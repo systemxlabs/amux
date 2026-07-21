@@ -38,3 +38,7 @@ amux 是一个 tmux-like 桌面应用 for Agentic Coding。
 ## 工作流
 
 工作流由一组任务组成，每个任务指定在哪台机器上执行、使用哪种 agent harness、发送什么 prompt、等待哪些前置任务完成后才开始。任务间可以有依赖关系，支持串行和并行。工作流手动触发后按依赖自动调度到对应机器的 agent 执行，全程可视化展示进度。执行期间用户可以取消整个工作流、跳过某个任务、或重试失败任务。系统预置常用模板（实现+Review、多模型对比、CI 修复、代码迁移），用户可从模板修改另存，也支持导出/导入工作流定义。
+
+## 参考
+1. herdr https://github.com/ogulcancelik/herdr
+2. freebuddy https://github.com/maojindao55/freebuddy
