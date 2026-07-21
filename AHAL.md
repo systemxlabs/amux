@@ -1,6 +1,6 @@
 # AHAL — Agent Harness Access Layer
 
-版本:0.3(草案)
+版本:0.4(草案)
 
 AHAL 是一个极简的 agent 控制平面**接口规范**,以库的形式提供。上层应用(client)链接 AHAL 库,通过统一接口控制各家的 agent harness(codex、Claude Code、Kimi Code 等);库内部由 driver 组件完成具体 harness 的适配。
 
@@ -150,11 +150,22 @@ interface SessionEvent {
 }
 
 type Event =
-  | { kind: "text"; text: string }                    // 增量,client 自行拼接
-  | { kind: "thinking"; text: string }                // 增量;harness 不输出思考时 driver 不发
-  | { kind: "tool_call"; toolCallId: string; name: string;
-      status: "started" | "output" | "completed" | "failed";
-      input?: unknown; output?: string }              // output 状态携带增量输出
+  // ── 内容块:text / thinking 各自独立的生命周期,块之间可交错 ──
+  | { kind: "text_started";     blockId: string }
+  | { kind: "text_delta";       blockId: string; text: string }        // 增量
+  | { kind: "text_finished";    blockId: string }
+  | { kind: "thinking_started"; blockId: string }
+  | { kind: "thinking_delta";   blockId: string; text: string }        // 增量
+  | { kind: "thinking_finished"; blockId: string }
+
+  // ── 工具调用:输入参数与执行输出均流式 ──
+  | { kind: "tool_call_started";  toolCallId: string; name: string }
+  | { kind: "tool_call_input";    toolCallId: string; delta: string }  // 参数 JSON 流式片段
+  | { kind: "tool_call_output";   toolCallId: string; output: string } // 执行输出流式
+  | { kind: "tool_call_finished"; toolCallId: string;
+      status: "completed" | "failed"; result?: string }
+
+  // ── 其他实体 ──
   | { kind: "subagent"; subagentId: string; status: string; description?: string }
   | { kind: "compaction_started" }
   | { kind: "compaction_finished" }
@@ -184,9 +195,15 @@ interface Usage {
 - `state_changed`(state 为 `idle`)恒为该区间的最后一个事件(可在投递前 drain 底层通道的滞留事件)
 - `reason`/`usage` 仅在 state 变为 `idle` 时携带;忙状态之间切换的事件不携带
 
+内容块与工具调用的生命周期规则:
+
+- 每个内容块按 `*_started` → `*_delta`* → `*_finished` 顺序投递;`blockId` 在工作区间内唯一。**块之间可交错**(如 thinking 块与 text 块交替),client MUST 按 `blockId` 分别拼接,不得假设同一时刻只有一个进行中的块
+- 每个工具调用按 `tool_call_started` → (`tool_call_input`*) → (`tool_call_output`*) → `tool_call_finished` 顺序投递;`toolCallId` 在工作区间内唯一
+- `tool_call_input` 携带的是**参数 JSON 的原始流式片段**(与底层模型的生成过程一致),client 如需结构化参数应在 `tool_call_finished` 后自行解析拼接结果;driver MAY 在底层不提供参数流时省略 `tool_call_input`,在 `tool_call_finished` 的 `result` 中携带完整参数与结果
+- harness 不输出思考内容时,driver 不发 `thinking_*` 事件
+
 其余事件规则:
 
-- `text` / `thinking` 为**增量**,client 自行拼接
 - 忙期间的事件严格有序;`background_task` / `notice` 这类主动事件可在任意时刻出现(包括 idle 期间),client 不得假设它们落在某个工作区间内
 - client MUST 容忍不认识的 `kind`(未来扩展),不得中断事件流消费
 
@@ -235,7 +252,7 @@ driver = createDriver("codex")
 
 - 底层 harness 可能存在短暂拒收 steer 的窗口(如 tool call 刚结束时)。driver MUST 内部缓冲并在窗口关闭后重试,窗口期 MUST 有上限(建议 ≤ 5s)。这一切对 client 不可见——`prompt()` 的 resolve 表示"driver 已受理并保证送达",不代表"此刻已注入"
 - 超时仍无法注入时,driver MUST 保证消息不丢:作为新输入启动工作,并发送 `error` 事件(`fatal: false`)说明发生了降级
-- cancel 或工作自然结束后,底层通道上仍可能有滞留事件。driver MUST 过滤这些 stragglers,保证 `state_changed`(state 为 `idle`)之后不再出现属于上一区间的 `text`/`tool_call` 等事件;client 无需做任何迟到检测
+- cancel 或工作自然结束后,底层通道上仍可能有滞留事件。driver MUST 过滤这些 stragglers,保证 `state_changed`(state 为 `idle`)之后不再出现属于上一区间的 `text_*`/`tool_call_*` 等事件;client 无需做任何迟到检测
 
 ### 5.3 follow-up 模式(客户端约定)
 
@@ -264,7 +281,7 @@ const session = await driver.createSession({ cwd: "/srv/app" });
 (async () => {
   for await (const { event } of session.events) {
     switch (event.kind) {
-      case "text":
+      case "text_delta":
         process.stdout.write(event.text);
         break;
       case "state_changed":
