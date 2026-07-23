@@ -65,12 +65,12 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 | `responding` | 结果输出中（生成对用户可见的回复文本） |
 | `acting` | 工具执行中 |
 
-典型的工作区间是 `idle → thinking → (responding | acting → thinking)* → responding → idle`。
+工作区间是 `idle → thinking → (acting → thinking)* → responding → idle`。
 
 ### 状态规则
 
 - `prompt()` 在 `idle` 时启动新工作；在忙状态时注入（steer）进行中的工作
-- 每次状态迁移发出一个 `state_changed` 事件（包括忙状态之间的来回切换）
+- 每次状态迁移发出一个 `state_changed` 事件
 - Driver **MUST** 精确区分三种忙状态（如实映射底层 harness 的推理、回复生成、工具执行阶段），不得笼统上报。底层协议无法提供此区分的 harness 不接入
 - Compaction 是 Driver 内部优化，不建模为事件，效果由 `usage_update` 的 `context` 字段反映
 - Session 自身的创建、重建、关闭不建模为状态：`createSession` resolve 即可用，`close()` 后调用任何方法 reject
@@ -121,7 +121,7 @@ interface Session {
   readonly cwd: string;
 
   prompt(input: Input): Promise<void>;
-  cancel(): Promise<boolean>;
+  cancel(): Promise<void>;
 
   readonly events: AsyncIterable<SessionEvent>;
 
@@ -190,6 +190,7 @@ type ContentBlock =
 
 ```typescript
 type Input = ContentBlock[];
+```
 
 - Session `idle` → 启动新工作
 - Session 忙（`thinking` / `responding` / `acting`）→ 作为 steer 注入进行中的工作
@@ -204,10 +205,10 @@ type Input = ContentBlock[];
 
 ### cancel()
 
-取消当前进行中的工作，返回是否确实有工作被取消（`idle` 时返回 `false`，不算错误）。
+取消当前进行中的工作。阻塞直到取消完成，失败则抛异常。调用时 Session 处于 `idle` 则无操作，正常返回。
 
 - 底层 harness 无协议层 interrupt 能力时，Driver **MUST** kill 底层进程并以原 session 上下文重建，对 Client 保持语义一致
-- cancel 后事件流 **MUST** 继续投递尾部事件，直到发出 `state_changed`（`state: "idle"`，`reason: "cancelled"`）
+- resolve 即确认取消完成，Client 无需等待事件
 
 ### close()
 
@@ -325,67 +326,18 @@ Driver **MUST** 保证：
 
 ---
 
-## 生命周期
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Driver
-
-    Client->>Driver: createSession({ cwd })
-    Driver-->>Client: Session (idle)
-
-    Note left of Client: 发起工作
-    Client->>Driver: session.prompt([{ type: "text", text: "修复 login 测试" }])
-    Driver-->>Client: prompt() resolved (送达)
-
-    Driver->>Client: state_changed (thinking)
-    Driver->>Client: agent_thought_chunk (messageId: m1)
-    Driver->>Client: state_changed (responding)
-    Driver->>Client: agent_message_chunk (messageId: m2)
-    Driver->>Client: state_changed (acting)
-    Driver->>Client: tool_call_update (toolCallId: c1, tool_name: "Bash", status: "pending")
-    Driver->>Client: tool_call_update (toolCallId: c1, status: "in_progress")
-    Driver->>Client: tool_call_content_chunk (toolCallId: c1)
-    Driver->>Client: tool_call_update (toolCallId: c1, status: "completed")
-    Driver->>Client: state_changed (thinking)
-    Driver->>Client: agent_thought_chunk (messageId: m1)
-    Driver->>Client: state_changed (responding)
-    Driver->>Client: agent_message_chunk (messageId: m2)
-
-    Note left of Client: Steer
-    Client->>Driver: session.prompt([{ type: "text", text: "别改 fixture" }])
-    Driver-->>Client: prompt() resolved (steer 送达)
-
-    Driver->>Client: state_changed (idle, reason: "end_turn")
-
-    opt Cancel
-        Client->>Driver: session.cancel()
-        Driver->>Client: state_changed (idle, reason: "cancelled")
-    end
-
-    Client->>Driver: session.close()
-
-    Note left of Client: 恢复
-    Client->>Driver: resumeSession(id)
-    Driver-->>Client: Session (恢复)
-```
-
----
-
 ## 语义细则
 
 ### Cancel 竞态
 
-`cancel()` 与工作自然结束存在竞态：cancel 调用时工作可能刚完成。
+`cancel()` 与工作自然结束存在竞态：cancel 调用时工作可能刚完成，此时无操作正常返回。
 
-以 `state_changed`（state 为 `idle`）事件为唯一事实来源：无论谁先谁后，Client 只根据收到的 `reason` 判断结局。
+### 瞬态窗口与 Steer 阻塞
 
-### 瞬态窗口与 Steer 缓冲
+底层 harness 可能存在短暂拒收 steer 的窗口（如 tool call 刚结束时）。`prompt()` **阻塞调用**，直到消息被 harness 接受或超时失败：
 
-底层 harness 可能存在短暂拒收 steer 的窗口（如 tool call 刚结束时）。Driver **MUST** 内部缓冲并在窗口关闭后重试，窗口期 **MUST** 有上限（建议 ≤ 5s）。这一切对 Client 不可见——`prompt()` 的 resolve 表示"Driver 已受理并保证送达"，不代表"此刻已注入"。
-
-超时仍无法注入时，Driver **MUST** 保证消息不丢：作为新输入启动工作，并发送 `error` 事件说明发生了降级。
+- 成功：Driver 内部缓冲并在窗口关闭后注入，`prompt()` resolve
+- 超时（建议 ≤ 5s）：`prompt()` reject
 
 ### Follow-up 模式（客户端约定）
 
