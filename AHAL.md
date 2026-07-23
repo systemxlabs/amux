@@ -150,20 +150,18 @@ interface SessionEvent {
 }
 
 type Event =
-  // ── 内容块:text / thinking 各自独立的生命周期,块之间可交错 ──
-  | { kind: "text_started";     blockId: string }
-  | { kind: "text_delta";       blockId: string; text: string }        // 增量
-  | { kind: "text_finished";    blockId: string }
-  | { kind: "thinking_started"; blockId: string }
-  | { kind: "thinking_delta";   blockId: string; text: string }        // 增量
-  | { kind: "thinking_finished"; blockId: string }
+  // ── 消息:agent_message(回复) / agent_thought(思考),upsert 创建,chunk 追加 ──
+  | { kind: "agent_message";        messageId: string }         // 首次 upsert 创建;后续 omit 不变
+  | { kind: "agent_message_chunk";  messageId: string; content: ContentBlock }  // 追加 content
+  | { kind: "agent_thought";        messageId: string }         // 首次 upsert 创建
+  | { kind: "agent_thought_chunk";  messageId: string; content: ContentBlock }  // 追加 content
 
-  // ── 工具调用:输入参数与执行输出均流式 ──
-  | { kind: "tool_call_started";  toolCallId: string; name: string }
-  | { kind: "tool_call_input";    toolCallId: string; delta: string }  // 参数 JSON 流式片段
-  | { kind: "tool_call_output";   toolCallId: string; output: string } // 执行输出流式
-  | { kind: "tool_call_finished"; toolCallId: string;
-      status: "completed" | "failed"; result?: string }
+  // ── 工具调用:upsert 创建/更新,chunk 追加内容 ──
+  | { kind: "tool_call_update";  toolCallId: string;
+      name?: string; title?: string;             // 首次出现时必选 name;后续可选 title 覆盖展示名
+      status?: "pending" | "in_progress" | "completed" | "failed" | "cancelled";
+      result?: string }                          // 终态时携带结果摘要
+  | { kind: "tool_call_content_chunk"; toolCallId: string; content: ContentBlock }  // 追加 content
 
   // ── 其他实体 ──
   | { kind: "subagent"; subagentId: string; status: string; description?: string }
@@ -197,10 +195,9 @@ interface Usage {
 
 内容块与工具调用的生命周期规则:
 
-- 每个内容块按 `*_started` → `*_delta`* → `*_finished` 顺序投递;`blockId` 在工作区间内唯一。**块之间可交错**(如 thinking 块与 text 块交替),client MUST 按 `blockId` 分别拼接,不得假设同一时刻只有一个进行中的块
-- 每个工具调用按 `tool_call_started` → (`tool_call_input`*) → (`tool_call_output`*) → `tool_call_finished` 顺序投递;`toolCallId` 在工作区间内唯一
-- `tool_call_input` 携带的是**参数 JSON 的原始流式片段**(与底层模型的生成过程一致),client 如需结构化参数应在 `tool_call_finished` 后自行解析拼接结果;driver MAY 在底层不提供参数流时省略 `tool_call_input`,在 `tool_call_finished` 的 `result` 中携带完整参数与结果
-- harness 不输出思考内容时,driver 不发 `thinking_*` 事件
+- `agent_message` / `agent_thought` 首次出现时创建（`messageId` 在工作区间内唯一），后续同 ID 的 update 合并字段（omit 保留原值）。`agent_message_chunk` / `agent_thought_chunk` 追加 content 到对应 messageId。message 之间可交错——thinking 和回复的 chunk 可以交替发送，client 按 `messageId` 分别拼接
+- 每个工具调用首次出现为 `tool_call_update`（`name` 必选），后续字段合并（omit 保留原值，value 替换，`null` 清除）。`status` 依次推进：`pending` → `in_progress` → 终态（`completed` | `failed` | `cancelled`）。`tool_call_content_chunk` 追加 content 到该工具调用的输出
+- harness 不输出思考内容时,driver 不发 `agent_thought*` 事件
 
 其余事件规则:
 
@@ -252,7 +249,7 @@ driver = createDriver("codex")
 
 - 底层 harness 可能存在短暂拒收 steer 的窗口(如 tool call 刚结束时)。driver MUST 内部缓冲并在窗口关闭后重试,窗口期 MUST 有上限(建议 ≤ 5s)。这一切对 client 不可见——`prompt()` 的 resolve 表示"driver 已受理并保证送达",不代表"此刻已注入"
 - 超时仍无法注入时,driver MUST 保证消息不丢:作为新输入启动工作,并发送 `error` 事件(`fatal: false`)说明发生了降级
-- cancel 或工作自然结束后,底层通道上仍可能有滞留事件。driver MUST 过滤这些 stragglers,保证 `state_changed`(state 为 `idle`)之后不再出现属于上一区间的 `text_*`/`tool_call_*` 等事件;client 无需做任何迟到检测
+- cancel 或工作自然结束后,底层通道上仍可能有滞留事件。driver MUST 过滤这些 stragglers,保证 `state_changed`(state 为 `idle`)之后不再出现属于上一区间的 `agent_message*`/`agent_thought*`/`tool_call_*` 等事件;client 无需做任何迟到检测
 
 ### 5.3 follow-up 模式(客户端约定)
 
@@ -281,8 +278,8 @@ const session = await driver.createSession({ cwd: "/srv/app" });
 (async () => {
   for await (const { event } of session.events) {
     switch (event.kind) {
-      case "text_delta":
-        process.stdout.write(event.text);
+      case "agent_message_chunk":
+        if (event.content.type === "text") process.stdout.write(event.content.text);
         break;
       case "state_changed":
         if (event.state === "idle") {
