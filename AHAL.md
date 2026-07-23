@@ -12,7 +12,7 @@ AHAL 不规定任何线上通信方式——Driver 与 harness 之间如何交�
 
 | 原则 | 说明 |
 |------|------|
-| **少** | 一个 Driver 接口 + 一个 Session 接口，覆盖 session 创建、prompt 发送、活动控制、事件流的全部需求 |
+| **简洁** | 一个 Driver 接口 + 一个 Session 接口，覆盖 session 创建、prompt 发送、活动控制、事件流的全部需求 |
 | **无能力协商** | 接口定义的语义即准入门槛，Driver 必须完整实现，无法满足的 harness 不接入 |
 | **无权限往返** | 不做 mid-run 审批，所有 agent 以 yolo 模式运行（自动批准一切操作），安全性完全依赖运行环境 |
 | **无 plan 模式** | plan 输出降级为普通事件透出，不建模状态 |
@@ -70,16 +70,11 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 ### 状态规则
 
 - `prompt()` 在 `idle` 时启动新工作；在忙状态时注入（steer）进行中的工作
-- 每次状态迁移发出一个 `state_changed` 事件（包括忙状态之间的来回切换）；当前快照通过 `session.state` 字段实时可读
+- 每次状态迁移发出一个 `state_changed` 事件（包括忙状态之间的来回切换）
 - Driver **MUST** 精确区分三种忙状态（如实映射底层 harness 的推理、回复生成、工具执行阶段），不得笼统上报。底层协议无法提供此区分的 harness 不接入
 - Compaction 不建模为状态：它是忙期间的一个插曲，由 `compaction_started` / `compaction_finished` 事件表达
 - Session 自身的创建、重建、关闭不建模为状态：`createSession` resolve 即可用，`close()` 后调用任何方法 reject
 
-### 状态字段 vs 事件流
-
-`state` 是状态快照字段，服务对迁移不敏感的读者（UI 状态徽标、`resumeSession` 后的即时判断、调试）。**状态的权威载体是事件流，不是字段**：Client **MUST NOT** 通过轮询 `state` 来检测工作完成——两次采样之间的迁移（及其 `reason` / `usage`）会丢失，完成检测只能依赖 `state_changed` 事件。
-
----
 
 ## Driver
 
@@ -124,7 +119,6 @@ const same = await driver.resumeSession(session.id);
 interface Session {
   readonly id: SessionId;
   readonly cwd: string;
-  readonly state: SessionState;   // 当前状态快照,实时可读
 
   prompt(input: Input): Promise<void>;
   cancel(): Promise<boolean>;
@@ -255,7 +249,7 @@ interface Usage {
 ```
 
 Driver **MUST** 保证：
-- **每次迁移都发**，与 `session.state` 字段严格一致（事件先到，字段随即更新；Client 以事件为准）
+- **每次迁移都发**，Client 以事件流为状态唯一来源
 - 每段工作区间恰好以一个 `state_changed`（state 为 `idle`）收尾，即使工作因错误、cancel 或 Driver 内部异常终止
 - `state_changed`（state 为 `idle`）恒为该区间的最后一个事件
 
