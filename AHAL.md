@@ -227,30 +227,39 @@ Message 之间可交错——thinking 和回复的 chunk 可以交替发送，Cl
 
 ```typescript
   | { kind: "state_changed"; state: SessionState;
-      reason?: StopReason; usage?: Usage }
+      reason?: StopReason }
 ```
 
-`reason` 和 `usage` 仅在 state 变为 `idle` 时携带；忙状态之间切换的事件不携带。
+`reason` 仅在 state 变为 `idle` 时携带；忙状态之间切换的事件不携带。
 
 **StopReason：**
 
 | 值 | 含义 |
 |----|------|
-| `"completed"` | 工作正常完成 |
+| `"end_turn"` | 正常结束，模型完成输出且未请求更多工具 |
 | `"cancelled"` | 被 `cancel()` 取消 |
+| `"max_tokens"` | 达到 token 上限 |
+| `"max_turn_requests"` | 达到模型请求次数上限 |
+| `"refusal"` | Agent 拒绝继续 |
 | `"error"` | 异常终止，Driver **SHOULD** 在其前发送 `error` 事件说明原因 |
-
-```typescript
-interface Usage {
-  inputTokens: number;
-  outputTokens: number;
-}
-```
 
 Driver **MUST** 保证：
 - **每次迁移都发**，Client 以事件流为状态唯一来源
 - 每段工作区间恰好以一个 `state_changed`（state 为 `idle`）收尾，即使工作因错误、cancel 或 Driver 内部异常终止
 - `state_changed`（state 为 `idle`）恒为该区间的最后一个事件
+
+### 用量
+
+`usage_update` 是独立事件，不与状态迁移绑定，Agent **MAY** 随时发送。
+
+```typescript
+  | { kind: "usage_update"; context: number; context_window: number }
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `context` | `number` | 上下文当前实际占用 token 数，compaction 后减小 |
+| `context_window` | `number` | 模型上下文窗口上限 |
 
 ### 其他实体
 
@@ -258,7 +267,6 @@ Driver **MUST** 保证：
   | { kind: "subagent"; subagentId: string; status: string; description?: string }
   | { kind: "compaction_started" }
   | { kind: "compaction_finished" }
-  | { kind: "usage"; inputTokens: number; outputTokens: number; cost?: number }
   | { kind: "error"; message: string; fatal: boolean }
   | { kind: "background_task"; taskId: string;
       status: "completed" | "failed"; description?: string; result?: string }
@@ -306,7 +314,7 @@ sequenceDiagram
     Client->>Driver: session.prompt([{ type: "text", text: "别改 fixture" }])
     Driver-->>Client: prompt() resolved (steer 送达)
 
-    Driver->>Client: state_changed (idle, reason: "completed", usage: {...})
+    Driver->>Client: state_changed (idle, reason: "end_turn")
 
     opt Cancel
         Client->>Driver: session.cancel()
@@ -390,9 +398,12 @@ const session = await driver.createSession({ cwd: "/srv/app" });
           console.log(`\n工具 ${event.tool_name}: ${event.status}`);
         }
         break;
+      case "usage_update":
+        console.log(`[usage] ctx ${event.context}/${event.context_window} tokens`);
+        break;
       case "state_changed":
         if (event.state === "idle") {
-          console.log(`\n工作结束: ${event.reason}`, event.usage);
+          console.log(`\n工作结束: ${event.reason}`);
         } else {
           console.log(`[${event.state}]`);
         }
