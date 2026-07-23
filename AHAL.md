@@ -131,17 +131,48 @@ interface Session {
 type SessionState = "idle" | "thinking" | "responding" | "acting";
 ```
 
+AHAL 使用与 [MCP](https://modelcontextprotocol.io/) 一致的 ContentBlock 结构。
+
+```typescript
+type TextResource = {
+  uri: string;          // 资源标识
+  text: string;         // 文本内容
+  mimeType?: string;    // MIME 类型
+};
+
+type BlobResource = {
+  uri: string;          // 资源标识
+  blob: string;         // base64 编码的二进制数据
+  mimeType?: string;    // MIME 类型
+};
+
+type ContentBlock =
+  // 文本 — 所有 Driver MUST 支持
+  | { type: "text"; text: string }
+  // 图片
+  | { type: "image"; data: string;    // base64 编码
+                     mimeType: string; // "image/png" / "image/jpeg" 等
+                     uri?: string }    // 图片来源 URL（可选）
+  // 音频
+  | { type: "audio"; data: string;    // base64 编码
+                     mimeType: string } // "audio/wav" / "audio/mp3" 等
+  // 内嵌资源 — 文件内容直接嵌入消息
+  | { type: "resource"; resource: TextResource | BlobResource }
+  // 资源引用 — 不携带内容，仅标识文件位置
+  | { type: "resource_link"; uri: string;           // 资源 URI
+                             name: string;           // 可读名称
+                             mimeType?: string;      // MIME 类型
+                             title?: string;         // 展示标题
+                             description?: string;   // 内容描述
+                             size?: number }          // 文件大小（字节）
+```
+
 ### prompt()
 
 唯一的消息发送入口，自适应语义，resolve 即送达。
 
 ```typescript
 type Input = ContentBlock[];
-
-type ContentBlock =
-  | { type: "text"; text: string }
-  | { type: "image"; path: string };
-```
 
 - Session `idle` → 启动新工作
 - Session 忙（`thinking` / `responding` / `acting`）→ 作为 steer 注入进行中的工作
