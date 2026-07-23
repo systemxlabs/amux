@@ -198,7 +198,6 @@ Message 之间可交错——thinking 和回复的 chunk 可以交替发送，Cl
 - 带 `content: []` 或 `content: null` → 清空
 - `agent_message_chunk` / `agent_thought_chunk` → 追加一个 ContentBlock 到对应 messageId 的末尾
 
-harness 不输出思考内容时，Driver 不发 `agent_thought*` 事件。
 
 ### 工具调用
 
@@ -220,7 +219,7 @@ harness 不输出思考内容时，Driver 不发 `agent_thought*` 事件。
 | `status` | `string?` | 依次推进：`pending` → `in_progress` → 终态（`completed` \| `failed` \| `cancelled`） |
 | `content` | `ContentBlock[]?` | 替换全部输出；省略保留；`[]`/`null` 清空 |
 
-**Content 合并规则：** 与消息一致——`content` 整体替换，`tool_call_content_chunk` 追加。之后发送的 `tool_call_update` 携带 `content` 时替换全部（包括此前 chunk 累积的内容）。
+**Content 合并规则：** 与消息一致。
 
 ### 状态变更
 
@@ -345,8 +344,6 @@ sequenceDiagram
 session.prompt(A) → 等 state_changed(state=idle) 事件 → session.prompt(B)
 ```
 
-回到 idle 后 Session 必然空闲，此时 B 必然作为新工作启动。
-
 ### Client 崩溃与恢复
 
 - Session 不随 Client 释放而销毁：只要底层 harness 的持久化还在，Client 重启后可 `resumeSession` 继续
@@ -364,7 +361,7 @@ class SessionBusyError extends AhalError {}          // session 正在重建中�
 class InvalidInputError extends AhalError {}         // 输入非法或过大
 ```
 
-其他语言的实现 **MUST** 提供可区分的等价错误类型，不得用裸字符串表达错误类别。
+其他语言的实现 **MUST** 提供可区分的等价错误类型。
 
 ---
 
