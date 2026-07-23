@@ -158,9 +158,9 @@ type Event =
 
   // ── 工具调用:upsert 创建/更新,chunk 追加内容 ──
   | { kind: "tool_call_update";  toolCallId: string;
-      name?: string; title?: string;             // 首次出现时必选 name;后续可选 title 覆盖展示名
+      tool_name?: string; title?: string;       // 首次出现时必选 tool_name;后续可选 title 覆盖展示名
       status?: "pending" | "in_progress" | "completed" | "failed" | "cancelled";
-      result?: string }                          // 终态时携带结果摘要
+      content?: ContentBlock[] }                 // 替换全部输出;省略则保留;[] 清空
   | { kind: "tool_call_content_chunk"; toolCallId: string; content: ContentBlock }  // 追加 content
 
   // ── 其他实体 ──
@@ -196,7 +196,7 @@ interface Usage {
 内容块与工具调用的生命周期规则:
 
 - `agent_message` / `agent_thought` 首次出现时创建（`messageId` 在工作区间内唯一），后续同 ID 的 update 合并字段（omit 保留原值）。`agent_message_chunk` / `agent_thought_chunk` 追加 content 到对应 messageId。message 之间可交错——thinking 和回复的 chunk 可以交替发送，client 按 `messageId` 分别拼接
-- 每个工具调用首次出现为 `tool_call_update`（`name` 必选），后续字段合并（omit 保留原值，value 替换，`null` 清除）。`status` 依次推进：`pending` → `in_progress` → 终态（`completed` | `failed` | `cancelled`）。`tool_call_content_chunk` 追加 content 到该工具调用的输出
+- 每个工具调用首次出现为 `tool_call_update`（`tool_name` 必选），后续字段合并（omit 保留原值，value 替换，`null` 清除）。`status` 依次推进：`pending` → `in_progress` → 终态（`completed` | `failed` | `cancelled`）。`tool_call_content_chunk` 追加 content 到该工具调用的输出；`tool_call_update` 携带 `content` 字段时整体替换，携带 `[]` 或 `null` 时清空
 - harness 不输出思考内容时,driver 不发 `agent_thought*` 事件
 
 其余事件规则:
