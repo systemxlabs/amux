@@ -72,7 +72,7 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 - `prompt()` 在 `idle` 时启动新工作；在忙状态时注入（steer）进行中的工作
 - 每次状态迁移发出一个 `state_changed` 事件（包括忙状态之间的来回切换）
 - Driver **MUST** 精确区分三种忙状态（如实映射底层 harness 的推理、回复生成、工具执行阶段），不得笼统上报。底层协议无法提供此区分的 harness 不接入
-- Compaction 不建模为状态：它是忙期间的一个插曲，由 `compaction_started` / `compaction_finished` 事件表达
+- Compaction 是 Driver 内部优化，不建模为事件，效果由 `usage_update` 的 `context` 字段反映
 - Session 自身的创建、重建、关闭不建模为状态：`createSession` resolve 即可用，`close()` 后调用任何方法 reject
 
 
@@ -309,22 +309,17 @@ Driver **MUST** 保证：
 | `context` | `number` | 上下文当前实际占用 token 数，compaction 后减小 |
 | `context_window` | `number` | 模型上下文窗口上限 |
 
-### 其他实体
+### 错误
 
 ```typescript
-  | { kind: "subagent"; subagentId: string; status: string; description?: string }
-  | { kind: "compaction_started" }
-  | { kind: "compaction_finished" }
-  | { kind: "error"; message: string; fatal: boolean }
-  | { kind: "background_task"; taskId: string;
-      status: "completed" | "failed"; description?: string; result?: string }
-  | { kind: "notice"; message: string }
+  | { kind: "error"; message: string }
 ```
+
 
 ### 事件顺序与容忍
 
 - 忙期间的事件严格有序
-- `background_task` / `notice` 这类主动事件可在任意时刻出现（包括 idle 期间），Client 不得假设它们落在某个工作区间内
+- `error` 事件可在任意时刻出现（包括 idle 期间）
 - Client **MUST** 容忍不认识的 `kind`（未来扩展），不得中断事件流消费
 - `state_changed`（state 为 `idle`）之后 **MUST NOT** 再出现属于上一区间的 `agent_message*` / `agent_thought*` / `tool_call_*` 等事件；Driver 负责过滤这些滞留事件
 
@@ -390,7 +385,7 @@ sequenceDiagram
 
 底层 harness 可能存在短暂拒收 steer 的窗口（如 tool call 刚结束时）。Driver **MUST** 内部缓冲并在窗口关闭后重试，窗口期 **MUST** 有上限（建议 ≤ 5s）。这一切对 Client 不可见——`prompt()` 的 resolve 表示"Driver 已受理并保证送达"，不代表"此刻已注入"。
 
-超时仍无法注入时，Driver **MUST** 保证消息不丢：作为新输入启动工作，并发送 `error` 事件（`fatal: false`）说明发生了降级。
+超时仍无法注入时，Driver **MUST** 保证消息不丢：作为新输入启动工作，并发送 `error` 事件说明发生了降级。
 
 ### Follow-up 模式（客户端约定）
 
@@ -455,9 +450,6 @@ const session = await driver.createSession({ cwd: "/srv/app" });
         } else {
           console.log(`[${event.state}]`);
         }
-        break;
-      case "background_task":
-        console.log(`后台任务 ${event.taskId}: ${event.status}`);
         break;
     }
   }
