@@ -131,8 +131,6 @@ interface Session {
 type SessionState = "idle" | "thinking" | "responding" | "acting";
 ```
 
-AHAL 使用与 [MCP](https://modelcontextprotocol.io/) 一致的 ContentBlock 结构。
-
 ```typescript
 type TextResource = {
   uri: string;          // 资源标识
@@ -147,25 +145,44 @@ type BlobResource = {
 };
 
 type ContentBlock =
-  // 文本 — 所有 Driver MUST 支持
   | { type: "text"; text: string }
-  // 图片
-  | { type: "image"; data: string;    // base64 编码
-                     mimeType: string; // "image/png" / "image/jpeg" 等
-                     uri?: string }    // 图片来源 URL（可选）
-  // 音频
-  | { type: "audio"; data: string;    // base64 编码
-                     mimeType: string } // "audio/wav" / "audio/mp3" 等
-  // 内嵌资源 — 文件内容直接嵌入消息
-  | { type: "resource"; resource: TextResource | BlobResource }
-  // 资源引用 — 不携带内容，仅标识文件位置
-  | { type: "resource_link"; uri: string;           // 资源 URI
-                             name: string;           // 可读名称
-                             mimeType?: string;      // MIME 类型
-                             title?: string;         // 展示标题
-                             description?: string;   // 内容描述
-                             size?: number }          // 文件大小（字节）
+  | { type: "memory_resource"; data: string; mimeType: string }
+  | { type: "embedded_resource"; resource: TextResource | BlobResource }
+  | { type: "resource_link"; uri: string; name: string; mimeType?: string;
+      title?: string; description?: string; size?: number }
 ```
+
+**Text**
+
+| 字段 | 类型 | 必选 | 说明 |
+|------|------|------|------|
+| `text` | `string` | 是 | 文本内容 |
+
+**Memory Resource** — 内存中的数据，无 URI、无文件实体，由 `mimeType` 决定渲染方式。
+
+| 字段 | 类型 | 必选 | 说明 |
+|------|------|------|------|
+| `data` | `string` | 是 | base64 编码的二进制数据 |
+| `mimeType` | `string` | 是 | MIME 类型，如 `"image/png"`、`"audio/wav"` |
+
+**Embedded Resource** — 有 URI 标识 + 内嵌内容。
+
+| 字段 | 类型 | 必选 | 说明 |
+|------|------|------|------|
+| `resource` | `TextResource \| BlobResource` | 是 | 内嵌的资源内容，必须有 `uri` |
+
+`TextResource` 和 `BlobResource` 字段见上方类型定义。
+
+**Resource Link** — 资源引用，不携带内容，仅标识文件位置。
+
+| 字段 | 类型 | 必选 | 说明 |
+|------|------|------|------|
+| `uri` | `string` | 是 | 资源 URI |
+| `name` | `string` | 是 | 可读名称 |
+| `mimeType` | `string` | 否 | MIME 类型 |
+| `title` | `string` | 否 | 展示标题 |
+| `description` | `string` | 否 | 内容描述 |
+| `size` | `number` | 否 | 文件大小（字节） |
 
 ### prompt()
 
