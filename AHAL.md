@@ -1,6 +1,6 @@
 # AHAL — Agent Harness Access Layer
 
-版本: 0.5 (草案)
+版本: 0.6 (草案)
 
 AHAL 是 Agent Harness 的控制平面接口规范，以库的形式提供。上层应用（Client）链接 AHAL 库，通过统一接口控制各家的 agent harness（Codex、Claude Code、Kimi Code 等）；库内部由 Driver 组件完成具体 harness 的适配。
 
@@ -49,7 +49,7 @@ AHAL 不规定任何线上通信方式——Driver 与 harness 之间如何交�
 
 ## 概念模型
 
-AHAL 只有两个概念：
+AHAL 只有两个核心概念：
 
 - **Session**：与某个 harness 的一段持续会话，有持久化历史，可关闭、可恢复
 - **事件流**：Session 上发生的一切，按序投递给 Client
@@ -65,7 +65,7 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 | `responding` | 结果输出中（生成对用户可见的回复文本） |
 | `acting` | 工具执行中 |
 
-工作区间是 `idle → thinking → (acting → thinking)* → responding → idle`。
+工作区间从 `idle` 进入忙状态开始，到回到 `idle` 结束。忙状态之间可任意转换（包括 `responding → acting`，即模型边输出边调工具），每次迁移都发出事件。
 
 ### 状态规则
 
@@ -73,12 +73,14 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 - 每次状态迁移发出一个 `state_changed` 事件
 - Driver **MUST** 精确区分三种忙状态（如实映射底层 harness 的推理、回复生成、工具执行阶段），不得笼统上报。底层协议无法提供此区分的 harness 不接入
 - Compaction 是 Driver 内部优化，不建模为事件，效果由 `usage_update` 的 `context` 字段反映
-- Session 自身的创建、重建、关闭不建模为状态：`createSession` resolve 即可用，`close()` 后调用任何方法 reject
+- Session 自身的创建、重建、关闭不建模为状态：`createSession` resolve 即可用，`close()` 后调用任何方法 reject `SessionClosedError`
 
 
 ## Driver
 
 ```typescript
+function createDriver(runtime: string): Driver;
+
 interface Driver {
   readonly runtime: string;        // harness 标识,如 "codex" | "kimi" | "claude"
   readonly ahalVersion: number;    // 实现的 AHAL 规范版本
@@ -131,47 +133,26 @@ interface Session {
 type SessionState = "idle" | "thinking" | "responding" | "acting";
 ```
 
+`events` 是 hot stream：支持多处订阅，每次订阅从订阅时刻起接收后续事件；`close()` resolve 后迭代器结束。
+
 ```typescript
-type TextResource = {
-  uri: string;          // 资源标识
-  text: string;         // 文本内容
-  mimeType?: string;    // MIME 类型
-};
-
-type BlobResource = {
-  uri: string;          // 资源标识
-  blob: string;         // base64 编码的二进制数据
-  mimeType?: string;    // MIME 类型
-};
-
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "memory_resource"; data: string; mimeType: string }
-  | { type: "embedded_resource"; resource: TextResource | BlobResource }
+  | { type: "resource"; uri?: string; text?: string; blob?: string; mimeType: string }
   | { type: "resource_link"; uri: string; name: string; mimeType?: string;
       title?: string; description?: string; size?: number }
 ```
 
-**Text**
+**Text** — 纯文本内容。
+
+**Resource** — 内嵌资源内容。`text` 与 `blob` 二者必有其一；`uri` 省略时表示无文件实体的内存数据（如截图、录音）。
 
 | 字段 | 类型 | 必选 | 说明 |
 |------|------|------|------|
-| `text` | `string` | 是 | 文本内容 |
-
-**Memory Resource** — 内存中的数据，无 URI、无文件实体，由 `mimeType` 决定渲染方式。
-
-| 字段 | 类型 | 必选 | 说明 |
-|------|------|------|------|
-| `data` | `string` | 是 | base64 编码的二进制数据 |
+| `text` | `string` | 二选一 | 文本内容 |
+| `blob` | `string` | 二选一 | base64 编码的二进制数据 |
 | `mimeType` | `string` | 是 | MIME 类型，如 `"image/png"`、`"audio/wav"` |
-
-**Embedded Resource** — 有 URI 标识 + 内嵌内容。
-
-| 字段 | 类型 | 必选 | 说明 |
-|------|------|------|------|
-| `resource` | `TextResource \| BlobResource` | 是 | 内嵌的资源内容，必须有 `uri` |
-
-`TextResource` 和 `BlobResource` 字段见上方类型定义。
+| `uri` | `string` | 否 | 资源标识；省略表示无 URI 的内存数据 |
 
 **Resource Link** — 资源引用，不携带内容，仅标识文件位置。
 
@@ -201,18 +182,16 @@ type Input = ContentBlock[];
 
 **有序性。** 同一 Session 上连续调用的多条消息，按调用顺序送达 agent。
 
-**Follow-up 语义。** 接口不提供队列。Client 若需要"等当前工作做完再做下一件"，应自行等待 `state_changed`（state 变为 `idle`）事件后再调用。
-
 ### cancel()
 
-取消当前进行中的工作。阻塞直到取消完成，失败则抛异常。调用时 Session 处于 `idle` 则无操作，正常返回。
+取消当前进行中的工作。阻塞直到取消完成，失败则抛异常。调用时 Session 处于 `idle`（包括工作恰好在调用期间自然完成的竞态）则无操作，正常返回。
 
 - 底层 harness 无协议层 interrupt 能力时，Driver **MUST** kill 底层进程并以原 session 上下文重建，对 Client 保持语义一致
 - resolve 即确认取消完成，Client 无需等待事件
 
 ### close()
 
-关闭 Session，释放底层资源（子进程、连接等）。Session 的对话历史仍被持久化，之后可通过 `resumeSession` 恢复。
+关闭 Session，释放底层资源（子进程、连接等）。Session 的对话历史仍被持久化，之后可通过 `resumeSession` 恢复。`close()` 后调用任何方法 reject `SessionClosedError`。
 
 ---
 
@@ -223,6 +202,7 @@ Session 的全部事件通过 `AsyncIterable<SessionEvent>` 按序投递。
 ```typescript
 interface SessionEvent {
   event: Event;
+  timestamp: number;   // 事件产生时间（epoch ms）
 }
 ```
 
@@ -244,17 +224,17 @@ Message 之间可交错——thinking 和回复的 chunk 可以交替发送，Cl
 
 - `agent_message` / `agent_thought` 不带 `content` → 保留已有输出不变
 - 带 `content` → 整体替换（包括此前通过 chunk 累积的内容）
-- 带 `content: []` 或 `content: null` → 清空
+- 带 `content: []` → 清空
 - `agent_message_chunk` / `agent_thought_chunk` → 追加一个 ContentBlock 到对应 messageId 的末尾
 
 
 ### 工具调用
 
-`tool_call_update` 同样使用 upsert 语义：首次出现时创建（`tool_name` 必选），后续同 `toolCallId` 的 update 合并字段。`tool_call_content_chunk` 追加 ContentBlock。
+`tool_call_update` 同样使用 upsert 语义：首次出现时创建（`toolName` 必选），后续同 `toolCallId` 的 update 合并字段。`tool_call_content_chunk` 追加 ContentBlock。
 
 ```typescript
   | { kind: "tool_call_update";  toolCallId: string;
-      tool_name?: string; title?: string;
+      toolName?: string; title?: string;
       status?: "pending" | "in_progress" | "completed" | "failed" | "cancelled";
       content?: ContentBlock[] }
   | { kind: "tool_call_content_chunk"; toolCallId: string; content: ContentBlock }
@@ -263,10 +243,10 @@ Message 之间可交错——thinking 和回复的 chunk 可以交替发送，Cl
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `toolCallId` | `string` | 工具调用标识，工作区间内唯一 |
-| `tool_name` | `string?` | 工具名（如 `"Bash"`、`"Read"`），首次出现时必选 |
+| `toolName` | `string?` | 工具名（如 `"Bash"`、`"Read"`），首次出现时必选 |
 | `title` | `string?` | 展示标题（如 `"安装依赖"`），可中途更新 |
 | `status` | `string?` | 依次推进：`pending` → `in_progress` → 终态（`completed` \| `failed` \| `cancelled`） |
-| `content` | `ContentBlock[]?` | 替换全部输出；省略保留；`[]`/`null` 清空 |
+| `content` | `ContentBlock[]?` | 替换全部输出；省略保留；`[]` 清空 |
 
 **Content 合并规则：** 与消息一致。
 
@@ -277,20 +257,17 @@ Message 之间可交错——thinking 和回复的 chunk 可以交替发送，Cl
 ```typescript
   | { kind: "state_changed"; state: SessionState;
       reason?: StopReason }
+
+type StopReason =
+  | "end_turn"           // 正常结束，模型完成输出且未请求更多工具
+  | "cancelled"          // 被 cancel() 取消
+  | "max_tokens"         // 达到 token 上限
+  | "max_turn_requests"  // 达到模型请求次数上限
+  | "refusal"            // Agent 拒绝继续
+  | "error";             // 异常终止，Driver SHOULD 在其前发送 error 事件说明原因
 ```
 
 `reason` 仅在 state 变为 `idle` 时携带；忙状态之间切换的事件不携带。
-
-**StopReason：**
-
-| 值 | 含义 |
-|----|------|
-| `"end_turn"` | 正常结束，模型完成输出且未请求更多工具 |
-| `"cancelled"` | 被 `cancel()` 取消 |
-| `"max_tokens"` | 达到 token 上限 |
-| `"max_turn_requests"` | 达到模型请求次数上限 |
-| `"refusal"` | Agent 拒绝继续 |
-| `"error"` | 异常终止，Driver **SHOULD** 在其前发送 `error` 事件说明原因 |
 
 Driver **MUST** 保证：
 - **每次迁移都发**，Client 以事件流为状态唯一来源
@@ -299,16 +276,16 @@ Driver **MUST** 保证：
 
 ### 用量
 
-`usage_update` 是独立事件，不与状态迁移绑定，Agent **MAY** 随时发送。
+`usage_update` 是独立事件，不与状态迁移绑定，Driver **MAY** 随时发送。
 
 ```typescript
-  | { kind: "usage_update"; context: number; context_window: number }
+  | { kind: "usage_update"; context: number; contextWindow: number }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `context` | `number` | 上下文当前实际占用 token 数，compaction 后减小 |
-| `context_window` | `number` | 模型上下文窗口上限 |
+| `contextWindow` | `number` | 模型上下文窗口上限 |
 
 ### 错误
 
@@ -328,20 +305,16 @@ Driver **MUST** 保证：
 
 ## 语义细则
 
-### Cancel 竞态
-
-`cancel()` 与工作自然结束存在竞态：cancel 调用时工作可能刚完成，此时无操作正常返回。
-
 ### 瞬态窗口与 Steer 阻塞
 
 底层 harness 可能存在短暂拒收 steer 的窗口（如 tool call 刚结束时）。`prompt()` **阻塞调用**，直到消息被 harness 接受或超时失败：
 
 - 成功：Driver 内部缓冲并在窗口关闭后注入，`prompt()` resolve
-- 超时（建议 ≤ 5s）：`prompt()` reject
+- 超时（建议 ≤ 5s）：`prompt()` reject `PromptTimeoutError`
 
 ### Follow-up 模式（客户端约定）
 
-接口无队列。需要"做完 A 再做 B"的 Client：
+接口不提供队列。需要"做完 A 再做 B"的 Client，应等待 `state_changed`（state 变为 `idle`）事件后再调用 `prompt()`：
 
 ```
 session.prompt(A) → 等 state_changed(state=idle) 事件 → session.prompt(B)
@@ -360,7 +333,9 @@ session.prompt(A) → 等 state_changed(state=idle) 事件 → session.prompt(B)
 class AhalError extends Error {}
 class SessionNotFoundError extends AhalError {}      // resumeSession 的 session 不存在或无法恢复
 class HarnessUnavailableError extends AhalError {}   // 底层 harness 不可用（未安装、版本不兼容）
-class SessionBusyError extends AhalError {}          // session 正在重建中，暂时不可写
+class SessionBusyError extends AhalError {}          // Driver 内部重建底层进程期间（如崩溃恢复），暂时不可写
+class SessionClosedError extends AhalError {}        // close() 后调用 Session 的任何方法
+class PromptTimeoutError extends AhalError {}        // steer 注入等待超时
 class InvalidInputError extends AhalError {}         // 输入非法或过大
 ```
 
@@ -390,11 +365,11 @@ const session = await driver.createSession({ cwd: "/srv/app" });
         break;
       case "tool_call_update":
         if (event.status === "completed" || event.status === "failed") {
-          console.log(`\n工具 ${event.tool_name}: ${event.status}`);
+          console.log(`\n工具 ${event.toolName}: ${event.status}`);
         }
         break;
       case "usage_update":
-        console.log(`[usage] ctx ${event.context}/${event.context_window} tokens`);
+        console.log(`[usage] ctx ${event.context}/${event.contextWindow} tokens`);
         break;
       case "state_changed":
         if (event.state === "idle") {
