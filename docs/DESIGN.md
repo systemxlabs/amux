@@ -4,7 +4,7 @@
 
 ---
 
-## 架构
+## 1. 架构
 
 采用 Client-Server 架构：GUI 桌面应用（Client）与各机器上的 server 常驻进程之间通过 WebSocket 通信，参考 [raft.build](https://raft.build) 的设计模式。
 
@@ -28,7 +28,7 @@
 - **多设备共存**：任意数量的 GUI 可同时连接同一 server、查看并操作同一会话，互不踢出
 - **生命周期解耦**：任何客户端断开（含桌面应用关闭）不停止 server、不销毁会话；会话仅由显式关闭 / 删除结束
 
-## Server 生命周期与启动
+## 2. Server 生命周期与启动
 
 每台机器（含本机）统一运行一个 server 常驻进程，与任何客户端连接无关：
 
@@ -37,7 +37,7 @@
 - **机器重启**：重启机器后需重新启动 server，会话从磁盘注册表恢复（崩溃前忙状态的会话标为 interrupted，由客户端决定是否 resume）
 - **GUI 视角**：本机与远程完全一致——注册、连接、认证、离线处理无差别
 
-## 传输与消息
+## 3. 传输与消息
 
 - 传输统一为 **WebSocket**，消息格式为 **JSON-RPC 2.0**：请求必须回响应，事件以通知（无响应）表达
 - **认证**：所有连接统一携带 token（安装 server 时生成，仅展示一次）
@@ -45,42 +45,42 @@
 - 断线后客户端指数退避重连
 - 单用户信任模型：无用户体系与权限系统（PRD 边界），安全性依赖运行环境
 
-### 事件交付
+### 3.1 事件交付
 
 - **广播**：server 向所有已连接客户端持续推送每条事件通知（AHAL 事件透传），**连接即收流，无订阅机制**；多客户端收到同一份事件流，互不踢出
 - **顺序**：推送顺序 = AHAL 投递顺序；跨机器时间线用时间戳（各机时钟偏差为已知限制）
 - **连接补齐**：客户端连接时先获取会话历史，再由 server 把缓冲的流式事件传递给客户端（补齐历史与实时之间的缺口），之后续上实时流；`idle` 后不再出现上一区间的消息/工具事件
 
-## 会话
+## 4. 会话
 
 - 交互只有两个动作：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作）
 - **按钮映射**（客户端本地配置，无专用协议）：commit / submit PR 等需要编写内容的操作经 prompt 由 agent 执行；push、undo / revert（文件 / hunk / 全部）等无需判断的操作由 server 直连 git 执行——undo/revert 需等工作区间结束后再触发，否则"撤销最近变更"的时点语义是乱的；skill 安装 / 更新经 prompt 由 agent 执行（见「Skills 管理」）；新会话 / Kill Session 由客户端直接发起对应会话操作
 - **多客户端并发**：server 对同一会话的所有 prompt（含各客户端的）按到达顺序串行化，保证按调用顺序送达
 - **通知（P1）**：客户端从事件流自行推导（工作结束 / 异常 / 长时间无响应），配置存客户端本地，无需协议
 
-## 数据存储
+## 5. 数据存储
 
 - server 与 GUI 的本地数据统一存放于 `~/.amux`（各自子目录），GUI 侧的机器注册表、技能注册表等配置也在其中
 - worktree 统一创建于 `~/.amux/worktrees`
 - server 存储**会话历史**（对话内容）+ **一段有界的流式事件缓冲**（最近一段时间的原始事件，非全量持久化）
 
-## Skills 管理
+## 6. Skills 管理
 
 Skills 注册表（URL + 本地目录 + 作用域 + 启用状态）是用户配置，存于 **GUI 客户端**（GUI 本地配置）——增删 / 启停是 GUI 本地操作，多设备各自配置。
 
 Skill 的安装 / 更新**像按钮一样由用户触发**：GUI 按注册表拼接一段 prompt（如"克隆 `{url}` 到 `{localDir}` 并启用"），发给某个会话的 agent 执行 clone/pull——与 commit 按钮同属"按钮 = 拼接 prompt"的模式。作用域决定该 skill 的按钮出现在哪些会话（global 全部、project 特定 repo 的会话、personal 自用）。
 
-## Server 与 Agent Harness 通信
+## 7. Server 与 Agent Harness 通信
 
 Server 与 Agent Harness 之间通过 [AHAL](AHAL.md) 层通信。AHAL 提供统一的 Driver/Session 接口，屏蔽不同 harness 的差异。
 
-## 工作流
+## 8. 工作流
 
 工作流引擎运行在 GUI 客户端（server 之间不通信），基于会话原语编排（见「会话」）：模板与实例是 GUI 本地数据，任务通过创建会话、发送 prompt、取消工作等原语组合表达，不占用协议面。
 
 已知取舍：关闭应用后各机器上已启动的 agent 任务继续运行，但工作流推进逻辑（排序、审查门、失败策略）随 GUI 退出而停止；若要求跨关闭存活，需把引擎下沉到 server 并引入 server 间通信。
 
-## 参考
+## 9. 参考
 
 - [raft.build](https://raft.build)：Client-Server + WebSocket 的桌面应用架构参考
 - [herdr](https://github.com/ogulcancelik/herdr)：终端 agent 多路复用，server 常驻与 attach/reattach 模式

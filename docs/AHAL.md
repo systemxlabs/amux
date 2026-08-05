@@ -6,7 +6,7 @@ AHAL 是 Agent Harness 的控制平面接口规范，以库的形式提供。上
 
 ---
 
-## 设计原则
+## 1. 设计原则
 
 | 原则 | 说明 |
 |------|------|
@@ -19,7 +19,7 @@ AHAL 是 Agent Harness 的控制平面接口规范，以库的形式提供。上
 
 ---
 
-## 架构
+## 2. 架构
 
 ```
 ┌─────────────────┐
@@ -44,14 +44,14 @@ AHAL 是 Agent Harness 的控制平面接口规范，以库的形式提供。上
 
 ---
 
-## 概念模型
+## 3. 概念模型
 
 AHAL 只有两个核心概念：
 
 - **Session**：与某个 harness 的一段持续会话，有持久化历史，可关闭、可恢复
 - **事件流**：Session 上发生的一切，按序投递给 Client
 
-### 状态模型
+### 3.1 状态模型
 
 Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 
@@ -66,7 +66,7 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 
 ---
 
-## Driver
+## 4. Driver
 
 | 名称 | 语义 |
 |---|---|
@@ -76,7 +76,7 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 
 ---
 
-## Session
+## 5. Session
 
 | 名称 | 语义 |
 |---|---|
@@ -87,11 +87,11 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 
 ---
 
-## 事件流
+## 6. 事件流
 
 Session 的全部输出以**流式传输**按序投递——消息、思考、工具调用、状态变化都以流式更新表达，每条事件携带产生时间。流式模型参考 ACPv2（Agent Client Protocol）的 `session/update` 设计：全量更新与增量 chunk 并存、按 ID 聚合。
 
-### 流式语义
+### 6.1 流式语义
 
 - **聚合**：消息与工具更新按 ID 聚合——全量更新可整体替换，chunk 追加；不同消息可交错，Client 按 ID 分别拼接
 - **状态**：每次迁移都发；工作区间以 `state_changed`（`idle`）收尾并携带结束原因（正常结束 / 取消 / 达到上限 / 拒绝 / 错误）；`idle` 恒为该区间的最后一条事件
