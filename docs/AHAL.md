@@ -4,8 +4,6 @@
 
 AHAL 是 Agent Harness 的控制平面接口规范，以库的形式提供。上层应用（Client）链接 AHAL 库，通过统一接口控制各家的 agent harness（Codex、Claude Code、Kimi Code 等）；库内部由 Driver 组件完成具体 harness 的适配。
 
-AHAL 不规定任何线上通信方式——Driver 与 harness 之间如何交互（子进程 + 原生协议、进程内 SDK 等）完全是实现细节。
-
 ---
 
 ## 设计原则
