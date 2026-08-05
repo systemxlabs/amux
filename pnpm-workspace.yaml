@@ -1,0 +1,9 @@
+packages:
+  - "app"
+  - "server"
+  - "ahal"
+  - "ahal-*"
+  - "shared"
+
+allowBuilds:
+  esbuild: true
