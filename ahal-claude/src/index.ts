@@ -1,1 +1,4 @@
-// claude driver：实现 AHAL Driver 语义（骨架）。见 docs/AHAL.md。
+/** ahal-claude：基于 @anthropic-ai/claude-agent-sdk 的驱动 */
+export { ClaudeDriver, createClaudeDriver } from "./driver.js";
+export { ClaudeNormalizer } from "./normalize.js";
+export type { ClaudeMessage, ClaudeRawStreamEvent, ToolResultBlock } from "./normalize.js";
