@@ -240,6 +240,14 @@ body {
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.conversation-head .mono.dim {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conversation-scroll {
@@ -661,4 +669,34 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 12px;
+}
+
+/* ---- 会话行内恢复按钮 ---- */
+
+.resume-btn {
+  margin-left: auto;
+  color: var(--accent);
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+/* ---- 页内提示（替代 alert 弹窗） ---- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 100;
+  background: var(--bg-active);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  max-width: 70vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

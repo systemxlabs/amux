@@ -14,6 +14,7 @@ export interface FeedEvent {
 export class SessionFeed {
   private items: FeedEvent[] = [];
   private seen = -1;
+  private rev = 0;
 
   constructor(public readonly sessionId: string) {}
 
@@ -26,10 +27,20 @@ export class SessionFeed {
     return this.seen;
   }
 
+  /**
+   * 内容版本号：每次变更自增。
+   * events 数组是原地变更的（引用不变），React 的 useMemo 依赖数组引用
+   * 无法感知新增事件——UI 层须依赖本字段触发重算。
+   */
+  get revision(): number {
+    return this.rev;
+  }
+
   /** 重连补齐第一步：以历史替换当前内容。 */
   applyHistory(events: readonly FeedEvent[]): void {
     this.items = [...events];
     this.seen = events.length ? events[events.length - 1].seq : -1;
+    this.rev++;
   }
 
   /** 应用一批事件（缓冲补齐或实时到达）；返回实际新增条数。 */
@@ -46,6 +57,7 @@ export class SessionFeed {
     if (e.seq <= this.seen) return false;
     this.items.push(e);
     this.seen = e.seq;
+    this.rev++;
     return true;
   }
 }

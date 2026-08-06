@@ -35,6 +35,7 @@ export interface SidebarProps {
   selectedSessionId: string | null;
   onSelectSession: (machineId: string, sessionId: string) => void;
   onSelectMachine: (machineId: string) => void;
+  onResumeSession: (machineId: string, sessionId: string) => void;
   onNewSession: (machineId: string) => void;
   onAddMachine: () => void;
   onRemoveMachine: (machineId: string) => void;
@@ -82,6 +83,7 @@ export function Sidebar(props: SidebarProps) {
               <div className="session-list">
                 {sessions.map((s) => {
                   const badge = statusBadge(s);
+                  const resumable = s.closed || s.interrupted;
                   return (
                     <div
                       key={s.id}
@@ -91,6 +93,18 @@ export function Sidebar(props: SidebarProps) {
                       <div className="session-line">
                         <span className={`session-state ${badge.cls}`}>{badge.text}</span>
                         <span className="session-harness">{s.harness}</span>
+                        {resumable && (
+                          <button
+                            className="btn subtle small resume-btn"
+                            title="恢复该会话（resume）"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              props.onResumeSession(m.id, s.id);
+                            }}
+                          >
+                            恢复
+                          </button>
+                        )}
                       </div>
                       <div className="session-summary">{recentSummary(store?.state.feeds.get(s.id), s)}</div>
                     </div>

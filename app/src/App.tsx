@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { Input } from "ahal";
 import { buttonDisabled, DEFAULT_BUTTONS } from "./lib/buttons.js";
-import { addMachine as saveAddMachine, loadMachines, removeMachine as saveRemoveMachine, type MachineConfig } from "./lib/configStore.js";
+import {
+  addMachine,
+  loadMachines,
+  loadNotifyPrefs,
+  removeMachine,
+  type MachineConfig,
+} from "./lib/configStore.js";
 import { MachineStore } from "./lib/machineStore.js";
 import { NotificationDetector } from "./lib/notify.js";
 import { notifyError, notifyLongIdle, notifyWorkEnded, setNotificationOpenHandler } from "./lib/notifyBridge.js";
@@ -16,11 +22,19 @@ function shortId(id: string): string {
 }
 
 export default function App() {
-  const [machines, setMachines] = useState<MachineConfig[]>(() => loadMachines());
-  const [tick, setTick] = useState(0);
+  const [machines, setMachines] = useState<MachineConfig[]>([]);
+  const [, setTick] = useState(0);
   const storesRef = useRef<Map<string, MachineStore>>(new Map());
   const [selected, setSelected] = useState<{ machineId: string; sessionId: string | null } | null>(null);
   const [dialog, setDialog] = useState<"add-machine" | "new-session" | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<number | null>(null);
+
+  const showToast = (msg: string): void => {
+    setToast(msg);
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 4000);
+  };
 
   const ensureStore = (m: MachineConfig): MachineStore => {
     let s = storesRef.current.get(m.id);
@@ -34,63 +48,91 @@ export default function App() {
   };
 
   useEffect(() => {
-    for (const m of machines) ensureStore(m);
     setNotificationOpenHandler((machineId, sessionId) => setSelected({ machineId, sessionId }));
+    void loadMachines()
+      .then(setMachines)
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 机器列表就绪 / 变更时确保每个机器有 store（含新增与移除后的增量）
+  useEffect(() => {
+    for (const m of machines) ensureStore(m);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machines]);
+
   // 通知推导：周期扫描各会话事件流，经 NotificationDetector 触发桌面通知
   useEffect(() => {
-    const detectors = new Map<string, NotificationDetector>();
-    const lastSeq = new Map<string, number>();
-    const interval = window.setInterval(() => {
-      for (const [mid, store] of storesRef.current) {
-        const machineName = store.state.config.name;
-        for (const s of store.state.sessions) {
-          const feed = store.state.feeds.get(s.id);
-          if (!feed) continue;
-          let d = detectors.get(s.id);
-          if (!d) {
-            d = new NotificationDetector({ workEnded: true, onError: true, longIdleSeconds: 300 });
-            detectors.set(s.id, d);
-          }
-          const label = `${s.harness} ${shortId(s.id)}`;
-          const from = lastSeq.get(s.id) ?? -1;
-          for (const ev of feed.events) {
-            if (ev.seq > from) {
-              const n = d.onEvent(ev.event, ev.timestamp);
-              if (n) {
-                if (n.kind === "work-ended") notifyWorkEnded(mid, s.id, machineName, label, n.reason);
-                else if (n.kind === "error") notifyError(mid, s.id, machineName, label, n.message);
+    let stopped = false;
+    let interval: number | null = null;
+    void loadNotifyPrefs().then((prefs) => {
+      if (stopped) return;
+      const detectors = new Map<string, NotificationDetector>();
+      const lastSeq = new Map<string, number>();
+      interval = window.setInterval(() => {
+        for (const [mid, store] of storesRef.current) {
+          const machineName = store.state.config.name;
+          for (const s of store.state.sessions) {
+            const feed = store.state.feeds.get(s.id);
+            if (!feed) continue;
+            let d = detectors.get(s.id);
+            if (!d) {
+              d = new NotificationDetector({
+                workEnded: prefs.workEnded,
+                onError: prefs.onError,
+                longIdleSeconds: prefs.longIdleSeconds,
+              });
+              detectors.set(s.id, d);
+            }
+            const label = `${s.harness} ${shortId(s.id)}`;
+            const from = lastSeq.get(s.id) ?? -1;
+            for (const ev of feed.events) {
+              if (ev.seq > from) {
+                const n = d.onEvent(ev.event, ev.timestamp);
+                if (n) {
+                  if (n.kind === "work-ended") notifyWorkEnded(mid, s.id, machineName, label, n.reason);
+                  else if (n.kind === "error") notifyError(mid, s.id, machineName, label, n.message);
+                }
               }
             }
+            lastSeq.set(s.id, feed.lastSeq);
+            const idle = d.tick();
+            if (idle) notifyLongIdle(mid, s.id, machineName, label);
           }
-          lastSeq.set(s.id, feed.lastSeq);
-          const idle = d.tick();
-          if (idle) notifyLongIdle(mid, s.id, machineName, label);
         }
-      }
-    }, 1000);
-    return () => window.clearInterval(interval);
+      }, 1000);
+    });
+    return () => {
+      stopped = true;
+      if (interval !== null) window.clearInterval(interval);
+    };
   }, []);
 
   const selectedStore = selected ? storesRef.current.get(selected.machineId) : undefined;
   const selectedMeta = selectedStore?.state.sessions.find((s) => s.id === selected?.sessionId);
   const selectedFeed = selectedStore && selected?.sessionId ? selectedStore.state.feeds.get(selected.sessionId) : undefined;
-  void tick;
 
   const promptSelected = (input: Input) => {
     const sel = selected;
     const store = sel ? storesRef.current.get(sel.machineId) : undefined;
     if (!store || !sel?.sessionId) return;
-    void store.prompt(sel.sessionId, input).catch((e) => alert(`prompt 失败：${(e as Error).message}`));
+    void store.prompt(sel.sessionId, input).catch((e) => showToast(`prompt 失败：${(e as Error).message}`));
   };
 
   const cancelSelected = () => {
     const sel = selected;
     const store = sel ? storesRef.current.get(sel.machineId) : undefined;
     if (!store || !sel?.sessionId) return;
-    void store.cancel(sel.sessionId).catch((e) => alert(`cancel 失败：${(e as Error).message}`));
+    void store.cancel(sel.sessionId).catch((e) => showToast(`cancel 失败：${(e as Error).message}`));
+  };
+
+  const resumeSelected = (machineId: string, sessionId: string) => {
+    const store = storesRef.current.get(machineId);
+    if (!store) return;
+    void store
+      .resumeSession(sessionId)
+      .then(() => setSelected({ machineId, sessionId }))
+      .catch((e) => showToast(`恢复失败：${(e as Error).message}`));
   };
 
   const onButton = (id: string) => {
@@ -103,16 +145,16 @@ export default function App() {
     const cwd = meta.cwd;
     switch (b.kind) {
       case "prompt":
-        void store.prompt(sel.sessionId, [{ type: "text", text: b.promptTemplate ?? b.label }]).catch((e) => alert(`失败：${(e as Error).message}`));
+        void store.prompt(sel.sessionId, [{ type: "text", text: b.promptTemplate ?? b.label }]).catch((e) => showToast(`失败：${(e as Error).message}`));
         break;
       case "git-push":
-        void store.gitPush(cwd).then((r) => alert(r.ok ? "Push 完成" : `Push 失败：${r.message ?? ""}`));
+        void store.gitPush(cwd).then((r) => showToast(r.ok ? "Push 完成" : `Push 失败：${r.message ?? ""}`));
         break;
       case "git-revert":
-        void store.gitRevert(cwd).then((r) => alert(r.ok ? "已撤销" : `撤销失败：${r.message ?? ""}`));
+        void store.gitRevert(cwd).then((r) => showToast(r.ok ? "已撤销" : `撤销失败：${r.message ?? ""}`));
         break;
       case "kill-session":
-        void store.closeSession(sel.sessionId).then(() => setSelected(null)).catch((e) => alert(`失败：${(e as Error).message}`));
+        void store.closeSession(sel.sessionId).then(() => setSelected(null)).catch((e) => showToast(`失败：${(e as Error).message}`));
         break;
       case "new-session":
         setDialog("new-session");
@@ -129,6 +171,7 @@ export default function App() {
         selectedSessionId={selected?.sessionId ?? null}
         onSelectSession={(machineId, sessionId) => setSelected({ machineId, sessionId })}
         onSelectMachine={(machineId) => setSelected({ machineId, sessionId: null })}
+        onResumeSession={resumeSelected}
         onNewSession={(machineId) => {
           setSelected({ machineId, sessionId: null });
           setDialog("new-session");
@@ -137,8 +180,9 @@ export default function App() {
         onRemoveMachine={(machineId) => {
           storesRef.current.get(machineId)?.disconnect();
           storesRef.current.delete(machineId);
-          saveRemoveMachine(machineId);
-          setMachines(loadMachines());
+          void removeMachine(machineId)
+            .then(setMachines)
+            .catch(() => {});
           if (selected?.machineId === machineId) setSelected(null);
         }}
       />
@@ -161,6 +205,7 @@ export default function App() {
               key={selectedMeta.id}
               meta={selectedMeta}
               events={selectedFeed?.events ?? []}
+              revision={selectedFeed?.revision ?? 0}
               onPrompt={promptSelected}
               onCancel={cancelSelected}
             />
@@ -193,14 +238,13 @@ export default function App() {
         <AddMachineDialog
           onCancel={() => setDialog(null)}
           onSave={(draft) => {
-            saveAddMachine(draft);
-            setMachines(loadMachines());
-            setDialog(null);
-            // 新建的机器 store 由 ensureStore 在渲染中懒创建
-            requestAnimationFrame(() => {
-              const m = loadMachines().find((x) => x.name === draft.name);
-              if (m) ensureStore(m);
-            });
+            void addMachine(draft)
+              .then((list) => {
+                setMachines(list);
+                setDialog(null);
+                // 新机器的 store 由 [machines] effect 懒创建
+              })
+              .catch((e) => showToast(`保存失败：${(e as Error).message}`));
           }}
         />
       )}
@@ -215,11 +259,12 @@ export default function App() {
               setSelected({ machineId: selected!.machineId, sessionId: meta.id });
               setDialog(null);
             } catch (e) {
-              alert(`创建失败：${(e as Error).message}`);
+              showToast(`创建失败：${(e as Error).message}`);
             }
           }}
         />
       )}
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }

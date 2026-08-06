@@ -6,6 +6,8 @@ import { contentToText, eventsToView } from "../lib/viewModel.js";
 export interface ConversationProps {
   meta: SessionMeta;
   events: readonly { seq: number; event: Event; timestamp: number }[];
+  /** 事件流版本号（SessionFeed.revision）：events 原地变更，用它触发视图重算 */
+  revision: number;
   onPrompt: (input: Input) => void;
   onCancel: () => void;
 }
@@ -36,7 +38,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 export function Conversation(props: ConversationProps) {
-  const view = useMemo(() => eventsToView(props.events), [props.events]);
+  const view = useMemo(() => eventsToView(props.events), [props.events, props.revision]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const [text, setText] = useState("");

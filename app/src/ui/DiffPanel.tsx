@@ -138,6 +138,9 @@ export function DiffPanel(props: DiffPanelProps) {
           </div>
           {message && <div className="flash">{message}</div>}
           {diffError && <div className="error-line">{diffError}</div>}
+          {diff === "" && diffPath && status?.changes.find((c) => c.path === diffPath)?.status === "untracked" && (
+            <div className="empty-hint">未跟踪文件（git diff 不含未跟踪内容；提交后可见对比）</div>
+          )}
           <pre className="diff-text">{diff}</pre>
         </div>
       )}
