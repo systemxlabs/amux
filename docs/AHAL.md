@@ -95,3 +95,46 @@ Session 的全部输出以**流式传输**按序投递——消息、思考、�
 - **聚合**：消息与工具更新按 ID 聚合——全量更新可整体替换，chunk 追加；不同消息可交错，Client 按 ID 分别拼接
 - **状态**：每次迁移都发；工作区间以 `state_changed`（`idle`）收尾并携带结束原因（正常结束 / 取消 / 达到上限 / 拒绝 / 错误）；`idle` 恒为该区间的最后一条事件
 - **顺序与容忍**：事件严格有序；`idle` 后不再出现上一区间的消息/工具事件；Client 容忍不认识的更新类型（未来扩展）
+
+---
+
+## 7. 实现包与 Driver 技术决策
+
+本节记录各实现包的形态与落地时做出的技术决策（接口签名以各包代码为准）。
+
+### 7.1 ahal 包
+
+- **纯类型与接口包**：Driver/Session 接口、四态、内容块、全部事件类型、可区分错误类型；零依赖、无运行时逻辑
+- 接口签名即契约（"以代码为准"）；错误类型命名由实现决定（AhalError 基类 + 7 个可区分子类）
+- `createDriver` 工厂**不在此包**——由 server 按机器已装 harness 组装各 driver 工厂
+
+### 7.2 ahal-codex（codex app-server）
+
+- **集成**：spawn `codex app-server`，JSON-RPC 2.0 over stdio（NDJSON 帧）
+- **协议版本**：codex 0.137 起为 v2（thread/turn 模型）——AHAL Session 对应 thread，工作区间对应 turn
+- **yolo**：`thread/start` 与 `turn/start` 携带 `approvalPolicy: "never"` + `sandboxPolicy: { type: "dangerFullAccess" }`
+- **prompt**：idle → `turn/start`；忙 → `turn/steer`（注入失败回退为 `turn/start`）
+- **cancel**：`turn/interrupt`；`turn/completed` 状态 `interrupted` 映射为 `cancelled`
+- **resume**：`thread/resume`（`~/.codex/sessions` 持久化）；线程自带 cwd，恢复时优先采用
+- **三态映射**：reasoning 通知 → thinking；agentMessage delta → responding；commandExecution 等工具 item → acting
+- **收尾**：以 `turn/completed` 为准——thread idle 通知不单独收尾，避免吞掉 `interrupted`（cancelled）状态
+
+### 7.3 ahal-claude（claude-agent-sdk）
+
+- **集成**：`@anthropic-ai/claude-agent-sdk`（进程内，spawn claude CLI）
+- **yolo**：`permissionMode: "bypassPermissions"`
+- **prompt**：idle → `query()`；忙时 steer = abort 当前 query + 以 `resume: sessionId` 续跑
+- **会话身份**：`Session.id` 在首次 query 后更新为 SDK 真实 `session_id`；后续 prompt 用 `resume` 固定会话（新会话不可传 `continue: true`，会串到 cwd 最近会话）
+- **cancel**：`abortController.abort()`（顶层选项，非 signal）→ 无 result，驱动手动收尾 `idle(cancelled)`
+- **resume**：`getSessionInfo` 预检，不存在抛 `SessionNotFoundError`；cwd 优先取会话记录值
+- **三态映射**：thinking 块 / thinking_tokens → thinking；text 块 / delta → responding；tool_use 块 / tool_progress → acting
+
+### 7.4 ahal-kimi（kimi acp）
+
+- **集成**：spawn `kimi acp`（Agent Client Protocol over stdio）——`kimi-code-sdk` 在 npm 不存在，ACP 是其官方无头协议
+- **yolo**：`session/new` 携带 `config: { mode: "yolo" }`
+- **prompt**：`session/prompt`（忙时再次调用即 steer）；kimi 的响应在 turn 结束返回，驱动以首个更新作为已接受信号 resolve
+- **cancel**：`session/cancel` → 手动收尾 `idle(cancelled)`
+- **resume**：`session/resume`（需 sessionId + cwd）
+- **三态映射**：`agent_thought`(+chunk) → thinking；`agent_message`(+chunk) → responding；`tool_call_update`(+content_chunk) → acting
+- **已知限制**：ACP chunk 通知无 messageId → 按种类合成稳定 id；协议无 turn 边界 → "idle 后不再出现上一区间事件"为尽力而为
