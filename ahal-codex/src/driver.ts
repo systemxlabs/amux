@@ -305,15 +305,17 @@ export class CodexDriver implements Driver {
     return this.attachSession(threadId, options.cwd, client);
   }
 
-  async resumeSession(sessionId: string): Promise<Session> {
+  async resumeSession(sessionId: string, cwd?: string): Promise<Session> {
     const client = await this.ensureServer();
     try {
-      const result = (await client.request("thread/resume", {
-        threadId: sessionId,
-      })) as { thread?: { id?: string; cwd?: string } };
+      const params: Record<string, unknown> = { threadId: sessionId };
+      if (cwd) params.cwd = cwd;
+      const result = (await client.request("thread/resume", params)) as {
+        thread?: { id?: string; cwd?: string };
+      };
       const threadId = result.thread?.id ?? sessionId;
-      const cwd = result.thread?.cwd ?? process.cwd();
-      return this.attachSession(threadId, cwd, client);
+      const resumeCwd = result.thread?.cwd ?? cwd ?? process.cwd();
+      return this.attachSession(threadId, resumeCwd, client);
     } catch (e) {
       throw new SessionNotFoundError(`无法恢复会话 ${sessionId}: ${(e as Error).message}`);
     }

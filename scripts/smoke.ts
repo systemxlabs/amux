@@ -147,6 +147,16 @@ async function runOnce(runNo: number): Promise<Record<string, unknown>> {
   summary["resumed"] = true;
   await session2.close();
 
+  // 5. resume 不存在的会话 → SessionNotFoundError
+  let notFound = false;
+  try {
+    await driver.resumeSession("does-not-exist-0000-0000-0000-000000000000");
+  } catch (e) {
+    notFound = (e as Error).name === "SessionNotFoundError";
+  }
+  assert(notFound, "resume 不存在的会话应抛 SessionNotFoundError");
+  summary["resumeNotFoundChecked"] = true;
+
   return summary;
 }
 

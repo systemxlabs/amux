@@ -6,7 +6,7 @@
  * cancel：abort 当前 query，随后手动收尾为 idle(cancelled)。
  * resume：query({ options: { resume: sessionId } })（~/.claude/projects 持久化）。
  */
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { getSessionInfo, query } from "@anthropic-ai/claude-agent-sdk";
 import {
   InvalidInputError,
   SessionClosedError,
@@ -238,9 +238,14 @@ export class ClaudeDriver implements Driver {
     return new ClaudeSession(options, null);
   }
 
-  async resumeSession(sessionId: string): Promise<Session> {
-    // session 是否存在由首个 query(resume) 验证；此处先构造，失败在 prompt 时暴露
-    return new ClaudeSession({ cwd: process.cwd() }, sessionId);
+  async resumeSession(sessionId: string, cwd?: string): Promise<Session> {
+    // 预检：会话不存在则立即报错（而非延迟到 prompt）
+    const info = await getSessionInfo(sessionId, { dir: cwd }).catch(() => undefined);
+    if (!info) {
+      throw new SessionNotFoundError(`无法恢复会话 ${sessionId}: 会话不存在`);
+    }
+    const resumeCwd = info.cwd ?? cwd ?? process.cwd();
+    return new ClaudeSession({ cwd: resumeCwd }, sessionId);
   }
 }
 

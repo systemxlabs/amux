@@ -161,8 +161,8 @@ export class InvalidInputError extends AhalError {
 export interface Driver {
   /** 创建 Session，以 yolo 模式启动 agent（自动批准/屏蔽一切审批请求） */
   createSession(options: SessionOptions): Promise<Session>;
-  /** 恢复已持久化的 Session（进程重启后）；无法恢复时报错；依赖底层 harness 的持久化 */
-  resumeSession(sessionId: SessionId): Promise<Session>;
+  /** 恢复已持久化的 Session（进程重启后）；无法恢复时报错；依赖底层 harness 的持久化；cwd 可选（缺省用默认目录） */
+  resumeSession(sessionId: SessionId, cwd?: string): Promise<Session>;
 }
 
 /**

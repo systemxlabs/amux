@@ -29,6 +29,7 @@ export interface KimiUpdate {
   status?: string;
   state?: "running" | "idle";
   stopReason?: string;
+  message?: string;
   content?: ContentBlock | ContentBlock[] | { type?: string; [k: string]: unknown };
   [k: string]: unknown;
 }
@@ -175,6 +176,13 @@ export class KimiNormalizer {
         } else if (update.state === "idle") {
           out.push(...this.finish(stopReasonOf(update.stopReason)));
         }
+        break;
+      }
+      case "error": {
+        out.push({
+          kind: "error",
+          message: typeof update.message === "string" ? update.message : "kimi 会话错误",
+        });
         break;
       }
       default:

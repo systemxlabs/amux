@@ -70,7 +70,6 @@ Session 有四种状态。`thinking`、`responding`、`acting` 统称"忙"。
 
 | 名称 | 语义 |
 |---|---|
-| `createDriver` | 按 harness 标识创建 Driver |
 | `Driver.createSession` | 创建 Session，以 yolo 模式启动 agent|
 | `Driver.resumeSession` | 恢复已持久化的 Session（进程重启后）；无法恢复时报错；依赖底层 harness 的持久化 |
 

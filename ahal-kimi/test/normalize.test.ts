@@ -113,4 +113,21 @@ describe("KimiNormalizer 三态映射与状态机", () => {
     );
     expect(events.some((e) => e.kind === "agent_message_chunk")).toBe(true);
   });
+
+  it("error 更新产生 error 事件；区间激活时以 idle(error) 收尾", () => {
+    const n = new KimiNormalizer();
+    const events: Event[] = [];
+    events.push(...n.push(upd({ sessionUpdate: "error", message: "boom" })));
+    expect(events).toContainEqual({ kind: "error", message: "boom" });
+    // 区间激活后出错：error 事件 + idle(error) 收尾
+    events.push(...n.push(upd({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "想" } })));
+    events.push(...n.push(upd({ sessionUpdate: "error", message: "boom2" })));
+    events.push(...n.finish("error"));
+    expect(events).toContainEqual({ kind: "error", message: "boom2" });
+    expect(events[events.length - 1]).toEqual({
+      kind: "state_changed",
+      state: "idle",
+      reason: "error",
+    });
+  });
 });

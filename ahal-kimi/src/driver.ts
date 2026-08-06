@@ -160,7 +160,14 @@ class KimiSession implements Session {
   /** prompt 出错（error 响应 / 进程异常）时调用 */
   fail(e: Error): void {
     if (this.closed) return;
-    const events = this.normalizer.push({ sessionUpdate: "error", message: e.message } as unknown as KimiUpdate);
+    const events = this.normalizer.push({
+      sessionUpdate: "error",
+      message: e.message,
+    } as unknown as KimiUpdate);
+    // 若区间已激活，异常终止也须以 idle(error) 收尾
+    if (this.normalizer.snapshot().intervalActive) {
+      events.push(...this.normalizer.finish("error"));
+    }
     const now = Date.now();
     for (const ev of events) this.broadcaster.emit({ event: ev, timestamp: now });
     this.pendingPrompt?.reject(e);
@@ -268,15 +275,15 @@ export class KimiDriver implements Driver {
     return this.attach(sessionId, options.cwd, client);
   }
 
-  async resumeSession(sessionId: string): Promise<Session> {
+  async resumeSession(sessionId: string, cwd?: string): Promise<Session> {
     const client = await this.ensureServer();
     try {
       const result = (await client.request("session/resume", {
         sessionId,
-        cwd: process.cwd(),
+        cwd: cwd ?? process.cwd(),
       })) as { sessionId?: string };
       const sid = result.sessionId ?? sessionId;
-      return this.attach(sid, process.cwd(), client);
+      return this.attach(sid, cwd ?? process.cwd(), client);
     } catch (e) {
       throw new SessionNotFoundError(`无法恢复会话 ${sessionId}: ${(e as Error).message}`);
     }
