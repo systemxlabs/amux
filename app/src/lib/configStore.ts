@@ -4,7 +4,6 @@
  * 存储：Tauri 环境下经 Rust command 写入 `~/.amux/gui/config.json`
  * （docs/DESIGN.md §5 统一数据目录；原子写、Unix 0600，含机器 token）；
  * 纯浏览器开发环境（无 Tauri）回退 localStorage 单 key。
- * 首次运行时自动把旧版 localStorage 分键（amux.machines.v1 等）迁移进新存储。
  */
 
 import { DEFAULT_BUTTONS } from "./buttons.js";
@@ -57,7 +56,6 @@ interface ConfigBackend {
 }
 
 const LS_CONFIG_KEY = "amux.config.v1";
-const LEGACY_KEYS = ["amux.machines.v1", "amux.buttons.v1", "amux.notify.v1"] as const;
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -145,49 +143,10 @@ export function normalizeConfig(raw: unknown): GuiConfig {
   return cfg;
 }
 
-// ---- 旧版 localStorage 迁移 ----
-
-function readLegacy(): GuiConfig | null {
-  if (typeof localStorage === "undefined") return null;
-  try {
-    const rawMachines = localStorage.getItem("amux.machines.v1");
-    const rawButtons = localStorage.getItem("amux.buttons.v1");
-    const rawNotify = localStorage.getItem("amux.notify.v1");
-    if (!rawMachines && !rawButtons && !rawNotify) return null;
-    const cfg = defaultConfig();
-    if (rawMachines) {
-      const list = JSON.parse(rawMachines) as unknown;
-      if (Array.isArray(list)) cfg.machines = list.filter(isMachineConfig);
-    }
-    if (rawButtons) {
-      const list = JSON.parse(rawButtons) as unknown;
-      if (Array.isArray(list)) cfg.buttons = list.filter(isStoredButton);
-    }
-    if (rawNotify) cfg.notify = normalizeNotify(JSON.parse(rawNotify));
-    return cfg;
-  } catch {
-    return null;
-  }
-}
-
-function clearLegacy(): void {
-  if (typeof localStorage === "undefined") return;
-  for (const k of LEGACY_KEYS) localStorage.removeItem(k);
-}
-
 // ---- 对外 API（全部异步） ----
 
 export async function loadConfig(): Promise<GuiConfig> {
-  const b = activeBackend();
-  let raw = await b.load();
-  if (raw === null || raw === "") {
-    const legacy = readLegacy();
-    if (legacy) {
-      raw = JSON.stringify(legacy);
-      await b.save(raw);
-      clearLegacy();
-    }
-  }
+  const raw = await activeBackend().load();
   if (!raw) return defaultConfig();
   try {
     return normalizeConfig(JSON.parse(raw) as unknown);
