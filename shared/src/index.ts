@@ -1,1 +1,2 @@
-// app↔server 共享消息类型（JSON-RPC）。见 docs/DESIGN.md。
+export * from "./jsonrpc.js";
+export * from "./protocol.js";

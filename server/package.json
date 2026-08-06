@@ -4,6 +4,22 @@
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
-  "scripts": { "typecheck": "tsc --noEmit" },
-  "dependencies": { "ahal": "workspace:*", "ahal-codex": "workspace:*", "ahal-kimi": "workspace:*", "ahal-claude": "workspace:*", "shared": "workspace:*" }
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ahal": "workspace:*",
+    "ahal-codex": "workspace:*",
+    "ahal-kimi": "workspace:*",
+    "ahal-claude": "workspace:*",
+    "shared": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0"
+  }
 }
