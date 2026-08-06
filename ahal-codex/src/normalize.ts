@@ -280,6 +280,11 @@ export class CodexNormalizer {
     return out;
   }
 
+  /** 外部收尾（interrupt 超时无 turn/completed）：无条件关闭区间并发出 idle */
+  finish(reason: StopReason): Event[] {
+    return this.closeInterval(reason);
+  }
+
   /** 状态迁移；每次迁移发一个 state_changed（忙态之间、进入忙态） */
   private transition(next: SessionState): Event[] {
     if (this.state === next) return [];

@@ -118,6 +118,7 @@ class CodexSession implements Session {
   private normalizer = new CodexNormalizer();
   private broadcaster = new Broadcaster<SessionEvent>();
   private promptQueue: Promise<unknown> = Promise.resolve();
+  private idleWaiters = new Set<() => void>();
   private onClosed?: () => void;
 
   constructor(
@@ -144,6 +145,7 @@ class CodexSession implements Session {
     // 更新工作状态
     const snap = this.normalizer.snapshot();
     this.runtime.working = snap.intervalActive;
+    if (!this.runtime.working) this.flushIdleWaiters();
     if (wire.method === "turn/started") {
       this.runtime.turnId = wire.params.turn.id;
     }
@@ -215,30 +217,41 @@ class CodexSession implements Session {
     }
     // 阻塞直到工作区间收尾（normalizer 发出 idle）
     await this.waitForIdle(30000);
+    if (this.runtime.working) {
+      // 超时仍无 turn/completed：手动收尾，避免会话永久卡在忙状态
+      this.runtime.turnId = null;
+      this.runtime.working = false;
+      const now = Date.now();
+      this.broadcaster.emit({
+        event: { kind: "error", message: "等待工作区间收尾超时" },
+        timestamp: now,
+      });
+      for (const e of this.normalizer.finish("cancelled")) {
+        this.broadcaster.emit({ event: e, timestamp: now });
+      }
+      this.flushIdleWaiters();
+    }
   }
 
-  private async waitForIdle(timeoutMs: number): Promise<void> {
-    if (!this.runtime.working) return;
-    const done = new Promise<void>((resolve) => {
+  private flushIdleWaiters(): void {
+    const waiters = [...this.idleWaiters];
+    this.idleWaiters.clear();
+    for (const w of waiters) w();
+  }
+
+  private waitForIdle(timeoutMs: number): Promise<void> {
+    if (!this.runtime.working) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const onIdle = () => {
+        clearTimeout(timer);
+        resolve();
+      };
       const timer = setTimeout(() => {
-        this.broadcaster.emit({
-          event: { kind: "error", message: "等待工作区间收尾超时" },
-          timestamp: Date.now(),
-        });
+        this.idleWaiters.delete(onIdle);
         resolve();
       }, timeoutMs);
-      const unsub = this.broadcaster.subscribe();
-      void (async () => {
-        for await (const se of unsub) {
-          if (se.event.kind === "state_changed" && se.event.state === "idle") {
-            clearTimeout(timer);
-            resolve();
-            return;
-          }
-        }
-      })();
+      this.idleWaiters.add(onIdle);
     });
-    await done;
   }
 
   async close(): Promise<void> {

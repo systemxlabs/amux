@@ -156,6 +156,7 @@ class KimiSession implements Session {
     // 等待 turn.ended(cancelled) 收尾；未到达则手动收尾
     await this.waitForIdle(15000);
     const events = this.normalizer.finish("cancelled");
+    this.working = false;
     const now = Date.now();
     for (const e of events) this.broadcaster.emit({ event: e, timestamp: now });
   }

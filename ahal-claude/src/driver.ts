@@ -8,6 +8,7 @@
  */
 import { getSessionInfo, query } from "@anthropic-ai/claude-agent-sdk";
 import {
+  AhalError,
   InvalidInputError,
   SessionClosedError,
   SessionNotFoundError,
@@ -91,7 +92,8 @@ class ClaudeSession implements Session {
   private broadcaster = new Broadcaster<SessionEvent>();
   private abortCtrl: AbortController | null = null;
   private promptQueue: Promise<unknown> = Promise.resolve();
-  private steerRequested = false;
+  /** cancel 代数：steer 打断等待期间发生 cancel 时递增，用于放弃被并发取消的注入 */
+  private generation = 0;
 
   constructor(
     private readonly opts: SessionOptions,
@@ -126,11 +128,14 @@ class ClaudeSession implements Session {
     this.assertOpen();
     if (this.working) {
       // 忙 → steer：打断当前 query，续跑
-      this.steerRequested = true;
+      const gen = this.generation;
       this.abortCtrl?.abort();
       await this.waitWorkingDone();
-      this.steerRequested = false;
       if (this.closed) throw new SessionClosedError(`Session ${this.id} 已关闭`);
+      // 打断等待期间发生了 cancel：工作已被取消，不能假装消息已送达
+      if (this.generation !== gen) {
+        throw new AhalError("prompt 被并发 cancel 取消，未送达");
+      }
     }
     await this.runQuery(text);
   }
@@ -212,7 +217,7 @@ class ClaudeSession implements Session {
   async cancel(): Promise<void> {
     this.assertOpen();
     if (!this.working) return;
-    this.steerRequested = false;
+    this.generation++;
     this.abortCtrl?.abort();
     await this.waitWorkingDone();
     // abort 无 result，手动收尾为 idle(cancelled)
@@ -224,7 +229,7 @@ class ClaudeSession implements Session {
   async close(): Promise<void> {
     if (this.closed) return;
     if (this.working) {
-      this.steerRequested = false;
+      this.generation++;
       this.abortCtrl?.abort();
       await this.waitWorkingDone();
     }
