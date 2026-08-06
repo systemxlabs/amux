@@ -98,22 +98,13 @@ Session 的全部输出以**流式传输**按序投递——消息、思考、�
 
 ---
 
-## 7. 实现包与 Driver 技术决策
+## 7. 实现与对接
 
 本节记录各实现包的形态与落地时选用的对接方式（细节以各包代码为准）。
 
-### 7.1 ahal 包
-
-纯类型与接口包（零依赖、无运行时）；`createDriver` 工厂归 server，由 server 按机器已装 harness 组装各 driver 工厂。
-
-### 7.2 ahal-codex
-
-采用 `codex app-server` 子进程（JSON-RPC over stdio）。
-
-### 7.3 ahal-claude
-
-采用 `@anthropic-ai/claude-agent-sdk`（进程内封装）。
-
-### 7.4 ahal-kimi
-
-采用 `kimi acp`（Agent Client Protocol over stdio）——`kimi-code-sdk` 在 npm 不存在，ACP 为其官方无头协议。
+| 包 | 形态 |
+|---|---|
+| `ahal` | 纯类型与接口（零依赖、无运行时） |
+| `ahal-codex` | 采用 `codex app-server` 子进程（JSON-RPC over stdio） |
+| `ahal-claude` | 采用 `@anthropic-ai/claude-agent-sdk`（进程内封装） |
+| `ahal-kimi` | 采用 `kimi acp`（Agent Client Protocol over stdio） |
