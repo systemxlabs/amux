@@ -1,12 +1,20 @@
 /**
- * kimi driver：spawn `kimi acp`（Agent Client Protocol over stdio）。
+ * kimi driver：基于 @botiverse/kimi-code-sdk（@moonshot-ai/kimi-code-sdk 的社区镜像，进程内封装）。
  *
- * yolo：session/new 携带 config.mode = "yolo"。
- * prompt：idle 启动新工作；忙时再次 session/prompt 即 steer（kimi ACP 支持注入）。
- *   kimi 的 session/prompt 响应在 turn 结束时返回（携带 stopReason）——
- *   驱动层以"收到首个本 turn 更新"作为已接受信号来 resolve prompt()。
- * cancel：session/cancel；resume：session/resume { sessionId, cwd }。
+ * yolo：createSession 携带 permission: "yolo"。
+ * prompt：session.prompt()（忙时 session.steer()）；SDK 的 prompt 在接受时 resolve（约 16ms）。
+ * cancel：session.cancel()；若收不到 turn.ended 则手动收尾 idle(cancelled)。
+ * resume：harness.resumeSession({ id })（会话持久化在 ~/.kimi-code/sessions）。
+ * 注意：harness 需 homeDir 指向 kimi 配置目录（~/.kimi-code），session 需先 init()。
  */
+import {
+  createKimiHarness,
+  type Event as KimiSdkWireEvent,
+  type KimiHarness,
+  type Session as KimiSdkSession,
+} from "@botiverse/kimi-code-sdk";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
   InvalidInputError,
   SessionClosedError,
@@ -18,37 +26,22 @@ import {
   type SessionEvent,
   type SessionOptions,
 } from "ahal";
-import { JsonRpcClient, type JsonRpcNotification } from "./jsonrpc.js";
-import { KimiNormalizer, type KimiUpdate } from "./normalize.js";
+import { KimiSdkNormalizer, type KimiSdkEvent } from "./normalize.js";
 
-const YOLO_CONFIG = { mode: "yolo" };
+function kimiHomeDir(): string {
+  return process.env.KIMI_HOME ?? path.join(os.homedir(), ".kimi-code");
+}
 
-/** ACP prompt 内容块（kimi acp 协议形状） */
-type AcpContentBlock =
-  | { type: "text"; text: string }
-  | { type: "resource"; resource: { uri?: string; mimeType?: string; text?: string } };
-
-/** AHAL 内容块 → ACP prompt 内容块 */
-function toAcpPrompt(input: Input): AcpContentBlock[] {
-  const out: AcpContentBlock[] = [];
+/** AHAL 内容块 → 提示文本 */
+function toPromptText(input: Input): string {
+  const parts: string[] = [];
   for (const block of input) {
-    if (block.type === "text") {
-      out.push({ type: "text", text: block.text });
-    } else if (block.type === "resource" && "text" in block) {
-      out.push({
-        type: "resource",
-        resource: { uri: block.uri, mimeType: block.mimeType, text: block.text },
-      });
-    } else if (block.type === "resource_link") {
-      out.push({
-        type: "resource",
-        resource: { uri: block.uri, mimeType: block.mimeType },
-      });
-    } else {
-      throw new InvalidInputError("二进制资源（blob）暂不支持");
-    }
+    if (block.type === "text") parts.push(block.text);
+    else if (block.type === "resource" && "text" in block) parts.push(block.text);
+    else if (block.type === "resource_link") parts.push(block.uri);
+    else throw new InvalidInputError("二进制资源（blob）暂不支持");
   }
-  return out;
+  return parts.join("\n");
 }
 
 /** 极简 hot stream 广播器（与其它 driver 同构） */
@@ -104,24 +97,28 @@ class KimiSession implements Session {
   readonly id: string;
   readonly cwd: string;
   private closed = false;
-  private normalizer = new KimiNormalizer();
+  private working = false;
+  private normalizer = new KimiSdkNormalizer();
   private broadcaster = new Broadcaster<SessionEvent>();
   private promptQueue: Promise<unknown> = Promise.resolve();
-  private pendingPrompt: { resolve: () => void; reject: (e: Error) => void } | null = null;
-  private working = false;
   private onClosed?: () => void;
 
   constructor(
-    sessionId: string,
-    cwd: string,
-    private readonly client: JsonRpcClient,
-    private readonly sendPrompt: (prompt: AcpContentBlock[]) => Promise<{ stopReason?: string }>,
-    private readonly sendCancel: () => Promise<unknown>,
+    private readonly sdk: KimiSdkSession,
+    private readonly harness: KimiHarness,
     onClosed?: () => void,
   ) {
-    this.id = sessionId;
-    this.cwd = cwd;
+    this.id = sdk.id;
+    this.cwd = sdk.workDir;
     this.onClosed = onClosed;
+    // 事件订阅：先于首个 prompt 建立
+    sdk.onEvent((event: KimiSdkWireEvent) => {
+      if (this.closed) return;
+      const events = this.normalizer.push(event as unknown as KimiSdkEvent);
+      const now = Date.now();
+      for (const e of events) this.broadcaster.emit({ event: e, timestamp: now });
+      this.working = this.normalizer.snapshot().intervalActive;
+    });
   }
 
   readonly events: AsyncIterable<SessionEvent> = this.broadcaster.subscribe();
@@ -130,82 +127,44 @@ class KimiSession implements Session {
     if (this.closed) throw new SessionClosedError(`Session ${this.id} 已关闭`);
   }
 
-  /** driver 收到本 session 的 session/update 通知时调用 */
-  feed(notification: JsonRpcNotification): void {
-    if (this.closed) return;
-    const params = notification.params as { update?: KimiUpdate } | undefined;
-    const update = params?.update;
-    if (!update || typeof update.sessionUpdate !== "string") return;
-    const events = this.normalizer.push(update);
-    const now = Date.now();
-    for (const e of events) this.broadcaster.emit({ event: e, timestamp: now });
-    // 首个更新 = 已接受信号
-    this.pendingPrompt?.resolve();
-    this.pendingPrompt = null;
-    const snap = this.normalizer.snapshot();
-    this.working = snap.intervalActive;
-  }
-
-  /** prompt 完成（session/prompt 响应带 stopReason）时调用 */
-  complete(stopReason?: string): void {
-    if (this.closed) return;
-    const events = this.normalizer.finish(stopReason);
-    const now = Date.now();
-    for (const e of events) this.broadcaster.emit({ event: e, timestamp: now });
-    this.pendingPrompt?.resolve();
-    this.pendingPrompt = null;
-    this.working = this.normalizer.snapshot().intervalActive;
-  }
-
-  /** prompt 出错（error 响应 / 进程异常）时调用 */
-  fail(e: Error): void {
-    if (this.closed) return;
-    const events = this.normalizer.push({
-      sessionUpdate: "error",
-      message: e.message,
-    } as unknown as KimiUpdate);
-    // 若区间已激活，异常终止也须以 idle(error) 收尾
-    if (this.normalizer.snapshot().intervalActive) {
-      events.push(...this.normalizer.finish("error"));
-    }
-    const now = Date.now();
-    for (const ev of events) this.broadcaster.emit({ event: ev, timestamp: now });
-    this.pendingPrompt?.reject(e);
-    this.pendingPrompt = null;
-  }
-
   prompt(input: Input): Promise<void> {
     this.assertOpen();
-    const prompt = toAcpPrompt(input);
-    if (prompt.length === 0) return Promise.resolve();
-    const run = this.promptQueue.then(() => this.deliver(prompt));
+    const text = toPromptText(input);
+    if (!text.trim()) return Promise.resolve();
+    const run = this.promptQueue.then(() => this.deliver(text));
     this.promptQueue = run.catch(() => {});
     return run;
   }
 
-  private async deliver(prompt: AcpContentBlock[]): Promise<void> {
+  private async deliver(text: string): Promise<void> {
     this.assertOpen();
-    this.working = true;
-    await new Promise<void>((resolve, reject) => {
-      this.pendingPrompt = { resolve, reject };
-      this.sendPrompt(prompt)
-        .then((res) => {
-          // kimi 在 turn 完成时返回 stopReason → 收尾
-          this.complete(res.stopReason);
-        })
-        .catch((e) => this.fail(e as Error));
-    });
+    if (this.working) {
+      await this.sdk.steer(text);
+    } else {
+      await this.sdk.prompt(text);
+    }
   }
 
   async cancel(): Promise<void> {
     this.assertOpen();
     if (!this.working) return;
     try {
-      await this.sendCancel();
+      await this.sdk.cancel();
     } catch {
       /* ignore */
     }
-    this.complete("cancelled");
+    // 等待 turn.ended(cancelled) 收尾；未到达则手动收尾
+    await this.waitForIdle(15000);
+    const events = this.normalizer.finish("cancelled");
+    const now = Date.now();
+    for (const e of events) this.broadcaster.emit({ event: e, timestamp: now });
+  }
+
+  private async waitForIdle(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && this.working) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
   }
 
   async close(): Promise<void> {
@@ -218,109 +177,55 @@ class KimiSession implements Session {
       }
     }
     this.closed = true;
+    try {
+      await this.harness.closeSession(this.id);
+    } catch {
+      /* ignore */
+    }
     this.broadcaster.close();
     this.onClosed?.();
   }
 }
 
 export class KimiDriver implements Driver {
-  private client: JsonRpcClient | null = null;
-  private initialized: Promise<void> | null = null;
-  private sessions = new Map<string, KimiSession>();
+  private harness: KimiHarness | null = null;
 
-  constructor(private readonly binary: string = "kimi") {}
-
-  private async ensureServer(): Promise<JsonRpcClient> {
-    if (this.client && !this.client.isClosed) {
-      await this.initialized;
-      return this.client;
-    }
-    const client = new JsonRpcClient(this.binary, ["acp"], {
-      stderr: () => {
-        /* 保留 stderr 观察，不阻塞 */
-      },
-    });
-    this.client = client;
-    this.initialized = client
-      .request("initialize", {
-        protocolVersion: 1,
-        clientInfo: { name: "ahal-kimi", version: "1" },
-      })
-      .then(() => undefined)
-      .catch(() => {
-        throw new Error("kimi acp 初始化失败（未登录或不可用）");
+  private async ensureHarness(): Promise<KimiHarness> {
+    if (!this.harness) {
+      this.harness = createKimiHarness({
+        homeDir: kimiHomeDir(),
+        uiMode: "headless",
+        autoLoadConfig: true,
       });
-    client.onNotification((n) => this.dispatch(n));
-    await this.initialized;
-    return client;
-  }
-
-  private dispatch(n: JsonRpcNotification): void {
-    if (n.method !== "session/update") return;
-    const params = n.params as { sessionId?: string } | undefined;
-    if (!params?.sessionId) return;
-    const session = this.sessions.get(params.sessionId);
-    if (session) session.feed(n);
+    }
+    return this.harness;
   }
 
   async createSession(options: SessionOptions): Promise<Session> {
-    const client = await this.ensureServer();
-    const result = (await client.request("session/new", {
-      cwd: options.cwd,
-      mcpServers: [],
-      config: YOLO_CONFIG,
-    })) as { sessionId?: string };
-    const sessionId = result.sessionId;
-    if (!sessionId) throw new Error("session/new 未返回 sessionId");
-    return this.attach(sessionId, options.cwd, client);
+    const harness = await this.ensureHarness();
+    const sdk = await harness.createSession({
+      workDir: options.cwd,
+      permission: "yolo",
+      ...(options.model ? { model: options.model } : {}),
+    });
+    await sdk.init();
+    return new KimiSession(sdk, harness);
   }
 
-  async resumeSession(sessionId: string, cwd?: string): Promise<Session> {
-    const client = await this.ensureServer();
+  async resumeSession(sessionId: string, _cwd?: string): Promise<Session> {
+    const harness = await this.ensureHarness();
     try {
-      const result = (await client.request("session/resume", {
-        sessionId,
-        cwd: cwd ?? process.cwd(),
-      })) as { sessionId?: string };
-      const sid = result.sessionId ?? sessionId;
-      return this.attach(sid, cwd ?? process.cwd(), client);
+      const sdk = await harness.resumeSession({ id: sessionId });
+      await sdk.init();
+      return new KimiSession(sdk, harness);
     } catch (e) {
       throw new SessionNotFoundError(`无法恢复会话 ${sessionId}: ${(e as Error).message}`);
     }
   }
-
-  private attach(sessionId: string, cwd: string, client: JsonRpcClient): Session {
-    const existing = this.sessions.get(sessionId);
-    if (existing) return existing;
-    const session = new KimiSession(
-      sessionId,
-      cwd,
-      client,
-      async (prompt) => {
-        const res = (await client.request("session/prompt", {
-          sessionId,
-          prompt,
-        })) as { stopReason?: string };
-        return res;
-      },
-      () => client.request("session/cancel", { sessionId }),
-      () => {
-        this.sessions.delete(sessionId);
-        this.maybeShutdown();
-      },
-    );
-    this.sessions.set(sessionId, session);
-    return session;
-  }
-
-  private maybeShutdown(): void {
-    if (this.sessions.size === 0 && this.client && !this.client.isClosed) {
-      this.client.close();
-      this.client = null;
-    }
-  }
 }
 
-export function createKimiDriver(options?: { binary?: string }): Driver {
-  return new KimiDriver(options?.binary ?? process.env.KIMI_BINARY ?? "kimi");
+export function createKimiDriver(): Driver {
+  return new KimiDriver();
 }
+
+export type { ContentBlock };

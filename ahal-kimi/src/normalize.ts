@@ -1,216 +1,186 @@
 /**
- * kimi ACP 更新 → AHAL 事件的纯归一化层。
- * 无 I/O、可单测。输入 ACP session/update 通知（所用子集）+ 结束原因，输出 AHAL Event。
+ * @botiverse/kimi-code-sdk 事件 → AHAL 事件的纯归一化层。
+ * 无 I/O、可单测。输入 SDK 事件（所用子集），输出 AHAL Event。
  *
- * 三态映射（kimi 明确区分思考与回复流）：
- *   - thinking：agent_thought / agent_thought_chunk
- *   - responding：agent_message / agent_message_chunk
- *   - acting：tool_call_update / tool_call_content_chunk
+ * 三态映射：
+ *   - thinking：thinking.delta
+ *   - responding：assistant.delta
+ *   - acting：tool.call.started / tool.call.delta / tool.result / tool.progress
  *
- * 工作区间：首个忙事件开始，以 finish(stopReason)（prompt 完成/state_update idle）收尾。
- * kimi 的 chunk 通知不带 messageId —— 按种类合成稳定 id（agent_message / agent_thought）。
+ * 工作区间：turn.started 开始，turn.ended 收尾（reason 映射结束原因）。
+ * SDK 事件无消息级 ID，文本按种类合成稳定 id（agent_message / agent_thought）。
  */
-import type {
-  ContentBlock,
-  Event,
-  SessionState,
-  StopReason,
-  ToolCallStatus,
-} from "ahal";
+import type { ContentBlock, Event, SessionState, StopReason, ToolCallStatus } from "ahal";
 
-// ---- kimi ACP 更新（所用子集）----
+// ---- @botiverse/kimi-code-sdk 事件（所用子集）----
 
-export interface KimiUpdate {
-  sessionUpdate: string;
-  messageId?: string;
-  toolCallId?: string;
-  toolName?: string;
-  title?: string;
-  status?: string;
-  state?: "running" | "idle";
-  stopReason?: string;
-  message?: string;
-  content?: ContentBlock | ContentBlock[] | { type?: string; [k: string]: unknown };
-  [k: string]: unknown;
-}
-
-export interface KimiStopReason {
-  stopReason?: string;
-}
+export type KimiSdkEvent =
+  | { type: "turn.started"; turnId: number; [k: string]: unknown }
+  | { type: "turn.ended"; turnId: number; reason: string; error?: unknown; [k: string]: unknown }
+  | { type: "thinking.delta"; turnId: number; delta: string; [k: string]: unknown }
+  | { type: "assistant.delta"; turnId: number; delta: string; [k: string]: unknown }
+  | {
+      type: "tool.call.started";
+      turnId: number;
+      toolCallId: string;
+      name?: string;
+      description?: string;
+      [k: string]: unknown;
+    }
+  | { type: "tool.call.delta"; turnId: number; toolCallId?: string; [k: string]: unknown }
+  | {
+      type: "tool.result";
+      turnId: number;
+      toolCallId: string;
+      output?: unknown;
+      isError?: boolean;
+      [k: string]: unknown;
+    }
+  | { type: "tool.progress"; turnId: number; [k: string]: unknown }
+  | {
+      type: "agent.status.updated";
+      contextTokens?: number;
+      maxContextTokens?: number;
+      [k: string]: unknown;
+    }
+  | { type: "error"; message?: string; code?: string; [k: string]: unknown };
 
 const SYNTH_MESSAGE_ID = "agent_message";
 const SYNTH_THOUGHT_ID = "agent_thought";
 
-const BUSY_UPDATE_KINDS = new Set([
-  "agent_message",
-  "agent_message_chunk",
-  "agent_thought",
-  "agent_thought_chunk",
-  "tool_call_update",
-  "tool_call_content_chunk",
-  "state_update",
+const BUSY_TYPES = new Set([
+  "turn.started",
+  "thinking.delta",
+  "assistant.delta",
+  "tool.call.started",
+  "tool.call.delta",
+  "tool.result",
+  "tool.progress",
 ]);
 
-export class KimiNormalizer {
+export function isBusySdkEvent(ev: KimiSdkEvent): boolean {
+  return BUSY_TYPES.has(ev.type);
+}
+
+export class KimiSdkNormalizer {
   private state: SessionState = "idle";
   private intervalActive = false;
   private intervalClosed = false;
-  private messages = new Map<string, { kind: "agent_message" | "agent_thought"; text: string }>();
   private tools = new Map<string, { toolName: string; status: ToolCallStatus }>();
 
   snapshot(): { state: SessionState; intervalActive: boolean; intervalClosed: boolean } {
     return { state: this.state, intervalActive: this.intervalActive, intervalClosed: this.intervalClosed };
   }
 
-  push(update: KimiUpdate): Event[] {
+  push(ev: KimiSdkEvent): Event[] {
     const out: Event[] = [];
     if (this.intervalClosed) {
-      // 收尾后：忙碌类更新开启新区间，其余滞留事件过滤
-      if (!BUSY_UPDATE_KINDS.has(update.sessionUpdate)) return out;
+      // 收尾后：忙碌类事件开启新区间，其余过滤
+      if (!isBusySdkEvent(ev)) return out;
       this.intervalClosed = false;
     }
 
-    switch (update.sessionUpdate) {
-      case "user_message":
-        break;
-      case "agent_message":
-      case "agent_message_chunk": {
-        out.push(...this.transition("responding"));
-        const mid = update.messageId ?? SYNTH_MESSAGE_ID;
-        const content = this.toText(update.content);
-        if (update.sessionUpdate === "agent_message") {
-          this.messages.set(mid, { kind: "agent_message", text: content });
-          out.push({
-            kind: "agent_message",
-            messageId: mid,
-            content: content ? [{ type: "text", text: content }] : [],
-          });
-        } else {
-          const cur = this.messages.get(mid);
-          if (!cur) {
-            this.messages.set(mid, { kind: "agent_message", text: content });
-            out.push({ kind: "agent_message", messageId: mid, content: [] });
-          } else {
-            cur.text += content;
-          }
-          out.push({
-            kind: "agent_message_chunk",
-            messageId: mid,
-            content: { type: "text", text: content },
-          });
+    switch (ev.type) {
+      case "turn.started": {
+        if (!this.intervalActive) {
+          this.intervalActive = true;
+          out.push(...this.transition("thinking"));
         }
         break;
       }
-      case "agent_thought":
-      case "agent_thought_chunk": {
+      case "thinking.delta": {
         out.push(...this.transition("thinking"));
-        const mid = update.messageId ?? SYNTH_THOUGHT_ID;
-        const content = this.toText(update.content);
-        if (update.sessionUpdate === "agent_thought") {
-          this.messages.set(mid, { kind: "agent_thought", text: content });
-          out.push({
-            kind: "agent_thought",
-            messageId: mid,
-            content: content ? [{ type: "text", text: content }] : [],
-          });
-        } else {
-          const cur = this.messages.get(mid);
-          if (!cur) {
-            this.messages.set(mid, { kind: "agent_thought", text: content });
-            out.push({ kind: "agent_thought", messageId: mid, content: [] });
-          } else {
-            cur.text += content;
-          }
-          out.push({
-            kind: "agent_thought_chunk",
-            messageId: mid,
-            content: { type: "text", text: content },
-          });
-        }
-        break;
-      }
-      case "tool_call_update": {
-        out.push(...this.transition("acting"));
-        const toolCallId = update.toolCallId ?? `tool:${this.tools.size + 1}`;
-        const tool = this.tools.get(toolCallId) ?? { toolName: update.toolName ?? "tool", status: "in_progress" as ToolCallStatus };
-        if (update.toolName) tool.toolName = update.toolName;
-        if (update.status) {
-          tool.status = update.status as ToolCallStatus;
-        }
-        this.tools.set(toolCallId, tool);
-        const e: { kind: "tool_call_update"; toolCallId: string; toolName: string; title?: string; status: ToolCallStatus } = {
-          kind: "tool_call_update",
-          toolCallId,
-          toolName: tool.toolName,
-          status: tool.status,
-        };
-        if (typeof update.title === "string") e.title = update.title;
-        out.push(e);
-        break;
-      }
-      case "tool_call_content_chunk": {
-        out.push(...this.transition("acting"));
-        const toolCallId = update.toolCallId ?? `tool:${this.tools.size}`;
-        const tool = this.tools.get(toolCallId);
-        if (!tool) {
-          this.tools.set(toolCallId, { toolName: "tool", status: "in_progress" });
-          out.push({
-            kind: "tool_call_update",
-            toolCallId,
-            toolName: "tool",
-            status: "in_progress",
-          });
-        }
-        const text = this.toText(update.content);
         out.push({
-          kind: "tool_call_content_chunk",
-          toolCallId,
-          content: { type: "text", text },
+          kind: "agent_thought_chunk",
+          messageId: SYNTH_THOUGHT_ID,
+          content: { type: "text", text: ev.delta },
         });
         break;
       }
-      case "state_update": {
-        if (update.state === "running") {
-          // 具体忙态由具体更新种类驱动；此处确保区间激活
-          if (!this.intervalActive) this.intervalActive = true;
-        } else if (update.state === "idle") {
-          out.push(...this.finish(stopReasonOf(update.stopReason)));
+      case "assistant.delta": {
+        out.push(...this.transition("responding"));
+        out.push({
+          kind: "agent_message_chunk",
+          messageId: SYNTH_MESSAGE_ID,
+          content: { type: "text", text: ev.delta },
+        });
+        break;
+      }
+      case "tool.call.started": {
+        out.push(...this.transition("acting"));
+        const toolCallId = ev.toolCallId;
+        const name = ev.name ?? "tool";
+        this.tools.set(toolCallId, { toolName: name, status: "in_progress" });
+        const update: { kind: "tool_call_update"; toolCallId: string; toolName: string; title?: string; status: ToolCallStatus } = {
+          kind: "tool_call_update",
+          toolCallId,
+          toolName: name,
+          status: "in_progress",
+        };
+        if (typeof ev.description === "string" && ev.description) update.title = ev.description;
+        out.push(update);
+        break;
+      }
+      case "tool.call.delta":
+      case "tool.progress": {
+        out.push(...this.transition("acting"));
+        break;
+      }
+      case "tool.result": {
+        // 工具结束后模型回到思考
+        out.push(...this.transition("thinking"));
+        const tool = this.tools.get(ev.toolCallId) ?? { toolName: "tool", status: "in_progress" as ToolCallStatus };
+        tool.status = ev.isError ? "failed" : "completed";
+        this.tools.set(ev.toolCallId, tool);
+        out.push({ kind: "tool_call_update", toolCallId: ev.toolCallId, status: tool.status });
+        break;
+      }
+      case "turn.ended": {
+        const reason = stopReasonOf(ev.reason);
+        if (reason === "error") {
+          const detail =
+            typeof ev.error === "string"
+              ? ev.error
+              : ev.error != null
+                ? JSON.stringify(ev.error)
+                : "kimi turn 失败";
+          out.push({ kind: "error", message: detail });
+        } else if (ev.reason === "blocked") {
+          out.push({ kind: "error", message: "kimi turn 被阻塞" });
+        }
+        out.push(...this.forceClose(reason));
+        break;
+      }
+      case "agent.status.updated": {
+        if (typeof ev.contextTokens === "number") {
+          out.push({
+            kind: "usage_update",
+            context: ev.contextTokens,
+            contextWindow: typeof ev.maxContextTokens === "number" ? ev.maxContextTokens : 0,
+          });
         }
         break;
       }
       case "error": {
-        out.push({
-          kind: "error",
-          message: typeof update.message === "string" ? update.message : "kimi 会话错误",
-        });
+        const message =
+          typeof ev.message === "string"
+            ? ev.message
+            : typeof ev.code === "string"
+              ? `kimi 错误: ${ev.code}`
+              : "kimi 会话错误";
+        out.push({ kind: "error", message });
         break;
       }
       default:
-        // plan_update / available_commands_update / 未知类型 → 容忍忽略
+        // 容忍未知事件类型（未来扩展）
         break;
     }
     return out;
   }
 
-  /** 外部收尾（prompt 完成 / 取消）：发出唯一的 state_changed(idle, reason) */
-  finish(reason?: string): Event[] {
-    return this.closeInterval(stopReasonOf(reason));
-  }
-
-  private toText(content: unknown): string {
-    if (content == null) return "";
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content
-        .map((c) => {
-          if (typeof c === "string") return c;
-          const t = (c as { type?: string; text?: string }).text;
-          return typeof t === "string" ? t : "";
-        })
-        .join("");
-    }
-    const t = (content as { text?: string }).text;
-    return typeof t === "string" ? t : "";
+  /** 外部收尾（cancel 后无 turn.ended）：无条件关闭区间并发出 idle */
+  finish(reason: StopReason): Event[] {
+    return this.forceClose(reason);
   }
 
   private transition(next: SessionState): Event[] {
@@ -220,28 +190,27 @@ export class KimiNormalizer {
     return [{ kind: "state_changed", state: next }];
   }
 
-  private closeInterval(reason: StopReason): Event[] {
-    if (!this.intervalActive || this.intervalClosed) return [];
+  private forceClose(reason: StopReason): Event[] {
+    if (this.intervalClosed) return [];
     this.intervalActive = false;
     this.intervalClosed = true;
     this.state = "idle";
-    this.messages.clear();
     this.tools.clear();
     return [{ kind: "state_changed", state: "idle", reason }];
   }
 }
 
-function stopReasonOf(reason?: string): StopReason {
+function stopReasonOf(reason: string): StopReason {
   switch (reason) {
     case "cancelled":
       return "cancelled";
-    case "max_tokens":
-      return "max_tokens";
-    case "refusal":
-      return "refusal";
-    case "error":
+    case "failed":
       return "error";
+    case "blocked":
+      return "refusal";
     default:
       return "end_turn";
   }
 }
+
+export type { ContentBlock };

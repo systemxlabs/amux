@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@botiverse/kimi-code-sdk": "0.28.1-botiverse.0",
     "ahal": "workspace:*"
   }
 }

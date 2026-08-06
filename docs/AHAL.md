@@ -107,4 +107,4 @@ Session 的全部输出以**流式传输**按序投递——消息、思考、�
 | `ahal` | 纯类型与接口（零依赖、无运行时） |
 | `ahal-codex` | 采用 `codex app-server` 子进程（JSON-RPC over stdio） |
 | `ahal-claude` | 采用 `@anthropic-ai/claude-agent-sdk`（进程内封装） |
-| `ahal-kimi` | 采用 `kimi acp`（Agent Client Protocol over stdio） |
+| `ahal-kimi` | 采用 `@botiverse/kimi-code-sdk`（进程内封装） |

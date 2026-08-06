@@ -1,39 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { KimiNormalizer, type KimiUpdate } from "../src/normalize.js";
+import { KimiSdkNormalizer, type KimiSdkEvent } from "../src/normalize.js";
 import type { Event } from "ahal";
 
-function upd(partial: Partial<KimiUpdate> & { sessionUpdate: string }): KimiUpdate {
-  return partial as KimiUpdate;
+function ev(partial: Record<string, unknown> & { type: string }): KimiSdkEvent {
+  return partial as unknown as KimiSdkEvent;
 }
 
-function run(...updates: KimiUpdate[]): Event[] {
-  const n = new KimiNormalizer();
+function run(...events: KimiSdkEvent[]): Event[] {
+  const n = new KimiSdkNormalizer();
   const out: Event[] = [];
-  for (const u of updates) out.push(...n.push(u));
+  for (const e of events) out.push(...n.push(e));
   return out;
 }
 
-function runAndFinish(stopReason: string, ...updates: KimiUpdate[]): Event[] {
-  const n = new KimiNormalizer();
+function runAndFinish(reason: string, ...events: KimiSdkEvent[]): Event[] {
+  const n = new KimiSdkNormalizer();
   const out: Event[] = [];
-  for (const u of updates) out.push(...n.push(u));
-  out.push(...n.finish(stopReason));
+  for (const e of events) out.push(...n.push(e));
+  out.push(...n.finish(reason as never));
   return out;
 }
 
-describe("KimiNormalizer 三态映射与状态机", () => {
+describe("KimiSdkNormalizer 三态映射与状态机", () => {
   it("完整工作区间：thinking → responding → acting → idle(end_turn)，idle 为最后一条", () => {
     const events = runAndFinish(
       "end_turn",
-      upd({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "想" } }),
-      upd({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "你" } }),
-      upd({ sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "Bash", status: "in_progress" }),
-      upd({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed" }),
+      ev({ type: "turn.started", turnId: 0 }),
+      ev({ type: "thinking.delta", turnId: 0, delta: "想" }),
+      ev({ type: "assistant.delta", turnId: 0, delta: "你" }),
+      ev({ type: "tool.call.started", turnId: 0, toolCallId: "t1", name: "Read" }),
+      ev({ type: "tool.result", turnId: 0, toolCallId: "t1", isError: false }),
     );
     const states = events
       .filter((e) => e.kind === "state_changed")
       .map((e) => (e as { state: string }).state);
-    expect(states).toEqual(["thinking", "responding", "acting", "idle"]);
+    expect(states).toEqual(["thinking", "responding", "acting", "thinking", "idle"]);
     expect(events[events.length - 1]).toEqual({
       kind: "state_changed",
       state: "idle",
@@ -41,93 +42,82 @@ describe("KimiNormalizer 三态映射与状态机", () => {
     });
   });
 
-  it("chunk 无 messageId 时按种类合成稳定 id 并追加", () => {
+  it("turn.ended 映射结束原因：completed / cancelled / failed / blocked", () => {
+    const mk = (reason: string) =>
+      run(
+        ev({ type: "turn.started", turnId: 0 }),
+        ev({ type: "turn.ended", turnId: 0, reason }),
+      );
+    expect((mk("completed").at(-1) as { reason?: string }).reason).toBe("end_turn");
+    expect((mk("cancelled").at(-1) as { reason?: string }).reason).toBe("cancelled");
+    const failed = mk("failed");
+    expect(failed.some((e) => e.kind === "error")).toBe(true);
+    expect((failed.at(-1) as { reason?: string }).reason).toBe("error");
+    expect((mk("blocked").at(-1) as { reason?: string }).reason).toBe("refusal");
+  });
+
+  it("文本/思考按种类合成稳定 id 并追加 chunk", () => {
     const events = run(
-      upd({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "A" } }),
-      upd({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "B" } }),
+      ev({ type: "turn.started", turnId: 0 }),
+      ev({ type: "assistant.delta", turnId: 0, delta: "A" }),
+      ev({ type: "assistant.delta", turnId: 0, delta: "B" }),
+      ev({ type: "thinking.delta", turnId: 0, delta: "想" }),
     );
     const chunks = events.filter((e) => e.kind === "agent_message_chunk");
     expect(chunks.map((c) => (c as { content: { text: string } }).content.text)).toEqual(["A", "B"]);
-    const msg = events.find((e) => e.kind === "agent_message");
-    expect(msg).toMatchObject({ messageId: "agent_message", content: [] });
+    const thought = events.filter((e) => e.kind === "agent_thought_chunk");
+    expect(thought.map((c) => (c as { content: { text: string } }).content.text)).toEqual(["想"]);
   });
 
-  it("带 messageId 的全量 agent_message 替换", () => {
+  it("工具调用：toolName/状态推进、isError → failed", () => {
     const events = run(
-      upd({ sessionUpdate: "agent_message", messageId: "m1", content: [{ type: "text", text: "完整" }] }),
-      upd({ sessionUpdate: "agent_message", messageId: "m1", content: [{ type: "text", text: "替换" }] }),
-    );
-    const msgs = events.filter((e) => e.kind === "agent_message");
-    expect(msgs.map((m) => (m as { content: { text: string }[] }).content[0].text)).toEqual([
-      "完整",
-      "替换",
-    ]);
-  });
-
-  it("工具调用：toolName/状态推进、content_chunk 追加", () => {
-    const events = run(
-      upd({ sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "Read", status: "in_progress" }),
-      upd({ sessionUpdate: "tool_call_content_chunk", toolCallId: "t1", content: { type: "text", text: "out" } }),
-      upd({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "failed" }),
+      ev({ type: "turn.started", turnId: 0 }),
+      ev({ type: "tool.call.started", turnId: 0, toolCallId: "t1", name: "Read", description: "读文件" }),
+      ev({ type: "tool.result", turnId: 0, toolCallId: "t1", isError: false }),
+      ev({ type: "tool.call.started", turnId: 0, toolCallId: "t2", name: "Bash" }),
+      ev({ type: "tool.result", turnId: 0, toolCallId: "t2", isError: true }),
     );
     const tools = events.filter((e) => e.kind === "tool_call_update");
-    expect(tools[0]).toMatchObject({ toolCallId: "t1", toolName: "Read", status: "in_progress" });
-    expect(tools[1]).toMatchObject({ toolCallId: "t1", status: "failed" });
-    const chunks = events.filter((e) => e.kind === "tool_call_content_chunk");
-    expect(chunks[0]).toMatchObject({ toolCallId: "t1" });
+    expect(tools[0]).toMatchObject({ toolCallId: "t1", toolName: "Read", status: "in_progress", title: "读文件" });
+    expect(tools[1]).toMatchObject({ toolCallId: "t1", status: "completed" });
+    expect(tools[2]).toMatchObject({ toolCallId: "t2", toolName: "Bash", status: "in_progress" });
+    expect(tools[3]).toMatchObject({ toolCallId: "t2", status: "failed" });
   });
 
-  it("state_update idle 收尾并携带 stopReason；cancelled 透传", () => {
+  it("agent.status.updated → usage_update", () => {
     const events = run(
-      upd({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } }),
-      upd({ sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }),
+      ev({ type: "turn.started", turnId: 0 }),
+      ev({ type: "agent.status.updated", contextTokens: 1234, maxContextTokens: 262144 }),
     );
-    expect(events[events.length - 1]).toEqual({
-      kind: "state_changed",
-      state: "idle",
-      reason: "cancelled",
-    });
+    expect(events).toContainEqual({ kind: "usage_update", context: 1234, contextWindow: 262144 });
   });
 
-  it("收尾后：非忙碌类滞留事件被过滤；忙碌类事件视为新区间开始（kimi 无 turn 边界）", () => {
-    const n = new KimiNormalizer();
-    const all: Event[] = [];
-    all.push(...n.push(upd({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "a" } })));
-    all.push(...n.finish("end_turn"));
-    // 滞留的非忙碌类通知（plan_update）被过滤
-    all.push(...n.push(upd({ sessionUpdate: "plan_update", plan: { type: "items", entries: [] } })));
-    expect(all.filter((e) => e.kind === "agent_message_chunk")).toHaveLength(1);
-    // 忙碌类事件开启新区间
-    all.push(...n.push(upd({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "新" } })));
-    expect(all.filter((e) => e.kind === "agent_thought_chunk")).toHaveLength(1);
-    // 新区间正常收尾
-    all.push(...n.finish("end_turn"));
-    expect(all[all.length - 1]).toEqual({ kind: "state_changed", state: "idle", reason: "end_turn" });
-  });
-
-  it("容忍未知 update 类型", () => {
-    const events = run(
-      upd({ sessionUpdate: "available_commands_update" }),
-      upd({ sessionUpdate: "plan_update", plan: { type: "items", entries: [] } }),
-      upd({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } }),
-    );
-    expect(events.some((e) => e.kind === "agent_message_chunk")).toBe(true);
-  });
-
-  it("error 更新产生 error 事件；区间激活时以 idle(error) 收尾", () => {
-    const n = new KimiNormalizer();
-    const events: Event[] = [];
-    events.push(...n.push(upd({ sessionUpdate: "error", message: "boom" })));
+  it("error 事件透传", () => {
+    const events = run(ev({ type: "error", message: "boom", code: "x" }));
     expect(events).toContainEqual({ kind: "error", message: "boom" });
-    // 区间激活后出错：error 事件 + idle(error) 收尾
-    events.push(...n.push(upd({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "想" } })));
-    events.push(...n.push(upd({ sessionUpdate: "error", message: "boom2" })));
-    events.push(...n.finish("error"));
-    expect(events).toContainEqual({ kind: "error", message: "boom2" });
-    expect(events[events.length - 1]).toEqual({
-      kind: "state_changed",
-      state: "idle",
-      reason: "error",
-    });
+  });
+
+  it("收尾后：非忙碌类事件过滤，忙碌类开启新区间", () => {
+    const n = new KimiSdkNormalizer();
+    const all: Event[] = [];
+    all.push(...n.push(ev({ type: "turn.started", turnId: 0 })));
+    all.push(...n.finish("end_turn"));
+    // 非忙碌事件（如状态更新之外的未知类型）被过滤
+    all.push(...n.push(ev({ type: "session.meta.updated", sessionId: "s" })));
+    expect(all.filter((e) => e.kind === "state_changed")).toHaveLength(2);
+    // 忙碌类事件开启新区间
+    all.push(...n.push(ev({ type: "turn.started", turnId: 1 })));
+    all.push(...n.push(ev({ type: "assistant.delta", turnId: 1, delta: "新" })));
+    expect(all.filter((e) => e.kind === "agent_message_chunk")).toHaveLength(1);
+  });
+
+  it("容忍未知事件类型", () => {
+    const events = run(
+      ev({ type: "turn.started", turnId: 0 }),
+      ev({ type: "hook.result", hook: "x" }),
+      ev({ type: "shell.output", output: "x" }),
+      ev({ type: "turn.ended", turnId: 0, reason: "completed" }),
+    );
+    expect((events.at(-1) as { reason?: string }).reason).toBe("end_turn");
   });
 });
