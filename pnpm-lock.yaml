@@ -11,9 +11,6 @@ importers:
       '@types/node':
         specifier: ^22.20.1
         version: 22.20.1
-      tsx:
-        specifier: ^4.23.5
-        version: 4.23.5
       typescript:
         specifier: ^5.5.0
         version: 5.8.3
@@ -2471,6 +2468,7 @@ snapshots:
       esbuild: 0.28.1
     optionalDependencies:
       fsevents: 2.3.3
+    optional: true
 
   type-is@2.1.0:
     dependencies:
