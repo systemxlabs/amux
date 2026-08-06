@@ -1,6 +1,12 @@
 /**
  * server 配置与 token：命令行参数 / 环境变量 / 数据目录 config.json 三级覆盖。
- * 数据目录默认 ~/.amux/server；token 首次启动生成、仅展示一次（存 token 文件）。
+ * 数据目录默认 ~/.amux/server。
+ *
+ * token 三种来源（参考 raft-daemon 的 --api-key 风格）：
+ * - `--token <值>`（别名 `--api-key`）或环境变量 `AMUX_TOKEN`：用户指定，直接使用并
+ *   持久化到 token 文件（后续重启沿用，不再随机生成）
+ * - token 文件（~/.amux/server/token）：上次启动写入的
+ * - 都没有：首次启动随机生成、仅展示一次（存 token 文件）
  */
 
 import { randomBytes } from "node:crypto";
@@ -15,6 +21,8 @@ export interface ServerConfig {
   /** 每会话有界事件缓冲条数 */
   maxBufferEvents: number;
   harnesses: Record<string, { defaultModel?: string }>;
+  /** 启动时指定的 token（--token / --api-key / AMUX_TOKEN）；缺省用文件或自动生成 */
+  token?: string;
 }
 
 export function defaultDataDir(): string {
@@ -67,11 +75,23 @@ export function loadConfig(argv: string[]): ServerConfig {
     dataDir,
     maxBufferEvents: toInt(args["max-buffer"]) ?? (typeof fileConfig.maxBufferEvents === "number" ? fileConfig.maxBufferEvents : undefined) ?? 2000,
     harnesses: fileConfig.harnesses ?? {},
+    token: args.token ?? args["api-key"] ?? process.env.AMUX_TOKEN ?? undefined,
   };
 }
 
-export function loadOrCreateToken(dataDir: string): { token: string; newlyCreated: boolean } {
+/**
+ * 解析 token：
+ * - provided（--token / --api-key / AMUX_TOKEN）：直接使用并写入 token 文件（重启沿用）
+ * - 文件已有：复用
+ * - 都没有：随机生成、仅展示一次（写文件）
+ */
+export function loadOrCreateToken(dataDir: string, provided?: string): { token: string; newlyCreated: boolean } {
   const file = join(dataDir, "token");
+  if (provided) {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(file, provided + "\n", { mode: 0o600 });
+    return { token: provided, newlyCreated: false };
+  }
   if (existsSync(file)) {
     const t = readFileSync(file, "utf8").trim();
     if (t) return { token: t, newlyCreated: false };

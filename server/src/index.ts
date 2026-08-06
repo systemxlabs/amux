@@ -24,7 +24,7 @@ export const SERVER_VERSION = "0.1.0";
 async function main(): Promise<void> {
   const config = loadConfig(process.argv.slice(2));
   mkdirSync(config.dataDir, { recursive: true });
-  const { token, newlyCreated } = loadOrCreateToken(config.dataDir);
+  const { token, newlyCreated } = loadOrCreateToken(config.dataDir, config.token);
 
   const registry = new SessionRegistry(join(config.dataDir, "sessions.json"));
   registry.load();
@@ -81,7 +81,9 @@ async function main(): Promise<void> {
 
   const addr = transport.address();
   console.log(`amux server v${SERVER_VERSION} listening on ws://${addr.host}:${addr.port} (数据目录: ${config.dataDir})`);
-  if (newlyCreated) {
+  if (config.token) {
+    console.log(`已使用指定 token（--token/--api-key/AMUX_TOKEN），并写入 ${join(config.dataDir, "token")}`);
+  } else if (newlyCreated) {
     console.log(`AMUX TOKEN（仅展示一次）: ${token}`);
   }
 
