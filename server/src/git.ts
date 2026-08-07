@@ -39,8 +39,21 @@ export class GitRunner {
     }
   }
 
+  /** 是否"不是 git 仓库"类错误（含中英文 git 输出）。 */
+  private isNotRepoError(e: unknown): boolean {
+    const msg = e instanceof GitError ? `${e.message}\n${e.stderr}` : (e as Error).message;
+    return /not a git repository|不是 Git 仓库/i.test(msg);
+  }
+
   async status(cwd: string): Promise<GitStatusResult> {
-    const branch = await this.branch(cwd);
+    let branch: string;
+    try {
+      branch = await this.branch(cwd);
+    } catch (e) {
+      // 非 git 仓库是合法场景（如尚未初始化的工作区）：返回标记而非报错
+      if (this.isNotRepoError(e)) return { branch: "", changes: [], notRepo: true };
+      throw e;
+    }
     const { stdout: porcelain } = await this.run(cwd, ["status", "--porcelain=v1"]);
     const numstat = await this.numstat(cwd);
 

@@ -1,36 +1,36 @@
 import { describe, expect, it } from "vitest";
 import { SessionFeed } from "./sessionFeed.js";
 
-const ev = (seq: number, kind = "agent_message") => ({
-  seq,
-  event: { kind, messageId: `m${seq}` } as never,
-  timestamp: seq,
-});
+const ev = (kind = "agent_message") => ({ event: { kind, messageId: "m" } as never, timestamp: 0 });
+const userMsg = () => ({ content: [{ type: "text" as const, text: "用户" }], timestamp: 0 });
 
-describe("SessionFeed（重连补齐合并）", () => {
-  it("历史替换 + 缺口补齐去重（恰好一次、不重复）", () => {
+describe("SessionFeed（历史 + 实时按序追加）", () => {
+  it("applyHistory 以历史替换；实时项按到达顺序追加（无去重逻辑）", () => {
     const feed = new SessionFeed("s1");
-    feed.applyHistory([ev(1), ev(2), ev(3)]);
-    expect(feed.lastSeq).toBe(3);
-    // 缓冲带回与历史重叠的事件（2、3）与缺口事件（4、5）
-    const added = feed.apply([ev(2), ev(3), ev(4), ev(5)]);
-    expect(added).toBe(2);
-    expect(feed.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5]);
+    feed.applyHistory([ev("agent_thought"), userMsg(), ev("agent_message")]);
+    expect(feed.events).toHaveLength(3);
+    feed.apply([ev("agent_thought"), userMsg()]);
+    expect(feed.events).toHaveLength(5);
+    feed.applyOne(ev("agent_message"));
+    expect(feed.events).toHaveLength(6);
+    expect(feed.revision).toBe(4); // applyHistory 1 + apply 2 条 + applyOne 1 条
   });
 
-  it("实时乱序/重复事件被丢弃", () => {
+  it("drainNotify：只含以通知（apply/applyOne）到达的实时项；消费即清空", () => {
     const feed = new SessionFeed("s1");
-    feed.applyHistory([ev(1), ev(2)]);
-    expect(feed.applyOne(ev(2))).toBe(false); // 重复
-    expect(feed.applyOne(ev(1))).toBe(false); // 乱序旧事件
-    expect(feed.applyOne(ev(3))).toBe(true);
-    expect(feed.events.map((e) => e.seq)).toEqual([1, 2, 3]);
+    feed.applyHistory([ev("agent_thought")]); // 历史不触发通知
+    expect(feed.drainNotify()).toEqual([]);
+    feed.applyOne(ev("agent_message"));
+    feed.applyOne(userMsg());
+    expect(feed.drainNotify()).toHaveLength(2);
+    expect(feed.drainNotify()).toEqual([]); // 已消费
   });
 
-  it("空历史时 seen = -1，缓冲全部接受", () => {
+  it("apply 与 applyOne 同语义：按序追加、返回新增数", () => {
     const feed = new SessionFeed("s1");
-    feed.applyHistory([]);
-    expect(feed.lastSeq).toBe(-1);
-    expect(feed.apply([ev(1), ev(2)])).toBe(2);
+    expect(feed.apply([ev(), ev()])).toBe(2);
+    expect(feed.events).toHaveLength(2);
+    expect(feed.applyOne(ev())).toBe(true);
+    expect(feed.events).toHaveLength(3);
   });
 });

@@ -1,8 +1,9 @@
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { describe, expect, it } from "vitest";
 import { Broadcaster } from "./broadcast.js";
-import { EventBuffer } from "./eventbuffer.js";
 import { GitRunner } from "./git.js";
 import { HarnessRegistry } from "./harness.js";
 import { HistoryStore } from "./history.js";
@@ -35,7 +36,6 @@ async function startTestServer(): Promise<TestServer> {
   const registry = new SessionRegistry(join(dataDir, "sessions.json"));
   registry.load();
   const history = new HistoryStore(join(dataDir, "history"));
-  const buffer = new EventBuffer(100);
   const broadcaster = new Broadcaster();
   const sessions = new Map<string, StubSession>();
   const driver = new StubDriver({ sessions });
@@ -44,7 +44,7 @@ async function startTestServer(): Promise<TestServer> {
     { name: "claude", createDriver: () => driver, probe: () => true },
     { name: "kimi", createDriver: () => new StubDriver({ failCreate: true }), probe: () => true },
   ]);
-  const manager = new SessionManager({ registry, history, buffer, broadcast: broadcaster, harnesses });
+  const manager = new SessionManager({ registry, history, broadcast: broadcaster, harnesses });
   const git = new GitRunner();
   const rpc = new RpcServer();
   for (const [m, h] of Object.entries(buildMethodHandlers({ manager, git, harnesses, serverVersion: "test" }))) {
@@ -64,10 +64,19 @@ async function startTestServer(): Promise<TestServer> {
         return;
       }
       if (frame.kind === "request" || frame.kind === "notification") {
+        const catchup = broadcaster.catchupFor(s);
+        const ctx =
+          catchup === undefined
+            ? undefined
+            : {
+                catchup,
+                send: (method: string, params: unknown) => broadcaster.sendTo(s, method, params),
+              };
         void rpc
-          .handle(frame.kind === "request" ? frame.request : frame.notification)
-          .then((res) => {
-            if (res && frame.kind === "request") s.send(encodeMessage(res));
+          .handle(frame.kind === "request" ? frame.request : frame.notification, ctx)
+          .then(({ response, afterSend }) => {
+            if (response && frame.kind === "request") s.send(encodeMessage(response));
+            afterSend?.();
           })
           .catch(() => {
             // 通知类错误不回响应
@@ -92,6 +101,22 @@ function connect(url: string): Promise<WebSocket> {
     ws.on("open", () => resolve(ws));
     ws.on("error", reject);
   });
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** 建一个真实 git 仓库（有初始提交），供 git_status 端到端用。 */
+function initRepo(): string {
+  const dir = tmpDir("amux-tr-git-");
+  git(dir, "init", "-b", "main", "-q");
+  git(dir, "config", "user.email", "t@t");
+  git(dir, "config", "user.name", "t");
+  writeFileSync(join(dir, "a.txt"), "line1\nline2\n");
+  git(dir, "add", ".");
+  git(dir, "commit", "-m", "init", "-q");
+  return dir;
 }
 
 function request(ws: WebSocket, id: number, method: string, params?: unknown): Promise<Record<string, unknown>> {
@@ -217,13 +242,13 @@ describe("Transport + RpcServer（真实 WebSocket，原始 JSON-RPC 帧）", ()
     }
   });
 
-  it("广播：两个客户端收到同一份按序事件流，互不踢出", async () => {
+  it("广播：两个客户端收到同一份按序事件流（不带序号），互不踢出", async () => {
     const srv = await startTestServer();
     try {
       const wsA = await connect(srv.url);
       const wsB = await connect(srv.url);
-      const eventsA: Array<{ seq: number; event: { kind: string } }> = [];
-      const eventsB: Array<{ seq: number; event: { kind: string } }> = [];
+      const eventsA: Array<{ event: { kind: string }; seq?: number }> = [];
+      const eventsB: Array<{ event: { kind: string }; seq?: number }> = [];
       wsA.on("message", (d) => {
         const m = JSON.parse(d.toString());
         if (m.method === "event") eventsA.push(m.params);
@@ -237,11 +262,15 @@ describe("Transport + RpcServer（真实 WebSocket，原始 JSON-RPC 帧）", ()
       const sessionId = (res.result as { session: { id: string } }).session.id;
       const stub = [...srv.sessions.values()][0]!;
 
+      // 两个客户端都先 get_history（标记补齐位置），避免事件被暂存
+      await request(wsA, 11, "get_history", { sessionId });
+      await request(wsB, 12, "get_history", { sessionId });
+
       stub.pushEvent({ kind: "agent_message", messageId: "m", content: [{ type: "text", text: "hi" }] });
       await waitFor(() => eventsA.length === 1 && eventsB.length === 1);
       expect(eventsA[0]).toEqual(eventsB[0]);
-      expect(eventsA[0].seq).toBe(1);
       expect(eventsA[0].event.kind).toBe("agent_message");
+      expect(eventsA[0].seq).toBeUndefined();
 
       stub.pushEvent({ kind: "state_changed", state: "idle", reason: "end_turn" });
       await waitFor(() => eventsA.length === 2 && eventsB.length === 2);
@@ -255,7 +284,7 @@ describe("Transport + RpcServer（真实 WebSocket，原始 JSON-RPC 帧）", ()
     }
   });
 
-  it("重连补齐：历史 + 缓冲缺口恰好一次、不重复", async () => {
+  it("重连补齐（server 按连接对齐）：历史 + 补齐后实时恰好一次、顺序完整", async () => {
     const srv = await startTestServer();
     try {
       const ws1 = await connect(srv.url);
@@ -263,39 +292,77 @@ describe("Transport + RpcServer（真实 WebSocket，原始 JSON-RPC 帧）", ()
       const sessionId = (res.result as { session: { id: string } }).session.id;
       const stub = [...srv.sessions.values()][0]!;
 
-      // 第一段：完整对话事件（非 chunk，落历史）
+      // 第一段：对话事件（thought、message 落历史；state_changed 不落）
       stub.pushEvent({ kind: "agent_thought", messageId: "t1" });
       stub.pushEvent({ kind: "agent_message", messageId: "m1", content: [{ type: "text", text: "done" }] });
       stub.pushEvent({ kind: "state_changed", state: "idle", reason: "end_turn" });
-      await waitFor(() => srv.manager.historyFor(sessionId).length === 3);
+      await waitFor(() => srv.manager.historyFor(sessionId).length === 2);
       ws1.close();
 
-      // 第二段开始：chunk 先到（流式片段，不入历史，只进缓冲）
-      stub.pushEvent({ kind: "agent_message_chunk", messageId: "m2", content: { type: "text", text: "半" } });
-      await waitFor(() => srv.manager.bufferedFor(sessionId).length === 4);
-
-      // 流式中途重连：历史（1-3）+ 缓冲补齐缺口（4）
+      // 第二段：ws2 连接（尚未 get_history，该会话的实时项被 server 按连接暂存）
       const ws2 = await connect(srv.url);
-      const hist = await request(ws2, 2, "get_history", { sessionId });
-      const histEvents = (hist.result as { events: Array<{ seq: number }> }).events;
-      expect(histEvents.map((e) => e.seq)).toEqual([1, 2, 3]);
-      const lastSeq = histEvents[histEvents.length - 1].seq;
-      const buf = await request(ws2, 3, "get_buffered_events", { sessionId, afterSeq: lastSeq });
-      const bufEvents = (buf.result as { events: Array<{ seq: number }> }).events;
-      expect(bufEvents.map((e) => e.seq)).toEqual([4]);
-
-      // 续上实时流：5、6 经广播到达，合并后恰好一次、不重复
-      const live: Array<{ seq: number }> = [];
+      const live: Array<{ event: { kind: string; messageId?: string } }> = [];
       ws2.on("message", (d) => {
         const m = JSON.parse(d.toString());
         if (m.method === "event" && m.params.sessionId === sessionId) live.push(m.params);
       });
+
+      // 连接建立后到达：chunk（不落盘，流式）+ 完整 message（落盘）——都应被暂存，不直接广播
+      stub.pushEvent({ kind: "agent_message_chunk", messageId: "m2", content: { type: "text", text: "半" } });
       stub.pushEvent({ kind: "agent_message", messageId: "m2", content: [{ type: "text", text: "完整" }] });
-      stub.pushEvent({ kind: "state_changed", state: "idle", reason: "end_turn" });
-      await waitFor(() => live.length === 2);
-      const merged = [...histEvents, ...bufEvents, ...live.map((e) => ({ seq: e.seq }))];
-      expect(merged.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]); // 恰好一次、顺序完整
+      await waitFor(() => srv.manager.currentOrder(sessionId) === 5);
+      // 暂存期间客户端收不到任何该会话通知
+      expect(live.length).toBe(0);
+
+      // get_history：历史快照与补齐位置原子对齐（含 m2 完整消息，chunk 由完整消息收敛）
+      const hist = await request(ws2, 2, "get_history", { sessionId });
+      const histItems = (hist.result as { items: Array<{ event: { kind: string; messageId: string }; seq?: number }> }).items;
+      expect(histItems.map((e) => e.event.kind)).toEqual(["agent_thought", "agent_message", "agent_message"]);
+      expect(histItems.map((e) => e.event.messageId)).toEqual(["t1", "m1", "m2"]);
+      for (const it of histItems) expect("seq" in it).toBe(false); // 历史记录不带序号
+
+      // 补齐后实时事件直接广播（不重复历史）
+      stub.pushEvent({ kind: "agent_message", messageId: "m3", content: [{ type: "text", text: "继续" }] });
+      await waitFor(() => live.length === 1);
+      expect(live[0].event.messageId).toBe("m3");
+
+      // 客户端视角合并：历史 + 实时 = 恰好一次、按真实顺序（chunk/状态不参与对话内容）
+      const merged = [...histItems.map((e) => e.event.messageId), ...live.map((e) => e.event.messageId)];
+      expect(merged).toEqual(["t1", "m1", "m2", "m3"]);
+
+      // get_buffered_events 已从协议移除
+      const gone = await request(ws2, 3, "get_buffered_events", { sessionId });
+      expect(gone.error).toMatchObject({ code: -32601 });
+
       ws2.close();
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("git_status：真实 git 仓库返回正确形状（branch/changes）；非 git 仓库返回 notRepo 标记且 server 不崩溃", async () => {
+    const srv = await startTestServer();
+    try {
+      const ws = await connect(srv.url);
+      // 真实 git 仓库：result 必须含 branch 与 changes 数组（回归：曾因缺 await 把 Promise 序列化为 {}）
+      const repo = initRepo();
+      const ok = await request(ws, 1, "git_status", { cwd: repo });
+      expect(ok.error).toBeUndefined();
+      const result = ok.result as { branch: string; changes: Array<{ path: string }>; notRepo?: boolean };
+      expect(result.branch).toBe("main");
+      expect(Array.isArray(result.changes)).toBe(true);
+      expect(result.notRepo).toBeUndefined();
+
+      // 非 git 仓库（存在但未初始化）：成功响应 + notRepo 标记（而非错误/空对象），server 进程不受影响
+      const plainDir = tmpDir("amux-notrepo-");
+      const notRepo = await request(ws, 2, "git_status", { cwd: plainDir });
+      expect(notRepo.error).toBeUndefined();
+      expect((notRepo.result as { notRepo: boolean }).notRepo).toBe(true);
+
+      // server 仍存活：后续请求正常响应
+      const info = await request(ws, 3, "get_info", {});
+      expect(info.error).toBeUndefined();
+      ws.close();
     } finally {
       await srv.close();
     }

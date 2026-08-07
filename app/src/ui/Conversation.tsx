@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ContentBlock, Event, Input } from "ahal";
+import type { ContentBlock, Input } from "ahal";
 import type { SessionMeta } from "shared";
+import { buttonDisabled, type ActionButton } from "../lib/buttons.js";
+import type { FeedItem } from "../lib/sessionFeed.js";
 import { contentToText, eventsToView } from "../lib/viewModel.js";
 
 export interface ConversationProps {
   meta: SessionMeta;
-  events: readonly { seq: number; event: Event; timestamp: number }[];
+  events: readonly FeedItem[];
   /** 事件流版本号（SessionFeed.revision）：events 原地变更，用它触发视图重算 */
   revision: number;
+  /** 快捷按钮栏（PRD §3.1：位于输入区上方、对话流与输入框之间） */
+  buttons: ActionButton[];
+  onButton: (id: string) => void;
   onPrompt: (input: Input) => void;
   onCancel: () => void;
 }
@@ -107,7 +112,7 @@ export function Conversation(props: ConversationProps) {
   return (
     <section className="conversation">
       <div className="conversation-head">
-        <span className="session-state badge">{STATE_LABEL[view.state] ?? view.state}</span>
+        <span className="session-state badge">{STATE_LABEL[props.meta.state] ?? props.meta.state}</span>
         <span className="mono">{props.meta.harness}</span>
         <span className="mono dim">{props.meta.cwd}</span>
         {view.usage && (
@@ -129,8 +134,8 @@ export function Conversation(props: ConversationProps) {
       >
         {view.bubbles.length === 0 && view.tools.length === 0 && <div className="empty-hint">尚无内容 · 可拖拽文件/粘贴图片作为上下文</div>}
         {view.bubbles.map((b) => (
-          <div key={b.key} className={`bubble ${b.kind === "thought" ? "thought" : "message"}`}>
-            <div className="bubble-label">{b.kind === "thought" ? "思考" : "Agent"}</div>
+          <div key={b.key} className={`bubble ${b.kind === "thought" ? "thought" : b.kind === "user" ? "user" : "message"}`}>
+            <div className="bubble-label">{b.kind === "thought" ? "思考" : b.kind === "user" ? "我" : "Agent"}</div>
             <pre className="bubble-content">{contentToText(b.content)}</pre>
           </div>
         ))}
@@ -155,6 +160,20 @@ export function Conversation(props: ConversationProps) {
           </button>
         )}
       </div>
+      {props.buttons.length > 0 && (
+        <div className="button-bar">
+          {props.buttons.map((b) => (
+            <button
+              key={b.id}
+              className="btn"
+              disabled={buttonDisabled(b, props.meta.state, props.meta.closed, props.meta.interrupted)}
+              onClick={() => props.onButton(b.id)}
+            >
+              {b.label}
+            </button>
+          ))}
+        </div>
+      )}
       {refs.length > 0 && (
         <div className="refs">
           {refs.map((r, i) => (
@@ -198,11 +217,10 @@ export function Conversation(props: ConversationProps) {
           </button>
         </div>
         <div className="input-actions">
-          <span className="dim">{view.state === "idle" ? "空闲：发送将启动新工作" : "忙：发送将作为 steer 注入"}</span>
           <button className="btn primary" onClick={send} disabled={!text.trim() && refs.length === 0}>
             发送
           </button>
-          <button className="btn" onClick={props.onCancel} disabled={view.state === "idle"}>
+          <button className="btn" onClick={props.onCancel} disabled={props.meta.state === "idle"}>
             取消
           </button>
         </div>

@@ -1,6 +1,8 @@
 /**
- * 单机器控制器：持有 MachineClient，维护会话列表与每会话事件流（SessionFeed），
- * 处理重连补齐（历史 + 缓冲 → 实时，seq 去重）与会话生命周期通知。
+ * 单机器控制器：持有 MachineClient，维护会话列表与每会话事件流（SessionFeed）。
+ * 事件交付按 docs/DESIGN.md §3.1/§5：重连先拉历史（get_history，按 jsonl 顺序），
+ * 之后的实时/补齐项由 server 按连接对齐、以通知按序送达——客户端按序追加即可，
+ * 无需 seq 去重、无需本地暂存。
  */
 
 import {
@@ -10,12 +12,13 @@ import {
   type MachineInfo,
   type SessionMeta,
   type SessionNotification,
+  type UserMessageNotification,
 } from "shared";
 import type { Input } from "ahal";
 import type { MachineConfig } from "./configStore.js";
 import type { ConnectionStatus } from "./machineClient.js";
 import { MachineClient } from "./machineClient.js";
-import { SessionFeed, type FeedEvent } from "./sessionFeed.js";
+import { SessionFeed, type FeedItem } from "./sessionFeed.js";
 
 export interface MachineState {
   config: MachineConfig;
@@ -30,8 +33,6 @@ export class MachineStore {
   readonly state: MachineState;
   private readonly client: MachineClient;
   private readonly listeners = new Set<() => void>();
-  /** 重连补齐期间到达的实时事件（等补齐完成后冲入对应 feed） */
-  private pendingLive = new Map<string, EventNotification[]>();
   private destroyed = false;
 
   constructor(config: MachineConfig, opts: { setTimeout?: typeof window.setTimeout } = {}) {
@@ -121,36 +122,50 @@ export class MachineStore {
     switch (method) {
       case Notifications.Event: {
         const n = params as EventNotification;
-        const feed = this.state.feeds.get(n.sessionId);
-        if (feed) {
-          feed.applyOne({ seq: n.seq, event: n.event, timestamp: n.timestamp });
-        } else {
-          // 补齐期间：暂存，补齐完成后冲入
-          const list = this.pendingLive.get(n.sessionId) ?? [];
-          list.push(n);
-          this.pendingLive.set(n.sessionId, list);
-        }
-        this.emit();
+        this.routeLive(n.sessionId, { event: n.event, timestamp: n.timestamp });
+        break;
+      }
+      case Notifications.UserMessage: {
+        const n = params as UserMessageNotification;
+        this.routeLive(n.sessionId, { content: n.content, timestamp: n.timestamp });
         break;
       }
       case Notifications.SessionCreated:
       case Notifications.SessionClosed:
-      case Notifications.SessionInterrupted:
-      case Notifications.SessionDeleted: {
+      case Notifications.SessionInterrupted: {
         const n = params as SessionNotification;
         this.upsertSessionMeta(n.session);
         if (method === Notifications.SessionCreated && !this.state.feeds.has(n.session.id)) {
           void this.catchUpSession(n.session.id);
         }
-        if (method === Notifications.SessionDeleted) {
-          this.state.feeds.delete(n.session.id);
-        }
+        this.emit();
+        break;
+      }
+      case Notifications.SessionDeleted: {
+        const n = params as SessionNotification;
+        // 永久删除：从列表与事件流移除（不可恢复，不再 upsert）
+        this.state.sessions = this.state.sessions.filter((s) => s.id !== n.session.id);
+        this.state.feeds.delete(n.session.id);
         this.emit();
         break;
       }
       default:
         break;
     }
+  }
+
+  /** 实时项路由：feed 已存在则按序追加；未 get_history 的会话 server 侧会暂存，不会收到通知。 */
+  private routeLive(sessionId: string, item: FeedItem): void {
+    const feed = this.state.feeds.get(sessionId);
+    if (feed) {
+      feed.applyOne(item);
+    }
+    // 状态变化不落历史：实时同步到会话 meta，保证头部/列表状态始终最新
+    if ("event" in item && item.event.kind === "state_changed") {
+      const meta = this.state.sessions.find((s) => s.id === sessionId);
+      if (meta) meta.state = item.event.state;
+    }
+    this.emit();
   }
 
   private upsertSessionMeta(meta: SessionMeta): void {
@@ -172,17 +187,8 @@ export class MachineStore {
       this.state.info = info.info;
       const res = await this.client.request<{ sessions: SessionMeta[] }>(Methods.ListSessions);
       this.state.sessions = res.sessions.sort((a, b) => b.createdAt - a.createdAt);
-      // 逐会话拉历史 + 缓冲补齐
+      // 逐会话拉历史；补齐缺口由 server 按连接对齐，以通知按序送达（无需本地暂存）
       await Promise.all(res.sessions.map((s) => this.catchUpSession(s.id)));
-      // 补齐期间暂存的实时事件：冲入 feed（seq 去重由 feed 保证）
-      for (const [sid, list] of this.pendingLive) {
-        const feed = this.state.feeds.get(sid);
-        if (feed) {
-          for (const n of list) feed.applyOne({ seq: n.seq, event: n.event, timestamp: n.timestamp });
-          this.state.feeds.set(sid, feed);
-        }
-      }
-      this.pendingLive.clear();
     } catch (e) {
       this.state.error = (e as Error).message;
     } finally {
@@ -193,13 +199,8 @@ export class MachineStore {
   private async catchUpSession(sessionId: string): Promise<void> {
     const feed = new SessionFeed(sessionId);
     try {
-      const hist = await this.client.request<{ events: FeedEvent[] }>(Methods.GetHistory, { sessionId });
-      feed.applyHistory(hist.events);
-      const buf = await this.client.request<{ events: FeedEvent[] }>(Methods.GetBufferedEvents, {
-        sessionId,
-        afterSeq: feed.lastSeq,
-      });
-      feed.apply(buf.events);
+      const hist = await this.client.request<{ items: FeedItem[] }>(Methods.GetHistory, { sessionId });
+      feed.applyHistory(hist.items);
     } catch {
       // 会话可能刚被删除：保留空 feed
     }

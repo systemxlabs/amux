@@ -6,12 +6,12 @@ import { tmpDir } from "./testutil.js";
 function entry(over: Partial<import("./registry.js").RegisteredSession> = {}): import("./registry.js").RegisteredSession {
   return {
     id: "s_1",
+    harnessSessionId: "thread_1",
     harness: "codex",
     cwd: "/tmp/work",
     createdAt: 1000,
     lastEventAt: 1000,
     lastState: "idle",
-    lastSeq: 7,
     closed: false,
     interrupted: false,
     ...over,
@@ -30,7 +30,7 @@ describe("SessionRegistry", () => {
     r2.load();
     expect(r2.has("a")).toBe(true);
     expect(r2.has("b")).toBe(true);
-    expect(r2.get("a")).toMatchObject({ id: "a", harness: "claude", lastSeq: 7, closed: false });
+    expect(r2.get("a")).toMatchObject({ id: "a", harness: "claude", closed: false });
     expect(r2.get("b")?.closed).toBe(true);
   });
 

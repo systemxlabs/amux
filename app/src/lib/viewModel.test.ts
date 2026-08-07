@@ -30,6 +30,17 @@ describe("eventsToView（事件 → 对话视图）", () => {
     expect(view.tools[0].content).toEqual([{ type: "text", text: "输出片段" }]);
   });
 
+  it("用户消息（非事件项）渲染为 user 气泡", () => {
+    const view = eventsToView([
+      { content: [{ type: "text", text: "你好" }], timestamp: 1 },
+      { event: { kind: "agent_message", messageId: "m1", content: [{ type: "text", text: "回复" }] }, timestamp: 2 },
+    ]);
+    expect(view.bubbles).toHaveLength(2);
+    expect(view.bubbles[0]).toMatchObject({ kind: "user", final: true });
+    expect(view.bubbles[0].content).toEqual([{ type: "text", text: "你好" }]);
+    expect(view.bubbles[1].kind).toBe("message");
+  });
+
   it("状态、用量、错误", () => {
     const view = eventsToView([
       { event: { kind: "state_changed", state: "thinking" }, timestamp: 1 },

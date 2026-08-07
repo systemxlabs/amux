@@ -1,17 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { Input } from "ahal";
-import { buttonDisabled, DEFAULT_BUTTONS } from "./lib/buttons.js";
+import { DEFAULT_BUTTONS } from "./lib/buttons.js";
 import {
-  addMachine,
   loadMachines,
   loadNotifyPrefs,
-  removeMachine,
   type MachineConfig,
 } from "./lib/configStore.js";
 import { MachineStore } from "./lib/machineStore.js";
 import { NotificationDetector } from "./lib/notify.js";
 import { notifyError, notifyLongIdle, notifyWorkEnded, setNotificationOpenHandler } from "./lib/notifyBridge.js";
-import { AddMachineDialog, NewSessionDialog } from "./ui/dialogs.js";
+import { NewSessionDialog } from "./ui/dialogs.js";
+import { SettingsDialog } from "./ui/Settings.js";
 import { Conversation } from "./ui/Conversation.js";
 import { DiffPanel } from "./ui/DiffPanel.js";
 import { Sidebar } from "./ui/Sidebar.js";
@@ -26,7 +25,11 @@ export default function App() {
   const [, setTick] = useState(0);
   const storesRef = useRef<Map<string, MachineStore>>(new Map());
   const [selected, setSelected] = useState<{ machineId: string; sessionId: string | null } | null>(null);
-  const [dialog, setDialog] = useState<"add-machine" | "new-session" | null>(null);
+  const [dialog, setDialog] = useState<"new-session" | "settings" | null>(null);
+  /** 右侧面板展开状态（PRD §3.1：默认折叠，由悬浮按钮触发展开） */
+  const [panel, setPanel] = useState<"diff" | "detail" | null>(null);
+  /** 当前选中会话的 workspace 是否 git 仓库（非 git 仓库不提供 diff 按钮） */
+  const [notRepo, setNotRepo] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
 
@@ -68,7 +71,6 @@ export default function App() {
     void loadNotifyPrefs().then((prefs) => {
       if (stopped) return;
       const detectors = new Map<string, NotificationDetector>();
-      const lastSeq = new Map<string, number>();
       interval = window.setInterval(() => {
         for (const [mid, store] of storesRef.current) {
           const machineName = store.state.config.name;
@@ -85,17 +87,16 @@ export default function App() {
               detectors.set(s.id, d);
             }
             const label = `${s.harness} ${shortId(s.id)}`;
-            const from = lastSeq.get(s.id) ?? -1;
-            for (const ev of feed.events) {
-              if (ev.seq > from) {
-                const n = d.onEvent(ev.event, ev.timestamp);
+            // 只推导实时/补齐到达的事件（历史不触发通知；server 按连接对齐保证无重复）
+            for (const item of feed.drainNotify()) {
+              if ("event" in item) {
+                const n = d.onEvent(item.event, item.timestamp);
                 if (n) {
                   if (n.kind === "work-ended") notifyWorkEnded(mid, s.id, machineName, label, n.reason);
                   else if (n.kind === "error") notifyError(mid, s.id, machineName, label, n.message);
                 }
               }
             }
-            lastSeq.set(s.id, feed.lastSeq);
             const idle = d.tick();
             if (idle) notifyLongIdle(mid, s.id, machineName, label);
           }
@@ -111,6 +112,29 @@ export default function App() {
   const selectedStore = selected ? storesRef.current.get(selected.machineId) : undefined;
   const selectedMeta = selectedStore?.state.sessions.find((s) => s.id === selected?.sessionId);
   const selectedFeed = selectedStore && selected?.sessionId ? selectedStore.state.feeds.get(selected.sessionId) : undefined;
+
+  // 选中会话变化：重置右侧面板（默认折叠）；检查 workspace 是否 git 仓库（非 git 仓库不提供 diff 按钮）
+  useEffect(() => {
+    setPanel(null);
+    if (!selectedStore || !selectedMeta) {
+      setNotRepo(false);
+      return;
+    }
+    let stale = false;
+    setNotRepo(false);
+    void selectedStore
+      .gitStatus(selectedMeta.cwd)
+      .then((res) => {
+        if (!stale) setNotRepo((res as { notRepo?: boolean }).notRepo === true);
+      })
+      .catch(() => {
+        if (!stale) setNotRepo(false);
+      });
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStore, selectedMeta?.id]);
 
   const promptSelected = (input: Input) => {
     const sel = selected;
@@ -135,6 +159,20 @@ export default function App() {
       .catch((e) => showToast(`恢复失败：${(e as Error).message}`));
   };
 
+  /** 删除会话（永久，历史一并删除；不可恢复）。 */
+  const deleteSelected = (machineId: string, sessionId: string): void => {
+    const store = storesRef.current.get(machineId);
+    if (!store) return;
+    if (!window.confirm("删除会话将永久移除其历史记录，且不可恢复。确定删除？")) return;
+    void store
+      .deleteSession(sessionId)
+      .then(() => {
+        if (selected?.machineId === machineId && selected?.sessionId === sessionId) setSelected(null);
+        showToast("会话已删除");
+      })
+      .catch((e) => showToast(`删除失败：${(e as Error).message}`));
+  };
+
   const onButton = (id: string) => {
     const sel = selected;
     const store = sel ? storesRef.current.get(sel.machineId) : undefined;
@@ -153,13 +191,17 @@ export default function App() {
       case "git-revert":
         void store.gitRevert(cwd).then((r) => showToast(r.ok ? "已撤销" : `撤销失败：${r.message ?? ""}`));
         break;
-      case "kill-session":
-        void store.closeSession(sel.sessionId).then(() => setSelected(null)).catch((e) => showToast(`失败：${(e as Error).message}`));
-        break;
-      case "new-session":
-        setDialog("new-session");
-        break;
     }
+  };
+
+  /** 关闭会话（Kill：结束但保留历史，可恢复）。侧边栏会话菜单入口。 */
+  const closeSession = (machineId: string, sessionId: string): void => {
+    const store = storesRef.current.get(machineId);
+    if (!store) return;
+    void store
+      .closeSession(sessionId)
+      .then(() => showToast("会话已关闭（可恢复）"))
+      .catch((e) => showToast(`关闭失败：${(e as Error).message}`));
   };
 
   return (
@@ -176,40 +218,55 @@ export default function App() {
           setSelected({ machineId, sessionId: null });
           setDialog("new-session");
         }}
-        onAddMachine={() => setDialog("add-machine")}
-        onRemoveMachine={(machineId) => {
-          storesRef.current.get(machineId)?.disconnect();
-          storesRef.current.delete(machineId);
-          void removeMachine(machineId)
-            .then(setMachines)
-            .catch(() => {});
-          if (selected?.machineId === machineId) setSelected(null);
-        }}
+        onCloseSession={closeSession}
+        onDeleteSession={(machineId, sessionId) => deleteSelected(machineId, sessionId)}
+        onOpenSettings={() => setDialog("settings")}
       />
       <main className="main">
         {selectedStore && selectedMeta ? (
           <>
-            <div className="button-bar">
-              {DEFAULT_BUTTONS.map((b) => (
-                <button
-                  key={b.id}
-                  className="btn"
-                  disabled={buttonDisabled(b, selectedMeta.state, selectedMeta.closed, selectedMeta.interrupted)}
-                  onClick={() => onButton(b.id)}
-                >
-                  {b.label}
-                </button>
-              ))}
+            <div className="main-body">
+              <div className="conversation-wrap">
+                <Conversation
+                  key={selectedMeta.id}
+                  meta={selectedMeta}
+                  events={selectedFeed?.events ?? []}
+                  revision={selectedFeed?.revision ?? 0}
+                  buttons={DEFAULT_BUTTONS}
+                  onButton={onButton}
+                  onPrompt={promptSelected}
+                  onCancel={cancelSelected}
+                />
+                {/* 悬浮按钮：对话流右侧竖排（PRD §3.1）；非 git 仓库无 diff 按钮 */}
+                <div className="floating-buttons">
+                  {!notRepo && (
+                    <button
+                      className={`btn subtle small ${panel === "diff" ? "active" : ""}`}
+                      onClick={() => setPanel(panel === "diff" ? null : "diff")}
+                      title="工作区 diff"
+                    >
+                      Diff
+                    </button>
+                  )}
+                  <button
+                    className={`btn subtle small ${panel === "detail" ? "active" : ""}`}
+                    onClick={() => setPanel(panel === "detail" ? null : "detail")}
+                    title="会话详情"
+                  >
+                    详情
+                  </button>
+                </div>
+              </div>
+              {panel && (
+                <DiffPanel
+                  store={selectedStore}
+                  meta={selectedMeta}
+                  view={panel}
+                  onClose={() => setPanel(null)}
+                  onDelete={() => deleteSelected(selected!.machineId, selectedMeta.id)}
+                />
+              )}
             </div>
-            <Conversation
-              key={selectedMeta.id}
-              meta={selectedMeta}
-              events={selectedFeed?.events ?? []}
-              revision={selectedFeed?.revision ?? 0}
-              onPrompt={promptSelected}
-              onCancel={cancelSelected}
-            />
-            <DiffPanel store={selectedStore} meta={selectedMeta} />
           </>
         ) : (
           <div className="empty-state">
@@ -223,10 +280,10 @@ export default function App() {
               </>
             ) : (
               <>
-                <p>在左侧选择机器与会话，或添加机器开始使用。</p>
+                <p>在左侧选择机器与会话；机器接入在设置页完成。</p>
                 {machines.length === 0 && (
-                  <button className="btn primary" onClick={() => setDialog("add-machine")}>
-                    添加第一台机器
+                  <button className="btn primary" onClick={() => setDialog("settings")}>
+                    添加机器
                   </button>
                 )}
               </>
@@ -234,17 +291,22 @@ export default function App() {
           </div>
         )}
       </main>
-      {dialog === "add-machine" && (
-        <AddMachineDialog
-          onCancel={() => setDialog(null)}
-          onSave={(draft) => {
-            void addMachine(draft)
-              .then((list) => {
-                setMachines(list);
-                setDialog(null);
-                // 新机器的 store 由 [machines] effect 懒创建
-              })
-              .catch((e) => showToast(`保存失败：${(e as Error).message}`));
+      {dialog === "settings" && (
+        <SettingsDialog
+          machines={machines}
+          stores={storesRef.current}
+          onClose={() => setDialog(null)}
+          onMachinesChange={(list) => {
+            setMachines(list);
+            // 移除的机器断开连接并清理 store；新增机器由 [machines] effect 懒创建
+            const alive = new Set(list.map((m) => m.id));
+            for (const [id, store] of storesRef.current) {
+              if (!alive.has(id)) {
+                store.disconnect();
+                storesRef.current.delete(id);
+              }
+            }
+            if (selected && !alive.has(selected.machineId)) setSelected(null);
           }}
         />
       )}

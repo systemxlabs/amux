@@ -1,5 +1,7 @@
+import { useState } from "react";
 import type { MachineConfig } from "../lib/configStore.js";
 import type { MachineStore } from "../lib/machineStore.js";
+import type { FeedItem } from "../lib/sessionFeed.js";
 import type { SessionMeta } from "shared";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -15,15 +17,20 @@ function statusBadge(s: SessionMeta): { text: string; cls: string } {
   return { text: STATUS_LABEL[s.state] ?? s.state, cls: s.state === "idle" ? "idle" : "busy" };
 }
 
-function recentSummary(feed: { events: readonly { event: { kind: string }; timestamp: number }[] } | undefined, meta: SessionMeta): string {
+function recentSummary(feed: { events: readonly FeedItem[] } | undefined, meta: SessionMeta): string {
   if (!feed || feed.events.length === 0) {
     return meta.cwd;
   }
-  const last = feed.events[feed.events.length - 1];
-  if (last.event.kind === "agent_message") {
-    const msg = last.event as { content?: Array<{ type: string; text?: string }> };
-    const texts = (msg.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "");
-    if (texts.length) return texts[0].slice(0, 60);
+  // 取最后一个 agent 事件（跳过用户消息项）作摘要
+  for (let i = feed.events.length - 1; i >= 0; i--) {
+    const item = feed.events[i];
+    if (!("event" in item)) continue;
+    if (item.event.kind === "agent_message") {
+      const msg = item.event as { content?: Array<{ type: string; text?: string }> };
+      const texts = (msg.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "");
+      if (texts.length) return texts[0].slice(0, 60);
+    }
+    return meta.cwd;
   }
   return meta.cwd;
 }
@@ -37,21 +44,21 @@ export interface SidebarProps {
   onSelectMachine: (machineId: string) => void;
   onResumeSession: (machineId: string, sessionId: string) => void;
   onNewSession: (machineId: string) => void;
-  onAddMachine: () => void;
-  onRemoveMachine: (machineId: string) => void;
+  onCloseSession: (machineId: string, sessionId: string) => void;
+  onDeleteSession: (machineId: string, sessionId: string) => void;
+  /** 打开设置页面（机器管理在设置页，PRD §3.4） */
+  onOpenSettings: () => void;
 }
 
 export function Sidebar(props: SidebarProps) {
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
         <span className="app-title">amux</span>
-        <button className="btn subtle" onClick={props.onAddMachine} title="添加机器">
-          ＋ 机器
-        </button>
       </div>
       <div className="machine-list">
-        {props.machines.length === 0 && <div className="empty-hint">还没有机器，点击「＋ 机器」添加</div>}
+        {props.machines.length === 0 && <div className="empty-hint">还没有机器，点击底部「设置」接入</div>}
         {props.machines.map((m) => {
           const store = props.stores.get(m.id);
           const status = store?.state.status ?? "disconnected";
@@ -75,9 +82,6 @@ export function Sidebar(props: SidebarProps) {
                   title="在该机器新建会话"
                 >
                   ＋
-                </button>
-                <button className="btn subtle small" onClick={(e) => { e.stopPropagation(); props.onRemoveMachine(m.id); }} title="移除机器">
-                  ✕
                 </button>
               </div>
               <div className="session-list">
@@ -105,6 +109,51 @@ export function Sidebar(props: SidebarProps) {
                             恢复
                           </button>
                         )}
+                        <span className="session-menu-wrap">
+                          <button
+                            className="btn subtle small menu-btn"
+                            title="会话菜单"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setMenuFor(menuFor === s.id ? null : s.id);
+                            }}
+                          >
+                            ⋮
+                          </button>
+                          {menuFor === s.id && (
+                            <>
+                              <div
+                                className="menu-backdrop"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMenuFor(null);
+                                }}
+                              />
+                              <div className="session-menu">
+                                <button
+                                  className="menu-item"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setMenuFor(null);
+                                    props.onCloseSession(m.id, s.id);
+                                  }}
+                                >
+                                  关闭会话
+                                </button>
+                                <button
+                                  className="menu-item danger"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setMenuFor(null);
+                                    props.onDeleteSession(m.id, s.id);
+                                  }}
+                                >
+                                  删除会话
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </span>
                       </div>
                       <div className="session-summary">{recentSummary(store?.state.feeds.get(s.id), s)}</div>
                     </div>
@@ -115,6 +164,11 @@ export function Sidebar(props: SidebarProps) {
             </div>
           );
         })}
+      </div>
+      <div className="sidebar-footer">
+        <button className="btn subtle" onClick={props.onOpenSettings} title="设置（机器管理）">
+          ⚙ 设置
+        </button>
       </div>
     </aside>
   );

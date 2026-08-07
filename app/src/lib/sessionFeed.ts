@@ -1,62 +1,61 @@
 /**
- * 会话事件流合并（纯逻辑）：历史（全量对话）+ 缓冲/实时（带 seq）合并，
- * 以 seq 去重——缺口事件恰好一次、不重复（docs/DESIGN.md §3.1 连接补齐）。
+ * 会话流（纯逻辑）：历史 + 实时合并。
+ * 事件交付按 docs/DESIGN.md §3.1/§5——server 按连接对齐，客户端按到达顺序
+ * 追加即可，天然无重复、无需去重（无 seq 游标）。
+ * 用户消息由 server 自身存储（不进 AHAL 事件流），在 feed 里与事件同序展示。
+ * 通知推导用「实时事件队列」：只有以通知到达的实时/补齐项入队，历史不触发通知。
  */
 
-import type { Event } from "ahal";
+import type { ContentBlock, Event } from "ahal";
 
-export interface FeedEvent {
-  seq: number;
-  event: Event;
-  timestamp: number;
-}
+export type FeedItem =
+  | { event: Event; timestamp: number }
+  | { content: ContentBlock[]; timestamp: number };
 
 export class SessionFeed {
-  private items: FeedEvent[] = [];
-  private seen = -1;
+  private items: FeedItem[] = [];
+  private notifyQueue: FeedItem[] = [];
   private rev = 0;
 
   constructor(public readonly sessionId: string) {}
 
-  /** 已合并的按序事件（历史在前，缺口/实时在后） */
-  get events(): readonly FeedEvent[] {
+  /** 已合并的按序项（历史在前，实时在后） */
+  get events(): readonly FeedItem[] {
     return this.items;
-  }
-
-  get lastSeq(): number {
-    return this.seen;
   }
 
   /**
    * 内容版本号：每次变更自增。
-   * events 数组是原地变更的（引用不变），React 的 useMemo 依赖数组引用
+   * items 数组是原地变更的（引用不变），React 的 useMemo 依赖数组引用
    * 无法感知新增事件——UI 层须依赖本字段触发重算。
    */
   get revision(): number {
     return this.rev;
   }
 
-  /** 重连补齐第一步：以历史替换当前内容。 */
-  applyHistory(events: readonly FeedEvent[]): void {
-    this.items = [...events];
-    this.seen = events.length ? events[events.length - 1].seq : -1;
+  /** 取走自上次调用以来以通知到达的实时事件（通知推导用；消费即清空）。 */
+  drainNotify(): FeedItem[] {
+    const out = this.notifyQueue;
+    this.notifyQueue = [];
+    return out;
+  }
+
+  /** 重连补齐：以历史（按 jsonl 追加顺序）替换当前内容。 */
+  applyHistory(items: readonly FeedItem[]): void {
+    this.items = [...items];
     this.rev++;
   }
 
-  /** 应用一批事件（缓冲补齐或实时到达）；返回实际新增条数。 */
-  apply(events: readonly FeedEvent[]): number {
-    let added = 0;
-    for (const e of events) {
-      if (this.applyOne(e)) added++;
-    }
-    return added;
+  /** 应用一批实时项（按到达顺序追加）。 */
+  apply(items: readonly FeedItem[]): number {
+    for (const item of items) this.applyOne(item);
+    return items.length;
   }
 
-  /** 应用单条；seq <= 已见最大 seq 的事件跳过（去重）。 */
-  applyOne(e: FeedEvent): boolean {
-    if (e.seq <= this.seen) return false;
-    this.items.push(e);
-    this.seen = e.seq;
+  /** 应用单个实时项（按序追加；server 按连接对齐保证无重复，无需去重）。 */
+  applyOne(item: FeedItem): boolean {
+    this.items.push(item);
+    this.notifyQueue.push(item);
     this.rev++;
     return true;
   }

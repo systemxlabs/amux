@@ -109,6 +109,10 @@ export class FakeBroadcaster {
     this.notifications.push({ method, params });
   }
 
+  notifyStream(method: "event" | "user_message", _sessionId: string, _order: number, params: unknown): void {
+    this.notifications.push({ method, params });
+  }
+
   last(): { method: string; params: unknown } | undefined {
     return this.notifications[this.notifications.length - 1];
   }

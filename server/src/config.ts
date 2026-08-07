@@ -2,15 +2,11 @@
  * server 配置与 token：命令行参数 / 环境变量 / 数据目录 config.json 三级覆盖。
  * 数据目录默认 ~/.amux/server。
  *
- * token 三种来源（参考 raft-daemon 的 --api-key 风格）：
- * - `--token <值>`（别名 `--api-key`）或环境变量 `AMUX_TOKEN`：用户指定，直接使用并
- *   持久化到 token 文件（后续重启沿用，不再随机生成）
- * - token 文件（~/.amux/server/token）：上次启动写入的
- * - 都没有：首次启动随机生成、仅展示一次（存 token 文件）
+ * 认证 token 不落盘：每次启动由用户指定，统一名称 token——
+ * `--token <值>` 或环境变量 `AMUX_TOKEN`；未指定则拒绝启动。
  */
 
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -18,10 +14,8 @@ export interface ServerConfig {
   host: string;
   port: number;
   dataDir: string;
-  /** 每会话有界事件缓冲条数 */
-  maxBufferEvents: number;
   harnesses: Record<string, { defaultModel?: string }>;
-  /** 启动时指定的 token（--token / --api-key / AMUX_TOKEN）；缺省用文件或自动生成 */
+  /** 本次启动指定的 token（--token / AMUX_TOKEN）；未指定则无法启动 */
   token?: string;
 }
 
@@ -73,31 +67,16 @@ export function loadConfig(argv: string[]): ServerConfig {
     host: args.host ?? process.env.AMUX_HOST ?? fileConfig.host ?? "127.0.0.1",
     port: toInt(args.port) ?? toInt(process.env.AMUX_PORT) ?? (typeof fileConfig.port === "number" ? fileConfig.port : undefined) ?? 34567,
     dataDir,
-    maxBufferEvents: toInt(args["max-buffer"]) ?? (typeof fileConfig.maxBufferEvents === "number" ? fileConfig.maxBufferEvents : undefined) ?? 2000,
     harnesses: fileConfig.harnesses ?? {},
-    token: args.token ?? args["api-key"] ?? process.env.AMUX_TOKEN ?? undefined,
+    token: args.token ?? process.env.AMUX_TOKEN ?? undefined,
   };
 }
 
 /**
- * 解析 token：
- * - provided（--token / --api-key / AMUX_TOKEN）：直接使用并写入 token 文件（重启沿用）
- * - 文件已有：复用
- * - 都没有：随机生成、仅展示一次（写文件）
+ * 解析认证 token：仅接受用户显式指定（--token / AMUX_TOKEN），
+ * 不落盘、不生成——每次启动都必须指定，未指定则抛错（由启动入口拒绝启动）。
  */
-export function loadOrCreateToken(dataDir: string, provided?: string): { token: string; newlyCreated: boolean } {
-  const file = join(dataDir, "token");
-  if (provided) {
-    mkdirSync(dataDir, { recursive: true });
-    writeFileSync(file, provided + "\n", { mode: 0o600 });
-    return { token: provided, newlyCreated: false };
-  }
-  if (existsSync(file)) {
-    const t = readFileSync(file, "utf8").trim();
-    if (t) return { token: t, newlyCreated: false };
-  }
-  const token = randomBytes(24).toString("base64url");
-  mkdirSync(dataDir, { recursive: true });
-  writeFileSync(file, token + "\n", { mode: 0o600 });
-  return { token, newlyCreated: true };
+export function requireToken(provided: string | undefined): string {
+  if (provided !== undefined && provided.length > 0) return provided;
+  throw new Error("未指定认证 token：请用 --token <值> 或环境变量 AMUX_TOKEN 指定后启动（token 不落盘，每次启动需重新指定）");
 }

@@ -8,7 +8,7 @@ import type { ContentBlock, Event, SessionState, ToolCallStatus } from "ahal";
 
 export interface MessageBubble {
   key: string;
-  kind: "message" | "thought";
+  kind: "message" | "thought" | "user";
   content: ContentBlock[];
   timestamp: number;
   /** 是否已有最终完整内容（区别于仅 chunk 片段） */
@@ -37,13 +37,25 @@ export interface ViewInput {
   timestamp: number;
 }
 
-export function eventsToView(events: readonly ViewInput[]): SessionView {
+/** 视图输入项：AHAL 事件或用户消息（server 存储） */
+export type ViewItem = ViewInput | { content: ContentBlock[]; timestamp: number };
+
+export function eventsToView(events: readonly ViewItem[]): SessionView {
   const view: SessionView = { bubbles: [], tools: [], state: "idle", errors: [], lastEventAt: 0 };
   const bubbleByKey = new Map<string, MessageBubble>();
   const toolByKey = new Map<string, ToolCallView>();
 
-  for (const { event, timestamp } of events) {
-    if (timestamp > view.lastEventAt) view.lastEventAt = timestamp;
+  for (const item of events) {
+    if (item.timestamp > view.lastEventAt) view.lastEventAt = item.timestamp;
+    if (!("event" in item)) {
+      // 用户消息（server 存储，非 AHAL 事件）
+      const key = `user:${item.timestamp}:${view.bubbles.length}`;
+      const b: MessageBubble = { key, kind: "user", content: item.content, timestamp: item.timestamp, final: true };
+      bubbleByKey.set(key, b);
+      view.bubbles.push(b);
+      continue;
+    }
+    const { event, timestamp } = item;
     switch (event.kind) {
       case "agent_message":
       case "agent_thought": {

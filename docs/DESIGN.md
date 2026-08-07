@@ -70,23 +70,27 @@
 - **认证 token 不落盘**：每次启动由 `--token` 或环境变量 `AMUX_TOKEN` 指定（统一名称 token，无别名）；未指定则拒绝启动（token 随进程内存存在，重启需重新指定）
 - **重连补齐（server 按连接对齐）**：不设按会话的有界流式缓冲——客户端重连先取历史（`get_history`），补齐期间到达的实时项由 server 按连接暂存、按序补齐后并入广播（补齐完成即清空，无持久化）
 
-## 6. Skills 管理
+## 6. 日志与追踪（可观测性）
+
+日志是 amux 调试的主要手段：GUI ↔ server ↔ driver ↔ harness 跨进程、跨机器，问题定位依赖能串起整条链路的日志。具体格式、级别策略、覆盖范围与落盘位置交由实现 agent 决定。
+
+## 7. Skills 管理
 
 Skills 注册表（URL + 本地目录 + 作用域 + 启用状态）是用户配置，存于 **GUI 客户端**（GUI 本地配置）——增删 / 启停是 GUI 本地操作，多设备各自配置。
 
 Skill 的安装 / 更新**像按钮一样由用户触发**：GUI 按注册表拼接一段 prompt（如"克隆 `{url}` 到 `{localDir}` 并启用"），发给某个会话的 agent 执行 clone/pull——与 commit 按钮同属"按钮 = 拼接 prompt"的模式。作用域决定该 skill 的按钮出现在哪些会话（global 全部、project 特定 repo 的会话、personal 自用）。
 
-## 7. Server 与 Agent Harness 通信
+## 8. Server 与 Agent Harness 通信
 
 Server 与 Agent Harness 之间通过 [AHAL](AHAL.md) 层通信。AHAL 提供统一的 Driver/Session 接口，屏蔽不同 harness 的差异。
 
-## 8. 工作流
+## 9. 工作流
 
 工作流引擎运行在 GUI 客户端（server 之间不通信），基于会话原语编排（见「会话」）：模板与实例是 GUI 本地数据，任务通过创建会话、发送 prompt、取消工作等原语组合表达，不占用协议面。
 
 已知取舍：关闭应用后各机器上已启动的 agent 任务继续运行，但工作流推进逻辑（排序、审查门、失败策略）随 GUI 退出而停止；若要求跨关闭存活，需把引擎下沉到 server 并引入 server 间通信。
 
-## 9. 参考
+## 10. 参考
 
 - [raft.build](https://raft.build)：Client-Server + WebSocket 的桌面应用架构参考
 - [herdr](https://github.com/ogulcancelik/herdr)：终端 agent 多路复用，server 常驻与 attach/reattach 模式

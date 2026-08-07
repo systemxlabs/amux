@@ -48,6 +48,13 @@ describe("GitRunner（真实 git 仓库）", () => {
     expect(n).toMatchObject({ status: "untracked", additions: 0, deletions: 0 });
   });
 
+  it("status：非 git 仓库返回 notRepo 标记（合法场景，不抛错）", async () => {
+    const dir = tmpDir("amux-notrepo-");
+    const runner = new GitRunner();
+    const st = await runner.status(dir);
+    expect(st).toMatchObject({ branch: "", changes: [], notRepo: true });
+  });
+
   it("diff：包含修改文件的补丁；指定 path 只返回该文件", async () => {
     const dir = initRepo();
     writeFileSync(join(dir, "a.txt"), "line1\nCHANGED\nline3\n");

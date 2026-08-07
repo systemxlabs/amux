@@ -11,15 +11,13 @@ import type { HarnessName, SessionMeta } from "shared";
 export interface RegisteredSession {
   id: string;
   /** harness 侧会话 id（driver Session.id，resume 键）；创建时记录，恢复时使用 */
-  harnessSessionId?: string;
+  harnessSessionId: string;
   harness: HarnessName;
   cwd: string;
   model?: string;
   createdAt: number;
   lastEventAt: number;
   lastState: SessionState;
-  /** 已持久化/缓冲事件的最后 seq（重启后新事件从 lastSeq+1 延续） */
-  lastSeq: number;
   closed: boolean;
   interrupted: boolean;
 }

@@ -1,12 +1,14 @@
 /**
- * 会话历史存储：对话相关事件（非 *_chunk）按会话追加写入 JSONL（全量持久化）。
- * 每个事件带 server 序号（seq），与缓冲/实时流共用同一序号空间。
+ * 会话历史存储：每个会话一个 JSONL 文件（`<sessionId>.jsonl`），
+ * agent 事件与用户输入**混合按序**写入（docs/DESIGN.md §5）——
+ * 一行一条记录，按追加顺序即真实对话顺序（jsonl 只追加不修改）。
+ * 事件侧只落非 *_chunk 的完整事件（对话内容，全量持久化）。
  */
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { StoredEvent } from "shared";
+import type { HistoryItem } from "shared";
 
 export class HistoryStore {
   constructor(private readonly dir: string) {}
@@ -15,29 +17,24 @@ export class HistoryStore {
     return join(this.dir, `${sessionId}.jsonl`);
   }
 
-  async append(sessionId: string, ev: StoredEvent): Promise<void> {
+  async append(sessionId: string, item: HistoryItem): Promise<void> {
     mkdirSync(this.dir, { recursive: true });
-    await appendFile(this.file(sessionId), JSON.stringify(ev) + "\n", "utf8");
+    await appendFile(this.file(sessionId), JSON.stringify(item) + "\n", "utf8");
   }
 
-  load(sessionId: string): StoredEvent[] {
+  load(sessionId: string): HistoryItem[] {
     const f = this.file(sessionId);
     if (!existsSync(f)) return [];
-    const out: StoredEvent[] = [];
+    const out: HistoryItem[] = [];
     for (const line of readFileSync(f, "utf8").split("\n")) {
       if (!line.trim()) continue;
       try {
-        out.push(JSON.parse(line) as StoredEvent);
+        out.push(JSON.parse(line) as HistoryItem);
       } catch {
         // 跳过损坏行
       }
     }
     return out;
-  }
-
-  lastSeq(sessionId: string): number {
-    const evs = this.load(sessionId);
-    return evs.length ? evs[evs.length - 1].seq : -1;
   }
 
   async remove(sessionId: string): Promise<void> {

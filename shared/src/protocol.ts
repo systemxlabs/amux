@@ -43,15 +43,30 @@ export interface SessionMeta {
 }
 
 /**
- * 带 server 序号的持久化/缓冲事件。seq 按会话单调递增（重启后延续），
- * 客户端用它做重连补齐去重：跳过 seq <= 已见最大 seq 的事件。
+ * 持久化/广播的事件（docs/DESIGN.md §5：一行一条记录，按追加顺序即真实对话顺序）。
  * event 为 ahal 事件本身，timestamp 为 server 端时间戳（epoch ms）。
+ * 不带序号：重连补齐由 server 按连接对齐（docs/DESIGN.md §3.1），客户端按序追加即可。
  */
 export interface StoredEvent {
-  seq: number;
   event: Event;
   timestamp: number;
 }
+
+/**
+ * 用户输入（prompt）的记录：由 server 持久化在自身存储中（不进 AHAL 事件流，
+ * 见 docs/DESIGN.md §4）。与事件写入同一 jsonl、按追加顺序。
+ */
+export interface StoredUserMessage {
+  content: Input;
+  timestamp: number;
+}
+
+/**
+ * 会话历史记录：agent 事件或用户输入。
+ * 两种记录写入**同一个 jsonl**（按会话一个文件），按追加顺序即真实对话顺序；
+ * 客户端按此顺序渲染（重连补齐由 server 按连接对齐，客户端无需去重）。
+ */
+export type HistoryItem = StoredEvent | StoredUserMessage;
 
 // ---- 方法面 ----
 
@@ -65,7 +80,6 @@ export const Methods = {
   Prompt: "prompt",
   Cancel: "cancel",
   GetHistory: "get_history",
-  GetBufferedEvents: "get_buffered_events",
   GitStatus: "git_status",
   GitDiff: "git_diff",
   GitPush: "git_push",
@@ -124,17 +138,8 @@ export interface GetHistoryParams {
 }
 
 export interface GetHistoryResult {
-  events: StoredEvent[];
-}
-
-export interface GetBufferedEventsParams {
-  sessionId: string;
-  /** 只返回 seq 大于该值的事件；缺省返回缓冲全部（客户端总是传 lastHistorySeq 以避免重复） */
-  afterSeq?: number;
-}
-
-export interface GetBufferedEventsResult {
-  events: StoredEvent[];
+  /** 会话历史（agent 事件与用户输入混合，按 jsonl 追加顺序） */
+  items: HistoryItem[];
 }
 
 // ---- git 直连（server 执行；push/revert 为无需判断的写操作）----
@@ -154,6 +159,8 @@ export interface GitChange {
 export interface GitStatusResult {
   branch: string;
   changes: GitChange[];
+  /** cwd 不是 git 仓库（无 diff 可展示；GUI 显示提示并禁用 diff 操作） */
+  notRepo?: boolean;
 }
 
 export interface GitDiffParams {
@@ -196,6 +203,7 @@ export interface GitRevertResult {
 
 export const Notifications = {
   Event: "event",
+  UserMessage: "user_message",
   SessionCreated: "session_created",
   SessionClosed: "session_closed",
   SessionInterrupted: "session_interrupted",
@@ -206,8 +214,14 @@ export type NotificationName = (typeof Notifications)[keyof typeof Notifications
 
 export interface EventNotification {
   sessionId: string;
-  seq: number;
   event: Event;
+  timestamp: number;
+}
+
+/** 用户输入通知（server 收到 prompt 时广播；与事件同一流，重连由 server 按连接补齐） */
+export interface UserMessageNotification {
+  sessionId: string;
+  content: Input;
   timestamp: number;
 }
 

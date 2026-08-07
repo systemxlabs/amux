@@ -1,18 +1,24 @@
 /**
- * 会话管理：创建/恢复/关闭/删除、prompt 串行化、cancel、事件管道（广播/历史落盘/有界缓冲）。
+ * 会话管理：创建/恢复/关闭/删除、prompt 串行化、cancel、事件管道（广播/历史落盘）。
  * 与 harness 的交互只经 ahal Driver/Session 接口（docs/AHAL.md）。
+ *
+ * 事件交付（docs/DESIGN.md §3.1/§5）：会话历史只落对话内容（jsonl 追加顺序），
+ * 实时通知不携带序号，重连补齐由 server 按连接对齐——本类为每个事件分配内部
+ * 单调序号（实现细节，不进协议），供 broadcast 层做按连接补齐位置对齐。
  */
 
 import { randomUUID } from "node:crypto";
 import { SessionClosedError, SessionNotFoundError, type Driver, type Input, type Session, type SessionEvent } from "ahal";
-import { Notifications, type EventNotification, type HarnessName, type SessionMeta, type StoredEvent } from "shared";
-import { EventBuffer } from "./eventbuffer.js";
+import { Notifications, type EventNotification, type HarnessName, type HistoryItem, type SessionMeta, type StoredEvent, type StoredUserMessage, type UserMessageNotification } from "shared";
 import { HistoryStore } from "./history.js";
 import { toMeta, type RegisteredSession, type SessionRegistry } from "./registry.js";
 
-/** *_chunk 事件是流式片段，不落盘为对话历史（最终内容在对应的完整事件里）。 */
-function isChunkEvent(ev: { kind: string }): boolean {
-  return ev.kind === "agent_message_chunk" || ev.kind === "agent_thought_chunk" || ev.kind === "tool_call_content_chunk";
+/**
+ * 落盘白名单：会话历史只保存对话内容——用户输入、agent 思考、工具调用、agent 输出。
+ * 状态变化、用量、错误、流式片段（*_chunk）不落盘（docs/DESIGN.md §5）。
+ */
+function shouldPersist(ev: { kind: string }): boolean {
+  return ev.kind === "agent_message" || ev.kind === "agent_thought" || ev.kind === "tool_call_update";
 }
 
 /** 单个活跃会话：持有 ahal Session + 事件泵 + prompt 串行队列。 */
@@ -25,9 +31,13 @@ class ManagedSession {
     private readonly owner: SessionManager,
   ) {}
 
-  /** 串行化：所有 prompt 按调用顺序排队执行（多客户端并发也保证顺序）。 */
+  /** 串行化：prompt（含用户消息记录）按调用顺序排队执行（多客户端并发也保证顺序）。 */
   prompt(input: Input): Promise<void> {
-    const run = this.queue.then(() => this.ah.prompt(input));
+    const run = this.queue.then(async () => {
+      // 用户消息记录与 ah.prompt 在同一队列内：并发 steer 时落盘/广播顺序与执行顺序一致
+      await this.owner.recordUserMessage(this, input);
+      await this.ah.prompt(input);
+    });
     this.queue = run.then(
       () => undefined,
       () => undefined,
@@ -47,14 +57,19 @@ class ManagedSession {
 export interface SessionManagerDeps {
   registry: SessionRegistry;
   history: HistoryStore;
-  buffer: EventBuffer;
-  broadcast: { notify(name: string, params: unknown): void };
+  broadcast: {
+    notify(name: string, params: unknown): void;
+    /** 会话流通知（event / user_message）：按连接补齐路由（docs/DESIGN.md §3.1） */
+    notifyStream(method: "event" | "user_message", sessionId: string, order: number, params: unknown): void;
+  };
   harnesses: { createDriver(name: HarnessName): Driver };
   logger?: (line: string) => void;
 }
 
 export class SessionManager {
   private readonly live = new Map<string, ManagedSession>();
+  /** 每会话内部单调序号（仅用于按连接补齐位置对齐，不进协议、不落盘）。 */
+  private readonly orders = new Map<string, number>();
 
   constructor(private readonly deps: SessionManagerDeps) {}
 
@@ -84,14 +99,20 @@ export class SessionManager {
     return false;
   }
 
-  historyFor(sessionId: string): StoredEvent[] {
+  historyFor(sessionId: string): HistoryItem[] {
     this.requireEntry(sessionId);
     return this.deps.history.load(sessionId);
   }
 
-  bufferedFor(sessionId: string, afterSeq?: number): StoredEvent[] {
-    this.requireEntry(sessionId);
-    return this.deps.buffer.get(sessionId, afterSeq ?? -1);
+  /** 会话当前的内部序号（get_history 标记按连接补齐位置用；同步读，与历史快照原子对齐）。 */
+  currentOrder(sessionId: string): number {
+    return this.orders.get(sessionId) ?? 0;
+  }
+
+  private nextOrder(sessionId: string): number {
+    const n = (this.orders.get(sessionId) ?? 0) + 1;
+    this.orders.set(sessionId, n);
+    return n;
   }
 
   private requireEntry(id: string): RegisteredSession {
@@ -124,7 +145,6 @@ export class SessionManager {
       createdAt: Date.now(),
       lastEventAt: Date.now(),
       lastState: "idle",
-      lastSeq: 0,
       closed: false,
       interrupted: false,
     };
@@ -140,11 +160,10 @@ export class SessionManager {
     const existing = this.live.get(sessionId);
     if (existing) return toMeta(existing.meta);
     const driver = this.deps.harnesses.createDriver(entry.harness);
-    const ah = await driver.resumeSession(entry.harnessSessionId ?? entry.id, entry.cwd);
+    const ah = await driver.resumeSession(entry.harnessSessionId, entry.cwd);
     entry.closed = false;
     entry.interrupted = false;
     entry.lastState = "idle";
-    entry.lastSeq = this.deps.history.lastSeq(sessionId);
     this.deps.registry.upsert(entry);
     this.deps.registry.save();
     this.attach(entry, ah);
@@ -154,7 +173,28 @@ export class SessionManager {
 
   async prompt(sessionId: string, input: Input): Promise<void> {
     const managed = this.requireLive(sessionId);
+    // 用户输入记录（server 自身存储，不进 AHAL 事件流）与 ah.prompt 在同一串行队列内
     await managed.prompt(input);
+  }
+
+  /**
+   * 记录用户输入：写入会话历史（与事件同一 jsonl、按追加顺序）、
+   * 以 user_message 通知广播（客户端据此渲染"我"的气泡，重连可补齐）。
+   * 由 ManagedSession.prompt 在串行队列内调用，保证并发 steer 时顺序一致。
+   */
+  recordUserMessage(managed: ManagedSession, input: Input): Promise<void> {
+    const entry = managed.meta;
+    const now = Date.now();
+    entry.lastEventAt = now;
+    const rec: StoredUserMessage = { content: input, timestamp: now };
+    return this.deps.history.append(entry.id, rec).then(() => {
+      this.deps.registry.upsert(entry);
+      this.deps.broadcast.notifyStream(Notifications.UserMessage, entry.id, this.nextOrder(entry.id), {
+        sessionId: entry.id,
+        content: input,
+        timestamp: now,
+      } satisfies UserMessageNotification);
+    });
   }
 
   async cancel(sessionId: string): Promise<void> {
@@ -192,7 +232,7 @@ export class SessionManager {
     }
     this.deps.registry.remove(sessionId);
     this.deps.registry.save();
-    this.deps.buffer.clear(sessionId);
+    this.orders.delete(sessionId);
     await this.deps.history.remove(sessionId);
     this.deps.broadcast.notify(Notifications.SessionDeleted, { session: toMeta({ ...entry, closed: true }) });
   }
@@ -211,8 +251,7 @@ export class SessionManager {
       }
       try {
         const driver = this.deps.harnesses.createDriver(entry.harness);
-        const ah = await driver.resumeSession(entry.harnessSessionId ?? entry.id, entry.cwd);
-        entry.lastSeq = this.deps.history.lastSeq(entry.id);
+        const ah = await driver.resumeSession(entry.harnessSessionId, entry.cwd);
         this.attach(entry, ah);
       } catch (e) {
         entry.interrupted = true;
@@ -251,11 +290,10 @@ export class SessionManager {
       try {
         for await (const se of ah.events as AsyncIterable<SessionEvent>) {
           if (!this.deps.registry.has(sessionId)) break; // 会话已删除
-          const seq = ++entry.lastSeq;
           entry.lastEventAt = se.timestamp;
-          const stored: StoredEvent = { seq, event: se.event, timestamp: se.timestamp };
-          this.deps.buffer.push(sessionId, stored);
-          if (!isChunkEvent(se.event)) {
+          const stored: StoredEvent = { event: se.event, timestamp: se.timestamp };
+          // 先落盘再广播：保证 get_history 的同步读盘与补齐位置原子对齐
+          if (shouldPersist(se.event)) {
             await this.deps.history.append(sessionId, stored);
           }
           if (se.event.kind === "state_changed") {
@@ -263,9 +301,8 @@ export class SessionManager {
             this.deps.registry.upsert(entry);
             this.deps.registry.save();
           }
-          this.deps.broadcast.notify(Notifications.Event, {
+          this.deps.broadcast.notifyStream(Notifications.Event, sessionId, this.nextOrder(sessionId), {
             sessionId,
-            seq,
             event: se.event,
             timestamp: se.timestamp,
           } satisfies EventNotification);

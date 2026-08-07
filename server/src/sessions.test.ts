@@ -1,7 +1,6 @@
 import { join } from "node:path";
 import { HarnessUnavailableError, SessionClosedError, SessionNotFoundError, type SessionState } from "ahal";
 import { describe, expect, it } from "vitest";
-import { EventBuffer } from "./eventbuffer.js";
 import { HistoryStore } from "./history.js";
 import { SessionRegistry, type RegisteredSession } from "./registry.js";
 import { SessionManager } from "./sessions.js";
@@ -10,12 +9,12 @@ import { FakeBroadcaster, FakeHarnessRegistry, StubDriver, StubSession, tmpDir }
 function entry(over: Partial<RegisteredSession> = {}): RegisteredSession {
   return {
     id: "s_1",
+    harnessSessionId: "thread_1",
     harness: "codex",
     cwd: "/tmp/work",
     createdAt: 1000,
     lastEventAt: 1000,
     lastState: "idle",
-    lastSeq: 0,
     closed: false,
     interrupted: false,
     ...over,
@@ -34,13 +33,12 @@ function makeManager(opts: { driver?: StubDriver; registry?: SessionRegistry } =
   const dataDir = tmpDir("amux-sm-");
   const registry = opts.registry ?? new SessionRegistry(join(dataDir, "sessions.json"));
   const history = new HistoryStore(join(dataDir, "history"));
-  const buffer = new EventBuffer(100);
   const broadcast = new FakeBroadcaster();
   const sessions = new Map<string, StubSession>();
   const driver = opts.driver ?? new StubDriver({ sessions });
   const harnesses = new FakeHarnessRegistry(new Map([["codex", driver]]));
-  const manager = new SessionManager({ registry, history, buffer, broadcast, harnesses });
-  return { manager, registry, history, buffer, broadcast, driver, sessions, dataDir };
+  const manager = new SessionManager({ registry, history, broadcast, harnesses });
+  return { manager, registry, history, broadcast, driver, sessions, dataDir };
 }
 
 const text = (t: string) => [{ type: "text" as const, text: t }];
@@ -72,14 +70,13 @@ describe("SessionManager 生命周期", () => {
 
   it("resume：恢复会话并清除 interrupted/closed 标记", async () => {
     const { manager, registry, sessions } = makeManager();
-    registry.upsert(entry({ id: "s_old", cwd: "/tmp", lastState: "thinking", lastSeq: 3, interrupted: true }));
+    registry.upsert(entry({ id: "s_old", cwd: "/tmp", lastState: "thinking", interrupted: true }));
     registry.save();
     const meta = await manager.resume("s_old");
     expect(meta.interrupted).toBe(false);
     expect(meta.closed).toBe(false);
     expect(meta.state).toBe("idle");
-    expect(sessions.has("s_old")).toBe(true);
-    expect(registry.get("s_old")?.lastSeq).toBe(-1); // 无历史，从 -1 续
+    expect(sessions.has("thread_1")).toBe(true); // 恢复按 harnessSessionId（resume 键）
   });
 
   it("resume 不存在的会话 → SessionNotFoundError", async () => {
@@ -138,11 +135,41 @@ describe("SessionManager 生命周期", () => {
     await Promise.all([p1, p2]);
     expect(stub.promptCalls.map((c) => (c[0] as { text: string }).text)).toEqual(["一", "二"]);
   });
+
+  it("prompt 持久化用户输入（同一 jsonl，混合按序）并广播 user_message 通知（不带序号）", async () => {
+    const { manager, history, broadcast, sessions } = makeManager();
+    const meta = await manager.create({ harness: "codex", cwd: "/tmp" });
+    await manager.prompt(meta.id, text("你好"));
+    const stub = stubOf(sessions);
+    stub.pushEvent({ kind: "agent_message", messageId: "m1", content: text("回复") }, 2000);
+
+    await waitFor(
+      () =>
+        broadcast.notifications.filter((n) => n.method === "user_message").length === 1 &&
+        broadcast.notifications.filter((n) => n.method === "event").length === 1,
+    );
+
+    // 用户输入以 user_message 通知广播（非 event），不带 seq
+    const um = broadcast.notifications.find((n) => n.method === "user_message")!.params as { content: unknown; timestamp: number };
+    expect(um.content).toEqual(text("你好"));
+    expect("seq" in um).toBe(false);
+    const evParams = broadcast.notifications.filter((n) => n.method === "event").map((n) => n.params as { event: { kind: string } });
+    expect(evParams[0]).toMatchObject({ event: { kind: "agent_message" } });
+    expect("seq" in evParams[0]).toBe(false);
+
+    // 会话历史：单个 jsonl，用户输入与事件混合按序（非拆分文件、不带序号）
+    const hist = history.load(meta.id);
+    expect(hist).toHaveLength(2);
+    expect(hist[0]).toMatchObject({ content: text("你好") });
+    expect(hist[1]).toMatchObject({ event: { kind: "agent_message" } });
+    expect("seq" in hist[0]).toBe(false);
+    expect("seq" in hist[1]).toBe(false);
+  });
 });
 
 describe("SessionManager 事件管道", () => {
-  it("事件按序广播（带 seq）、历史只含非 chunk、缓冲含全部、状态更新", async () => {
-    const { manager, history, buffer, broadcast, sessions } = makeManager();
+  it("事件按序广播（不带序号）、历史只含非 chunk、状态更新", async () => {
+    const { manager, history, broadcast, sessions } = makeManager();
     const meta = await manager.create({ harness: "codex", cwd: "/tmp" });
     const stub = stubOf(sessions);
     stub.pushEvent({ kind: "agent_thought", messageId: "m1" }, 1000);
@@ -154,21 +181,17 @@ describe("SessionManager 事件管道", () => {
     await waitFor(() => broadcast.notifications.filter((n) => n.method === "event").length === 5);
 
     const events = broadcast.notifications.filter((n) => n.method === "event");
-    expect(events.map((n) => (n.params as { seq: number }).seq)).toEqual([1, 2, 3, 4, 5]);
     for (const n of events) {
       const p = n.params as { sessionId: string };
       expect(p.sessionId).toBe(meta.id);
+      expect("seq" in p).toBe(false);
     }
     // 广播顺序 = 投递顺序
     expect((events[0].params as { event: { kind: string } }).event.kind).toBe("agent_thought");
 
-    // 历史只含非 chunk 事件（对话内容），seq 保留
+    // 历史只保存对话内容（思考/工具调用/输出）：状态、用量、错误、chunk 不落盘
     const hist = history.load(meta.id);
-    expect(hist.map((h) => h.event.kind)).toEqual(["agent_thought", "agent_message", "state_changed", "state_changed"]);
-    expect(hist.map((h) => h.seq)).toEqual([1, 3, 4, 5]);
-
-    // 缓冲含全部原始事件
-    expect(buffer.get(meta.id).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(hist.map((h) => (h as { event: { kind: string } }).event.kind)).toEqual(["agent_thought", "agent_message"]);
 
     // 状态经 state_changed 更新并持久化
     const m = manager.list().find((s) => s.id === meta.id)!;
@@ -183,10 +206,20 @@ describe("SessionManager 事件管道", () => {
     expect(manager.anyBusyInCwd("/tmp/other")).toBe(false);
   });
 
-  it("historyFor/bufferedFor：会话不存在报 SessionNotFoundError", async () => {
+  it("historyFor：会话不存在报 SessionNotFoundError", async () => {
     const { manager } = makeManager();
     expect(() => manager.historyFor("nope")).toThrow(SessionNotFoundError);
-    expect(() => manager.bufferedFor("nope")).toThrow(SessionNotFoundError);
+  });
+
+  it("currentOrder：内部序号随事件递增，供 get_history 标记补齐位置", async () => {
+    const { manager, sessions } = makeManager();
+    const meta = await manager.create({ harness: "codex", cwd: "/tmp" });
+    expect(manager.currentOrder(meta.id)).toBe(0);
+    const stub = stubOf(sessions);
+    stub.pushEvent({ kind: "agent_message", messageId: "m", content: text("hi") });
+    await waitFor(() => manager.currentOrder(meta.id) === 1);
+    stub.pushEvent({ kind: "state_changed", state: "idle", reason: "end_turn" });
+    await waitFor(() => manager.currentOrder(meta.id) === 2);
   });
 });
 
@@ -194,21 +227,20 @@ describe("SessionManager 重启恢复", () => {
   it("忙会话标 interrupted；空闲会话自动恢复；恢复失败标 interrupted；closed 保持", async () => {
     const dataDir = tmpDir("amux-restore-");
     const registry = new SessionRegistry(join(dataDir, "sessions.json"));
-    registry.upsert(entry({ id: "busy", cwd: "/tmp/a", lastState: "thinking" }));
-    registry.upsert(entry({ id: "idle_ok", cwd: "/tmp/b", lastState: "idle" }));
-    registry.upsert(entry({ id: "idle_fail", cwd: "/tmp/c", lastState: "idle" }));
-    registry.upsert(entry({ id: "closed", cwd: "/tmp/d", lastState: "thinking", closed: true }));
+    registry.upsert(entry({ id: "busy", harnessSessionId: "h_busy", cwd: "/tmp/a", lastState: "thinking" }));
+    registry.upsert(entry({ id: "idle_ok", harnessSessionId: "h_ok", cwd: "/tmp/b", lastState: "idle" }));
+    registry.upsert(entry({ id: "idle_fail", harnessSessionId: "h_fail", cwd: "/tmp/c", lastState: "idle" }));
+    registry.upsert(entry({ id: "closed", harnessSessionId: "h_closed", cwd: "/tmp/d", lastState: "thinking", closed: true }));
     const driver = new StubDriver({ sessions: new Map() });
     const origResume = driver.resumeSession.bind(driver);
     driver.resumeSession = async (id: string, cwd?: string) => {
-      if (id === "idle_fail") throw new SessionNotFoundError("不存在");
+      if (id === "h_fail") throw new SessionNotFoundError("不存在");
       return origResume(id, cwd);
     };
     const history = new HistoryStore(join(dataDir, "history"));
-    const buffer = new EventBuffer(100);
     const broadcast = new FakeBroadcaster();
     const harnesses = new FakeHarnessRegistry(new Map([["codex", driver]]));
-    const manager = new SessionManager({ registry, history, buffer, broadcast, harnesses });
+    const manager = new SessionManager({ registry, history, broadcast, harnesses });
 
     await manager.restore();
 
