@@ -6,92 +6,143 @@
 
 ## 1. 架构
 
-采用 Client-Server 架构：GUI 桌面应用（Client）与各机器上的 server 常驻进程之间通过 WebSocket 通信，参考 [raft.build](https://raft.build) 的设计模式。
+Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server 常驻进程通过 WebSocket 通信；server 作为 **ACP v1 client** 对接各 agent harness（Codex / Claude / Kimi），经 ACP 的 stdio 传输 spawn agent 子进程。
 
 ```
-┌──────────────┐   WS(注册)   ┌──────────────┐
-│              │────────────►│ 机器 A server │──► AHAL → harness
-│  GUI 桌面     │             └──────────────┘
-│  (聚合视图)   │   WS(注册)   ┌──────────────┐
-│              │────────────►│ 机器 B server │──► AHAL → harness
-└──────────────┘             └──────────────┘
-                     （机器 A/B 无本机/远程之分，含本机）
+┌──────────────┐   WS(JSON-RPC)  ┌───────────────┐  ACP v1 (stdio) ┌────────────┐
+│  GUI 桌面     │◄───────────────►│ 机器 server   │◄───────────────►│ agent      │
+│ (GPUI)       │                 │ (常驻)         │   spawn 子进程   │ codex-acp  │
+│  ▲           │                 │  ACP client    │                │ claude-acp │
+│  │ 会话历史    │                 └───────────────┘                │ kimi acp   │
+│  └ 本地缓存   │                                                    └────────────┘
+└──────────────┘
 ```
 
-- **Client（仅 GUI 客户端）**：amux 桌面应用（Tauri），是唯一的客户端，直连各已注册机器的 server——本机与远程同等对待，统一注册后连接。每条连接对应一台机器，使用同一套协议。
-- **Server**：每台机器运行一个常驻进程（TypeScript），持有本机 AHAL Driver 实例，负责会话生命周期、事件持久化、git 能力。**server 之间不通信**——每个 server 只服务本机会话，对连接方一律按 GUI 客户端对待。
+- **Client（仅 GUI 客户端）**：amux 桌面应用，基于 **GPUI + gpui-component**，直连各已注册机器的 server——本机与远程同等对待，统一注册后连接。每条连接对应一台机器，使用同一套协议。
+- **Server**：每台机器运行一个常驻进程，是 **ACP v1 client**——spawn agent 子进程、驱动 ACP 会话、把 agent 输出聚合后交付给 GUI、直连 git。**server 之间不通信**——每个 server 只服务本机会话，对连接方一律按 GUI 客户端对待
+- **协议单一来源**：app↔server 协议（方法面、参数/结果类型、通知类型）由共享 crate 定义（见 §2），GUI 与 server 从同一处导入——单一语言实现，无需双语言协议对齐
 
 职责划分：
 
-- **会话数据主权**：每个会话的会话历史、元数据只存于该会话所在机器的 server；GUI 不复制远程会话历史
-- **GUI = 聚合层**：会话列表由 GUI 汇总各 server 的连接编排；跨机器工作流是 GUI 内部编排，基于会话原语实现，不占用协议面；远程 server 离线时其会话标为不可达
-- **多设备共存**：任意数量的 GUI 可同时连接同一 server、查看并操作同一会话，互不踢出
+- **历史权威 = agent**：会话历史的唯一真相源在 agent 侧；server 不保存（详见 §5）
+- **GUI = 聚合层**：会话列表由 GUI 汇总各 server（server 从 agent `session/list` 获得）；跨机器工作流是 GUI 内部编排，基于会话原语实现，不占用协议面；远程 server 离线时其会话标为不可达
+- **多设备共存**：任意数量的 GUI 可同时连接同一 server、查看并操作同一会话，互不踢出；各 GUI 独立加载与缓存会话数据
 - **生命周期解耦**：任何客户端断开（含桌面应用关闭）不停止 server、不销毁会话；会话仅由显式关闭 / 删除结束
 
-## 2. Server 生命周期与启动
+## 2. 代码仓库结构（workspace crate）
 
-每台机器（含本机）统一运行一个 server 常驻进程，与任何客户端连接无关：
+| crate | 职责 |
+|---|---|
+| `protocol` | app↔server 协议面：方法名、参数/结果类型、通知类型。**协议的唯一来源**，GUI 与 server 均从这里导入 |
+| `server` | 每台机器的常驻进程：WebSocket 传输（tokio-tungstenite）、JSON-RPC 分发、会话管理、会话数据聚合与 activities 缓存、git 能力（status/diff/push/revert）；经 ACP 官方 SDK（`agent-client-protocol`）与 agent 通信 |
+| `gui` | GPUI 桌面应用：三面板视图（Dock 布局）、对话流、会话活动页、diff 编辑器、侧边栏、设置页；会话历史本地缓存 |
 
-- **启动**：server 由所在机器自行启动（手动命令、系统服务或安装脚本），GUI 不负责拉起——连接失败即视为该机器离线；认证 token 每次启动需指定（见 §3）
-- **关闭**：GUI 关闭只断开 socket；server 继续常驻，agent 任务与事件落盘不受影响
-- **机器重启**：重启机器后需重新启动 server，会话从磁盘注册表恢复（崩溃前忙状态的会话标为 interrupted，由客户端决定是否 resume）
+- server 与 agent 的交互**只经 ACP 协议**（官方 SDK `agent-client-protocol` + `agent-client-protocol-tokio`）
+- server 之间不通信；跨机器编排在 GUI 侧完成
+- 技术依赖：`tokio`（异步）、`serde`/`serde_json`（JSON-RPC）、`tokio-tungstenite`（WS）、`agent-client-protocol`（ACP 官方 SDK）、`gpui` + `gpui-component`（GUI，跟踪 Zed 主线 git 依赖）
+
+## 3. Server 生命周期与启动
+
+每台机器（含本机）统一运行一个 server 常驻进程（单二进制），与任何客户端连接无关：
+
+- **启动**：server 由所在机器自行启动（手动命令、系统服务或安装脚本），GUI 不负责拉起——连接失败即视为该机器离线；认证 token 每次启动需指定（见 §4）
+- **关闭**：GUI 关闭只断开 socket；server 继续常驻，agent 子进程与 ACP 会话不受影响
+- **机器重启**：server 无持久化状态（历史在 agent 侧、配置可重建）——重启后重新 spawn agent 子进程，会话列表经 ACP `session/list` 从 agent 侧恢复
 - **GUI 视角**：本机与远程完全一致——注册、连接、认证、离线处理无差别
 
-## 3. 传输与消息
+## 4. 传输与消息（GUI ↔ server）
 
-- 传输统一为 **WebSocket**，消息格式为 **JSON-RPC 2.0**：请求必须回响应，事件以通知（无响应）表达
+- 传输统一为 **WebSocket**（tokio-tungstenite），消息格式为 **JSON-RPC 2.0**：请求必须回响应，事件以通知（无响应）表达
 - **认证**：所有连接统一携带 token；**token 不落盘，每次启动由用户指定**（`--token` 或环境变量 `AMUX_TOKEN`，统一名称 token，无别名），未指定则 server 拒绝启动
 - **会话 ID**：server 直接颁发全局唯一的会话 ID；机器归属由连接推断（每条连接对应一台机器），请求发给会话所属的 server 连接
 - 断线后客户端指数退避重连
 - 单用户信任模型：无用户体系与权限系统（PRD 边界），安全性依赖运行环境
 
-### 3.1 事件交付
+## 5. 会话数据（事件交付 · 历史 · 活动）
 
-- **广播**：server 向所有已连接客户端持续推送每条通知（AHAL 事件 + 用户消息 `user_message`），多客户端收到同一份流、互不踢出；无订阅机制
-- **顺序**：推送顺序 = 会话内记录顺序（jsonl 追加顺序 / 实时到达顺序）；跨机器时间线用时间戳（各机时钟偏差为已知限制）
-- **连接补齐（server 按连接对齐）**：客户端连接时先获取会话历史（`get_history`，持久化的对话内容，按 jsonl 顺序）；server 记录该连接在各会话上的补齐位置，连接建立后到达的实时项由 server 按连接暂存，按序补齐历史之后的缺口后并入实时广播——客户端按序追加即可，天然无重复、无需去重；补齐期间未收到的在飞流式片段（`*_chunk`）由随后到达的完整消息（`agent_message` 等）收敛为完整内容
+会话数据指一个会话的全部内容：对话内容（用户消息 + agent 输出）与会话活动（activities）。本节统一描述它们的交付、存储与获取。
 
-## 4. 会话
+### 5.1 交付模型
 
-- 交互只有两个动作：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作）
-- **用户输入持久化**：server 将用户 prompt 记入会话历史（与事件同一 jsonl、按追加顺序），并以 `user_message` 通知广播——事件流只含 agent 侧输出，用户输入由历史记录补全对话
+- **非流式交付**：agent 工作以 turn 为单位。server 接收 agent 的流式事件（ACP `session/update`），在 turn 结束时**聚合交付**——把整个 agent 输出作为一条完整消息推送给 GUI。GUI 不接收逐 chunk 的流式传输
+- **会话状态**：进行中 / 完成（turn 边界）由 server 推送（推导见 §9）
+
+### 5.2 会话历史
+
+- **权威 = agent**：会话历史的唯一真相源在 agent 侧（ACP session 持久化）；server 不保存
+- GUI 打开会话时全量加载对话内容，缓存到本地（GUI 数据目录，按会话一个缓存文件）：
+  - **打开会话**：对话内容全量加载（经 §9 `session/load` 重放聚合）→ 写入本地缓存
+  - **增量**：turn 结束后的新输出追加到缓存
+  - **resume（重新恢复会话）**：**清空旧缓存，重新全量加载**——不保留跨 resume 的缓存，保证缓存与 agent 侧历史一致
+  - **会话删除**（ACP `session/delete`）：历史随 agent 侧删除而消失，不可恢复
+  - 缓存仅作会话打开期间的读写（滚动回溯、分页），不承担历史权威
+
+### 5.3 会话活动（activities）
+
+- 中间活动（thinking / tool call / compaction 等）经 §9 从 ACP 事件聚合产生
+- **server 有界缓存**：按会话保留最近若干条活动（非持久化，超出淘汰最旧）
+- GUI 在会话活动页需要时经 `get_activities` **主动获取**（展示见 §7）
+
+### 5.4 打开会话与重连
+
+- **打开会话**：GUI 打开会话时，server 经 ACP `session/load`（见 §9）**全量重放**并聚合为对话内容交付给 GUI；`session/load` 的响应即**重放边界**
+- **GUI 重连**：GUI 重连后重新打开会话（再次 `session/load`），重新聚合加载
+
+### 5.5 本地数据
+
+- server 其余本地数据存放于 `~/.amux/server`（配置等）；**认证 token 不落盘**（见 §4）
+- GUI 本地数据存放于 `~/.amux/gui`：机器注册表、快捷按钮、通知偏好、Skills 注册表、会话历史缓存
+- worktree 统一创建于 `~/.amux/worktrees`
+
+## 6. 会话（交互）
+
+- 交互只有两个动作：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作），经 ACP `session/prompt` / `session/cancel` 到达 agent
+- **steer（忙时 prompt）**：忙时 prompt 的行为取决于 agent 实现（ACP v1 turn 模型），不支持进行中注入时 server 直接报错——见 §9
+- **用户输入**：GUI 的 prompt 经 server 转发给 agent；用户消息同时由 GUI 本地立即渲染（不依赖回显），并保留在对话内容中
 - **按钮映射**（客户端本地配置，无专用协议）：commit / submit PR 等需要编写内容的操作经 prompt 由 agent 执行；push、undo / revert（文件 / hunk / 全部）等无需判断的操作由 server 直连 git 执行——undo/revert 需等工作区间结束后再触发，否则"撤销最近变更"的时点语义是乱的；skill 安装 / 更新经 prompt 由 agent 执行（见「Skills 管理」）；新会话 / Kill Session 由客户端直接发起对应会话操作
 - **多客户端并发**：server 对同一会话的所有 prompt（含各客户端的）按到达顺序串行化，保证按调用顺序送达
-- **通知**：客户端从事件流自行推导（工作结束 / 异常 / 长时间无响应），配置存客户端本地，无需协议
+- **通知**：客户端从会话状态与 turn 完成推导（工作结束 / 异常 / 长时间无响应），配置存客户端本地，无需协议
 
-## 5. 数据存储
+## 7. GUI（GPUI 桌面应用）
 
-- server 与 GUI 的本地数据统一存放于 `~/.amux`（各自子目录），GUI 侧的机器注册表、技能注册表等配置也在其中
-- worktree 统一创建于 `~/.amux/worktrees`
-- **server 会话历史以 JSONL 落盘**（`~/.amux/server/history/<sessionId>.jsonl`，每个会话一个文件）：
-  - 一行一条记录，**对话内容按追加顺序**（jsonl 只追加不修改，物理行序即真实对话顺序）
-  - **只保存对话内容**：用户输入、agent 思考（`agent_thought`）、工具调用（`tool_call_update`）、agent 输出（`agent_message`）——状态变化、用量、错误、流式片段（`*_chunk`）**不落盘**，仅实时流转
-- **会话注册表**（`~/.amux/server/sessions.json`）：会话元数据（harness / cwd / 模型 / 最后状态 / closed / interrupted 等），供重启恢复与 interrupted 标记
-- **认证 token 不落盘**：每次启动由 `--token` 或环境变量 `AMUX_TOKEN` 指定（统一名称 token，无别名）；未指定则拒绝启动（token 随进程内存存在，重启需重新指定）
-- **重连补齐（server 按连接对齐）**：不设按会话的有界流式缓冲——客户端重连先取历史（`get_history`），补齐期间到达的实时项由 server 按连接暂存、按序补齐后并入广播（补齐完成即清空，无持久化）
+GUI 为单进程桌面应用（GPUI + gpui-component，跟踪 Zed 主线 git 依赖；跨平台 macOS / Linux / Windows）：
 
-## 6. 日志与追踪（可观测性）
+- **布局**：三面板 **Dock 布局**（gpui-component），面板划分与交互见 PRD §3.1
+- **对话流**：只展示用户消息与 agent 输出的消息气泡（**Markdown 渲染**，gpui-component）+ 虚拟化列表；输出为完整消息，非流式（数据来源见 §5）
+- **会话活动页**：独立视图展示会话 activities 时间线——thinking / tool call / compaction 等详细活动（工具调用参数与结果、思考内容、压缩摘要），经 `get_activities` 获取（见 §5.3）
+- **Diff Review**（PRD §4.7）：代码编辑器组件 + **Tree Sitter 语法高亮**（gpui-component）；文件列表、side-by-side/inline diff、revert 操作
+- **输入与设置**：输入区（多行、拖拽/粘贴、@ 引用）、快捷按钮栏、设置页（机器管理）——gpui-component 表单/对话框组件
+- **异步模型**：GPUI executor 承载 UI，WS 连接与 ACP 重放流经 **tokio** 运行，事件桥接进 GPUI 事件循环
+- **本地配置**：机器注册表、按钮、通知偏好、Skills 注册表（GUI 数据目录；会话历史缓存见 §5.2）
 
-日志是 amux 调试的主要手段：GUI ↔ server ↔ driver ↔ harness 跨进程、跨机器，问题定位依赖能串起整条链路的日志。具体格式、级别策略、覆盖范围与落盘位置交由实现 agent 决定。
+## 8. 日志与追踪（可观测性）
 
-## 7. Skills 管理
+日志是 amux 调试的主要手段：GUI ↔ server ↔ ACP client ↔ agent 跨进程、跨机器，问题定位依赖能串起整条链路的日志。具体格式、级别策略、覆盖范围与落盘位置交由实现 agent 决定。
 
-Skills 注册表（URL + 本地目录 + 作用域 + 启用状态）是用户配置，存于 **GUI 客户端**（GUI 本地配置）——增删 / 启停是 GUI 本地操作，多设备各自配置。
+## 9. Server 与 Agent Harness 通信（ACP v1）
 
-Skill 的安装 / 更新**像按钮一样由用户触发**：GUI 按注册表拼接一段 prompt（如"克隆 `{url}` 到 `{localDir}` 并启用"），发给某个会话的 agent 执行 clone/pull——与 commit 按钮同属"按钮 = 拼接 prompt"的模式。作用域决定该 skill 的按钮出现在哪些会话（global 全部、project 特定 repo 的会话、personal 自用）。
+Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与各 agent harness 通信：
 
-## 8. Server 与 Agent Harness 通信
+- **传输**：ACP stdio——server spawn agent 子进程（`codex-acp` / `claude-acp` / `kimi acp`），JSON-RPC 2.0 over stdin/stdout；每条消息单行 JSON，无内嵌换行
+- **会话生命周期**：
+  - `session/new`：新建会话（yolo 模式启动，见下）
+  - `session/load`：加载会话并**全量重放历史**（`session/update` 通知流，重放完才响应）
+  - `session/resume`：恢复会话上下文（不重放历史；历史加载走 `session/load`）
+  - `session/prompt` / `session/cancel` / `session/delete` / `session/list`
+- **事件聚合**：agent 的 `session/update` 通知 → server 聚合为完整输出（消息按 ID 收敛）与 activities（thinking / tool call / compaction 等）；输出交付与 activities 缓存见 §5
+- **会话状态**：由 ACP 会话信息（`session_info_update`）与 prompt/turn 生命周期推导（忙 / 就绪），经 §5.1 推送为 GUI 的会话状态展示
+- **权限（yolo）**：agent 经 `session/request_permission` 请求权限；server **自动批准**（yolo 模式，既定决策延续，无审批往返），安全性依赖运行环境
+- **steer**：ACP v1 为 turn 模型，prompt 启动一个 turn、turn 结束（agent 回到就绪）后才可再 prompt。忙时 prompt 行为取决于 agent 实现（部分 agent 支持进行中注入）；若 agent 不支持进行中注入，server **直接向用户报错**（不排队、不静默降级）
 
-Server 与 Agent Harness 之间通过 [AHAL](AHAL.md) 层通信。AHAL 提供统一的 Driver/Session 接口，屏蔽不同 harness 的差异。
+## 10. 工作流
 
-## 9. 工作流
+**待定**：工作流功能暂未确定（见 PRD §4.10），待后续设计。
 
-工作流引擎运行在 GUI 客户端（server 之间不通信），基于会话原语编排（见「会话」）：模板与实例是 GUI 本地数据，任务通过创建会话、发送 prompt、取消工作等原语组合表达，不占用协议面。
+## 11. 参考
 
-已知取舍：关闭应用后各机器上已启动的 agent 任务继续运行，但工作流推进逻辑（排序、审查门、失败策略）随 GUI 退出而停止；若要求跨关闭存活，需把引擎下沉到 server 并引入 server 间通信。
-
-## 10. 参考
-
+- [Agent Client Protocol (ACP) v1](https://agentclientprotocol.com/)：server 与 agent 之间的通信协议（stdio 传输、session 生命周期、session/update 事件流、request_permission）
+- [GPUI](https://gpui.rs/)：Zed 的 GPU 加速 GUI 框架（Zed 主线 git 依赖）
+- [gpui-component](https://github.com/longbridge/gpui-component)：GPUI 组件库（Dock 布局、Markdown、虚拟化列表、代码编辑器 + Tree Sitter、表单/对话框）
 - [raft.build](https://raft.build)：Client-Server + WebSocket 的桌面应用架构参考
 - [herdr](https://github.com/ogulcancelik/herdr)：终端 agent 多路复用，server 常驻与 attach/reattach 模式
 - [t3code](https://github.com/pingdotgg/t3code)：agent 控制面——provider 驱动注册、按 turn 的 git checkpoint、事件溯源思路
