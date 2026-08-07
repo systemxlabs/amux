@@ -1,0 +1,21 @@
+[package]
+name = "gui"
+description = "GPUI 桌面应用：三面板视图（Dock 布局）、对话流、会话活动页、diff 编辑器、侧边栏、设置页；会话历史本地缓存"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util = "0.3"
+
+# GPUI（Zed 主线 git）+ gpui-component（longbridge）
+# 注意：跟踪 Zed 主线，API 可能随上游变化（docs/DESIGN.md §7）
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui_component = { package = "gpui-component", git = "https://github.com/longbridge/gpui-component" }
