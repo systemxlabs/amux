@@ -41,9 +41,7 @@ impl Client {
         self.next_id += 1;
         self.write
             .send(Message::Text(
-                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
-                    .to_string()
-                    .into(),
+                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string(),
             ))
             .await
             .unwrap();
@@ -66,19 +64,15 @@ impl Client {
     async fn drain_notifications(&mut self) {
         // 读取一小段时间内的通知
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        loop {
-            match tokio::time::timeout(std::time::Duration::from_millis(50), self.read.next()).await
-            {
-                Ok(Some(Ok(Message::Text(t)))) => {
-                    let v: Value = serde_json::from_str(&t).unwrap();
-                    if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                        self.notifications.push((
-                            m.to_string(),
-                            v.get("params").cloned().unwrap_or(Value::Null),
-                        ));
-                    }
-                }
-                _ => break,
+        while let Ok(Some(Ok(Message::Text(t)))) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), self.read.next()).await
+        {
+            let v: Value = serde_json::from_str(&t).unwrap();
+            if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
+                self.notifications.push((
+                    m.to_string(),
+                    v.get("params").cloned().unwrap_or(Value::Null),
+                ));
             }
         }
     }
@@ -102,22 +96,34 @@ use std::sync::atomic::{AtomicU16, Ordering};
 
 static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
 
-async fn spawn_server() -> u16 {
+/// 测试结束自动杀掉 server 子进程（避免并行测试端口残留）。
+struct ServerGuard {
+    child: tokio::process::Child,
+}
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        // Drop 里不能 await；start_kill 同步发送 SIGKILL（kill() 是 async，丢弃 future 等于没杀）
+        let _ = self.child.start_kill();
+    }
+}
+
+async fn spawn_server() -> (u16, ServerGuard) {
     let bin = env!("CARGO_BIN_EXE_server");
     // 每测试唯一端口（并行测试不冲突）
     let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-    tokio::process::Command::new(bin)
+    let child = tokio::process::Command::new(bin)
         .args(["--token", "test-token", "--port", &port.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn server");
-    wait_port(port).await
+    wait_port(port).await;
+    (port, ServerGuard { child })
 }
 
 #[tokio::test]
 async fn session_lifecycle_and_activities() {
-    let port = spawn_server().await;
+    let (port, _guard) = spawn_server().await;
     let mut c = Client::connect(port).await;
 
     let info = c.call("get_info", json!({})).await;
@@ -189,7 +195,7 @@ async fn session_lifecycle_and_activities() {
 
 #[tokio::test]
 async fn busy_prompt_returns_steer_unsupported() {
-    let port = spawn_server().await;
+    let (port, _guard) = spawn_server().await;
     let mut c = Client::connect(port).await;
 
     let created = c
@@ -231,7 +237,7 @@ async fn busy_prompt_returns_steer_unsupported() {
 
 #[tokio::test]
 async fn missing_session_returns_not_found() {
-    let port = spawn_server().await;
+    let (port, _guard) = spawn_server().await;
     let mut c = Client::connect(port).await;
 
     let open = c.call("open_session", json!({"sessionId": "nope"})).await;
