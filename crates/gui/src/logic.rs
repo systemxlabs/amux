@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn session_sort_key_uses_last_event() {
-        let mut a = SessionMeta {
+        let a = SessionMeta {
             id: "a".into(),
             harness: "codex".into(),
             cwd: "/".into(),

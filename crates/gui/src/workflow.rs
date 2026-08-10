@@ -944,7 +944,6 @@ struct PromptSessionArgs {
 mod tests {
     use super::*;
     use rig::tool::Tool as _;
-    use std::collections::VecDeque;
 
     fn run(machine: &str, harness: &str, prompt: &str) -> OrcAction {
         OrcAction::Run {
