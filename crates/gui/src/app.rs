@@ -89,16 +89,11 @@ fn block_text(content: &[ContentBlock]) -> String {
 }
 
 impl AmuxApp {
-    pub fn new(
-        store: Arc<ConfigStore>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(store: Arc<ConfigStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state =
             cx.new(|cx| InputState::new(window, cx).placeholder("输入消息，Ctrl+Enter 发送"));
         // 工作目录输入框：新建会话时由用户填写（PRD §4.1）
-        let session_cwd_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("工作目录"));
+        let session_cwd_input = cx.new(|cx| InputState::new(window, cx).placeholder("工作目录"));
         let settings_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("名称 ws://地址 token（空格分隔）"));
         let machines = store
@@ -543,15 +538,18 @@ impl AmuxApp {
                             }));
                         if machine_active {
                             machine_view.child(
-                                v_flex().gap_1().child(Input::new(&self.session_cwd_input)).child(
-                                    Button::new(format!("new-{mi}"))
-                                        .small()
-                                        .label("＋ 新建会话")
-                                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                                            this.active = Some(mi);
-                                            this.create_session(window, cx);
-                                        })),
-                                ),
+                                v_flex()
+                                    .gap_1()
+                                    .child(Input::new(&self.session_cwd_input))
+                                    .child(
+                                        Button::new(format!("new-{mi}"))
+                                            .small()
+                                            .label("＋ 新建会话")
+                                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                                this.active = Some(mi);
+                                                this.create_session(window, cx);
+                                            })),
+                                    ),
                             )
                         } else {
                             machine_view
