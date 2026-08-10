@@ -72,6 +72,8 @@ pub struct AmuxApp {
     diff: String,
     show_settings: bool,
     input_state: Entity<InputState>,
+    /// 新建会话的工作目录（PRD §4.1：新建会话时指定工作目录）
+    session_cwd_input: Entity<InputState>,
     settings_input: Entity<InputState>,
     _tasks: Vec<Task<()>>,
 }
@@ -96,6 +98,12 @@ impl AmuxApp {
     ) -> Self {
         let input_state =
             cx.new(|cx| InputState::new(window, cx).placeholder("输入消息，Ctrl+Enter 发送"));
+        // 工作目录输入框：默认值为启动参数 --cwd（PRD §4.1 新建会话时指定）
+        let session_cwd_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("工作目录")
+                .default_value(cwd.clone())
+        });
         let settings_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("名称 ws://地址 token（空格分隔）"));
         let machines = store
@@ -118,6 +126,7 @@ impl AmuxApp {
             diff: String::new(),
             show_settings: false,
             input_state,
+            session_cwd_input,
             settings_input,
             _tasks: Vec::new(),
         };
@@ -221,13 +230,21 @@ impl AmuxApp {
         .detach();
     }
 
-    fn create_session(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn create_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(idx) = self.active else { return };
+        // 工作目录取自输入框（PRD §4.1：新建会话时指定工作目录，agent 即在该目录启动）
+        let cwd = self.session_cwd_input.read(cx).value().trim().to_string();
+        if cwd.is_empty() {
+            if let Some(m) = self.machines.get_mut(idx) {
+                m.status = "请填写工作目录".into();
+            }
+            cx.notify();
+            return;
+        }
         let Some(m) = self.machines.get(idx) else {
             return;
         };
         let client = m.client.clone();
-        let cwd = self.cwd.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             if let Ok(res) = client
                 .request(
@@ -527,7 +544,7 @@ impl AmuxApp {
                             }));
                         if machine_active {
                             machine_view.child(
-                                h_flex().gap_1().child(
+                                v_flex().gap_1().child(Input::new(&self.session_cwd_input)).child(
                                     Button::new(format!("new-{mi}"))
                                         .small()
                                         .label("＋ 新建会话")
