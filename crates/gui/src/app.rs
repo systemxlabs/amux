@@ -609,6 +609,8 @@ impl AmuxApp {
         h_flex()
             .flex_1()
             .min_h_0()
+            // 默认 items_center 会让对话区不撑满、长对话溢出；改为 stretch
+            .items_stretch()
             .child(match self.center_view {
                 CenterView::Dialog => self.render_dialog(_window_placeholder(window), cx),
                 CenterView::Activities => self.render_activities(_window_placeholder(window), cx),
@@ -647,6 +649,8 @@ impl AmuxApp {
             div()
                 .id("dialog-empty")
                 .flex_1()
+                .items_center()
+                .justify_center()
                 .child(Label::new("选择左侧会话查看对话，或输入消息开始"))
                 .into_any()
         } else {
@@ -700,6 +704,8 @@ impl AmuxApp {
             div()
                 .id("activities-empty")
                 .flex_1()
+                .items_center()
+                .justify_center()
                 .child(Label::new(
                     "暂无活动（打开会话后产生 thinking / tool_call 等）",
                 ))
@@ -991,6 +997,8 @@ impl Render for AmuxApp {
         let mut root = h_flex()
             .size_full()
             .relative()
+            // h_flex 默认 items_center：改为 stretch，让 main 撑满窗口高度
+            .items_stretch()
             .child(self.render_sidebar(window, cx))
             .child(self.render_main(window, cx));
         if let Some(p) = panel {
