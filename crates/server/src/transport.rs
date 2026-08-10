@@ -269,6 +269,13 @@ fn notification_frame(n: &ServerNotification) -> Option<String> {
             notify::USER_MESSAGE,
             serde_json::json!({ "session_id": session_id, "content": content, "timestamp": timestamp }),
         ),
+        ServerNotification::Activity {
+            session_id,
+            activity,
+        } => (
+            notify::ACTIVITY,
+            serde_json::json!({ "session_id": session_id, "activity": activity }),
+        ),
     };
     let frame = JsonRpcNotification {
         jsonrpc: "2.0".into(),

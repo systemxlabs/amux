@@ -79,7 +79,8 @@ Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server �
 
 ### 5.3 会话活动（activities）
 
-- 中间活动（thinking / tool call / compaction 等）经 ACP 事件聚合产生
+- 中间活动（thinking / tool call / compaction 等）经 ACP 事件聚合产生；**同类连续事件合并为一条**（thinking 逐块累积、同一工具调用合并），turn 结束写入历史
+- **实时活动**：turn 进行中，合并后的当前活动经 `activity` 通知**流式推送**（GUI 实时活动条与活动视图追加展示），空闲时清空
 - **server 有界缓存**：按会话保留最近若干条活动（非持久化，超出淘汰最旧）
 - GUI 在活动视图需要时经 `get_activities` **主动获取**（中间下方实时一条 + 右侧完整历史）
 

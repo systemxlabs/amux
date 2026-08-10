@@ -171,7 +171,7 @@ pub enum DialogItem {
 // ---- 会话活动（activities，docs/DESIGN.md §5.3）----
 
 /// 会话活动：turn 过程中的详细活动（PRD §4.3）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
     Thinking {

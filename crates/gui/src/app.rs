@@ -1,6 +1,6 @@
 //! amux 主视图（docs/DESIGN.md §7 / PRD §3、§4）。
 //! 三面板布局 + 多机器 + 工作流编排 + 设置浮窗（五分类）：
-//! - 左侧：会话列表（按最近活跃排序；含编排会话与折叠的子会话；可按机器/agent/编排筛选）
+//! - 左侧：会话列表（按最近活跃排序；含编排会话与折叠的子会话）+ 顶部「+」新建会话入口
 //!   + 底部设置入口
 //! - 中间：上方对话流（用户消息 + agent 完整输出气泡，非流式）+ 下方进行中活动条（一条或无）
 //!   + 快捷指令栏 + 输入区（多行、@ 引用、拖拽文件、粘贴图片、语音）+ 右侧竖排悬浮按钮
@@ -60,16 +60,6 @@ enum SettingsCategory {
     Templates,
 }
 
-/// 会话列表筛选（PRD §3.1：按机器 / agent 类型 / 编排 agent 筛选）。
-#[derive(Clone, PartialEq)]
-enum SessionFilter {
-    All,
-    Machine(String),
-    Harness(String),
-    /// 只显示编排 agent 会话（工作流）
-    Orchestrator,
-}
-
 /// diff 渲染模式（PRD §3.5：side-by-side 或 inline）。
 #[derive(Clone, Copy, PartialEq)]
 enum DiffMode {
@@ -95,6 +85,8 @@ struct MachineView {
     selected: Option<String>,
     dialog: Vec<DialogItem>,
     activities: Vec<Activity>,
+    /// 当前打开会话的实时活动（turn 中合并流式推送，空闲时清空）
+    live_activity: Option<Activity>,
     /// 当前查看 harness 的 skills 列表
     skills: Vec<String>,
     skills_harness: Option<String>,
@@ -117,6 +109,7 @@ impl MachineView {
             selected: None,
             dialog: Vec::new(),
             activities: Vec::new(),
+            live_activity: None,
             skills: Vec::new(),
             skills_harness: None,
             diff_status: None,
@@ -144,7 +137,6 @@ pub struct AmuxApp {
     panel: Option<Panel>,
     show_settings: bool,
     settings_category: SettingsCategory,
-    session_filter: SessionFilter,
     new_session_mode: NewSessionMode,
     /// 输入区
     input_state: Entity<InputState>,
@@ -172,8 +164,6 @@ pub struct AmuxApp {
     skill_edit_target: Option<String>,
     /// 模板编辑目标
     tpl_edit_target: Option<String>,
-    /// 进行中活动（中间面板下方活动条，一条或无）
-    current_activity: Option<Activity>,
     /// 会话详情是否可编辑标题
     editing_title: bool,
     /// 新会话视图（PRD §4.1.2）：选中的机器与 agent
@@ -263,7 +253,6 @@ impl AmuxApp {
             panel: None,
             show_settings: false,
             settings_category: SettingsCategory::Machines,
-            session_filter: SessionFilter::All,
             new_session_mode: NewSessionMode::Direct,
             input_state,
             input_attachments: Vec::new(),
@@ -283,7 +272,6 @@ impl AmuxApp {
             orch_model_input,
             model_input,
             title_input,
-            current_activity: None,
             qc_edit_target: None,
             skill_edit_target: None,
             tpl_edit_target: None,
@@ -425,6 +413,23 @@ impl AmuxApp {
                     timestamp: ts,
                 });
             }
+            // 实时活动：turn 中合并流式推送（thinking 逐块累积为一条）
+            "activity" => {
+                // 只跟踪当前打开会话的活动；其他会话的活动不抢占活动条
+                let sid = n.params.get("session_id").and_then(|v| v.as_str());
+                if m.selected.as_deref() != sid {
+                    return;
+                }
+                if let Some(a) = n
+                    .params
+                    .get("activity")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                {
+                    m.live_activity = Some(a);
+                    cx.notify();
+                }
+            }
             "session_state" => {
                 let sid = n.params.get("session_id").and_then(|v| v.as_str());
                 let state = n.params.get("state").and_then(|v| v.as_str()).map(|s| {
@@ -438,37 +443,41 @@ impl AmuxApp {
                     cx.notify();
                     return;
                 };
-                // 进行中活动条：忙时拉取最新活动，空闲清空
-                if state == SessionState::Busy {
-                    let _ = n;
-                    let client = m.client.clone();
-                    let sid_owned = sid.to_string();
-                    cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                        if let Ok(res) = client
-                            .request(
-                                protocol::method::GET_ACTIVITIES,
-                                Some(json!({ "sessionId": sid_owned })),
-                            )
-                            .await
-                        {
-                            let acts: Vec<Activity> = res
-                                .get("activities")
-                                .cloned()
-                                .map(|v| serde_json::from_value(v).unwrap_or_default())
-                                .unwrap_or_default();
-                            let _ = this.update_in(cx, |this, _window, cx| {
-                                if let Some(mm) = this.machines.get_mut(idx) {
-                                    mm.activities = acts.clone();
-                                }
-                                this.current_activity = acts.into_iter().last();
-                                cx.notify();
-                            });
-                        }
-                    })
-                    .detach();
-                } else {
-                    this.current_activity = None;
-                }
+                // 活动历史刷新（turn 边界拉取合并后的完整活动）；实时活动由
+                // activity 通知流式驱动（docs/DESIGN.md §5.3）
+                let client = m.client.clone();
+                let sid_owned = sid.to_string();
+                cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                    if let Ok(res) = client
+                        .request(
+                            protocol::method::GET_ACTIVITIES,
+                            Some(json!({ "sessionId": sid_owned })),
+                        )
+                        .await
+                    {
+                        let acts: Vec<Activity> = res
+                            .get("activities")
+                            .cloned()
+                            .map(|v| serde_json::from_value(v).unwrap_or_default())
+                            .unwrap_or_default();
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            if let Some(mm) = this.machines.get_mut(idx) {
+                                mm.activities = acts.clone();
+                            }
+                            cx.notify();
+                        });
+                    }
+                    // 空闲：清空实时活动
+                    if state == SessionState::Idle {
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            if let Some(mm) = this.machines.get_mut(idx) {
+                                mm.live_activity = None;
+                            }
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
                 // 工作流自动推进：子会话变 idle → 注入完成情况并推进（docs/DESIGN.md §10）
                 if state == SessionState::Idle {
                     let session_id = sid.to_string();
@@ -524,8 +533,8 @@ impl AmuxApp {
             "disconnected" => {
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = "离线（重连中…）".into();
+                    m.live_activity = None;
                 }
-                this.current_activity = None;
                 cx.notify();
             }
             _ => {}
@@ -763,12 +772,12 @@ impl AmuxApp {
                     m.selected = Some(session_id.clone());
                     m.dialog = items.clone();
                     m.activities = acts.clone();
+                    m.live_activity = None;
                 }
                 this.selected = Some(Selected::Session {
                     machine,
                     id: session_id,
                 });
-                this.current_activity = None;
                 this.panel = None;
                 cx.notify();
             });
@@ -1441,9 +1450,20 @@ impl AmuxApp {
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(0x111827)),
+                    )
+                    .child(div().flex_1())
+                    // 新会话入口（PRD §4.1.2）：新建会话视图在中间面板，侧边栏仅一个 + 号
+                    .child(
+                        Button::new("goto-new-session")
+                            .small()
+                            .label("＋")
+                            .tooltip("新会话 / 工作流")
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.selected = None;
+                                cx.notify();
+                            })),
                     ),
             )
-            .child(self.render_filters(cx))
             .child(
                 div()
                     .id("sidebar-sessions")
@@ -1466,77 +1486,6 @@ impl AmuxApp {
             )
     }
 
-    /// 会话列表筛选（PRD §3.1）。
-    fn render_filters(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let all = self.session_filter == SessionFilter::All;
-        let orc = self.session_filter == SessionFilter::Orchestrator;
-        let mut row = h_flex()
-            .flex_wrap()
-            .gap_1()
-            .pb_1()
-            .child(
-                Button::new("filter-all")
-                    .small()
-                    .label("全部")
-                    .when(all, |b| b.primary())
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.session_filter = SessionFilter::All;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("filter-orc")
-                    .small()
-                    .label("编排")
-                    .when(orc, |b| b.primary())
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.session_filter = SessionFilter::Orchestrator;
-                        cx.notify();
-                    })),
-            );
-        // 机器筛选
-        for (i, m) in self.machines.iter().enumerate() {
-            let sel = self.session_filter == SessionFilter::Machine(m.config.name.clone());
-            let name = m.config.name.clone();
-            row = row.child(
-                Button::new(format!("filter-m-{i}"))
-                    .small()
-                    .label(name.clone())
-                    .when(sel, |b| b.primary())
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.session_filter = SessionFilter::Machine(name.clone());
-                        cx.notify();
-                    })),
-            );
-        }
-        // agent 类型筛选（各机器发现的 harness 去重）
-        let mut harnesses: Vec<String> = Vec::new();
-        for m in &self.machines {
-            if let Some(info) = &m.info {
-                for h in &info.harnesses {
-                    if !harnesses.contains(&h.name) {
-                        harnesses.push(h.name.clone());
-                    }
-                }
-            }
-        }
-        for h in harnesses {
-            let sel = self.session_filter == SessionFilter::Harness(h.clone());
-            let hh = h.clone();
-            row = row.child(
-                Button::new(format!("filter-h-{hh}"))
-                    .small()
-                    .label(hh.clone())
-                    .when(sel, |b| b.primary())
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.session_filter = SessionFilter::Harness(hh.clone());
-                        cx.notify();
-                    })),
-            );
-        }
-        row
-    }
-
     /// 会话列表：普通会话（按最近活跃排序）+ 编排会话（子会话折叠）。
     fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let mut out: Vec<gpui::AnyElement> = Vec::new();
@@ -1544,11 +1493,6 @@ impl AmuxApp {
         // 编排会话
         for (wi, wf) in self.workflows.iter().enumerate() {
             let orc_sel = self.selected == Some(Selected::Workflow { engine: wi });
-            if let SessionFilter::Machine(_) | SessionFilter::Harness(_) = &self.session_filter {
-                continue; // 机器/agent 筛选下不显示编排会话（编排 agent 会话单独筛选）
-            }
-            if self.session_filter == SessionFilter::Orchestrator
-                || self.session_filter == SessionFilter::All
             {
                 let title = if wf.session.title.is_empty() {
                     "新工作流".to_string()
@@ -1638,14 +1582,6 @@ impl AmuxApp {
 
         // 普通会话：按机器分组，最近活跃排序
         for (mi, m) in self.machines.iter().enumerate() {
-            if let SessionFilter::Machine(name) = &self.session_filter {
-                if name != &m.config.name {
-                    continue;
-                }
-            }
-            if let SessionFilter::Orchestrator = &self.session_filter {
-                continue;
-            }
             let mut sessions = m.sessions.clone();
             sessions.sort_by_key(|s| std::cmp::Reverse(session_sort_key(s)));
             if sessions.is_empty() {
@@ -1679,11 +1615,6 @@ impl AmuxApp {
                     ),
             );
             for s in sessions {
-                if let SessionFilter::Harness(h) = &self.session_filter {
-                    if &s.harness != h {
-                        continue;
-                    }
-                }
                 let sid = s.id.clone();
                 let sel = self.selected
                     == Some(Selected::Session {
@@ -1716,28 +1647,6 @@ impl AmuxApp {
             }
             out.push(group.into_any());
         }
-
-        // 新会话区：新会话视图在中间面板（PRD §4.1.2），左侧栏只保留一个引导入口
-        let create_hint = v_flex()
-            .gap_2()
-            .p_2()
-            .bg(rgb(0xffffff))
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(0xe5e7eb))
-            .shadow_sm()
-            .child(Label::new("创建新会话 / 工作流").font_weight(FontWeight::SEMIBOLD))
-            .child(
-                Button::new("goto-new-session")
-                    .small()
-                    .primary()
-                    .label("＋ 新会话视图")
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.selected = None;
-                        cx.notify();
-                    })),
-            );
-        out.push(create_hint.into_any());
         out
     }
 
@@ -2068,8 +1977,15 @@ impl AmuxApp {
     }
 
     /// 中间面板下方：正在进行的活动（一条或无，空闲不显示，PRD §4.1.3）。
+    /// 实时活动来自当前打开会话的 live_activity（turn 中合并流式推送）。
     fn render_activity_bar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        match &self.current_activity {
+        let current = match &self.selected {
+            Some(Selected::Session { machine, .. }) => {
+                self.machine(*machine).and_then(|m| m.live_activity.clone())
+            }
+            _ => None,
+        };
+        match &current {
             Some(Activity::Thinking { content, .. }) => h_flex()
                 .gap_2()
                 .p_2()
@@ -2759,12 +2675,12 @@ impl AmuxApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let activities = match &self.selected {
+        let (activities, live) = match &self.selected {
             Some(Selected::Session { machine, .. }) => self
                 .machine(*machine)
-                .map(|m| m.activities.clone())
+                .map(|m| (m.activities.clone(), m.live_activity.clone()))
                 .unwrap_or_default(),
-            _ => Vec::new(),
+            _ => (Vec::new(), None),
         };
         let rows = activities
             .iter()
@@ -2797,6 +2713,40 @@ impl AmuxApp {
                     .child(format!("[{kind}] {detail}"))
             })
             .collect::<Vec<_>>();
+        // 实时活动（turn 进行中合并流式的一条，追加在历史下方）
+        let mut children = rows;
+        if let Some(a) = &live {
+            let (kind, detail) = match a {
+                Activity::Thinking { content, .. } => ("思考", content.clone()),
+                Activity::ToolCall {
+                    name,
+                    title,
+                    content,
+                    ..
+                } => (
+                    "工具调用",
+                    format!(
+                        "{} {} {}",
+                        name,
+                        title.clone().unwrap_or_default(),
+                        content.clone().unwrap_or_default()
+                    ),
+                ),
+                Activity::Compaction { detail, .. } => ("压缩", detail.clone()),
+            };
+            children.push(
+                div()
+                    .id("act-live")
+                    .w_full()
+                    .p_1()
+                    .bg(rgb(0xfffbeb))
+                    .border_1()
+                    .border_color(rgb(0xfcd34d))
+                    .rounded_md()
+                    .child(Spinner::new())
+                    .child(format!("[{kind}] {detail}")),
+            );
+        }
         v_flex()
             .w(px(400.))
             .h_full()
@@ -2816,7 +2766,7 @@ impl AmuxApp {
                     .flex_1()
                     .gap_2()
                     .overflow_y_scroll()
-                    .children(rows),
+                    .children(children),
             )
             .into_any()
     }

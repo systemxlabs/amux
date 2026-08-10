@@ -56,4 +56,6 @@ pub mod notify {
     pub const SESSION_STATE: &str = "session_state";
     /// 用户消息（GUI 本地立即渲染，可经此同步）
     pub const USER_MESSAGE: &str = "user_message";
+    /// 实时活动（turn 中经 ACP 事件流合并的当前活动，thinking 逐块累积流式推送）
+    pub const ACTIVITY: &str = "activity";
 }

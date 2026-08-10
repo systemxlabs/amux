@@ -36,6 +36,11 @@ pub enum ServerNotification {
         content: Vec<ContentBlock>,
         timestamp: u64,
     },
+    /// turn 中的实时活动（合并后的当前活动，docs/DESIGN.md §5.3 流式）
+    Activity {
+        session_id: String,
+        activity: Activity,
+    },
 }
 
 struct SessionRecord {
@@ -49,6 +54,8 @@ pub struct SessionManager {
     registry: Mutex<HashMap<String, SessionRecord>>,
     /// 按会话的 activities 有界缓存（docs/DESIGN.md §5.3）
     activities: Mutex<HashMap<String, VecDeque<Activity>>>,
+    /// turn 进行中的实时活动（同类事件合并，thinking 流式累积；turn 结束清空）
+    live_activities: std::sync::Mutex<HashMap<String, Activity>>,
     tx: broadcast::Sender<ServerNotification>,
     max_activities: usize,
 }
@@ -58,6 +65,69 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// 把 turn 事件合并进 activities 列表（docs/DESIGN.md §5.3 事件流合并）：
+/// - 连续 thinking 块累积为一条 Thinking（流式，逐块追加内容）
+/// - 同工具（相同 kind）的 tool_call / tool_call_update 合并为一条 ToolCall
+/// - compaction 独立成条
+/// 返回合并/新增后的当前活动（供实时推送；无活动产出时返回 None）。
+fn merge_activity(acts: &mut Vec<Activity>, ev: AgentEvent, ts: u64) -> Option<Activity> {
+    match ev {
+        AgentEvent::Thinking(c) => {
+            if let Some(Activity::Thinking { content, .. }) = acts.last_mut() {
+                content.push_str(&c);
+                acts.last().cloned()
+            } else {
+                let a = Activity::Thinking {
+                    timestamp: ts,
+                    content: c,
+                };
+                acts.push(a.clone());
+                Some(a)
+            }
+        }
+        AgentEvent::ToolCall {
+            name,
+            title,
+            content,
+        } => {
+            let mergeable = matches!(acts.last(), Some(Activity::ToolCall { name: last, .. }) if *last == name);
+            if mergeable {
+                if let Some(Activity::ToolCall {
+                    title: t, content: c, ..
+                }) = acts.last_mut()
+                {
+                    if t.is_none() {
+                        *t = title;
+                    }
+                    if let Some(nc) = content {
+                        *c = Some(nc);
+                    }
+                }
+                acts.last().cloned()
+            } else {
+                let a = Activity::ToolCall {
+                    timestamp: ts,
+                    name,
+                    title,
+                    content,
+                };
+                acts.push(a.clone());
+                Some(a)
+            }
+        }
+        AgentEvent::Compaction(d) => {
+            let a = Activity::Compaction {
+                timestamp: ts,
+                detail: d,
+            };
+            acts.push(a.clone());
+            Some(a)
+        }
+        // OutputChunk / UserMessage / TurnEnded 不产生活动
+        _ => None,
+    }
 }
 
 impl SessionManager {
@@ -70,6 +140,7 @@ impl SessionManager {
             agents,
             registry: Mutex::new(HashMap::new()),
             activities: Mutex::new(HashMap::new()),
+            live_activities: std::sync::Mutex::new(HashMap::new()),
             tx,
             max_activities,
         };
@@ -246,6 +317,24 @@ impl SessionManager {
         Ok(list)
     }
 
+    /// 推送合并后的实时活动（turn 进行中；仅在活动有变化时通知，避免刷屏）。
+    fn push_live_activity(&self, session_id: &str, activity: Option<Activity>) {
+        let Some(activity) = activity else {
+            return;
+        };
+        let mut live = self.live_activities.lock().unwrap();
+        let changed = live.get(session_id) != Some(&activity);
+        if changed {
+            live.insert(session_id.to_string(), activity.clone());
+            let _ = self
+                .tx
+                .send(ServerNotification::Activity {
+                    session_id: session_id.to_string(),
+                    activity,
+                });
+        }
+    }
+
     // ---- 交互 ----
 
     /// prompt：经 driver 触发 turn，聚合事件为完整输出 + activities（非流式交付）。
@@ -298,7 +387,8 @@ impl SessionManager {
         });
         self.set_state(session_id, SessionState::Busy).await;
 
-        // 聚合 turn 事件
+        // 聚合 turn 事件：同类事件合并（thinking 逐块累积、同工具调用合并），
+        // 合并后的当前活动经 activity 通知实时推送（docs/DESIGN.md §5.3 流式）
         let mut rx = driver.prompt(&agent_session_id, input);
         let mut output: Vec<ContentBlock> = Vec::new();
         let mut acts: Vec<Activity> = Vec::new();
@@ -308,29 +398,28 @@ impl SessionManager {
                 AgentEvent::UserMessage(_) => {
                     // 回显：server 已发 user_message 通知，此处忽略
                 }
-                AgentEvent::Thinking(c) => acts.push(Activity::Thinking {
-                    timestamp: now(),
-                    content: c,
-                }),
+                AgentEvent::Thinking(c) => {
+                    let merged = merge_activity(&mut acts, AgentEvent::Thinking(c), now());
+                    self.push_live_activity(session_id, merged);
+                }
                 AgentEvent::ToolCall {
                     name,
                     title,
                     content,
                 } => {
-                    acts.push(Activity::ToolCall {
-                        timestamp: now(),
-                        name,
-                        title,
-                        content,
-                    });
+                    let merged =
+                        merge_activity(&mut acts, AgentEvent::ToolCall { name, title, content }, now());
+                    self.push_live_activity(session_id, merged);
                 }
-                AgentEvent::Compaction(d) => acts.push(Activity::Compaction {
-                    timestamp: now(),
-                    detail: d,
-                }),
+                AgentEvent::Compaction(d) => {
+                    let merged = merge_activity(&mut acts, AgentEvent::Compaction(d), now());
+                    self.push_live_activity(session_id, merged);
+                }
                 AgentEvent::TurnEnded => break,
             }
         }
+        // turn 结束：清空实时活动，合并后的完整活动写入有界缓存
+        self.live_activities.lock().unwrap().remove(session_id);
 
         // 写入 activities 有界缓存
         if !acts.is_empty() {
@@ -425,6 +514,65 @@ mod tests {
     ) -> (SessionManager, broadcast::Receiver<ServerNotification>) {
         let agents = Arc::new(AgentRegistry::new_for_tests());
         SessionManager::new(agents, max_activities)
+    }
+
+    /// 事件流合并：连续 thinking 累积为一条，同工具调用合并，compaction 独立成条。
+    #[test]
+    fn merge_activity_merges_consecutive_kinds() {
+        let mut acts: Vec<Activity> = Vec::new();
+        // 连续 thinking 块 → 累积为一条
+        merge_activity(&mut acts, AgentEvent::Thinking("思考".into()), 1);
+        merge_activity(&mut acts, AgentEvent::Thinking("中…".into()), 2);
+        assert_eq!(acts.len(), 1);
+        match &acts[0] {
+            Activity::Thinking { content, .. } => assert_eq!(content, "思考中…"),
+            other => panic!("应为合并后的 Thinking，得到 {other:?}"),
+        }
+        // 同工具 tool_call + tool_call_update → 合并为一条（title/content 补全）
+        merge_activity(
+            &mut acts,
+            AgentEvent::ToolCall {
+                name: "execute".into(),
+                title: Some("运行测试".into()),
+                content: None,
+            },
+            3,
+        );
+        merge_activity(
+            &mut acts,
+            AgentEvent::ToolCall {
+                name: "execute".into(),
+                title: None,
+                content: Some("cargo test".into()),
+            },
+            4,
+        );
+        assert_eq!(acts.len(), 2);
+        match &acts[1] {
+            Activity::ToolCall {
+                name, title, content, ..
+            } => {
+                assert_eq!(name, "execute");
+                assert_eq!(title.as_deref(), Some("运行测试"));
+                assert_eq!(content.as_deref(), Some("cargo test"));
+            }
+            other => panic!("应为合并后的 ToolCall，得到 {other:?}"),
+        }
+        // 不同工具 → 新条目
+        merge_activity(
+            &mut acts,
+            AgentEvent::ToolCall {
+                name: "read".into(),
+                title: None,
+                content: None,
+            },
+            5,
+        );
+        assert_eq!(acts.len(), 3);
+        // compaction 独立成条
+        merge_activity(&mut acts, AgentEvent::Compaction("压缩".into()), 6);
+        assert_eq!(acts.len(), 4);
+        assert!(matches!(acts[3], Activity::Compaction { .. }));
     }
 
     #[tokio::test]
