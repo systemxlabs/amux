@@ -1,7 +1,7 @@
 //! GUI 纯逻辑（PRD §4.2 输入 / §3.1 会话排序）：@ 引用解析、附件 → prompt 组装、
 //! 最近活跃排序键。与 GPUI 渲染分离，可单测直驱。
 
-use protocol::{ContentBlock, SessionMeta};
+use protocol::ContentBlock;
 
 /// 输入附件：@ 引用文件/目录、拖拽文件、粘贴图片、语音。
 #[derive(Debug, Clone, PartialEq)]
@@ -124,15 +124,9 @@ pub fn compose_prompt(text: &str, attachments: &[InputAttachment]) -> Vec<Conten
     blocks
 }
 
-/// 会话列表排序键：最近活跃（last_event_at 降序，PRD §3.1）。
-pub fn session_sort_key(m: &SessionMeta) -> u64 {
-    m.last_event_at
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::SessionState;
 
     #[test]
     fn parse_at_references_extracts_paths_and_cleans_text() {
@@ -218,30 +212,5 @@ mod tests {
             }],
         );
         assert_eq!(blocks.len(), 1);
-    }
-
-    #[test]
-    fn session_sort_key_uses_last_event() {
-        let a = SessionMeta {
-            id: "a".into(),
-            harness: "codex".into(),
-            cwd: "/".into(),
-            model: None,
-            state: SessionState::Idle,
-            interrupted: false,
-            closed: false,
-            title: "a".into(),
-            created_at: 1,
-            last_event_at: 10,
-        };
-        let mut b = a.clone();
-        b.id = "b".into();
-        b.last_event_at = 20;
-        b.title = "b".into();
-        assert!(session_sort_key(&b) > session_sort_key(&a));
-        // 排序：最近活跃在前
-        let mut list = vec![a, b];
-        list.sort_by_key(|s| std::cmp::Reverse(session_sort_key(s)));
-        assert_eq!(list[0].id, "b");
     }
 }

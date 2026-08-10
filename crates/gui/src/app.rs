@@ -35,7 +35,7 @@ use crate::config::{
     WorkflowTemplate,
 };
 use crate::logic::{
-    compose_prompt, parse_at_references, read_path_context, session_sort_key, InputAttachment,
+    compose_prompt, parse_at_references, read_path_context, InputAttachment,
 };
 use crate::workflow::{MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification, WsClient};
@@ -58,6 +58,14 @@ enum SettingsCategory {
     QuickCommands,
     Skills,
     Templates,
+}
+
+/// 会话列表项（统一最近活跃排序，docs/PRD §4.1.1）。
+enum SessionListItem {
+    /// 普通 agent 会话（机器下标 + 元数据）
+    Session { machine: usize, meta: SessionMeta },
+    /// 编排会话（工作流，下标）
+    Workflow { idx: usize },
 }
 
 /// diff 渲染模式（PRD §3.5：side-by-side 或 inline）。
@@ -135,6 +143,8 @@ pub struct AmuxApp {
     workflow_dir: PathBuf,
     selected: Option<Selected>,
     panel: Option<Panel>,
+    /// 右侧上下文面板展开时窗口向右扩展的物理像素（关闭时收回，docs/DESIGN.md §7）
+    panel_delta_px: f32,
     show_settings: bool,
     settings_category: SettingsCategory,
     new_session_mode: NewSessionMode,
@@ -251,6 +261,7 @@ impl AmuxApp {
             workflow_dir,
             selected: None,
             panel: None,
+            panel_delta_px: 0.0,
             show_settings: false,
             settings_category: SettingsCategory::Machines,
             new_session_mode: NewSessionMode::Direct,
@@ -502,14 +513,21 @@ impl AmuxApp {
                             .take(200)
                             .collect::<String>();
                         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                            let _ = wf
-                                .on_child_state(&session_id, SessionState::Idle, Some(ex))
-                                .await;
-                            let _ = wf.persist(&workflow_dir);
-                            let _ = this.update_in(cx, |this, _window, cx| {
-                                this.workflows.insert(wi, wf);
-                                cx.notify();
-                            });
+                            // 自动推进在 GUI 的 tokio runtime 上执行（rig 需要 reactor）
+                            if let Some(wf) = run_engine_on_tokio(async move {
+                                let _ = wf
+                                    .on_child_state(&session_id, SessionState::Idle, Some(ex))
+                                    .await;
+                                let _ = wf.persist(&workflow_dir);
+                                wf
+                            })
+                            .await
+                            {
+                                let _ = this.update_in(cx, |this, _window, cx| {
+                                    this.workflows.insert(wi, wf);
+                                    cx.notify();
+                                });
+                            }
                         });
                         this._tasks.push(t);
                     }
@@ -677,6 +695,10 @@ impl AmuxApp {
         }
         let client = m.client.clone();
         let text = text.clone();
+        protocol::log::info(
+            "gui.app",
+            format!("创建会话（machine={machine} harness={harness} cwd={cwd}）"),
+        );
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             // 1) 创建会话
             let res = client
@@ -686,6 +708,7 @@ impl AmuxApp {
                 )
                 .await;
             let Ok(res) = res else {
+                protocol::log::error("gui.app", "创建会话请求失败");
                 let _ = this.update_in(cx, |this, _window, cx| {
                     if let Some(m) = this.machine_mut(machine) {
                         m.status = "创建会话失败".into();
@@ -709,7 +732,13 @@ impl AmuxApp {
                 });
                 return;
             }
-            // 2) 发送首条指令
+            // 2) 立即跳转到该会话视图（不等首条指令 turn 完成；输出/活动
+            //    经 turn_completed / activity 通知流式到达，docs/DESIGN.md §5.1）
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.open_session(window, cx, machine, sid.clone());
+            });
+            // 3) 发送首条指令（后台执行，不阻塞跳转）
+            protocol::log::debug("gui.app", format!("发送首条指令 session={sid}"));
             let _ = client
                 .request(
                     protocol::method::PROMPT,
@@ -719,10 +748,6 @@ impl AmuxApp {
                     })),
                 )
                 .await;
-            // 3) 打开该会话（全量重放，含首条指令与 agent 输出）
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.open_session(window, cx, machine, sid.clone());
-            });
         })
         .detach();
     }
@@ -767,7 +792,7 @@ impl AmuxApp {
                     .map(|v| serde_json::from_value(v).unwrap_or_default())
                     .unwrap_or_default();
             }
-            let _ = this.update_in(cx, |this, _window, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(m) = this.machine_mut(machine) {
                     m.selected = Some(session_id.clone());
                     m.dialog = items.clone();
@@ -778,7 +803,7 @@ impl AmuxApp {
                     machine,
                     id: session_id,
                 });
-                this.panel = None;
+                this.set_panel(window, cx, None);
                 cx.notify();
             });
         })
@@ -930,6 +955,7 @@ impl AmuxApp {
         let blocks = compose_prompt(&clean_text, &all);
 
         let Some(target) = self.selected.clone() else {
+            protocol::log::warn("gui.app", "发送 prompt 但未选中会话");
             if let Some(m) = self.machine_mut(0) {
                 m.status = "请先选择会话".into();
             }
@@ -938,6 +964,10 @@ impl AmuxApp {
         };
         match target {
             Selected::Session { machine, id } => {
+                protocol::log::debug(
+                    "gui.app",
+                    format!("发送 prompt session={id}：{}", truncate(&clean_text, 60)),
+                );
                 let Some(m) = self.machine(machine) else {
                     return;
                 };
@@ -951,6 +981,7 @@ impl AmuxApp {
                         )
                         .await
                     {
+                        protocol::log::error("gui.app", format!("prompt 请求失败: {e}"));
                         let msg = format!("prompt 失败: {e}");
                         let _ = this.update_in(cx, |this, _window, cx| {
                             if let Some(m) = this.machine_mut(machine) {
@@ -963,17 +994,24 @@ impl AmuxApp {
                 .detach();
             }
             Selected::Workflow { engine } => {
-                // 向编排会话发送介入指令（暂停/继续/调整后续动作，docs/DESIGN.md §10）
+                // 向编排会话发送介入指令（暂停/继续/调整后续动作，docs/DESIGN.md §10）；
+                // 编排在 GUI 的 tokio runtime 上执行（rig LLM 调用需要 reactor）
                 let mut wf = self.workflows.remove(engine);
                 let text = clean_text;
                 let workflow_dir = self.workflow_dir.clone();
                 let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                    let _ = wf.steer(&text).await;
-                    let _ = wf.persist(&workflow_dir);
-                    let _ = this.update_in(cx, |this, _window, cx| {
-                        this.workflows.insert(engine, wf);
-                        cx.notify();
-                    });
+                    if let Some(wf) = run_engine_on_tokio(async move {
+                        let _ = wf.steer(&text).await;
+                        let _ = wf.persist(&workflow_dir);
+                        wf
+                    })
+                    .await
+                    {
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            this.workflows.insert(engine, wf);
+                            cx.notify();
+                        });
+                    }
                 });
                 self._tasks.push(t);
             }
@@ -1160,9 +1198,12 @@ impl AmuxApp {
         // 依据子会话当前状态恢复自动推进：查询各机器会话列表，喂 idle 状态
         for i in 0..self.machines.len() {
             let client = self.machines[i].client.clone();
+            let workflow_dir = self.workflow_dir.clone();
             cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                 if let Ok(res) = client.request(protocol::method::LIST_SESSIONS, None).await {
                     let sessions = res.get("sessions").cloned().unwrap_or_default();
+                    // 收集 idle 子会话（工作流下标 + 会话 id）
+                    let mut advances: Vec<(usize, String)> = Vec::new();
                     let _ = this.update_in(cx, |this, _window, cx| {
                         for s in sessions.as_array().cloned().unwrap_or_default() {
                             let sid = s["id"].as_str().unwrap_or("").to_string();
@@ -1171,23 +1212,45 @@ impl AmuxApp {
                             } else {
                                 SessionState::Idle
                             };
-                            let wi = this
-                                .workflows
-                                .iter()
-                                .position(|wf| wf.session.children.iter().any(|c| c.id == sid));
-                            if let Some(wi) = wi {
-                                if state == SessionState::Idle {
-                                    let mut wf = this.workflows.remove(wi);
-                                    let fut = wf.on_child_state(&sid, SessionState::Idle, None);
-                                    if futures_util::FutureExt::now_or_never(fut).is_some() {
-                                        let _ = wf.persist(&this.workflow_dir.clone());
-                                        this.workflows.insert(wi, wf);
-                                    }
+                            if state == SessionState::Idle {
+                                if let Some(wi) = this.workflows.iter().position(|wf| {
+                                    wf.session.children.iter().any(|c| c.id == sid)
+                                }) {
+                                    advances.push((wi, sid));
                                 }
                             }
                         }
                         cx.notify();
                     });
+                    // 自动推进在 GUI 的 tokio runtime 上执行（rig 需要 reactor，
+                    // 避免主线程无 runtime 崩溃）
+                    for (wi, sid) in advances {
+                        let mut wf = {
+                            let mut out = None;
+                            let _ = this.update_in(cx, |this, _window, _cx| {
+                                if wi < this.workflows.len() {
+                                    out = Some(this.workflows.remove(wi));
+                                }
+                            });
+                            match out {
+                                Some(wf) => wf,
+                                None => continue,
+                            }
+                        };
+                        let workflow_dir = workflow_dir.clone();
+                        if let Some(wf) = run_engine_on_tokio(async move {
+                            let _ = wf.on_child_state(&sid, SessionState::Idle, None).await;
+                            let _ = wf.persist(&workflow_dir);
+                            wf
+                        })
+                        .await
+                        {
+                            let _ = this.update_in(cx, |this, _window, cx| {
+                                this.workflows.insert(wi, wf);
+                                cx.notify();
+                            });
+                        }
+                    }
                 }
             })
             .detach();
@@ -1220,15 +1283,22 @@ impl AmuxApp {
             s.set_value("", window, cx);
         });
 
-        // 启动首个 turn（拆解步骤并下发指令），任务内驱动
+        // 启动首个 turn（拆解步骤并下发指令）：编排主循环在 GUI 的 tokio runtime
+        // 上执行（rig LLM 调用需要 reactor），完成后经 oneshot 传回引擎状态
         let mut wf = self.workflows.remove(wi);
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let _ = wf.start().await;
-            let _ = wf.persist(&workflow_dir);
-            let _ = this.update_in(cx, |this, _window, cx| {
-                this.workflows.insert(wi, wf);
-                cx.notify();
-            });
+            if let Some(wf) = run_engine_on_tokio(async move {
+                let _ = wf.start().await;
+                let _ = wf.persist(&workflow_dir);
+                wf
+            })
+            .await
+            {
+                let _ = this.update_in(cx, |this, _window, cx| {
+                    this.workflows.insert(wi, wf);
+                    cx.notify();
+                });
+            }
         });
         self._tasks.push(t);
         cx.notify();
@@ -1486,168 +1556,179 @@ impl AmuxApp {
             )
     }
 
-    /// 会话列表：普通会话（按最近活跃排序）+ 编排会话（子会话折叠）。
+    /// 会话列表：普通会话 + 工作流会话**统一按最近活跃排序**（docs/PRD §4.1.1；
+    /// 子会话随父会话一起参与排序）。
     fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let mut out: Vec<gpui::AnyElement> = Vec::new();
-
-        // 编排会话
+        // 汇总：普通会话按 last_event_at；工作流按 max(父 updated_at, 子会话 last_event_at)
+        let mut items: Vec<(u64, SessionListItem)> = Vec::new();
+        for (mi, m) in self.machines.iter().enumerate() {
+            for s in &m.sessions {
+                items.push((
+                    s.last_event_at,
+                    SessionListItem::Session {
+                        machine: mi,
+                        meta: s.clone(),
+                    },
+                ));
+            }
+        }
         for (wi, wf) in self.workflows.iter().enumerate() {
-            let orc_sel = self.selected == Some(Selected::Workflow { engine: wi });
-            {
-                let title = if wf.session.title.is_empty() {
-                    "新工作流".to_string()
-                } else {
-                    wf.session.title.clone()
-                };
-                let state = if wf.session.done {
-                    "完成"
-                } else if wf.session.paused {
-                    "已暂停"
-                } else if wf.session.state == SessionState::Busy {
-                    "编排中…"
+            let mut recency = wf.session.updated_at;
+            for c in &wf.session.children {
+                if let Some(mm) = self.machines.get(c.machine_idx) {
+                    if let Some(s) = mm.sessions.iter().find(|s| s.id == c.id) {
+                        recency = recency.max(s.last_event_at);
+                    }
+                }
+            }
+            items.push((recency, SessionListItem::Workflow { idx: wi }));
+        }
+        items.sort_by_key(|(rec, _)| std::cmp::Reverse(*rec));
+
+        items
+            .into_iter()
+            .map(|(_, item)| match item {
+                SessionListItem::Session { machine, meta } => {
+                    self.render_session_row(cx, machine, &meta)
+                }
+                SessionListItem::Workflow { idx } => self.render_workflow_row(cx, idx),
+            })
+            .collect()
+    }
+
+    /// 普通会话行：标题 · agent@机器 · 状态（机器信息内联，docs/PRD §4.1.1）。
+    fn render_session_row(
+        &self,
+        cx: &mut Context<Self>,
+        machine: usize,
+        s: &SessionMeta,
+    ) -> gpui::AnyElement {
+        let machine_name = self
+            .machines
+            .get(machine)
+            .map(|m| m.config.name.clone())
+            .unwrap_or_default();
+        let sid = s.id.clone();
+        let sel = self.selected
+            == Some(Selected::Session {
+                machine,
+                id: sid.clone(),
+            });
+        let title = if s.title.is_empty() {
+            format!("（未命名）{}", short_cwd(&s.cwd))
+        } else {
+            s.title.clone()
+        };
+        let state_label = match s.state {
+            SessionState::Busy => "● 工作中",
+            SessionState::Idle => {
+                if s.closed {
+                    "已关闭"
                 } else {
                     "空闲"
-                };
-                let header = h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(Label::new(format!(
-                        "🧭 {title} · {} 子会话",
-                        wf.session.children.len()
-                    )))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(format!("wf-open-{wi}"))
-                            .small()
-                            .label("打开")
-                            .when(orc_sel, |b| b.primary())
-                            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                this.selected = Some(Selected::Workflow { engine: wi });
-                                this.panel = None;
-                                cx.notify();
-                            })),
-                    );
-                // 子会话默认折叠、可展开下钻（PRD §3.1/§4.1.1）
-                let mut content = v_flex().gap_1();
-                for c in &wf.session.children {
-                    let cid = c.id.clone();
-                    let step = c.step_desc.clone();
-                    let machine_name = c.machine_name.clone();
-                    let harness = c.harness.clone();
-                    let st = match c.state {
-                        SessionState::Busy => "忙",
-                        SessionState::Idle => "空闲",
-                    };
-                    content = content.child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(Label::new("↳").text_color(rgb(0x9ca3af)))
-                            .child(
-                                Button::new(format!("wf-child-{wi}-{cid}"))
-                                    .small()
-                                    .label(format!("{step} [{harness}@{machine_name}] {st}"))
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let mi = this
-                                            .machines
-                                            .iter()
-                                            .position(|mm| mm.config.name == machine_name)
-                                            .unwrap_or(0);
-                                        this.open_session(window, cx, mi, cid.clone());
-                                    })),
-                            ),
-                    );
                 }
-                let item = v_flex()
-                    .gap_2()
-                    .p_2()
-                    .bg(rgb(0xffffff))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(0xe5e7eb))
-                    .shadow_sm()
-                    .child(header)
-                    .child(
-                        div()
-                            .px_1()
-                            .py(px(2.))
-                            .rounded_full()
-                            .bg(rgb(0xf3f4f6))
-                            .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
-                    )
-                    .child(Collapsible::new().open(false).content(content));
-                out.push(item.into_any());
             }
-        }
+        };
+        let label: SharedString =
+            format!("{title} · {}@{machine_name} · {state_label}", s.harness).into();
+        let btn = Button::new(format!("sess-{machine}-{sid}"))
+            .small()
+            .label(label)
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.open_session(window, cx, machine, sid.clone());
+            }));
+        (if sel { btn.primary() } else { btn })
+            .into_any_element()
+    }
 
-        // 普通会话：按机器分组，最近活跃排序
-        for (mi, m) in self.machines.iter().enumerate() {
-            let mut sessions = m.sessions.clone();
-            sessions.sort_by_key(|s| std::cmp::Reverse(session_sort_key(s)));
-            if sessions.is_empty() {
-                continue;
-            }
-            let mut group = v_flex()
-                .gap_2()
-                .p_2()
-                .bg(rgb(0xffffff))
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(0xe5e7eb))
-                .shadow_sm();
-            group = group.child(
+    /// 工作流行：标题 · 子会话数 + 打开按钮 + 状态徽章 + 折叠的子会话（docs/PRD §4.1.1）。
+    fn render_workflow_row(&self, cx: &mut Context<Self>, wi: usize) -> gpui::AnyElement {
+        let Some(wf) = self.workflows.get(wi) else {
+            return div().into_any();
+        };
+        let orc_sel = self.selected == Some(Selected::Workflow { engine: wi });
+        let title = if wf.session.title.is_empty() {
+            "新工作流".to_string()
+        } else {
+            wf.session.title.clone()
+        };
+        let state = if wf.session.done {
+            "完成"
+        } else if wf.session.paused {
+            "已暂停"
+        } else if wf.session.state == SessionState::Busy {
+            "编排中…"
+        } else {
+            "空闲"
+        };
+        let header = h_flex()
+            .gap_2()
+            .items_center()
+            .child(Label::new(format!(
+                "🧭 {title} · {} 子会话",
+                wf.session.children.len()
+            )))
+            .child(div().flex_1())
+            .child(
+                Button::new(format!("wf-open-{wi}"))
+                    .small()
+                    .label("打开")
+                    .when(orc_sel, |b| b.primary())
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.selected = Some(Selected::Workflow { engine: wi });
+                        this.set_panel(window, cx, None);
+                    })),
+            );
+        // 子会话默认折叠、可展开下钻（PRD §3.1/§4.1.1）
+        let mut content = v_flex().gap_1();
+        for c in &wf.session.children {
+            let cid = c.id.clone();
+            let step = c.step_desc.clone();
+            let machine_name = c.machine_name.clone();
+            let harness = c.harness.clone();
+            let st = match c.state {
+                SessionState::Busy => "忙",
+                SessionState::Idle => "空闲",
+            };
+            content = content.child(
                 h_flex()
-                    .gap_2()
+                    .gap_1()
                     .items_center()
+                    .child(Label::new("↳").text_color(rgb(0x9ca3af)))
                     .child(
-                        Label::new(m.config.name.clone())
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x111827)),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .px_2()
-                            .py(px(1.))
-                            .rounded_full()
-                            .bg(rgb(0xf3f4f6))
-                            .child(Label::new(m.status.clone()).text_xs().text_color(rgb(0x6b7280))),
+                        Button::new(format!("wf-child-{wi}-{cid}"))
+                            .small()
+                            .label(format!("{step} [{harness}@{machine_name}] {st}"))
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                let mi = this
+                                    .machines
+                                    .iter()
+                                    .position(|mm| mm.config.name == machine_name)
+                                    .unwrap_or(0);
+                                this.open_session(window, cx, mi, cid.clone());
+                            })),
                     ),
             );
-            for s in sessions {
-                let sid = s.id.clone();
-                let sel = self.selected
-                    == Some(Selected::Session {
-                        machine: mi,
-                        id: sid.clone(),
-                    });
-                let title = if s.title.is_empty() {
-                    format!("（未命名）{}", short_cwd(&s.cwd))
-                } else {
-                    s.title.clone()
-                };
-                let state_label = match s.state {
-                    SessionState::Busy => "● 工作中",
-                    SessionState::Idle => {
-                        if s.closed {
-                            "已关闭"
-                        } else {
-                            "空闲"
-                        }
-                    }
-                };
-                let label: SharedString = format!("{title} · {} · {state_label}", s.harness).into();
-                let btn = Button::new(format!("sess-{mi}-{sid}"))
-                    .small()
-                    .label(label)
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.open_session(window, cx, mi, sid.clone());
-                    }));
-                group = group.child(if sel { btn.primary() } else { btn });
-            }
-            out.push(group.into_any());
         }
-        out
+        v_flex()
+            .gap_2()
+            .p_2()
+            .bg(rgb(0xffffff))
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0xe5e7eb))
+            .shadow_sm()
+            .child(header)
+            .child(
+                div()
+                    .px_1()
+                    .py(px(2.))
+                    .rounded_full()
+                    .bg(rgb(0xf3f4f6))
+                    .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
+            )
+            .child(Collapsible::new().open(false).content(content))
+            .into_any()
     }
 
     fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2048,15 +2129,17 @@ impl AmuxApp {
                     .label("Diff")
                     .when(panel == Some(Panel::Diff), |b| b.primary())
                     .on_click(cx.listener(|this, _ev, window, cx| {
-                        if this.panel == Some(Panel::Diff) {
-                            this.panel = None;
+                        let next = if this.panel == Some(Panel::Diff) {
+                            None
                         } else {
-                            this.panel = Some(Panel::Diff);
+                            Some(Panel::Diff)
+                        };
+                        this.set_panel(window, cx, next);
+                        if next == Some(Panel::Diff) {
                             if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
                                 this.load_diff(window, cx, machine);
                             }
                         }
-                        cx.notify();
                     })),
             )
             .child(
@@ -2064,13 +2147,13 @@ impl AmuxApp {
                     .small()
                     .label("详情")
                     .when(panel == Some(Panel::Detail), |b| b.primary())
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.panel = if this.panel == Some(Panel::Detail) {
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        let next = if this.panel == Some(Panel::Detail) {
                             None
                         } else {
                             Some(Panel::Detail)
                         };
-                        cx.notify();
+                        this.set_panel(window, cx, next);
                     })),
             )
             .child(
@@ -2079,15 +2162,17 @@ impl AmuxApp {
                     .label("活动")
                     .when(panel == Some(Panel::Activities), |b| b.primary())
                     .on_click(cx.listener(|this, _ev, window, cx| {
-                        if this.panel == Some(Panel::Activities) {
-                            this.panel = None;
+                        let next = if this.panel == Some(Panel::Activities) {
+                            None
                         } else {
-                            this.panel = Some(Panel::Activities);
+                            Some(Panel::Activities)
+                        };
+                        this.set_panel(window, cx, next);
+                        if next == Some(Panel::Activities) {
                             if let Some(Selected::Session { machine, id }) = this.selected.clone() {
                                 this.load_activities(window, cx, machine, id);
                             }
                         }
-                        cx.notify();
                     })),
             )
     }
@@ -2195,7 +2280,18 @@ impl AmuxApp {
                 h_flex()
                     .gap_2()
                     .items_end()
-                    .child(div().flex_1().min_h(px(80.)).child(Input::new(&self.input_state)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(80.))
+                            .child(Input::new(&self.input_state))
+                            // Ctrl+Enter 发送（PRD §4.2：多行输入 + 快捷键发送）
+                            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                                if ev.keystroke.modifiers.control && ev.keystroke.key == "enter" {
+                                    this.send_prompt(window, cx);
+                                }
+                            })),
+                    )
                     .child(
                         Button::new("send")
                             .primary()
@@ -2237,6 +2333,34 @@ impl AmuxApp {
     }
 
     // ---- 右侧面板 ----
+
+    /// 面板逻辑宽度（px）；窗口向右扩展量据此计算。
+    fn panel_width_logical(panel: Panel) -> f32 {
+        match panel {
+            Panel::Diff => 460.0,
+            Panel::Detail => 360.0,
+            Panel::Activities => 400.0,
+        }
+    }
+
+    /// 打开/切换/关闭右侧上下文面板：窗口**向右扩展**（中间面板宽度不变），
+    /// 关闭时收回（docs/DESIGN.md §7 / PRD §4.1.4）。
+    fn set_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        panel: Option<Panel>,
+    ) {
+        let new_delta = panel.map(Self::panel_width_logical).unwrap_or(0.0) * window.scale_factor();
+        let bounds = window.bounds();
+        // 基准宽度 = 当前宽度 - 已扩展量（手动缩放窗口时下次切换自动校正）
+        let base = bounds.size.width - new_delta.into();
+        self.panel = panel;
+        self.panel_delta_px = new_delta;
+        let width: gpui::Pixels = base + new_delta.into();
+        window.resize(gpui::Size::new(width, bounds.size.height));
+        cx.notify();
+    }
 
     fn render_panel(
         &self,
@@ -2401,9 +2525,8 @@ impl AmuxApp {
                         Button::new("close-panel")
                             .small()
                             .label("✕")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.panel = None;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.set_panel(window, cx, None);
                             })),
                     ),
             )
@@ -2571,9 +2694,8 @@ impl AmuxApp {
                         )
                         .child(div().flex_1())
                         .child(Button::new("close-panel2").small().label("✕").on_click(
-                            cx.listener(|this, _ev, _window, cx| {
-                                this.panel = None;
-                                cx.notify();
+                            cx.listener(|this, _ev, window, cx| {
+                                this.set_panel(window, cx, None);
                             }),
                         )),
                 )
@@ -3318,6 +3440,29 @@ impl Render for AmuxApp {
 
 fn short_cwd(cwd: &str) -> String {
     cwd.rsplit('/').next().unwrap_or(cwd).to_string()
+}
+
+/// 截断长文本（日志用）。
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        let t: String = s.chars().take(max).collect();
+        format!("{t}…")
+    } else {
+        s.to_string()
+    }
+}
+
+/// 在 GUI 的 tokio runtime 上执行编排引擎任务（rig/reqwest 的 LLM 调用需要
+/// tokio reactor；GPUI 主线程无 runtime，docs/DESIGN.md §7「异步模型」）。
+/// 引擎状态（wf）经 oneshot 传回；中断时返回 None。
+async fn run_engine_on_tokio<T: Send + 'static>(
+    fut: impl std::future::Future<Output = T> + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    crate::ws::runtime().spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    rx.await.ok()
 }
 
 fn info_row(label: &str, value: &str) -> impl IntoElement {

@@ -173,6 +173,10 @@ impl SessionManager {
         let driver = self.agents.driver_for(harness)?;
         let agent_session_id = driver.create_session(cwd, model)?;
         let id = format!("s_{}", uuid_v4());
+        protocol::log::info(
+            "server.session",
+            format!("创建会话 {id}（harness={harness} cwd={cwd} agent={agent_session_id}）"),
+        );
         let meta = SessionMeta {
             id,
             harness: harness.to_string(),
@@ -209,6 +213,7 @@ impl SessionManager {
         rec.meta.closed = false;
         rec.meta.state = SessionState::Idle;
         let meta = rec.meta.clone();
+        protocol::log::info("server.session", format!("恢复会话 {session_id}"));
         let _ = self
             .tx
             .send(ServerNotification::SessionCreated(meta.clone()));
@@ -223,6 +228,7 @@ impl SessionManager {
         rec.driver.close(&rec.agent_session_id)?;
         rec.meta.closed = true;
         let meta = rec.meta.clone();
+        protocol::log::info("server.session", format!("关闭会话 {session_id}"));
         let _ = self.tx.send(ServerNotification::SessionClosed(meta));
         Ok(())
     }
@@ -238,6 +244,7 @@ impl SessionManager {
         self.activities.lock().await.remove(session_id);
         let mut meta = rec.meta;
         meta.closed = true;
+        protocol::log::info("server.session", format!("删除会话 {session_id}"));
         let _ = self.tx.send(ServerNotification::SessionDeleted(meta));
         Ok(())
     }
@@ -366,6 +373,16 @@ impl SessionManager {
                 title_changed,
             )
         };
+        let summary: String = first_text(&input)
+            .chars()
+            .take(60)
+            .collect::<String>()
+            + if first_text(&input).chars().count() > 60 { "…" } else { "" };
+        let started = std::time::Instant::now();
+        protocol::log::info(
+            "server.session",
+            format!("prompt 开始 {session_id}（agent={agent_session_id}）：{summary}"),
+        );
         let meta = if title_changed {
             self.registry
                 .lock()
@@ -394,7 +411,12 @@ impl SessionManager {
         let mut acts: Vec<Activity> = Vec::new();
         while let Some(ev) = rx.recv().await {
             match ev {
-                AgentEvent::OutputChunk(s) => output.push(ContentBlock::Text { text: s }),
+                // 输出块直接拼接：ACP chunk 是流式片段（agent 自身文本含换行），
+                // 合并为一条文本块，避免多块间被 GUI 以换行连接（非流式交付）
+                AgentEvent::OutputChunk(s) => match output.last_mut() {
+                    Some(ContentBlock::Text { text }) => text.push_str(&s),
+                    _ => output.push(ContentBlock::Text { text: s }),
+                },
                 AgentEvent::UserMessage(_) => {
                     // 回显：server 已发 user_message 通知，此处忽略
                 }
@@ -446,6 +468,10 @@ impl SessionManager {
                 }));
         }
         self.set_state(session_id, SessionState::Idle).await;
+        protocol::log::info(
+            "server.session",
+            format!("prompt 完成 {session_id}（{}ms）", started.elapsed().as_millis()),
+        );
         Ok(())
     }
 
@@ -457,7 +483,15 @@ impl SessionManager {
                 .ok_or_else(|| format!("会话不存在: {session_id}"))?;
             (rec.driver.clone(), rec.agent_session_id.clone())
         };
-        driver.cancel(&agent_session_id)
+        protocol::log::info(
+            "server.session",
+            format!("取消 {session_id}（agent={agent_session_id}）"),
+        );
+        let r = driver.cancel(&agent_session_id);
+        if let Err(e) = &r {
+            protocol::log::error("server.session", format!("取消失败 {session_id}: {e}"));
+        }
+        r
     }
 
     async fn set_state(&self, session_id: &str, state: SessionState) {
