@@ -10,8 +10,10 @@ pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub token: String,
-    /// ACP agent 可执行（如 codex-acp）；缺省时用内存 Stub（演示）
+    /// ACP agent 可执行（如 codex-acp / `kimi acp`）；缺省时用内存 Stub（演示）
     pub agent_bin: Option<String>,
+    /// ACP agent 子命令参数（如 `kimi acp` 的 `["acp"]`）
+    pub agent_args: Vec<String>,
 }
 
 /// 解析配置（纯函数，env 与 args 可注入便于测试）。
@@ -29,6 +31,7 @@ pub fn parse_config(
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_data_dir(env).join(".amux").join("server"));
     let mut agent_bin = get("AMUX_AGENT_BIN");
+    let mut agent_args: Vec<String> = Vec::new();
 
     let mut token = get("AMUX_TOKEN");
     let mut i = 0;
@@ -58,7 +61,15 @@ pub fn parse_config(
             }
             "--agent" => {
                 i += 1;
-                agent_bin = args.get(i).cloned();
+                if let Some(v) = args.get(i) {
+                    // 支持 `--agent "kimi acp"`（bin 与子命令参数空格分隔），
+                    // 也支持纯路径（`--agent /path/codex-acp`）
+                    let mut parts = v.split_whitespace();
+                    if let Some(bin) = parts.next() {
+                        agent_bin = Some(bin.to_string());
+                        agent_args = parts.map(str::to_string).collect();
+                    }
+                }
             }
             _ => {}
         }
@@ -74,6 +85,7 @@ pub fn parse_config(
         data_dir,
         token,
         agent_bin,
+        agent_args,
     })
 }
 

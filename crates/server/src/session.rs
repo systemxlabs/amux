@@ -419,14 +419,11 @@ mod tests {
         }]
     }
 
-    /// 演示模式注册表（stub 驱动接受任意 harness 名）。
+    /// 测试注册表（stub 驱动接受任意 harness 名，忽略本机 PATH 发现）。
     fn stub_manager(
         max_activities: usize,
     ) -> (SessionManager, broadcast::Receiver<ServerNotification>) {
-        let agents = Arc::new(AgentRegistry::new(
-            None,
-            std::env::temp_dir().join(format!("amux-test-models-{}.json", std::process::id())),
-        ));
+        let agents = Arc::new(AgentRegistry::new_for_tests());
         SessionManager::new(agents, max_activities)
     }
 

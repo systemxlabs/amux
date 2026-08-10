@@ -151,9 +151,7 @@ pub struct AmuxApp {
     input_attachments: Vec<InputAttachment>,
     voice_recording: bool,
     session_cwd_input: Entity<InputState>,
-    session_harness_input: Entity<InputState>,
     workflow_input: Entity<InputState>,
-    template_select: Entity<InputState>,
     settings_input: Entity<InputState>,
     /// 设置表单输入
     qc_name_input: Entity<InputState>,
@@ -178,6 +176,11 @@ pub struct AmuxApp {
     current_activity: Option<Activity>,
     /// 会话详情是否可编辑标题
     editing_title: bool,
+    /// 新会话视图（PRD §4.1.2）：选中的机器与 agent
+    new_session_machine: Option<usize>,
+    new_session_harness: Option<String>,
+    /// 新会话视图：首条指令输入框
+    new_session_msg_input: Entity<InputState>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -202,14 +205,11 @@ impl AmuxApp {
         let session_cwd_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("工作目录（如 ~/projects/api-server）")
         });
-        let session_harness_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("agent（留空取首个可用）"));
         let workflow_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("用自然语言描述完整执行计划（支持 @ 引用上下文）…")
                 .multi_line(true)
         });
-        let template_select = cx.new(|cx| InputState::new(window, cx).placeholder("模板名…"));
         let settings_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("名称 ws://地址 token（空格分隔）"));
         let qc_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("指令名"));
@@ -239,6 +239,11 @@ impl AmuxApp {
         let model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("默认模型（可留空）"));
         let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
+        let new_session_msg_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("用自然语言描述你的首个指令/目标…")
+                .multi_line(true)
+        });
 
         let machines = store
             .list_machines()
@@ -268,9 +273,7 @@ impl AmuxApp {
             input_attachments: Vec::new(),
             voice_recording: false,
             session_cwd_input,
-            session_harness_input,
             workflow_input,
-            template_select,
             settings_input,
             qc_name_input,
             qc_prompt_input,
@@ -289,6 +292,9 @@ impl AmuxApp {
             skill_edit_target: None,
             tpl_edit_target: None,
             editing_title: false,
+            new_session_machine: None,
+            new_session_harness: None,
+            new_session_msg_input,
             _tasks: Vec::new(),
         };
         // 预填编排配置表单
@@ -589,6 +595,13 @@ impl AmuxApp {
         .detach();
     }
 
+    /// 刷新全部机器信息（打开机器管理设置时调用，保证 agent 列表最新）。
+    fn refresh_machine_infos(&self, window: &mut Window, cx: &mut Context<Self>) {
+        for i in 0..self.machines.len() {
+            self.fetch_info(i, window, cx);
+        }
+    }
+
     fn available_harness(&self, idx: usize) -> String {
         self.machine(idx)
             .and_then(|m| m.info.as_ref())
@@ -601,68 +614,85 @@ impl AmuxApp {
             .unwrap_or_else(|| "stub".into())
     }
 
-    fn create_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.active_machine() else {
+    /// 新会话视图"创建并发送"（PRD §4.1.2）：按所选机器/agent/工作目录创建会话，
+    /// 并把自然语言首条指令作为第一个 prompt 发出。
+    fn create_and_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let machine = self.new_session_machine.unwrap_or(0);
+        let Some(m) = self.machine(machine) else {
             return;
         };
+        let harness = self
+            .new_session_harness
+            .clone()
+            .unwrap_or_else(|| self.available_harness(machine));
         let cwd = self.session_cwd_input.read(cx).value().trim().to_string();
+        let text = self.new_session_msg_input.read(cx).value().to_string();
         if cwd.is_empty() {
-            if let Some(m) = self.machine_mut(idx) {
+            if let Some(m) = self.machine_mut(machine) {
                 m.status = "请填写工作目录".into();
             }
             cx.notify();
             return;
         }
-        let harness = {
-            let v = self
-                .session_harness_input
-                .read(cx)
-                .value()
-                .trim()
-                .to_string();
-            if v.is_empty() {
-                self.available_harness(idx)
-            } else {
-                v
+        if text.trim().is_empty() {
+            if let Some(m) = self.machine_mut(machine) {
+                m.status = "请填写首条指令".into();
             }
-        };
-        let Some(m) = self.machine(idx) else {
+            cx.notify();
             return;
-        };
+        }
         let client = m.client.clone();
+        let text = text.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if let Ok(res) = client
+            // 1) 创建会话
+            let res = client
                 .request(
                     protocol::method::CREATE_SESSION,
                     Some(json!({ "harness": harness, "cwd": cwd })),
                 )
-                .await
-            {
-                let sid = res
-                    .get("session")
-                    .and_then(|s| s.get("id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                .await;
+            let Ok(res) = res else {
                 let _ = this.update_in(cx, |this, _window, cx| {
-                    if !sid.is_empty() {
-                        this.selected = Some(Selected::Session {
-                            machine: idx,
-                            id: sid.clone(),
-                        });
+                    if let Some(m) = this.machine_mut(machine) {
+                        m.status = "创建会话失败".into();
                     }
-                    if let Some(m) = this.machine_mut(idx) {
-                        m.selected = Some(sid.clone());
-                    }
-                    this.open_session_internal(idx, &sid, cx);
                     cx.notify();
                 });
+                return;
+            };
+            let sid = res
+                .get("session")
+                .and_then(|s| s.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if sid.is_empty() {
+                let _ = this.update_in(cx, |this, _window, cx| {
+                    if let Some(m) = this.machine_mut(machine) {
+                        m.status = "创建会话失败：未返回 id".into();
+                    }
+                    cx.notify();
+                });
+                return;
             }
+            // 2) 发送首条指令
+            let _ = client
+                .request(
+                    protocol::method::PROMPT,
+                    Some(json!({
+                        "sessionId": sid,
+                        "input": [{ "type": "text", "text": text }]
+                    })),
+                )
+                .await;
+            // 3) 打开该会话（全量重放，含首条指令与 agent 输出）
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.open_session(window, cx, machine, sid.clone());
+            });
         })
         .detach();
     }
 
-    /// 打开会话：拉取对话内容 + 活动。
     fn open_session(
         &self,
         window: &mut Window,
@@ -719,10 +749,6 @@ impl AmuxApp {
             });
         })
         .detach();
-    }
-
-    fn open_session_internal(&self, machine: usize, session_id: &str, cx: &mut Context<Self>) {
-        let _ = (machine, session_id, cx);
     }
 
     fn load_diff(&self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
@@ -1393,8 +1419,9 @@ impl AmuxApp {
                     Button::new("settings")
                         .small()
                         .label("⚙ 设置")
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                        .on_click(cx.listener(|this, _ev, window, cx| {
                             this.show_settings = true;
+                            this.refresh_machine_infos(window, cx);
                             cx.notify();
                         })),
                 ),
@@ -1606,86 +1633,36 @@ impl AmuxApp {
             out.push(group.into_any());
         }
 
-        // 新会话区（输入机器/agent/工作目录，或工作流描述/模板）
-        let cwd_input = self.session_cwd_input.clone();
-        let harness_input = self.session_harness_input.clone();
-        let wf_input = self.workflow_input.clone();
-        let tpl_input = self.template_select.clone();
-        let mode = self.new_session_mode;
-        let mut create_area = v_flex().gap_1().p_1().bg(rgb(0xe4e6ea)).rounded_md();
-        create_area = create_area.child(
-            h_flex()
-                .gap_1()
-                .child(
-                    Button::new("mode-direct")
-                        .small()
-                        .label("直接创建")
-                        .when(mode == NewSessionMode::Direct, |b| b.primary())
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.new_session_mode = NewSessionMode::Direct;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("mode-workflow")
-                        .small()
-                        .label("工作流")
-                        .when(mode == NewSessionMode::Workflow, |b| b.primary())
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.new_session_mode = NewSessionMode::Workflow;
-                            cx.notify();
-                        })),
-                ),
-        );
-        match mode {
-            NewSessionMode::Direct => {
-                create_area = create_area
-                    .child(Input::new(&harness_input))
-                    .child(Input::new(&cwd_input))
-                    .child(
-                        Button::new("new-session-btn")
-                            .small()
-                            .label("＋ 创建会话")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.create_session(window, cx);
-                            })),
-                    );
-            }
-            NewSessionMode::Workflow => {
-                create_area = create_area.child(Input::new(&wf_input)).child(
-                    Button::new("new-workflow-btn")
-                        .small()
-                        .label("＋ 创建编排会话")
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            this.create_workflow(window, cx);
-                        })),
-                );
-                // 从模板创建
-                let templates = self.store.list_templates();
-                if !templates.is_empty() {
-                    let mut tpl_row = h_flex().gap_1();
-                    for t in templates {
-                        let name = t.name.clone();
-                        let tpl = t.clone();
-                        tpl_row = tpl_row.child(
-                            Button::new(format!("tpl-{}", t.id))
-                                .small()
-                                .label(name)
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    this.create_workflow_from_template(window, cx, tpl.clone());
-                                })),
-                        );
-                    }
-                    create_area = create_area.child(Label::new("从模板创建：")).child(tpl_row);
-                }
-                let _ = tpl_input;
-            }
-        }
-        out.push(create_area.into_any());
+        // 新会话区：新会话视图在中间面板（PRD §4.1.2），左侧栏只保留一个引导入口
+        let create_hint = v_flex()
+            .gap_1()
+            .p_1()
+            .bg(rgb(0xe4e6ea))
+            .rounded_md()
+            .child(Label::new("创建新会话 / 工作流："))
+            .child(
+                Button::new("goto-new-session")
+                    .small()
+                    .label("＋ 新会话视图")
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.selected = None;
+                        cx.notify();
+                    })),
+            );
+        out.push(create_hint.into_any());
         out
     }
 
     fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 未选中会话：整块中间面板就是新会话视图（PRD §4.1.2），不显示对话/输入区
+        if self.selected.is_none() {
+            return v_flex()
+                .flex_1()
+                .min_w_0()
+                .p_2()
+                .child(self.render_center(window, cx))
+                .into_any();
+        }
         v_flex()
             .flex_1()
             .min_w_0()
@@ -1695,16 +1672,195 @@ impl AmuxApp {
             .child(self.render_quick_buttons(cx))
             .child(self.render_activity_bar(cx))
             .child(self.render_input(_window_placeholder(window), cx))
+            .into_any()
     }
 
-    /// 中间面板：上方对话流 + 下方进行中活动条。
-    fn render_center(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 中间面板：未选中会话时显示新会话视图（PRD §4.1.2），否则对话流 + 悬浮按钮。
+    fn render_center(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.selected.is_none() {
+            return self.render_new_session_view(_window_placeholder(window), cx);
+        }
         h_flex()
             .flex_1()
             .min_h_0()
             .items_stretch()
             .child(self.render_dialog(_window_placeholder(window), cx))
             .child(self.render_floating_buttons(window, cx))
+            .into_any()
+    }
+
+    /// 新会话视图（PRD §4.1.2）：自然语言输入 + 选择机器与 agent + 指定工作目录，
+    /// 或切换"从工作流模板创建"。
+    fn render_new_session_view(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mode = self.new_session_mode;
+        let mut col = v_flex()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(Label::new("新会话"))
+            // 模式切换：直接创建 / 从工作流模板创建
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("ns-mode-direct")
+                            .small()
+                            .label("直接创建")
+                            .when(mode == NewSessionMode::Direct, |b| b.primary())
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.new_session_mode = NewSessionMode::Direct;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("ns-mode-tpl")
+                            .small()
+                            .label("从工作流模板创建")
+                            .when(mode == NewSessionMode::Workflow, |b| b.primary())
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.new_session_mode = NewSessionMode::Workflow;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        match mode {
+            NewSessionMode::Direct => {
+                col = col
+                    // 选择机器
+                    .child(Label::new("机器"))
+                    .child(self.render_machine_selector(cx))
+                    // 选择 agent（该机器自动发现的 agent）
+                    .child(Label::new("Agent"))
+                    .child(self.render_harness_selector(cx))
+                    // 指定工作目录
+                    .child(Label::new("工作目录"))
+                    .child(Input::new(&self.session_cwd_input))
+                    // 自然语言首条指令
+                    .child(Label::new("指令（自然语言）"))
+                    .child(
+                        div()
+                            .w(px(520.))
+                            .child(Input::new(&self.new_session_msg_input)),
+                    )
+                    .child(
+                        Button::new("ns-create-send")
+                            .primary()
+                            .label("创建会话并发送")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.create_and_send(window, cx);
+                            })),
+                    );
+            }
+            NewSessionMode::Workflow => {
+                col = col
+                    .child(Label::new("工作流模板"))
+                    .child(self.render_template_selector(cx))
+                    .child(Label::new("或直接输入自然语言计划"))
+                    .child(div().w(px(520.)).child(Input::new(&self.workflow_input)))
+                    .child(
+                        Button::new("ns-create-workflow")
+                            .primary()
+                            .label("创建编排会话")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.create_workflow(window, cx);
+                            })),
+                    );
+            }
+        }
+        col.into_any()
+    }
+
+    /// 机器选择（新会话视图）。
+    fn render_machine_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = h_flex().gap_1();
+        if self.machines.is_empty() {
+            row = row.child(Label::new("（请先在设置中添加机器）"));
+        }
+        for (i, m) in self.machines.iter().enumerate() {
+            let sel = self.new_session_machine == Some(i)
+                || (self.new_session_machine.is_none() && i == 0);
+            let name = m.config.name.clone();
+            row = row.child(
+                Button::new(format!("ns-machine-{i}"))
+                    .small()
+                    .label(name.clone())
+                    .when(sel, |b| b.primary())
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.new_session_machine = Some(i);
+                        this.new_session_harness = None; // 换机器后 agent 重选
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
+
+    /// agent 选择（新会话视图；来自该机器自动发现的 agent）。
+    fn render_harness_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let machine = self.new_session_machine.unwrap_or(0);
+        let harnesses: Vec<String> = self
+            .machine(machine)
+            .and_then(|m| m.info.as_ref())
+            .map(|info| {
+                info.harnesses
+                    .iter()
+                    .filter(|h| h.available)
+                    .map(|h| h.name.clone())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["stub".to_string()]);
+        let mut row = h_flex().gap_1();
+        for (i, h) in harnesses.iter().enumerate() {
+            let sel = self.new_session_harness.as_deref() == Some(h.as_str())
+                || (self.new_session_harness.is_none() && i == 0);
+            let hh = h.clone();
+            row = row.child(
+                Button::new(format!("ns-harness-{hh}"))
+                    .small()
+                    .label(hh.clone())
+                    .when(sel, |b| b.primary())
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.new_session_harness = Some(hh.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+        if self
+            .machine(machine)
+            .and_then(|m| m.info.as_ref())
+            .map(|info| info.harnesses.is_empty())
+            .unwrap_or(false)
+        {
+            row = row.child(Label::new("（该机器未检测到 agent）"));
+        }
+        row
+    }
+
+    /// 工作流模板选择（新会话视图，PRD §3.7 从模板创建）。
+    fn render_template_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let templates = self.store.list_templates();
+        let mut row = h_flex().gap_1();
+        if templates.is_empty() {
+            row = row.child(Label::new("（暂无模板，可在设置中新建）"));
+        }
+        for t in templates {
+            let tpl = t.clone();
+            row = row.child(
+                Button::new(format!("ns-tpl-{}", t.id))
+                    .small()
+                    .label(t.name.clone())
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.create_workflow_from_template(window, cx, tpl.clone());
+                    })),
+            );
+        }
+        row
     }
 
     fn render_dialog(&self, _window: &mut Window, _cx: &mut Context<Self>) -> gpui::AnyElement {

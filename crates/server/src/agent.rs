@@ -88,11 +88,22 @@ pub type SharedDriver = Arc<dyn AgentDriver>;
 
 // ---- AgentRegistry：harness 名 → 驱动 ----
 
-/// harness 注册表（PRD §3.3）：
+/// 自动发现的 ACP agent（含 ACP 子命令参数，如 `kimi acp`）。
+#[derive(Debug, Clone)]
+pub struct DiscoveredAgent {
+    pub name: String,
+    pub bin: String,
+    pub args: Vec<String>,
+}
+
+/// harness 注册表（PRD §3.3：agent 自动发现，可执行路径不手动指定）：
 ///
-/// - `--agent` 指定的驱动（harness 名 = 可执行文件名，如 `mock_acp` / `codex-acp`）
-/// - PATH 上自动发现的 `*-acp` 可执行（惰性 spawn，不手动指定路径）
-/// - 演示模式（未指定 `--agent`）：单一内存 Stub，接受任意 harness 名
+/// - `--agent` 指定的驱动（harness 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
+/// - 自动发现（无需 `--agent`）：
+///   - PATH 上的 `*-acp` 可执行（如 `codex-acp` / `claude-acp` / `kimi-acp`）
+///   - 已知 agent CLI（`codex` / `claude` / `kimi`）的 `acp` 子命令探测（如 `kimi acp`）
+///   - 发现项惰性 spawn（按需拉起，不手动指定路径）
+/// - 演示兜底：既无 `--agent` 又无任何发现时，用内存 Stub（接受任意 harness 名）
 ///
 /// 默认模型按 harness 持久化到数据目录（`agent-models.json`），get_info 一并返回。
 pub struct AgentRegistry {
@@ -100,8 +111,8 @@ pub struct AgentRegistry {
     stub: Option<SharedDriver>,
     /// 配置驱动：harness 名 + 驱动
     configured: Option<(String, SharedDriver)>,
-    /// PATH 自动发现的 harness 名（不含已配置的）
-    discovered: Vec<String>,
+    /// 自动发现的 agent（不含已配置的）
+    discovered: Vec<DiscoveredAgent>,
     /// 惰性 spawn 的发现驱动
     spawned: std::sync::Mutex<HashMap<String, SharedDriver>>,
     /// 按 harness 的默认模型配置
@@ -110,17 +121,22 @@ pub struct AgentRegistry {
 }
 
 impl AgentRegistry {
-    /// 构建注册表。
-    /// - `configured`：`--agent` 启动的驱动（harness 名 + 驱动），可为 None（演示模式）
+    /// 构建注册表（生产路径：自动发现本机 ACP agent）。
+    /// - `configured`：`--agent` 显式指定的驱动，可为 None（由自动发现接管）
     /// - `model_file`：默认模型配置的落盘路径
     pub fn new(configured: Option<(String, SharedDriver)>, model_file: std::path::PathBuf) -> Self {
         let discovered = discover_acp_agents()
             .into_iter()
-            .filter(|h| configured.as_ref().map(|(c, _)| c != h).unwrap_or(true))
+            .filter(|d| {
+                configured
+                    .as_ref()
+                    .map(|(c, _)| c != &d.name)
+                    .unwrap_or(true)
+            })
             .collect::<Vec<_>>();
         let models = load_models(&model_file);
         AgentRegistry {
-            stub: if configured.is_none() {
+            stub: if configured.is_none() && discovered.is_empty() {
                 Some(Arc::new(StubAgentDriver::new()))
             } else {
                 None
@@ -130,6 +146,19 @@ impl AgentRegistry {
             spawned: std::sync::Mutex::new(HashMap::new()),
             models: std::sync::Mutex::new(models),
             model_file,
+        }
+    }
+
+    /// 测试构造：忽略本机 PATH 发现，强制 stub 演示模式（harness 任意）。
+    #[cfg(test)]
+    pub fn new_for_tests() -> Self {
+        AgentRegistry {
+            stub: Some(Arc::new(StubAgentDriver::new())),
+            configured: None,
+            discovered: Vec::new(),
+            spawned: std::sync::Mutex::new(HashMap::new()),
+            models: std::sync::Mutex::new(HashMap::new()),
+            model_file: std::path::PathBuf::new(),
         }
     }
 
@@ -143,18 +172,18 @@ impl AgentRegistry {
                 available: true,
                 default_model: models.get(name).cloned().flatten(),
             });
-        } else {
+        } else if self.stub.is_some() {
             out.push(HarnessInfo {
                 name: "stub".into(),
                 available: true,
                 default_model: models.get("stub").cloned().flatten(),
             });
         }
-        for h in &self.discovered {
+        for d in &self.discovered {
             out.push(HarnessInfo {
-                name: h.clone(),
+                name: d.name.clone(),
                 available: true,
-                default_model: models.get(h).cloned().flatten(),
+                default_model: models.get(&d.name).cloned().flatten(),
             });
         }
         out
@@ -170,13 +199,14 @@ impl AgentRegistry {
                 return Ok(d.clone());
             }
         }
-        if self.discovered.iter().any(|h| h == harness) {
+        if let Some(d) = self.discovered.iter().find(|d| d.name == harness) {
             let mut spawned = self.spawned.lock().unwrap();
             if let Some(d) = spawned.get(harness) {
                 return Ok(d.clone());
             }
-            let driver = AcpAgentDriver::spawn(harness, &[])
-                .map_err(|e| format!("启动 ACP agent ({harness}) 失败: {e}"))?;
+            let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
+            let driver = AcpAgentDriver::spawn(&d.bin, &args)
+                .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
             let driver: SharedDriver = Arc::new(driver);
             spawned.insert(harness.to_string(), driver.clone());
             return Ok(driver);
@@ -216,11 +246,15 @@ fn load_models(path: &std::path::Path) -> HashMap<String, Option<String>> {
         .unwrap_or_default()
 }
 
-/// PATH 上自动发现的 ACP agent 可执行（`*-acp`，含 `.exe` 后缀剥离）。
-fn discover_acp_agents() -> Vec<String> {
-    use std::collections::BTreeSet;
+/// 自动发现 ACP agent（PRD §3.3：可执行路径自动发现、不手动指定）：
+/// 1) PATH 上的 `*-acp` 可执行（独立 ACP server，如 `codex-acp` / `claude-acp` / `kimi-acp`）
+/// 2) 已知 agent CLI（`codex` / `claude` / `kimi`）的 `acp` 子命令探测（如 `kimi acp`）
+fn discover_acp_agents() -> Vec<DiscoveredAgent> {
+    let mut found: Vec<DiscoveredAgent> = Vec::new();
     let path = std::env::var("PATH").unwrap_or_default();
-    let mut found = BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // 1) `*-acp` 可执行
     for dir in path.split(':') {
         if dir.is_empty() {
             continue;
@@ -230,13 +264,65 @@ fn discover_acp_agents() -> Vec<String> {
         };
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            let stem = name.strip_suffix(".exe").unwrap_or(&name);
-            if stem.ends_with("-acp") && is_executable(&e.path()) {
-                found.insert(stem.to_string());
+            let stem = name.strip_suffix(".exe").unwrap_or(&name).to_string();
+            if stem.ends_with("-acp") && is_executable(&e.path()) && seen.insert(stem.clone()) {
+                found.push(DiscoveredAgent {
+                    name: stem,
+                    bin: e.path().display().to_string(),
+                    args: Vec::new(),
+                });
             }
         }
     }
-    found.into_iter().collect()
+
+    // 2) 已知 CLI 的 `acp` 子命令探测（`<bin> acp --help` 退出 0 且输出含 acp）
+    for cli in ["codex", "claude", "kimi"] {
+        if !seen.insert(cli.to_string()) {
+            continue;
+        }
+        let Some(bin) = find_on_path(cli) else {
+            continue;
+        };
+        if has_acp_subcommand(&bin) {
+            found.push(DiscoveredAgent {
+                name: cli.to_string(),
+                bin,
+                args: vec!["acp".to_string()],
+            });
+        }
+    }
+    found
+}
+
+/// 在 PATH 上查找可执行文件（含 `.exe` 后缀剥离）。
+fn find_on_path(name: &str) -> Option<String> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        for candidate in [name, &format!("{name}.exe")] {
+            let p = std::path::Path::new(dir).join(candidate);
+            if p.is_file() && is_executable(&p) {
+                return Some(p.display().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 探测 `<bin> acp --help`：退出码 0 且输出提及 acp（区分"有 acp 子命令"与
+/// "未知子命令回落通用帮助"——codex 0.137 退出 0 但输出不含 acp，故被排除）。
+fn has_acp_subcommand(bin: &str) -> bool {
+    use std::process::Command;
+    let Ok(out) = Command::new(bin).args(["acp", "--help"]).output() else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    text.contains("acp")
 }
 
 #[cfg(unix)]
@@ -443,43 +529,45 @@ async fn exec_main(
     }
 }
 
+/// 读取事件字段：兼容两种 ACP 结构——扁平（`params.sessionUpdate`，mock_acp）与
+/// 嵌套（`params.update.sessionUpdate`，kimi acp / ACP 规范）。
+fn ev_field<'a>(params: &'a Value, key: &str) -> Option<&'a Value> {
+    params
+        .get(key)
+        .or_else(|| params.get("update").and_then(|u| u.get(key)))
+}
+
 /// 把 session/update 通知映射为 AgentEvent 并路由。
 fn route_update(
     routes: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
     sid: &str,
     params: &Value,
 ) {
-    let Some(kind) = params.get("sessionUpdate").and_then(|v| v.as_str()) else {
+    let Some(kind) = ev_field(params, "sessionUpdate").and_then(|v| v.as_str()) else {
         return;
     };
     let ev = match kind {
-        "agent_message_chunk" => params
-            .get("content")
+        "agent_message_chunk" => ev_field(params, "content")
             .and_then(|c| c.get("text"))
             .and_then(|t| t.as_str())
             .map(|s| AgentEvent::OutputChunk(s.to_string())),
-        "user_message_chunk" => params
-            .get("content")
+        "user_message_chunk" => ev_field(params, "content")
             .and_then(|c| c.get("text"))
             .and_then(|t| t.as_str())
             .map(|s| AgentEvent::UserMessage(s.to_string())),
-        "agent_thought_chunk" => params
-            .get("content")
+        "agent_thought_chunk" => ev_field(params, "content")
             .and_then(|c| c.get("text"))
             .and_then(|t| t.as_str())
             .map(|s| AgentEvent::Thinking(s.to_string())),
         "tool_call" | "tool_call_update" => Some(AgentEvent::ToolCall {
-            name: params
-                .get("kind")
+            name: ev_field(params, "kind")
                 .and_then(|k| k.as_str())
                 .unwrap_or("tool_call")
                 .to_string(),
-            title: params
-                .get("title")
+            title: ev_field(params, "title")
                 .and_then(|t| t.as_str())
                 .map(str::to_string),
-            content: params
-                .get("rawInput")
+            content: ev_field(params, "rawInput")
                 .and_then(|r| r.as_str())
                 .map(str::to_string),
         }),
@@ -746,5 +834,78 @@ impl AgentDriver for StubAgentDriver {
 
     fn list_skills(&self) -> Vec<String> {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn route_with_channel() -> (Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>, mpsc::Receiver<AgentEvent>) {
+        let (tx, rx) = mpsc::channel(16);
+        let routes = Mutex::new(HashMap::from([("s1".to_string(), tx)]));
+        (routes, rx)
+    }
+
+    /// mock_acp 的扁平事件格式（params.sessionUpdate / params.content）。
+    #[test]
+    fn route_update_flat_format() {
+        let (routes, mut rx) = route_with_channel();
+        let params = json!({
+            "sessionId": "s1",
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "输出" }
+        });
+        route_update(&routes, "s1", &params);
+        let ev = rx.try_recv().expect("应收到事件");
+        assert!(matches!(ev, AgentEvent::OutputChunk(s) if s == "输出"));
+    }
+
+    /// 真实 agent（kimi acp / ACP 规范）的嵌套事件格式（params.update.sessionUpdate）。
+    #[test]
+    fn route_update_nested_format() {
+        let (routes, mut rx) = route_with_channel();
+        let params = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "收到" }
+            }
+        });
+        route_update(&routes, "s1", &params);
+        let ev = rx.try_recv().expect("应收到事件");
+        assert!(matches!(ev, AgentEvent::OutputChunk(s) if s == "收到"));
+
+        // thinking 事件（嵌套）
+        let (routes, mut rx) = route_with_channel();
+        let params = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "type": "text", "text": "思考中" }
+            }
+        });
+        route_update(&routes, "s1", &params);
+        let ev = rx.try_recv().expect("应收到 thinking 事件");
+        assert!(matches!(ev, AgentEvent::Thinking(s) if s == "思考中"));
+
+        // 未知事件种类忽略
+        let (routes, mut rx) = route_with_channel();
+        let params = json!({
+            "sessionId": "s1",
+            "update": { "sessionUpdate": "available_commands_update", "availableCommands": [] }
+        });
+        route_update(&routes, "s1", &params);
+        assert!(rx.try_recv().is_err(), "未知事件不应产生 AgentEvent");
+    }
+
+    /// 自动发现：`acp` 子命令探测逻辑（输出含 acp 才算支持）。
+    #[test]
+    fn has_acp_subcommand_detects() {
+        // 用当前测试二进制自身不可能触发，直接验证判别逻辑：
+        // `kimi acp --help` 在装有 kimi 的机器上命中；此处只验证函数对
+        // 不存在二进制的安全返回 false。
+        assert!(!has_acp_subcommand("/nonexistent/bin/definitely-not-here"));
     }
 }

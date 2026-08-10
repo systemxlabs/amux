@@ -29,26 +29,33 @@ async fn main() {
         }
     };
 
-    // 依赖组装：ACP agent 驱动（--agent 指定真实 agent 可执行，如 codex-acp）；
-    // 未指定时用内存 Stub（演示模式）。docs/DESIGN.md §9
+    // 依赖组装：ACP agent 驱动（--agent 显式指定 agent 可执行与子命令参数，如
+    // `--agent "kimi acp"` 或 `--agent /path/codex-acp`）；未指定时由 AgentRegistry
+    // 自动发现本机 ACP agent（PRD §3.3），仅当无任何发现时才回落内存 Stub。docs/DESIGN.md §9
     let configured: Option<(String, SharedDriver)> = match &cfg.agent_bin {
-        Some(bin) => match AcpAgentDriver::spawn(bin, &[]) {
-            Ok(d) => {
-                let name = std::path::Path::new(bin)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("agent")
-                    .to_string();
-                println!("已连接 ACP agent: {bin}（harness: {name}）");
-                Some((name, Arc::new(d)))
+        Some(bin) => {
+            let args: Vec<&str> = cfg.agent_args.iter().map(String::as_str).collect();
+            match AcpAgentDriver::spawn(bin, &args) {
+                Ok(d) => {
+                    let name = std::path::Path::new(bin)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("agent")
+                        .to_string();
+                    println!(
+                        "已连接 ACP agent: {bin} {}（harness: {name}）",
+                        cfg.agent_args.join(" ")
+                    );
+                    Some((name, Arc::new(d)))
+                }
+                Err(e) => {
+                    eprintln!("启动 ACP agent ({bin}) 失败: {e}");
+                    std::process::exit(1);
+                }
             }
-            Err(e) => {
-                eprintln!("启动 ACP agent ({bin}) 失败: {e}");
-                std::process::exit(1);
-            }
-        },
+        }
         None => {
-            println!("未指定 --agent，使用内存 Stub（演示模式）");
+            println!("未指定 --agent，将自动发现本机 ACP agent");
             None
         }
     };
