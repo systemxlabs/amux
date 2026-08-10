@@ -79,8 +79,8 @@ impl Client {
 }
 
 async fn wait_port(port: u16) -> u16 {
-    // 等待 server 监听就绪
-    for _ in 0..50 {
+    // 等待 server 监听就绪（并行测试 + 全量编译负载下偶发启动慢，放宽到 10s）
+    for _ in 0..100 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
