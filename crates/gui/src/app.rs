@@ -18,7 +18,7 @@ use serde_json::json;
 
 use protocol::{Activity, ContentBlock, DialogItem, SessionMeta};
 
-use crate::config::{machine_ws_url, ConfigStore, MachineConfig};
+use crate::config::{machine_ws_url, ConfigStore, MachineConfig, NotifyPrefs};
 use crate::ws::{Notification, WsClient};
 
 /// 中间面板视图：对话流 / 会话活动页。
@@ -33,6 +33,15 @@ enum CenterView {
 enum Panel {
     Diff,
     Detail,
+}
+
+/// 设置页分类（PRD §3.4：机器管理 / 通知 / 快捷按钮 / Skills）。
+#[derive(Clone, Copy, PartialEq)]
+enum SettingsCategory {
+    Machines,
+    Notify,
+    QuickButtons,
+    Skills,
 }
 
 /// 单机器视图：独立连接 + 会话列表 + 选中会话的对话/活动。
@@ -70,6 +79,10 @@ pub struct AmuxApp {
     panel: Option<Panel>,
     diff: String,
     show_settings: bool,
+    /// 设置页当前分类（导航侧边栏选中项）
+    settings_category: SettingsCategory,
+    /// 通知偏好缓存（设置页读写，保存时落盘）
+    notify_prefs: NotifyPrefs,
     input_state: Entity<InputState>,
     /// 新建会话的工作目录（PRD §4.1：新建会话时指定工作目录）
     session_cwd_input: Entity<InputState>,
@@ -106,6 +119,9 @@ impl AmuxApp {
             })
             .collect::<Vec<_>>();
 
+        // 通知偏好缓存（结构体字面量前读取，store 随后被移入）
+        let notify_prefs = store.load().notify;
+
         let mut app = Self {
             store,
             machines,
@@ -114,6 +130,8 @@ impl AmuxApp {
             panel: None,
             diff: String::new(),
             show_settings: false,
+            settings_category: SettingsCategory::Machines,
+            notify_prefs,
             input_state,
             session_cwd_input,
             settings_input,
@@ -887,8 +905,9 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 设置浮窗：半透明遮罩 + 居中卡片（PRD §3.4 设置以浮窗打开）。
-    /// 遮罩与卡片是兄弟元素：点卡片不会触发遮罩关闭，点遮罩关闭设置。
+    /// 设置浮窗：半透明遮罩 + 居中卡片（PRD §3.4）。
+    /// 卡片内部为分类导航侧边栏 + 右侧设置内容；点遮罩或"关闭"收起。
+    /// 遮罩与卡片是兄弟元素，且卡片拦截鼠标按下，面板内点击不会误触遮罩关闭。
     fn render_settings_overlay(
         &self,
         _window: &mut Window,
@@ -912,15 +931,99 @@ impl AmuxApp {
                         cx.notify();
                     })),
             )
-            .child(self.render_settings_panel(_window, cx))
+            .child(
+                h_flex()
+                    .id("settings-card")
+                    // 拦截卡片内的鼠标按下，阻止事件继续分发到全屏遮罩（兄弟元素），
+                    // 否则点输入框/按钮时遮罩的 click 也触发、浮窗被关闭
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .w(px(720.))
+                    .h(px(560.))
+                    .bg(rgb(0xffffff))
+                    .rounded_md()
+                    .shadow_lg()
+                    .child(self.render_settings_nav(cx))
+                    .child(self.render_settings_content(cx)),
+            )
     }
 
-    /// 设置卡片（机器管理：列表 + 移除 + 添加）。
-    fn render_settings_panel(
+    /// 设置分类导航侧边栏（选中项高亮）+ 底部关闭。
+    fn render_settings_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("settings-nav")
+            .w(px(180.))
+            .h_full()
+            .gap_1()
+            .p_2()
+            .bg(rgb(0xf0f1f4))
+            .child(Label::new("设置"))
+            .child(self.settings_nav_item(SettingsCategory::Machines, cx))
+            .child(self.settings_nav_item(SettingsCategory::Notify, cx))
+            .child(self.settings_nav_item(SettingsCategory::QuickButtons, cx))
+            .child(self.settings_nav_item(SettingsCategory::Skills, cx))
+            .child(div().flex_1())
+            .child(
+                Button::new("settings-back")
+                    .small()
+                    .label("关闭")
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.show_settings = false;
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// 单个分类导航项：选中时 primary 高亮。
+    fn settings_nav_item(
         &self,
-        _window: &mut Window,
+        target: SettingsCategory,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let (id, label) = match target {
+            SettingsCategory::Machines => ("cat-machines", "机器管理"),
+            SettingsCategory::Notify => ("cat-notify", "通知"),
+            SettingsCategory::QuickButtons => ("cat-quickbuttons", "快捷按钮"),
+            SettingsCategory::Skills => ("cat-skills", "Skills"),
+        };
+        let btn = Button::new(id).small().label(label).on_click(cx.listener(
+            move |this, _ev, _window, cx| {
+                this.settings_category = target;
+                cx.notify();
+            },
+        ));
+        if self.settings_category == target {
+            btn.primary()
+        } else {
+            btn
+        }
+    }
+
+    /// 右侧设置内容（按当前分类渲染）。
+    fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("settings-content")
+            .flex_1()
+            .h_full()
+            .gap_2()
+            .p_4()
+            .overflow_y_scroll()
+            .child(match self.settings_category {
+                SettingsCategory::Machines => self.render_machines_settings(cx),
+                SettingsCategory::Notify => self.render_notify_settings(cx),
+                SettingsCategory::QuickButtons => settings_placeholder(
+                    "快捷按钮",
+                    "PRD §4.6：预设 Commit & Push / Submit PR，可增删、改提示词",
+                ),
+                SettingsCategory::Skills => {
+                    settings_placeholder("Skills", "PRD §4.9：Skills 注册表（仓库 URL + 本地目录）")
+                }
+            })
+    }
+
+    /// 机器管理：列表 + 移除 + 添加。
+    fn render_machines_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machines = self
             .machines
             .iter()
@@ -943,34 +1046,8 @@ impl AmuxApp {
             })
             .collect::<Vec<_>>();
         v_flex()
-            .id("settings-panel")
-            // 拦截面板内的鼠标按下，阻止事件继续分发到全屏遮罩（兄弟元素），
-            // 否则点输入框/按钮时遮罩的 click 也触发、浮窗被关闭
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
-                cx.stop_propagation();
-            })
-            .w(px(560.))
-            .max_h(px(640.))
             .gap_2()
-            .p_4()
-            .bg(rgb(0xffffff))
-            .rounded_md()
-            .shadow_lg()
-            .overflow_y_scroll()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(Label::new("设置 — 机器管理"))
-                    .child(
-                        Button::new("close-settings")
-                            .small()
-                            .label("关闭")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.show_settings = false;
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .child(Label::new("机器管理"))
             .children(machines)
             .child(
                 h_flex()
@@ -993,7 +1070,64 @@ impl AmuxApp {
                     )),
             )
             .child(Label::new("添加格式：名称 ws://地址 token（空格分隔）"))
+            .into_any()
     }
+
+    /// 通知偏好：工作结束 / 出错开关（保存到本地配置）。
+    fn render_notify_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let prefs = self.notify_prefs.clone();
+        let view = cx.entity();
+        v_flex()
+            .gap_2()
+            .child(Label::new("通知"))
+            .child(
+                switch::Switch::new("notify-work-ended")
+                    .checked(prefs.work_ended)
+                    .label("工作结束时发送桌面通知")
+                    .on_click({
+                        let view = view.clone();
+                        move |checked, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.notify_prefs.work_ended = *checked;
+                                this.store.save_notify(&this.notify_prefs);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(
+                switch::Switch::new("notify-on-error")
+                    .checked(prefs.on_error)
+                    .label("出错时发送桌面通知")
+                    .on_click({
+                        let view = view.clone();
+                        move |checked, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.notify_prefs.on_error = *checked;
+                                this.store.save_notify(&this.notify_prefs);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(Label::new(format!(
+                "长时间无响应阈值：{} 秒（配置项，暂不可调）",
+                prefs.long_idle_seconds
+            )))
+            .into_any()
+    }
+}
+
+/// 待实现分类的占位内容。
+fn settings_placeholder(title: &str, note: &str) -> gpui::AnyElement {
+    v_flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .child(Label::new(title))
+        .child(Label::new(format!("待实现（{note}）")))
+        .into_any()
 }
 
 impl Render for AmuxApp {
@@ -1009,7 +1143,7 @@ impl Render for AmuxApp {
         if let Some(p) = panel {
             root = root.child(p);
         }
-        // 设置浮窗：作为最后一个子元素盖在主界面之上（PRD §3.4）
+        // 设置浮窗：作为最后一个子元素盖在主界面之上
         if self.show_settings {
             root = root.child(self.render_settings_overlay(window, cx));
         }
