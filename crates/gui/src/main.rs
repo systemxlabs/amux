@@ -15,9 +15,8 @@ use gpui_component::*;
 use gpui_component_assets::Assets;
 
 fn main() {
-    // 参数：--cwd（新会话工作目录）；可选 --data-dir（GUI 配置目录，默认 ~/.amux/gui）
+    // 参数：可选 --data-dir（GUI 配置目录，默认 ~/.amux/gui）
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut cwd = "/tmp/work".to_string();
     let mut data_dir = std::env::var("AMUX_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -28,12 +27,6 @@ fn main() {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--cwd" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    cwd = v.clone();
-                }
-            }
             "--data-dir" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
@@ -56,7 +49,7 @@ fn main() {
         cx.spawn(async move |cx| {
             let window_options = WindowOptions::default();
             cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|cx| AmuxApp::new(store.clone(), cwd.clone(), window, cx));
+                let view = cx.new(|cx| AmuxApp::new(store.clone(), window, cx));
                 // 窗口第一层必须是 Root
                 cx.new(|cx| Root::new(view, window, cx))
             })

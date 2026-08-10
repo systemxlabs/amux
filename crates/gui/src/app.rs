@@ -66,7 +66,6 @@ pub struct AmuxApp {
     machines: Vec<MachineView>,
     /// 当前查看的机器下标
     active: Option<usize>,
-    cwd: String,
     center_view: CenterView,
     panel: Option<Panel>,
     diff: String,
@@ -92,18 +91,14 @@ fn block_text(content: &[ContentBlock]) -> String {
 impl AmuxApp {
     pub fn new(
         store: Arc<ConfigStore>,
-        cwd: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let input_state =
             cx.new(|cx| InputState::new(window, cx).placeholder("输入消息，Ctrl+Enter 发送"));
-        // 工作目录输入框：默认值为启动参数 --cwd（PRD §4.1 新建会话时指定）
-        let session_cwd_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("工作目录")
-                .default_value(cwd.clone())
-        });
+        // 工作目录输入框：新建会话时由用户填写（PRD §4.1）
+        let session_cwd_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("工作目录"));
         let settings_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("名称 ws://地址 token（空格分隔）"));
         let machines = store
@@ -120,7 +115,6 @@ impl AmuxApp {
             store,
             machines,
             active: None,
-            cwd,
             center_view: CenterView::Dialog,
             panel: None,
             diff: String::new(),
@@ -336,12 +330,17 @@ impl AmuxApp {
         let Some(m) = self.machines.get(idx) else {
             return;
         };
+        // 工作区：优先选中会话的工作目录；未选会话时用工作目录输入框的值
         let cwd = m
             .selected
             .as_ref()
             .and_then(|sid| m.sessions.iter().find(|s| s.id == *sid))
             .map(|s| s.cwd.clone())
-            .unwrap_or_else(|| self.cwd.clone());
+            .or_else(|| {
+                let v = self.session_cwd_input.read(cx).value().trim().to_string();
+                (!v.is_empty()).then_some(v)
+            });
+        let Some(cwd) = cwd else { return };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             if let Ok(res) = client
