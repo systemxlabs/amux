@@ -248,11 +248,7 @@ impl AmuxApp {
         let machines = store
             .list_machines()
             .into_iter()
-            .map(|config| {
-                let mut m = MachineView::new(config.clone());
-                m.status = "已连接".into();
-                m
-            })
+            .map(|config| MachineView::new(config.clone()))
             .collect::<Vec<_>>();
 
         let orchestrator = store.orchestrator();
@@ -524,6 +520,14 @@ impl AmuxApp {
                     }
                 }
             }
+            // 连接断开：如实标记离线（PRD §3.3 在线状态），清空进行中活动
+            "disconnected" => {
+                if let Some(m) = this.machines.get_mut(idx) {
+                    m.status = "离线（重连中…）".into();
+                }
+                this.current_activity = None;
+                cx.notify();
+            }
             _ => {}
         }
         cx.notify();
@@ -570,14 +574,17 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 拉取机器信息（agent 发现 + 默认模型）。
+    /// 拉取机器信息（agent 发现 + 默认模型）；失败时如实标记连接失败（PRD §3.3 在线状态）。
     fn fetch_info(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = self.machines.get(idx) else {
             return;
         };
         let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if let Ok(res) = client.request(protocol::method::GET_INFO, None).await {
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| match client
+            .request(protocol::method::GET_INFO, None)
+            .await
+        {
+            Ok(res) => {
                 let info: MachineInfo =
                     serde_json::from_value(res).unwrap_or_else(|_| MachineInfo {
                         server_version: String::new(),
@@ -587,6 +594,14 @@ impl AmuxApp {
                     if let Some(m) = this.machines.get_mut(idx) {
                         m.info = Some(info);
                         m.status = "已连接".into();
+                    }
+                    cx.notify();
+                });
+            }
+            Err(e) => {
+                let _ = this.update_in(cx, |this, _window, cx| {
+                    if let Some(m) = this.machines.get_mut(idx) {
+                        m.status = format!("连接失败（{e}）");
                     }
                     cx.notify();
                 });
@@ -602,7 +617,8 @@ impl AmuxApp {
         }
     }
 
-    fn available_harness(&self, idx: usize) -> String {
+    /// 该机器首个可用 agent（None = 未获取到 agent 列表）。
+    fn available_harness(&self, idx: usize) -> Option<String> {
         self.machine(idx)
             .and_then(|m| m.info.as_ref())
             .and_then(|i| {
@@ -611,7 +627,6 @@ impl AmuxApp {
                     .find(|h| h.available)
                     .map(|h| h.name.clone())
             })
-            .unwrap_or_else(|| "stub".into())
     }
 
     /// 新会话视图"创建并发送"（PRD §4.1.2）：按所选机器/agent/工作目录创建会话，
@@ -621,10 +636,20 @@ impl AmuxApp {
         let Some(m) = self.machine(machine) else {
             return;
         };
-        let harness = self
-            .new_session_harness
-            .clone()
-            .unwrap_or_else(|| self.available_harness(machine));
+        // agent 必须来自该机器自动发现的列表（不回落 stub，避免发给 server 报错）
+        let harness = match self.new_session_harness.clone() {
+            Some(h) => h,
+            None => match self.available_harness(machine) {
+                Some(h) => h,
+                None => {
+                    if let Some(m) = self.machine_mut(machine) {
+                        m.status = "获取 agent 列表失败，请检查机器连接".into();
+                    }
+                    cx.notify();
+                    return;
+                }
+            },
+        };
         let cwd = self.session_cwd_input.read(cx).value().trim().to_string();
         let text = self.new_session_msg_input.read(cx).value().to_string();
         if cwd.is_empty() {
@@ -1801,43 +1826,42 @@ impl AmuxApp {
         row
     }
 
-    /// agent 选择（新会话视图；来自该机器自动发现的 agent）。
+    /// agent 选择（新会话视图；来自该机器自动发现的 agent，PRD §3.3）。
     fn render_harness_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let machine = self.new_session_machine.unwrap_or(0);
-        let harnesses: Vec<String> = self
-            .machine(machine)
-            .and_then(|m| m.info.as_ref())
-            .map(|info| {
-                info.harnesses
+        let info = self.machine(machine).and_then(|m| m.info.clone());
+        let mut row = h_flex().gap_1();
+        match info {
+            None => {
+                row = row.child(Label::new("（正在获取该机器 agent 列表…）"));
+            }
+            Some(info) => {
+                let harnesses: Vec<String> = info
+                    .harnesses
                     .iter()
                     .filter(|h| h.available)
                     .map(|h| h.name.clone())
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["stub".to_string()]);
-        let mut row = h_flex().gap_1();
-        for (i, h) in harnesses.iter().enumerate() {
-            let sel = self.new_session_harness.as_deref() == Some(h.as_str())
-                || (self.new_session_harness.is_none() && i == 0);
-            let hh = h.clone();
-            row = row.child(
-                Button::new(format!("ns-harness-{hh}"))
-                    .small()
-                    .label(hh.clone())
-                    .when(sel, |b| b.primary())
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.new_session_harness = Some(hh.clone());
-                        cx.notify();
-                    })),
-            );
-        }
-        if self
-            .machine(machine)
-            .and_then(|m| m.info.as_ref())
-            .map(|info| info.harnesses.is_empty())
-            .unwrap_or(false)
-        {
-            row = row.child(Label::new("（该机器未检测到 agent）"));
+                    .collect();
+                if harnesses.is_empty() {
+                    row = row.child(Label::new("（该机器未检测到 agent）"));
+                } else {
+                    for (i, h) in harnesses.iter().enumerate() {
+                        let sel = self.new_session_harness.as_deref() == Some(h.as_str())
+                            || (self.new_session_harness.is_none() && i == 0);
+                        let hh = h.clone();
+                        row = row.child(
+                            Button::new(format!("ns-harness-{hh}"))
+                                .small()
+                                .label(hh.clone())
+                                .when(sel, |b| b.primary())
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    this.new_session_harness = Some(hh.clone());
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                }
+            }
         }
         row
     }
@@ -2995,8 +3019,9 @@ impl AmuxApp {
                                         // PRD §3.6：给 agent 安装 skills 时启动新会话并发送安装提示词
                                         let skill = skill.clone();
                                         if let Some(mi) = this.active_machine() {
-                                            let harness = this.available_harness(mi);
-                                            this.install_skill(window, cx, mi, harness, skill);
+                                            if let Some(harness) = this.available_harness(mi) {
+                                                this.install_skill(window, cx, mi, harness, skill);
+                                            }
                                         }
                                     })),
                             )

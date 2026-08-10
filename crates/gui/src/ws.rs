@@ -157,7 +157,11 @@ async fn run_loop(
                             }
                         }
                     }
-                    // 连接断开：清 pending，退避后重连
+                    // 连接断开：通知 UI（真实离线状态，PRD §3.3 在线状态），清 pending，退避后重连
+                    let _ = notify_tx.send(Notification {
+                        method: "disconnected".into(),
+                        params: Value::Null,
+                    });
                     for (_, resp) in pending.drain() {
                         let _ = resp.send(Err(RpcError {
                             code: -1,

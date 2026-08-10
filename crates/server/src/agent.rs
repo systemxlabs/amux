@@ -107,12 +107,14 @@ pub struct DiscoveredAgent {
 ///
 /// 默认模型按 harness 持久化到数据目录（`agent-models.json`），get_info 一并返回。
 pub struct AgentRegistry {
-    /// 演示模式：任意 harness 名都解析到同一个 Stub 驱动
-    stub: Option<SharedDriver>,
+    /// 演示模式：任意 harness 名都解析到同一个 Stub 驱动（内部可变，随发现刷新）
+    stub: std::sync::Mutex<Option<SharedDriver>>,
+    /// 测试强制 stub：跳过运行期发现（避免本机 PATH 干扰单测）
+    force_stub: bool,
     /// 配置驱动：harness 名 + 驱动
     configured: Option<(String, SharedDriver)>,
-    /// 自动发现的 agent（不含已配置的）
-    discovered: Vec<DiscoveredAgent>,
+    /// 自动发现的 agent（不含已配置的；可运行期刷新）
+    discovered: std::sync::Mutex<Vec<DiscoveredAgent>>,
     /// 惰性 spawn 的发现驱动
     spawned: std::sync::Mutex<HashMap<String, SharedDriver>>,
     /// 按 harness 的默认模型配置
@@ -125,46 +127,65 @@ impl AgentRegistry {
     /// - `configured`：`--agent` 显式指定的驱动，可为 None（由自动发现接管）
     /// - `model_file`：默认模型配置的落盘路径
     pub fn new(configured: Option<(String, SharedDriver)>, model_file: std::path::PathBuf) -> Self {
-        let discovered = discover_acp_agents()
-            .into_iter()
-            .filter(|d| {
-                configured
-                    .as_ref()
-                    .map(|(c, _)| c != &d.name)
-                    .unwrap_or(true)
-            })
-            .collect::<Vec<_>>();
-        let models = load_models(&model_file);
-        AgentRegistry {
-            stub: if configured.is_none() && discovered.is_empty() {
-                Some(Arc::new(StubAgentDriver::new()))
-            } else {
-                None
-            },
+        let registry = AgentRegistry {
+            stub: std::sync::Mutex::new(None),
+            force_stub: false,
             configured,
-            discovered,
+            discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
-            models: std::sync::Mutex::new(models),
+            models: std::sync::Mutex::new(load_models(&model_file)),
             model_file,
+        };
+        registry.refresh_discovery();
+        registry
+    }
+
+    /// 重新扫描本机 ACP agent（运行期安装的新 agent 经 get_info 刷新即可发现，PRD §3.3）。
+    /// 合并新发现的 agent，保留已配置/已发现条目；无任何 agent 且无配置时启用 stub 兜底。
+    fn refresh_discovery(&self) {
+        if self.force_stub {
+            return;
         }
+        let current = discover_acp_agents();
+        let mut disc = self.discovered.lock().unwrap();
+        for d in current {
+            let dup = disc.iter().any(|x| x.name == d.name)
+                || self
+                    .configured
+                    .as_ref()
+                    .map(|(c, _)| c == &d.name)
+                    .unwrap_or(false);
+            if !dup {
+                disc.push(d);
+            }
+        }
+        let need_stub = self.configured.is_none() && disc.is_empty();
+        *self.stub.lock().unwrap() = if need_stub {
+            Some(Arc::new(StubAgentDriver::new()))
+        } else {
+            None
+        };
     }
 
     /// 测试构造：忽略本机 PATH 发现，强制 stub 演示模式（harness 任意）。
     #[cfg(test)]
     pub fn new_for_tests() -> Self {
         AgentRegistry {
-            stub: Some(Arc::new(StubAgentDriver::new())),
+            stub: std::sync::Mutex::new(Some(Arc::new(StubAgentDriver::new()))),
+            force_stub: true,
             configured: None,
-            discovered: Vec::new(),
+            discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
             models: std::sync::Mutex::new(HashMap::new()),
             model_file: std::path::PathBuf::new(),
         }
     }
 
-    /// get_info 的 harness 列表（available + 默认模型）。
+    /// get_info 的 harness 列表（available + 默认模型）；先运行期刷新一次发现。
     pub fn harnesses(&self) -> Vec<HarnessInfo> {
+        self.refresh_discovery();
         let models = self.models.lock().unwrap();
+        let discovered = self.discovered.lock().unwrap();
         let mut out: Vec<HarnessInfo> = Vec::new();
         if let Some((name, _)) = &self.configured {
             out.push(HarnessInfo {
@@ -172,14 +193,14 @@ impl AgentRegistry {
                 available: true,
                 default_model: models.get(name).cloned().flatten(),
             });
-        } else if self.stub.is_some() {
+        } else if self.stub.lock().unwrap().is_some() {
             out.push(HarnessInfo {
                 name: "stub".into(),
                 available: true,
                 default_model: models.get("stub").cloned().flatten(),
             });
         }
-        for d in &self.discovered {
+        for d in discovered.iter() {
             out.push(HarnessInfo {
                 name: d.name.clone(),
                 available: true,
@@ -190,8 +211,9 @@ impl AgentRegistry {
     }
 
     /// 按 harness 名解析驱动；未知 harness 报错（HARNESS_UNAVAILABLE）。
+    /// 未知 harness 时先运行期刷新一次发现（新装的 agent 无需重启即可用）。
     pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
-        if let Some(stub) = &self.stub {
+        if let Some(stub) = &*self.stub.lock().unwrap() {
             return Ok(stub.clone());
         }
         if let Some((name, d)) = &self.configured {
@@ -199,7 +221,15 @@ impl AgentRegistry {
                 return Ok(d.clone());
             }
         }
-        if let Some(d) = self.discovered.iter().find(|d| d.name == harness) {
+        self.refresh_discovery();
+        let found = self
+            .discovered
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| d.name == harness)
+            .cloned();
+        if let Some(d) = found {
             let mut spawned = self.spawned.lock().unwrap();
             if let Some(d) = spawned.get(harness) {
                 return Ok(d.clone());
@@ -842,7 +872,10 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
-    fn route_with_channel() -> (Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>, mpsc::Receiver<AgentEvent>) {
+    fn route_with_channel() -> (
+        Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
+        mpsc::Receiver<AgentEvent>,
+    ) {
         let (tx, rx) = mpsc::channel(16);
         let routes = Mutex::new(HashMap::from([("s1".to_string(), tx)]));
         (routes, rx)
