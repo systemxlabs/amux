@@ -486,7 +486,7 @@ impl AmuxApp {
             .h_full()
             .gap_1()
             .p_2()
-            .bg(rgb(0x1b1e24))
+            .bg(rgb(0xf0f1f4))
             .child(h_flex().gap_1().child(Label::new("机器与会话")))
             .child(
                 div()
@@ -499,7 +499,7 @@ impl AmuxApp {
                         let machine_view = v_flex()
                             .gap_1()
                             .p_1()
-                            .bg(rgb(0x23272f))
+                            .bg(rgb(0xe4e6ea))
                             .rounded_md()
                             .child(
                                 h_flex()
@@ -629,7 +629,7 @@ impl AmuxApp {
                     .id(("row", i))
                     .w_full()
                     .p_2()
-                    .bg(rgb(0x2a2f38))
+                    .bg(rgb(0xe6ecf4))
                     .rounded_md()
                     .child("我：")
                     .child(block_text(content)),
@@ -637,7 +637,7 @@ impl AmuxApp {
                     .id(("row", i))
                     .w_full()
                     .p_2()
-                    .bg(rgb(0x1b1e24))
+                    .bg(rgb(0xffffff))
                     .rounded_md()
                     .child("Agent：")
                     .child(block_text(content)),
@@ -691,7 +691,7 @@ impl AmuxApp {
                     .id(("act", i))
                     .w_full()
                     .p_1()
-                    .bg(rgb(0x1b1e24))
+                    .bg(rgb(0xf5f6f8))
                     .rounded_md()
                     .child(format!("[{kind}] {detail}"))
             })
@@ -812,7 +812,7 @@ impl AmuxApp {
             .h_full()
             .gap_1()
             .p_2()
-            .bg(rgb(0x1b1e24))
+            .bg(rgb(0xf7f8fa))
             .child(
                 h_flex().child(Label::new("工作区 Diff")).child(
                     Button::new("close-panel")
@@ -853,7 +853,7 @@ impl AmuxApp {
             .h_full()
             .gap_1()
             .p_2()
-            .bg(rgb(0x1b1e24))
+            .bg(rgb(0xf7f8fa))
             .child(
                 h_flex().child(Label::new("会话详情")).child(
                     Button::new("close-panel2")

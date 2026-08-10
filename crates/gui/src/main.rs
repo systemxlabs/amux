@@ -46,6 +46,8 @@ fn main() {
     app.run(move |cx| {
         // 必须先初始化 gpui-component
         gpui_component::init(cx);
+        // 亮色主题（PRD §3.1 界面）
+        Theme::change(ThemeMode::Light, None, cx);
         cx.spawn(async move |cx| {
             let window_options = WindowOptions::default();
             cx.open_window(window_options, |window, cx| {
