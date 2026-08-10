@@ -234,6 +234,9 @@ impl SessionManager {
         while let Some(ev) = rx.recv().await {
             match ev {
                 AgentEvent::OutputChunk(s) => output.push(ContentBlock::Text { text: s }),
+                AgentEvent::UserMessage(_) => {
+                    // 回显：server 已发 user_message 通知，此处忽略
+                }
                 AgentEvent::Thinking(c) => acts.push(Activity::Thinking {
                     timestamp: now(),
                     content: c,

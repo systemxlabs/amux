@@ -15,3 +15,7 @@ tokio-tungstenite.workspace = true
 futures-util = "0.3"
 # ACP 官方 SDK（docs/DESIGN.md §9）；当前 driver 为内存 Stub，接入 ACP stdio 时启用
 agent-client-protocol = { version = "1", features = ["unstable"] }
+
+[[bin]]
+name = "mock_acp"
+path = "tests/support/mock_acp.rs"

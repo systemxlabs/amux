@@ -10,7 +10,7 @@ mod transport;
 
 use std::sync::Arc;
 
-use crate::agent::{SharedDriver, StubAgentDriver};
+use crate::agent::{AcpAgentDriver, SharedDriver, StubAgentDriver};
 use crate::config::load_config;
 use crate::git::GitRunner;
 use crate::rpc::Handlers;
@@ -29,8 +29,24 @@ async fn main() {
         }
     };
 
-    // 依赖组装：agent 驱动（当前为内存 Stub；真实 ACP stdio 对接见 docs/DESIGN.md §9，待接入）
-    let driver: SharedDriver = Arc::new(StubAgentDriver::new());
+    // 依赖组装：ACP agent 驱动（--agent 指定真实 agent 可执行，如 codex-acp）；
+    // 未指定时用内存 Stub（演示模式）。docs/DESIGN.md §9
+    let driver: SharedDriver = match &cfg.agent_bin {
+        Some(bin) => match AcpAgentDriver::spawn(bin, &[]) {
+            Ok(d) => {
+                println!("已连接 ACP agent: {bin}");
+                Arc::new(d)
+            }
+            Err(e) => {
+                eprintln!("启动 ACP agent ({bin}) 失败: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            println!("未指定 --agent，使用内存 Stub（演示模式）");
+            Arc::new(StubAgentDriver::new())
+        }
+    };
     let (manager, notifications) = SessionManager::new(driver.clone(), 200);
     let manager = Arc::new(manager);
 

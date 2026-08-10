@@ -10,6 +10,8 @@ pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub token: String,
+    /// ACP agent 可执行（如 codex-acp）；缺省时用内存 Stub（演示）
+    pub agent_bin: Option<String>,
 }
 
 /// 解析配置（纯函数，env 与 args 可注入便于测试）。
@@ -26,6 +28,7 @@ pub fn parse_config(
     let mut data_dir = get("AMUX_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_data_dir(env).join(".amux").join("server"));
+    let mut agent_bin = get("AMUX_AGENT_BIN");
 
     let mut token = get("AMUX_TOKEN");
     let mut i = 0;
@@ -53,6 +56,10 @@ pub fn parse_config(
                     data_dir = PathBuf::from(v);
                 }
             }
+            "--agent" => {
+                i += 1;
+                agent_bin = args.get(i).cloned();
+            }
             _ => {}
         }
         i += 1;
@@ -66,6 +73,7 @@ pub fn parse_config(
         port,
         data_dir,
         token,
+        agent_bin,
     })
 }
 
