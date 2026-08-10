@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-amux 是一个 **agent 控制平面**（beta 阶段，个人工具）：GUI 桌面应用，统一调度多台机器上的 agent harness（Codex、Claude Code、Kimi Code），采用 Client-Server 架构，**全 Rust 实现**（GPUI 桌面应用 + Rust server + ACP v1）。产品定位见 [docs/PRD.md](docs/PRD.md)，系统架构见 [docs/DESIGN.md](docs/DESIGN.md)。
+amux 是一个 **agent 控制平面**（beta 阶段，个人工具）：GUI 桌面应用，统一调度多台机器上的 agent（Codex、Claude Code、Kimi Code），采用 Client-Server 架构，**全 Rust 实现**（GPUI 桌面应用 + Rust server + ACP v1）。产品定位见 [docs/PRD.md](docs/PRD.md)，系统架构见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 项目状态
 
@@ -25,7 +25,7 @@ amux 处于 **beta 阶段**：允许随意破坏性改动，无需向后兼容�
 
 关键边界：
 
-- server 与 harness 的交互**只经 ACP 协议**（官方 SDK `agent-client-protocol` + `agent-client-protocol-tokio`，docs/DESIGN.md §9）
+- server 与 agent 的交互**只经 ACP 协议**（官方 SDK `agent-client-protocol` + `agent-client-protocol-tokio`，docs/DESIGN.md §9）
 - server 之间不通信；跨机器编排在 GUI 侧完成
 
 ## 技术栈与约定

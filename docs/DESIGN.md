@@ -6,7 +6,7 @@
 
 ## 1. 架构
 
-Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server 常驻进程通过 WebSocket 通信；server 作为 **ACP v1 client** 对接各 agent harness（Codex / Claude / Kimi），经 ACP 的 stdio 传输 spawn agent 子进程。
+Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server 常驻进程通过 WebSocket 通信；server 作为 **ACP v1 client** 对接各 agent（Codex / Claude / Kimi），经 ACP 的 stdio 传输 spawn agent 子进程。
 
 ```
 ┌──────────────┐   WS(JSON-RPC)  ┌───────────────┐  ACP v1 (stdio) ┌────────────┐
@@ -118,9 +118,9 @@ GUI 为单进程桌面应用（GPUI + gpui-component，跟踪 Zed 主线 git 依
 
 日志是 amux 调试的主要手段：GUI ↔ server ↔ ACP client ↔ agent 跨进程、跨机器，问题定位依赖能串起整条链路的日志。具体格式、级别策略、覆盖范围与落盘位置交由实现 agent 决定。
 
-## 9. Server 与 Agent Harness 通信（ACP v1）
+## 9. Server 与 Agent 通信（ACP v1）
 
-Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与各 agent harness 通信：
+Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与各 agent 通信：
 
 - **传输**：ACP stdio——server spawn agent 子进程（`codex-acp` / `claude-acp` / `kimi acp`），JSON-RPC 2.0 over stdin/stdout；每条消息单行 JSON，无内嵌换行
 - **会话生命周期**：
