@@ -1,22 +1,32 @@
 //! Agent 驱动抽象（docs/DESIGN.md §9）：server 与 agent harness 的唯一接口。
 //! 本模块提供：
-//! - `AcpAgentDriver`：真实 ACP v1 对接（stdio JSON-RPC，`codex-acp` / `claude-acp` / `kimi acp`）
+//! - `AcpAgentDriver`：真实 ACP v1 对接（官方 SDK `agent-client-protocol`，
+//!   `AcpAgent` stdio 传输 + typed 请求/通知，`codex-acp` / `claude-acp` / `kimi acp`）
 //! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
 //! - `AgentRegistry`：按 harness 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
 //!   `*-acp` 可执行（惰性 spawn，PRD §3.3「可执行路径自动发现、不手动指定」）+ 默认模型配置
 //!
-//! ACP v1 语义：session/new、load、resume、prompt、cancel、close、delete、list 等方法；
-//! session/update 事件流聚合；session/request_permission 自动批准（yolo）。
+//! ACP v1 语义（docs/DESIGN.md §9）：session/new、load、resume、prompt、cancel、close、
+//! delete、list 等方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
 //!
-//! AcpAgentDriver 使用**专用 exec 线程**承载全部异步 IO（子进程 stdin/stdout 读写、
+//! AcpAgentDriver 使用**专用 exec 线程**承载全部异步 IO（官方 SDK 连接、子进程 stdio、
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨 runtime
 //! 嵌套的 tokio 问题（调用方可能处于任意 tokio runtime 上下文）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use agent_client_protocol::schema::v1::{
+    CancelNotification, CloseSessionRequest, ContentBlock as AcpContentBlock,
+    DeleteSessionRequest, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
+    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
+    SessionNotification, SessionUpdate, TextContent, ToolKind,
+};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, JsonRpcRequest};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use protocol::ContentBlock;
@@ -368,18 +378,7 @@ fn is_executable(_path: &std::path::Path) -> bool {
     true
 }
 
-// ---- 真实 ACP v1 stdio 对接 ----
-
-/// 请求的待处理动作（按请求 id 匹配响应）。
-enum PendingAction {
-    /// 同步方法调用：结果经 std 通道送回调用方
-    Call(std::sync::mpsc::SyncSender<Result<Value, String>>),
-    /// prompt：响应（turn 完成）时移除路由并推 TurnEnded
-    Prompt {
-        sid: String,
-        routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
-    },
-}
+// ---- 真实 ACP v1 stdio 对接（官方 SDK agent-client-protocol）----
 
 /// 主线程 → exec 线程的方法请求。
 enum ExecReq {
@@ -390,44 +389,43 @@ enum ExecReq {
     },
     Prompt {
         sid: String,
-        prompt: Vec<Value>,
+        prompt: Vec<ContentBlock>,
         routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
     },
 }
 
-/// ACP v1 客户端（stdio JSON-RPC，docs/DESIGN.md §9）。
+/// ACP v1 客户端（官方 SDK stdio 传输，docs/DESIGN.md §9）。
 pub struct AcpAgentDriver {
     exec_tx: std::sync::mpsc::SyncSender<ExecReq>,
     /// 会话事件路由：agent sessionId -> prompt/load 的事件接收端
     routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
     /// create 时记录的会话 cwd（load/resume 需要）
     cwds: Arc<Mutex<HashMap<String, String>>>,
-    /// 保活子进程句柄
-    _child: Arc<Mutex<Option<tokio::process::Child>>>,
+    /// exec 线程句柄（连接由 SDK 管理，线程结束即子进程清理）
+    _thread: std::thread::JoinHandle<()>,
 }
 
 impl AcpAgentDriver {
-    /// 启动 ACP agent 子进程（stdio JSON-RPC）；exec 线程承载全部 IO。
+    /// 启动 ACP agent 子进程（官方 SDK `AcpAgent` 管理 stdio 传输与进程生命周期）；
+    /// exec 线程承载全部异步 IO。
     pub fn spawn(bin: &str, args: &[&str]) -> Result<Self, String> {
         let (exec_tx, exec_rx) = std::sync::mpsc::sync_channel::<ExecReq>(32);
         let routes = Arc::new(Mutex::new(HashMap::new()));
         let routes2 = routes.clone();
-        let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let bin = bin.to_string();
-        let child_holder: Arc<Mutex<Option<tokio::process::Child>>> = Arc::new(Mutex::new(None));
-        let ch = child_holder.clone();
-        std::thread::spawn(move || {
+        let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let thread = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("构建 tokio runtime 失败");
-            rt.block_on(exec_main(&bin, &args, exec_rx, routes2, ch));
+            rt.block_on(exec_main(&bin, &args, exec_rx, routes2));
         });
         Ok(AcpAgentDriver {
             exec_tx,
             routes,
             cwds: Arc::new(Mutex::new(HashMap::new())),
-            _child: child_holder,
+            _thread: thread,
         })
     }
 
@@ -443,195 +441,6 @@ impl AcpAgentDriver {
             .map_err(|_| "agent 已关闭".to_string())?;
         rx.recv().map_err(|_| "ACP 调用执行失败".to_string())?
     }
-}
-
-/// exec 线程主循环：spawn 子进程，读写 stdin/stdout，路由通知，自动批准权限。
-async fn exec_main(
-    bin: &str,
-    args: &[String],
-    exec_rx: std::sync::mpsc::Receiver<ExecReq>,
-    routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
-    child_holder: Arc<Mutex<Option<tokio::process::Child>>>,
-) {
-    let mut child = tokio::process::Command::new(bin)
-        .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .expect("spawn ACP agent");
-    let stdin = child.stdin.take().expect("agent 无 stdin");
-    let stdout = child.stdout.take().expect("agent 无 stdout");
-    *child_holder.lock().unwrap() = Some(child);
-
-    // std exec_rx → tokio 通道（阻塞转发，供 select 使用）
-    let (req_tx, mut req_rx) = mpsc::channel::<ExecReq>(32);
-    tokio::task::spawn_blocking(move || {
-        while let Ok(req) = exec_rx.recv() {
-            if req_tx.blocking_send(req).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut writer = stdin;
-    let mut reader = BufReader::new(stdout).lines();
-    let mut pending: HashMap<u64, PendingAction> = HashMap::new();
-    let mut next_id: u64 = 1;
-
-    loop {
-        tokio::select! {
-            req = req_rx.recv() => {
-                let Some(req) = req else { break };
-                let id = next_id;
-                next_id += 1;
-                let (method, params, action) = match req {
-                    ExecReq::Call { method, params, resp } => (method, params, PendingAction::Call(resp)),
-                    ExecReq::Prompt { sid, prompt, routes: r } => (
-                        "session/prompt".to_string(),
-                        json!({ "sessionId": sid, "prompt": prompt }),
-                        PendingAction::Prompt { sid, routes: r },
-                    ),
-                };
-                let frame = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-                if writer.write_all(format!("{frame}\n").as_bytes()).await.is_err() {
-                    break;
-                }
-                if writer.flush().await.is_err() {
-                    break;
-                }
-                pending.insert(id, action);
-            }
-            line = reader.next_line() => {
-                let Ok(Some(line)) = line else { break };
-                if line.trim().is_empty() { continue; }
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                if let Some(id) = v.get("id") {
-                    if v.get("method").is_some() {
-                        // agent 发来的请求（如 request_permission）：自动批准（yolo）
-                        if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-                            if method == "session/request_permission" {
-                                let params = v.get("params").cloned().unwrap_or(Value::Null);
-                                auto_approve(&mut writer, Some(id.clone()), &params).await;
-                            }
-                        }
-                    } else if let Some(id) = id.as_u64() {
-                        // 响应：匹配 pending
-                        if let Some(action) = pending.remove(&id) {
-                            let result = if let Some(err) = v.get("error") {
-                                Err(err.get("message").and_then(|m| m.as_str()).unwrap_or("ACP 错误").to_string())
-                            } else {
-                                Ok(v.get("result").cloned().unwrap_or(Value::Null))
-                            };
-                            match action {
-                                PendingAction::Call(resp) => {
-                                    let _ = resp.send(result);
-                                }
-                                PendingAction::Prompt { sid, routes } => {
-                                    let route_tx = { routes.lock().unwrap().remove(&sid) };
-                                    if let Some(route_tx) = route_tx {
-                                        let _ = route_tx.send(AgentEvent::TurnEnded).await;
-                                    }
-                                    if let Err(e) = result {
-                                        eprintln!("[acp] prompt 失败: {e}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-                    if method == "session/update" {
-                        if let Some(params) = v.get("params") {
-                            if let Some(sid) = params.get("sessionId").and_then(|s| s.as_str()) {
-                                route_update(&routes, sid, params);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // agent 退出：清空 pending
-    for (_, action) in pending.drain() {
-        if let PendingAction::Call(resp) = action {
-            let _ = resp.send(Err("agent 连接断开".into()));
-        }
-    }
-}
-
-/// 读取事件字段：兼容两种 ACP 结构——扁平（`params.sessionUpdate`，mock_acp）与
-/// 嵌套（`params.update.sessionUpdate`，kimi acp / ACP 规范）。
-fn ev_field<'a>(params: &'a Value, key: &str) -> Option<&'a Value> {
-    params
-        .get(key)
-        .or_else(|| params.get("update").and_then(|u| u.get(key)))
-}
-
-/// 把 session/update 通知映射为 AgentEvent 并路由。
-fn route_update(
-    routes: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
-    sid: &str,
-    params: &Value,
-) {
-    let Some(kind) = ev_field(params, "sessionUpdate").and_then(|v| v.as_str()) else {
-        return;
-    };
-    let ev = match kind {
-        "agent_message_chunk" => ev_field(params, "content")
-            .and_then(|c| c.get("text"))
-            .and_then(|t| t.as_str())
-            .map(|s| AgentEvent::OutputChunk(s.to_string())),
-        "user_message_chunk" => ev_field(params, "content")
-            .and_then(|c| c.get("text"))
-            .and_then(|t| t.as_str())
-            .map(|s| AgentEvent::UserMessage(s.to_string())),
-        "agent_thought_chunk" => ev_field(params, "content")
-            .and_then(|c| c.get("text"))
-            .and_then(|t| t.as_str())
-            .map(|s| AgentEvent::Thinking(s.to_string())),
-        "tool_call" | "tool_call_update" => Some(AgentEvent::ToolCall {
-            name: ev_field(params, "kind")
-                .and_then(|k| k.as_str())
-                .unwrap_or("tool_call")
-                .to_string(),
-            title: ev_field(params, "title")
-                .and_then(|t| t.as_str())
-                .map(str::to_string),
-            content: ev_field(params, "rawInput")
-                .and_then(|r| r.as_str())
-                .map(str::to_string),
-        }),
-        _ => None,
-    };
-    if let Some(ev) = ev {
-        if let Some(tx) = routes.lock().unwrap().get(sid) {
-            let _ = tx.try_send(ev);
-        }
-    }
-}
-
-/// yolo：自动批准 session/request_permission（选第一个 allow 选项）。
-async fn auto_approve(writer: &mut tokio::process::ChildStdin, id: Option<Value>, params: &Value) {
-    let option_id = params
-        .get("options")
-        .and_then(|o| o.as_array())
-        .and_then(|opts| {
-            opts.iter().find(|o| {
-                o.get("kind")
-                    .and_then(|k| k.as_str())
-                    .map(|k| k.starts_with("allow"))
-                    .unwrap_or(false)
-            })
-        })
-        .and_then(|o| o.get("optionId").cloned())
-        .unwrap_or_else(|| json!("allow-once"));
-    let frame = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": { "outcome": { "outcome": "selected", "optionId": option_id } }
-    });
-    let _ = writer.write_all(format!("{frame}\n").as_bytes()).await;
-    let _ = writer.flush().await;
 }
 
 impl AgentDriver for AcpAgentDriver {
@@ -716,7 +525,7 @@ impl AgentDriver for AcpAgentDriver {
             .insert(agent_session_id.to_string(), tx.clone());
         let req = ExecReq::Prompt {
             sid: agent_session_id.to_string(),
-            prompt: input.iter().map(content_block_json).collect(),
+            prompt: input,
             routes: self.routes.clone(),
         };
         let _ = self.exec_tx.send(req);
@@ -771,16 +580,274 @@ impl AgentDriver for AcpAgentDriver {
     }
 }
 
-/// protocol::ContentBlock → ACP ContentBlock（{type, text} 等，MCP 兼容）。
-fn content_block_json(b: &ContentBlock) -> Value {
+/// 自定义请求：ACP `skill/list`（PRD §3.3；SDK schema v1 未收录该方法）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
+#[request(method = "skill/list", response = serde_json::Value)]
+struct SkillListRequest {}
+
+/// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
+async fn exec_main(
+    bin: &str,
+    args: &[String],
+    exec_rx: std::sync::mpsc::Receiver<ExecReq>,
+    routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
+) {
+    // std exec_rx → tokio 通道（阻塞转发，供 select 使用）
+    let (req_tx, mut req_rx) = mpsc::channel::<ExecReq>(32);
+    tokio::task::spawn_blocking(move || {
+        while let Ok(req) = exec_rx.recv() {
+            if req_tx.blocking_send(req).is_err() {
+                break;
+            }
+        }
+    });
+
+    let agent = match AcpAgent::from_args(
+        std::iter::once(bin.to_string()).chain(args.iter().cloned()),
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[acp] 解析 agent 命令失败 ({bin}): {e}");
+            return;
+        }
+    };
+
+    let _ = Client
+        .builder()
+        .name("amux-server")
+        .on_receive_notification(
+            async move |notif: SessionNotification, _cx| {
+                route_update(&routes, &notif);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_request(
+            async move |request: RequestPermissionRequest, responder, _cx| {
+                // yolo：自动批准（选第一个 allow 选项；无选项则取消）
+                match request.options.first() {
+                    Some(opt) => responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                            opt.option_id.clone(),
+                        )),
+                    )),
+                    None => responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    )),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_with(agent, |cx: ConnectionTo<Agent>| async move {
+            // 初始化握手（版本协商）。失败仅记录——部分 agent（如 mock_acp）不实现
+            // initialize 也照常工作，连接保持。
+            if let Err(e) = cx
+                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await
+            {
+                eprintln!("[acp] initialize 失败（继续）: {e}");
+            }
+
+            // 服务循环：每个请求独立 spawn，支持并发（cancel 不必等 prompt 完成）
+            loop {
+                let Some(req) = req_rx.recv().await else {
+                    break;
+                };
+                match req {
+                    ExecReq::Call {
+                        method,
+                        params,
+                        resp,
+                    } => {
+                        let cx = cx.clone();
+                        tokio::spawn(async move {
+                            let result = dispatch_call(&cx, &method, &params).await;
+                            let _ = resp.send(result);
+                        });
+                    }
+                    ExecReq::Prompt { sid, prompt, routes } => {
+                        let cx = cx.clone();
+                        tokio::spawn(async move {
+                            let blocks = prompt
+                                .iter()
+                                .filter_map(acp_content_block)
+                                .collect::<Vec<_>>();
+                            let _ = cx
+                                .send_request(PromptRequest::new(sid.clone(), blocks))
+                                .on_receiving_result(async move |result| {
+                                    // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）
+                                    if let Some(tx) = routes.lock().unwrap().remove(&sid) {
+                                        let _ = tx.try_send(AgentEvent::TurnEnded);
+                                    }
+                                    if let Err(e) = result {
+                                        eprintln!("[acp] prompt 失败: {e}");
+                                    }
+                                    Ok(())
+                                });
+                        });
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await;
+}
+
+/// 按方法名分发 ACP v1 方法调用（typed 请求，经官方 SDK 传输）。
+async fn dispatch_call(
+    cx: &ConnectionTo<Agent>,
+    method: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    let sid = || {
+        params
+            .get("sessionId")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    match method {
+        "session/new" => {
+            let cwd = params
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .unwrap_or("/");
+            let resp = cx
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await
+                .map_err(|e| format!("session/new 失败: {e}"))?;
+            Ok(json!({ "sessionId": resp.session_id }))
+        }
+        "session/load" => {
+            let cwd = params
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .unwrap_or("/tmp");
+            cx.send_request(LoadSessionRequest::new(sid(), cwd))
+                .block_task()
+                .await
+                .map_err(|e| format!("session/load 失败: {e}"))?;
+            Ok(Value::Null)
+        }
+        "session/resume" => {
+            let cwd = params
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .unwrap_or("/tmp");
+            cx.send_request(ResumeSessionRequest::new(sid(), cwd))
+                .block_task()
+                .await
+                .map_err(|e| format!("session/resume 失败: {e}"))?;
+            Ok(Value::Null)
+        }
+        "session/cancel" => {
+            cx.send_notification(CancelNotification::new(sid()))
+                .map_err(|e| format!("session/cancel 失败: {e}"))?;
+            Ok(Value::Null)
+        }
+        "session/close" => {
+            cx.send_request(CloseSessionRequest::new(sid()))
+                .block_task()
+                .await
+                .map_err(|e| format!("session/close 失败: {e}"))?;
+            Ok(Value::Null)
+        }
+        "session/delete" => {
+            cx.send_request(DeleteSessionRequest::new(sid()))
+                .block_task()
+                .await
+                .map_err(|e| format!("session/delete 失败: {e}"))?;
+            Ok(Value::Null)
+        }
+        "session/list" => {
+            let resp = cx
+                .send_request(ListSessionsRequest::new())
+                .block_task()
+                .await
+                .map_err(|e| format!("session/list 失败: {e}"))?;
+            let sessions = resp
+                .sessions
+                .into_iter()
+                .map(|s| json!({ "id": s.session_id }))
+                .collect::<Vec<_>>();
+            Ok(json!({ "sessions": sessions }))
+        }
+        "skill/list" => {
+            let resp = cx
+                .send_request(SkillListRequest {})
+                .block_task()
+                .await
+                .map_err(|e| format!("skill/list 失败: {e}"))?;
+            Ok(resp)
+        }
+        _ => Err(format!("未知 ACP 方法: {method}")),
+    }
+}
+
+/// 把 ACP `session/update` 通知映射为 AgentEvent 并路由（docs/DESIGN.md §5 聚合）。
+fn route_update(
+    routes: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
+    notif: &SessionNotification,
+) {
+    let ev = match &notif.update {
+        SessionUpdate::UserMessageChunk(chunk) => {
+            text_of(&chunk.content).map(AgentEvent::UserMessage)
+        }
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            text_of(&chunk.content).map(AgentEvent::OutputChunk)
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            text_of(&chunk.content).map(AgentEvent::Thinking)
+        }
+        SessionUpdate::ToolCall(tc) => Some(AgentEvent::ToolCall {
+            name: tool_kind_str(&tc.kind),
+            title: Some(tc.title.clone()),
+            content: tc.raw_input.as_ref().map(|v| v.to_string()),
+        }),
+        SessionUpdate::ToolCallUpdate(tcu) => Some(AgentEvent::ToolCall {
+            name: tcu
+                .fields
+                .kind
+                .as_ref()
+                .map(tool_kind_str)
+                .unwrap_or_else(|| "tool_call".to_string()),
+            title: tcu.fields.title.clone(),
+            content: tcu.fields.raw_input.as_ref().map(|v| v.to_string()),
+        }),
+        // SessionInfoUpdate / UsageUpdate / AvailableCommandsUpdate / CurrentModeUpdate /
+        // ConfigOptionUpdate / Plan 等不产生 AgentEvent
+        _ => None,
+    };
+    if let Some(ev) = ev {
+        if let Some(tx) = routes.lock().unwrap().get(notif.session_id.to_string().as_str()) {
+            let _ = tx.try_send(ev);
+        }
+    }
+}
+
+/// ContentBlock → 文本（仅 text 类型；其他类型忽略）。
+fn text_of(block: &AcpContentBlock) -> Option<String> {
+    match block {
+        AcpContentBlock::Text(t) => Some(t.text.clone()),
+        _ => None,
+    }
+}
+
+/// ToolKind → 字符串（serde 序列化的 snake_case 名，如 `execute` / `read`）。
+fn tool_kind_str(kind: &ToolKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "tool_call".to_string())
+}
+
+/// protocol::ContentBlock → SDK ContentBlock（MCP 兼容；无 SDK 等价的类型忽略）。
+fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
     match b {
-        ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
-        ContentBlock::Resource { .. } => {
-            json!({ "type": "resource", "mimeType": "text/plain", "text": "" })
-        }
-        ContentBlock::ResourceLink { name, uri, .. } => {
-            json!({ "type": "resource_link", "name": name, "uri": uri })
-        }
+        ContentBlock::Text { text } => Some(AcpContentBlock::Text(TextContent::new(text.clone()))),
+        ContentBlock::Resource { .. } | ContentBlock::ResourceLink { .. } => None,
     }
 }
 
@@ -870,6 +937,10 @@ impl AgentDriver for StubAgentDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1::{
+        ContentChunk, ContentBlock as AcpContentBlock, SessionId, TextContent, ToolCall,
+        ToolCallStatus, ToolKind,
+    };
     use tokio::sync::mpsc;
 
     fn route_with_channel() -> (
@@ -881,56 +952,82 @@ mod tests {
         (routes, rx)
     }
 
-    /// mock_acp 的扁平事件格式（params.sessionUpdate / params.content）。
+    /// ACP 规范嵌套格式（params.update.sessionUpdate）的 agent_message_chunk。
     #[test]
-    fn route_update_flat_format() {
+    fn route_update_agent_message_chunk() {
         let (routes, mut rx) = route_with_channel();
-        let params = json!({
-            "sessionId": "s1",
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "输出" }
-        });
-        route_update(&routes, "s1", &params);
+        let notif = SessionNotification::new(
+            SessionId::new("s1"),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(AcpContentBlock::Text(
+                TextContent::new("输出"),
+            ))),
+        );
+        route_update(&routes, &notif);
         let ev = rx.try_recv().expect("应收到事件");
         assert!(matches!(ev, AgentEvent::OutputChunk(s) if s == "输出"));
     }
 
-    /// 真实 agent（kimi acp / ACP 规范）的嵌套事件格式（params.update.sessionUpdate）。
+    /// user_message_chunk → UserMessage。
     #[test]
-    fn route_update_nested_format() {
+    fn route_update_user_message_chunk() {
         let (routes, mut rx) = route_with_channel();
-        let params = json!({
-            "sessionId": "s1",
-            "update": {
-                "sessionUpdate": "agent_message_chunk",
-                "content": { "type": "text", "text": "收到" }
-            }
-        });
-        route_update(&routes, "s1", &params);
+        let notif = SessionNotification::new(
+            SessionId::new("s1"),
+            SessionUpdate::UserMessageChunk(ContentChunk::new(AcpContentBlock::Text(
+                TextContent::new("收到"),
+            ))),
+        );
+        route_update(&routes, &notif);
         let ev = rx.try_recv().expect("应收到事件");
-        assert!(matches!(ev, AgentEvent::OutputChunk(s) if s == "收到"));
+        assert!(matches!(ev, AgentEvent::UserMessage(s) if s == "收到"));
+    }
 
-        // thinking 事件（嵌套）
+    /// agent_thought_chunk → Thinking。
+    #[test]
+    fn route_update_thinking() {
         let (routes, mut rx) = route_with_channel();
-        let params = json!({
-            "sessionId": "s1",
-            "update": {
-                "sessionUpdate": "agent_thought_chunk",
-                "content": { "type": "text", "text": "思考中" }
-            }
-        });
-        route_update(&routes, "s1", &params);
+        let notif = SessionNotification::new(
+            SessionId::new("s1"),
+            SessionUpdate::AgentThoughtChunk(ContentChunk::new(AcpContentBlock::Text(
+                TextContent::new("思考中"),
+            ))),
+        );
+        route_update(&routes, &notif);
         let ev = rx.try_recv().expect("应收到 thinking 事件");
         assert!(matches!(ev, AgentEvent::Thinking(s) if s == "思考中"));
+    }
 
-        // 未知事件种类忽略
+    /// tool_call → ToolCall 活动（kind / title / rawInput）。
+    #[test]
+    fn route_update_tool_call() {
         let (routes, mut rx) = route_with_channel();
-        let params = json!({
-            "sessionId": "s1",
-            "update": { "sessionUpdate": "available_commands_update", "availableCommands": [] }
-        });
-        route_update(&routes, "s1", &params);
-        assert!(rx.try_recv().is_err(), "未知事件不应产生 AgentEvent");
+        let tc = ToolCall::new("tc1", "运行 cargo test")
+            .kind(ToolKind::Execute)
+            .status(ToolCallStatus::Pending)
+            .raw_input(serde_json::json!({"command": "cargo test"}));
+        let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCall(tc));
+        route_update(&routes, &notif);
+        let ev = rx.try_recv().expect("应收到 tool_call 事件");
+        match ev {
+            AgentEvent::ToolCall { name, title, content } => {
+                assert_eq!(name, "execute");
+                assert_eq!(title.as_deref(), Some("运行 cargo test"));
+                assert!(content.unwrap_or_default().contains("cargo test"));
+            }
+            other => panic!("应为 ToolCall，得到 {other:?}"),
+        }
+    }
+
+    /// 不产生 AgentEvent 的更新（session_info_update 等）忽略。
+    #[test]
+    fn route_update_ignores_irrelevant() {
+        let (routes, mut rx) = route_with_channel();
+        let notif = SessionNotification::new(
+            SessionId::new("s1"),
+            SessionUpdate::SessionInfoUpdate(agent_client_protocol::schema::v1::SessionInfoUpdate::new()),
+        );
+        route_update(&routes, &notif);
+        assert!(rx.try_recv().is_err(), "无关更新不应产生 AgentEvent");
     }
 
     /// 自动发现：`acp` 子命令探测逻辑（输出含 acp 才算支持）。

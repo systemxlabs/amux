@@ -1,8 +1,8 @@
-//! 模拟 ACP v1 agent（stdio JSON-RPC）：按 ACP v1 帧应答 server 的方法调用。
+//! 模拟 ACP v1 agent（官方 SDK `agent-client-protocol` 的 **Agent 侧**实现）。
 //! 用于驱动 `AcpAgentDriver` 的对接测试（crates/server/tests/acp.rs）与
 //! test-server 的端到端测试。
 //!
-//! 行为要点：
+//! 行为要点（与协议语义对齐）：
 //! - `session/new` 返回自增的唯一 sessionId（mock_s_1、mock_s_2、…），支持多会话
 //! - `session/prompt` 记录该会话的用户指令与 agent 输出（内存），`session/load`
 //!   全量重放记录的历史（更接近真实 agent 的持久化语义）
@@ -13,9 +13,21 @@
 //! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use agent_client_protocol::schema::v1::{
+    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
+    ContentChunk, DeleteSessionRequest, DeleteSessionResponse, InitializeRequest,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, MessageId, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionInfo,
+    SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+};
+use agent_client_protocol::{Agent, JsonRpcRequest, Result, Stdio};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -27,181 +39,6 @@ fn history() -> &'static std::sync::Mutex<HashMap<String, Vec<Value>>> {
     H.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-fn delay_ms() -> u64 {
-    std::env::var("AMUX_MOCK_DELAY_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300)
-}
-
-fn main() {
-    let state_file = std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("AMUX_MOCK_STATE").ok())
-        .unwrap_or_else(|| "/tmp/mock_acp_state".into());
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut line = String::new();
-    let mut reader = stdin.lock();
-
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-
-        if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-            eprintln!("[mock] 收到请求: {method}");
-            let id = v.get("id").cloned();
-            let params = v.get("params").cloned().unwrap_or(Value::Null);
-            let sid = params
-                .get("sessionId")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            match method {
-                "session/new" => {
-                    let n = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
-                    respond(
-                        &mut stdout,
-                        id,
-                        Some(json!({ "sessionId": format!("mock_s_{n}") })),
-                    );
-                }
-                "session/load" => {
-                    // 全量重放：该会话记录的历史（用户指令 + agent 输出）
-                    let hist = history().lock().unwrap().get(&sid).cloned().unwrap_or_else(|| {
-                        vec![
-                            json!({ "messageId": "u1", "kind": "user", "content": { "type": "text", "text": "你好" } }),
-                            json!({ "messageId": "a1", "kind": "agent", "content": { "type": "text", "text": "历史回复" } }),
-                        ]
-                    });
-                    for (i, item) in hist.iter().enumerate() {
-                        let kind = if item["kind"] == "user" {
-                            "user_message_chunk"
-                        } else {
-                            "agent_message_chunk"
-                        };
-                        let mid =
-                            format!("{}{}", if item["kind"] == "user" { "u" } else { "a" }, i);
-                        notify(
-                            &mut stdout,
-                            &sid,
-                            kind,
-                            json!({ "messageId": mid, "content": item["content"].clone() }),
-                        );
-                    }
-                    respond(&mut stdout, id, Some(json!({})));
-                }
-                "session/prompt" => {
-                    // 记录用户指令（先取 id 再锁，避免 json! 内再次锁同一 mutex 死锁）
-                    let user_text: String = params
-                        .get("prompt")
-                        .and_then(|p| p.as_array())
-                        .and_then(|arr| {
-                            arr.iter().find_map(|b| {
-                                b.get("text").and_then(|t| t.as_str()).map(str::to_string)
-                            })
-                        })
-                        .unwrap_or_default();
-                    let user_mid = format!("u{}", history_len(&sid));
-                    history()
-                        .lock()
-                        .unwrap()
-                        .entry(sid.clone())
-                        .or_default()
-                        .push(json!({
-                            "messageId": user_mid,
-                            "kind": "user",
-                            "content": { "type": "text", "text": user_text }
-                        }));
-                    // 先请求权限（期望 server yolo 自动批准）
-                    let req_id = json!(9000);
-                    let frame = json!({
-                        "jsonrpc": "2.0", "id": req_id, "method": "session/request_permission",
-                        "params": {
-                            "sessionId": sid, "title": "运行命令？",
-                            "options": [{ "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" }]
-                        }
-                    });
-                    let _ = stdout.write_all(format!("{frame}\n").as_bytes());
-                    let _ = stdout.flush();
-                    // busy 窗口：让 server 有确定的时间观察 Busy 状态（-32006 测试）
-                    let ms = delay_ms();
-                    if ms > 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(ms));
-                    }
-                    // 事件流
-                    notify(
-                        &mut stdout,
-                        &sid,
-                        "agent_thought_chunk",
-                        json!({ "messageId": "t1", "content": { "type": "text", "text": "思考中" } }),
-                    );
-                    notify(
-                        &mut stdout,
-                        &sid,
-                        "tool_call",
-                        json!({ "toolCallId": "tc1", "kind": "shell", "title": "运行 cargo test", "status": "pending" }),
-                    );
-                    let agent_mid = format!("a{}", history_len(&sid));
-                    notify(
-                        &mut stdout,
-                        &sid,
-                        "agent_message_chunk",
-                        json!({ "messageId": agent_mid, "content": { "type": "text", "text": "完成！" } }),
-                    );
-                    history()
-                        .lock()
-                        .unwrap()
-                        .entry(sid.clone())
-                        .or_default()
-                        .push(json!({
-                            "messageId": agent_mid,
-                            "kind": "agent",
-                            "content": { "type": "text", "text": "完成！" }
-                        }));
-                    respond(&mut stdout, id, Some(json!({ "stopReason": "end_turn" })));
-                }
-                "session/cancel" | "session/close" | "session/delete" | "session/resume" => {
-                    respond(&mut stdout, id, Some(json!({})))
-                }
-                "session/list" => respond(
-                    &mut stdout,
-                    id,
-                    Some(json!({ "sessions": [{ "id": "mock_s_1" }] })),
-                ),
-                "skill/list" => respond(
-                    &mut stdout,
-                    id,
-                    Some(json!({
-                        "skills": [
-                            { "name": "web-browser" },
-                            { "name": "docs-search" },
-                            { "name": "code-analysis" }
-                        ]
-                    })),
-                ),
-                _ => respond(&mut stdout, id, None),
-            }
-        } else if v.get("id").is_some() && v.get("result").is_some() {
-            // client 的响应：权限批准（outcome.selected）→ 记录到状态文件
-            if v["result"]["outcome"]["outcome"].as_str() == Some("selected") {
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&state_file)
-                    .map(|mut f| {
-                        let _ = writeln!(f, "approved");
-                    });
-            }
-        }
-    }
-}
-
 fn history_len(sid: &str) -> usize {
     history()
         .lock()
@@ -211,17 +48,241 @@ fn history_len(sid: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn notify(w: &mut io::Stdout, sid: &str, kind: &str, payload: Value) {
-    let mut params = payload.clone();
-    params["sessionUpdate"] = json!(kind);
-    params["sessionId"] = json!(sid);
-    let frame = json!({ "jsonrpc": "2.0", "method": "session/update", "params": params });
-    let _ = w.write_all(format!("{frame}\n").as_bytes());
-    let _ = w.flush();
+fn delay_ms() -> u64 {
+    std::env::var("AMUX_MOCK_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
 }
 
-fn respond(w: &mut io::Stdout, id: Option<Value>, result: Option<Value>) {
-    let frame = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-    let _ = w.write_all(format!("{frame}\n").as_bytes());
-    let _ = w.flush();
+/// 把权限批准（outcome.selected）记录到状态文件（供测试断言 yolo 生效）。
+fn append_approved(state_file: &str) {
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_file)
+        .map(|mut f| {
+            use std::io::Write;
+            let _ = writeln!(f, "approved");
+        });
+}
+
+/// 自定义请求：ACP `skill/list`（PRD §3.3；SDK schema v1 未收录该方法）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
+#[request(method = "skill/list", response = serde_json::Value)]
+struct SkillListRequest {}
+
+fn main() -> Result<()> {
+    let state_file = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("AMUX_MOCK_STATE").ok())
+        .unwrap_or_else(|| "/tmp/mock_acp_state".into());
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("构建 tokio runtime 失败");
+    rt.block_on(run(&state_file))
+}
+
+async fn run(state_file: &str) -> Result<()> {
+    let state_file = state_file.to_string();
+    Agent
+        .builder()
+        .name("mock_acp")
+        .on_receive_request(
+            async move |initialize: InitializeRequest, responder, _cx| {
+                responder.respond(
+                    InitializeResponse::new(initialize.protocol_version)
+                        .agent_capabilities(AgentCapabilities::new()),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: NewSessionRequest, responder, _cx| {
+                let n = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+                responder.respond(NewSessionResponse::new(format!("mock_s_{n}")))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: LoadSessionRequest, responder, cx| {
+                // 全量重放：该会话记录的历史（用户指令 + agent 输出），重放完才响应
+                let sid = request.session_id.to_string();
+                let hist = history().lock().unwrap().get(&sid).cloned().unwrap_or_else(|| {
+                    vec![
+                        json!({ "messageId": "u1", "kind": "user", "content": { "type": "text", "text": "你好" } }),
+                        json!({ "messageId": "a1", "kind": "agent", "content": { "type": "text", "text": "历史回复" } }),
+                    ]
+                });
+                for (i, item) in hist.iter().enumerate() {
+                    let (kind, mid) = if item["kind"] == "user" {
+                        ("user_message_chunk", format!("u{i}"))
+                    } else {
+                        ("agent_message_chunk", format!("a{i}"))
+                    };
+                    let text = item["content"]["text"].as_str().unwrap_or("").to_string();
+                    let update = if kind == "user_message_chunk" {
+                        SessionUpdate::UserMessageChunk(
+                            ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+                                .message_id(MessageId::new(mid)),
+                        )
+                    } else {
+                        SessionUpdate::AgentMessageChunk(
+                            ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+                                .message_id(MessageId::new(mid)),
+                        )
+                    };
+                    cx.send_notification(SessionNotification::new(request.session_id.clone(), update))?;
+                }
+                responder.respond(LoadSessionResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: ResumeSessionRequest, responder, _cx| {
+                responder.respond(ResumeSessionResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: PromptRequest, responder, cx| {
+                // 记录用户指令（先取 id 再锁，避免 json! 内再次锁同一 mutex 死锁）
+                let sid = request.session_id.to_string();
+                let user_text: String = request
+                    .prompt
+                    .iter()
+                    .find_map(|b| match b {
+                        ContentBlock::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let user_mid = format!("u{}", history_len(&sid));
+                history()
+                    .lock()
+                    .unwrap()
+                    .entry(sid.clone())
+                    .or_default()
+                    .push(json!({
+                        "messageId": user_mid,
+                        "kind": "user",
+                        "content": { "type": "text", "text": user_text }
+                    }));
+
+                // 后台任务承载整个 turn（权限 → busy 窗口 → 事件流 → 响应），
+                // 不阻塞 SDK 事件循环（handler 内 await 会卡住连接）。
+                let state_file = state_file.clone();
+                let cx_task = cx.clone();
+                cx.spawn(async move {
+                    // 1) 先请求权限（期望 client yolo 自动批准）→ 记录批准
+                    let perm = ToolCallUpdate::new(
+                        "tc1",
+                        ToolCallUpdateFields::new()
+                            .kind(ToolKind::Execute)
+                            .title("运行命令？")
+                            .status(ToolCallStatus::Pending),
+                    );
+                    let req = RequestPermissionRequest::new(
+                        request.session_id.clone(),
+                        perm,
+                        vec![PermissionOption::new(
+                            "allow-once",
+                            "Allow once",
+                            PermissionOptionKind::AllowOnce,
+                        )],
+                    );
+                    let resp = cx_task.send_request(req).block_task().await?;
+                    if matches!(
+                        resp.outcome,
+                        RequestPermissionOutcome::Selected(_)
+                    ) {
+                        append_approved(&state_file);
+                    }
+
+                    // 2) busy 窗口：让 server 有确定的时间观察 Busy 状态（-32006 测试）
+                    let ms = delay_ms();
+                    if ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(ms)).await;
+                    }
+
+                    cx_task.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+                            ContentBlock::Text(TextContent::new("思考中")),
+                        )),
+                    ))?;
+                    cx_task.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::ToolCall(
+                            ToolCall::new("tc1", "运行 cargo test")
+                                .kind(ToolKind::Execute)
+                                .status(ToolCallStatus::Pending),
+                        ),
+                    ))?;
+                    cx_task.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                            ContentBlock::Text(TextContent::new("完成！")),
+                        )),
+                    ))?;
+
+                    // 记录 agent 输出（先取 id 再锁，避免 json! 内再次锁同一 mutex 死锁）
+                    let agent_mid = format!("a{}", history_len(&request.session_id.to_string()));
+                    history()
+                        .lock()
+                        .unwrap()
+                        .entry(sid)
+                        .or_default()
+                        .push(json!({
+                            "messageId": agent_mid,
+                            "kind": "agent",
+                            "content": { "type": "text", "text": "完成！" }
+                        }));
+
+                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                })?;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: CloseSessionRequest, responder, _cx| {
+                responder.respond(CloseSessionResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: DeleteSessionRequest, responder, _cx| {
+                responder.respond(DeleteSessionResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: ListSessionsRequest, responder, _cx| {
+                responder.respond(ListSessionsResponse::new(vec![SessionInfo::new(
+                    "mock_s_1",
+                    "/tmp",
+                )]))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: SkillListRequest, responder, _cx| {
+                responder.respond(json!({
+                    "skills": [
+                        { "name": "web-browser" },
+                        { "name": "docs-search" },
+                        { "name": "code-analysis" }
+                    ]
+                }))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |_cancel: CancelNotification, _cx| Ok(()),
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_to(Stdio::new())
+        .await
 }
