@@ -944,6 +944,11 @@ impl AmuxApp {
             .collect::<Vec<_>>();
         v_flex()
             .id("settings-panel")
+            // 拦截面板内的鼠标按下，阻止事件继续分发到全屏遮罩（兄弟元素），
+            // 否则点输入框/按钮时遮罩的 click 也触发、浮窗被关闭
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                cx.stop_propagation();
+            })
             .w(px(560.))
             .max_h(px(640.))
             .gap_2()
