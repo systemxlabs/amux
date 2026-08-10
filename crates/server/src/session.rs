@@ -3,13 +3,17 @@
 //! 历史权威在 agent 侧；server 不保存对话历史，仅维护会话元数据与 activities 缓存。
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{broadcast, Mutex};
 
-use protocol::{Activity, ContentBlock, DialogItem, SessionMeta, SessionState, TurnCompleted};
+use protocol::{
+    generate_title, Activity, ContentBlock, DialogItem, HarnessInfo, SessionMeta, SessionState,
+    TurnCompleted,
+};
 
-use crate::agent::{AgentEvent, DialogRecord, SharedDriver};
+use crate::agent::{AgentEvent, AgentRegistry, DialogRecord, SharedDriver};
 
 /// server → GUI 通知（docs/DESIGN.md §4/§5）。
 #[derive(Debug, Clone)]
@@ -20,6 +24,8 @@ pub enum ServerNotification {
     #[allow(dead_code)]
     SessionInterrupted(SessionMeta),
     SessionDeleted(SessionMeta),
+    /// 会话元数据更新（标题修改等，多 GUI 同步）
+    SessionUpdated(SessionMeta),
     TurnCompleted(TurnCompleted),
     SessionState {
         session_id: String,
@@ -35,10 +41,11 @@ pub enum ServerNotification {
 struct SessionRecord {
     meta: SessionMeta,
     agent_session_id: String,
+    driver: SharedDriver,
 }
 
 pub struct SessionManager {
-    driver: SharedDriver,
+    agents: Arc<AgentRegistry>,
     registry: Mutex<HashMap<String, SessionRecord>>,
     /// 按会话的 activities 有界缓存（docs/DESIGN.md §5.3）
     activities: Mutex<HashMap<String, VecDeque<Activity>>>,
@@ -55,18 +62,34 @@ fn now() -> u64 {
 
 impl SessionManager {
     pub fn new(
-        driver: SharedDriver,
+        agents: Arc<AgentRegistry>,
         max_activities: usize,
     ) -> (Self, broadcast::Receiver<ServerNotification>) {
         let (tx, rx) = broadcast::channel(256);
         let manager = SessionManager {
-            driver,
+            agents,
             registry: Mutex::new(HashMap::new()),
             activities: Mutex::new(HashMap::new()),
             tx,
             max_activities,
         };
         (manager, rx)
+    }
+
+    // ---- 机器信息 ----
+    pub fn harnesses(&self) -> Vec<HarnessInfo> {
+        self.agents.harnesses()
+    }
+
+    pub fn set_default_model(&self, harness: &str, model: Option<String>) {
+        self.agents.set_default_model(harness, model);
+    }
+
+    pub fn list_agent_skills(&self, harness: &str) -> Vec<String> {
+        match self.agents.driver_for(harness) {
+            Ok(d) => d.list_skills(),
+            Err(_) => Vec::new(),
+        }
     }
 
     // ---- 生命周期 ----
@@ -76,7 +99,8 @@ impl SessionManager {
         cwd: &str,
         model: Option<&str>,
     ) -> Result<SessionMeta, String> {
-        let agent_session_id = self.driver.create_session(cwd, model)?;
+        let driver = self.agents.driver_for(harness)?;
+        let agent_session_id = driver.create_session(cwd, model)?;
         let id = format!("s_{}", uuid_v4());
         let meta = SessionMeta {
             id,
@@ -86,6 +110,7 @@ impl SessionManager {
             state: SessionState::Idle,
             interrupted: false,
             closed: false,
+            title: String::new(),
             created_at: now(),
             last_event_at: now(),
         };
@@ -94,6 +119,7 @@ impl SessionManager {
             SessionRecord {
                 meta: meta.clone(),
                 agent_session_id,
+                driver,
             },
         );
         let _ = self
@@ -107,7 +133,7 @@ impl SessionManager {
         let rec = reg
             .get_mut(session_id)
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        self.driver.resume_session(&rec.agent_session_id)?;
+        rec.driver.resume_session(&rec.agent_session_id)?;
         rec.meta.interrupted = false;
         rec.meta.closed = false;
         rec.meta.state = SessionState::Idle;
@@ -123,7 +149,7 @@ impl SessionManager {
         let rec = reg
             .get_mut(session_id)
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        self.driver.close(&rec.agent_session_id)?;
+        rec.driver.close(&rec.agent_session_id)?;
         rec.meta.closed = true;
         let meta = rec.meta.clone();
         let _ = self.tx.send(ServerNotification::SessionClosed(meta));
@@ -137,11 +163,26 @@ impl SessionManager {
             reg.remove(session_id)
                 .ok_or_else(|| format!("会话不存在: {session_id}"))?
         };
-        self.driver.delete(&rec.agent_session_id)?;
+        rec.driver.delete(&rec.agent_session_id)?;
         self.activities.lock().await.remove(session_id);
         let mut meta = rec.meta;
         meta.closed = true;
         let _ = self.tx.send(ServerNotification::SessionDeleted(meta));
+        Ok(())
+    }
+
+    /// 修改会话标题（用户可随时修改，PRD §3.1）；广播 session_updated 同步各 GUI。
+    pub async fn set_session_title(&self, session_id: &str, title: &str) -> Result<(), String> {
+        let meta = {
+            let mut reg = self.registry.lock().await;
+            let rec = reg
+                .get_mut(session_id)
+                .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+            rec.meta.title = title.trim().to_string();
+            rec.meta.last_event_at = now();
+            rec.meta.clone()
+        };
+        let _ = self.tx.send(ServerNotification::SessionUpdated(meta));
         Ok(())
     }
 
@@ -161,11 +202,14 @@ impl SessionManager {
 
     /// 打开会话：经 driver 的 `session/load` 全量重放，聚合对话内容返回。
     pub async fn open(&self, session_id: &str) -> Result<Vec<DialogItem>, String> {
-        let reg = self.registry.lock().await;
-        let rec = reg
-            .get(session_id)
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        let records = self.driver.load_session(&rec.agent_session_id)?;
+        let (driver, agent_session_id) = {
+            let reg = self.registry.lock().await;
+            let rec = reg
+                .get(session_id)
+                .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+            (rec.driver.clone(), rec.agent_session_id.clone())
+        };
+        let records = driver.load_session(&agent_session_id)?;
         Ok(records
             .into_iter()
             .map(|r| match r {
@@ -207,17 +251,44 @@ impl SessionManager {
     /// prompt：经 driver 触发 turn，聚合事件为完整输出 + activities（非流式交付）。
     /// 忙时 prompt（steer）依赖 agent 实现；当前 agent 不支持进行中注入时直接报错
     /// （docs/DESIGN.md §9：不排队、不静默降级）。
+    /// 首条 prompt 时为会话生成默认标题（PRD §3.1：由首条指令/目标自动生成简短摘要）。
     pub async fn prompt(&self, session_id: &str, input: Vec<ContentBlock>) -> Result<(), String> {
-        let agent_session_id = {
-            let reg = self.registry.lock().await;
+        // 忙检查 + Busy 状态在同一次加锁内完成（原子），避免并发 prompt 竞态
+        let (driver, agent_session_id, title_changed) = {
+            let mut reg = self.registry.lock().await;
             let rec = reg
-                .get(session_id)
+                .get_mut(session_id)
                 .ok_or_else(|| format!("会话不存在: {session_id}"))?;
             if rec.meta.state == SessionState::Busy {
                 return Err("会话忙：agent 不支持进行中注入（steer），请等待当前工作结束".into());
             }
-            rec.agent_session_id.clone()
+            let title_changed = if rec.meta.title.is_empty() {
+                let t = first_text(&input);
+                rec.meta.title = generate_title(&t);
+                true
+            } else {
+                false
+            };
+            rec.meta.state = SessionState::Busy;
+            rec.meta.last_event_at = now();
+            (
+                rec.driver.clone(),
+                rec.agent_session_id.clone(),
+                title_changed,
+            )
         };
+        let meta = if title_changed {
+            self.registry
+                .lock()
+                .await
+                .get(session_id)
+                .map(|r| r.meta.clone())
+        } else {
+            None
+        };
+        if let Some(m) = meta {
+            let _ = self.tx.send(ServerNotification::SessionUpdated(m));
+        }
 
         // 用户消息通知 + 忙状态
         let _ = self.tx.send(ServerNotification::UserMessage {
@@ -228,7 +299,7 @@ impl SessionManager {
         self.set_state(session_id, SessionState::Busy).await;
 
         // 聚合 turn 事件
-        let mut rx = self.driver.prompt(&agent_session_id, input);
+        let mut rx = driver.prompt(&agent_session_id, input);
         let mut output: Vec<ContentBlock> = Vec::new();
         let mut acts: Vec<Activity> = Vec::new();
         while let Some(ev) = rx.recv().await {
@@ -290,13 +361,14 @@ impl SessionManager {
     }
 
     pub async fn cancel(&self, session_id: &str) -> Result<(), String> {
-        let agent_session_id = {
+        let (driver, agent_session_id) = {
             let reg = self.registry.lock().await;
-            reg.get(session_id)
-                .map(|r| r.agent_session_id.clone())
-                .ok_or_else(|| format!("会话不存在: {session_id}"))?
+            let rec = reg
+                .get(session_id)
+                .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+            (rec.driver.clone(), rec.agent_session_id.clone())
         };
-        self.driver.cancel(&agent_session_id)
+        driver.cancel(&agent_session_id)
     }
 
     async fn set_state(&self, session_id: &str, state: SessionState) {
@@ -314,6 +386,17 @@ impl SessionManager {
     }
 }
 
+/// 取输入的首个文本块（标题生成用）。
+fn first_text(input: &[ContentBlock]) -> String {
+    input
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// 简易唯一 id（s_ 前缀；不引额外依赖）。
 fn uuid_v4() -> String {
     let nanos = SystemTime::now()
@@ -326,7 +409,7 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::StubAgentDriver;
+    use crate::agent::AgentRegistry;
     use protocol::ContentBlock;
     use std::sync::Arc;
 
@@ -336,10 +419,20 @@ mod tests {
         }]
     }
 
+    /// 演示模式注册表（stub 驱动接受任意 harness 名）。
+    fn stub_manager(
+        max_activities: usize,
+    ) -> (SessionManager, broadcast::Receiver<ServerNotification>) {
+        let agents = Arc::new(AgentRegistry::new(
+            None,
+            std::env::temp_dir().join(format!("amux-test-models-{}.json", std::process::id())),
+        ));
+        SessionManager::new(agents, max_activities)
+    }
+
     #[tokio::test]
     async fn prompt_aggregates_output_and_activities() {
-        let driver: SharedDriver = Arc::new(StubAgentDriver::new());
-        let (mgr, mut rx) = SessionManager::new(driver, 100);
+        let (mgr, mut rx) = stub_manager(100);
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
 
         mgr.prompt(&meta.id, text("hi")).await.unwrap();
@@ -372,8 +465,7 @@ mod tests {
     #[tokio::test]
     async fn activities_cache_is_bounded() {
         // 缓存上限 1：stub 每次 turn 产生 thinking + tool_call 两条，只保留最后一条
-        let driver: SharedDriver = Arc::new(StubAgentDriver::new());
-        let (mgr, _rx) = SessionManager::new(driver, 1);
+        let (mgr, _rx) = stub_manager(1);
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
         mgr.prompt(&meta.id, text("x")).await.unwrap();
         let acts = mgr.get_activities(&meta.id, None).await.unwrap();
@@ -383,8 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_session_returns_dialog_content() {
-        let driver: SharedDriver = Arc::new(StubAgentDriver::new());
-        let (mgr, _rx) = SessionManager::new(driver, 100);
+        let (mgr, _rx) = stub_manager(100);
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
         let items = mgr.open(&meta.id).await.unwrap();
         assert!(items.is_empty()); // stub 无持久化历史（历史权威在 agent，docs/DESIGN.md §5.2）
@@ -392,8 +483,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_delete_lifecycle() {
-        let driver: SharedDriver = Arc::new(StubAgentDriver::new());
-        let (mgr, mut rx) = SessionManager::new(driver, 100);
+        let (mgr, mut rx) = stub_manager(100);
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
         assert_eq!(mgr.list().await.len(), 1);
 
@@ -415,10 +505,52 @@ mod tests {
 
     #[tokio::test]
     async fn missing_session_errors() {
-        let driver: SharedDriver = Arc::new(StubAgentDriver::new());
-        let (mgr, _rx) = SessionManager::new(driver, 100);
+        let (mgr, _rx) = stub_manager(100);
         assert!(mgr.prompt("nope", text("x")).await.is_err());
         assert!(mgr.open("nope").await.is_err());
         assert!(mgr.delete("nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn first_prompt_generates_title() {
+        let (mgr, mut rx) = stub_manager(100);
+        let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
+        assert!(meta.title.is_empty());
+
+        mgr.prompt(&meta.id, text("实现登录功能\n然后写测试"))
+            .await
+            .unwrap();
+
+        let listed = mgr.list().await;
+        assert_eq!(listed[0].title, "实现登录功能");
+
+        // session_updated 通知携带新标题（GUI 刷新列表）
+        let mut saw_updated = false;
+        while let Ok(n) = rx.recv().await {
+            if let ServerNotification::SessionUpdated(s) = n {
+                assert_eq!(s.title, "实现登录功能");
+                saw_updated = true;
+                break;
+            }
+        }
+        assert!(saw_updated, "应广播 session_updated");
+
+        // 用户修改标题后，后续 prompt 不再覆盖
+        mgr.set_session_title(&meta.id, "我的标题").await.unwrap();
+        mgr.prompt(&meta.id, text("第二条指令")).await.unwrap();
+        assert_eq!(mgr.list().await[0].title, "我的标题");
+    }
+
+    #[tokio::test]
+    async fn set_default_model_persists() {
+        let (mgr, _rx) = stub_manager(100);
+        mgr.set_default_model("stub", Some("gpt-4o".into()));
+        let hs = mgr.harnesses();
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0].name, "stub");
+        assert_eq!(hs[0].default_model.as_deref(), Some("gpt-4o"));
+        // 未知 harness 的模型配置不破坏列表
+        mgr.set_default_model("nope", Some("x".into()));
+        assert_eq!(mgr.harnesses().len(), 1);
     }
 }

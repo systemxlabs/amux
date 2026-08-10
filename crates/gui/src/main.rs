@@ -1,8 +1,12 @@
 //! amux GUI 桌面应用入口（docs/DESIGN.md §7）。
 //! 三面板（机器/会话 + 对话流 + 上下文面板）多机器客户端；本地配置（机器注册表）持久化。
 
+#![recursion_limit = "512"]
+
 mod app;
 mod config;
+mod logic;
+mod workflow;
 mod ws;
 
 use std::path::PathBuf;
@@ -26,21 +30,23 @@ fn main() {
         });
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--data-dir" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    data_dir = PathBuf::from(v);
-                }
+        if args[i].as_str() == "--data-dir" {
+            i += 1;
+            if let Some(v) = args.get(i) {
+                data_dir = PathBuf::from(v);
             }
-            _ => {}
         }
         i += 1;
     }
 
-    // 本地配置（机器注册表 / 通知偏好）持久化
+    // 本地配置（机器注册表 / 通知偏好 / 快捷指令 / Skills / 模板 / 编排配置）持久化；
+    // 工作流状态持久化于 GUI 数据目录 workflows/（docs/DESIGN.md §5.5/§10）
     let config_path = data_dir.join("config.json");
-    let store = Arc::new(ConfigStore::new(Box::new(FileBackend::new(config_path))));
+    let workflow_dir = data_dir.join("workflows");
+    let store = Arc::new(ConfigStore::new_with_dir(
+        Box::new(FileBackend::new(config_path)),
+        workflow_dir,
+    ));
 
     let app = gpui_platform::application().with_assets(Assets);
     app.run(move |cx| {

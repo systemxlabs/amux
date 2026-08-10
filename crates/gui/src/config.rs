@@ -1,10 +1,13 @@
-//! GUI 本地配置（docs/DESIGN.md §6 / PRD §3.4）：机器注册表、通知偏好、快捷按钮。
+//! GUI 本地配置（docs/DESIGN.md §6 / PRD §3.4/§3.6/§3.7/§4.3）：
+//! 机器注册表、通知偏好、快捷指令、Skills 注册表、工作流模板、编排 agent API 配置。
 //! 纯逻辑与 IO 分离：配置形状 + 校验/归一化 + 增删改查为可单测纯逻辑；
 //! 持久化后端可注入（测试用临时目录）。
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+pub use protocol::{OrchestratorConfig, QuickCommand, SkillEntry, WorkflowTemplate};
 
 // ---- 配置形状 ----
 
@@ -37,10 +40,19 @@ impl Default for NotifyPrefs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GuiConfig {
     pub version: u32,
     pub machines: Vec<MachineConfig>,
     pub notify: NotifyPrefs,
+    /// 快捷指令（PRD §3.4）
+    pub quick_commands: Vec<QuickCommand>,
+    /// Skills 注册表（PRD §3.6）
+    pub skills: Vec<SkillEntry>,
+    /// 工作流模板（PRD §3.7）
+    pub workflow_templates: Vec<WorkflowTemplate>,
+    /// 内置编排 agent API 配置（PRD §4.3「编排 agent」）
+    pub orchestrator: OrchestratorConfig,
 }
 
 impl Default for GuiConfig {
@@ -49,6 +61,22 @@ impl Default for GuiConfig {
             version: 1,
             machines: Vec::new(),
             notify: NotifyPrefs::default(),
+            // PRD §3.4：预设 Commit & Push、Submit PR
+            quick_commands: vec![
+                QuickCommand {
+                    id: "qc_commit_push".into(),
+                    name: "Commit & Push".into(),
+                    prompt: "提交并推送当前工作区的更改：为改动写一条简洁的 commit message，commit 后 push。".into(),
+                },
+                QuickCommand {
+                    id: "qc_submit_pr".into(),
+                    name: "Submit PR".into(),
+                    prompt: "提交一个 Pull Request：stage → commit → push → 创建 PR。".into(),
+                },
+            ],
+            skills: Vec::new(),
+            workflow_templates: Vec::new(),
+            orchestrator: OrchestratorConfig::default(),
         }
     }
 }
@@ -60,6 +88,30 @@ fn is_machine(v: &serde_json::Value) -> bool {
         && v.get("name").and_then(|x| x.as_str()).is_some()
         && v.get("url").and_then(|x| x.as_str()).is_some()
         && v.get("token").and_then(|x| x.as_str()).is_some()
+}
+
+fn is_quick_command(v: &serde_json::Value) -> bool {
+    v.get("id").and_then(|x| x.as_str()).is_some()
+        && v.get("name").and_then(|x| x.as_str()).is_some()
+        && v.get("prompt").and_then(|x| x.as_str()).is_some()
+}
+
+fn is_skill(v: &serde_json::Value) -> bool {
+    v.get("id").and_then(|x| x.as_str()).is_some()
+        && v.get("name").and_then(|x| x.as_str()).is_some()
+        && v.get("description").and_then(|x| x.as_str()).is_some()
+}
+
+fn is_template(v: &serde_json::Value) -> bool {
+    v.get("id").and_then(|x| x.as_str()).is_some()
+        && v.get("name").and_then(|x| x.as_str()).is_some()
+        && v.get("description").and_then(|x| x.as_str()).is_some()
+}
+
+fn is_orchestrator(v: &serde_json::Value) -> bool {
+    v.get("apiBackend").and_then(|x| x.as_str()).is_some()
+        && v.get("baseUrl").and_then(|x| x.as_str()).is_some()
+        && v.get("model").and_then(|x| x.as_str()).is_some()
 }
 
 /// 任意输入 → 合法配置。
@@ -87,6 +139,62 @@ pub fn normalize(raw: &serde_json::Value) -> GuiConfig {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(300),
         };
+    }
+    if let Some(list) = raw.get("quickCommands") {
+        // 配置自带该分类时整体替换（清除预设），否则保留默认预设
+        cfg.quick_commands.clear();
+        if let Some(arr) = list.as_array() {
+            for v in arr {
+                if !is_quick_command(v) {
+                    continue;
+                }
+                cfg.quick_commands.push(QuickCommand {
+                    id: v["id"].as_str().unwrap_or("").to_string(),
+                    name: v["name"].as_str().unwrap_or("").to_string(),
+                    prompt: v["prompt"].as_str().unwrap_or("").to_string(),
+                });
+            }
+        }
+    }
+    if let Some(list) = raw.get("skills") {
+        cfg.skills.clear();
+        if let Some(arr) = list.as_array() {
+            for v in arr {
+                if !is_skill(v) {
+                    continue;
+                }
+                cfg.skills.push(SkillEntry {
+                    id: v["id"].as_str().unwrap_or("").to_string(),
+                    name: v["name"].as_str().unwrap_or("").to_string(),
+                    description: v["description"].as_str().unwrap_or("").to_string(),
+                });
+            }
+        }
+    }
+    if let Some(list) = raw.get("workflowTemplates") {
+        cfg.workflow_templates.clear();
+        if let Some(arr) = list.as_array() {
+            for v in arr {
+                if !is_template(v) {
+                    continue;
+                }
+                cfg.workflow_templates.push(WorkflowTemplate {
+                    id: v["id"].as_str().unwrap_or("").to_string(),
+                    name: v["name"].as_str().unwrap_or("").to_string(),
+                    description: v["description"].as_str().unwrap_or("").to_string(),
+                });
+            }
+        }
+    }
+    if let Some(o) = raw.get("orchestrator") {
+        if is_orchestrator(o) {
+            cfg.orchestrator = OrchestratorConfig {
+                api_backend: o["apiBackend"].as_str().unwrap_or("").to_string(),
+                base_url: o["baseUrl"].as_str().unwrap_or("").to_string(),
+                api_key: o["apiKey"].as_str().unwrap_or("").to_string(),
+                model: o["model"].as_str().unwrap_or("").to_string(),
+            };
+        }
     }
     cfg
 }
@@ -132,11 +240,26 @@ impl ConfigBackend for FileBackend {
 /// 配置仓库：读写 + 增删改查机器（纯逻辑）。
 pub struct ConfigStore {
     backend: Box<dyn ConfigBackend>,
+    workflow_dir: PathBuf,
 }
 
 impl ConfigStore {
+    #[allow(dead_code)]
     pub fn new(backend: Box<dyn ConfigBackend>) -> Self {
-        ConfigStore { backend }
+        ConfigStore {
+            backend,
+            workflow_dir: std::env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".amux").join("gui").join("workflows"))
+                .unwrap_or_else(|_| PathBuf::from(".amux/gui/workflows")),
+        }
+    }
+
+    /// 指定工作流持久化目录（GUI 数据目录，docs/DESIGN.md §5.5）。
+    pub fn new_with_dir(backend: Box<dyn ConfigBackend>, workflow_dir: PathBuf) -> Self {
+        ConfigStore {
+            backend,
+            workflow_dir,
+        }
     }
 
     pub fn load(&self) -> GuiConfig {
@@ -193,6 +316,122 @@ impl ConfigStore {
         let mut cfg = self.load();
         cfg.notify = prefs.clone();
         self.persist(&cfg);
+    }
+
+    // ---- 快捷指令（PRD §3.4）----
+
+    pub fn list_quick_commands(&self) -> Vec<QuickCommand> {
+        self.load().quick_commands
+    }
+
+    pub fn add_quick_command(&self, name: &str, prompt: &str) -> QuickCommand {
+        let mut cfg = self.load();
+        let cmd = QuickCommand {
+            id: format!("qc_{:x}", cfg.quick_commands.len() + 1),
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+        };
+        cfg.quick_commands.push(cmd.clone());
+        self.persist(&cfg);
+        cmd
+    }
+
+    pub fn update_quick_command(&self, id: &str, name: &str, prompt: &str) {
+        let mut cfg = self.load();
+        if let Some(c) = cfg.quick_commands.iter_mut().find(|c| c.id == id) {
+            c.name = name.to_string();
+            c.prompt = prompt.to_string();
+        }
+        self.persist(&cfg);
+    }
+
+    pub fn remove_quick_command(&self, id: &str) {
+        let mut cfg = self.load();
+        cfg.quick_commands.retain(|c| c.id != id);
+        self.persist(&cfg);
+    }
+
+    // ---- Skills 注册表（PRD §3.6）----
+
+    pub fn list_skills(&self) -> Vec<SkillEntry> {
+        self.load().skills
+    }
+
+    pub fn add_skill(&self, name: &str, description: &str) -> SkillEntry {
+        let mut cfg = self.load();
+        let skill = SkillEntry {
+            id: format!("sk_{:x}", cfg.skills.len() + 1),
+            name: name.to_string(),
+            description: description.to_string(),
+        };
+        cfg.skills.push(skill.clone());
+        self.persist(&cfg);
+        skill
+    }
+
+    pub fn update_skill(&self, id: &str, name: &str, description: &str) {
+        let mut cfg = self.load();
+        if let Some(s) = cfg.skills.iter_mut().find(|s| s.id == id) {
+            s.name = name.to_string();
+            s.description = description.to_string();
+        }
+        self.persist(&cfg);
+    }
+
+    pub fn remove_skill(&self, id: &str) {
+        let mut cfg = self.load();
+        cfg.skills.retain(|s| s.id != id);
+        self.persist(&cfg);
+    }
+
+    // ---- 工作流模板（PRD §3.7）----
+
+    pub fn list_templates(&self) -> Vec<WorkflowTemplate> {
+        self.load().workflow_templates
+    }
+
+    pub fn add_template(&self, name: &str, description: &str) -> WorkflowTemplate {
+        let mut cfg = self.load();
+        let tpl = WorkflowTemplate {
+            id: format!("tpl_{:x}", cfg.workflow_templates.len() + 1),
+            name: name.to_string(),
+            description: description.to_string(),
+        };
+        cfg.workflow_templates.push(tpl.clone());
+        self.persist(&cfg);
+        tpl
+    }
+
+    pub fn update_template(&self, id: &str, name: &str, description: &str) {
+        let mut cfg = self.load();
+        if let Some(t) = cfg.workflow_templates.iter_mut().find(|t| t.id == id) {
+            t.name = name.to_string();
+            t.description = description.to_string();
+        }
+        self.persist(&cfg);
+    }
+
+    pub fn remove_template(&self, id: &str) {
+        let mut cfg = self.load();
+        cfg.workflow_templates.retain(|t| t.id != id);
+        self.persist(&cfg);
+    }
+
+    // ---- 编排 agent 配置（PRD §4.3）----
+
+    pub fn orchestrator(&self) -> OrchestratorConfig {
+        self.load().orchestrator
+    }
+
+    pub fn save_orchestrator(&self, cfg: &OrchestratorConfig) {
+        let mut c = self.load();
+        c.orchestrator = cfg.clone();
+        self.persist(&c);
+    }
+
+    /// 工作流持久化目录（GUI 本地，docs/DESIGN.md §5.5/§10）。
+    pub fn workflow_dir(&self) -> PathBuf {
+        self.workflow_dir.clone()
     }
 }
 
@@ -303,5 +542,102 @@ mod tests {
             ..m.clone()
         };
         assert_eq!(machine_ws_url(&m2), "ws://h:1/amux/?token=t");
+    }
+
+    #[test]
+    fn defaults_include_preset_quick_commands() {
+        let cfg = GuiConfig::default();
+        assert_eq!(cfg.quick_commands.len(), 2);
+        assert_eq!(cfg.quick_commands[0].name, "Commit & Push");
+        assert_eq!(cfg.quick_commands[1].name, "Submit PR");
+        assert_eq!(cfg.orchestrator.model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn quick_command_crud_roundtrip() {
+        let (store, _b) = store();
+        assert_eq!(store.list_quick_commands().len(), 2); // 预设
+        let c = store.add_quick_command("构建", "运行 cargo build");
+        assert_eq!(store.list_quick_commands().len(), 3);
+        store.update_quick_command(&c.id, "构建+测试", "cargo test");
+        let got = store
+            .list_quick_commands()
+            .into_iter()
+            .find(|x| x.id == c.id)
+            .unwrap();
+        assert_eq!(got.name, "构建+测试");
+        assert_eq!(got.prompt, "cargo test");
+        store.remove_quick_command(&c.id);
+        assert_eq!(store.list_quick_commands().len(), 2);
+    }
+
+    #[test]
+    fn skill_crud_roundtrip() {
+        let (store, _b) = store();
+        let s = store.add_skill("web", "https://github.com/x/web");
+        assert_eq!(store.list_skills().len(), 1);
+        store.update_skill(&s.id, "web2", "本地 ~/skills/web");
+        let got = store.list_skills().into_iter().next().unwrap();
+        assert_eq!(got.description, "本地 ~/skills/web");
+        store.remove_skill(&s.id);
+        assert!(store.list_skills().is_empty());
+    }
+
+    #[test]
+    fn template_crud_and_file_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("amux-gui-tpl-{}", std::process::id()));
+        let path = dir.join("config.json");
+        let store = ConfigStore::new(Box::new(FileBackend::new(path.clone())));
+        let t = store.add_template("实现并审查", "用 codex 实现，claude 审查");
+        store.add_template("部署", "构建并部署到远程");
+
+        // 重新加载（落盘往返）
+        let store2 = ConfigStore::new(Box::new(FileBackend::new(path.clone())));
+        let templates = store2.list_templates();
+        assert_eq!(templates.len(), 2);
+        assert_eq!(templates[0].name, "实现并审查");
+
+        store2.remove_template(&t.id);
+        let store3 = ConfigStore::new(Box::new(FileBackend::new(path)));
+        assert_eq!(store3.list_templates().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orchestrator_save_roundtrip() {
+        let (store, _b) = store();
+        let cfg = OrchestratorConfig {
+            api_backend: "messages".into(),
+            base_url: "http://localhost:8000/v1".into(),
+            api_key: "sk-test".into(),
+            model: "gpt-4.1".into(),
+        };
+        store.save_orchestrator(&cfg);
+        assert_eq!(store.orchestrator().model, "gpt-4.1");
+        assert_eq!(store.orchestrator().api_backend, "messages");
+    }
+
+    #[test]
+    fn normalize_keeps_new_sections_and_rejects_bad() {
+        let raw = serde_json::json!({
+            "version": 1,
+            "machines": [{ "id": "a", "name": "ok", "url": "ws://h", "token": "t" }],
+            "quickCommands": [
+                { "id": "q1", "name": "构建", "prompt": "cargo build" },
+                { "name": "缺 prompt" }
+            ],
+            "skills": [{ "id": "s1", "name": "web", "description": "url" }],
+            "workflowTemplates": [{ "id": "t1", "name": "审查", "description": "desc" }],
+            "orchestrator": { "apiBackend": "chat_completions", "baseUrl": "http://x", "apiKey": "k", "model": "m" }
+        });
+        let cfg = normalize(&raw);
+        assert_eq!(cfg.machines.len(), 1);
+        assert_eq!(cfg.quick_commands.len(), 1, "缺 prompt 的条目应被丢弃");
+        assert_eq!(cfg.skills.len(), 1);
+        assert_eq!(cfg.workflow_templates.len(), 1);
+        assert_eq!(cfg.orchestrator.model, "m");
+        // 坏的 orchestrator 回退默认
+        let raw2 = serde_json::json!({ "orchestrator": { "baseUrl": 1 } });
+        assert_eq!(normalize(&raw2).orchestrator.model, "gpt-4o-mini");
     }
 }

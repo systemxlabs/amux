@@ -253,6 +253,9 @@ fn notification_frame(n: &ServerNotification) -> Option<String> {
         ServerNotification::SessionDeleted(s) => {
             (notify::SESSION_DELETED, serde_json::json!({ "session": s }))
         }
+        ServerNotification::SessionUpdated(s) => {
+            (notify::SESSION_UPDATED, serde_json::json!({ "session": s }))
+        }
         ServerNotification::TurnCompleted(t) => (notify::TURN_COMPLETED, serde_json::json!(t)),
         ServerNotification::SessionState { session_id, state } => (
             notify::SESSION_STATE,

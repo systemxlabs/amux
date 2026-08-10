@@ -2,6 +2,8 @@
 //! 本模块提供：
 //! - `AcpAgentDriver`：真实 ACP v1 对接（stdio JSON-RPC，`codex-acp` / `claude-acp` / `kimi acp`）
 //! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
+//! - `AgentRegistry`：按 harness 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
+//!   `*-acp` 可执行（惰性 spawn，PRD §3.3「可执行路径自动发现、不手动指定」）+ 默认模型配置
 //!
 //! ACP v1 语义：session/new、load、resume、prompt、cancel、close、delete、list 等方法；
 //! session/update 事件流聚合；session/request_permission 自动批准（yolo）。
@@ -18,6 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use protocol::ContentBlock;
+use protocol::HarnessInfo;
 
 /// turn 过程中的 agent 事件（server 聚合为输出 + activities，docs/DESIGN.md §5）。
 #[derive(Debug, Clone)]
@@ -67,6 +70,9 @@ pub trait AgentDriver: Send + Sync {
     /// 列出 agent 侧全部会话 id（server 重启后从 agent 恢复会话列表，docs/DESIGN.md §3）
     #[allow(dead_code)]
     fn list_sessions(&self) -> Vec<String>;
+    /// 该 agent 安装的 skills 列表（PRD §3.3；agent 不支持时返回空列表）
+    #[allow(dead_code)]
+    fn list_skills(&self) -> Vec<String>;
 }
 
 /// 对话内容条目（load 重放的产物）。
@@ -79,6 +85,172 @@ pub enum DialogRecord {
 
 #[allow(dead_code)]
 pub type SharedDriver = Arc<dyn AgentDriver>;
+
+// ---- AgentRegistry：harness 名 → 驱动 ----
+
+/// harness 注册表（PRD §3.3）：
+///
+/// - `--agent` 指定的驱动（harness 名 = 可执行文件名，如 `mock_acp` / `codex-acp`）
+/// - PATH 上自动发现的 `*-acp` 可执行（惰性 spawn，不手动指定路径）
+/// - 演示模式（未指定 `--agent`）：单一内存 Stub，接受任意 harness 名
+///
+/// 默认模型按 harness 持久化到数据目录（`agent-models.json`），get_info 一并返回。
+pub struct AgentRegistry {
+    /// 演示模式：任意 harness 名都解析到同一个 Stub 驱动
+    stub: Option<SharedDriver>,
+    /// 配置驱动：harness 名 + 驱动
+    configured: Option<(String, SharedDriver)>,
+    /// PATH 自动发现的 harness 名（不含已配置的）
+    discovered: Vec<String>,
+    /// 惰性 spawn 的发现驱动
+    spawned: std::sync::Mutex<HashMap<String, SharedDriver>>,
+    /// 按 harness 的默认模型配置
+    models: std::sync::Mutex<HashMap<String, Option<String>>>,
+    model_file: std::path::PathBuf,
+}
+
+impl AgentRegistry {
+    /// 构建注册表。
+    /// - `configured`：`--agent` 启动的驱动（harness 名 + 驱动），可为 None（演示模式）
+    /// - `model_file`：默认模型配置的落盘路径
+    pub fn new(configured: Option<(String, SharedDriver)>, model_file: std::path::PathBuf) -> Self {
+        let discovered = discover_acp_agents()
+            .into_iter()
+            .filter(|h| configured.as_ref().map(|(c, _)| c != h).unwrap_or(true))
+            .collect::<Vec<_>>();
+        let models = load_models(&model_file);
+        AgentRegistry {
+            stub: if configured.is_none() {
+                Some(Arc::new(StubAgentDriver::new()))
+            } else {
+                None
+            },
+            configured,
+            discovered,
+            spawned: std::sync::Mutex::new(HashMap::new()),
+            models: std::sync::Mutex::new(models),
+            model_file,
+        }
+    }
+
+    /// get_info 的 harness 列表（available + 默认模型）。
+    pub fn harnesses(&self) -> Vec<HarnessInfo> {
+        let models = self.models.lock().unwrap();
+        let mut out: Vec<HarnessInfo> = Vec::new();
+        if let Some((name, _)) = &self.configured {
+            out.push(HarnessInfo {
+                name: name.clone(),
+                available: true,
+                default_model: models.get(name).cloned().flatten(),
+            });
+        } else {
+            out.push(HarnessInfo {
+                name: "stub".into(),
+                available: true,
+                default_model: models.get("stub").cloned().flatten(),
+            });
+        }
+        for h in &self.discovered {
+            out.push(HarnessInfo {
+                name: h.clone(),
+                available: true,
+                default_model: models.get(h).cloned().flatten(),
+            });
+        }
+        out
+    }
+
+    /// 按 harness 名解析驱动；未知 harness 报错（HARNESS_UNAVAILABLE）。
+    pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
+        if let Some(stub) = &self.stub {
+            return Ok(stub.clone());
+        }
+        if let Some((name, d)) = &self.configured {
+            if name == harness {
+                return Ok(d.clone());
+            }
+        }
+        if self.discovered.iter().any(|h| h == harness) {
+            let mut spawned = self.spawned.lock().unwrap();
+            if let Some(d) = spawned.get(harness) {
+                return Ok(d.clone());
+            }
+            let driver = AcpAgentDriver::spawn(harness, &[])
+                .map_err(|e| format!("启动 ACP agent ({harness}) 失败: {e}"))?;
+            let driver: SharedDriver = Arc::new(driver);
+            spawned.insert(harness.to_string(), driver.clone());
+            return Ok(driver);
+        }
+        Err(format!("本机未发现 agent: {harness}"))
+    }
+
+    /// 查询默认模型（get_info 用）。
+    #[allow(dead_code)]
+    pub fn default_model(&self, harness: &str) -> Option<String> {
+        self.models.lock().unwrap().get(harness).cloned().flatten()
+    }
+
+    /// 配置默认模型并落盘（PRD §3.3）。
+    pub fn set_default_model(&self, harness: &str, model: Option<String>) {
+        self.models
+            .lock()
+            .unwrap()
+            .insert(harness.to_string(), model);
+        self.save_models();
+    }
+
+    fn save_models(&self) {
+        let models = self.models.lock().unwrap();
+        let json = serde_json::to_string_pretty(&*models).unwrap_or_default();
+        if let Some(parent) = self.model_file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&self.model_file, json);
+    }
+}
+
+fn load_models(path: &std::path::Path) -> HashMap<String, Option<String>> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<HashMap<String, Option<String>>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// PATH 上自动发现的 ACP agent 可执行（`*-acp`，含 `.exe` 后缀剥离）。
+fn discover_acp_agents() -> Vec<String> {
+    use std::collections::BTreeSet;
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut found = BTreeSet::new();
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let stem = name.strip_suffix(".exe").unwrap_or(&name);
+            if stem.ends_with("-acp") && is_executable(&e.path()) {
+                found.insert(stem.to_string());
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &std::path::Path) -> bool {
+    true
+}
 
 // ---- 真实 ACP v1 stdio 对接 ----
 
@@ -463,6 +635,22 @@ impl AgentDriver for AcpAgentDriver {
             Err(_) => Vec::new(),
         }
     }
+
+    /// 经 ACP `skill/list` 查询该 agent 安装的 skills（agent 不支持时返回空列表）。
+    fn list_skills(&self) -> Vec<String> {
+        match self.call("skill/list", json!({})) {
+            Ok(res) => res
+                .get("skills")
+                .and_then(|s| s.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 /// protocol::ContentBlock → ACP ContentBlock（{type, text} 等，MCP 兼容）。
@@ -554,5 +742,9 @@ impl AgentDriver for StubAgentDriver {
 
     fn list_sessions(&self) -> Vec<String> {
         self.sessions.lock().unwrap().clone()
+    }
+
+    fn list_skills(&self) -> Vec<String> {
+        Vec::new()
     }
 }

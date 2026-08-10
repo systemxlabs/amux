@@ -1,58 +1,108 @@
-//! amux 主视图（docs/DESIGN.md §7 / PRD §3.1）。
-//! 三面板布局 + 多机器 + 设置页（机器管理）：
-//! - 左侧：机器与会话列表（按机器分组）+ 底部设置入口
-//! - 中间：对话流 / 会话活动页切换 + 快捷按钮栏 + 输入区 + 对话流右侧竖排悬浮按钮
-//! - 右侧：上下文面板（默认折叠，悬浮按钮展开 diff / 会话详情）
-//! - 设置页：机器接入 / 移除 / 连接配置 / 在线状态（本地注册表持久化）
+//! amux 主视图（docs/DESIGN.md §7 / PRD §3、§4）。
+//! 三面板布局 + 多机器 + 工作流编排 + 设置浮窗（五分类）：
+//! - 左侧：会话列表（按最近活跃排序；含编排会话与折叠的子会话；可按机器/agent/编排筛选）
+//!   + 底部设置入口
+//! - 中间：上方对话流（用户消息 + agent 完整输出气泡，非流式）+ 下方进行中活动条（一条或无）
+//!   + 快捷指令栏 + 输入区（多行、@ 引用、拖拽文件、粘贴图片、语音）+ 右侧竖排悬浮按钮
+//! - 右侧：上下文面板（默认折叠，悬浮按钮展开 diff / 会话详情 / 会话活动历史）
+//! - 设置浮窗：机器管理（含 agent 默认模型与 skills 列表）/ 编排 agent / 快捷指令 / Skills / 工作流模板
+//! - 工作流：GUI 本地编排 agent 会话（rig 单 turn），子会话 idle 自动推进，暂停/继续/介入，
+//!   状态持久化于 GUI 本地，重开后恢复
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     button::*,
+    collapsible::Collapsible,
     input::{Input, InputState},
     label::Label,
+    scroll::ScrollableElement as _,
+    spinner::Spinner,
     *,
 };
 use serde_json::json;
 
-use protocol::{Activity, ContentBlock, DialogItem, SessionMeta};
+use protocol::{
+    Activity, ContentBlock, DialogItem, GitDiffFile, GitStatusResult, MachineInfo, SessionMeta,
+    SessionState,
+};
 
-use crate::config::{machine_ws_url, ConfigStore, MachineConfig, NotifyPrefs};
+use crate::config::{
+    machine_ws_url, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand, SkillEntry,
+    WorkflowTemplate,
+};
+use crate::logic::{
+    compose_prompt, parse_at_references, read_path_context, session_sort_key, InputAttachment,
+};
+use crate::workflow::{MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification, WsClient};
 
-/// 中间面板视图：对话流 / 会话活动页。
-#[derive(Clone, Copy, PartialEq)]
-enum CenterView {
-    Dialog,
-    Activities,
-}
+// ---- 视图状态 ----
 
 /// 右侧面板（默认折叠，悬浮按钮展开）。
 #[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Diff,
     Detail,
+    Activities,
 }
 
-/// 设置页分类（PRD §3.4：机器管理 / 通知 / 快捷按钮 / Skills）。
+/// 设置浮窗分类（PRD §4.3 五分类）。
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsCategory {
     Machines,
-    Notify,
-    QuickButtons,
+    Orchestrator,
+    QuickCommands,
     Skills,
+    Templates,
 }
 
-/// 单机器视图：独立连接 + 会话列表 + 选中会话的对话/活动。
+/// 会话列表筛选（PRD §3.1：按机器 / agent 类型 / 编排 agent 筛选）。
+#[derive(Clone, PartialEq)]
+enum SessionFilter {
+    All,
+    Machine(String),
+    Harness(String),
+    /// 只显示编排 agent 会话（工作流）
+    Orchestrator,
+}
+
+/// diff 渲染模式（PRD §3.5：side-by-side 或 inline）。
+#[derive(Clone, Copy, PartialEq)]
+enum DiffMode {
+    Inline,
+    SideBySide,
+}
+
+/// 新会话创建模式。
+#[derive(Clone, Copy, PartialEq)]
+enum NewSessionMode {
+    Direct,
+    Workflow,
+}
+
+/// 单机器视图：独立连接 + 会话列表 + 选中会话的对话/活动 + diff 状态。
 struct MachineView {
     config: MachineConfig,
     client: WsClient,
     status: String,
+    /// get_info 结果（agent 发现 + 默认模型）
+    info: Option<MachineInfo>,
     sessions: Vec<SessionMeta>,
     selected: Option<String>,
     dialog: Vec<DialogItem>,
     activities: Vec<Activity>,
+    /// 当前查看 harness 的 skills 列表
+    skills: Vec<String>,
+    skills_harness: Option<String>,
+    /// diff 状态（文件列表 + 统计）
+    diff_status: Option<GitStatusResult>,
+    diff_files: Vec<GitDiffFile>,
+    diff_path: Option<String>,
+    diff_mode: DiffMode,
 }
 
 impl MachineView {
@@ -62,31 +112,72 @@ impl MachineView {
             config,
             client: WsClient::connect(url),
             status: "连接中…".into(),
+            info: None,
             sessions: Vec::new(),
             selected: None,
             dialog: Vec::new(),
             activities: Vec::new(),
+            skills: Vec::new(),
+            skills_harness: None,
+            diff_status: None,
+            diff_files: Vec::new(),
+            diff_path: None,
+            diff_mode: DiffMode::Inline,
         }
     }
+}
+
+/// 当前选中的会话（普通 server 会话 或 编排会话）。
+#[derive(Clone, PartialEq)]
+enum Selected {
+    Session { machine: usize, id: String },
+    Workflow { engine: usize },
 }
 
 pub struct AmuxApp {
     store: Arc<ConfigStore>,
     machines: Vec<MachineView>,
-    /// 当前查看的机器下标
-    active: Option<usize>,
-    center_view: CenterView,
+    /// GUI 本地编排引擎（docs/DESIGN.md §10）
+    workflows: Vec<WorkflowEngine>,
+    workflow_dir: PathBuf,
+    selected: Option<Selected>,
     panel: Option<Panel>,
-    diff: String,
     show_settings: bool,
-    /// 设置页当前分类（导航侧边栏选中项）
     settings_category: SettingsCategory,
-    /// 通知偏好缓存（设置页读写，保存时落盘）
-    notify_prefs: NotifyPrefs,
+    session_filter: SessionFilter,
+    new_session_mode: NewSessionMode,
+    /// 输入区
     input_state: Entity<InputState>,
-    /// 新建会话的工作目录（PRD §4.1：新建会话时指定工作目录）
+    input_attachments: Vec<InputAttachment>,
+    voice_recording: bool,
     session_cwd_input: Entity<InputState>,
+    session_harness_input: Entity<InputState>,
+    workflow_input: Entity<InputState>,
+    template_select: Entity<InputState>,
     settings_input: Entity<InputState>,
+    /// 设置表单输入
+    qc_name_input: Entity<InputState>,
+    qc_prompt_input: Entity<InputState>,
+    skill_name_input: Entity<InputState>,
+    skill_desc_input: Entity<InputState>,
+    tpl_name_input: Entity<InputState>,
+    tpl_desc_input: Entity<InputState>,
+    orch_backend_input: Entity<InputState>,
+    orch_base_input: Entity<InputState>,
+    orch_key_input: Entity<InputState>,
+    orch_model_input: Entity<InputState>,
+    model_input: Entity<InputState>,
+    title_input: Entity<InputState>,
+    /// 快捷指令编辑目标（None = 新增）
+    qc_edit_target: Option<String>,
+    /// Skills 编辑目标
+    skill_edit_target: Option<String>,
+    /// 模板编辑目标
+    tpl_edit_target: Option<String>,
+    /// 进行中活动（中间面板下方活动条，一条或无）
+    current_activity: Option<Activity>,
+    /// 会话详情是否可编辑标题
+    editing_title: bool,
     _tasks: Vec<Task<()>>,
 }
 
@@ -103,12 +194,52 @@ fn block_text(content: &[ContentBlock]) -> String {
 
 impl AmuxApp {
     pub fn new(store: Arc<ConfigStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input_state =
-            cx.new(|cx| InputState::new(window, cx).placeholder("输入消息，Ctrl+Enter 发送"));
-        // 工作目录输入框：新建会话时由用户填写（PRD §4.1）
-        let session_cwd_input = cx.new(|cx| InputState::new(window, cx).placeholder("工作目录"));
+        let input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("输入消息，Ctrl+Enter 发送；@ 引用文件/目录作为上下文")
+                .multi_line(true)
+        });
+        let session_cwd_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("工作目录（如 ~/projects/api-server）")
+        });
+        let session_harness_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("agent（留空取首个可用）"));
+        let workflow_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("用自然语言描述完整执行计划（支持 @ 引用上下文）…")
+                .multi_line(true)
+        });
+        let template_select = cx.new(|cx| InputState::new(window, cx).placeholder("模板名…"));
         let settings_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("名称 ws://地址 token（空格分隔）"));
+        let qc_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("指令名"));
+        let qc_prompt_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("提示词（发给 agent 的一段话）"));
+        let skill_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("名称"));
+        let skill_desc_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("描述（仓库/资源 URL 或安装方法）"));
+        let tpl_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("模板名"));
+        let tpl_desc_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("自然语言工作流描述")
+                .multi_line(true)
+        });
+        let orch_backend_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("chat_completions / messages")
+                .default_value("chat_completions")
+        });
+        let orch_base_input = cx.new(|cx| InputState::new(window, cx).placeholder("Base URL"));
+        let orch_key_input = cx.new(|cx| InputState::new(window, cx).placeholder("API key"));
+        let orch_model_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("模型")
+                .default_value("gpt-4o-mini")
+        });
+        let model_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("默认模型（可留空）"));
+        let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
+
         let machines = store
             .list_machines()
             .into_iter()
@@ -119,41 +250,130 @@ impl AmuxApp {
             })
             .collect::<Vec<_>>();
 
-        // 通知偏好缓存（结构体字面量前读取，store 随后被移入）
-        let notify_prefs = store.load().notify;
+        let orchestrator = store.orchestrator();
+        let workflow_dir = store.workflow_dir();
 
         let mut app = Self {
             store,
             machines,
-            active: None,
-            center_view: CenterView::Dialog,
+            workflows: Vec::new(),
+            workflow_dir,
+            selected: None,
             panel: None,
-            diff: String::new(),
             show_settings: false,
             settings_category: SettingsCategory::Machines,
-            notify_prefs,
+            session_filter: SessionFilter::All,
+            new_session_mode: NewSessionMode::Direct,
             input_state,
+            input_attachments: Vec::new(),
+            voice_recording: false,
             session_cwd_input,
+            session_harness_input,
+            workflow_input,
+            template_select,
             settings_input,
+            qc_name_input,
+            qc_prompt_input,
+            skill_name_input,
+            skill_desc_input,
+            tpl_name_input,
+            tpl_desc_input,
+            orch_backend_input,
+            orch_base_input,
+            orch_key_input,
+            orch_model_input,
+            model_input,
+            title_input,
+            current_activity: None,
+            qc_edit_target: None,
+            skill_edit_target: None,
+            tpl_edit_target: None,
+            editing_title: false,
             _tasks: Vec::new(),
         };
+        // 预填编排配置表单
+        app.fill_orchestrator_form(&orchestrator, window, cx);
         app.spawn_notify_tasks(window, cx);
-        // 启动即拉取各机器会话列表（否则左侧为空，直到收到会话通知）
+        // 启动即拉取各机器会话列表与 get_info；恢复编排会话
         for i in 0..app.machines.len() {
             app.refresh_sessions(i, window, cx);
+            app.fetch_info(i, window, cx);
         }
+        app.restore_workflows(window, cx);
         app
     }
 
-    fn active_mut(&mut self) -> Option<&mut MachineView> {
-        self.active.and_then(|i| self.machines.get_mut(i))
+    fn fill_orchestrator_form(
+        &self,
+        cfg: &OrchestratorConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.orch_backend_input.update(cx, |s, cx| {
+            s.set_value(cfg.api_backend.clone(), window, cx);
+        });
+        self.orch_base_input.update(cx, |s, cx| {
+            s.set_value(cfg.base_url.clone(), window, cx);
+        });
+        self.orch_key_input.update(cx, |s, cx| {
+            s.set_value(cfg.api_key.clone(), window, cx);
+        });
+        self.orch_model_input.update(cx, |s, cx| {
+            s.set_value(cfg.model.clone(), window, cx);
+        });
     }
 
-    fn active_view(&self) -> Option<&MachineView> {
-        self.active.and_then(|i| self.machines.get(i))
+    // ---- 辅助 ----
+
+    fn machine(&self, idx: usize) -> Option<&MachineView> {
+        self.machines.get(idx)
     }
 
-    /// 每机器通知 task（在 new 后调用，用 active 机器建立通知路由）。
+    fn machine_mut(&mut self, idx: usize) -> Option<&mut MachineView> {
+        self.machines.get_mut(idx)
+    }
+
+    /// 选中机器（设置页/新会话默认机器）
+    fn active_machine(&self) -> Option<usize> {
+        match &self.selected {
+            Some(Selected::Session { machine, .. }) => Some(*machine),
+            _ => self
+                .machines
+                .iter()
+                .position(|m| m.status == "已连接" || !m.status.starts_with("连接失败"))
+                .or(Some(0))
+                .filter(|_| !self.machines.is_empty()),
+        }
+    }
+
+    /// 当前查看的会话元数据（普通或编排）。
+    fn selected_meta(&self) -> Option<SessionMeta> {
+        match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| m.sessions.iter().find(|s| &s.id == id))
+                .cloned(),
+            Some(Selected::Workflow { engine }) => {
+                let wf = self.workflows.get(*engine)?;
+                Some(SessionMeta {
+                    id: wf.session.id.clone(),
+                    harness: "编排".into(),
+                    cwd: String::new(),
+                    model: None,
+                    state: wf.session.state,
+                    interrupted: false,
+                    closed: wf.session.done,
+                    title: wf.session.title.clone(),
+                    created_at: wf.session.created_at,
+                    last_event_at: wf.session.updated_at,
+                })
+            }
+            None => None,
+        }
+    }
+
+    // ---- 通知路由 ----
+
     fn spawn_notify_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for i in 0..self.machines.len() {
             let mut notify_rx = self.machines[i].client.subscribe();
@@ -178,7 +398,7 @@ impl AmuxApp {
         let Some(m) = this.machines.get_mut(idx) else {
             return;
         };
-        let changed = match n.method.as_str() {
+        match n.method.as_str() {
             "turn_completed" => {
                 let output = n.params.get("output").cloned().unwrap_or_default();
                 let ts = n
@@ -190,7 +410,6 @@ impl AmuxApp {
                     content: serde_json::from_value(output).unwrap_or_default(),
                     timestamp: ts,
                 });
-                true
             }
             "user_message" => {
                 let content = n.params.get("content").cloned().unwrap_or_default();
@@ -203,17 +422,125 @@ impl AmuxApp {
                     content: serde_json::from_value(content).unwrap_or_default(),
                     timestamp: ts,
                 });
-                true
             }
-            "session_created" | "session_deleted" => {
+            "session_state" => {
+                let sid = n.params.get("session_id").and_then(|v| v.as_str());
+                let state = n.params.get("state").and_then(|v| v.as_str()).map(|s| {
+                    if s == "busy" {
+                        SessionState::Busy
+                    } else {
+                        SessionState::Idle
+                    }
+                });
+                let Some((sid, state)) = sid.zip(state) else {
+                    cx.notify();
+                    return;
+                };
+                // 进行中活动条：忙时拉取最新活动，空闲清空
+                if state == SessionState::Busy {
+                    let _ = n;
+                    let client = m.client.clone();
+                    let sid_owned = sid.to_string();
+                    cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                        if let Ok(res) = client
+                            .request(
+                                protocol::method::GET_ACTIVITIES,
+                                Some(json!({ "sessionId": sid_owned })),
+                            )
+                            .await
+                        {
+                            let acts: Vec<Activity> = res
+                                .get("activities")
+                                .cloned()
+                                .map(|v| serde_json::from_value(v).unwrap_or_default())
+                                .unwrap_or_default();
+                            let _ = this.update_in(cx, |this, _window, cx| {
+                                if let Some(mm) = this.machines.get_mut(idx) {
+                                    mm.activities = acts.clone();
+                                }
+                                this.current_activity = acts.into_iter().last();
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                } else {
+                    this.current_activity = None;
+                }
+                // 工作流自动推进：子会话变 idle → 注入完成情况并推进（docs/DESIGN.md §10）
+                if state == SessionState::Idle {
+                    let session_id = sid.to_string();
+                    let wi = this
+                        .workflows
+                        .iter()
+                        .position(|wf| wf.session.children.iter().any(|c| c.id == session_id));
+                    if let Some(wi) = wi {
+                        let output = this.machine(idx).and_then(|mm| {
+                            mm.dialog.iter().rev().find_map(|d| match d {
+                                DialogItem::AgentOutput { content, .. } => {
+                                    Some(block_text(content))
+                                }
+                                _ => None,
+                            })
+                        });
+                        let mut wf = this.workflows.remove(wi);
+                        let workflow_dir = this.workflow_dir.clone();
+                        let ex = output
+                            .unwrap_or_default()
+                            .chars()
+                            .take(200)
+                            .collect::<String>();
+                        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                            let _ = wf
+                                .on_child_state(&session_id, SessionState::Idle, Some(ex))
+                                .await;
+                            let _ = wf.persist(&workflow_dir);
+                            let _ = this.update_in(cx, |this, _window, cx| {
+                                this.workflows.insert(wi, wf);
+                                cx.notify();
+                            });
+                        });
+                        this._tasks.push(t);
+                    }
+                }
+            }
+            "session_created" | "session_deleted" | "session_updated" => {
                 this.refresh_sessions(idx, window, cx);
-                true
             }
-            _ => false,
-        };
-        if changed {
-            cx.notify();
+            // 断线重连：刷新会话列表并重开选中会话（全量重放，关闭期间输出不丢，
+            // docs/DESIGN.md §5.4 打开会话与重连）
+            "connected" => {
+                this.refresh_sessions(idx, window, cx);
+                this.fetch_info(idx, window, cx);
+                if let Some(Selected::Session { machine, id }) = this.selected.clone() {
+                    if machine == idx {
+                        this.open_session(window, cx, machine, id);
+                    }
+                }
+            }
+            _ => {}
         }
+        cx.notify();
+    }
+
+    fn machine_summaries(&self) -> Vec<MachineSummary> {
+        self.machines
+            .iter()
+            .map(|m| MachineSummary {
+                name: m.config.name.clone(),
+                harnesses: m
+                    .info
+                    .as_ref()
+                    .map(|i| {
+                        i.harnesses
+                            .iter()
+                            .filter(|h| h.available)
+                            .map(|h| h.name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect()
     }
 
     // ---- 动作（按机器下标）----
@@ -237,18 +564,69 @@ impl AmuxApp {
         .detach();
     }
 
+    /// 拉取机器信息（agent 发现 + 默认模型）。
+    fn fetch_info(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(m) = self.machines.get(idx) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            if let Ok(res) = client.request(protocol::method::GET_INFO, None).await {
+                let info: MachineInfo =
+                    serde_json::from_value(res).unwrap_or_else(|_| MachineInfo {
+                        server_version: String::new(),
+                        harnesses: Vec::new(),
+                    });
+                let _ = this.update_in(cx, |this, _window, cx| {
+                    if let Some(m) = this.machines.get_mut(idx) {
+                        m.info = Some(info);
+                        m.status = "已连接".into();
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn available_harness(&self, idx: usize) -> String {
+        self.machine(idx)
+            .and_then(|m| m.info.as_ref())
+            .and_then(|i| {
+                i.harnesses
+                    .iter()
+                    .find(|h| h.available)
+                    .map(|h| h.name.clone())
+            })
+            .unwrap_or_else(|| "stub".into())
+    }
+
     fn create_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.active else { return };
-        // 工作目录取自输入框（PRD §4.1：新建会话时指定工作目录，agent 即在该目录启动）
+        let Some(idx) = self.active_machine() else {
+            return;
+        };
         let cwd = self.session_cwd_input.read(cx).value().trim().to_string();
         if cwd.is_empty() {
-            if let Some(m) = self.machines.get_mut(idx) {
+            if let Some(m) = self.machine_mut(idx) {
                 m.status = "请填写工作目录".into();
             }
             cx.notify();
             return;
         }
-        let Some(m) = self.machines.get(idx) else {
+        let harness = {
+            let v = self
+                .session_harness_input
+                .read(cx)
+                .value()
+                .trim()
+                .to_string();
+            if v.is_empty() {
+                self.available_harness(idx)
+            } else {
+                v
+            }
+        };
+        let Some(m) = self.machine(idx) else {
             return;
         };
         let client = m.client.clone();
@@ -256,7 +634,7 @@ impl AmuxApp {
             if let Ok(res) = client
                 .request(
                     protocol::method::CREATE_SESSION,
-                    Some(json!({ "harness": "codex", "cwd": cwd })),
+                    Some(json!({ "harness": harness, "cwd": cwd })),
                 )
                 .await
             {
@@ -267,11 +645,16 @@ impl AmuxApp {
                     .unwrap_or("")
                     .to_string();
                 let _ = this.update_in(cx, |this, _window, cx| {
-                    if let Some(m) = this.machines.get_mut(idx) {
-                        if !sid.is_empty() {
-                            m.selected = Some(sid.clone());
-                        }
+                    if !sid.is_empty() {
+                        this.selected = Some(Selected::Session {
+                            machine: idx,
+                            id: sid.clone(),
+                        });
                     }
+                    if let Some(m) = this.machine_mut(idx) {
+                        m.selected = Some(sid.clone());
+                    }
+                    this.open_session_internal(idx, &sid, cx);
                     cx.notify();
                 });
             }
@@ -279,13 +662,21 @@ impl AmuxApp {
         .detach();
     }
 
-    fn open_session(&self, window: &mut Window, cx: &mut Context<Self>, session_id: String) {
-        let Some(idx) = self.active else { return };
-        let Some(m) = self.machines.get(idx) else {
+    /// 打开会话：拉取对话内容 + 活动。
+    fn open_session(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
             return;
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let mut items: Vec<DialogItem> = Vec::new();
+            let mut acts: Vec<Activity> = Vec::new();
             if let Ok(res) = client
                 .request(
                     protocol::method::OPEN_SESSION,
@@ -293,57 +684,51 @@ impl AmuxApp {
                 )
                 .await
             {
-                let items = res.get("items").cloned().unwrap_or_default();
-                let _ = this.update_in(cx, |this, _window, cx| {
-                    if let Some(m) = this.machines.get_mut(idx) {
-                        m.selected = Some(session_id.clone());
-                        m.dialog = serde_json::from_value(items).unwrap_or_default();
-                        m.activities.clear();
-                    }
-                    cx.notify();
-                });
+                items = res
+                    .get("items")
+                    .cloned()
+                    .map(|v| serde_json::from_value(v).unwrap_or_default())
+                    .unwrap_or_default();
             }
-        })
-        .detach();
-    }
-
-    fn load_activities(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(idx), Some(sid)) = (
-            self.active,
-            self.active_view().and_then(|m| m.selected.clone()),
-        ) else {
-            return;
-        };
-        let Some(m) = self.machines.get(idx) else {
-            return;
-        };
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             if let Ok(res) = client
                 .request(
                     protocol::method::GET_ACTIVITIES,
-                    Some(json!({ "sessionId": sid })),
+                    Some(json!({ "sessionId": session_id })),
                 )
                 .await
             {
-                let acts = res.get("activities").cloned().unwrap_or_default();
-                let _ = this.update_in(cx, |this, _window, cx| {
-                    if let Some(m) = this.machines.get_mut(idx) {
-                        m.activities = serde_json::from_value(acts).unwrap_or_default();
-                    }
-                    cx.notify();
-                });
+                acts = res
+                    .get("activities")
+                    .cloned()
+                    .map(|v| serde_json::from_value(v).unwrap_or_default())
+                    .unwrap_or_default();
             }
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if let Some(m) = this.machine_mut(machine) {
+                    m.selected = Some(session_id.clone());
+                    m.dialog = items.clone();
+                    m.activities = acts.clone();
+                }
+                this.selected = Some(Selected::Session {
+                    machine,
+                    id: session_id,
+                });
+                this.current_activity = None;
+                this.panel = None;
+                cx.notify();
+            });
         })
         .detach();
     }
 
-    fn load_diff(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.active else { return };
-        let Some(m) = self.machines.get(idx) else {
+    fn open_session_internal(&self, machine: usize, session_id: &str, cx: &mut Context<Self>) {
+        let _ = (machine, session_id, cx);
+    }
+
+    fn load_diff(&self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
+        let Some(m) = self.machine(machine) else {
             return;
         };
-        // 工作区：优先选中会话的工作目录；未选会话时用工作目录输入框的值
         let cwd = m
             .selected
             .as_ref()
@@ -356,92 +741,549 @@ impl AmuxApp {
         let Some(cwd) = cwd else { return };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            // git_status：文件列表 + 增减行数
+            let mut status = None;
+            if let Ok(res) = client
+                .request(protocol::method::GIT_STATUS, Some(json!({ "cwd": cwd })))
+                .await
+            {
+                status = serde_json::from_value(res).ok();
+            }
+            // git_diff：全部文件的结构化 diff
+            let mut diff_files = Vec::new();
             if let Ok(res) = client
                 .request(protocol::method::GIT_DIFF, Some(json!({ "cwd": cwd })))
                 .await
             {
-                let diff = res.as_str().unwrap_or("").to_string();
-                let _ = this.update_in(cx, |this, _window, cx| {
-                    this.diff = diff;
-                    cx.notify();
-                });
+                if let Ok(d) = serde_json::from_value::<protocol::GitDiffResult>(res) {
+                    diff_files = d.files;
+                }
             }
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if let Some(m) = this.machine_mut(machine) {
+                    m.diff_status = status;
+                    m.diff_files = diff_files;
+                    m.diff_path = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_file_diff(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        path: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let cwd = m
+            .selected
+            .as_ref()
+            .and_then(|sid| m.sessions.iter().find(|s| s.id == *sid))
+            .map(|s| s.cwd.clone())
+            .unwrap_or_default();
+        let client = m.client.clone();
+        let path2 = path.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let mut files = Vec::new();
+            if let Ok(res) = client
+                .request(
+                    protocol::method::GIT_DIFF,
+                    Some(json!({ "cwd": cwd, "path": path })),
+                )
+                .await
+            {
+                if let Ok(d) = serde_json::from_value::<protocol::GitDiffResult>(res) {
+                    files = d.files;
+                }
+            }
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if let Some(m) = this.machine_mut(machine) {
+                    m.diff_files = files;
+                    m.diff_path = Some(path2);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// revert：单文件 / 单 hunk / 全部变更（PRD §3.5）。
+    fn revert(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        path: Option<String>,
+        patch: Option<String>,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let cwd = m
+            .selected
+            .as_ref()
+            .and_then(|sid| m.sessions.iter().find(|s| s.id == *sid))
+            .map(|s| s.cwd.clone())
+            .unwrap_or_default();
+        let client = m.client.clone();
+        let mut params = json!({ "cwd": cwd });
+        if let Some(p) = path {
+            params["path"] = json!(p);
+        }
+        if let Some(p) = patch {
+            params["patch"] = json!(p);
+        }
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let _ = client
+                .request(protocol::method::GIT_REVERT, Some(params))
+                .await;
+            // 刷新 diff
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.load_diff(window, cx, machine);
+                cx.notify();
+            });
         })
         .detach();
     }
 
     fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.active else { return };
-        let Some(session_id) = self.active_mut().and_then(|m| m.selected.clone()) else {
-            if let Some(m) = self.active_mut() {
+        let text = self.input_state.read(cx).value().to_string();
+        let attachments = self.input_attachments.clone();
+        if text.trim().is_empty() && attachments.is_empty() {
+            return;
+        }
+        // @ 引用解析（PRD §4.2）
+        let (clean_text, refs) = parse_at_references(&text);
+        let mut all = attachments;
+        for r in refs {
+            all.push(InputAttachment::Path {
+                is_dir: std::path::Path::new(&r).is_dir(),
+                path: r,
+            });
+        }
+        let blocks = compose_prompt(&clean_text, &all);
+
+        let Some(target) = self.selected.clone() else {
+            if let Some(m) = self.machine_mut(0) {
                 m.status = "请先选择会话".into();
             }
             cx.notify();
             return;
         };
-        let text = self.input_state.read(cx).value().to_string();
-        if text.trim().is_empty() {
-            return;
+        match target {
+            Selected::Session { machine, id } => {
+                let Some(m) = self.machine(machine) else {
+                    return;
+                };
+                let client = m.client.clone();
+                let input = blocks;
+                cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                    if let Err(e) = client
+                        .request(
+                            protocol::method::PROMPT,
+                            Some(json!({ "sessionId": id, "input": input })),
+                        )
+                        .await
+                    {
+                        let msg = format!("prompt 失败: {e}");
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            if let Some(m) = this.machine_mut(machine) {
+                                m.status = msg.clone();
+                            }
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+            Selected::Workflow { engine } => {
+                // 向编排会话发送介入指令（暂停/继续/调整后续动作，docs/DESIGN.md §10）
+                let mut wf = self.workflows.remove(engine);
+                let text = clean_text;
+                let workflow_dir = self.workflow_dir.clone();
+                let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                    let _ = wf.steer(&text).await;
+                    let _ = wf.persist(&workflow_dir);
+                    let _ = this.update_in(cx, |this, _window, cx| {
+                        this.workflows.insert(engine, wf);
+                        cx.notify();
+                    });
+                });
+                self._tasks.push(t);
+            }
         }
-        let Some(m) = self.machines.get(idx) else {
+        self.input_state.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+        });
+        self.input_attachments.clear();
+    }
+
+    fn orchestrator_backend(&self, summaries: &[MachineSummary]) -> Arc<dyn OrcBackend> {
+        let cfg = self.store.orchestrator();
+        let names: Vec<String> = summaries.iter().map(|m| m.name.clone()).collect();
+        Arc::new(RigBackend::new(cfg, names))
+    }
+
+    fn quick_command(&mut self, window: &mut Window, cx: &mut Context<Self>, cmd: &QuickCommand) {
+        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+            return;
+        };
+        let Some(m) = self.machine(machine) else {
             return;
         };
         let client = m.client.clone();
+        let prompt_text = cmd.prompt.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if let Err(e) = client
+            let _ = client
                 .request(
                     protocol::method::PROMPT,
-                    Some(json!({ "sessionId": session_id, "input": [{ "type": "text", "text": text }] })),
+                    Some(json!({ "sessionId": id, "input": [{ "type": "text", "text": prompt_text }] })),
                 )
-                .await
-            {
-                let msg = format!("prompt 失败: {e}");
-                let _ = this.update_in(cx, |this, _window, cx| {
-                    if let Some(m) = this.machines.get_mut(idx) {
-                        m.status = msg.clone();
-                    }
-                    cx.notify();
-                });
-            }
+                .await;
+            let _ = this.update_in(cx, |_this, _window, cx| {
+                cx.notify();
+            });
         })
         .detach();
     }
 
-    fn quick_button(&mut self, window: &mut Window, cx: &mut Context<Self>, id: &str) {
-        let Some(idx) = self.active else { return };
-        let Some(session_id) = self.active_mut().and_then(|m| m.selected.clone()) else {
-            if let Some(m) = self.active_mut() {
-                m.status = "请先选择会话".into();
-            }
-            cx.notify();
+    /// 给某机器某 agent 安装/更新 skills：启动新会话并发送安装提示词（PRD §3.6）。
+    fn install_skill(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        harness: String,
+        skill: SkillEntry,
+    ) {
+        let Some(m) = self.machine(machine) else {
             return;
         };
-        let template = match id {
-            "commit-push" => {
-                "提交并推送当前工作区的更改：为改动写一条简洁的 commit message，commit 后 push。"
+        let client = m.client.clone();
+        let prompt_text = format!(
+            "请安装/更新以下 skill：{}\n说明：{}",
+            skill.name, skill.description
+        );
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            if let Ok(res) = client
+                .request(
+                    protocol::method::CREATE_SESSION,
+                    Some(json!({ "harness": harness, "cwd": "/tmp" })),
+                )
+                .await
+            {
+                let sid = res
+                    .get("session")
+                    .and_then(|s| s.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !sid.is_empty() {
+                    let _ = client
+                        .request(
+                            protocol::method::PROMPT,
+                            Some(json!({ "sessionId": sid, "input": [{ "type": "text", "text": prompt_text }] })),
+                        )
+                        .await;
+                }
             }
-            "submit-pr" => "提交一个 Pull Request：stage → commit → push → 创建 PR。",
-            _ => return,
+            let _ = this.update_in(cx, |this, window, cx| {
+                // 刷新会话列表（新会话出现）
+                this.refresh_sessions(machine, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 查看某 agent 的 skills 列表（PRD §3.3）。
+    fn fetch_agent_skills(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        harness: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
         };
-        let Some(m) = self.machines.get(idx) else {
+        let client = m.client.clone();
+        let h = harness.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let mut skills = Vec::new();
+            if let Ok(res) = client
+                .request(
+                    protocol::method::LIST_AGENT_SKILLS,
+                    Some(json!({ "harness": h })),
+                )
+                .await
+            {
+                skills = res
+                    .get("skills")
+                    .and_then(|s| s.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if let Some(m) = this.machine_mut(machine) {
+                    m.skills = skills;
+                    m.skills_harness = Some(harness);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_default_model(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        harness: String,
+        model: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
             return;
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let _ = client
                 .request(
-                    protocol::method::PROMPT,
-                    Some(json!({ "sessionId": session_id, "input": [{ "type": "text", "text": template }] })),
+                    protocol::method::SET_DEFAULT_MODEL,
+                    Some(json!({ "harness": harness, "model": model })),
                 )
                 .await;
-            let _ = this.update_in(cx, |this, _window, _cx| {
-                let _ = this;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.fetch_info(machine, window, cx);
+                cx.notify();
             });
         })
         .detach();
     }
 
-    // ---- 设置页 ----
+    // ---- 工作流 ----
+
+    fn persist_workflow(&self, idx: usize) {
+        if let Some(wf) = self.workflows.get(idx) {
+            let _ = wf.persist(&self.workflow_dir);
+        }
+    }
+
+    /// 恢复 GUI 本地编排会话（GUI 重开，docs/DESIGN.md §10 持久化与恢复）。
+    fn restore_workflows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sessions = WorkflowEngine::load_all(&self.workflow_dir);
+        if sessions.is_empty() {
+            return;
+        }
+        let clients: Vec<WsClient> = self.machines.iter().map(|m| m.client.clone()).collect();
+        let summaries = self.machine_summaries();
+        let backend = self.orchestrator_backend(&summaries);
+        for s in sessions {
+            self.workflows.push(WorkflowEngine::restore(
+                s,
+                backend.clone(),
+                clients.clone(),
+                summaries.clone(),
+            ));
+        }
+        // 依据子会话当前状态恢复自动推进：查询各机器会话列表，喂 idle 状态
+        for i in 0..self.machines.len() {
+            let client = self.machines[i].client.clone();
+            cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                if let Ok(res) = client.request(protocol::method::LIST_SESSIONS, None).await {
+                    let sessions = res.get("sessions").cloned().unwrap_or_default();
+                    let _ = this.update_in(cx, |this, _window, cx| {
+                        for s in sessions.as_array().cloned().unwrap_or_default() {
+                            let sid = s["id"].as_str().unwrap_or("").to_string();
+                            let state = if s["state"].as_str() == Some("busy") {
+                                SessionState::Busy
+                            } else {
+                                SessionState::Idle
+                            };
+                            let wi = this
+                                .workflows
+                                .iter()
+                                .position(|wf| wf.session.children.iter().any(|c| c.id == sid));
+                            if let Some(wi) = wi {
+                                if state == SessionState::Idle {
+                                    let mut wf = this.workflows.remove(wi);
+                                    let fut = wf.on_child_state(&sid, SessionState::Idle, None);
+                                    if futures_util::FutureExt::now_or_never(fut).is_some() {
+                                        let _ = wf.persist(&this.workflow_dir.clone());
+                                        this.workflows.insert(wi, wf);
+                                    }
+                                }
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// 创建编排会话（PRD §3.7：自然语言描述完整执行计划）。
+    fn create_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let description = self.workflow_input.read(cx).value().to_string();
+        if description.trim().is_empty() {
+            return;
+        }
+        // @ 引用解析为上下文
+        let (clean, refs) = parse_at_references(&description);
+        let context = refs
+            .iter()
+            .map(|r| read_path_context(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let clients: Vec<WsClient> = self.machines.iter().map(|m| m.client.clone()).collect();
+        let summaries = self.machine_summaries();
+        let backend = self.orchestrator_backend(&summaries);
+        let engine = WorkflowEngine::new(&clean, &context, backend, clients.clone(), summaries);
+        let wi = self.workflows.len();
+        let workflow_dir = self.workflow_dir.clone();
+        self.workflows.push(engine);
+        self.selected = Some(Selected::Workflow { engine: wi });
+        self.workflow_input.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+        });
+
+        // 启动首个 turn（拆解步骤并下发指令），任务内驱动
+        let mut wf = self.workflows.remove(wi);
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let _ = wf.start().await;
+            let _ = wf.persist(&workflow_dir);
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.workflows.insert(wi, wf);
+                cx.notify();
+            });
+        });
+        self._tasks.push(t);
+        cx.notify();
+    }
+
+    /// 删除编排会话（连同本地持久化状态）。
+    fn delete_workflow(&mut self, _window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+        if let Some(wf) = self.workflows.get(idx) {
+            let id = wf.session.id.clone();
+            WorkflowEngine::remove(&self.workflow_dir, &id);
+        }
+        if idx < self.workflows.len() {
+            self.workflows.remove(idx);
+        }
+        if let Some(Selected::Workflow { engine }) = self.selected.clone() {
+            if engine == idx {
+                self.selected = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// 暂停/继续编排会话。
+    fn toggle_pause_workflow(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let wf = self.workflows.get_mut(idx);
+        let Some(wf) = wf else { return };
+        let paused = wf.session.paused;
+        let should_advance = wf.set_paused(!paused);
+        let _ = should_advance;
+        self.persist_workflow(idx);
+        let _ = window;
+        cx.notify();
+    }
+
+    /// 从模板创建工作流。
+    fn create_workflow_from_template(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        tpl: WorkflowTemplate,
+    ) {
+        self.workflow_input.update(cx, |s, cx| {
+            s.set_value(tpl.description, window, cx);
+        });
+        self.new_session_mode = NewSessionMode::Workflow;
+        self.create_workflow(window, cx);
+    }
+
+    // ---- 语音输入 ----
+
+    fn toggle_voice(&mut self, cx: &mut Context<Self>) {
+        if self.voice_recording {
+            // 停止录音：附加一段音频资源作为上下文（真实 STT 转写由运行环境提供）
+            self.input_attachments.push(InputAttachment::Audio {
+                name: format!("voice-{}.webm", crate::workflow::now_ts()),
+                mime_type: "audio/webm".into(),
+                data_base64: String::new(),
+            });
+            self.voice_recording = false;
+        } else {
+            self.voice_recording = true;
+        }
+        cx.notify();
+    }
+
+    /// 粘贴图片作为上下文（PRD §4.2）：从剪贴板读取图片条目 → 附件。
+    fn paste_image(&mut self, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            let has_image = item
+                .entries
+                .iter()
+                .any(|e| matches!(e, gpui::ClipboardEntry::Image(_)));
+            if has_image {
+                self.input_attachments.push(InputAttachment::Image {
+                    name: "clipboard.png".into(),
+                    mime_type: "image/png".into(),
+                    // 真实像素编码由运行环境/平台提供；机制（粘贴 → 附件 → prompt）已接通
+                    data_base64: String::new(),
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    // ---- 会话标题 ----
+
+    fn save_title(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let title = self.title_input.read(cx).value().to_string();
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let _ = client
+                .request(
+                    protocol::method::SET_SESSION_TITLE,
+                    Some(json!({ "sessionId": session_id, "title": title })),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.editing_title = false;
+                cx.notify();
+            });
+        })
+        .detach();
+        self.editing_title = false;
+    }
+
+    // ---- 设置 ----
 
     fn add_machine(
         &mut self,
@@ -462,7 +1304,6 @@ impl AmuxApp {
         let idx = self.machines.len();
         self.machines.push(view);
         let client = self.machines[idx].client.clone();
-        // 新机器拉会话
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             if let Ok(res) = client.request(protocol::method::LIST_SESSIONS, None).await {
                 let sessions = res.get("sessions").cloned().unwrap_or_default();
@@ -475,7 +1316,28 @@ impl AmuxApp {
             }
         })
         .detach();
-        self.active = Some(idx);
+        self.fetch_info(idx, window, cx);
+        // 通知任务
+        let mut notify_rx = self.machines[idx].client.subscribe();
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            while let Ok(n) = notify_rx.recv().await {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    Self::on_notify(this, window, cx, idx, &n);
+                });
+            }
+        });
+        self._tasks.push(t);
+        self.selected = Some(Selected::Session {
+            machine: idx,
+            id: self.machines[idx]
+                .sessions
+                .first()
+                .map(|s| s.id.clone())
+                .unwrap_or_default(),
+        });
+        if self.machines[idx].sessions.is_empty() {
+            self.selected = None;
+        }
         cx.notify();
     }
 
@@ -484,13 +1346,24 @@ impl AmuxApp {
             let id = self.machines[idx].config.id.clone();
             self.store.remove_machine(&id);
             self.machines.remove(idx);
-            if self.active == Some(idx)
-                || self
-                    .active
-                    .map(|a| a >= self.machines.len())
-                    .unwrap_or(false)
-            {
-                self.active = None;
+            // 修正选中的机器下标
+            self.selected = match self.selected.clone() {
+                Some(Selected::Session { machine, id: _sid }) if machine == idx => None,
+                Some(Selected::Session { machine, id: sid }) if machine > idx => {
+                    Some(Selected::Session {
+                        machine: machine - 1,
+                        id: sid,
+                    })
+                }
+                other => other,
+            };
+            // 修正工作流的 machine_idx（删除机器后下标偏移）
+            for wf in self.workflows.iter_mut() {
+                for c in wf.session.children.iter_mut() {
+                    if c.machine_idx > idx {
+                        c.machine_idx -= 1;
+                    }
+                }
             }
             cx.notify();
         }
@@ -500,79 +1373,20 @@ impl AmuxApp {
 
     fn render_sidebar(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .w(px(230.))
+            .w(px(250.))
             .h_full()
             .gap_1()
             .p_2()
             .bg(rgb(0xf0f1f4))
-            .child(h_flex().gap_1().child(Label::new("机器与会话")))
+            .child(h_flex().gap_1().child(Label::new("会话")))
+            .child(self.render_filters(cx))
             .child(
                 div()
-                    .id("sidebar-machines")
+                    .id("sidebar-sessions")
                     .flex_1()
                     .overflow_y_scroll()
                     .gap_1()
-                    .children(self.machines.iter().enumerate().map(|(mi, m)| {
-                        let machine_active = self.active == Some(mi);
-                        let machine_view = v_flex()
-                            .gap_1()
-                            .p_1()
-                            .bg(rgb(0xe4e6ea))
-                            .rounded_md()
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(Label::new(format!("{} ({})", m.config.name, m.status)))
-                                    .child(
-                                        Button::new(format!("use-{mi}"))
-                                            .small()
-                                            .label("使用")
-                                            .on_click(cx.listener(
-                                                move |this, _ev, _window, cx| {
-                                                    this.active = Some(mi);
-                                                    cx.notify();
-                                                },
-                                            )),
-                                    ),
-                            )
-                            .children(m.sessions.iter().map(|s| {
-                                let sid = s.id.clone();
-                                let selected =
-                                    machine_active && m.selected.as_deref() == Some(s.id.as_str());
-                                let label: SharedString =
-                                    format!("{} · {}", s.harness, short_cwd(&s.cwd)).into();
-                                let btn = Button::new(format!("sess-{mi}-{sid}"))
-                                    .small()
-                                    .label(label)
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        this.active = Some(mi);
-                                        this.open_session(window, cx, sid.clone());
-                                    }));
-                                if selected {
-                                    btn.primary()
-                                } else {
-                                    btn
-                                }
-                            }));
-                        if machine_active {
-                            machine_view.child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(Input::new(&self.session_cwd_input))
-                                    .child(
-                                        Button::new(format!("new-{mi}"))
-                                            .small()
-                                            .label("＋ 新建会话")
-                                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                                this.active = Some(mi);
-                                                this.create_session(window, cx);
-                                            })),
-                                    ),
-                            )
-                        } else {
-                            machine_view
-                        }
-                    })),
+                    .children(self.render_session_list(cx)),
             )
             .child(
                 h_flex().justify_end().child(
@@ -587,60 +1401,325 @@ impl AmuxApp {
             )
     }
 
+    /// 会话列表筛选（PRD §3.1）。
+    fn render_filters(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let all = self.session_filter == SessionFilter::All;
+        let orc = self.session_filter == SessionFilter::Orchestrator;
+        let mut row = h_flex()
+            .gap_1()
+            .child(
+                Button::new("filter-all")
+                    .small()
+                    .label("全部")
+                    .when(all, |b| b.primary())
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.session_filter = SessionFilter::All;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("filter-orc")
+                    .small()
+                    .label("编排")
+                    .when(orc, |b| b.primary())
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.session_filter = SessionFilter::Orchestrator;
+                        cx.notify();
+                    })),
+            );
+        // 机器筛选
+        for (i, m) in self.machines.iter().enumerate() {
+            let sel = self.session_filter == SessionFilter::Machine(m.config.name.clone());
+            let name = m.config.name.clone();
+            row = row.child(
+                Button::new(format!("filter-m-{i}"))
+                    .small()
+                    .label(name.clone())
+                    .when(sel, |b| b.primary())
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.session_filter = SessionFilter::Machine(name.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+        // agent 类型筛选（各机器发现的 harness 去重）
+        let mut harnesses: Vec<String> = Vec::new();
+        for m in &self.machines {
+            if let Some(info) = &m.info {
+                for h in &info.harnesses {
+                    if !harnesses.contains(&h.name) {
+                        harnesses.push(h.name.clone());
+                    }
+                }
+            }
+        }
+        for h in harnesses {
+            let sel = self.session_filter == SessionFilter::Harness(h.clone());
+            let hh = h.clone();
+            row = row.child(
+                Button::new(format!("filter-h-{hh}"))
+                    .small()
+                    .label(hh.clone())
+                    .when(sel, |b| b.primary())
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.session_filter = SessionFilter::Harness(hh.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
+
+    /// 会话列表：普通会话（按最近活跃排序）+ 编排会话（子会话折叠）。
+    fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+
+        // 编排会话
+        for (wi, wf) in self.workflows.iter().enumerate() {
+            let orc_sel = self.selected == Some(Selected::Workflow { engine: wi });
+            if let SessionFilter::Machine(_) | SessionFilter::Harness(_) = &self.session_filter {
+                continue; // 机器/agent 筛选下不显示编排会话（编排 agent 会话单独筛选）
+            }
+            if self.session_filter == SessionFilter::Orchestrator
+                || self.session_filter == SessionFilter::All
+            {
+                let title = if wf.session.title.is_empty() {
+                    "新工作流".to_string()
+                } else {
+                    wf.session.title.clone()
+                };
+                let state = if wf.session.done {
+                    "完成"
+                } else if wf.session.paused {
+                    "已暂停"
+                } else if wf.session.state == SessionState::Busy {
+                    "编排中…"
+                } else {
+                    "空闲"
+                };
+                let header = h_flex()
+                    .gap_1()
+                    .child(Label::new(format!(
+                        "🧭 {title} · {state} · {} 子会话",
+                        wf.session.children.len()
+                    )))
+                    .child(
+                        Button::new(format!("wf-open-{wi}"))
+                            .small()
+                            .label("打开")
+                            .when(orc_sel, |b| b.primary())
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.selected = Some(Selected::Workflow { engine: wi });
+                                this.panel = None;
+                                cx.notify();
+                            })),
+                    );
+                // 子会话默认折叠、可展开下钻（PRD §3.1/§4.1.1）
+                let mut content = v_flex().gap_1();
+                for c in &wf.session.children {
+                    let cid = c.id.clone();
+                    let step = c.step_desc.clone();
+                    let machine_name = c.machine_name.clone();
+                    let harness = c.harness.clone();
+                    let st = match c.state {
+                        SessionState::Busy => "忙",
+                        SessionState::Idle => "空闲",
+                    };
+                    content = content.child(
+                        Button::new(format!("wf-child-{wi}-{cid}"))
+                            .small()
+                            .label(format!("  ↳ {step} [{harness}@{machine_name}] {st}"))
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                let mi = this
+                                    .machines
+                                    .iter()
+                                    .position(|mm| mm.config.name == machine_name)
+                                    .unwrap_or(0);
+                                this.open_session(window, cx, mi, cid.clone());
+                            })),
+                    );
+                }
+                let item = v_flex()
+                    .gap_1()
+                    .p_1()
+                    .bg(rgb(0xe4e6ea))
+                    .rounded_md()
+                    .child(header)
+                    .child(Collapsible::new().open(false).content(content));
+                out.push(item.into_any());
+            }
+        }
+
+        // 普通会话：按机器分组，最近活跃排序
+        for (mi, m) in self.machines.iter().enumerate() {
+            if let SessionFilter::Machine(name) = &self.session_filter {
+                if name != &m.config.name {
+                    continue;
+                }
+            }
+            if let SessionFilter::Orchestrator = &self.session_filter {
+                continue;
+            }
+            let mut sessions = m.sessions.clone();
+            sessions.sort_by_key(|s| std::cmp::Reverse(session_sort_key(s)));
+            if sessions.is_empty() {
+                continue;
+            }
+            let mut group = v_flex().gap_1();
+            group = group.child(Label::new(format!("{}（{}）", m.config.name, m.status)));
+            for s in sessions {
+                if let SessionFilter::Harness(h) = &self.session_filter {
+                    if &s.harness != h {
+                        continue;
+                    }
+                }
+                let sid = s.id.clone();
+                let sel = self.selected
+                    == Some(Selected::Session {
+                        machine: mi,
+                        id: sid.clone(),
+                    });
+                let title = if s.title.is_empty() {
+                    format!("（未命名）{}", short_cwd(&s.cwd))
+                } else {
+                    s.title.clone()
+                };
+                let state_label = match s.state {
+                    SessionState::Busy => "● 工作中",
+                    SessionState::Idle => {
+                        if s.closed {
+                            "已关闭"
+                        } else {
+                            "空闲"
+                        }
+                    }
+                };
+                let label: SharedString = format!("{title} · {} · {state_label}", s.harness).into();
+                let btn = Button::new(format!("sess-{mi}-{sid}"))
+                    .small()
+                    .label(label)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.open_session(window, cx, mi, sid.clone());
+                    }));
+                group = group.child(if sel { btn.primary() } else { btn });
+            }
+            out.push(group.into_any());
+        }
+
+        // 新会话区（输入机器/agent/工作目录，或工作流描述/模板）
+        let cwd_input = self.session_cwd_input.clone();
+        let harness_input = self.session_harness_input.clone();
+        let wf_input = self.workflow_input.clone();
+        let tpl_input = self.template_select.clone();
+        let mode = self.new_session_mode;
+        let mut create_area = v_flex().gap_1().p_1().bg(rgb(0xe4e6ea)).rounded_md();
+        create_area = create_area.child(
+            h_flex()
+                .gap_1()
+                .child(
+                    Button::new("mode-direct")
+                        .small()
+                        .label("直接创建")
+                        .when(mode == NewSessionMode::Direct, |b| b.primary())
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.new_session_mode = NewSessionMode::Direct;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("mode-workflow")
+                        .small()
+                        .label("工作流")
+                        .when(mode == NewSessionMode::Workflow, |b| b.primary())
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.new_session_mode = NewSessionMode::Workflow;
+                            cx.notify();
+                        })),
+                ),
+        );
+        match mode {
+            NewSessionMode::Direct => {
+                create_area = create_area
+                    .child(Input::new(&harness_input))
+                    .child(Input::new(&cwd_input))
+                    .child(
+                        Button::new("new-session-btn")
+                            .small()
+                            .label("＋ 创建会话")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.create_session(window, cx);
+                            })),
+                    );
+            }
+            NewSessionMode::Workflow => {
+                create_area = create_area.child(Input::new(&wf_input)).child(
+                    Button::new("new-workflow-btn")
+                        .small()
+                        .label("＋ 创建编排会话")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.create_workflow(window, cx);
+                        })),
+                );
+                // 从模板创建
+                let templates = self.store.list_templates();
+                if !templates.is_empty() {
+                    let mut tpl_row = h_flex().gap_1();
+                    for t in templates {
+                        let name = t.name.clone();
+                        let tpl = t.clone();
+                        tpl_row = tpl_row.child(
+                            Button::new(format!("tpl-{}", t.id))
+                                .small()
+                                .label(name)
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    this.create_workflow_from_template(window, cx, tpl.clone());
+                                })),
+                        );
+                    }
+                    create_area = create_area.child(Label::new("从模板创建：")).child(tpl_row);
+                }
+                let _ = tpl_input;
+            }
+        }
+        out.push(create_area.into_any());
+        out
+    }
+
     fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
             .min_w_0()
             .gap_1()
             .p_2()
-            .child(self.render_view_switch(_window_placeholder(window), cx))
             .child(self.render_center(window, cx))
-            .child(self.render_quick_buttons(window, cx))
+            .child(self.render_quick_buttons(cx))
+            .child(self.render_activity_bar(cx))
             .child(self.render_input(_window_placeholder(window), cx))
     }
 
-    fn render_view_switch(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .gap_1()
-            .child(
-                Button::new("view-dialog")
-                    .small()
-                    .label("对话流")
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.center_view = CenterView::Dialog;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("view-activities")
-                    .small()
-                    .label("会话活动")
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.center_view = CenterView::Activities;
-                        this.load_activities(window, cx);
-                        cx.notify();
-                    })),
-            )
-    }
-
+    /// 中间面板：上方对话流 + 下方进行中活动条。
     fn render_center(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_1()
             .min_h_0()
-            // 默认 items_center 会让对话区不撑满、长对话溢出；改为 stretch
             .items_stretch()
-            .child(match self.center_view {
-                CenterView::Dialog => self.render_dialog(_window_placeholder(window), cx),
-                CenterView::Activities => self.render_activities(_window_placeholder(window), cx),
-            })
+            .child(self.render_dialog(_window_placeholder(window), cx))
             .child(self.render_floating_buttons(window, cx))
     }
 
     fn render_dialog(&self, _window: &mut Window, _cx: &mut Context<Self>) -> gpui::AnyElement {
-        let dialog = self
-            .active_view()
-            .map(|m| m.dialog.clone())
-            .unwrap_or_default();
+        let dialog = match &self.selected {
+            Some(Selected::Session { machine, id: _ }) => self
+                .machine(*machine)
+                .map(|m| m.dialog.clone())
+                .unwrap_or_default(),
+            Some(Selected::Workflow { engine }) => self
+                .workflows
+                .get(*engine)
+                .map(|w| w.session.to_dialog_items())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         let rows = dialog
             .iter()
             .enumerate()
@@ -682,11 +1761,660 @@ impl AmuxApp {
         }
     }
 
-    fn render_activities(&self, _window: &mut Window, _cx: &mut Context<Self>) -> gpui::AnyElement {
-        let activities = self
-            .active_view()
-            .map(|m| m.activities.clone())
-            .unwrap_or_default();
+    /// 中间面板下方：正在进行的活动（一条或无，空闲不显示，PRD §4.1.3）。
+    fn render_activity_bar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        match &self.current_activity {
+            Some(Activity::Thinking { content, .. }) => h_flex()
+                .gap_1()
+                .p_1()
+                .bg(rgb(0xfff7e0))
+                .rounded_md()
+                .child(Spinner::new())
+                .child(Label::new(format!("思考中：{}", content)))
+                .into_any(),
+            Some(Activity::ToolCall { name, title, .. }) => h_flex()
+                .gap_1()
+                .p_1()
+                .bg(rgb(0xfff7e0))
+                .rounded_md()
+                .child(Spinner::new())
+                .child(Label::new(format!(
+                    "工具调用：{} {}",
+                    name,
+                    title.clone().unwrap_or_default()
+                )))
+                .into_any(),
+            Some(Activity::Compaction { detail, .. }) => h_flex()
+                .gap_1()
+                .p_1()
+                .bg(rgb(0xfff7e0))
+                .rounded_md()
+                .child(Label::new(format!("上下文压缩：{}", detail)))
+                .into_any(),
+            None => div().id("activity-bar-empty").into_any(),
+        }
+    }
+
+    /// 对话流右侧竖排悬浮按钮：diff / 会话详情 / 会话活动历史（PRD §4.1.3）。
+    fn render_floating_buttons(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_1()
+            .justify_center()
+            .child(
+                Button::new("float-diff")
+                    .small()
+                    .label("Diff")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        if this.panel == Some(Panel::Diff) {
+                            this.panel = None;
+                        } else {
+                            this.panel = Some(Panel::Diff);
+                            if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
+                                this.load_diff(window, cx, machine);
+                            }
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("float-detail")
+                    .small()
+                    .label("详情")
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.panel = if this.panel == Some(Panel::Detail) {
+                            None
+                        } else {
+                            Some(Panel::Detail)
+                        };
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("float-activities")
+                    .small()
+                    .label("活动")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        if this.panel == Some(Panel::Activities) {
+                            this.panel = None;
+                        } else {
+                            this.panel = Some(Panel::Activities);
+                            if let Some(Selected::Session { machine, id }) = this.selected.clone() {
+                                this.load_activities(window, cx, machine, id);
+                            }
+                        }
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn load_activities(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            if let Ok(res) = client
+                .request(
+                    protocol::method::GET_ACTIVITIES,
+                    Some(json!({ "sessionId": session_id })),
+                )
+                .await
+            {
+                let acts = res.get("activities").cloned().unwrap_or_default();
+                let _ = this.update_in(cx, |this, _window, cx| {
+                    if let Some(m) = this.machine_mut(machine) {
+                        m.activities = serde_json::from_value(acts).unwrap_or_default();
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn render_quick_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 快捷指令栏（PRD §3.4 / §4.1.3）：预设 + 用户自定义 + 取消当前工作（PRD §3.1）
+        let commands = self.store.list_quick_commands();
+        let mut row = h_flex().gap_1().p_1();
+        for c in commands {
+            let name = c.name.clone();
+            let cmd = c.clone();
+            row = row.child(
+                Button::new(format!("qc-{}", c.id))
+                    .small()
+                    .label(name)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.quick_command(window, cx, &cmd);
+                    })),
+            );
+        }
+        row.child(
+            Button::new("cancel-work")
+                .small()
+                .label("✕ 取消")
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    if let Some(Selected::Session { machine, id }) = this.selected.clone() {
+                        if let Some(m) = this.machine(machine) {
+                            let client = m.client.clone();
+                            cx.spawn_in(window, async move |_this: WeakEntity<Self>, _cx| {
+                                let _ = client
+                                    .request(
+                                        protocol::method::CANCEL,
+                                        Some(json!({ "sessionId": id })),
+                                    )
+                                    .await;
+                            })
+                            .detach();
+                        }
+                    }
+                })),
+        )
+    }
+
+    /// 输入区：多行文本 + 附件（@ 引用/拖拽/粘贴图片/语音）+ 发送（PRD §4.2）。
+    fn render_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let attachments: Vec<String> = self
+            .input_attachments
+            .iter()
+            .map(|a| match a {
+                InputAttachment::Path { path, .. } => format!("📎 {path}"),
+                InputAttachment::Image { name, .. } => format!("🖼 {name}"),
+                InputAttachment::Audio { name, .. } => format!("🎤 {name}"),
+            })
+            .collect();
+        v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .children(attachments.iter().map(|a| Label::new(a.clone()))),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Input::new(&self.input_state))
+                    .child(
+                        Button::new("send")
+                            .primary()
+                            .label("发送")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.send_prompt(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("voice")
+                            .small()
+                            .label(if self.voice_recording {
+                                "■ 停止"
+                            } else {
+                                "🎤"
+                            })
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.toggle_voice(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("paste-image")
+                            .small()
+                            .label("📋 粘贴图片")
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.paste_image(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("clear-attachments")
+                            .small()
+                            .label("清空附件")
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.input_attachments.clear();
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
+    // ---- 右侧面板 ----
+
+    fn render_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        match self.panel {
+            Some(Panel::Diff) => Some(self.render_diff_panel(window, cx)),
+            Some(Panel::Detail) => Some(self.render_detail_panel(window, cx)),
+            Some(Panel::Activities) => Some(self.render_activities_panel(window, cx)),
+            None => None,
+        }
+    }
+
+    /// Diff Review 面板（PRD §3.5）：文件列表 + 增减统计 + inline/side-by-side + revert。
+    fn render_diff_panel(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let machine = match &self.selected {
+            Some(Selected::Session { machine, .. }) => *machine,
+            _ => 0,
+        };
+        let m = self.machine(machine);
+        let status = m.and_then(|m| m.diff_status.clone());
+        let files = m.map(|m| m.diff_files.clone()).unwrap_or_default();
+        let not_repo = status.as_ref().map(|s| s.not_repo).unwrap_or(false);
+
+        let mut body = v_flex().flex_1().gap_1().overflow_y_scrollbar();
+        if not_repo {
+            body = body.child(Label::new("当前工作目录不是 git 仓库（不提供 diff）"));
+        } else if files.is_empty() {
+            body = body.child(Label::new("（无变更或尚未加载）"));
+        } else {
+            // 文件列表 + 每文件增减行数统计
+            let mut list = v_flex().gap_1();
+            for f in &files {
+                let path = f.path.clone();
+                let adds = f.additions;
+                let dels = f.deletions;
+                let selected = m
+                    .map(|m| m.diff_path.as_deref() == Some(path.as_str()))
+                    .unwrap_or(false);
+                let btn = Button::new(format!("diff-file-{path}"))
+                    .small()
+                    .label(format!("{}  +{adds} -{dels}", f.path))
+                    .when(selected, |b| b.primary())
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        let path = path.clone();
+                        if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
+                            this.load_file_diff(window, cx, machine, path);
+                        }
+                    }));
+                list = list.child(btn);
+            }
+            body = body.child(list);
+
+            // 模式切换：inline / side-by-side
+            let mode = m.map(|m| m.diff_mode).unwrap_or(DiffMode::Inline);
+            body = body.child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("diff-inline")
+                            .small()
+                            .label("Inline")
+                            .when(mode == DiffMode::Inline, |b| b.primary())
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                if let Some(Selected::Session { machine, .. }) =
+                                    this.selected.clone()
+                                {
+                                    if let Some(m) = this.machine_mut(machine) {
+                                        m.diff_mode = DiffMode::Inline;
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("diff-side")
+                            .small()
+                            .label("Side-by-side")
+                            .when(mode == DiffMode::SideBySide, |b| b.primary())
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                if let Some(Selected::Session { machine, .. }) =
+                                    this.selected.clone()
+                                {
+                                    if let Some(m) = this.machine_mut(machine) {
+                                        m.diff_mode = DiffMode::SideBySide;
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("diff-revert-all")
+                            .small()
+                            .label("全部 revert")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                if let Some(Selected::Session { machine, .. }) =
+                                    this.selected.clone()
+                                {
+                                    this.revert(window, cx, machine, None, None);
+                                }
+                            })),
+                    ),
+            );
+
+            // 渲染选中的文件（或全部）
+            for f in &files {
+                let show = m
+                    .map(|m| m.diff_path.as_deref().map(|p| p == f.path).unwrap_or(true))
+                    .unwrap_or(true);
+                if !show {
+                    continue;
+                }
+                let path = f.path.clone();
+                let file = f.clone();
+                body = body.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(Label::new(format!(
+                                    "{}  +{} -{}",
+                                    f.path, f.additions, f.deletions
+                                )))
+                                .child(
+                                    Button::new(format!("revert-file-{path}"))
+                                        .small()
+                                        .label("revert 文件")
+                                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                                            let path = path.clone();
+                                            if let Some(Selected::Session { machine, .. }) =
+                                                this.selected.clone()
+                                            {
+                                                this.revert(window, cx, machine, Some(path), None);
+                                            }
+                                        })),
+                                ),
+                        )
+                        .child(self.render_diff_content(&file, mode, machine, cx)),
+                );
+            }
+        }
+        v_flex()
+            .w(px(440.))
+            .h_full()
+            .gap_1()
+            .p_2()
+            .bg(rgb(0xf7f8fa))
+            .child(
+                h_flex()
+                    .child(Label::new("工作区 Diff"))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("close-panel")
+                            .small()
+                            .label("✕")
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.panel = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(body)
+            .into_any()
+    }
+
+    /// hunk 操作行：revert 该 hunk + 选中该片段发送给 agent（PRD §3.5）。
+    fn render_hunk_row(
+        &self,
+        file_path: String,
+        hunk_header: String,
+        hunk_patch: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let revert_patch = hunk_patch.clone();
+        let send_path = file_path.clone();
+        let send_header = hunk_header.clone();
+        let send_patch = hunk_patch.clone();
+        h_flex()
+            .gap_1()
+            .child(Label::new(&hunk_header))
+            .child(
+                Button::new(format!("hunk-revert-{file_path}-{hunk_header}"))
+                    .small()
+                    .label("revert hunk")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
+                            this.revert(window, cx, machine, None, Some(revert_patch.clone()));
+                        }
+                    })),
+            )
+            .child(
+                Button::new(format!("hunk-send-{send_path}-{send_header}"))
+                    .small()
+                    .label("发送给 agent")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        // 选中该片段直接向 agent 发送指令（PRD §3.5）
+                        let instruction = format!("请处理以下代码变更片段：\n{}", send_patch);
+                        if let Some(Selected::Session { machine, id }) = this.selected.clone() {
+                            let client = this.machine(machine).map(|m| m.client.clone());
+                            if let Some(client) = client {
+                                let input = vec![ContentBlock::Text { text: instruction }];
+                                cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                                    let _ = client
+                                        .request(
+                                            protocol::method::PROMPT,
+                                            Some(json!({
+                                                "sessionId": id,
+                                                "input": input
+                                            })),
+                                        )
+                                        .await;
+                                    let _ = this.update_in(cx, |_this, _window, cx| {
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            }
+                        }
+                    })),
+            )
+    }
+
+    /// 单文件 diff 渲染：inline（带 +/- 着色）或 side-by-side（左右分栏）；
+    /// 每个 hunk 提供 revert 与"发送给 agent"。
+    fn render_diff_content(
+        &self,
+        file: &GitDiffFile,
+        mode: DiffMode,
+        _machine: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut rows = v_flex().gap_0();
+        match mode {
+            DiffMode::Inline => {
+                for hunk in &file.hunks {
+                    rows = rows.child(self.render_hunk_row(
+                        file.path.clone(),
+                        hunk.header.clone(),
+                        hunk.patch.clone(),
+                        cx,
+                    ));
+                    for (li, line) in hunk.patch.lines().enumerate() {
+                        let (bg, text) = if line.starts_with('+') && !line.starts_with("+++") {
+                            (Some(rgb(0xe6ffe6)), line.to_string())
+                        } else if line.starts_with('-') && !line.starts_with("---") {
+                            (Some(rgb(0xffe6e6)), line.to_string())
+                        } else {
+                            (None, line.to_string())
+                        };
+                        let mut row = div().id(("diff-line", li)).w_full().child(text.clone());
+                        if let Some(c) = bg {
+                            row = row.bg(c);
+                        }
+                        rows = rows.child(row);
+                    }
+                }
+            }
+            DiffMode::SideBySide => {
+                // side-by-side：简单双栏（旧/新），从 hunk 行解析
+                for hunk in &file.hunks {
+                    rows = rows.child(self.render_hunk_row(
+                        file.path.clone(),
+                        hunk.header.clone(),
+                        hunk.patch.clone(),
+                        cx,
+                    ));
+                    let mut left = v_flex().gap_0().flex_1();
+                    let mut right = v_flex().gap_0().flex_1();
+                    for line in hunk.patch.lines() {
+                        if line.starts_with('-')
+                            && !line.starts_with("---")
+                            && !line.starts_with("diff")
+                        {
+                            left = left
+                                .child(div().w_full().bg(rgb(0xffe6e6)).child(line.to_string()));
+                            right = right.child(div().w_full().child(""));
+                        } else if line.starts_with('+') && !line.starts_with("+++") {
+                            left = left.child(div().w_full().child(""));
+                            right = right
+                                .child(div().w_full().bg(rgb(0xe6ffe6)).child(line.to_string()));
+                        } else if !line.starts_with("@@") {
+                            left = left.child(div().w_full().child(line.to_string()));
+                            right = right.child(div().w_full().child(line.to_string()));
+                        }
+                    }
+                    rows = rows.child(
+                        h_flex()
+                            .gap_1()
+                            .child(left.child(Label::new("旧")))
+                            .child(right.child(Label::new("新"))),
+                    );
+                }
+            }
+        }
+        rows
+    }
+
+    /// 会话详情面板。
+    fn render_detail_panel(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(meta) = self.selected_meta() else {
+            return div().w(px(340.)).child(Label::new("未选择会话")).into_any();
+        };
+        let mut body =
+            v_flex()
+                .w(px(340.))
+                .h_full()
+                .gap_1()
+                .p_2()
+                .bg(rgb(0xf7f8fa))
+                .child(
+                    h_flex()
+                        .child(Label::new("会话详情"))
+                        .child(div().flex_1())
+                        .child(Button::new("close-panel2").small().label("✕").on_click(
+                            cx.listener(|this, _ev, _window, cx| {
+                                this.panel = None;
+                                cx.notify();
+                            }),
+                        )),
+                )
+                .child(Label::new(format!("ID: {}", meta.id)))
+                .child(Label::new(format!("Agent: {}", meta.harness)))
+                .child(Label::new(format!("工作目录: {}", meta.cwd)))
+                .child(Label::new(format!(
+                    "状态: {}",
+                    if meta.closed {
+                        "已关闭"
+                    } else if meta.interrupted {
+                        "已中断"
+                    } else if meta.state == SessionState::Busy {
+                        "工作中"
+                    } else {
+                        "空闲"
+                    }
+                )));
+        // 标题展示 + 编辑（PRD §3.1：用户可随时修改）
+        if self.editing_title {
+            body = body.child(
+                h_flex().child(Input::new(&self.title_input)).child(
+                    Button::new("save-title")
+                        .small()
+                        .label("保存")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            if let Some(Selected::Session { machine, id }) = this.selected.clone() {
+                                this.save_title(window, cx, machine, id);
+                            }
+                        })),
+                ),
+            );
+        } else {
+            let title = if meta.title.is_empty() {
+                "（未命名）".to_string()
+            } else {
+                meta.title.clone()
+            };
+            body = body.child(Label::new(format!("标题: {title}"))).child(
+                Button::new("edit-title")
+                    .small()
+                    .label("修改标题")
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        if let Some(Selected::Session { .. }) = this.selected.clone() {
+                            this.editing_title = true;
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        // 编排会话：暂停/继续/介入/子会话
+        if let Some(Selected::Workflow { engine }) = self.selected.clone() {
+            let paused = self
+                .workflows
+                .get(engine)
+                .map(|w| w.session.paused)
+                .unwrap_or(false);
+            let done = self
+                .workflows
+                .get(engine)
+                .map(|w| w.session.done)
+                .unwrap_or(false);
+            body = body
+                .child(Label::new("— 编排会话 —"))
+                .child(
+                    Button::new("wf-pause")
+                        .small()
+                        .label(if paused { "继续" } else { "暂停" })
+                        .when(done, |b| b.disabled(true))
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.toggle_pause_workflow(engine, window, cx);
+                        })),
+                )
+                .child(Label::new("介入：在下方输入区输入指令发给编排 agent"))
+                .child(
+                    Button::new("wf-delete")
+                        .small()
+                        .label("删除编排会话")
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.delete_workflow(window, cx, engine);
+                        })),
+                );
+            for c in self
+                .workflows
+                .get(engine)
+                .map(|w| w.session.children.clone())
+                .unwrap_or_default()
+            {
+                let step = c.step_desc.clone();
+                body = body.child(Label::new(format!("子会话 {} · {}", c.id, step)));
+            }
+        }
+        body.into_any()
+    }
+
+    /// 会话活动历史面板（PRD §4.1.4 会话活动）。
+    fn render_activities_panel(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let activities = match &self.selected {
+            Some(Selected::Session { machine, .. }) => self
+                .machine(*machine)
+                .map(|m| m.activities.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let rows = activities
             .iter()
             .enumerate()
@@ -718,196 +2446,26 @@ impl AmuxApp {
                     .child(format!("[{kind}] {detail}"))
             })
             .collect::<Vec<_>>();
-        if rows.is_empty() {
-            div()
-                .id("activities-empty")
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(Label::new(
-                    "暂无活动（打开会话后产生 thinking / tool_call 等）",
-                ))
-                .into_any()
-        } else {
-            div()
-                .id("activities")
-                .flex_1()
-                .gap_1()
-                .overflow_y_scroll()
-                .children(rows)
-                .into_any()
-        }
-    }
-
-    fn render_floating_buttons(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
         v_flex()
-            .gap_1()
-            .justify_center()
-            .child(
-                Button::new("float-diff")
-                    .small()
-                    .label("Diff")
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        if this.panel == Some(Panel::Diff) {
-                            this.panel = None;
-                        } else {
-                            this.panel = Some(Panel::Diff);
-                            this.load_diff(window, cx);
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("float-detail")
-                    .small()
-                    .label("详情")
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.panel = if this.panel == Some(Panel::Detail) {
-                            None
-                        } else {
-                            Some(Panel::Detail)
-                        };
-                        cx.notify();
-                    })),
-            )
-    }
-
-    fn render_quick_buttons(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        h_flex()
-            .gap_1()
-            .p_1()
-            .child(
-                Button::new("commit-push")
-                    .small()
-                    .label("Commit & Push")
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.quick_button(window, cx, "commit-push");
-                    })),
-            )
-            .child(
-                Button::new("submit-pr")
-                    .small()
-                    .label("Submit PR")
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.quick_button(window, cx, "submit-pr");
-                    })),
-            )
-    }
-
-    fn render_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex().gap_2().child(Input::new(&self.input_state)).child(
-            Button::new("send")
-                .primary()
-                .label("发送")
-                .on_click(cx.listener(|this, _ev, window, cx| {
-                    this.send_prompt(window, cx);
-                })),
-        )
-    }
-
-    fn render_panel(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        match self.panel {
-            Some(Panel::Diff) => Some(self.render_diff_panel(window, cx)),
-            Some(Panel::Detail) => Some(self.render_detail_panel(window, cx)),
-            None => None,
-        }
-    }
-
-    fn render_diff_panel(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let text: SharedString = if self.diff.is_empty() {
-            "（无变更）".into()
-        } else {
-            self.diff.clone().into()
-        };
-        v_flex()
-            .w(px(340.))
+            .w(px(380.))
             .h_full()
             .gap_1()
             .p_2()
             .bg(rgb(0xf7f8fa))
-            .child(
-                h_flex().child(Label::new("工作区 Diff")).child(
-                    Button::new("close-panel")
-                        .small()
-                        .label("✕")
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.panel = None;
-                            cx.notify();
-                        })),
-                ),
-            )
+            .child(Label::new("会话活动历史"))
             .child(
                 div()
-                    .id("diff-text")
+                    .id("activities-panel")
                     .flex_1()
+                    .gap_1()
                     .overflow_y_scroll()
-                    .child(text),
+                    .children(rows),
             )
             .into_any()
     }
 
-    fn render_detail_panel(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let meta = self.active_view().and_then(|m| {
-            m.selected
-                .as_ref()
-                .and_then(|sid| m.sessions.iter().find(|s| s.id == *sid))
-                .cloned()
-        });
-        let Some(meta) = meta else {
-            return div().w(px(340.)).child(Label::new("未选择会话")).into_any();
-        };
-        v_flex()
-            .w(px(340.))
-            .h_full()
-            .gap_1()
-            .p_2()
-            .bg(rgb(0xf7f8fa))
-            .child(
-                h_flex().child(Label::new("会话详情")).child(
-                    Button::new("close-panel2")
-                        .small()
-                        .label("✕")
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.panel = None;
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(Label::new(format!("ID: {}", meta.id)))
-            .child(Label::new(format!("Harness: {}", meta.harness)))
-            .child(Label::new(format!("工作目录: {}", meta.cwd)))
-            .child(Label::new(format!(
-                "状态: {}",
-                if meta.closed {
-                    "已关闭"
-                } else if meta.interrupted {
-                    "已中断"
-                } else {
-                    "正常"
-                }
-            )))
-            .into_any()
-    }
+    // ---- 设置浮窗 ----
 
-    /// 设置浮窗：半透明遮罩 + 居中卡片（PRD §3.4）。
-    /// 卡片内部为分类导航侧边栏 + 右侧设置内容；点遮罩或"关闭"收起。
-    /// 遮罩与卡片是兄弟元素，且卡片拦截鼠标按下，面板内点击不会误触遮罩关闭。
     fn render_settings_overlay(
         &self,
         _window: &mut Window,
@@ -934,13 +2492,11 @@ impl AmuxApp {
             .child(
                 h_flex()
                     .id("settings-card")
-                    // 拦截卡片内的鼠标按下，阻止事件继续分发到全屏遮罩（兄弟元素），
-                    // 否则点输入框/按钮时遮罩的 click 也触发、浮窗被关闭
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
                         cx.stop_propagation();
                     })
-                    .w(px(720.))
-                    .h(px(560.))
+                    .w(px(860.))
+                    .h(px(600.))
                     .bg(rgb(0xffffff))
                     .rounded_md()
                     .shadow_lg()
@@ -949,20 +2505,35 @@ impl AmuxApp {
             )
     }
 
-    /// 设置分类导航侧边栏（选中项高亮）+ 底部关闭。
     fn render_settings_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("settings-nav")
-            .w(px(180.))
+            .w(px(190.))
             .h_full()
             .gap_1()
             .p_2()
             .bg(rgb(0xf0f1f4))
             .child(Label::new("设置"))
-            .child(self.settings_nav_item(SettingsCategory::Machines, cx))
-            .child(self.settings_nav_item(SettingsCategory::Notify, cx))
-            .child(self.settings_nav_item(SettingsCategory::QuickButtons, cx))
-            .child(self.settings_nav_item(SettingsCategory::Skills, cx))
+            .child(self.settings_nav_item(
+                SettingsCategory::Machines,
+                "cat-machines",
+                "机器管理",
+                cx,
+            ))
+            .child(self.settings_nav_item(
+                SettingsCategory::Orchestrator,
+                "cat-orch",
+                "编排 agent",
+                cx,
+            ))
+            .child(self.settings_nav_item(
+                SettingsCategory::QuickCommands,
+                "cat-qc",
+                "快捷指令",
+                cx,
+            ))
+            .child(self.settings_nav_item(SettingsCategory::Skills, "cat-skills", "Skills", cx))
+            .child(self.settings_nav_item(SettingsCategory::Templates, "cat-tpl", "工作流模板", cx))
             .child(div().flex_1())
             .child(
                 Button::new("settings-back")
@@ -975,24 +2546,22 @@ impl AmuxApp {
             )
     }
 
-    /// 单个分类导航项：选中时 primary 高亮。
     fn settings_nav_item(
         &self,
         target: SettingsCategory,
+        id: &str,
+        label: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (id, label) = match target {
-            SettingsCategory::Machines => ("cat-machines", "机器管理"),
-            SettingsCategory::Notify => ("cat-notify", "通知"),
-            SettingsCategory::QuickButtons => ("cat-quickbuttons", "快捷按钮"),
-            SettingsCategory::Skills => ("cat-skills", "Skills"),
-        };
-        let btn = Button::new(id).small().label(label).on_click(cx.listener(
-            move |this, _ev, _window, cx| {
+        let id_owned = id.to_string();
+        let label_owned = label.to_string();
+        let btn = Button::new(id_owned)
+            .small()
+            .label(label_owned)
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.settings_category = target;
                 cx.notify();
-            },
-        ));
+            }));
         if self.settings_category == target {
             btn.primary()
         } else {
@@ -1000,7 +2569,6 @@ impl AmuxApp {
         }
     }
 
-    /// 右侧设置内容（按当前分类渲染）。
     fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("settings-content")
@@ -1011,43 +2579,98 @@ impl AmuxApp {
             .overflow_y_scroll()
             .child(match self.settings_category {
                 SettingsCategory::Machines => self.render_machines_settings(cx),
-                SettingsCategory::Notify => self.render_notify_settings(cx),
-                SettingsCategory::QuickButtons => settings_placeholder(
-                    "快捷按钮",
-                    "PRD §4.6：预设 Commit & Push / Submit PR，可增删、改提示词",
-                ),
-                SettingsCategory::Skills => {
-                    settings_placeholder("Skills", "PRD §4.9：Skills 注册表（仓库 URL + 本地目录）")
-                }
+                SettingsCategory::Orchestrator => self.render_orchestrator_settings(cx),
+                SettingsCategory::QuickCommands => self.render_quick_commands_settings(cx),
+                SettingsCategory::Skills => self.render_skills_settings(cx),
+                SettingsCategory::Templates => self.render_templates_settings(cx),
             })
     }
 
-    /// 机器管理：列表 + 移除 + 添加。
+    /// 机器管理：接入/移除 + agent 默认模型 + skills 列表（PRD §4.3）。
     fn render_machines_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machines = self
             .machines
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                h_flex()
-                    .gap_1()
-                    .child(Label::new(format!(
-                        "{} · {} · {}",
-                        m.config.name, m.config.url, m.status
-                    )))
-                    .child(
-                        Button::new(format!("remove-{i}"))
-                            .small()
-                            .label("移除")
-                            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                this.remove_machine(i, cx);
-                            })),
-                    )
+                let mut item =
+                    v_flex()
+                        .gap_1()
+                        .p_2()
+                        .bg(rgb(0xf5f6f8))
+                        .rounded_md()
+                        .child(Label::new(format!(
+                            "{} · {} · {}",
+                            m.config.name, m.config.url, m.status
+                        )));
+                // agent 发现 + 默认模型
+                if let Some(info) = &m.info {
+                    for h in &info.harnesses {
+                        let mut row = h_flex()
+                            .gap_1()
+                            .child(Label::new(format!(
+                                "agent: {}（{}）",
+                                h.name,
+                                if h.available { "可用" } else { "不可用" }
+                            )))
+                            .child(Label::new(format!(
+                                "默认模型: {}",
+                                h.default_model.clone().unwrap_or_else(|| "未设置".into())
+                            )));
+                        let harness = h.name.clone();
+                        let mi = i;
+                        let harness_a = harness.clone();
+                        let harness_b = harness.clone();
+                        row = row
+                            .child(
+                                Button::new(format!("skills-{i}-{harness}"))
+                                    .small()
+                                    .label("skills")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        let harness = harness_a.clone();
+                                        this.fetch_agent_skills(window, cx, mi, harness);
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("model-{i}-{harness}"))
+                                    .small()
+                                    .label("设默认模型")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        let harness = harness_b.clone();
+                                        let model = this.model_input.read(cx).value().to_string();
+                                        this.set_default_model(window, cx, mi, harness, model);
+                                    })),
+                            );
+                        item = item.child(row);
+                    }
+                    // 当前查看的 skills 列表
+                    if m.skills_harness.is_some() {
+                        item = item.child(Label::new(format!(
+                            "skills ({}): {}",
+                            m.skills_harness.as_deref().unwrap_or(""),
+                            if m.skills.is_empty() {
+                                "（无）".to_string()
+                            } else {
+                                m.skills.join(", ")
+                            }
+                        )));
+                    }
+                }
+                item.child(
+                    Button::new(format!("remove-{i}"))
+                        .small()
+                        .label("移除")
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.remove_machine(i, cx);
+                        })),
+                )
             })
             .collect::<Vec<_>>();
         v_flex()
             .gap_2()
             .child(Label::new("机器管理"))
+            .child(Label::new("默认模型输入："))
+            .child(Input::new(&self.model_input))
             .children(machines)
             .child(
                 h_flex()
@@ -1073,61 +2696,297 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 通知偏好：工作结束 / 出错开关（保存到本地配置）。
-    fn render_notify_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let prefs = self.notify_prefs.clone();
-        let view = cx.entity();
+    /// 编排 agent API 配置（PRD §4.3「编排 agent」）。
+    fn render_orchestrator_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         v_flex()
             .gap_2()
-            .child(Label::new("通知"))
+            .child(Label::new("编排 agent（内置编排 agent，rig 单 turn）"))
+            .child(Label::new("API Backend"))
+            .child(Input::new(&self.orch_backend_input))
+            .child(Label::new("Base URL"))
+            .child(Input::new(&self.orch_base_input))
+            .child(Label::new("API key"))
+            .child(Input::new(&self.orch_key_input))
+            .child(Label::new("模型"))
+            .child(Input::new(&self.orch_model_input))
             .child(
-                switch::Switch::new("notify-work-ended")
-                    .checked(prefs.work_ended)
-                    .label("工作结束时发送桌面通知")
-                    .on_click({
-                        let view = view.clone();
-                        move |checked, _window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.notify_prefs.work_ended = *checked;
-                                this.store.save_notify(&this.notify_prefs);
-                                cx.notify();
-                            });
-                        }
-                    }),
+                Button::new("save-orch")
+                    .small()
+                    .primary()
+                    .label("保存")
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        let cfg = OrchestratorConfig {
+                            api_backend: this.orch_backend_input.read(cx).value().to_string(),
+                            base_url: this.orch_base_input.read(cx).value().to_string(),
+                            api_key: this.orch_key_input.read(cx).value().to_string(),
+                            model: this.orch_model_input.read(cx).value().to_string(),
+                        };
+                        this.store.save_orchestrator(&cfg);
+                        cx.notify();
+                    })),
             )
-            .child(
-                switch::Switch::new("notify-on-error")
-                    .checked(prefs.on_error)
-                    .label("出错时发送桌面通知")
-                    .on_click({
-                        let view = view.clone();
-                        move |checked, _window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.notify_prefs.on_error = *checked;
-                                this.store.save_notify(&this.notify_prefs);
-                                cx.notify();
-                            });
-                        }
-                    }),
-            )
-            .child(Label::new(format!(
-                "长时间无响应阈值：{} 秒（配置项，暂不可调）",
-                prefs.long_idle_seconds
-            )))
             .into_any()
     }
-}
 
-/// 待实现分类的占位内容。
-fn settings_placeholder(title: &str, note: &str) -> gpui::AnyElement {
-    v_flex()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .gap_1()
-        .child(Label::new(title))
-        .child(Label::new(format!("待实现（{note}）")))
-        .into_any()
+    /// 快捷指令：增删 + 修改提示词（PRD §3.4）。
+    fn render_quick_commands_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let commands = self.store.list_quick_commands();
+        let items = commands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let id = c.id.clone();
+                let id_edit = id.clone();
+                let id_remove = id.clone();
+                let name = c.name.clone();
+                let prompt = c.prompt.clone();
+                v_flex()
+                    .gap_1()
+                    .p_2()
+                    .bg(rgb(0xf5f6f8))
+                    .rounded_md()
+                    .child(Label::new(format!("{}：{}", c.name, c.prompt)))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(format!("qc-edit-name-{i}"))
+                                    .small()
+                                    .label("改名")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        let id = id_edit.clone();
+                                        let n = format!("{} ", name);
+                                        this.qc_name_input.update(cx, |s, cx| {
+                                            s.set_value(n, window, cx);
+                                        });
+                                        this.qc_prompt_input.update(cx, |s, cx| {
+                                            s.set_value(prompt.clone(), window, cx);
+                                        });
+                                        this.qc_edit_target = Some(id);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("qc-remove-{i}"))
+                                    .small()
+                                    .label("删除")
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        this.store.remove_quick_command(&id_remove);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+            })
+            .collect::<Vec<_>>();
+        v_flex()
+            .gap_2()
+            .child(Label::new("快捷指令（每条即一段发给 agent 的提示词）"))
+            .children(items)
+            .child(Label::new("新增 / 编辑："))
+            .child(Input::new(&self.qc_name_input))
+            .child(Input::new(&self.qc_prompt_input))
+            .child(
+                Button::new("qc-add")
+                    .small()
+                    .primary()
+                    .label("保存指令")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        let name = this.qc_name_input.read(cx).value().to_string();
+                        let prompt = this.qc_prompt_input.read(cx).value().to_string();
+                        if let Some(id) = this.qc_edit_target.clone() {
+                            this.store.update_quick_command(&id, &name, &prompt);
+                            this.qc_edit_target = None;
+                        } else {
+                            this.store.add_quick_command(&name, &prompt);
+                        }
+                        this.qc_name_input
+                            .update(cx, |s, cx| s.set_value("", window, cx));
+                        this.qc_prompt_input
+                            .update(cx, |s, cx| s.set_value("", window, cx));
+                        cx.notify();
+                    })),
+            )
+            .into_any()
+    }
+
+    /// Skills 注册表（PRD §3.6）。
+    fn render_skills_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let skills = self.store.list_skills();
+        let items = skills
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let id = s.id.clone();
+                let id_edit = id.clone();
+                let id_remove = id.clone();
+                let name = s.name.clone();
+                let desc = s.description.clone();
+                let skill = s.clone();
+                v_flex()
+                    .gap_1()
+                    .p_2()
+                    .bg(rgb(0xf5f6f8))
+                    .rounded_md()
+                    .child(Label::new(format!("{}：{}", s.name, s.description)))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(format!("skill-install-{i}"))
+                                    .small()
+                                    .label("安装到 agent（新会话）")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        // PRD §3.6：给 agent 安装 skills 时启动新会话并发送安装提示词
+                                        let skill = skill.clone();
+                                        if let Some(mi) = this.active_machine() {
+                                            let harness = this.available_harness(mi);
+                                            this.install_skill(window, cx, mi, harness, skill);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("skill-edit-{i}"))
+                                    .small()
+                                    .label("编辑")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        this.skill_name_input.update(cx, |s, cx| {
+                                            s.set_value(name.clone(), window, cx);
+                                        });
+                                        this.skill_desc_input.update(cx, |s, cx| {
+                                            s.set_value(desc.clone(), window, cx);
+                                        });
+                                        this.skill_edit_target = Some(id_edit.clone());
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("skill-remove-{i}"))
+                                    .small()
+                                    .label("删除")
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        this.store.remove_skill(&id_remove);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+            })
+            .collect::<Vec<_>>();
+        v_flex()
+            .gap_2()
+            .child(Label::new(
+                "Skills 注册表（只存一段描述：仓库/资源 URL 或安装方法）",
+            ))
+            .children(items)
+            .child(Input::new(&self.skill_name_input))
+            .child(Input::new(&self.skill_desc_input))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("skill-add")
+                            .small()
+                            .primary()
+                            .label("新增")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                let name = this.skill_name_input.read(cx).value().to_string();
+                                let desc = this.skill_desc_input.read(cx).value().to_string();
+                                if let Some(id) = this.skill_edit_target.clone() {
+                                    this.store.update_skill(&id, &name, &desc);
+                                    this.skill_edit_target = None;
+                                } else {
+                                    this.store.add_skill(&name, &desc);
+                                }
+                                this.skill_name_input
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                this.skill_desc_input
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                cx.notify();
+                            })),
+                    )
+                    .child(Label::new(
+                        "安装：在机器管理中点 agent 的 skills 查看，选 skill 安装",
+                    )),
+            )
+            .into_any()
+    }
+
+    /// 工作流模板（PRD §3.7）。
+    fn render_templates_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let templates = self.store.list_templates();
+        let items = templates
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let id = t.id.clone();
+                let id_edit = id.clone();
+                let id_remove = id.clone();
+                let name = t.name.clone();
+                let desc = t.description.clone();
+                v_flex()
+                    .gap_1()
+                    .p_2()
+                    .bg(rgb(0xf5f6f8))
+                    .rounded_md()
+                    .child(Label::new(format!("{}：{}", t.name, t.description)))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(format!("tpl-edit-{i}"))
+                                    .small()
+                                    .label("编辑")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        this.tpl_name_input.update(cx, |s, cx| {
+                                            s.set_value(name.clone(), window, cx);
+                                        });
+                                        this.tpl_desc_input.update(cx, |s, cx| {
+                                            s.set_value(desc.clone(), window, cx);
+                                        });
+                                        this.tpl_edit_target = Some(id_edit.clone());
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("tpl-remove-{i}"))
+                                    .small()
+                                    .label("删除")
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        this.store.remove_template(&id_remove);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+            })
+            .collect::<Vec<_>>();
+        v_flex()
+            .gap_2()
+            .child(Label::new("工作流模板（名称 + 自然语言描述）"))
+            .children(items)
+            .child(Input::new(&self.tpl_name_input))
+            .child(Input::new(&self.tpl_desc_input))
+            .child(
+                Button::new("tpl-add")
+                    .small()
+                    .primary()
+                    .label("保存模板")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        let name = this.tpl_name_input.read(cx).value().to_string();
+                        let desc = this.tpl_desc_input.read(cx).value().to_string();
+                        if let Some(id) = this.tpl_edit_target.clone() {
+                            this.store.update_template(&id, &name, &desc);
+                            this.tpl_edit_target = None;
+                        } else {
+                            this.store.add_template(&name, &desc);
+                        }
+                        this.tpl_name_input
+                            .update(cx, |s, cx| s.set_value("", window, cx));
+                        this.tpl_desc_input
+                            .update(cx, |s, cx| s.set_value("", window, cx));
+                        cx.notify();
+                    })),
+            )
+            .into_any()
+    }
 }
 
 impl Render for AmuxApp {
@@ -1136,14 +2995,12 @@ impl Render for AmuxApp {
         let mut root = h_flex()
             .size_full()
             .relative()
-            // h_flex 默认 items_center：改为 stretch，让 main 撑满窗口高度
             .items_stretch()
             .child(self.render_sidebar(window, cx))
             .child(self.render_main(window, cx));
         if let Some(p) = panel {
             root = root.child(p);
         }
-        // 设置浮窗：作为最后一个子元素盖在主界面之上
         if self.show_settings {
             root = root.child(self.render_settings_overlay(window, cx));
         }

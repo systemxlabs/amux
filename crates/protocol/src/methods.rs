@@ -30,6 +30,12 @@ pub mod method {
     pub const GIT_PUSH: &str = "git_push";
     /// git revert（undo；需工作区间结束）
     pub const GIT_REVERT: &str = "git_revert";
+    /// 修改会话标题（用户可随时修改）
+    pub const SET_SESSION_TITLE: &str = "set_session_title";
+    /// 配置 agent 默认模型（server 侧持久化）
+    pub const SET_DEFAULT_MODEL: &str = "set_default_model";
+    /// 查询某 agent 安装的 skills 列表
+    pub const LIST_AGENT_SKILLS: &str = "list_agent_skills";
 }
 
 /// server → GUI 通知名。
@@ -42,6 +48,8 @@ pub mod notify {
     pub const SESSION_INTERRUPTED: &str = "session_interrupted";
     /// 会话删除
     pub const SESSION_DELETED: &str = "session_deleted";
+    /// 会话元数据更新（标题修改等）
+    pub const SESSION_UPDATED: &str = "session_updated";
     /// turn 完成：agent 完整输出（非流式交付，docs/DESIGN.md §5.1）
     pub const TURN_COMPLETED: &str = "turn_completed";
     /// 会话状态（进行中 / 完成，turn 边界）

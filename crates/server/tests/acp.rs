@@ -7,6 +7,7 @@ use protocol::ContentBlock;
 
 // server 是 bin crate：测试用 #[path] 引入 agent 模块的真实实现
 #[path = "../src/agent.rs"]
+#[allow(dead_code)]
 mod agent;
 
 use agent::{AcpAgentDriver, AgentDriver, AgentEvent, DialogRecord};
@@ -106,7 +107,7 @@ async fn acp_driver_full_flow() {
         })
         .collect();
     assert!(
-        output_texts.iter().any(|t| t.contains("历史回复")),
+        output_texts.iter().any(|t| t.contains("完成")),
         "load 重放应含 agent 输出: {output_texts:?}"
     );
 

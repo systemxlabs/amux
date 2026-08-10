@@ -10,7 +10,7 @@ mod transport;
 
 use std::sync::Arc;
 
-use crate::agent::{AcpAgentDriver, SharedDriver, StubAgentDriver};
+use crate::agent::{AcpAgentDriver, AgentRegistry, SharedDriver};
 use crate::config::load_config;
 use crate::git::GitRunner;
 use crate::rpc::Handlers;
@@ -31,11 +31,16 @@ async fn main() {
 
     // 依赖组装：ACP agent 驱动（--agent 指定真实 agent 可执行，如 codex-acp）；
     // 未指定时用内存 Stub（演示模式）。docs/DESIGN.md §9
-    let driver: SharedDriver = match &cfg.agent_bin {
+    let configured: Option<(String, SharedDriver)> = match &cfg.agent_bin {
         Some(bin) => match AcpAgentDriver::spawn(bin, &[]) {
             Ok(d) => {
-                println!("已连接 ACP agent: {bin}");
-                Arc::new(d)
+                let name = std::path::Path::new(bin)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("agent")
+                    .to_string();
+                println!("已连接 ACP agent: {bin}（harness: {name}）");
+                Some((name, Arc::new(d)))
             }
             Err(e) => {
                 eprintln!("启动 ACP agent ({bin}) 失败: {e}");
@@ -44,17 +49,22 @@ async fn main() {
         },
         None => {
             println!("未指定 --agent，使用内存 Stub（演示模式）");
-            Arc::new(StubAgentDriver::new())
+            None
         }
     };
-    let (manager, notifications) = SessionManager::new(driver.clone(), 200);
-    let manager = Arc::new(manager);
 
     // 数据目录（docs/DESIGN.md §5.5）
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
         eprintln!("创建数据目录失败: {e}");
         std::process::exit(1);
     }
+    let agents = Arc::new(AgentRegistry::new(
+        configured,
+        cfg.data_dir.join("agent-models.json"),
+    ));
+
+    let (manager, notifications) = SessionManager::new(agents, 200);
+    let manager = Arc::new(manager);
 
     let handlers = Arc::new(Handlers {
         manager: manager.clone(),

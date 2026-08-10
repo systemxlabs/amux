@@ -7,8 +7,9 @@ use serde_json::Value;
 
 use protocol::{
     method, rpc_error, server_error, ActivitiesResult, CreateSessionParams, GetActivitiesParams,
-    GitDiffParams, GitOpResult, GitRevertParams, MachineInfo, OpenSessionResult, PromptParams,
-    SessionIdParams, SessionResult, SessionsResult,
+    GitDiffParams, GitOpResult, GitRevertParams, ListAgentSkillsParams, ListAgentSkillsResult,
+    MachineInfo, OpenSessionResult, PromptParams, SessionIdParams, SessionResult, SessionsResult,
+    SetDefaultModelParams, SetSessionTitleParams,
 };
 
 use crate::git::GitRunner;
@@ -71,7 +72,7 @@ impl Handlers {
             method::GET_INFO => {
                 let info = MachineInfo {
                     server_version: self.server_version.clone(),
-                    harnesses: vec![],
+                    harnesses: self.manager.harnesses(),
                 };
                 Ok(serde_json::to_value(info).map_err(|e| RpcError::internal(e.to_string()))?)
             }
@@ -167,7 +168,8 @@ impl Handlers {
             }
             method::GIT_DIFF => {
                 let p: GitDiffParams = parse(params)?;
-                Ok(Value::String(self.git.diff(&p.cwd, p.path.as_deref())))
+                let r = self.git.diff(&p.cwd, p.path.as_deref());
+                Ok(serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))?)
             }
             method::GIT_PUSH => {
                 let cwd = parse::<GitCwdParams>(params)?.cwd;
@@ -180,6 +182,25 @@ impl Handlers {
                     .git
                     .revert(&p.cwd, p.path.as_deref(), p.patch.as_deref());
                 Ok(serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))?)
+            }
+            method::SET_SESSION_TITLE => {
+                let p: SetSessionTitleParams = parse(params)?;
+                self.manager
+                    .set_session_title(&p.session_id, &p.title)
+                    .await
+                    .map_err(map_session_err)?;
+                Ok(Value::Null)
+            }
+            method::SET_DEFAULT_MODEL => {
+                let p: SetDefaultModelParams = parse(params)?;
+                self.manager.set_default_model(&p.harness, p.model);
+                Ok(Value::Null)
+            }
+            method::LIST_AGENT_SKILLS => {
+                let p: ListAgentSkillsParams = parse(params)?;
+                let skills = self.manager.list_agent_skills(&p.harness);
+                Ok(serde_json::to_value(ListAgentSkillsResult { skills })
+                    .map_err(|e| RpcError::internal(e.to_string()))?)
             }
             _ => Err(RpcError {
                 code: rpc_error::METHOD_NOT_FOUND,
