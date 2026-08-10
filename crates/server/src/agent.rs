@@ -607,9 +607,21 @@ async fn exec_main(
     ) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("[acp] 解析 agent 命令失败 ({bin}): {e}");
+            protocol::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
             return;
         }
+    };
+    protocol::log::info(
+        "acp",
+        format!("已连接 ACP agent: {bin} {}", args.join(" ")),
+    );
+    // trace 级：ACP 线上原始帧（GUI ↔ server ↔ ACP client ↔ agent 全链路，docs/DESIGN.md §8）
+    let agent = if protocol::log::enabled(protocol::Level::Trace) {
+        agent.with_debug(|line, direction| {
+            protocol::log::trace("acp.wire", format!("{direction:?} {line}"));
+        })
+    } else {
+        agent
     };
 
     let _ = Client
@@ -646,7 +658,9 @@ async fn exec_main(
                 .block_task()
                 .await
             {
-                eprintln!("[acp] initialize 失败（继续）: {e}");
+                protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
+            } else {
+                protocol::log::debug("acp", "initialize 完成");
             }
 
             // 服务循环：每个请求独立 spawn，支持并发（cancel 不必等 prompt 完成）
@@ -681,7 +695,10 @@ async fn exec_main(
                                         let _ = tx.try_send(AgentEvent::TurnEnded);
                                     }
                                     if let Err(e) = result {
-                                        eprintln!("[acp] prompt 失败: {e}");
+                                        protocol::log::error(
+                                            "acp",
+                                            format!("prompt 失败 {sid}: {e}"),
+                                        );
                                     }
                                     Ok(())
                                 });
@@ -700,13 +717,29 @@ async fn dispatch_call(
     method: &str,
     params: &Value,
 ) -> Result<Value, String> {
-    let sid = || {
-        params
-            .get("sessionId")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
+    let sid = params
+        .get("sessionId")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    protocol::log::debug(
+        "acp",
+        format!("调用 {method} {}", protocol::log::params_summary(params, &["sessionId", "cwd"], 60)),
+    );
+    let result = dispatch_call_inner(cx, method, params, &sid).await;
+    match &result {
+        Ok(_) => protocol::log::debug("acp", format!("{method} 成功")),
+        Err(e) => protocol::log::error("acp", format!("{method} 失败: {e}")),
+    }
+    result
+}
+
+async fn dispatch_call_inner(
+    cx: &ConnectionTo<Agent>,
+    method: &str,
+    params: &Value,
+    sid: &str,
+) -> Result<Value, String> {
     match method {
         "session/new" => {
             let cwd = params
@@ -725,7 +758,7 @@ async fn dispatch_call(
                 .get("cwd")
                 .and_then(|c| c.as_str())
                 .unwrap_or("/tmp");
-            cx.send_request(LoadSessionRequest::new(sid(), cwd))
+            cx.send_request(LoadSessionRequest::new(sid.to_string(), cwd))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/load 失败: {e}"))?;
@@ -736,26 +769,26 @@ async fn dispatch_call(
                 .get("cwd")
                 .and_then(|c| c.as_str())
                 .unwrap_or("/tmp");
-            cx.send_request(ResumeSessionRequest::new(sid(), cwd))
+            cx.send_request(ResumeSessionRequest::new(sid.to_string(), cwd))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/resume 失败: {e}"))?;
             Ok(Value::Null)
         }
         "session/cancel" => {
-            cx.send_notification(CancelNotification::new(sid()))
+            cx.send_notification(CancelNotification::new(sid.to_string()))
                 .map_err(|e| format!("session/cancel 失败: {e}"))?;
             Ok(Value::Null)
         }
         "session/close" => {
-            cx.send_request(CloseSessionRequest::new(sid()))
+            cx.send_request(CloseSessionRequest::new(sid.to_string()))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/close 失败: {e}"))?;
             Ok(Value::Null)
         }
         "session/delete" => {
-            cx.send_request(DeleteSessionRequest::new(sid()))
+            cx.send_request(DeleteSessionRequest::new(sid.to_string()))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/delete 失败: {e}"))?;

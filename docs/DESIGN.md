@@ -106,7 +106,7 @@ Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server �
 
 GUI 为单进程桌面应用（GPUI + gpui-component，跟踪 Zed 主线 git 依赖；跨平台 macOS / Linux / Windows）：
 
-- **布局**：三面板 **Dock 布局**（gpui-component）
+- **布局**：三面板 **Dock 布局**（gpui-component）；右侧上下文面板（diff / 会话详情 / 会话活动）展开时**窗口向右扩展**，不压缩中间面板空间，关闭时收回
 - **对话流**：只展示用户消息与 agent 输出的消息气泡（**Markdown 渲染**，gpui-component）+ 虚拟化列表；输出为完整消息，非流式
 - **会话活动**：中间面板下方展示**正在进行的活动**（一条或无，实时）；右侧面板展示完整活动历史（上下滚动）——经 `get_activities` 获取
 - **Diff Review**：代码编辑器组件 + **Tree Sitter 语法高亮**（gpui-component）；文件列表、side-by-side/inline diff、revert 操作
@@ -116,7 +116,7 @@ GUI 为单进程桌面应用（GPUI + gpui-component，跟踪 Zed 主线 git 依
 
 ## 8. 日志与追踪（可观测性）
 
-日志是 amux 调试的主要手段：GUI ↔ server ↔ ACP client ↔ agent 跨进程、跨机器，问题定位依赖能串起整条链路的日志。具体格式、级别策略、覆盖范围与落盘位置交由实现 agent 决定。
+日志是 amux 调试的主要手段：GUI ↔ server ↔ ACP client ↔ agent 跨进程、跨机器，问题定位依赖能串起整条链路的日志。
 
 ## 9. Server 与 Agent 通信（ACP v1）
 

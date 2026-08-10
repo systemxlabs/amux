@@ -3,9 +3,11 @@
 //! GUI 与 server 均从这里导入类型与方法/通知名。
 
 pub mod jsonrpc;
+pub mod log;
 pub mod methods;
 pub mod types;
 
 pub use jsonrpc::*;
+pub use log::*;
 pub use methods::*;
 pub use types::*;

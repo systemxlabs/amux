@@ -145,6 +145,11 @@ async fn handle_connection(
         tokio::select! {
             n = notify_rx.recv() => {
                 let Ok(frame) = n else { break };
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&frame) {
+                    if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
+                        protocol::log::debug("server.transport", format!("通知 {m}"));
+                    }
+                }
                 if sink.send(Message::Text(frame)).await.is_err() {
                     break;
                 }
@@ -198,6 +203,7 @@ async fn dispatch(handlers: &Handlers, text: &str) -> Option<JsonRpcResponse> {
     };
     let method = value.get("method").and_then(|m| m.as_str());
     let Some(method) = method else {
+        protocol::log::error("server.transport", "收到非法请求（无 method）");
         return Some(JsonRpcResponse {
             jsonrpc: "2.0".into(),
             id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
@@ -212,19 +218,36 @@ async fn dispatch(handlers: &Handlers, text: &str) -> Option<JsonRpcResponse> {
     let params = value.get("params").cloned();
 
     if let Some(id) = value.get("id").cloned() {
-        // 请求
+        // 请求：记录方法 + 关键参数（长文本截断；docs/DESIGN.md §8 全链路日志）
+        let summary = protocol::log::params_summary(
+            params.as_ref().unwrap_or(&serde_json::Value::Null),
+            &["sessionId", "harness", "cwd", "input", "session_id"],
+            60,
+        );
+        protocol::log::debug("server.transport", format!("请求 {method} {summary}"));
+        let started = std::time::Instant::now();
         let result = handlers.handle(method, &params).await;
         let (result, error) = match result {
             Ok(v) => (Some(v), None),
-            Err(RpcError { code, message }) => (
-                None,
-                Some(protocol::JsonRpcError {
-                    code,
-                    message,
-                    data: None,
-                }),
-            ),
+            Err(RpcError { code, message }) => {
+                protocol::log::error(
+                    "server.transport",
+                    format!("请求 {method} 失败 [{code}]: {message}"),
+                );
+                (
+                    None,
+                    Some(protocol::JsonRpcError {
+                        code,
+                        message,
+                        data: None,
+                    }),
+                )
+            }
         };
+        protocol::log::debug(
+            "server.transport",
+            format!("响应 {method}（{}ms）", started.elapsed().as_millis()),
+        );
         Some(JsonRpcResponse {
             jsonrpc: "2.0".into(),
             id,

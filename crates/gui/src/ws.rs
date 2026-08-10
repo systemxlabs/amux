@@ -23,6 +23,12 @@ fn rt() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// GUI 全局 tokio runtime 句柄（WS 后台任务；也供需要 reactor 的
+/// 编排引擎等使用——rig/reqwest 的 LLM 调用必须在 tokio 上下文执行）。
+pub fn runtime() -> &'static tokio::runtime::Runtime {
+    rt()
+}
+
 #[derive(Debug)]
 pub struct RpcError {
     pub code: i32,
@@ -104,6 +110,7 @@ async fn run_loop(
                 Ok((ws, _)) => {
                     attempt = 0;
                     connected = true;
+                    protocol::log::info("gui.ws", format!("已连接 {url}"));
                     let _ = notify_tx.send(Notification {
                         method: "connected".into(),
                         params: Value::Null,
@@ -123,6 +130,10 @@ async fn run_loop(
                                     "jsonrpc": "2.0", "id": id, "method": req.method,
                                     "params": req.params
                                 });
+                                protocol::log::debug(
+                                    "gui.ws",
+                                    format!("请求 #{id} {}", frame.get("method").and_then(|m| m.as_str()).unwrap_or("?")),
+                                );
                                 if sink.send(Message::Text(frame.to_string())).await.is_err() {
                                     let _ = req.resp.send(Err(RpcError { code: -1, message: "发送失败".into() }));
                                     break;
@@ -140,15 +151,17 @@ async fn run_loop(
                                 if let Some(id) = v.get("id").and_then(|i| i.as_u64()) {
                                     if let Some(resp) = pending.remove(&id) {
                                         if let Some(err) = v.get("error") {
-                                            let _ = resp.send(Err(RpcError {
-                                                code: err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) as i32,
-                                                message: err.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
-                                            }));
+                                            let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) as i32;
+                                            let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                                            protocol::log::warn("gui.ws", format!("请求 #{id} 失败 [{code}]: {message}"));
+                                            let _ = resp.send(Err(RpcError { code, message }));
                                         } else {
+                                            protocol::log::debug("gui.ws", format!("请求 #{id} 成功"));
                                             let _ = resp.send(Ok(v.get("result").cloned().unwrap_or(Value::Null)));
                                         }
                                     }
                                 } else if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
+                                    protocol::log::debug("gui.ws", format!("通知 {method}"));
                                     let _ = notify_tx.send(Notification {
                                         method: method.to_string(),
                                         params: v.get("params").cloned().unwrap_or(Value::Null),
@@ -158,6 +171,7 @@ async fn run_loop(
                         }
                     }
                     // 连接断开：通知 UI（真实离线状态，PRD §3.3 在线状态），清 pending，退避后重连
+                    protocol::log::warn("gui.ws", format!("连接断开 {url}，准备重连"));
                     let _ = notify_tx.send(Notification {
                         method: "disconnected".into(),
                         params: Value::Null,
@@ -169,9 +183,10 @@ async fn run_loop(
                         }));
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     attempt += 1;
                     let delay = Duration::from_millis(500u64 * 2u64.pow(attempt.min(6)));
+                    protocol::log::debug("gui.ws", format!("连接失败（第 {attempt} 次），{delay:?} 后重试: {e}"));
                     tokio::time::sleep(delay).await;
                 }
             }
