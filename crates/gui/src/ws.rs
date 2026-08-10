@@ -50,6 +50,7 @@ pub struct Notification {
     pub params: Value,
 }
 
+#[derive(Clone)]
 pub struct WsClient {
     req_tx: mpsc::Sender<ClientReq>,
     notify_tx: broadcast::Sender<Notification>,
