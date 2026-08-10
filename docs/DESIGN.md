@@ -35,11 +35,11 @@ Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server �
 |---|---|
 | `protocol` | app↔server 协议面：方法名、参数/结果类型、通知类型。**协议的唯一来源**，GUI 与 server 均从这里导入 |
 | `server` | 每台机器的常驻进程：WebSocket 传输（tokio-tungstenite）、JSON-RPC 分发、会话管理、会话数据聚合与 activities 缓存、git 能力（status/diff/push/revert）；经 ACP 官方 SDK（`agent-client-protocol`）与 agent 通信 |
-| `gui` | GPUI 桌面应用：三面板视图（Dock 布局）、对话流、会话活动、diff 编辑器、侧边栏、设置页；会话历史本地缓存 |
+| `gui` | GPUI 桌面应用：三面板视图（Dock 布局）、对话流、会话活动、diff 编辑器、侧边栏、设置页；会话历史本地缓存；内置编排 agent（rig） |
 
 - server 与 agent 的交互**只经 ACP 协议**（官方 SDK `agent-client-protocol` + `agent-client-protocol-tokio`）
 - server 之间不通信；跨机器编排在 GUI 侧完成
-- 技术依赖：`tokio`（异步）、`serde`/`serde_json`（JSON-RPC）、`tokio-tungstenite`（WS）、`agent-client-protocol`（ACP 官方 SDK）、`gpui` + `gpui-component`（GUI，跟踪 Zed 主线 git 依赖）
+- 技术依赖：`tokio`（异步）、`serde`/`serde_json`（JSON-RPC）、`tokio-tungstenite`（WS）、`agent-client-protocol`（ACP 官方 SDK）、`rig`（编排 agent 的 LLM 客户端与工具抽象）、`gpui` + `gpui-component`（GUI，跟踪 Zed 主线 git 依赖）
 
 ## 3. Server 生命周期与启动
 
@@ -134,9 +134,10 @@ Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与
 
 ## 10. 工作流
 
-工作流由 **GUI 内置编排 agent** 驱动，基于会话原语实现，不占用协议面：
+工作流由 **GUI 内置编排 agent** 驱动（**rig 单 turn 模式**实现），基于会话原语实现，不占用协议面：
 
 - **编排 agent 会话**：工作流创建一个编排 agent 会话（GUI 内置 agent，状态存 GUI 本地），与普通会话一样支持 prompt / 状态（idle / thinking）
+- **rig 单 turn 模式**：每个 turn 调用一次 rig `Agent::prompt`（不用 `multi_turn` 长循环）——输出指令后 turn 结束、**不阻塞等待子会话**；子会话 idle 或用户介入后再启动下一 turn；会话操作（创建会话、向子会话发指令、汇总）定义为 rig 工具
 - **自动推进**：GUI 监听子会话状态（server 通知）；子 agent 会话变为 idle 时，系统自动向编排 agent 会话注入 prompt（含子会话完成情况），触发其评估结果并推进下一阶段
 - **无独立状态机**：进展由编排 agent 会话内容与状态（idle / thinking）体现，用户自行判断
 - **暂停 / 继续 / 介入**：均为向会话发送指令——暂停 / 继续发给编排 agent 会话由其控制子会话；介入可发给编排 agent 或子会话
