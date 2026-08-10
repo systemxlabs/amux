@@ -10,11 +10,12 @@ use gpui_component::*;
 use gpui_component_assets::Assets;
 
 fn main() {
-    // 连接参数：--token <值>（必填，与 server 一致）；可选 --host/--port
+    // 连接参数：--token <值>（必填，与 server 一致）；可选 --host/--port/--cwd
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut token: Option<String> = None;
     let mut host = "127.0.0.1".to_string();
     let mut port = "34567".to_string();
+    let mut cwd = "/tmp/work".to_string();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -34,6 +35,12 @@ fn main() {
                     port = v.clone();
                 }
             }
+            "--cwd" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    cwd = v.clone();
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -51,7 +58,7 @@ fn main() {
         cx.spawn(async move |cx| {
             let window_options = WindowOptions::default();
             cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|cx| AmuxApp::new(url.clone(), window, cx));
+                let view = cx.new(|cx| AmuxApp::new(url.clone(), cwd.clone(), window, cx));
                 // 窗口第一层必须是 Root
                 cx.new(|cx| Root::new(view, window, cx))
             })

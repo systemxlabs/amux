@@ -18,6 +18,7 @@ use crate::ws::{Notification, WsClient};
 
 pub struct AmuxApp {
     client: Arc<WsClient>,
+    cwd: String,
     status: SharedString,
     sessions: Vec<SessionMeta>,
     selected: Option<String>,
@@ -38,7 +39,7 @@ fn block_text(content: &[ContentBlock]) -> String {
 }
 
 impl AmuxApp {
-    pub fn new(url: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(url: String, cwd: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let client = Arc::new(WsClient::connect(url));
         let input_state =
             cx.new(|cx| InputState::new(window, cx).placeholder("输入消息，Ctrl+Enter 发送"));
@@ -70,6 +71,7 @@ impl AmuxApp {
 
         Self {
             client,
+            cwd,
             status: "连接中…".into(),
             sessions: Vec::new(),
             selected: None,
@@ -125,6 +127,34 @@ impl AmuxApp {
                 let sessions = res.get("sessions").cloned().unwrap_or_default();
                 let _ = this.update_in(cx, |this, _window, cx| {
                     this.sessions = serde_json::from_value(sessions).unwrap_or_default();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn create_session(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let cwd = self.cwd.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            if let Ok(res) = client
+                .request(
+                    protocol::method::CREATE_SESSION,
+                    Some(json!({ "harness": "codex", "cwd": cwd })),
+                )
+                .await
+            {
+                let sid = res
+                    .get("session")
+                    .and_then(|s| s.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let _ = this.update_in(cx, |this, _window, cx| {
+                    if !sid.is_empty() {
+                        this.selected = Some(sid.clone());
+                    }
                     cx.notify();
                 });
             }
@@ -207,6 +237,14 @@ impl AmuxApp {
             .gap_1()
             .p_1()
             .child(Label::new("会话:"))
+            .child(
+                Button::new("new-session")
+                    .small()
+                    .label("＋ 新建")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.create_session(window, cx);
+                    })),
+            )
             .children(self.sessions.iter().map(|s| {
                 let sid = s.id.clone();
                 let selected = self.selected.as_deref() == Some(s.id.as_str());
