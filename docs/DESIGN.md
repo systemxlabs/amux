@@ -91,15 +91,14 @@ Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server �
 ### 5.5 本地数据
 
 - server 其余本地数据存放于 `~/.amux/server`（配置等）；**认证 token 不落盘**（见 §4）
-- GUI 本地数据存放于 `~/.amux/gui`：机器注册表、快捷按钮、通知偏好、Skills 注册表、会话历史缓存
-- worktree 统一创建于 `~/.amux/worktrees`
+- GUI 本地数据存放于 `~/.amux/gui`：机器注册表、快捷指令、通知偏好、Skills 注册表、会话历史缓存
 
 ## 6. 会话（交互）
 
 - 交互只有两个动作：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作），经 ACP `session/prompt` / `session/cancel` 到达 agent
 - **steer（忙时 prompt）**：忙时 prompt 的行为取决于 agent 实现（ACP v1 turn 模型），不支持进行中注入时 server 直接报错——见 §9
 - **用户输入**：GUI 的 prompt 经 server 转发给 agent；用户消息同时由 GUI 本地立即渲染（不依赖回显），并保留在对话内容中
-- **按钮映射**（客户端本地配置，无专用协议）：commit / submit PR 等需要编写内容的操作经 prompt 由 agent 执行；push、undo / revert（文件 / hunk / 全部）等无需判断的操作由 server 直连 git 执行——undo/revert 需等工作区间结束后再触发，否则"撤销最近变更"的时点语义是乱的；skill 安装 / 更新经 prompt 由 agent 执行（见「Skills 管理」）；新会话 / Kill Session 由客户端直接发起对应会话操作
+- **快捷指令**（客户端本地配置，无专用协议）：每条指令是一段发给 agent 的提示词，经 prompt 由 agent 执行（Commit & Push、Submit PR、skill 安装 / 更新等，见「Skills 管理」）；直连 git 的 push / undo / revert 等操作不属于快捷指令；新会话 / Kill Session 由客户端直接发起对应会话操作
 - **多客户端并发**：server 对同一会话的所有 prompt（含各客户端的）按到达顺序串行化，保证按调用顺序送达
 - **通知**：客户端从会话状态与 turn 完成推导（工作结束 / 异常 / 长时间无响应），配置存客户端本地，无需协议
 
@@ -111,9 +110,9 @@ GUI 为单进程桌面应用（GPUI + gpui-component，跟踪 Zed 主线 git 依
 - **对话流**：只展示用户消息与 agent 输出的消息气泡（**Markdown 渲染**，gpui-component）+ 虚拟化列表；输出为完整消息，非流式（数据来源见 §5）
 - **会话活动页**：独立视图展示会话 activities 时间线——thinking / tool call / compaction 等详细活动（工具调用参数与结果、思考内容、压缩摘要），经 `get_activities` 获取（见 §5.3）
 - **Diff Review**（PRD §4.7）：代码编辑器组件 + **Tree Sitter 语法高亮**（gpui-component）；文件列表、side-by-side/inline diff、revert 操作
-- **输入与设置**：输入区（多行、拖拽/粘贴、@ 引用）、快捷按钮栏、设置页（机器管理）——gpui-component 表单/对话框组件
+- **输入与设置**：输入区（多行、拖拽/粘贴、@ 引用）、快捷指令栏、设置页（机器管理）——gpui-component 表单/对话框组件
 - **异步模型**：GPUI executor 承载 UI，WS 连接与 ACP 重放流经 **tokio** 运行，事件桥接进 GPUI 事件循环
-- **本地配置**：机器注册表、按钮、通知偏好、Skills 注册表（GUI 数据目录；会话历史缓存见 §5.2）
+- **本地配置**：机器注册表、快捷指令、通知偏好、Skills 注册表（GUI 数据目录；会话历史缓存见 §5.2）
 
 ## 8. 日志与追踪（可观测性）
 
