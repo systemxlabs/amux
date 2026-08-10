@@ -881,8 +881,40 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 设置页（机器管理：列表 + 移除 + 添加）。
-    fn render_settings(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// 设置浮窗：半透明遮罩 + 居中卡片（PRD §3.4 设置以浮窗打开）。
+    /// 遮罩与卡片是兄弟元素：点卡片不会触发遮罩关闭，点遮罩关闭设置。
+    fn render_settings_overlay(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("settings-overlay")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("settings-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(hsla(0., 0., 0., 0.45))
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.show_settings = false;
+                        cx.notify();
+                    })),
+            )
+            .child(self.render_settings_panel(_window, cx))
+    }
+
+    /// 设置卡片（机器管理：列表 + 移除 + 添加）。
+    fn render_settings_panel(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let machines = self
             .machines
             .iter()
@@ -905,19 +937,28 @@ impl AmuxApp {
             })
             .collect::<Vec<_>>();
         v_flex()
-            .flex_1()
-            .gap_1()
-            .p_3()
+            .id("settings-panel")
+            .w(px(560.))
+            .max_h(px(640.))
+            .gap_2()
+            .p_4()
+            .bg(rgb(0xffffff))
+            .rounded_md()
+            .shadow_lg()
+            .overflow_y_scroll()
             .child(
-                h_flex().child(Label::new("设置 — 机器管理")).child(
-                    Button::new("close-settings")
-                        .small()
-                        .label("关闭")
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.show_settings = false;
-                            cx.notify();
-                        })),
-                ),
+                h_flex()
+                    .justify_between()
+                    .child(Label::new("设置 — 机器管理"))
+                    .child(
+                        Button::new("close-settings")
+                            .small()
+                            .label("关闭")
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.show_settings = false;
+                                cx.notify();
+                            })),
+                    ),
             )
             .children(machines)
             .child(
@@ -941,22 +982,23 @@ impl AmuxApp {
                     )),
             )
             .child(Label::new("添加格式：名称 ws://地址 token（空格分隔）"))
-            .into_any()
     }
 }
 
 impl Render for AmuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.show_settings {
-            return self.render_settings(window, cx).into_any();
-        }
         let panel = self.render_panel(window, cx);
         let mut root = h_flex()
             .size_full()
+            .relative()
             .child(self.render_sidebar(window, cx))
             .child(self.render_main(window, cx));
         if let Some(p) = panel {
             root = root.child(p);
+        }
+        // 设置浮窗：作为最后一个子元素盖在主界面之上（PRD §3.4）
+        if self.show_settings {
+            root = root.child(self.render_settings_overlay(window, cx));
         }
         root.into_any()
     }
