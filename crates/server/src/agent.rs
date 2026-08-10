@@ -24,7 +24,7 @@ use agent_client_protocol::schema::v1::{
     SessionNotification, SessionUpdate, TextContent, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, JsonRpcRequest};
+use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, JsonRpcRequest, JsonRpcResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -157,7 +157,7 @@ impl AgentRegistry {
             return;
         }
         let current = discover_acp_agents();
-        let mut disc = self.discovered.lock().unwrap();
+        let mut disc = self.discovered.lock().expect("Mutex 中毒（临界区内不应 panic）");
         for d in current {
             let dup = disc.iter().any(|x| x.name == d.name)
                 || self
@@ -170,7 +170,7 @@ impl AgentRegistry {
             }
         }
         let need_stub = self.configured.is_none() && disc.is_empty();
-        *self.stub.lock().unwrap() = if need_stub {
+        *self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）") = if need_stub {
             Some(Arc::new(StubAgentDriver::new()))
         } else {
             None
@@ -194,8 +194,8 @@ impl AgentRegistry {
     /// get_info 的 harness 列表（available + 默认模型）；先运行期刷新一次发现。
     pub fn harnesses(&self) -> Vec<HarnessInfo> {
         self.refresh_discovery();
-        let models = self.models.lock().unwrap();
-        let discovered = self.discovered.lock().unwrap();
+        let models = self.models.lock().expect("Mutex 中毒（临界区内不应 panic）");
+        let discovered = self.discovered.lock().expect("Mutex 中毒（临界区内不应 panic）");
         let mut out: Vec<HarnessInfo> = Vec::new();
         if let Some((name, _)) = &self.configured {
             out.push(HarnessInfo {
@@ -203,7 +203,7 @@ impl AgentRegistry {
                 available: true,
                 default_model: models.get(name).cloned().flatten(),
             });
-        } else if self.stub.lock().unwrap().is_some() {
+        } else if self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）").is_some() {
             out.push(HarnessInfo {
                 name: "stub".into(),
                 available: true,
@@ -223,7 +223,7 @@ impl AgentRegistry {
     /// 按 harness 名解析驱动；未知 harness 报错（HARNESS_UNAVAILABLE）。
     /// 未知 harness 时先运行期刷新一次发现（新装的 agent 无需重启即可用）。
     pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
-        if let Some(stub) = &*self.stub.lock().unwrap() {
+        if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）") {
             return Ok(stub.clone());
         }
         if let Some((name, d)) = &self.configured {
@@ -240,7 +240,7 @@ impl AgentRegistry {
             .find(|d| d.name == harness)
             .cloned();
         if let Some(d) = found {
-            let mut spawned = self.spawned.lock().unwrap();
+            let mut spawned = self.spawned.lock().expect("Mutex 中毒（临界区内不应 panic）");
             if let Some(d) = spawned.get(harness) {
                 return Ok(d.clone());
             }
@@ -257,7 +257,7 @@ impl AgentRegistry {
     /// 查询默认模型（get_info 用）。
     #[allow(dead_code)]
     pub fn default_model(&self, harness: &str) -> Option<String> {
-        self.models.lock().unwrap().get(harness).cloned().flatten()
+        self.models.lock().expect("Mutex 中毒（临界区内不应 panic）").get(harness).cloned().flatten()
     }
 
     /// 配置默认模型并落盘（PRD §3.3）。
@@ -270,7 +270,7 @@ impl AgentRegistry {
     }
 
     fn save_models(&self) {
-        let models = self.models.lock().unwrap();
+        let models = self.models.lock().expect("Mutex 中毒（临界区内不应 panic）");
         let json = serde_json::to_string_pretty(&*models).unwrap_or_default();
         if let Some(parent) = self.model_file.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -494,7 +494,7 @@ impl AgentDriver for AcpAgentDriver {
                 AgentEvent::TurnEnded => break,
             }
         }
-        self.routes.lock().unwrap().remove(agent_session_id);
+        self.routes.lock().expect("Mutex 中毒（临界区内不应 panic）").remove(agent_session_id);
         res.map(|_| records)
     }
 
@@ -543,7 +543,7 @@ impl AgentDriver for AcpAgentDriver {
     }
 
     fn delete(&self, agent_session_id: &str) -> Result<(), String> {
-        self.cwds.lock().unwrap().remove(agent_session_id);
+        self.cwds.lock().expect("Mutex 中毒（临界区内不应 panic）").remove(agent_session_id);
         self.call("session/delete", json!({ "sessionId": agent_session_id }))
             .map(|_| ())
     }
@@ -580,9 +580,20 @@ impl AgentDriver for AcpAgentDriver {
     }
 }
 
+/// ACP `skill/list` 响应（SDK schema v1 未收录；typed 化，避免 Value 松散承载）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcResponse)]
+struct SkillListResponse {
+    skills: Vec<SkillInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkillInfo {
+    name: String,
+}
+
 /// 自定义请求：ACP `skill/list`（PRD §3.3；SDK schema v1 未收录该方法）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
-#[request(method = "skill/list", response = serde_json::Value)]
+#[request(method = "skill/list", response = SkillListResponse)]
 struct SkillListRequest {}
 
 /// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
@@ -691,7 +702,7 @@ async fn exec_main(
                                 .send_request(PromptRequest::new(sid.clone(), blocks))
                                 .on_receiving_result(async move |result| {
                                     // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）
-                                    if let Some(tx) = routes.lock().unwrap().remove(&sid) {
+                                    if let Some(tx) = routes.lock().expect("Mutex 中毒（临界区内不应 panic）").remove(&sid) {
                                         let _ = tx.try_send(AgentEvent::TurnEnded);
                                     }
                                     if let Err(e) = result {
@@ -813,7 +824,7 @@ async fn dispatch_call_inner(
                 .block_task()
                 .await
                 .map_err(|e| format!("skill/list 失败: {e}"))?;
-            Ok(resp)
+            serde_json::to_value(resp).map_err(|e| format!("skill/list 序列化失败: {e}"))
         }
         _ => Err(format!("未知 ACP 方法: {method}")),
     }
@@ -854,7 +865,7 @@ fn route_update(
         _ => None,
     };
     if let Some(ev) = ev {
-        if let Some(tx) = routes.lock().unwrap().get(notif.session_id.to_string().as_str()) {
+        if let Some(tx) = routes.lock().expect("Mutex 中毒（临界区内不应 panic）").get(notif.session_id.to_string().as_str()) {
             let _ = tx.try_send(ev);
         }
     }
@@ -904,7 +915,7 @@ impl StubAgentDriver {
 impl AgentDriver for StubAgentDriver {
     fn create_session(&self, cwd: &str, _model: Option<&str>) -> Result<String, String> {
         let id = format!("agent_{}", cwd.replace('/', "_"));
-        self.sessions.lock().unwrap().push(id.clone());
+        self.sessions.lock().expect("Mutex 中毒（临界区内不应 panic）").push(id.clone());
         Ok(id)
     }
 
@@ -959,7 +970,7 @@ impl AgentDriver for StubAgentDriver {
     }
 
     fn list_sessions(&self) -> Vec<String> {
-        self.sessions.lock().unwrap().clone()
+        self.sessions.lock().expect("Mutex 中毒（临界区内不应 panic）").clone()
     }
 
     fn list_skills(&self) -> Vec<String> {

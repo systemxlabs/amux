@@ -4210,6 +4210,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "uuid",
 ]
 
 [[package]]
@@ -9247,6 +9248,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "uuid",
 ]
 
 [[package]]

@@ -15,6 +15,7 @@ tokio-tungstenite.workspace = true
 futures-util = "0.3"
 # ACP 官方 SDK（docs/DESIGN.md §9）：Client 角色 + schema v1 + AcpAgent stdio 传输
 agent-client-protocol = { version = "1", features = ["unstable"] }
+uuid.workspace = true
 
 [[bin]]
 name = "mock_acp"

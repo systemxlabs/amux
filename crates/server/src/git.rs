@@ -287,13 +287,9 @@ impl GitRunner {
     /// - 都不给：全部变更——restore 全部 tracked 变更 + clean 全部 untracked
     pub fn revert(&self, cwd: &str, path: Option<&str>, patch: Option<&str>) -> GitOpResult {
         if let Some(p) = patch {
-            // 唯一临时目录（并发 revert 不互相覆盖）
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let dir =
-                std::env::temp_dir().join(format!("amux-revert-{}-{nanos}", std::process::id()));
+            // 唯一临时目录（并发 revert 不互相覆盖；uuid v4）
+            let dir = std::env::temp_dir()
+                .join(format!("amux-revert-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).ok();
             let patch_file = dir.join("revert.patch");
             if std::fs::write(&patch_file, p).is_err() {
@@ -389,12 +385,7 @@ mod tests {
     }
 
     fn unique_dir(prefix: &str) -> std::path::PathBuf {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
+        std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()))
     }
 
     fn init_repo() -> std::path::PathBuf {

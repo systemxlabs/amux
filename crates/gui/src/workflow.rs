@@ -83,14 +83,6 @@ pub fn now_ts() -> u64 {
     now()
 }
 
-fn uuid_v4() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{:016x}{:08x}", nanos, std::process::id() as u64)
-}
-
 // ---- 机器信息（供编排上下文与动作解析）----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,11 +184,11 @@ impl ToolState {
     }
 
     pub fn record(&self, op: ToolOp) {
-        self.ops.lock().unwrap().push(op);
+        self.ops.lock().expect("Mutex 中毒（临界区内不应 panic）").push(op);
     }
 
     pub fn take_ops(&self) -> Vec<ToolOp> {
-        std::mem::take(&mut *self.ops.lock().unwrap())
+        std::mem::take(&mut *self.ops.lock().expect("Mutex 中毒（临界区内不应 panic）"))
     }
 
     pub fn resolve_machine(&self, name: &str) -> Result<usize, String> {
@@ -274,7 +266,7 @@ impl WorkflowEngine {
         }
         let t = now();
         let session = OrcSession {
-            id: format!("orc_{}", uuid_v4()),
+            id: format!("orc_{}", uuid::Uuid::new_v4()),
             title: generate_title(description),
             description: full,
             state: SessionState::Idle,

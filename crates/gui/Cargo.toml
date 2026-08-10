@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+uuid.workspace = true
 futures-util = "0.3"
 
 # GPUI（Zed 主线 git）+ gpui-component（longbridge）

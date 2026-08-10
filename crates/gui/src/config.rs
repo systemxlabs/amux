@@ -444,10 +444,10 @@ mod tests {
     }
     impl ConfigBackend for MemBackend {
         fn load(&self) -> Option<String> {
-            self.data.lock().unwrap().clone()
+            self.data.lock().expect("Mutex 中毒（临界区内不应 panic）").clone()
         }
         fn save(&self, json: &str) -> std::io::Result<()> {
-            *self.data.lock().unwrap() = Some(json.to_string());
+            *self.data.lock().expect("Mutex 中毒（临界区内不应 panic）") = Some(json.to_string());
             Ok(())
         }
     }

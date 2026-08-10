@@ -172,7 +172,7 @@ impl SessionManager {
     ) -> Result<SessionMeta, String> {
         let driver = self.agents.driver_for(harness)?;
         let agent_session_id = driver.create_session(cwd, model)?;
-        let id = format!("s_{}", uuid_v4());
+        let id = format!("s_{}", uuid::Uuid::new_v4());
         protocol::log::info(
             "server.session",
             format!("创建会话 {id}（harness={harness} cwd={cwd} agent={agent_session_id}）"),
@@ -329,7 +329,7 @@ impl SessionManager {
         let Some(activity) = activity else {
             return;
         };
-        let mut live = self.live_activities.lock().unwrap();
+        let mut live = self.live_activities.lock().expect("Mutex 中毒（临界区内不应 panic）");
         let changed = live.get(session_id) != Some(&activity);
         if changed {
             live.insert(session_id.to_string(), activity.clone());
@@ -441,7 +441,7 @@ impl SessionManager {
             }
         }
         // turn 结束：清空实时活动，合并后的完整活动写入有界缓存
-        self.live_activities.lock().unwrap().remove(session_id);
+        self.live_activities.lock().expect("Mutex 中毒（临界区内不应 panic）").remove(session_id);
 
         // 写入 activities 有界缓存
         if !acts.is_empty() {
@@ -518,15 +518,6 @@ fn first_text(input: &[ContentBlock]) -> String {
             _ => None,
         })
         .unwrap_or_default()
-}
-
-/// 简易唯一 id（s_ 前缀；不引额外依赖）。
-fn uuid_v4() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{:016x}{:08x}", nanos, std::process::id() as u64)
 }
 
 #[cfg(test)]
