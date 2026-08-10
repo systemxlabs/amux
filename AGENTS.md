@@ -21,7 +21,7 @@ amux 处于 **beta 阶段**：允许随意破坏性改动，无需向后兼容�
 |---|---|
 | `protocol` | app↔server 协议面：方法名、参数/结果类型、通知类型。**协议的唯一来源**，GUI 与 server 均从这里导入 |
 | `server` | 每台机器的常驻进程：WebSocket 传输（tokio-tungstenite）、JSON-RPC 分发、会话管理、会话数据聚合与 activities 缓存、git 能力（status/diff/push/revert）；经 ACP 官方 SDK（`agent-client-protocol`）与 agent 通信。入口 `server/src/main.rs` |
-| `gui` | GPUI 桌面应用：三面板视图（Dock 布局）、对话流（Markdown）、会话活动页、diff 编辑器、侧边栏、设置页；会话历史本地缓存 |
+| `gui` | GPUI 桌面应用：三面板视图（Dock 布局）、对话流（Markdown）、会话活动、diff 编辑器、侧边栏、设置页；会话历史本地缓存 |
 
 关键边界：
 
