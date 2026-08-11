@@ -19,6 +19,7 @@ use gpui_component::{
     collapsible::Collapsible,
     input::{Input, InputState},
     label::Label,
+    radio::{Radio, RadioGroup},
     scroll::ScrollableElement as _,
     spinner::Spinner,
     *,
@@ -160,7 +161,8 @@ pub struct AmuxApp {
     skill_desc_input: Entity<InputState>,
     tpl_name_input: Entity<InputState>,
     tpl_desc_input: Entity<InputState>,
-    orch_backend_input: Entity<InputState>,
+    /// 编排 agent API Backend 单选（"chat_completions" | "messages"）
+    orch_backend: String,
     orch_base_input: Entity<InputState>,
     orch_key_input: Entity<InputState>,
     orch_model_input: Entity<InputState>,
@@ -224,11 +226,6 @@ impl AmuxApp {
                 .placeholder("自然语言工作流描述")
                 .multi_line(true)
         });
-        let orch_backend_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("chat_completions / messages")
-                .default_value("chat_completions")
-        });
         let orch_base_input = cx.new(|cx| InputState::new(window, cx).placeholder("Base URL"));
         let orch_key_input = cx.new(|cx| InputState::new(window, cx).placeholder("API key"));
         let orch_model_input = cx.new(|cx| {
@@ -277,7 +274,7 @@ impl AmuxApp {
             skill_desc_input,
             tpl_name_input,
             tpl_desc_input,
-            orch_backend_input,
+            orch_backend: orchestrator.api_backend.clone(),
             orch_base_input,
             orch_key_input,
             orch_model_input,
@@ -311,9 +308,6 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.orch_backend_input.update(cx, |s, cx| {
-            s.set_value(cfg.api_backend.clone(), window, cx);
-        });
         self.orch_base_input.update(cx, |s, cx| {
             s.set_value(cfg.base_url.clone(), window, cx);
         });
@@ -323,6 +317,43 @@ impl AmuxApp {
         self.orch_model_input.update(cx, |s, cx| {
             s.set_value(cfg.model.clone(), window, cx);
         });
+    }
+
+    /// API Backend 单选（PRD §4.3：chat_completions / messages）。
+    fn render_api_backend_radio(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = match self.orch_backend.as_str() {
+            "messages" => 1,
+            _ => 0,
+        };
+        let view = cx.entity();
+        RadioGroup::horizontal("orch-backend")
+            .selected_index(Some(selected))
+            .child(
+                Radio::new("be-chat_completions")
+                    .label("chat_completions")
+                    .on_click({
+                        let view = view.clone();
+                        move |checked, _window, cx| {
+                            if *checked {
+                                view.update(cx, |this, cx| {
+                                    this.orch_backend = "chat_completions".into();
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    }),
+            )
+            .child(Radio::new("be-messages").label("messages").on_click({
+                let view = view.clone();
+                move |checked, _window, cx| {
+                    if *checked {
+                        view.update(cx, |this, cx| {
+                            this.orch_backend = "messages".into();
+                            cx.notify();
+                        });
+                    }
+                }
+            }))
     }
 
     // ---- 辅助 ----
@@ -3271,7 +3302,7 @@ impl AmuxApp {
                             .text_sm()
                             .text_color(rgb(0x6b7280)),
                     )
-                    .child(Input::new(&self.orch_backend_input))
+                    .child(self.render_api_backend_radio(cx))
                     .child(Label::new("Base URL").text_sm().text_color(rgb(0x6b7280)))
                     .child(Input::new(&self.orch_base_input))
                     .child(Label::new("API key").text_sm().text_color(rgb(0x6b7280)))
@@ -3291,7 +3322,7 @@ impl AmuxApp {
                     .label("保存")
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         let cfg = OrchestratorConfig {
-                            api_backend: this.orch_backend_input.read(cx).value().to_string(),
+                            api_backend: this.orch_backend.clone(),
                             base_url: this.orch_base_input.read(cx).value().to_string(),
                             api_key: this.orch_key_input.read(cx).value().to_string(),
                             model: this.orch_model_input.read(cx).value().to_string(),
