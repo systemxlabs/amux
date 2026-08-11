@@ -3288,7 +3288,7 @@ impl AmuxApp {
         let configured = self.store.orchestrator().is_configured();
         let mut col = v_flex().gap_2().child(self.settings_header(
             "编排 agent",
-            "内置编排 agent（rig 单 turn）的 LLM API 配置；创建工作流前需填 Base URL 与 API key",
+            "内置编排 agent（rig 单 turn）的 LLM API 配置；创建工作流前需填 Base URL、API key 与模型",
         ));
         // 配置状态提示
         col = col.child(

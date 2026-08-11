@@ -142,7 +142,7 @@
 - 全局配置集中在**设置浮窗**，经左侧面板底部的设置入口打开；浮窗以半透明遮罩盖在主界面之上，内部为**分类导航侧边栏 + 右侧设置内容**（类似系统设置），点遮罩或关闭按钮收起
 - 设置浮窗分类：
   - **机器管理**：接入 / 移除机器、连接配置（地址、token）、agent 默认模型、查看每个 agent 的 skills 列表
-  - **编排 agent**：内置编排 agent 的 API 配置——API Backend（包含 chat_completions 和 messages）、Base URL、API key
+  - **编排 agent**：内置编排 agent 的 API 配置——API Backend（包含 chat_completions 和 messages）、Base URL、API key、**模型**（调用的 LLM 模型名，如 gpt-4o-mini；OpenAI 兼容 API 的请求必须指定模型）
   - **快捷指令**：指令自定义（增删指令、修改提示词）
   - **Skills**：skills 描述注册表
   - **工作流模板**：模板管理（查看 / 新建 / 编辑 / 删除）；模板是可复用的自然语言工作流描述
