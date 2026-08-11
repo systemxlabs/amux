@@ -184,7 +184,10 @@ impl ToolState {
     }
 
     pub fn record(&self, op: ToolOp) {
-        self.ops.lock().expect("Mutex 中毒（临界区内不应 panic）").push(op);
+        self.ops
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .push(op);
     }
 
     pub fn take_ops(&self) -> Vec<ToolOp> {

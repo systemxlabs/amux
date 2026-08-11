@@ -288,8 +288,7 @@ impl GitRunner {
     pub fn revert(&self, cwd: &str, path: Option<&str>, patch: Option<&str>) -> GitOpResult {
         if let Some(p) = patch {
             // 唯一临时目录（并发 revert 不互相覆盖；uuid v4）
-            let dir = std::env::temp_dir()
-                .join(format!("amux-revert-{}", uuid::Uuid::new_v4()));
+            let dir = std::env::temp_dir().join(format!("amux-revert-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).ok();
             let patch_file = dir.join("revert.patch");
             if std::fs::write(&patch_file, p).is_err() {

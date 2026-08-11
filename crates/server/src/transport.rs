@@ -110,7 +110,8 @@ async fn handle_connection(
     // Callback trait 固定签名（tungstenite 握手），Err 变体较大无法避免
     #[allow(clippy::result_large_err)]
     let callback = move |req: &Request, response: Response| -> Result<Response, ErrorResponse> {
-        *holder.lock().expect("Mutex 中毒（临界区内不应 panic）") = req.uri().query().map(str::to_string);
+        *holder.lock().expect("Mutex 中毒（临界区内不应 panic）") =
+            req.uri().query().map(str::to_string);
         Ok(response)
     };
     let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
@@ -120,7 +121,11 @@ async fn handle_connection(
             return;
         }
     };
-    let query = query_holder.lock().expect("Mutex 中毒（临界区内不应 panic）").clone().unwrap_or_default();
+    let query = query_holder
+        .lock()
+        .expect("Mutex 中毒（临界区内不应 panic）")
+        .clone()
+        .unwrap_or_default();
     if !authorized(&query, &opts.token) {
         log(&opts, format!("拒绝连接 ({peer}): token 无效"));
         let mut ws = ws;

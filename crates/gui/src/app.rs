@@ -34,9 +34,7 @@ use crate::config::{
     machine_ws_url, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand, SkillEntry,
     WorkflowTemplate,
 };
-use crate::logic::{
-    compose_prompt, parse_at_references, read_path_context, InputAttachment,
-};
+use crate::logic::{compose_prompt, parse_at_references, read_path_context, InputAttachment};
 use crate::workflow::{MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification, WsClient};
 
@@ -1204,24 +1202,25 @@ impl AmuxApp {
                     let sessions = res.get("sessions").cloned().unwrap_or_default();
                     // 收集 idle 子会话（工作流下标 + 会话 id）
                     let mut advances: Vec<(usize, String)> = Vec::new();
-                    let _ = this.update_in(cx, |this, _window, cx| {
-                        for s in sessions.as_array().cloned().unwrap_or_default() {
-                            let sid = s["id"].as_str().unwrap_or("").to_string();
-                            let state = if s["state"].as_str() == Some("busy") {
-                                SessionState::Busy
-                            } else {
-                                SessionState::Idle
-                            };
-                            if state == SessionState::Idle {
-                                if let Some(wi) = this.workflows.iter().position(|wf| {
-                                    wf.session.children.iter().any(|c| c.id == sid)
-                                }) {
-                                    advances.push((wi, sid));
+                    let _ =
+                        this.update_in(cx, |this, _window, cx| {
+                            for s in sessions.as_array().cloned().unwrap_or_default() {
+                                let sid = s["id"].as_str().unwrap_or("").to_string();
+                                let state = if s["state"].as_str() == Some("busy") {
+                                    SessionState::Busy
+                                } else {
+                                    SessionState::Idle
+                                };
+                                if state == SessionState::Idle {
+                                    if let Some(wi) = this.workflows.iter().position(|wf| {
+                                        wf.session.children.iter().any(|c| c.id == sid)
+                                    }) {
+                                        advances.push((wi, sid));
+                                    }
                                 }
                             }
-                        }
-                        cx.notify();
-                    });
+                            cx.notify();
+                        });
                     // 自动推进在 GUI 的 tokio runtime 上执行（rig 需要 reactor，
                     // 避免主线程无 runtime 崩溃）
                     for (wi, sid) in advances {
@@ -1637,8 +1636,7 @@ impl AmuxApp {
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.open_session(window, cx, machine, sid.clone());
             }));
-        (if sel { btn.primary() } else { btn })
-            .into_any_element()
+        (if sel { btn.primary() } else { btn }).into_any_element()
     }
 
     /// 工作流行：标题 · 子会话数 + 打开按钮 + 状态徽章 + 折叠的子会话（docs/PRD §4.1.1）。
@@ -1843,7 +1841,11 @@ impl AmuxApp {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(Label::new("指令（自然语言）").text_sm().text_color(rgb(0x6b7280)))
+                            .child(
+                                Label::new("指令（自然语言）")
+                                    .text_sm()
+                                    .text_color(rgb(0x6b7280)),
+                            )
                             .child(Input::new(&self.new_session_msg_input)),
                     )
                     .child(
@@ -1995,46 +1997,40 @@ impl AmuxApp {
             .iter()
             .enumerate()
             .map(|(i, item)| match item {
-                DialogItem::UserMessage { content, .. } => div()
-                    .id(("row", i))
-                    .w_full()
-                    .child(
-                        div()
-                            .ml_auto()
-                            .max_w(px(720.))
-                            .p_3()
-                            .rounded_md()
-                            .bg(rgb(0x3b82f6))
-                            .text_color(rgb(0xffffff))
-                            .shadow_sm()
-                            .child(
-                                Label::new("我")
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0xffffff)),
-                            )
-                            .child(block_text(content)),
-                    ),
-                DialogItem::AgentOutput { content, .. } => div()
-                    .id(("row", i))
-                    .w_full()
-                    .child(
-                        div()
-                            .max_w(px(720.))
-                            .p_3()
-                            .rounded_md()
-                            .bg(rgb(0xffffff))
-                            .border_1()
-                            .border_color(rgb(0xe5e7eb))
-                            .shadow_sm()
-                            .child(
-                                Label::new("Agent")
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0x6b7280)),
-                            )
-                            .child(block_text(content)),
-                    ),
+                DialogItem::UserMessage { content, .. } => div().id(("row", i)).w_full().child(
+                    div()
+                        .ml_auto()
+                        .max_w(px(720.))
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgb(0x3b82f6))
+                        .text_color(rgb(0xffffff))
+                        .shadow_sm()
+                        .child(
+                            Label::new("我")
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xffffff)),
+                        )
+                        .child(block_text(content)),
+                ),
+                DialogItem::AgentOutput { content, .. } => div().id(("row", i)).w_full().child(
+                    div()
+                        .max_w(px(720.))
+                        .p_3()
+                        .rounded_md()
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xe5e7eb))
+                        .shadow_sm()
+                        .child(
+                            Label::new("Agent")
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x6b7280)),
+                        )
+                        .child(block_text(content)),
+                ),
             })
             .collect::<Vec<_>>();
         if rows.is_empty() {
@@ -2345,12 +2341,7 @@ impl AmuxApp {
 
     /// 打开/切换/关闭右侧上下文面板：窗口**向右扩展**（中间面板宽度不变），
     /// 关闭时收回（docs/DESIGN.md §7 / PRD §4.1.4）。
-    fn set_panel(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        panel: Option<Panel>,
-    ) {
+    fn set_panel(&mut self, window: &mut Window, cx: &mut Context<Self>, panel: Option<Panel>) {
         let new_delta = panel.map(Self::panel_width_logical).unwrap_or(0.0) * window.scale_factor();
         let bounds = window.bounds();
         // 基准宽度 = 当前宽度 - 已扩展量（手动缩放窗口时下次切换自动校正）
@@ -3473,7 +3464,11 @@ fn info_row(label: &str, value: &str) -> impl IntoElement {
                 .text_sm()
                 .text_color(rgb(0x6b7280)),
         )
-        .child(Label::new(value.to_string()).text_sm().text_color(rgb(0x111827)))
+        .child(
+            Label::new(value.to_string())
+                .text_sm()
+                .text_color(rgb(0x111827)),
+        )
 }
 
 fn _window_placeholder(w: &mut Window) -> &mut Window {

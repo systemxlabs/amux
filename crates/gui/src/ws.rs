@@ -186,7 +186,10 @@ async fn run_loop(
                 Err(e) => {
                     attempt += 1;
                     let delay = Duration::from_millis(500u64 * 2u64.pow(attempt.min(6)));
-                    protocol::log::debug("gui.ws", format!("连接失败（第 {attempt} 次），{delay:?} 后重试: {e}"));
+                    protocol::log::debug(
+                        "gui.ws",
+                        format!("连接失败（第 {attempt} 次），{delay:?} 后重试: {e}"),
+                    );
                     tokio::time::sleep(delay).await;
                 }
             }

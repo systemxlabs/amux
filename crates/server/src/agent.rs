@@ -17,14 +17,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
-    CancelNotification, CloseSessionRequest, ContentBlock as AcpContentBlock,
-    DeleteSessionRequest, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, TextContent, ToolKind,
+    CancelNotification, CloseSessionRequest, ContentBlock as AcpContentBlock, DeleteSessionRequest,
+    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    TextContent, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, JsonRpcRequest, JsonRpcResponse};
+use agent_client_protocol::{
+    AcpAgent, Agent, Client, ConnectionTo, JsonRpcRequest, JsonRpcResponse,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -157,7 +159,10 @@ impl AgentRegistry {
             return;
         }
         let current = discover_acp_agents();
-        let mut disc = self.discovered.lock().expect("Mutex 中毒（临界区内不应 panic）");
+        let mut disc = self
+            .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
         for d in current {
             let dup = disc.iter().any(|x| x.name == d.name)
                 || self
@@ -194,8 +199,14 @@ impl AgentRegistry {
     /// get_info 的 harness 列表（available + 默认模型）；先运行期刷新一次发现。
     pub fn harnesses(&self) -> Vec<HarnessInfo> {
         self.refresh_discovery();
-        let models = self.models.lock().expect("Mutex 中毒（临界区内不应 panic）");
-        let discovered = self.discovered.lock().expect("Mutex 中毒（临界区内不应 panic）");
+        let models = self
+            .models
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
+        let discovered = self
+            .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
         let mut out: Vec<HarnessInfo> = Vec::new();
         if let Some((name, _)) = &self.configured {
             out.push(HarnessInfo {
@@ -203,7 +214,12 @@ impl AgentRegistry {
                 available: true,
                 default_model: models.get(name).cloned().flatten(),
             });
-        } else if self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）").is_some() {
+        } else if self
+            .stub
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_some()
+        {
             out.push(HarnessInfo {
                 name: "stub".into(),
                 available: true,
@@ -223,7 +239,8 @@ impl AgentRegistry {
     /// 按 harness 名解析驱动；未知 harness 报错（HARNESS_UNAVAILABLE）。
     /// 未知 harness 时先运行期刷新一次发现（新装的 agent 无需重启即可用）。
     pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
-        if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）") {
+        if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）")
+        {
             return Ok(stub.clone());
         }
         if let Some((name, d)) = &self.configured {
@@ -240,7 +257,10 @@ impl AgentRegistry {
             .find(|d| d.name == harness)
             .cloned();
         if let Some(d) = found {
-            let mut spawned = self.spawned.lock().expect("Mutex 中毒（临界区内不应 panic）");
+            let mut spawned = self
+                .spawned
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）");
             if let Some(d) = spawned.get(harness) {
                 return Ok(d.clone());
             }
@@ -257,7 +277,12 @@ impl AgentRegistry {
     /// 查询默认模型（get_info 用）。
     #[allow(dead_code)]
     pub fn default_model(&self, harness: &str) -> Option<String> {
-        self.models.lock().expect("Mutex 中毒（临界区内不应 panic）").get(harness).cloned().flatten()
+        self.models
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .get(harness)
+            .cloned()
+            .flatten()
     }
 
     /// 配置默认模型并落盘（PRD §3.3）。
@@ -270,7 +295,10 @@ impl AgentRegistry {
     }
 
     fn save_models(&self) {
-        let models = self.models.lock().expect("Mutex 中毒（临界区内不应 panic）");
+        let models = self
+            .models
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
         let json = serde_json::to_string_pretty(&*models).unwrap_or_default();
         if let Some(parent) = self.model_file.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -494,7 +522,10 @@ impl AgentDriver for AcpAgentDriver {
                 AgentEvent::TurnEnded => break,
             }
         }
-        self.routes.lock().expect("Mutex 中毒（临界区内不应 panic）").remove(agent_session_id);
+        self.routes
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .remove(agent_session_id);
         res.map(|_| records)
     }
 
@@ -543,7 +574,10 @@ impl AgentDriver for AcpAgentDriver {
     }
 
     fn delete(&self, agent_session_id: &str) -> Result<(), String> {
-        self.cwds.lock().expect("Mutex 中毒（临界区内不应 panic）").remove(agent_session_id);
+        self.cwds
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .remove(agent_session_id);
         self.call("session/delete", json!({ "sessionId": agent_session_id }))
             .map(|_| ())
     }
@@ -613,19 +647,15 @@ async fn exec_main(
         }
     });
 
-    let agent = match AcpAgent::from_args(
-        std::iter::once(bin.to_string()).chain(args.iter().cloned()),
-    ) {
-        Ok(a) => a,
-        Err(e) => {
-            protocol::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
-            return;
-        }
-    };
-    protocol::log::info(
-        "acp",
-        format!("已连接 ACP agent: {bin} {}", args.join(" ")),
-    );
+    let agent =
+        match AcpAgent::from_args(std::iter::once(bin.to_string()).chain(args.iter().cloned())) {
+            Ok(a) => a,
+            Err(e) => {
+                protocol::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
+                return;
+            }
+        };
+    protocol::log::info("acp", format!("已连接 ACP agent: {bin} {}", args.join(" ")));
     // trace 级：ACP 线上原始帧（GUI ↔ server ↔ ACP client ↔ agent 全链路，docs/DESIGN.md §8）
     let agent = if protocol::log::enabled(protocol::Level::Trace) {
         agent.with_debug(|line, direction| {
@@ -691,7 +721,11 @@ async fn exec_main(
                             let _ = resp.send(result);
                         });
                     }
-                    ExecReq::Prompt { sid, prompt, routes } => {
+                    ExecReq::Prompt {
+                        sid,
+                        prompt,
+                        routes,
+                    } => {
                         let cx = cx.clone();
                         tokio::spawn(async move {
                             let blocks = prompt
@@ -702,7 +736,11 @@ async fn exec_main(
                                 .send_request(PromptRequest::new(sid.clone(), blocks))
                                 .on_receiving_result(async move |result| {
                                     // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）
-                                    if let Some(tx) = routes.lock().expect("Mutex 中毒（临界区内不应 panic）").remove(&sid) {
+                                    if let Some(tx) = routes
+                                        .lock()
+                                        .expect("Mutex 中毒（临界区内不应 panic）")
+                                        .remove(&sid)
+                                    {
                                         let _ = tx.try_send(AgentEvent::TurnEnded);
                                     }
                                     if let Err(e) = result {
@@ -735,7 +773,10 @@ async fn dispatch_call(
         .to_string();
     protocol::log::debug(
         "acp",
-        format!("调用 {method} {}", protocol::log::params_summary(params, &["sessionId", "cwd"], 60)),
+        format!(
+            "调用 {method} {}",
+            protocol::log::params_summary(params, &["sessionId", "cwd"], 60)
+        ),
     );
     let result = dispatch_call_inner(cx, method, params, &sid).await;
     match &result {
@@ -753,10 +794,7 @@ async fn dispatch_call_inner(
 ) -> Result<Value, String> {
     match method {
         "session/new" => {
-            let cwd = params
-                .get("cwd")
-                .and_then(|c| c.as_str())
-                .unwrap_or("/");
+            let cwd = params.get("cwd").and_then(|c| c.as_str()).unwrap_or("/");
             let resp = cx
                 .send_request(NewSessionRequest::new(cwd))
                 .block_task()
@@ -765,10 +803,7 @@ async fn dispatch_call_inner(
             Ok(json!({ "sessionId": resp.session_id }))
         }
         "session/load" => {
-            let cwd = params
-                .get("cwd")
-                .and_then(|c| c.as_str())
-                .unwrap_or("/tmp");
+            let cwd = params.get("cwd").and_then(|c| c.as_str()).unwrap_or("/tmp");
             cx.send_request(LoadSessionRequest::new(sid.to_string(), cwd))
                 .block_task()
                 .await
@@ -776,10 +811,7 @@ async fn dispatch_call_inner(
             Ok(Value::Null)
         }
         "session/resume" => {
-            let cwd = params
-                .get("cwd")
-                .and_then(|c| c.as_str())
-                .unwrap_or("/tmp");
+            let cwd = params.get("cwd").and_then(|c| c.as_str()).unwrap_or("/tmp");
             cx.send_request(ResumeSessionRequest::new(sid.to_string(), cwd))
                 .block_task()
                 .await
@@ -865,7 +897,11 @@ fn route_update(
         _ => None,
     };
     if let Some(ev) = ev {
-        if let Some(tx) = routes.lock().expect("Mutex 中毒（临界区内不应 panic）").get(notif.session_id.to_string().as_str()) {
+        if let Some(tx) = routes
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .get(notif.session_id.to_string().as_str())
+        {
             let _ = tx.try_send(ev);
         }
     }
@@ -915,7 +951,10 @@ impl StubAgentDriver {
 impl AgentDriver for StubAgentDriver {
     fn create_session(&self, cwd: &str, _model: Option<&str>) -> Result<String, String> {
         let id = format!("agent_{}", cwd.replace('/', "_"));
-        self.sessions.lock().expect("Mutex 中毒（临界区内不应 panic）").push(id.clone());
+        self.sessions
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .push(id.clone());
         Ok(id)
     }
 
@@ -970,7 +1009,10 @@ impl AgentDriver for StubAgentDriver {
     }
 
     fn list_sessions(&self) -> Vec<String> {
-        self.sessions.lock().expect("Mutex 中毒（临界区内不应 panic）").clone()
+        self.sessions
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .clone()
     }
 
     fn list_skills(&self) -> Vec<String> {
@@ -982,7 +1024,7 @@ impl AgentDriver for StubAgentDriver {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        ContentChunk, ContentBlock as AcpContentBlock, SessionId, TextContent, ToolCall,
+        ContentBlock as AcpContentBlock, ContentChunk, SessionId, TextContent, ToolCall,
         ToolCallStatus, ToolKind,
     };
     use tokio::sync::mpsc;
@@ -1053,7 +1095,11 @@ mod tests {
         route_update(&routes, &notif);
         let ev = rx.try_recv().expect("应收到 tool_call 事件");
         match ev {
-            AgentEvent::ToolCall { name, title, content } => {
+            AgentEvent::ToolCall {
+                name,
+                title,
+                content,
+            } => {
                 assert_eq!(name, "execute");
                 assert_eq!(title.as_deref(), Some("运行 cargo test"));
                 assert!(content.unwrap_or_default().contains("cargo test"));
@@ -1068,7 +1114,9 @@ mod tests {
         let (routes, mut rx) = route_with_channel();
         let notif = SessionNotification::new(
             SessionId::new("s1"),
-            SessionUpdate::SessionInfoUpdate(agent_client_protocol::schema::v1::SessionInfoUpdate::new()),
+            SessionUpdate::SessionInfoUpdate(
+                agent_client_protocol::schema::v1::SessionInfoUpdate::new(),
+            ),
         );
         route_update(&routes, &notif);
         assert!(rx.try_recv().is_err(), "无关更新不应产生 AgentEvent");

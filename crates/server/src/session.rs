@@ -71,6 +71,7 @@ fn now() -> u64 {
 /// - 连续 thinking 块累积为一条 Thinking（流式，逐块追加内容）
 /// - 同工具（相同 kind）的 tool_call / tool_call_update 合并为一条 ToolCall
 /// - compaction 独立成条
+///
 /// 返回合并/新增后的当前活动（供实时推送；无活动产出时返回 None）。
 fn merge_activity(acts: &mut Vec<Activity>, ev: AgentEvent, ts: u64) -> Option<Activity> {
     match ev {
@@ -92,10 +93,13 @@ fn merge_activity(acts: &mut Vec<Activity>, ev: AgentEvent, ts: u64) -> Option<A
             title,
             content,
         } => {
-            let mergeable = matches!(acts.last(), Some(Activity::ToolCall { name: last, .. }) if *last == name);
+            let mergeable =
+                matches!(acts.last(), Some(Activity::ToolCall { name: last, .. }) if *last == name);
             if mergeable {
                 if let Some(Activity::ToolCall {
-                    title: t, content: c, ..
+                    title: t,
+                    content: c,
+                    ..
                 }) = acts.last_mut()
                 {
                     if t.is_none() {
@@ -329,16 +333,17 @@ impl SessionManager {
         let Some(activity) = activity else {
             return;
         };
-        let mut live = self.live_activities.lock().expect("Mutex 中毒（临界区内不应 panic）");
+        let mut live = self
+            .live_activities
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
         let changed = live.get(session_id) != Some(&activity);
         if changed {
             live.insert(session_id.to_string(), activity.clone());
-            let _ = self
-                .tx
-                .send(ServerNotification::Activity {
-                    session_id: session_id.to_string(),
-                    activity,
-                });
+            let _ = self.tx.send(ServerNotification::Activity {
+                session_id: session_id.to_string(),
+                activity,
+            });
         }
     }
 
@@ -373,11 +378,12 @@ impl SessionManager {
                 title_changed,
             )
         };
-        let summary: String = first_text(&input)
-            .chars()
-            .take(60)
-            .collect::<String>()
-            + if first_text(&input).chars().count() > 60 { "…" } else { "" };
+        let summary: String = first_text(&input).chars().take(60).collect::<String>()
+            + if first_text(&input).chars().count() > 60 {
+                "…"
+            } else {
+                ""
+            };
         let started = std::time::Instant::now();
         protocol::log::info(
             "server.session",
@@ -429,8 +435,15 @@ impl SessionManager {
                     title,
                     content,
                 } => {
-                    let merged =
-                        merge_activity(&mut acts, AgentEvent::ToolCall { name, title, content }, now());
+                    let merged = merge_activity(
+                        &mut acts,
+                        AgentEvent::ToolCall {
+                            name,
+                            title,
+                            content,
+                        },
+                        now(),
+                    );
                     self.push_live_activity(session_id, merged);
                 }
                 AgentEvent::Compaction(d) => {
@@ -441,7 +454,10 @@ impl SessionManager {
             }
         }
         // turn 结束：清空实时活动，合并后的完整活动写入有界缓存
-        self.live_activities.lock().expect("Mutex 中毒（临界区内不应 panic）").remove(session_id);
+        self.live_activities
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .remove(session_id);
 
         // 写入 activities 有界缓存
         if !acts.is_empty() {
@@ -470,7 +486,10 @@ impl SessionManager {
         self.set_state(session_id, SessionState::Idle).await;
         protocol::log::info(
             "server.session",
-            format!("prompt 完成 {session_id}（{}ms）", started.elapsed().as_millis()),
+            format!(
+                "prompt 完成 {session_id}（{}ms）",
+                started.elapsed().as_millis()
+            ),
         );
         Ok(())
     }
@@ -575,7 +594,10 @@ mod tests {
         assert_eq!(acts.len(), 2);
         match &acts[1] {
             Activity::ToolCall {
-                name, title, content, ..
+                name,
+                title,
+                content,
+                ..
             } => {
                 assert_eq!(name, "execute");
                 assert_eq!(title.as_deref(), Some("运行测试"));
