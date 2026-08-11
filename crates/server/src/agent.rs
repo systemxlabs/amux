@@ -307,6 +307,14 @@ impl AgentRegistry {
     }
 }
 
+/// 是否为 agent 内部的系统提醒（非真实用户消息）。
+/// 典型内容：turn 被取消后追加的 "The previous turn was interrupted by the user
+/// before completion; ..."，且通常以 `<system-reminder>` 包裹（kimi 等实现）。
+fn is_internal_reminder(s: &str) -> bool {
+    let t = s.trim_start();
+    t.starts_with("<system-reminder>") || s.contains("interrupted by the user before completion")
+}
+
 fn load_models(path: &std::path::Path) -> HashMap<String, Option<String>> {
     std::fs::read_to_string(path)
         .ok()
@@ -512,6 +520,12 @@ impl AgentDriver for AcpAgentDriver {
                     }]));
                 }
                 AgentEvent::UserMessage(s) => {
+                    // 过滤 agent 内部提醒：turn 被取消后 agent 会往会话历史追加一条
+                    // 系统提示（"The previous turn was interrupted by the user..."），
+                    // 不是真实用户消息，展示出来会污染会话历史（docs/DESIGN.md §5）
+                    if is_internal_reminder(&s) {
+                        continue;
+                    }
                     records.push(DialogRecord::UserMessage(vec![ContentBlock::Text {
                         text: s,
                     }]));
@@ -1120,6 +1134,21 @@ mod tests {
         );
         route_update(&routes, &notif);
         assert!(rx.try_recv().is_err(), "无关更新不应产生 AgentEvent");
+    }
+
+    /// agent 内部提醒（turn 取消后的中断提示）应被识别并过滤，不污染会话历史。
+    #[test]
+    fn internal_reminder_detected() {
+        assert!(is_internal_reminder(
+            "<system-reminder>\nThe previous turn was interrupted by the user before \
+             completion; any partial output shown above is incomplete. The user's next \
+             message continues the conversation.\n</system-reminder>"
+        ));
+        assert!(is_internal_reminder(
+            "The previous turn was interrupted by the user before completion; ..."
+        ));
+        assert!(!is_internal_reminder("请安装/更新以下 skill：OpenCLI"));
+        assert!(!is_internal_reminder("好的，我来分析一下这个问题。"));
     }
 
     /// 自动发现：`acp` 子命令探测逻辑（输出含 acp 才算支持）。
