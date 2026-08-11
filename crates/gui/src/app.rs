@@ -2098,7 +2098,7 @@ impl AmuxApp {
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.open_session(window, cx, machine, sid_open.clone());
             }));
-        let btn = if sel { btn.primary() } else { btn };
+        let btn = if sel { btn.primary() } else { btn.ghost() };
 
         // 正在重命名该会话：行内输入框 + 保存（右键 → 重命名）
         if self.renaming_session.as_ref() == Some(&(machine, sid.clone())) {
@@ -2225,6 +2225,7 @@ impl AmuxApp {
             .child(
                 Button::new(format!("wf-toggle-{wi}"))
                     .small()
+                    .ghost()
                     .label(if expanded { "▾" } else { "▸" })
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         if !this.expanded_workflows.insert(wi) {
@@ -2260,6 +2261,7 @@ impl AmuxApp {
                     .child(
                         Button::new(format!("wf-child-{wi}-{cid}"))
                             .small()
+                            .ghost()
                             .label(format!("{step} [{harness}@{machine_name}] {st}"))
                             .on_click(cx.listener(move |this, _ev, window, cx| {
                                 let mi = this
