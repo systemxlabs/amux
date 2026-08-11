@@ -3851,6 +3851,17 @@ impl Render for AmuxApp {
         if self.show_settings {
             root = root.child(self.render_settings_overlay(window, cx));
         }
+        // gpui-component 的 Root 不自动渲染 sheet/dialog/notification 层，
+        // 需应用在最顶层显式挂载（否则 open_alert_dialog 等不显示）
+        if let Some(layer) = Root::render_sheet_layer(window, cx) {
+            root = root.child(layer);
+        }
+        if let Some(layer) = Root::render_dialog_layer(window, cx) {
+            root = root.child(layer);
+        }
+        if let Some(layer) = Root::render_notification_layer(window, cx) {
+            root = root.child(layer);
+        }
         root.into_any()
     }
 }
