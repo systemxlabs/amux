@@ -1919,15 +1919,16 @@ impl AmuxApp {
                 h_flex()
                     .gap_1()
                     .items_center()
-                    // 工作中转圈；空闲占位（保持对齐）
+                    .child(btn)
+                    .child(div().flex_1())
+                    // 工作中转圈（右侧）；空闲占位（保持对齐）
                     .child(if busy {
                         Spinner::new()
                             .color(hsla(0.6, 0.8, 0.5, 1.0))
                             .into_any_element()
                     } else {
                         div().w(px(14.)).h(px(14.)).into_any_element()
-                    })
-                    .child(btn),
+                    }),
             )
             .into_any_element()
     }
