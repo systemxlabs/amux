@@ -20,8 +20,8 @@ amux 处于 **beta 阶段**：允许随意破坏性改动，无需向后兼容�
 | crate | 职责 |
 |---|---|
 | `protocol` | GUI 应用 ↔ server 协议面：方法名、参数/结果类型、通知类型。**协议的唯一来源**，GUI 应用与 server 均从这里导入 |
-| `server` | 每台机器的常驻进程：WebSocket 传输、JSON-RPC 分发、会话管理、会话数据聚合与 activities 缓存、git 能力；经 ACP 与 agent 通信 |
-| `gui` | GUI 应用 |
+| `server` | 每台机器的常驻进程：WebSocket 传输、JSON-RPC 分发、会话管理、ACP 会话事件透传、git 能力；经 ACP 与 agent 通信 |
+| `gui` | GUI 应用（会话事件聚合：对话流与活动） |
 
 关键边界：
 
