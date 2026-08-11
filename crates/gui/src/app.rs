@@ -208,6 +208,9 @@ pub struct AmuxApp {
     /// 新会话视图（PRD §4.1.2）：选中的机器与 agent
     new_session_machine: Option<usize>,
     new_session_harness: Option<String>,
+    /// Skills 安装目标（PRD §3.6）：选中的机器与 agent
+    skill_install_machine: Option<usize>,
+    skill_install_harness: Option<String>,
     /// 创建编排会话时的提示（如编排 agent 未配置 API）
     workflow_error: Option<String>,
     /// 对话流滚动句柄（打开会话/新消息自动滚到底部）
@@ -316,6 +319,8 @@ impl AmuxApp {
             renaming_workflow: None,
             new_session_machine: None,
             new_session_harness: None,
+            skill_install_machine: None,
+            skill_install_harness: None,
             workflow_error: None,
             dialog_scroll: ScrollHandle::new(),
             expanded_workflows: std::collections::HashSet::new(),
@@ -2601,6 +2606,71 @@ impl AmuxApp {
         row
     }
 
+    /// Skills 安装目标：机器选择（PRD §3.6）。
+    fn render_skill_machine_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = h_flex().gap_1();
+        if self.machines.is_empty() {
+            row = row.child(Label::new("（请先在设置中添加机器）"));
+        }
+        for (i, m) in self.machines.iter().enumerate() {
+            let sel = self.skill_install_machine == Some(i)
+                || (self.skill_install_machine.is_none() && i == 0);
+            let name = m.config.name.clone();
+            row = row.child(
+                Button::new(format!("skill-install-machine-{i}"))
+                    .small()
+                    .label(name.clone())
+                    .when(sel, |b| b.primary())
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.skill_install_machine = Some(i);
+                        this.skill_install_harness = None; // 换机器后 agent 重选
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
+
+    /// Skills 安装目标：agent 选择（来自该机器自动发现的 agent，PRD §3.3）。
+    fn render_skill_harness_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let machine = self.skill_install_machine.unwrap_or(0);
+        let info = self.machine(machine).and_then(|m| m.info.clone());
+        let mut row = h_flex().gap_1();
+        match info {
+            None => {
+                row = row.child(Label::new("（正在获取该机器 agent 列表…）"));
+            }
+            Some(info) => {
+                let harnesses: Vec<String> = info
+                    .harnesses
+                    .iter()
+                    .filter(|h| h.available)
+                    .map(|h| h.name.clone())
+                    .collect();
+                if harnesses.is_empty() {
+                    row = row.child(Label::new("（该机器未检测到 agent）"));
+                } else {
+                    for (i, h) in harnesses.iter().enumerate() {
+                        let sel = self.skill_install_harness.as_deref() == Some(h.as_str())
+                            || (self.skill_install_harness.is_none() && i == 0);
+                        let hh = h.clone();
+                        row = row.child(
+                            Button::new(format!("skill-install-harness-{hh}"))
+                                .small()
+                                .label(hh.clone())
+                                .when(sel, |b| b.primary())
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    this.skill_install_harness = Some(hh.clone());
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                }
+            }
+        }
+        row
+    }
+
     /// 工作流模板选择（新会话视图，PRD §3.7 从模板创建）。
     fn render_template_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let templates = self.store.list_templates();
@@ -4068,13 +4138,26 @@ impl AmuxApp {
                             .small()
                             .label("安装到 agent")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
-                                // PRD §3.6：给 agent 安装 skills 时启动新会话并发送安装提示词
+                                // PRD §3.6：给 agent 安装 skills 时启动新会话并发送安装提示词；
+                                // 安装目标来自上方选择（机器 + agent），未选时回落默认
                                 let skill = skill.clone();
-                                if let Some(mi) = this.active_machine() {
-                                    if let Some(harness) = this.available_harness(mi) {
-                                        this.install_skill(window, cx, mi, harness, skill);
+                                let mi =
+                                    this.skill_install_machine.or_else(|| this.active_machine());
+                                let Some(mi) = mi else {
+                                    return;
+                                };
+                                let harness = this
+                                    .skill_install_harness
+                                    .clone()
+                                    .or_else(|| this.available_harness(mi));
+                                let Some(harness) = harness else {
+                                    if let Some(m) = this.machine_mut(mi) {
+                                        m.status = "获取 agent 列表失败，请检查机器连接".into();
                                     }
-                                }
+                                    cx.notify();
+                                    return;
+                                };
+                                this.install_skill(window, cx, mi, harness, skill);
                             })),
                     )
                     .child(
@@ -4111,6 +4194,9 @@ impl AmuxApp {
                 "Skills 注册表",
                 "每条只存一段描述：仓库/资源 URL 或下载安装方法说明；支持增删改",
             ))
+            .child(self.settings_header("安装目标", "选择要安装到的机器与 agent（PRD §3.6）"))
+            .child(self.render_skill_machine_selector(cx))
+            .child(self.render_skill_harness_selector(cx))
             .children(items)
             .child(self.settings_header("新增 / 编辑", ""))
             .child(Input::new(&self.skill_name_input))
@@ -4140,7 +4226,7 @@ impl AmuxApp {
                             })),
                     )
                     .child(
-                        Label::new("安装：在机器管理中点 agent 的 skills 查看，选 skill 安装")
+                        Label::new("点击上方「安装到 agent」按所选目标安装")
                             .text_xs()
                             .text_color(rgb(0x9ca3af)),
                     ),
