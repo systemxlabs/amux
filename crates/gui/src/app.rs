@@ -135,10 +135,16 @@ enum Selected {
     Workflow { engine: usize },
 }
 
+/// 右键菜单目标：普通会话 或 编排（工作流）会话。
+#[derive(Clone)]
+enum ContextMenuTarget {
+    Session { machine: usize, session_id: String },
+    Workflow { engine: usize },
+}
+
 /// 右键会话弹出的操作菜单（PRD §3.1：删除 / 重命名）。
 struct SessionContextMenu {
-    machine: usize,
-    session_id: String,
+    target: ContextMenuTarget,
     title: String,
     x: f32,
     y: f32,
@@ -191,6 +197,8 @@ pub struct AmuxApp {
     context_menu: Option<SessionContextMenu>,
     /// 正在重命名的会话（机器下标, 会话 id）
     renaming_session: Option<(usize, String)>,
+    /// 正在重命名的编排会话（引擎下标）
+    renaming_workflow: Option<usize>,
     /// 新会话视图（PRD §4.1.2）：选中的机器与 agent
     new_session_machine: Option<usize>,
     new_session_harness: Option<String>,
@@ -295,6 +303,7 @@ impl AmuxApp {
             tpl_edit_target: None,
             context_menu: None,
             renaming_session: None,
+            renaming_workflow: None,
             new_session_machine: None,
             new_session_harness: None,
             workflow_error: None,
@@ -1564,16 +1573,26 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 右键会话操作菜单（删除 / 重命名，PRD §3.1）。
+    /// 重命名编排会话（GUI 本地标题，右键 → 重命名）。
+    fn rename_workflow(&mut self, cx: &mut Context<Self>, engine: usize, title: String) {
+        if let Some(wf) = self.workflows.get_mut(engine) {
+            wf.session.title = title.trim().to_string();
+            let dir = self.workflow_dir.clone();
+            let _ = wf.persist(&dir);
+        }
+        self.renaming_workflow = None;
+        cx.notify();
+    }
+
+    /// 右键会话操作菜单（删除 / 重命名，PRD §3.1；普通会话与编排会话通用）。
     fn render_context_menu(
         &self,
         menu: &SessionContextMenu,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let machine = menu.machine;
-        let sid = menu.session_id.clone();
-        let sid_rename = sid.clone();
+        let target = menu.target.clone();
+        let rename_target = target.clone();
         div()
             .id("ctx-backdrop")
             .absolute()
@@ -1609,7 +1628,7 @@ impl AmuxApp {
                             .small()
                             .label("重命名")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
-                                // 预填该会话当前标题后进入行内重命名
+                                // 预填当前标题后进入行内重命名
                                 let title = this
                                     .context_menu
                                     .as_ref()
@@ -1618,7 +1637,20 @@ impl AmuxApp {
                                 this.title_input.update(cx, |s, cx| {
                                     s.set_value(title, window, cx);
                                 });
-                                this.renaming_session = Some((machine, sid_rename.clone()));
+                                match &rename_target {
+                                    ContextMenuTarget::Session {
+                                        machine,
+                                        session_id,
+                                    } => {
+                                        this.renaming_session =
+                                            Some((*machine, session_id.clone()));
+                                        this.renaming_workflow = None;
+                                    }
+                                    ContextMenuTarget::Workflow { engine } => {
+                                        this.renaming_workflow = Some(*engine);
+                                        this.renaming_session = None;
+                                    }
+                                }
                                 this.context_menu = None;
                                 cx.notify();
                             })),
@@ -1626,10 +1658,30 @@ impl AmuxApp {
                     .child(
                         Button::new("ctx-delete")
                             .small()
-                            .label("删除会话")
+                            .label(if matches!(target, ContextMenuTarget::Workflow { .. }) {
+                                "删除工作流"
+                            } else {
+                                "删除会话"
+                            })
                             .on_click(cx.listener(move |this, _ev, window, cx| {
-                                // 专用确认弹窗（不可恢复，PRD §3.1）
-                                this.confirm_delete_session(window, cx, machine, sid.clone());
+                                match &target {
+                                    // 普通会话：专用确认弹窗（不可恢复，PRD §3.1）
+                                    ContextMenuTarget::Session {
+                                        machine,
+                                        session_id,
+                                    } => {
+                                        this.confirm_delete_session(
+                                            window,
+                                            cx,
+                                            *machine,
+                                            session_id.clone(),
+                                        );
+                                    }
+                                    // 编排会话：GUI 本地状态，直接删除
+                                    ContextMenuTarget::Workflow { engine } => {
+                                        this.delete_workflow(window, cx, *engine);
+                                    }
+                                }
                                 this.context_menu = None;
                                 cx.notify();
                             })),
@@ -1927,13 +1979,16 @@ impl AmuxApp {
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                     this.context_menu = Some(SessionContextMenu {
-                        machine,
-                        session_id: sid_ctx.clone(),
+                        target: ContextMenuTarget::Session {
+                            machine,
+                            session_id: sid_ctx.clone(),
+                        },
                         title: title.clone(),
                         x: ev.position.x.as_f32(),
                         y: ev.position.y.as_f32(),
                     });
                     this.renaming_session = None;
+                    this.renaming_workflow = None;
                     cx.notify();
                 }),
             )
@@ -2025,7 +2080,31 @@ impl AmuxApp {
                     ),
             );
         }
-        v_flex()
+
+        // 正在重命名该编排会话：行内输入框 + 保存（右键 → 重命名）
+        if self.renaming_workflow == Some(wi) {
+            return v_flex()
+                .gap_1()
+                .p_2()
+                .bg(rgb(0xffffff))
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(0xe5e7eb))
+                .child(Input::new(&self.title_input))
+                .child(
+                    Button::new(format!("wf-rename-save-{wi}"))
+                        .small()
+                        .primary()
+                        .label("保存")
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            let title = this.title_input.read(cx).value().to_string();
+                            this.rename_workflow(cx, wi, title);
+                        })),
+                )
+                .into_any_element();
+        }
+
+        let row = v_flex()
             .gap_2()
             .p_2()
             .bg(rgb(0xffffff))
@@ -2042,8 +2121,30 @@ impl AmuxApp {
                     .bg(rgb(0xf3f4f6))
                     .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
             )
-            .child(Collapsible::new().open(false).content(content))
-            .into_any()
+            .child(Collapsible::new().open(false).content(content));
+
+        // 右键弹出操作菜单（删除 / 重命名工作流，PRD §3.1）
+        let title_ctx = title.clone();
+        div()
+            .id(format!("wf-row-{wi}"))
+            .relative()
+            .w_full()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                    this.context_menu = Some(SessionContextMenu {
+                        target: ContextMenuTarget::Workflow { engine: wi },
+                        title: title_ctx.clone(),
+                        x: ev.position.x.as_f32(),
+                        y: ev.position.y.as_f32(),
+                    });
+                    this.renaming_workflow = None;
+                    this.renaming_session = None;
+                    cx.notify();
+                }),
+            )
+            .child(row)
+            .into_any_element()
     }
 
     fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
