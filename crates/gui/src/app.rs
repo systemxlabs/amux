@@ -2199,14 +2199,17 @@ impl AmuxApp {
             .border_color(rgb(0xe5e7eb))
             .shadow_sm()
             .child(header)
-            .child(
-                div()
-                    .px_1()
-                    .py(px(2.))
-                    .rounded_full()
-                    .bg(rgb(0xf3f4f6))
-                    .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
-            )
+            // 特殊状态徽章：仅 已暂停/完成 显示（工作中用转圈、空闲不显示文字）
+            .when(wf.session.paused || wf.session.done, |row| {
+                row.child(
+                    div()
+                        .px_1()
+                        .py(px(2.))
+                        .rounded_full()
+                        .bg(rgb(0xf3f4f6))
+                        .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
+                )
+            })
             .child(Collapsible::new().open(false).content(content));
 
         // 右键弹出操作菜单（删除 / 重命名工作流，PRD §3.1）
