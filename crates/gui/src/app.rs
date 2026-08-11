@@ -2840,7 +2840,6 @@ impl AmuxApp {
                         .gap_1()
                         .rounded_md()
                         .bg(rgb(0x3b82f6))
-                        .text_color(rgb(0xffffff))
                         .shadow_sm()
                         .child(
                             Label::new("我")
@@ -2848,7 +2847,12 @@ impl AmuxApp {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0xffffff)),
                         )
-                        .child(block_text(content)),
+                        // 用户消息：蓝底白字，可选中/复制（纯文本走 Markdown 解析为段落，继承白色）
+                        .child(
+                            TextView::markdown(format!("umd-{i}"), block_text(content))
+                                .selectable(true)
+                                .text_color(rgb(0xffffff)),
+                        ),
                 ),
                 DialogItem::AgentOutput { content, .. } => div().id(("row", i)).w_full().child(
                     div()
@@ -2868,8 +2872,11 @@ impl AmuxApp {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0x6b7280)),
                         )
-                        // agent 输出按 Markdown 渲染（docs/DESIGN.md §7 / PRD §4.1.3）
-                        .child(TextView::markdown(format!("amd-{i}"), block_text(content))),
+                        // agent 输出按 Markdown 渲染（docs/DESIGN.md §7 / PRD §4.1.3），可选中/复制
+                        .child(
+                            TextView::markdown(format!("amd-{i}"), block_text(content))
+                                .selectable(true),
+                        ),
                 ),
             })
             .collect::<Vec<_>>();
