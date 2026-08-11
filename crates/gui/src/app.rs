@@ -3520,20 +3520,9 @@ impl AmuxApp {
                 if let Some(wf) = self.workflows.get(*engine) {
                     for (i, m) in wf.session.transcript.iter().enumerate() {
                         match m {
-                            // 用户消息在对话流展示，不进活动
-                            OrcMsg::User { .. } => {}
-                            OrcMsg::Orc { text } => {
-                                rows.push(
-                                    div()
-                                        .id(("wf-act", i))
-                                        .w_full()
-                                        .p_1()
-                                        .bg(rgb(0xeff6ff))
-                                        .rounded_md()
-                                        .child(format!("[编排] {text}"))
-                                        .into_any_element(),
-                                );
-                            }
+                            // 用户消息与编排 agent 输出在对话流以气泡展示，不进活动
+                            // （活动只含系统事件与实时状态）
+                            OrcMsg::User { .. } | OrcMsg::Orc { .. } => {}
                             OrcMsg::System { text } => {
                                 rows.push(
                                     div()
