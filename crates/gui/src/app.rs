@@ -2121,18 +2121,6 @@ impl AmuxApp {
         let header = h_flex()
             .gap_1()
             .items_center()
-            // ">" 折叠指示：点击展开/折叠子会话（不与"打开会话"冲突）
-            .child(
-                Button::new(format!("wf-toggle-{wi}"))
-                    .small()
-                    .label(if expanded { "▾" } else { "▸" })
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        if !this.expanded_workflows.insert(wi) {
-                            this.expanded_workflows.remove(&wi);
-                        }
-                        cx.notify();
-                    })),
-            )
             // 标题区域：点击即打开会话交互页（与普通会话一致）
             .child(
                 h_flex()
@@ -2156,14 +2144,26 @@ impl AmuxApp {
                         )
                     }),
             )
-            // 与普通会话一致：工作中转圈（右侧）、空闲无转圈
+            // 与普通会话一致：工作中转圈、空闲无转圈
             .child(if wf.session.state == SessionState::Busy {
                 Spinner::new()
                     .color(hsla(0.6, 0.8, 0.5, 1.0))
                     .into_any_element()
             } else {
                 div().w(px(14.)).h(px(14.)).into_any_element()
-            });
+            })
+            // ">" 折叠指示（最右端）：点击展开/折叠子会话
+            .child(
+                Button::new(format!("wf-toggle-{wi}"))
+                    .small()
+                    .label(if expanded { "▾" } else { "▸" })
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        if !this.expanded_workflows.insert(wi) {
+                            this.expanded_workflows.remove(&wi);
+                        }
+                        cx.notify();
+                    })),
+            );
         // 子会话默认折叠、可展开下钻（PRD §3.1/§4.1.1）
         let mut content = v_flex().gap_1();
         for c in &wf.session.children {
