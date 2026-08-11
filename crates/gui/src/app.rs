@@ -2128,15 +2128,6 @@ impl AmuxApp {
                 wf.session.children.len()
             )))
             .child(div().flex_1())
-            .child(
-                Button::new(format!("wf-open-{wi}"))
-                    .small()
-                    .label("打开")
-                    .when(orc_sel, |b| b.primary())
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.open_workflow(window, cx, wi);
-                    })),
-            )
             // 与普通会话一致：工作中转圈（右侧）、空闲无转圈
             .child(if wf.session.state == SessionState::Busy {
                 Spinner::new()
