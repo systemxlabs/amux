@@ -3855,12 +3855,7 @@ impl Render for AmuxApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0x374151)),
             )
-            .child(div().flex_1())
-            .child(
-                Label::new("右键会话 → 删除 / 重命名")
-                    .text_xs()
-                    .text_color(rgb(0x9ca3af)),
-            );
+            .child(div().flex_1());
 
         let mut main_row = h_flex()
             .flex_1()
