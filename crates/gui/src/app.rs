@@ -2065,18 +2065,13 @@ impl AmuxApp {
             .collect()
     }
 
-    /// 普通会话行：标题 · agent@机器 · 状态（机器信息内联，docs/PRD §4.1.1）。
+    /// 普通会话行：标题 + 状态（agent 与机器在对话气泡中展示，docs/PRD §4.1.1）。
     fn render_session_row(
         &self,
         cx: &mut Context<Self>,
         machine: usize,
         s: &SessionMeta,
     ) -> gpui::AnyElement {
-        let machine_name = self
-            .machines
-            .get(machine)
-            .map(|m| m.config.name.clone())
-            .unwrap_or_default();
         let sid = s.id.clone();
         let sid_open = sid.clone(); // 打开会话闭包用
         let sel = self.selected
@@ -2091,7 +2086,7 @@ impl AmuxApp {
         };
         // 状态只区分 工作中 / 空闲：工作中前缀转圈，空闲无转圈（docs/PRD §4.1.1）
         let busy = s.state == SessionState::Busy;
-        let label: SharedString = format!("{title} · {}@{machine_name}", s.harness).into();
+        let label: SharedString = title.clone().into();
 
         // 正在重命名该会话：行内输入框 + 保存（右键 → 重命名）
         if self.renaming_session.as_ref() == Some(&(machine, sid.clone())) {
@@ -2640,6 +2635,21 @@ impl AmuxApp {
                 .unwrap_or_default(),
             None => Vec::new(),
         };
+        // agent 输出气泡标注 agent@机器（普通会话）；编排会话气泡标注"编排"
+        let agent_label: SharedString = match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| {
+                    let machine_name = m.config.name.clone();
+                    m.sessions
+                        .iter()
+                        .find(|s| &s.id == id)
+                        .map(|s| format!("{}@{machine_name}", s.harness).into())
+                })
+                .unwrap_or_else(|| "Agent".into()),
+            Some(Selected::Workflow { .. }) => "编排".into(),
+            None => "Agent".into(),
+        };
         let rows = dialog
             .iter()
             .enumerate()
@@ -2671,7 +2681,7 @@ impl AmuxApp {
                         .border_color(rgb(0xe5e7eb))
                         .shadow_sm()
                         .child(
-                            Label::new("Agent")
+                            Label::new(agent_label.clone())
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0x6b7280)),
