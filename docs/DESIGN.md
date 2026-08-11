@@ -48,7 +48,7 @@ Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server �
 
 ### 3.1 组件与边界
 
-- **Client（仅 GUI 客户端）**：amux 桌面应用，基于 **GPUI + gpui-component**，直连各已注册机器的 server——本机与远程同等对待，统一注册后连接。每条连接对应一台机器，使用同一套协议。
+- **Client（仅 GUI 客户端）**：amux 桌面应用（GPUI），直连各已注册机器的 server——本机与远程同等对待，统一注册后连接。每条连接对应一台机器，使用同一套协议。
 - **Server**：每台机器运行一个常驻进程，是 **ACP v1 client**——spawn agent 子进程、驱动 ACP 会话、把 agent 输出聚合后交付给 GUI、直连 git。**server 之间不通信**——每个 server 只服务本机会话，对连接方一律按 GUI 客户端对待。
 - **协议单一来源**：app↔server 协议（方法面、参数/结果类型、通知类型）由共享 crate 定义，GUI 与 server 从同一处导入——单一语言实现，无需双语言协议对齐。
 
@@ -99,14 +99,13 @@ Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server �
 
 ### 5.2 会话历史
 
-GUI 打开会话时全量加载对话内容，缓存到本地（GUI 数据目录，按会话一个缓存文件）：
+GUI 打开会话时经 ACP `session/load` **全量重放**并聚合为对话内容，缓存到本地（GUI 数据目录，按会话一个缓存文件；`session/load` 的响应即重放边界）：
 
-- **打开会话**：对话内容全量加载（经 ACP `session/load` 重放聚合）→ 写入本地缓存
+- **打开 / 重连**：对话内容全量加载 → 写入本地缓存；GUI 重连后重新加载
 - **增量**：turn 结束后的新输出追加到缓存
 - **resume（重新恢复会话）**：**清空旧缓存，重新全量加载**——不保留跨 resume 的缓存，保证缓存与 agent 侧历史一致
 - **会话删除**（ACP `session/delete`）：历史随 agent 侧删除而消失，不可恢复
 - 缓存仅作会话打开期间的读写（滚动回溯、分页），不承担历史权威
-- **打开会话与重连**：GUI 打开或重连会话时，server 经 ACP `session/load` **全量重放**并聚合为对话内容交付给 GUI；`session/load` 的响应即**重放边界**
 
 ### 5.3 会话活动
 
@@ -136,7 +135,6 @@ GUI 打开会话时全量加载对话内容，缓存到本地（GUI 数据目录
 ### 7.1 会话交互
 
 - 交互只有两个动作：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作），经 ACP `session/prompt` / `session/cancel` 到达 agent。
-- **steer（忙时 prompt）**：忙时 prompt 的行为取决于 agent 实现（ACP v1 turn 模型），不支持进行中注入时 server 直接报错。
 - **用户输入**：GUI 的 prompt 经 server 转发给 agent；用户消息同时由 GUI 本地立即渲染（不依赖回显），并保留在对话内容中。
 - **快捷指令**（客户端本地配置，无专用协议）：每条指令是一段发给 agent 的提示词，经 prompt 由 agent 执行（Commit & Push、Submit PR、skill 安装 / 更新等，见「Skills 管理」）；直连 git 的 push / undo / revert 等操作不属于快捷指令；新会话 / Kill Session 由客户端直接发起对应会话操作。
 - **多客户端并发**：server 对同一会话的所有 prompt（含各客户端的）按到达顺序串行化，保证按调用顺序送达。
@@ -177,12 +175,11 @@ ACP 接入方式分两类：
 
 ## 8. GUI（GPUI 桌面应用）
 
-GUI 为单进程桌面应用（GPUI + gpui-component，跟踪 Zed 主线 git 依赖；跨平台 macOS / Linux / Windows）。
+GUI 为单进程桌面应用（GPUI + gpui-component；跨平台 macOS / Linux / Windows）。
 
 ### 8.1 技术栈与异步模型
 
 - **UI 框架**：GPUI executor 承载 UI；WS 连接与 ACP 重放流经 **tokio** 运行，事件桥接进 GPUI 事件循环。
-- 依赖 `gpui` + `gpui-component`：Dock 布局、Markdown 渲染、虚拟化列表、代码编辑器 + Tree Sitter、表单/对话框组件等。
 
 ### 8.2 布局与关键视图
 
@@ -191,10 +188,6 @@ GUI 为单进程桌面应用（GPUI + gpui-component，跟踪 Zed 主线 git 依
 - **会话活动**：中间面板下方展示**正在进行的活动**（一条或无，实时）；右侧面板展示完整活动历史（上下滚动）——经 `get_activities` 获取。
 - **Diff Review**：代码编辑器组件 + **Tree Sitter 语法高亮**；文件列表、side-by-side/inline diff、revert 操作。
 - **输入与设置**：输入区（多行、拖拽/粘贴、@ 引用）、快捷指令栏、设置页（机器管理）——表单/对话框组件。
-
-### 8.3 本地配置
-
-GUI 本地数据目录 `~/.amux/gui` 存放：机器注册表、快捷指令、Skills 注册表、编排 agent 会话状态、会话历史缓存。
 
 ## 9. 工作流
 
