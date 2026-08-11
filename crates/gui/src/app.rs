@@ -153,7 +153,10 @@ pub struct AmuxApp {
     voice_recording: bool,
     session_cwd_input: Entity<InputState>,
     workflow_input: Entity<InputState>,
-    settings_input: Entity<InputState>,
+    /// 添加机器表单：名称 / 连接地址 / Token（分栏输入，不混在一个输入框）
+    machine_name_input: Entity<InputState>,
+    machine_url_input: Entity<InputState>,
+    machine_token_input: Entity<InputState>,
     /// 设置表单输入
     qc_name_input: Entity<InputState>,
     qc_prompt_input: Entity<InputState>,
@@ -212,8 +215,11 @@ impl AmuxApp {
                 .placeholder("用自然语言描述完整执行计划（支持 @ 引用上下文）…")
                 .multi_line(true)
         });
-        let settings_input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("名称 ws://地址 token（空格分隔）"));
+        let machine_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("名称，如 localpc"));
+        let machine_url_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("连接地址 ws://host:port"));
+        let machine_token_input = cx.new(|cx| InputState::new(window, cx).placeholder("Token"));
         let qc_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("指令名"));
         let qc_prompt_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("提示词（发给 agent 的一段话）"));
@@ -267,7 +273,9 @@ impl AmuxApp {
             voice_recording: false,
             session_cwd_input,
             workflow_input,
-            settings_input,
+            machine_name_input,
+            machine_url_input,
+            machine_token_input,
             qc_name_input,
             qc_prompt_input,
             skill_name_input,
@@ -1472,6 +1480,13 @@ impl AmuxApp {
         let machine = self
             .store
             .add_machine(name.trim(), url.trim(), token.trim());
+        // 清空添加表单（成功添加后）
+        self.machine_name_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.machine_url_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.machine_token_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
         let mut view = MachineView::new(machine);
         view.status = "已连接".into();
         let idx = self.machines.len();
@@ -3239,30 +3254,31 @@ impl AmuxApp {
             )
             .child(Input::new(&self.model_input))
             .children(machines)
+            .child(self.settings_header("添加机器", ""))
             .child(
-                h_flex()
+                v_flex()
                     .gap_1()
-                    .child(Input::new(&self.settings_input))
-                    .child(Button::new("settings-add").small().label("添加").on_click(
-                        cx.listener(|this, _ev, window, cx| {
-                            let text = this.settings_input.read(cx).value().to_string();
-                            let parts: Vec<&str> = text.split_whitespace().collect();
-                            if parts.len() >= 3 {
-                                this.add_machine(
-                                    window,
-                                    cx,
-                                    parts[0].to_string(),
-                                    parts[1].to_string(),
-                                    parts[2].to_string(),
-                                );
-                            }
-                        }),
-                    )),
-            )
-            .child(
-                Label::new("添加格式：名称 ws://地址 token（空格分隔）")
-                    .text_xs()
-                    .text_color(rgb(0x9ca3af)),
+                    .p_2()
+                    .bg(rgb(0xf7f8fa))
+                    .rounded_md()
+                    .child(Label::new("名称").text_sm().text_color(rgb(0x6b7280)))
+                    .child(Input::new(&self.machine_name_input))
+                    .child(Label::new("连接地址").text_sm().text_color(rgb(0x6b7280)))
+                    .child(Input::new(&self.machine_url_input))
+                    .child(Label::new("Token").text_sm().text_color(rgb(0x6b7280)))
+                    .child(Input::new(&self.machine_token_input))
+                    .child(
+                        Button::new("settings-add")
+                            .small()
+                            .primary()
+                            .label("添加机器")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                let name = this.machine_name_input.read(cx).value().to_string();
+                                let url = this.machine_url_input.read(cx).value().to_string();
+                                let token = this.machine_token_input.read(cx).value().to_string();
+                                this.add_machine(window, cx, name, url, token);
+                            })),
+                    ),
             )
             .into_any()
     }
