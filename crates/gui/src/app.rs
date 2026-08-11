@@ -179,6 +179,8 @@ pub struct AmuxApp {
     tpl_edit_target: Option<String>,
     /// 会话详情是否可编辑标题
     editing_title: bool,
+    /// 删除会话两步确认（记录待确认的会话 id；不可恢复，PRD §3.1）
+    delete_confirm_session: Option<String>,
     /// 新会话视图（PRD §4.1.2）：选中的机器与 agent
     new_session_machine: Option<usize>,
     new_session_harness: Option<String>,
@@ -282,6 +284,7 @@ impl AmuxApp {
             skill_edit_target: None,
             tpl_edit_target: None,
             editing_title: false,
+            delete_confirm_session: None,
             new_session_machine: None,
             new_session_harness: None,
             workflow_error: None,
@@ -562,7 +565,7 @@ impl AmuxApp {
                     }
                 }
             }
-            "session_created" | "session_deleted" | "session_updated" => {
+            "session_created" | "session_closed" | "session_deleted" | "session_updated" => {
                 this.refresh_sessions(idx, window, cx);
             }
             // 断线重连：刷新会话列表并重开选中会话（全量重放，关闭期间输出不丢，
@@ -1429,6 +1432,100 @@ impl AmuxApp {
         })
         .detach();
         self.editing_title = false;
+    }
+
+    // ---- 会话关闭 / 恢复 / 删除（PRD §3.1）----
+
+    /// 关闭会话：历史保留、可恢复继续。
+    fn close_session(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        protocol::log::info("gui.app", format!("关闭会话 {session_id}"));
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let _ = client
+                .request(
+                    protocol::method::CLOSE_SESSION,
+                    Some(json!({ "sessionId": session_id })),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.refresh_sessions(machine, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 恢复会话（已关闭的会话可继续）。
+    fn resume_session(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        protocol::log::info("gui.app", format!("恢复会话 {session_id}"));
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let _ = client
+                .request(
+                    protocol::method::RESUME_SESSION,
+                    Some(json!({ "sessionId": session_id })),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.refresh_sessions(machine, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 删除会话：历史一并移除、不可恢复（PRD §3.1）。
+    /// 调用方应先经两步确认（delete_confirm_session）。
+    fn delete_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        protocol::log::info("gui.app", format!("删除会话 {session_id}"));
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let _ = client
+                .request(
+                    protocol::method::DELETE_SESSION,
+                    Some(json!({ "sessionId": session_id })),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.delete_confirm_session = None;
+                // 删除的是当前选中会话则回到新会话视图
+                if let Some(Selected::Session { id, .. }) = this.selected.clone() {
+                    if id == session_id {
+                        this.selected = None;
+                    }
+                }
+                this.refresh_sessions(machine, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ---- 设置 ----
@@ -2783,6 +2880,85 @@ impl AmuxApp {
                         }
                         cx.notify();
                     })),
+            );
+        }
+        // 普通会话：关闭 / 恢复 / 删除（PRD §3.1：可恢复继续；可永久删除，不可恢复）
+        if let Some(Selected::Session { machine, id }) = self.selected.clone() {
+            let id_act = id.clone(); // 关闭/恢复用
+            let id_del = id.clone(); // 删除确认用
+            let confirming = self.delete_confirm_session.as_deref() == Some(id.as_str());
+            if meta.closed {
+                body = body.child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("resume-session")
+                                .small()
+                                .primary()
+                                .label("恢复会话")
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    let id = id_act.clone();
+                                    this.resume_session(window, cx, machine, id);
+                                })),
+                        )
+                        .child(
+                            Button::new("delete-session")
+                                .small()
+                                .label(if confirming {
+                                    "确认删除？"
+                                } else {
+                                    "删除会话"
+                                })
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    let id = id_del.clone();
+                                    if this.delete_confirm_session.as_deref() == Some(id.as_str()) {
+                                        this.delete_session(window, cx, machine, id);
+                                    } else {
+                                        // 两步确认：不可恢复（PRD §3.1）
+                                        this.delete_confirm_session = Some(id);
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                );
+            } else {
+                body = body.child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("close-session")
+                                .small()
+                                .label("关闭会话")
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    let id = id_act.clone();
+                                    this.close_session(window, cx, machine, id);
+                                })),
+                        )
+                        .child(
+                            Button::new("delete-session")
+                                .small()
+                                .label(if confirming {
+                                    "确认删除？"
+                                } else {
+                                    "删除会话"
+                                })
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    let id = id_del.clone();
+                                    if this.delete_confirm_session.as_deref() == Some(id.as_str()) {
+                                        this.delete_session(window, cx, machine, id);
+                                    } else {
+                                        // 两步确认：不可恢复（PRD §3.1）
+                                        this.delete_confirm_session = Some(id);
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                );
+            }
+            body = body.child(
+                Label::new("删除不可恢复，将连同历史一并移除")
+                    .text_xs()
+                    .text_color(rgb(0x9ca3af)),
             );
         }
         // 编排会话：暂停/继续/介入/子会话
