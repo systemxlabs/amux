@@ -339,6 +339,19 @@ pub struct GetActivitiesParams {
     pub limit: Option<usize>,
 }
 
+/// 打开会话（惰性加载：默认只取最新一窗，`before` 游标向上取更早历史）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSessionParams {
+    pub session_id: String,
+    /// 返回的最大条目数（默认 200）
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// 独占上界游标：只返回该下标之前的条目（None = 从最新一窗开始）
+    #[serde(default)]
+    pub before: Option<usize>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GitDiffParams {
     pub cwd: String,
@@ -391,8 +404,12 @@ pub struct SessionResult {
 
 #[derive(Debug, Serialize)]
 pub struct OpenSessionResult {
-    /// 对话内容全量（用户消息 + agent 输出，非流式）
+    /// 对话内容（一窗，非流式）
     pub items: Vec<DialogItem>,
+    /// 是否还有更早的历史（GUI 显示"加载更早消息"）
+    pub has_more: bool,
+    /// 下一次"加载更早"应传的 before 游标
+    pub next_before: usize,
 }
 
 #[derive(Debug, Serialize)]

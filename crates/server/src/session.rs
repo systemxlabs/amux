@@ -282,8 +282,14 @@ impl SessionManager {
 
     // ---- 会话数据（docs/DESIGN.md §5）----
 
-    /// 打开会话：经 driver 的 `session/load` 全量重放，聚合对话内容返回。
-    pub async fn open(&self, session_id: &str) -> Result<Vec<DialogItem>, String> {
+    /// 打开会话：经 driver 的 `session/load` 全量重放，聚合对话内容。
+    /// 惰性加载：默认返回最新一窗（`limit` 条），`before` 为独占上界游标向上取更早历史。
+    pub async fn open(
+        &self,
+        session_id: &str,
+        limit: Option<usize>,
+        before: Option<usize>,
+    ) -> Result<(Vec<DialogItem>, bool, usize), String> {
         let (driver, agent_session_id) = {
             let reg = self.registry.lock().await;
             let rec = reg
@@ -292,7 +298,7 @@ impl SessionManager {
             (rec.driver.clone(), rec.agent_session_id.clone())
         };
         let records = driver.load_session(&agent_session_id)?;
-        Ok(records
+        let items: Vec<DialogItem> = records
             .into_iter()
             .map(|r| match r {
                 DialogRecord::UserMessage(c) => DialogItem::UserMessage {
@@ -304,7 +310,18 @@ impl SessionManager {
                     timestamp: now(),
                 },
             })
-            .collect())
+            .collect();
+        let limit = limit.unwrap_or(200);
+        let (start, end, has_more) = Self::window_items(items.len(), limit, before);
+        let slice = items[start..end].to_vec();
+        Ok((slice, has_more, start))
+    }
+
+    /// 惰性加载切窗（纯函数）：按 limit 与 before 游标计算 [start, end) 与是否还有更早。
+    pub fn window_items(len: usize, limit: usize, before: Option<usize>) -> (usize, usize, bool) {
+        let end = before.unwrap_or(len).min(len);
+        let start = end.saturating_sub(limit);
+        (start, end, start > 0)
     }
 
     pub async fn get_activities(
@@ -669,7 +686,7 @@ mod tests {
     async fn open_session_returns_dialog_content() {
         let (mgr, _rx) = stub_manager(100);
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
-        let items = mgr.open(&meta.id).await.unwrap();
+        let (items, _has_more, _) = mgr.open(&meta.id, None, None).await.unwrap();
         assert!(items.is_empty()); // stub 无持久化历史（历史权威在 agent，docs/DESIGN.md §5.2）
     }
 
@@ -699,8 +716,30 @@ mod tests {
     async fn missing_session_errors() {
         let (mgr, _rx) = stub_manager(100);
         assert!(mgr.prompt("nope", text("x")).await.is_err());
-        assert!(mgr.open("nope").await.is_err());
+        assert!(mgr.open("nope", None, None).await.is_err());
         assert!(mgr.delete("nope").await.is_err());
+    }
+
+    #[test]
+    fn window_items_lazy_loading_slices() {
+        // 1000 条历史：默认窗口取最后 200，has_more=true，游标 800
+        let (start, end, has_more) = SessionManager::window_items(1000, 200, None);
+        assert_eq!((start, end, has_more), (800, 1000, true));
+        // 向上取更早一窗：before=800 → [600,800)，还有更早
+        let (start, end, has_more) = SessionManager::window_items(1000, 200, Some(800));
+        assert_eq!((start, end, has_more), (600, 800, true));
+        // 取到最旧一窗：has_more=false
+        let (start, end, has_more) = SessionManager::window_items(1000, 200, Some(200));
+        assert_eq!((start, end, has_more), (0, 200, false));
+        // 历史不足一窗：全部返回，has_more=false
+        let (start, end, has_more) = SessionManager::window_items(50, 200, None);
+        assert_eq!((start, end, has_more), (0, 50, false));
+        // 空历史
+        let (start, end, has_more) = SessionManager::window_items(0, 200, None);
+        assert_eq!((start, end, has_more), (0, 0, false));
+        // before 越界：钳制到末尾
+        let (start, end, has_more) = SessionManager::window_items(100, 200, Some(500));
+        assert_eq!((start, end, has_more), (0, 100, false));
     }
 
     #[tokio::test]

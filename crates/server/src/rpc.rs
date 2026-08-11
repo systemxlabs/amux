@@ -8,8 +8,8 @@ use serde_json::Value;
 use protocol::{
     method, rpc_error, server_error, ActivitiesResult, CreateSessionParams, GetActivitiesParams,
     GitDiffParams, GitOpResult, GitRevertParams, ListAgentSkillsParams, ListAgentSkillsResult,
-    MachineInfo, OpenSessionResult, PromptParams, SessionIdParams, SessionResult, SessionsResult,
-    SetDefaultModelParams, SetSessionTitleParams,
+    MachineInfo, OpenSessionParams, OpenSessionResult, PromptParams, SessionIdParams,
+    SessionResult, SessionsResult, SetDefaultModelParams, SetSessionTitleParams,
 };
 
 use crate::git::GitRunner;
@@ -137,14 +137,18 @@ impl Handlers {
                 Ok(Value::Null)
             }
             method::OPEN_SESSION => {
-                let p: SessionIdParams = parse(params)?;
-                let items = self
+                let p: OpenSessionParams = parse(params)?;
+                let (items, has_more, next_before) = self
                     .manager
-                    .open(&p.session_id)
+                    .open(&p.session_id, p.limit, p.before)
                     .await
                     .map_err(map_session_err)?;
-                Ok(serde_json::to_value(OpenSessionResult { items })
-                    .map_err(|e| RpcError::internal(e.to_string()))?)
+                Ok(serde_json::to_value(OpenSessionResult {
+                    items,
+                    has_more,
+                    next_before,
+                })
+                .map_err(|e| RpcError::internal(e.to_string()))?)
             }
             method::GET_ACTIVITIES => {
                 let p: GetActivitiesParams = parse(params)?;

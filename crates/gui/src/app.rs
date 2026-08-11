@@ -92,6 +92,10 @@ struct MachineView {
     sessions: Vec<SessionMeta>,
     selected: Option<String>,
     dialog: Vec<DialogItem>,
+    /// 惰性加载游标：下一次"加载更早消息"应传的 before
+    dialog_before: usize,
+    /// 是否还有更早历史
+    dialog_has_more: bool,
     activities: Vec<Activity>,
     /// 当前打开会话的实时活动（turn 中合并流式推送，空闲时清空）
     live_activity: Option<Activity>,
@@ -116,6 +120,8 @@ impl MachineView {
             sessions: Vec::new(),
             selected: None,
             dialog: Vec::new(),
+            dialog_before: 0,
+            dialog_has_more: false,
             activities: Vec::new(),
             live_activity: None,
             skills: Vec::new(),
@@ -204,6 +210,8 @@ pub struct AmuxApp {
     new_session_harness: Option<String>,
     /// 创建编排会话时的提示（如编排 agent 未配置 API）
     workflow_error: Option<String>,
+    /// 对话流滚动句柄（打开会话/新消息自动滚到底部）
+    dialog_scroll: ScrollHandle,
     _tasks: Vec<Task<()>>,
 }
 
@@ -307,6 +315,7 @@ impl AmuxApp {
             new_session_machine: None,
             new_session_harness: None,
             workflow_error: None,
+            dialog_scroll: ScrollHandle::new(),
             _tasks: Vec::new(),
         };
         // 预填编排配置表单
@@ -462,6 +471,8 @@ impl AmuxApp {
                     content: serde_json::from_value(output).unwrap_or_default(),
                     timestamp: ts,
                 });
+                // 新输出到达自动滚到底部（最新内容）
+                this.dialog_scroll.scroll_to_bottom();
             }
             "user_message" => {
                 let content = n.params.get("content").cloned().unwrap_or_default();
@@ -474,6 +485,7 @@ impl AmuxApp {
                     content: serde_json::from_value(content).unwrap_or_default(),
                     timestamp: ts,
                 });
+                this.dialog_scroll.scroll_to_bottom();
             }
             // 实时活动：turn 中合并流式推送（thinking 逐块累积为一条）
             "activity" => {
@@ -798,11 +810,14 @@ impl AmuxApp {
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let mut items: Vec<DialogItem> = Vec::new();
+            let mut has_more = false;
+            let mut next_before = 0usize;
             let mut acts: Vec<Activity> = Vec::new();
+            // 惰性加载：只取最新一窗（默认 200 条），顶部按需加载更早（PRD §3.2）
             if let Ok(res) = client
                 .request(
                     protocol::method::OPEN_SESSION,
-                    Some(json!({ "sessionId": session_id })),
+                    Some(json!({ "sessionId": session_id, "limit": 200 })),
                 )
                 .await
             {
@@ -811,6 +826,11 @@ impl AmuxApp {
                     .cloned()
                     .map(|v| serde_json::from_value(v).unwrap_or_default())
                     .unwrap_or_default();
+                has_more = res
+                    .get("hasMore")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                next_before = res.get("nextBefore").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             }
             if let Ok(res) = client
                 .request(
@@ -829,6 +849,8 @@ impl AmuxApp {
                 if let Some(m) = this.machine_mut(machine) {
                     m.selected = Some(session_id.clone());
                     m.dialog = items.clone();
+                    m.dialog_before = next_before;
+                    m.dialog_has_more = has_more;
                     m.activities = acts.clone();
                     m.live_activity = None;
                 }
@@ -837,6 +859,61 @@ impl AmuxApp {
                     id: session_id,
                 });
                 this.set_panel(window, cx, None);
+                // 打开后自动跳到对话底部（最新内容）
+                this.dialog_scroll.scroll_to_bottom();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 惰性加载更早的会话历史（顶部"加载更早消息"按钮，PRD §3.2）。
+    fn load_earlier_history(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let before = m.dialog_before;
+        if before == 0 {
+            return;
+        }
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let mut older: Vec<DialogItem> = Vec::new();
+            let mut has_more = false;
+            let mut next_before = 0usize;
+            if let Ok(res) = client
+                .request(
+                    protocol::method::OPEN_SESSION,
+                    Some(json!({ "sessionId": session_id, "limit": 200, "before": before })),
+                )
+                .await
+            {
+                older = res
+                    .get("items")
+                    .cloned()
+                    .map(|v| serde_json::from_value(v).unwrap_or_default())
+                    .unwrap_or_default();
+                has_more = res
+                    .get("hasMore")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                next_before = res.get("nextBefore").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            }
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if let Some(m) = this.machine_mut(machine) {
+                    // 更早的历史插入到最前（时间正序）
+                    let mut merged = older;
+                    merged.extend(m.dialog.clone());
+                    m.dialog = merged;
+                    m.dialog_before = next_before;
+                    m.dialog_has_more = has_more;
+                }
                 cx.notify();
             });
         })
@@ -2431,7 +2508,7 @@ impl AmuxApp {
         row
     }
 
-    fn render_dialog(&self, _window: &mut Window, _cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let dialog = match &self.selected {
             Some(Selected::Session { machine, id: _ }) => self
                 .machine(*machine)
@@ -2493,13 +2570,38 @@ impl AmuxApp {
                 .child(Label::new("选择左侧会话查看对话，或输入消息开始").text_color(rgb(0x9ca3af)))
                 .into_any()
         } else {
+            let mut children: Vec<gpui::AnyElement> = Vec::new();
+            // 惰性加载：还有更早历史时顶部显示"加载更早消息"（PRD §3.2）
+            if let Some(Selected::Session { machine, id }) = self.selected.clone() {
+                if let Some(m) = self.machine(machine) {
+                    if m.dialog_has_more && m.dialog_before > 0 {
+                        children.push(
+                            h_flex()
+                                .w_full()
+                                .justify_center()
+                                .child(
+                                    Button::new("load-earlier")
+                                        .small()
+                                        .label("加载更早消息")
+                                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                                            let id = id.clone();
+                                            this.load_earlier_history(window, cx, machine, id);
+                                        })),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+            children.extend(rows.into_iter().map(|r| r.into_any_element()));
             div()
                 .id("dialog")
                 .flex_1()
                 .gap_3()
                 .p_2()
                 .overflow_y_scroll()
-                .children(rows)
+                .track_scroll(&self.dialog_scroll)
+                .children(children)
                 .into_any()
         }
     }
