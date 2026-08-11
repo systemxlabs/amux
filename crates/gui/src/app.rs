@@ -2011,6 +2011,13 @@ impl AmuxApp {
             .into_any_element()
     }
 
+    /// 打开编排会话交互页。
+    fn open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wi: usize) {
+        self.selected = Some(Selected::Workflow { engine: wi });
+        self.set_panel(window, cx, None);
+        cx.notify();
+    }
+
     /// 工作流行：标题 · 子会话数 + 打开按钮 + 状态徽章 + 折叠的子会话（docs/PRD §4.1.1）。
     fn render_workflow_row(&self, cx: &mut Context<Self>, wi: usize) -> gpui::AnyElement {
         let Some(wf) = self.workflows.get(wi) else {
@@ -2032,8 +2039,13 @@ impl AmuxApp {
             "空闲"
         };
         let header = h_flex()
+            .id(format!("wf-header-{wi}"))
             .gap_2()
             .items_center()
+            // 与普通会话一致：点击行即打开会话交互页
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.open_workflow(window, cx, wi);
+            }))
             .child(Label::new(format!(
                 "🧭 {title} · {} 子会话",
                 wf.session.children.len()
@@ -2045,8 +2057,7 @@ impl AmuxApp {
                     .label("打开")
                     .when(orc_sel, |b| b.primary())
                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.selected = Some(Selected::Workflow { engine: wi });
-                        this.set_panel(window, cx, None);
+                        this.open_workflow(window, cx, wi);
                     })),
             );
         // 子会话默认折叠、可展开下钻（PRD §3.1/§4.1.1）
