@@ -212,6 +212,8 @@ pub struct AmuxApp {
     workflow_error: Option<String>,
     /// 对话流滚动句柄（打开会话/新消息自动滚到底部）
     dialog_scroll: ScrollHandle,
+    /// 已展开子会话的工作流（"▾"折叠指示，PRD §4.1.1）
+    expanded_workflows: std::collections::HashSet<usize>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -316,6 +318,7 @@ impl AmuxApp {
             new_session_harness: None,
             workflow_error: None,
             dialog_scroll: ScrollHandle::new(),
+            expanded_workflows: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
         // 预填编排配置表单
@@ -2114,29 +2117,45 @@ impl AmuxApp {
         } else {
             "空闲"
         };
+        let expanded = self.expanded_workflows.contains(&wi);
         let header = h_flex()
-            .id(format!("wf-header-{wi}"))
             .gap_1()
             .items_center()
-            // 与普通会话一致：点击行即打开会话交互页
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                this.open_workflow(window, cx, wi);
-            }))
+            // ">" 折叠指示：点击展开/折叠子会话（不与"打开会话"冲突）
             .child(
-                Label::new(format!("🧭 {title} · {} 子会话", wf.session.children.len())).text_sm(),
+                Button::new(format!("wf-toggle-{wi}"))
+                    .small()
+                    .label(if expanded { "▾" } else { "▸" })
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        if !this.expanded_workflows.insert(wi) {
+                            this.expanded_workflows.remove(&wi);
+                        }
+                        cx.notify();
+                    })),
             )
-            // 特殊状态徽章（已暂停/完成）内联显示
-            .when(wf.session.paused || wf.session.done, |h| {
-                h.child(
-                    div()
-                        .px_1()
-                        .py(px(1.))
-                        .rounded_full()
-                        .bg(rgb(0xf3f4f6))
-                        .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
-                )
-            })
-            .child(div().flex_1())
+            // 标题区域：点击即打开会话交互页（与普通会话一致）
+            .child(
+                h_flex()
+                    .id(format!("wf-title-{wi}"))
+                    .flex_1()
+                    .gap_1()
+                    .items_center()
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.open_workflow(window, cx, wi);
+                    }))
+                    .child(Label::new(format!("🧭 {title}")).text_sm())
+                    // 特殊状态徽章（已暂停/完成）内联显示
+                    .when(wf.session.paused || wf.session.done, |h| {
+                        h.child(
+                            div()
+                                .px_1()
+                                .py(px(1.))
+                                .rounded_full()
+                                .bg(rgb(0xf3f4f6))
+                                .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
+                        )
+                    }),
+            )
             // 与普通会话一致：工作中转圈（右侧）、空闲无转圈
             .child(if wf.session.state == SessionState::Busy {
                 Spinner::new()
@@ -2206,7 +2225,11 @@ impl AmuxApp {
             .rounded_md()
             // 与普通会话一致的紧凑行；子会话折叠区作为唯一"卡片感"来源
             .child(header)
-            .child(Collapsible::new().open(false).content(content));
+            .child(
+                Collapsible::new()
+                    .open(self.expanded_workflows.contains(&wi))
+                    .content(content),
+            );
 
         // 右键弹出操作菜单（删除 / 重命名工作流，PRD §3.1）
         let title_ctx = title.clone();
