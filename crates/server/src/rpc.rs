@@ -91,24 +91,6 @@ impl Handlers {
                 Ok(serde_json::to_value(SessionResult { session })
                     .map_err(|e| RpcError::internal(e.to_string()))?)
             }
-            method::RESUME_SESSION => {
-                let p: SessionIdParams = parse(params)?;
-                let session = self
-                    .manager
-                    .resume(&p.session_id)
-                    .await
-                    .map_err(map_session_err)?;
-                Ok(serde_json::to_value(SessionResult { session })
-                    .map_err(|e| RpcError::internal(e.to_string()))?)
-            }
-            method::CLOSE_SESSION => {
-                let p: SessionIdParams = parse(params)?;
-                self.manager
-                    .close(&p.session_id)
-                    .await
-                    .map_err(map_session_err)?;
-                Ok(Value::Null)
-            }
             method::DELETE_SESSION => {
                 let p: SessionIdParams = parse(params)?;
                 self.manager

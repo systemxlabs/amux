@@ -364,28 +364,14 @@ async fn close_resume_delete_lifecycle() {
         .unwrap()
         .to_string();
 
-    // close：历史保留、可恢复
-    let r = c.call("close_session", json!({"sessionId": sid})).await;
-    assert!(r.get("error").is_none());
-    let list = c.call("list_sessions", json!({})).await;
-    let meta = list["result"]["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == json!(sid))
-        .unwrap();
-    assert_eq!(meta["closed"], true, "close 后 closed 标记应为 true");
-
-    // resume 后可再 prompt
-    let r = c.call("resume_session", json!({"sessionId": sid})).await;
-    assert!(r.get("error").is_none());
+    // 直接 prompt 可正常执行
     let prompt = c
         .call(
             "prompt",
-            json!({"sessionId": sid, "input": [{"type": "text", "text": "恢复后继续"}]}),
+            json!({"sessionId": sid, "input": [{"type": "text", "text": "直接开始"}]}),
         )
         .await;
-    assert!(prompt.get("error").is_none(), "resume 后 prompt 应正常");
+    assert!(prompt.get("error").is_none(), "prompt 应正常");
 
     // delete 后列表为空
     let r = c.call("delete_session", json!({"sessionId": sid})).await;

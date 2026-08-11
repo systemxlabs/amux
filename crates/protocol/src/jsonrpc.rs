@@ -53,7 +53,6 @@ pub mod server_error {
     pub const SESSION_NOT_FOUND: i32 = -32001;
     pub const HARNESS_UNAVAILABLE: i32 = -32002;
     pub const SESSION_BUSY: i32 = -32003;
-    pub const SESSION_CLOSED: i32 = -32004;
     pub const INVALID_INPUT: i32 = -32005;
     /// steer 失败：agent 不支持进行中注入（docs/DESIGN.md §9）
     pub const STEER_UNSUPPORTED: i32 = -32006;

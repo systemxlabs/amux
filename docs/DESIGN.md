@@ -146,7 +146,6 @@ Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与
 - **会话生命周期**：
   - `session/new`：新建会话（yolo 模式启动，见下）
   - `session/load`：加载会话并**全量重放历史**（`session/update` 通知流，重放完才响应）
-  - `session/resume`：恢复会话上下文（不重放历史；历史加载走 `session/load`）
   - `session/prompt` / `session/cancel` / `session/delete` / `session/list`
 - **状态与边界**：agent 经 `session_info_update` 自报状态；server 从 prompt 请求生命周期反射 turn 边界（发出请求 = turn 开始，收到 result = turn 结束）。
 - **权限（yolo）**：agent 经 `session/request_permission` 请求权限；server **自动批准**（yolo 模式，既定决策延续，无审批往返），安全性依赖运行环境。

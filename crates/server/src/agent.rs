@@ -17,11 +17,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
-    CancelNotification, CloseSessionRequest, ContentBlock as AcpContentBlock, DeleteSessionRequest,
-    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
+    CancelNotification, ContentBlock as AcpContentBlock, DeleteSessionRequest, InitializeRequest,
+    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    TextContent, ToolKind,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{
@@ -64,8 +63,6 @@ pub trait AgentDriver: Send + Sync {
     fn create_session(&self, cwd: &str, model: Option<&str>) -> Result<String, String>;
     /// 加载会话（ACP `session/load` 全量重放；返回对话内容）
     fn load_session(&self, agent_session_id: &str) -> Result<Vec<DialogRecord>, String>;
-    /// 恢复会话上下文
-    fn resume_session(&self, agent_session_id: &str) -> Result<(), String>;
     /// 发送 prompt，返回事件流（阻塞直到 turn 结束）
     fn prompt(
         &self,
@@ -74,9 +71,6 @@ pub trait AgentDriver: Send + Sync {
     ) -> mpsc::Receiver<AgentEvent>;
     /// 取消进行中的工作
     fn cancel(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 关闭会话（保留历史可恢复）
-    #[allow(dead_code)]
-    fn close(&self, agent_session_id: &str) -> Result<(), String>;
     /// 删除会话（历史一并移除）
     fn delete(&self, agent_session_id: &str) -> Result<(), String>;
     /// 列出 agent 侧全部会话 id（server 重启后从 agent 恢复会话列表，docs/DESIGN.md §3）
@@ -561,21 +555,6 @@ impl AgentDriver for AcpAgentDriver {
         res.map(|_| records)
     }
 
-    fn resume_session(&self, agent_session_id: &str) -> Result<(), String> {
-        let cwd = self
-            .cwds
-            .lock()
-            .unwrap()
-            .get(agent_session_id)
-            .cloned()
-            .unwrap_or_else(|| "/tmp".into());
-        self.call(
-            "session/resume",
-            json!({ "sessionId": agent_session_id, "cwd": cwd }),
-        )
-        .map(|_| ())
-    }
-
     fn prompt(
         &self,
         agent_session_id: &str,
@@ -597,11 +576,6 @@ impl AgentDriver for AcpAgentDriver {
 
     fn cancel(&self, agent_session_id: &str) -> Result<(), String> {
         self.call("session/cancel", json!({ "sessionId": agent_session_id }))
-            .map(|_| ())
-    }
-
-    fn close(&self, agent_session_id: &str) -> Result<(), String> {
-        self.call("session/close", json!({ "sessionId": agent_session_id }))
             .map(|_| ())
     }
 
@@ -846,24 +820,9 @@ async fn dispatch_call_inner(
                 .map_err(|e| format!("session/load 失败: {e}"))?;
             Ok(Value::Null)
         }
-        "session/resume" => {
-            let cwd = params.get("cwd").and_then(|c| c.as_str()).unwrap_or("/tmp");
-            cx.send_request(ResumeSessionRequest::new(sid.to_string(), cwd))
-                .block_task()
-                .await
-                .map_err(|e| format!("session/resume 失败: {e}"))?;
-            Ok(Value::Null)
-        }
         "session/cancel" => {
             cx.send_notification(CancelNotification::new(sid.to_string()))
                 .map_err(|e| format!("session/cancel 失败: {e}"))?;
-            Ok(Value::Null)
-        }
-        "session/close" => {
-            cx.send_request(CloseSessionRequest::new(sid.to_string()))
-                .block_task()
-                .await
-                .map_err(|e| format!("session/close 失败: {e}"))?;
             Ok(Value::Null)
         }
         "session/delete" => {
@@ -998,10 +957,6 @@ impl AgentDriver for StubAgentDriver {
         Ok(Vec::new())
     }
 
-    fn resume_session(&self, _agent_session_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-
     fn prompt(
         &self,
         _agent_session_id: &str,
@@ -1029,10 +984,6 @@ impl AgentDriver for StubAgentDriver {
     }
 
     fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn close(&self, _agent_session_id: &str) -> Result<(), String> {
         Ok(())
     }
 

@@ -48,7 +48,8 @@ async fn acp_driver_full_flow() {
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");
     let driver =
-        AcpAgentDriver::spawn(mock, &[state_file.to_str().unwrap()]).expect("spawn mock acp");
+        AcpAgentDriver::spawn(mock, &[state_file.to_str().unwrap()], &[])
+            .expect("spawn mock acp");
 
     // create_session → session/new → mock_s_1
     let sid = driver.create_session("/tmp/work", None).expect("create");
@@ -118,8 +119,7 @@ async fn acp_driver_full_flow() {
         "list 应含 mock_s_1: {sessions:?}"
     );
 
-    // resume / cancel / delete 帧正常
-    driver.resume_session(&sid).expect("resume");
+    // cancel / delete 帧正常
     driver.cancel(&sid).expect("cancel");
     driver.delete(&sid).expect("delete");
 }

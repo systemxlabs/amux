@@ -271,9 +271,6 @@ fn notification_frame(n: &ServerNotification) -> Option<String> {
         ServerNotification::SessionCreated(s) => {
             (notify::SESSION_CREATED, serde_json::json!({ "session": s }))
         }
-        ServerNotification::SessionClosed(s) => {
-            (notify::SESSION_CLOSED, serde_json::json!({ "session": s }))
-        }
         ServerNotification::SessionInterrupted(s) => (
             notify::SESSION_INTERRUPTED,
             serde_json::json!({ "session": s }),

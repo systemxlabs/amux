@@ -19,7 +19,6 @@ use crate::agent::{AgentEvent, AgentRegistry, DialogRecord, SharedDriver};
 #[derive(Debug, Clone)]
 pub enum ServerNotification {
     SessionCreated(SessionMeta),
-    SessionClosed(SessionMeta),
     /// 崩溃恢复标记（重启后忙状态会话标 interrupted，docs/DESIGN.md §3）
     #[allow(dead_code)]
     SessionInterrupted(SessionMeta),
@@ -188,7 +187,6 @@ impl SessionManager {
             model: model.map(str::to_string),
             state: SessionState::Idle,
             interrupted: false,
-            closed: false,
             title: String::new(),
             created_at: now(),
             last_event_at: now(),
@@ -207,36 +205,6 @@ impl SessionManager {
         Ok(meta)
     }
 
-    pub async fn resume(&self, session_id: &str) -> Result<SessionMeta, String> {
-        let mut reg = self.registry.lock().await;
-        let rec = reg
-            .get_mut(session_id)
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        rec.driver.resume_session(&rec.agent_session_id)?;
-        rec.meta.interrupted = false;
-        rec.meta.closed = false;
-        rec.meta.state = SessionState::Idle;
-        let meta = rec.meta.clone();
-        protocol::log::info("server.session", format!("恢复会话 {session_id}"));
-        let _ = self
-            .tx
-            .send(ServerNotification::SessionCreated(meta.clone()));
-        Ok(meta)
-    }
-
-    pub async fn close(&self, session_id: &str) -> Result<(), String> {
-        let mut reg = self.registry.lock().await;
-        let rec = reg
-            .get_mut(session_id)
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        rec.driver.close(&rec.agent_session_id)?;
-        rec.meta.closed = true;
-        let meta = rec.meta.clone();
-        protocol::log::info("server.session", format!("关闭会话 {session_id}"));
-        let _ = self.tx.send(ServerNotification::SessionClosed(meta));
-        Ok(())
-    }
-
     pub async fn delete(&self, session_id: &str) -> Result<(), String> {
         // 先取并移除注册表条目（释放锁），再删 activities——统一锁序避免死锁
         let rec = {
@@ -246,8 +214,7 @@ impl SessionManager {
         };
         rec.driver.delete(&rec.agent_session_id)?;
         self.activities.lock().await.remove(session_id);
-        let mut meta = rec.meta;
-        meta.closed = true;
+        let meta = rec.meta;
         protocol::log::info("server.session", format!("删除会话 {session_id}"));
         let _ = self.tx.send(ServerNotification::SessionDeleted(meta));
         Ok(())

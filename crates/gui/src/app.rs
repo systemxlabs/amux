@@ -438,7 +438,6 @@ impl AmuxApp {
                     model: None,
                     state: wf.session.state,
                     interrupted: false,
-                    closed: wf.session.done,
                     title: wf.session.title.clone(),
                     created_at: wf.session.created_at,
                     last_event_at: wf.session.updated_at,
@@ -620,7 +619,7 @@ impl AmuxApp {
                     }
                 }
             }
-            "session_created" | "session_closed" | "session_deleted" | "session_updated" => {
+            "session_created" | "session_deleted" | "session_updated" => {
                 this.refresh_sessions(idx, window, cx);
             }
             // 断线重连：刷新会话列表并重开选中会话（全量重放，关闭期间输出不丢，
@@ -1612,63 +1611,7 @@ impl AmuxApp {
 
     // ---- 会话标题 ----
 
-    // ---- 会话关闭 / 恢复 / 删除（PRD §3.1）----
-
-    /// 关闭会话：历史保留、可恢复继续。
-    fn close_session(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        machine: usize,
-        session_id: String,
-    ) {
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        let client = m.client.clone();
-        protocol::log::info("gui.app", format!("关闭会话 {session_id}"));
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let _ = client
-                .request(
-                    protocol::method::CLOSE_SESSION,
-                    Some(json!({ "sessionId": session_id })),
-                )
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.refresh_sessions(machine, window, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 恢复会话（已关闭的会话可继续）。
-    fn resume_session(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        machine: usize,
-        session_id: String,
-    ) {
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        let client = m.client.clone();
-        protocol::log::info("gui.app", format!("恢复会话 {session_id}"));
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let _ = client
-                .request(
-                    protocol::method::RESUME_SESSION,
-                    Some(json!({ "sessionId": session_id })),
-                )
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.refresh_sessions(machine, window, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
+    // ---- 会话删除（PRD §3.1）----
 
     /// 删除会话：历史一并移除、不可恢复（PRD §3.1）。
     /// 调用方应先经确认弹窗（confirm_delete_session）。
@@ -3586,9 +3529,7 @@ impl AmuxApp {
                 .child(info_row("工作目录", &meta.cwd))
                 .child(info_row(
                     "状态",
-                    if meta.closed {
-                        "已关闭"
-                    } else if meta.interrupted {
+                    if meta.interrupted {
                         "已中断"
                     } else if meta.state == SessionState::Busy {
                         "工作中"
@@ -3603,31 +3544,8 @@ impl AmuxApp {
             meta.title.clone()
         };
         body = body.child(Label::new(format!("标题: {title}")));
-        // 普通会话：关闭 / 恢复（删除 / 重命名在会话列表右键菜单）
-        if let Some(Selected::Session { machine, id }) = self.selected.clone() {
-            let id_act = id.clone();
-            if meta.closed {
-                body = body.child(
-                    Button::new("resume-session")
-                        .small()
-                        .primary()
-                        .label("恢复会话")
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            let id = id_act.clone();
-                            this.resume_session(window, cx, machine, id);
-                        })),
-                );
-            } else {
-                body = body.child(
-                    Button::new("close-session")
-                        .small()
-                        .label("关闭会话")
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            let id = id_act.clone();
-                            this.close_session(window, cx, machine, id);
-                        })),
-                );
-            }
+        // 普通会话：删除 / 重命名在左侧会话列表右键菜单
+        if let Some(Selected::Session { .. }) = self.selected.clone() {
             body = body.child(
                 Label::new("删除 / 重命名：在左侧会话列表右键该会话")
                     .text_xs()

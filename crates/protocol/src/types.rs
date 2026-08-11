@@ -105,8 +105,6 @@ pub struct SessionMeta {
     pub state: SessionState,
     /// server 崩溃恢复标记（非 ACP 状态）
     pub interrupted: bool,
-    /// 已关闭（历史保留、可恢复）
-    pub closed: bool,
     /// 会话标题：默认由首条指令/目标自动生成（简短摘要），用户可随时修改
     /// （docs/PRD.md §3.1）。空字符串 = 尚无首条指令，GUI 显示占位文案。
     #[serde(default)]
@@ -455,7 +453,6 @@ mod tests {
             model: None,
             state: SessionState::Idle,
             interrupted: false,
-            closed: false,
             title: "实现登录".into(),
             created_at: 1,
             last_event_at: 1,

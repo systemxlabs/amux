@@ -8,10 +8,6 @@ pub mod method {
     pub const LIST_SESSIONS: &str = "list_sessions";
     /// 新建会话
     pub const CREATE_SESSION: &str = "create_session";
-    /// 恢复会话
-    pub const RESUME_SESSION: &str = "resume_session";
-    /// 关闭会话（保留历史，可恢复）
-    pub const CLOSE_SESSION: &str = "close_session";
     /// 删除会话（历史一并移除）
     pub const DELETE_SESSION: &str = "delete_session";
     /// 发送 prompt（idle 启动新工作、忙时 steer）
@@ -42,8 +38,6 @@ pub mod method {
 pub mod notify {
     /// 会话创建
     pub const SESSION_CREATED: &str = "session_created";
-    /// 会话关闭
-    pub const SESSION_CLOSED: &str = "session_closed";
     /// 会话中断（崩溃恢复标记）
     pub const SESSION_INTERRUPTED: &str = "session_interrupted";
     /// 会话删除
