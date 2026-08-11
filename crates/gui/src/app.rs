@@ -2055,6 +2055,13 @@ impl AmuxApp {
             .id(format!("sess-row-{machine}-{sid}"))
             .relative()
             .w_full()
+            // 选中会话加边框（默认无边框）
+            .border_1()
+            .border_color(if sel {
+                hsla(0.6, 0.8, 0.5, 1.0)
+            } else {
+                transparent_black()
+            })
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
@@ -2233,10 +2240,18 @@ impl AmuxApp {
 
         // 右键弹出操作菜单（删除 / 重命名工作流，PRD §3.1）
         let title_ctx = title.clone();
+        let wf_sel = self.selected == Some(Selected::Workflow { engine: wi });
         div()
             .id(format!("wf-row-{wi}"))
             .relative()
             .w_full()
+            // 选中工作流会话加边框（默认无边框）
+            .border_1()
+            .border_color(if wf_sel {
+                hsla(0.6, 0.8, 0.5, 1.0)
+            } else {
+                transparent_black()
+            })
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
