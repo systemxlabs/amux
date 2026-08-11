@@ -496,6 +496,10 @@ impl AmuxApp {
                     cx.notify();
                     return;
                 };
+                // 实时更新左侧会话列表的状态（busy/idle，turn 边界推送）
+                if let Some(s) = m.sessions.iter_mut().find(|s| s.id == sid) {
+                    s.state = state;
+                }
                 // 活动历史刷新（turn 边界拉取合并后的完整活动）；实时活动由
                 // activity 通知流式驱动（docs/DESIGN.md §5.3）
                 let client = m.client.clone();
