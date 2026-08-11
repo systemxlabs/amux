@@ -2094,11 +2094,11 @@ impl AmuxApp {
         let label: SharedString = format!("{title} · {}@{machine_name}", s.harness).into();
         let btn = Button::new(format!("sess-{machine}-{sid}"))
             .small()
+            .ghost()
             .label(label)
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.open_session(window, cx, machine, sid_open.clone());
             }));
-        let btn = if sel { btn.primary() } else { btn.ghost() };
 
         // 正在重命名该会话：行内输入框 + 保存（右键 → 重命名）
         if self.renaming_session.as_ref() == Some(&(machine, sid.clone())) {
@@ -2125,6 +2125,9 @@ impl AmuxApp {
             .id(format!("sess-row-{machine}-{sid}"))
             .relative()
             .w_full()
+            .rounded_md()
+            // 选中：浅蓝底 + 蓝色边框（默认主题 primary 为近黑色，不用）
+            .bg(rgb(0xbfdbfe).opacity(if sel { 0.2 } else { 0.0 }))
             // 选中会话加边框（默认无边框）
             .border_1()
             .border_color(if sel {
@@ -2317,6 +2320,9 @@ impl AmuxApp {
             .id(format!("wf-row-{wi}"))
             .relative()
             .w_full()
+            .rounded_md()
+            // 选中：浅蓝底 + 蓝色边框（与普通会话一致）
+            .bg(rgb(0xbfdbfe).opacity(if wf_sel { 0.2 } else { 0.0 }))
             // 选中工作流会话加边框（默认无边框）
             .border_1()
             .border_color(if wf_sel {
