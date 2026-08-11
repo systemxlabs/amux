@@ -3331,7 +3331,7 @@ impl AmuxApp {
                     .child(
                         Button::new(format!("qc-edit-name-{i}"))
                             .small()
-                            .label("改名")
+                            .label("编辑")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
                                 let id = id_edit.clone();
                                 let n = format!("{} ", name);
