@@ -2217,7 +2217,7 @@ impl AmuxApp {
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.open_workflow(window, cx, wi);
                     }))
-                    .child(Label::new(format!("🧭 {title}")).text_sm())
+                    .child(Label::new(title.as_str()).text_sm())
                     // 特殊状态徽章（已暂停/完成）内联显示
                     .when(wf.session.paused || wf.session.done, |h| {
                         h.child(
