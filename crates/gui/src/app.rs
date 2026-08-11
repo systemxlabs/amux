@@ -2092,13 +2092,6 @@ impl AmuxApp {
         // 状态只区分 工作中 / 空闲：工作中前缀转圈，空闲无转圈（docs/PRD §4.1.1）
         let busy = s.state == SessionState::Busy;
         let label: SharedString = format!("{title} · {}@{machine_name}", s.harness).into();
-        let btn = Button::new(format!("sess-{machine}-{sid}"))
-            .small()
-            .ghost()
-            .label(label)
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                this.open_session(window, cx, machine, sid_open.clone());
-            }));
 
         // 正在重命名该会话：行内输入框 + 保存（右键 → 重命名）
         if self.renaming_session.as_ref() == Some(&(machine, sid.clone())) {
@@ -2155,10 +2148,23 @@ impl AmuxApp {
             .child(
                 h_flex()
                     .w_full()
+                    // 与工作流会话等高（内容 24 + 内边距 8，docs/PRD §4.1.1）
+                    .h(px(32.))
+                    .px_1()
                     .gap_1()
                     .items_center()
-                    // 按钮撑满整行宽度（条目占据完整空间）
-                    .child(btn.flex_1())
+                    // 标题靠左对齐（与工作流会话一致；Button 会居中，故用 div+Label）
+                    .child(
+                        h_flex()
+                            .id(format!("sess-title-{machine}-{sid}"))
+                            .flex_1()
+                            .gap_1()
+                            .items_center()
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.open_session(window, cx, machine, sid_open.clone());
+                            }))
+                            .child(Label::new(label).text_sm()),
+                    )
                     // 工作中转圈（右侧）；空闲占位（保持对齐）
                     .child(if busy {
                         Spinner::new()
