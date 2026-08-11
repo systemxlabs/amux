@@ -35,7 +35,7 @@ async fn main() {
     let configured: Option<(String, SharedDriver)> = match &cfg.agent_bin {
         Some(bin) => {
             let args: Vec<&str> = cfg.agent_args.iter().map(String::as_str).collect();
-            match AcpAgentDriver::spawn(bin, &args) {
+            match AcpAgentDriver::spawn(bin, &args, &[]) {
                 Ok(d) => {
                     let name = std::path::Path::new(bin)
                         .file_stem()

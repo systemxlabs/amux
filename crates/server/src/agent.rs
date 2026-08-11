@@ -100,20 +100,22 @@ pub type SharedDriver = Arc<dyn AgentDriver>;
 
 // ---- AgentRegistry：harness 名 → 驱动 ----
 
-/// 自动发现的 ACP agent（含 ACP 子命令参数，如 `kimi acp`）。
+/// 自动发现的 ACP agent（含 ACP 子命令参数 / npx 包装器参数与附加环境变量）。
 #[derive(Debug, Clone)]
 pub struct DiscoveredAgent {
     pub name: String,
     pub bin: String,
     pub args: Vec<String>,
+    /// 附加环境变量（如 codex 包装器的 INITIAL_AGENT_MODE）
+    pub env: Vec<(String, String)>,
 }
 
 /// harness 注册表（PRD §3.3：agent 自动发现，可执行路径不手动指定）：
 ///
 /// - `--agent` 指定的驱动（harness 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
-/// - 自动发现（无需 `--agent`）：
-///   - PATH 上的 `*-acp` 可执行（如 `codex-acp` / `claude-acp` / `kimi-acp`）
-///   - 已知 agent CLI（`codex` / `claude` / `kimi`）的 `acp` 子命令探测（如 `kimi acp`）
+/// - 自动发现（无需 `--agent`，docs/DESIGN.md §9.1）：
+///   - 已知 CLI 的 `acp` 子命令探测（如 `kimi acp`，ACP 原生）
+///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
 ///   - 发现项惰性 spawn（按需拉起，不手动指定路径）
 /// - 演示兜底：既无 `--agent` 又无任何发现时，用内存 Stub（接受任意 harness 名）
 ///
@@ -265,7 +267,8 @@ impl AgentRegistry {
                 return Ok(d.clone());
             }
             let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
-            let driver = AcpAgentDriver::spawn(&d.bin, &args)
+            let env = d.env.clone();
+            let driver = AcpAgentDriver::spawn(&d.bin, &args, &env)
                 .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
             let driver: SharedDriver = Arc::new(driver);
             spawned.insert(harness.to_string(), driver.clone());
@@ -322,52 +325,65 @@ fn load_models(path: &std::path::Path) -> HashMap<String, Option<String>> {
         .unwrap_or_default()
 }
 
-/// 自动发现 ACP agent（PRD §3.3：可执行路径自动发现、不手动指定）：
-/// 1) PATH 上的 `*-acp` 可执行（独立 ACP server，如 `codex-acp` / `claude-acp` / `kimi-acp`）
-/// 2) 已知 agent CLI（`codex` / `claude` / `kimi`）的 `acp` 子命令探测（如 `kimi acp`）
+/// 自动发现 ACP agent（PRD §3.3：可执行路径自动发现、不手动指定；docs/DESIGN.md §9.1）：
+/// 1) 已知 CLI 的 `acp` 子命令探测（ACP 原生，如 `kimi acp`）
+/// 2) 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
+///
+/// 不做任意 `*-acp` 扫描：只认已知 agent，避免无关可执行污染列表。
 fn discover_acp_agents() -> Vec<DiscoveredAgent> {
     let mut found: Vec<DiscoveredAgent> = Vec::new();
-    let path = std::env::var("PATH").unwrap_or_default();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let npx = find_on_path("npx");
 
-    // 1) `*-acp` 可执行
-    for dir in path.split(':') {
-        if dir.is_empty() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            let stem = name.strip_suffix(".exe").unwrap_or(&name).to_string();
-            if stem.ends_with("-acp") && is_executable(&e.path()) && seen.insert(stem.clone()) {
-                found.push(DiscoveredAgent {
-                    name: stem,
-                    bin: e.path().display().to_string(),
-                    args: Vec::new(),
-                });
-            }
-        }
-    }
-
-    // 2) 已知 CLI 的 `acp` 子命令探测（`<bin> acp --help` 退出 0 且输出含 acp）
-    for cli in ["codex", "claude", "kimi"] {
+    // 已知 CLI：优先 ACP 原生（`acp` 子命令），否则回落 npx 官方包装器
+    for (cli, pkg) in [
+        ("kimi", None),
+        ("claude", Some("@agentclientprotocol/claude-agent-acp")),
+        ("codex", Some("@agentclientprotocol/codex-acp")),
+    ] {
         if !seen.insert(cli.to_string()) {
             continue;
         }
-        let Some(bin) = find_on_path(cli) else {
-            continue;
-        };
-        if has_acp_subcommand(&bin) {
-            found.push(DiscoveredAgent {
-                name: cli.to_string(),
-                bin,
-                args: vec!["acp".to_string()],
-            });
+        let cli_bin = find_on_path(cli);
+        let acp_supported = cli_bin.as_deref().map(has_acp_subcommand).unwrap_or(false);
+        if let Some(d) = discover_for_cli(cli, pkg, cli_bin, acp_supported, npx.clone()) {
+            found.push(d);
         }
     }
     found
+}
+
+/// 单 CLI 的发现决策（纯逻辑，便于单测；docs/DESIGN.md §9.1）：
+/// 已知 CLI 优先 ACP 原生（`acp` 子命令），否则回落 npx 官方包装器。
+fn discover_for_cli(
+    cli: &str,
+    pkg: Option<&str>,
+    cli_bin: Option<String>,
+    acp_supported: bool,
+    npx_bin: Option<String>,
+) -> Option<DiscoveredAgent> {
+    let cli_bin = cli_bin?;
+    if acp_supported {
+        return Some(DiscoveredAgent {
+            name: cli.to_string(),
+            bin: cli_bin,
+            args: vec!["acp".to_string()],
+            env: Vec::new(),
+        });
+    }
+    let pkg = pkg?;
+    let npx = npx_bin?;
+    let mut env = Vec::new();
+    if cli == "codex" {
+        // 全权限自主模式（docs/DESIGN.md §9.1）
+        env.push(("INITIAL_AGENT_MODE".into(), "agent-full-access".into()));
+    }
+    Some(DiscoveredAgent {
+        name: cli.to_string(),
+        bin: npx,
+        args: vec!["-y".to_string(), pkg.to_string()],
+        env,
+    })
 }
 
 /// 在 PATH 上查找可执行文件（含 `.exe` 后缀剥离）。
@@ -443,19 +459,21 @@ pub struct AcpAgentDriver {
 
 impl AcpAgentDriver {
     /// 启动 ACP agent 子进程（官方 SDK `AcpAgent` 管理 stdio 传输与进程生命周期）；
+    /// `env` 为附加环境变量（经 from_args 的 `NAME=value` 前缀传入）；
     /// exec 线程承载全部异步 IO。
-    pub fn spawn(bin: &str, args: &[&str]) -> Result<Self, String> {
+    pub fn spawn(bin: &str, args: &[&str], env: &[(String, String)]) -> Result<Self, String> {
         let (exec_tx, exec_rx) = std::sync::mpsc::sync_channel::<ExecReq>(32);
         let routes = Arc::new(Mutex::new(HashMap::new()));
         let routes2 = routes.clone();
         let bin = bin.to_string();
         let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let env = env.to_vec();
         let thread = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("构建 tokio runtime 失败");
-            rt.block_on(exec_main(&bin, &args, exec_rx, routes2));
+            rt.block_on(exec_main(&bin, &args, &env, exec_rx, routes2));
         });
         Ok(AcpAgentDriver {
             exec_tx,
@@ -648,6 +666,7 @@ struct SkillListRequest {}
 async fn exec_main(
     bin: &str,
     args: &[String],
+    env: &[(String, String)],
     exec_rx: std::sync::mpsc::Receiver<ExecReq>,
     routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
 ) {
@@ -661,14 +680,17 @@ async fn exec_main(
         }
     });
 
-    let agent =
-        match AcpAgent::from_args(std::iter::once(bin.to_string()).chain(args.iter().cloned())) {
-            Ok(a) => a,
-            Err(e) => {
-                protocol::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
-                return;
-            }
-        };
+    // SDK from_args 支持 `NAME=value` 前缀参数作为环境变量（docs/DESIGN.md §9.1）
+    let mut cmd: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    cmd.push(bin.to_string());
+    cmd.extend(args.iter().cloned());
+    let agent = match AcpAgent::from_args(cmd) {
+        Ok(a) => a,
+        Err(e) => {
+            protocol::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
+            return;
+        }
+    };
     protocol::log::info("acp", format!("已连接 ACP agent: {bin} {}", args.join(" ")));
     // trace 级：ACP 线上原始帧（GUI ↔ server ↔ ACP client ↔ agent 全链路，docs/DESIGN.md §8）
     let agent = if protocol::log::enabled(protocol::Level::Trace) {
@@ -1158,5 +1180,84 @@ mod tests {
         // `kimi acp --help` 在装有 kimi 的机器上命中；此处只验证函数对
         // 不存在二进制的安全返回 false。
         assert!(!has_acp_subcommand("/nonexistent/bin/definitely-not-here"));
+    }
+
+    /// 发现决策：ACP 原生优先；无 acp 子命令时回落 npx 包装器（docs/DESIGN.md §9.1）。
+    #[test]
+    fn discover_for_cli_prefers_native_acp() {
+        // kimi：ACP 原生（`kimi acp`），无附加 env
+        let d = discover_for_cli(
+            "kimi",
+            None,
+            Some("/usr/bin/kimi".into()),
+            true,
+            Some("/usr/bin/npx".into()),
+        )
+        .unwrap();
+        assert_eq!(d.name, "kimi");
+        assert_eq!(d.bin, "/usr/bin/kimi");
+        assert_eq!(d.args, vec!["acp"]);
+        assert!(d.env.is_empty());
+    }
+
+    /// 发现决策：claude 无 acp 子命令 → npx 包装器，无附加 env。
+    #[test]
+    fn discover_for_cli_claude_via_npx() {
+        let d = discover_for_cli(
+            "claude",
+            Some("@agentclientprotocol/claude-agent-acp"),
+            Some("/usr/bin/claude".into()),
+            false,
+            Some("/usr/bin/npx".into()),
+        )
+        .unwrap();
+        assert_eq!(d.name, "claude");
+        assert_eq!(d.bin, "/usr/bin/npx");
+        assert_eq!(d.args, vec!["-y", "@agentclientprotocol/claude-agent-acp"]);
+        assert!(d.env.is_empty());
+    }
+
+    /// 发现决策：codex 无 acp 子命令 → npx 包装器，带 INITIAL_AGENT_MODE 环境变量。
+    #[test]
+    fn discover_for_cli_codex_via_npx_with_env() {
+        let d = discover_for_cli(
+            "codex",
+            Some("@agentclientprotocol/codex-acp"),
+            Some("/usr/bin/codex".into()),
+            false,
+            Some("/usr/bin/npx".into()),
+        )
+        .unwrap();
+        assert_eq!(d.name, "codex");
+        assert_eq!(d.bin, "/usr/bin/npx");
+        assert_eq!(d.args, vec!["-y", "@agentclientprotocol/codex-acp"]);
+        assert_eq!(
+            d.env,
+            vec![(
+                "INITIAL_AGENT_MODE".to_string(),
+                "agent-full-access".to_string()
+            )]
+        );
+    }
+
+    /// 发现决策：CLI 未安装或无 npx 时不发现（懒加载，避免误报）。
+    #[test]
+    fn discover_for_cli_missing_prereqs() {
+        assert!(discover_for_cli(
+            "codex",
+            Some("@agentclientprotocol/codex-acp"),
+            None,
+            false,
+            Some("/usr/bin/npx".into()),
+        )
+        .is_none());
+        assert!(discover_for_cli(
+            "codex",
+            Some("@agentclientprotocol/codex-acp"),
+            Some("/usr/bin/codex".into()),
+            false,
+            None,
+        )
+        .is_none());
     }
 }
