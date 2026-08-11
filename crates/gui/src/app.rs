@@ -23,6 +23,7 @@ use gpui_component::{
     radio::{Radio, RadioGroup},
     scroll::ScrollableElement as _,
     spinner::Spinner,
+    text::TextView,
     WindowExt, *,
 };
 use serde_json::json;
@@ -2861,7 +2862,8 @@ impl AmuxApp {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0x6b7280)),
                         )
-                        .child(block_text(content)),
+                        // agent 输出按 Markdown 渲染（docs/DESIGN.md §7 / PRD §4.1.3）
+                        .child(TextView::markdown(format!("amd-{i}"), block_text(content))),
                 ),
             })
             .collect::<Vec<_>>();
