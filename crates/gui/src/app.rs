@@ -2954,8 +2954,9 @@ impl AmuxApp {
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
                         cx.stop_propagation();
                     })
-                    .w(px(860.))
-                    .h(px(600.))
+                    .w(px(880.))
+                    .h(px(620.))
+                    .overflow_hidden()
                     .bg(rgb(0xffffff))
                     .rounded_md()
                     .shadow_lg()
@@ -3032,6 +3033,7 @@ impl AmuxApp {
         v_flex()
             .id("settings-content")
             .flex_1()
+            .min_w_0()
             .h_full()
             .gap_2()
             .p_4()
@@ -3045,6 +3047,41 @@ impl AmuxApp {
             })
     }
 
+    /// 设置页分类标题（美化）。
+    fn settings_header(&self, title: &str, subtitle: &str) -> impl IntoElement {
+        v_flex()
+            .gap_0p5()
+            .child(Label::new(title).text_lg().font_weight(FontWeight::MEDIUM))
+            .child(Label::new(subtitle).text_sm().text_color(rgb(0x6b7280)))
+    }
+
+    /// 设置项卡片：左侧文本列（flex-1 min_w_0 截断）+ 右侧操作区。
+    /// `clamp`：0 = 不截断，1 = 单行省略号，n = 最多 n 行截断。
+    fn settings_item(
+        &self,
+        title: &str,
+        body: &str,
+        clamp: usize,
+        actions: impl IntoElement,
+    ) -> impl IntoElement {
+        let mut text_col = v_flex().flex_1().min_w_0().gap_0p5();
+        text_col = text_col.child(Label::new(title).text_sm().font_weight(FontWeight::MEDIUM));
+        let body_label = Label::new(body).text_sm().text_color(rgb(0x6b7280));
+        text_col = text_col.child(match clamp {
+            0 => body_label,
+            1 => body_label.truncate(),
+            n => body_label.line_clamp(n),
+        });
+        h_flex()
+            .gap_2()
+            .items_center()
+            .p_2()
+            .bg(rgb(0xf7f8fa))
+            .rounded_md()
+            .child(text_col)
+            .child(actions)
+    }
+
     /// 机器管理：接入/移除 + agent 默认模型 + skills 列表（PRD §4.3）。
     fn render_machines_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machines = self
@@ -3052,30 +3089,65 @@ impl AmuxApp {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let mut item =
-                    v_flex()
-                        .gap_1()
-                        .p_2()
-                        .bg(rgb(0xf5f6f8))
-                        .rounded_md()
-                        .child(Label::new(format!(
-                            "{} · {} · {}",
-                            m.config.name, m.config.url, m.status
-                        )));
+                let mut item = v_flex()
+                    .gap_1()
+                    .p_2()
+                    .bg(rgb(0xf5f6f8))
+                    .rounded_md()
+                    // 机器头：名称 + 在线状态徽章 + 移除
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                Label::new(&m.config.name)
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(machine_status_badge(&m.status))
+                            .child(div().flex_1())
+                            .child(
+                                Button::new(format!("remove-{i}"))
+                                    .small()
+                                    .label("移除")
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        this.remove_machine(i, cx);
+                                    })),
+                            ),
+                    )
+                    // URL 长文本单行省略
+                    .child(
+                        Label::new(&m.config.url)
+                            .text_xs()
+                            .text_color(rgb(0x9ca3af))
+                            .truncate(),
+                    );
                 // agent 发现 + 默认模型
                 if let Some(info) = &m.info {
                     for h in &info.harnesses {
-                        let mut row = h_flex()
-                            .gap_1()
-                            .child(Label::new(format!(
-                                "agent: {}（{}）",
-                                h.name,
-                                if h.available { "可用" } else { "不可用" }
-                            )))
-                            .child(Label::new(format!(
-                                "默认模型: {}",
-                                h.default_model.clone().unwrap_or_else(|| "未设置".into())
-                            )));
+                        let mut row = h_flex().gap_2().items_center().child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(
+                                    Label::new(format!(
+                                        "agent: {}（{}）",
+                                        h.name,
+                                        if h.available { "可用" } else { "不可用" }
+                                    ))
+                                    .text_sm(),
+                                )
+                                .child(
+                                    Label::new(format!(
+                                        "默认模型: {}",
+                                        h.default_model.clone().unwrap_or_else(|| "未设置".into())
+                                    ))
+                                    .text_xs()
+                                    .text_color(rgb(0x6b7280))
+                                    .truncate(),
+                                ),
+                        );
                         let harness = h.name.clone();
                         let mi = i;
                         let harness_a = harness.clone();
@@ -3102,33 +3174,38 @@ impl AmuxApp {
                             );
                         item = item.child(row);
                     }
-                    // 当前查看的 skills 列表
+                    // 当前查看的 skills 列表（长文本两行截断）
                     if m.skills_harness.is_some() {
-                        item = item.child(Label::new(format!(
-                            "skills ({}): {}",
-                            m.skills_harness.as_deref().unwrap_or(""),
-                            if m.skills.is_empty() {
-                                "（无）".to_string()
-                            } else {
-                                m.skills.join(", ")
-                            }
-                        )));
+                        item = item.child(
+                            Label::new(format!(
+                                "skills ({}): {}",
+                                m.skills_harness.as_deref().unwrap_or(""),
+                                if m.skills.is_empty() {
+                                    "（无）".to_string()
+                                } else {
+                                    m.skills.join(", ")
+                                }
+                            ))
+                            .text_xs()
+                            .text_color(rgb(0x6b7280))
+                            .line_clamp(2),
+                        );
                     }
                 }
-                item.child(
-                    Button::new(format!("remove-{i}"))
-                        .small()
-                        .label("移除")
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            this.remove_machine(i, cx);
-                        })),
-                )
+                item
             })
             .collect::<Vec<_>>();
         v_flex()
             .gap_2()
-            .child(Label::new("机器管理"))
-            .child(Label::new("默认模型输入："))
+            .child(self.settings_header(
+                "机器管理",
+                "接入 / 移除机器；每台机器自动发现本机 ACP agent，可配置默认模型、查看 skills",
+            ))
+            .child(
+                Label::new("默认模型输入：")
+                    .text_sm()
+                    .text_color(rgb(0x6b7280)),
+            )
             .child(Input::new(&self.model_input))
             .children(machines)
             .child(
@@ -3151,23 +3228,62 @@ impl AmuxApp {
                         }),
                     )),
             )
-            .child(Label::new("添加格式：名称 ws://地址 token（空格分隔）"))
+            .child(
+                Label::new("添加格式：名称 ws://地址 token（空格分隔）")
+                    .text_xs()
+                    .text_color(rgb(0x9ca3af)),
+            )
             .into_any()
     }
 
     /// 编排 agent API 配置（PRD §4.3「编排 agent」）。
     fn render_orchestrator_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        v_flex()
-            .gap_2()
-            .child(Label::new("编排 agent（内置编排 agent，rig 单 turn）"))
-            .child(Label::new("API Backend"))
-            .child(Input::new(&self.orch_backend_input))
-            .child(Label::new("Base URL"))
-            .child(Input::new(&self.orch_base_input))
-            .child(Label::new("API key"))
-            .child(Input::new(&self.orch_key_input))
-            .child(Label::new("模型"))
-            .child(Input::new(&self.orch_model_input))
+        let configured = self.store.orchestrator().is_configured();
+        let mut col = v_flex().gap_2().child(self.settings_header(
+            "编排 agent",
+            "内置编排 agent（rig 单 turn）的 LLM API 配置；创建工作流前需填 Base URL 与 API key",
+        ));
+        // 配置状态提示
+        col = col.child(
+            h_flex().gap_1().items_center().child(
+                Label::new(if configured {
+                    "✓ 已配置，可创建工作流"
+                } else {
+                    "⚠ 未配置：Base URL 与 API key 为空，暂不能创建工作流"
+                })
+                .text_sm()
+                .text_color(if configured {
+                    rgb(0x16a34a)
+                } else {
+                    rgb(0xb91c1c)
+                }),
+            ),
+        );
+        col = col
+            .child(
+                v_flex()
+                    .gap_1()
+                    .p_2()
+                    .bg(rgb(0xf7f8fa))
+                    .rounded_md()
+                    .child(
+                        Label::new("API Backend")
+                            .text_sm()
+                            .text_color(rgb(0x6b7280)),
+                    )
+                    .child(Input::new(&self.orch_backend_input))
+                    .child(Label::new("Base URL").text_sm().text_color(rgb(0x6b7280)))
+                    .child(Input::new(&self.orch_base_input))
+                    .child(Label::new("API key").text_sm().text_color(rgb(0x6b7280)))
+                    .child(Input::new(&self.orch_key_input))
+                    .child(Label::new("模型").text_sm().text_color(rgb(0x6b7280)))
+                    .child(Input::new(&self.orch_model_input))
+                    .child(
+                        Label::new("API Backend 取值：chat_completions / messages")
+                            .text_xs()
+                            .text_color(rgb(0x9ca3af)),
+                    ),
+            )
             .child(
                 Button::new("save-orch")
                     .small()
@@ -3181,10 +3297,11 @@ impl AmuxApp {
                             model: this.orch_model_input.read(cx).value().to_string(),
                         };
                         this.store.save_orchestrator(&cfg);
+                        this.workflow_error = None; // 配置好后清除创建工作流的提示
                         cx.notify();
                     })),
-            )
-            .into_any()
+            );
+        col.into_any()
     }
 
     /// 快捷指令：增删 + 修改提示词（PRD §3.4）。
@@ -3199,49 +3316,45 @@ impl AmuxApp {
                 let id_remove = id.clone();
                 let name = c.name.clone();
                 let prompt = c.prompt.clone();
-                v_flex()
+                let actions = h_flex()
                     .gap_1()
-                    .p_2()
-                    .bg(rgb(0xf5f6f8))
-                    .rounded_md()
-                    .child(Label::new(format!("{}：{}", c.name, c.prompt)))
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new(format!("qc-edit-name-{i}"))
-                                    .small()
-                                    .label("改名")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let id = id_edit.clone();
-                                        let n = format!("{} ", name);
-                                        this.qc_name_input.update(cx, |s, cx| {
-                                            s.set_value(n, window, cx);
-                                        });
-                                        this.qc_prompt_input.update(cx, |s, cx| {
-                                            s.set_value(prompt.clone(), window, cx);
-                                        });
-                                        this.qc_edit_target = Some(id);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new(format!("qc-remove-{i}"))
-                                    .small()
-                                    .label("删除")
-                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                        this.store.remove_quick_command(&id_remove);
-                                        cx.notify();
-                                    })),
-                            ),
+                        Button::new(format!("qc-edit-name-{i}"))
+                            .small()
+                            .label("改名")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                let id = id_edit.clone();
+                                let n = format!("{} ", name);
+                                this.qc_name_input.update(cx, |s, cx| {
+                                    s.set_value(n, window, cx);
+                                });
+                                this.qc_prompt_input.update(cx, |s, cx| {
+                                    s.set_value(prompt.clone(), window, cx);
+                                });
+                                this.qc_edit_target = Some(id);
+                                cx.notify();
+                            })),
                     )
+                    .child(
+                        Button::new(format!("qc-remove-{i}"))
+                            .small()
+                            .label("删除")
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.store.remove_quick_command(&id_remove);
+                                cx.notify();
+                            })),
+                    );
+                self.settings_item(&c.name, &c.prompt, 2, actions)
             })
             .collect::<Vec<_>>();
         v_flex()
             .gap_2()
-            .child(Label::new("快捷指令（每条即一段发给 agent 的提示词）"))
+            .child(self.settings_header(
+                "快捷指令",
+                "预设 Commit & Push、Submit PR；每条即一段发给 agent 的提示词，可增删改",
+            ))
             .children(items)
-            .child(Label::new("新增 / 编辑："))
+            .child(self.settings_header("新增 / 编辑", ""))
             .child(Input::new(&self.qc_name_input))
             .child(Input::new(&self.qc_prompt_input))
             .child(
@@ -3281,62 +3394,58 @@ impl AmuxApp {
                 let name = s.name.clone();
                 let desc = s.description.clone();
                 let skill = s.clone();
-                v_flex()
+                let actions = h_flex()
                     .gap_1()
-                    .p_2()
-                    .bg(rgb(0xf5f6f8))
-                    .rounded_md()
-                    .child(Label::new(format!("{}：{}", s.name, s.description)))
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new(format!("skill-install-{i}"))
-                                    .small()
-                                    .label("安装到 agent（新会话）")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        // PRD §3.6：给 agent 安装 skills 时启动新会话并发送安装提示词
-                                        let skill = skill.clone();
-                                        if let Some(mi) = this.active_machine() {
-                                            if let Some(harness) = this.available_harness(mi) {
-                                                this.install_skill(window, cx, mi, harness, skill);
-                                            }
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new(format!("skill-edit-{i}"))
-                                    .small()
-                                    .label("编辑")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        this.skill_name_input.update(cx, |s, cx| {
-                                            s.set_value(name.clone(), window, cx);
-                                        });
-                                        this.skill_desc_input.update(cx, |s, cx| {
-                                            s.set_value(desc.clone(), window, cx);
-                                        });
-                                        this.skill_edit_target = Some(id_edit.clone());
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new(format!("skill-remove-{i}"))
-                                    .small()
-                                    .label("删除")
-                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                        this.store.remove_skill(&id_remove);
-                                        cx.notify();
-                                    })),
-                            ),
+                        Button::new(format!("skill-install-{i}"))
+                            .small()
+                            .label("安装到 agent")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                // PRD §3.6：给 agent 安装 skills 时启动新会话并发送安装提示词
+                                let skill = skill.clone();
+                                if let Some(mi) = this.active_machine() {
+                                    if let Some(harness) = this.available_harness(mi) {
+                                        this.install_skill(window, cx, mi, harness, skill);
+                                    }
+                                }
+                            })),
                     )
+                    .child(
+                        Button::new(format!("skill-edit-{i}"))
+                            .small()
+                            .label("编辑")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.skill_name_input.update(cx, |s, cx| {
+                                    s.set_value(name.clone(), window, cx);
+                                });
+                                this.skill_desc_input.update(cx, |s, cx| {
+                                    s.set_value(desc.clone(), window, cx);
+                                });
+                                this.skill_edit_target = Some(id_edit.clone());
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("skill-remove-{i}"))
+                            .small()
+                            .label("删除")
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.store.remove_skill(&id_remove);
+                                cx.notify();
+                            })),
+                    );
+                // 描述可能是长 URL：单行省略号截断
+                self.settings_item(&s.name, &s.description, 1, actions)
             })
             .collect::<Vec<_>>();
         v_flex()
             .gap_2()
-            .child(Label::new(
-                "Skills 注册表（只存一段描述：仓库/资源 URL 或安装方法）",
+            .child(self.settings_header(
+                "Skills 注册表",
+                "每条只存一段描述：仓库/资源 URL 或下载安装方法说明；支持增删改",
             ))
             .children(items)
+            .child(self.settings_header("新增 / 编辑", ""))
             .child(Input::new(&self.skill_name_input))
             .child(Input::new(&self.skill_desc_input))
             .child(
@@ -3363,9 +3472,11 @@ impl AmuxApp {
                                 cx.notify();
                             })),
                     )
-                    .child(Label::new(
-                        "安装：在机器管理中点 agent 的 skills 查看，选 skill 安装",
-                    )),
+                    .child(
+                        Label::new("安装：在机器管理中点 agent 的 skills 查看，选 skill 安装")
+                            .text_xs()
+                            .text_color(rgb(0x9ca3af)),
+                    ),
             )
             .into_any()
     }
@@ -3382,46 +3493,44 @@ impl AmuxApp {
                 let id_remove = id.clone();
                 let name = t.name.clone();
                 let desc = t.description.clone();
-                v_flex()
+                let actions = h_flex()
                     .gap_1()
-                    .p_2()
-                    .bg(rgb(0xf5f6f8))
-                    .rounded_md()
-                    .child(Label::new(format!("{}：{}", t.name, t.description)))
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new(format!("tpl-edit-{i}"))
-                                    .small()
-                                    .label("编辑")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        this.tpl_name_input.update(cx, |s, cx| {
-                                            s.set_value(name.clone(), window, cx);
-                                        });
-                                        this.tpl_desc_input.update(cx, |s, cx| {
-                                            s.set_value(desc.clone(), window, cx);
-                                        });
-                                        this.tpl_edit_target = Some(id_edit.clone());
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new(format!("tpl-remove-{i}"))
-                                    .small()
-                                    .label("删除")
-                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                        this.store.remove_template(&id_remove);
-                                        cx.notify();
-                                    })),
-                            ),
+                        Button::new(format!("tpl-edit-{i}"))
+                            .small()
+                            .label("编辑")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.tpl_name_input.update(cx, |s, cx| {
+                                    s.set_value(name.clone(), window, cx);
+                                });
+                                this.tpl_desc_input.update(cx, |s, cx| {
+                                    s.set_value(desc.clone(), window, cx);
+                                });
+                                this.tpl_edit_target = Some(id_edit.clone());
+                                cx.notify();
+                            })),
                     )
+                    .child(
+                        Button::new(format!("tpl-remove-{i}"))
+                            .small()
+                            .label("删除")
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.store.remove_template(&id_remove);
+                                cx.notify();
+                            })),
+                    );
+                // 模板描述为自然语言：最多两行截断
+                self.settings_item(&t.name, &t.description, 2, actions)
             })
             .collect::<Vec<_>>();
         v_flex()
             .gap_2()
-            .child(Label::new("工作流模板（名称 + 自然语言描述）"))
+            .child(self.settings_header(
+                "工作流模板",
+                "可复用的自然语言工作流描述；支持查看 / 新建 / 编辑 / 删除",
+            ))
             .children(items)
+            .child(self.settings_header("新建 / 编辑", ""))
             .child(Input::new(&self.tpl_name_input))
             .child(Input::new(&self.tpl_desc_input))
             .child(
@@ -3480,6 +3589,18 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// 机器在线状态徽章（PRD §3.3 在线状态）。
+fn machine_status_badge(status: &str) -> impl IntoElement {
+    let color = if status.starts_with("已连接") {
+        rgb(0x16a34a)
+    } else if status.starts_with("连接失败") || status.starts_with("离线") {
+        rgb(0xdc2626)
+    } else {
+        rgb(0x9ca3af)
+    };
+    Label::new(status).text_xs().text_color(color)
 }
 
 /// 在 GUI 的 tokio runtime 上执行编排引擎任务（rig/reqwest 的 LLM 调用需要
