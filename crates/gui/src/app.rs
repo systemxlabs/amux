@@ -2908,6 +2908,8 @@ impl AmuxApp {
             children.extend(rows.into_iter().map(|r| r.into_any_element()));
             div()
                 .id("dialog")
+                // 必须是 flex 容器 gap 才生效（flex_1 只设 grow/shrink，不设 display）
+                .v_flex()
                 .flex_1()
                 // 气泡之间间隔 16px（gap_4），带头部标签的消息流更易区分
                 .gap_4()
