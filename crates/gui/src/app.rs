@@ -2909,7 +2909,8 @@ impl AmuxApp {
             div()
                 .id("dialog")
                 .flex_1()
-                .gap_3()
+                // 气泡之间间隔 16px（gap_4），带头部标签的消息流更易区分
+                .gap_4()
                 .p_2()
                 .overflow_y_scroll()
                 .track_scroll(&self.dialog_scroll)
