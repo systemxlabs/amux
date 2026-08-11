@@ -3836,15 +3836,46 @@ impl AmuxApp {
 impl Render for AmuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = self.render_panel(window, cx);
-        let mut root = h_flex()
-            .size_full()
-            .relative()
+        // 无边框窗口：标题栏按住可拖动窗口（GPUI 无 OS 标题栏，需 start_window_move）
+        let title_bar = h_flex()
+            .id("title-bar")
+            .h(px(28.))
+            .gap_2()
+            .items_center()
+            .px_2()
+            .bg(rgb(0xe8eaee))
+            .border_b_1()
+            .border_color(rgb(0xd8dbe0))
+            .on_mouse_down(MouseButton::Left, |_e, window, _cx| {
+                window.start_window_move();
+            })
+            .child(
+                Label::new("amux")
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x374151)),
+            )
+            .child(div().flex_1())
+            .child(
+                Label::new("右键会话 → 删除 / 重命名")
+                    .text_xs()
+                    .text_color(rgb(0x9ca3af)),
+            );
+
+        let mut main_row = h_flex()
+            .flex_1()
+            .min_h_0()
             .items_stretch()
             .child(self.render_sidebar(window, cx))
             .child(self.render_main(window, cx));
         if let Some(p) = panel {
-            root = root.child(p);
+            main_row = main_row.child(p);
         }
+        let mut root = v_flex()
+            .size_full()
+            .relative()
+            .child(title_bar)
+            .child(main_row);
         if let Some(menu) = &self.context_menu {
             root = root.child(self.render_context_menu(menu, window, cx));
         }
