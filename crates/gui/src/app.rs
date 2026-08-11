@@ -1901,6 +1901,7 @@ impl AmuxApp {
         div()
             .id(format!("sess-row-{machine}-{sid}"))
             .relative()
+            .w_full()
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
@@ -1917,10 +1918,11 @@ impl AmuxApp {
             )
             .child(
                 h_flex()
+                    .w_full()
                     .gap_1()
                     .items_center()
-                    .child(btn)
-                    .child(div().flex_1())
+                    // 按钮撑满整行宽度（条目占据完整空间）
+                    .child(btn.flex_1())
                     // 工作中转圈（右侧）；空闲占位（保持对齐）
                     .child(if busy {
                         Spinner::new()
