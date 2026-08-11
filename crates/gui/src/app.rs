@@ -2835,6 +2835,9 @@ impl AmuxApp {
                         .ml_auto()
                         .max_w(px(720.))
                         .p_3()
+                        // 头部标签与消息内容之间留一点间隔
+                        .v_flex()
+                        .gap_1()
                         .rounded_md()
                         .bg(rgb(0x3b82f6))
                         .text_color(rgb(0xffffff))
@@ -2851,6 +2854,9 @@ impl AmuxApp {
                     div()
                         .max_w(px(720.))
                         .p_3()
+                        // 头部标签与消息内容之间留一点间隔
+                        .v_flex()
+                        .gap_1()
                         .rounded_md()
                         .bg(rgb(0xffffff))
                         .border_1()
