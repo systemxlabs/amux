@@ -1289,6 +1289,21 @@ impl AmuxApp {
         if description.trim().is_empty() {
             return;
         }
+        self.create_workflow_with(window, cx, description, None);
+        self.workflow_input.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+        });
+    }
+
+    /// 创建编排会话（共用实现）。
+    /// `preamble`：模板/系统指令，内置进编排 agent 的系统提示词、不进入会话历史（PRD §3.7）。
+    fn create_workflow_with(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        description: String,
+        preamble: Option<String>,
+    ) {
         // 编排 agent 未配置 API 时不创建不可用的会话，给出提示并引导设置（PRD §4.3）
         if !self.store.orchestrator().is_configured() {
             self.workflow_error = Some(
@@ -1309,14 +1324,18 @@ impl AmuxApp {
         let clients: Vec<WsClient> = self.machines.iter().map(|m| m.client.clone()).collect();
         let summaries = self.machine_summaries();
         let backend = self.orchestrator_backend(&summaries);
-        let engine = WorkflowEngine::new(&clean, &context, backend, clients.clone(), summaries);
+        let engine = WorkflowEngine::new(
+            &clean,
+            &context,
+            preamble.as_deref().unwrap_or(""),
+            backend,
+            clients.clone(),
+            summaries,
+        );
         let wi = self.workflows.len();
         let workflow_dir = self.workflow_dir.clone();
         self.workflows.push(engine);
         self.selected = Some(Selected::Workflow { engine: wi });
-        self.workflow_input.update(cx, |s, cx| {
-            s.set_value("", window, cx);
-        });
 
         // 启动首个 turn（拆解步骤并下发指令）：编排主循环在 GUI 的 tokio runtime
         // 上执行（rig LLM 调用需要 reactor），完成后经 oneshot 传回引擎状态
@@ -1375,11 +1394,13 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         tpl: WorkflowTemplate,
     ) {
+        // 模板内置进编排 agent 的系统提示词（preamble），不进入会话历史（PRD §3.7）；
+        // 输入框中的内容（若有）作为用户的额外目标
+        let goal = self.workflow_input.read(cx).value().to_string();
+        self.create_workflow_with(window, cx, goal, Some(tpl.description.clone()));
         self.workflow_input.update(cx, |s, cx| {
-            s.set_value(tpl.description, window, cx);
+            s.set_value("", window, cx);
         });
-        self.new_session_mode = NewSessionMode::Workflow;
-        self.create_workflow(window, cx);
     }
 
     // ---- 语音输入 ----

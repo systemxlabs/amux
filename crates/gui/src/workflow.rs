@@ -62,6 +62,9 @@ pub struct OrcSession {
     pub title: String,
     /// 用户自然语言计划（含 @ 引用展开的上下文）
     pub description: String,
+    /// 模板/系统指令（内置进编排 agent 的系统提示词，不进入会话历史；PRD §3.7）
+    #[serde(default)]
+    pub preamble: String,
     pub state: SessionState,
     pub paused: bool,
     pub done: bool,
@@ -109,6 +112,8 @@ pub struct ChildStatus {
 #[derive(Debug, Clone)]
 pub struct OrcContext {
     pub plan: String,
+    /// 模板/系统指令（内置进编排系统提示词，不进入会话历史）
+    pub preamble: String,
     /// 对话历史（用户计划/介入、编排输出、系统事件）文本化
     pub transcript: Vec<String>,
     pub children: Vec<ChildStatus>,
@@ -246,10 +251,12 @@ pub struct WorkflowEngine {
 
 impl WorkflowEngine {
     /// 新建编排会话并执行首个决策 turn。
-    /// `context`：@ 引用展开的上下文文本（附加到计划后）。
+    /// - `context`：@ 引用展开的上下文文本（附加到计划后）
+    /// - `preamble`：模板/系统指令，内置进编排 agent 的系统提示词（不进入会话历史）
     pub fn new(
         description: &str,
         context: &str,
+        preamble: &str,
         backend: Arc<dyn OrcBackend>,
         clients: Vec<WsClient>,
         machines: Vec<MachineSummary>,
@@ -259,9 +266,13 @@ impl WorkflowEngine {
         } else {
             format!("{description}\n\n[上下文]\n{context}")
         };
-        let mut transcript = vec![OrcMsg::User {
-            text: description.to_string(),
-        }];
+        // 模板不进会话历史：仅当用户确实有描述/目标时才写入用户消息
+        let mut transcript = Vec::new();
+        if !description.trim().is_empty() {
+            transcript.push(OrcMsg::User {
+                text: description.to_string(),
+            });
+        }
         if !context.trim().is_empty() {
             transcript.push(OrcMsg::System {
                 text: "已附加 @ 引用的上下文".into(),
@@ -272,6 +283,7 @@ impl WorkflowEngine {
             id: format!("orc_{}", uuid::Uuid::new_v4()),
             title: generate_title(description),
             description: full,
+            preamble: preamble.to_string(),
             state: SessionState::Idle,
             paused: false,
             done: false,
@@ -367,6 +379,7 @@ impl WorkflowEngine {
     fn build_context(&self) -> OrcContext {
         OrcContext {
             plan: self.session.description.clone(),
+            preamble: self.session.preamble.clone(),
             transcript: self
                 .session
                 .transcript
@@ -737,7 +750,13 @@ impl OrcBackend for RigBackend {
                         .to_string(),
                 );
             }
-            let preamble = self.preamble();
+            // 模板/系统指令内置进编排系统提示词（不进入会话历史，PRD §3.7）
+            let mut preamble = self.preamble();
+            if !ctx.preamble.trim().is_empty() {
+                preamble.push_str("\n\n");
+                preamble.push_str("【工作流模板/执行要求】\n");
+                preamble.push_str(ctx.preamble.trim());
+            }
             let client = rig::providers::openai::Client::builder()
                 .api_key(self.cfg.api_key.clone())
                 .base_url(self.cfg.base_url.clone())
@@ -1030,7 +1049,14 @@ mod tests {
     fn title_generated_from_description() {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("实现登录功能\n然后写测试", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new(
+            "实现登录功能\n然后写测试",
+            "",
+            "",
+            backend,
+            clients,
+            vec![m],
+        );
         assert_eq!(engine.session.title, "实现登录功能");
         assert!(!engine.session.id.is_empty());
         assert!(engine
@@ -1047,6 +1073,7 @@ mod tests {
         let engine = WorkflowEngine::new(
             "实现功能",
             "@src/main.rs 的内容……",
+            "",
             backend,
             clients,
             vec![m],
@@ -1066,7 +1093,7 @@ mod tests {
             done: false,
             conclusion: None,
         }]);
-        let mut engine = WorkflowEngine::new("计划", "", backend, clients, vec![m]);
+        let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         engine.set_paused(true);
         assert!(engine.session.paused);
         // 暂停时不推进（决策用尽也不会被消费）
@@ -1103,7 +1130,7 @@ mod tests {
             done: true,
             conclusion: Some("全部步骤完成".into()),
         }]);
-        let mut engine = WorkflowEngine::new("计划", "", backend, clients, vec![m]);
+        let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         engine.start().await.unwrap();
         assert!(engine.session.done);
         assert!(engine
@@ -1121,7 +1148,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("计划A", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m]);
         let id = engine.session.id.clone();
         engine.persist(&dir).unwrap();
 
@@ -1254,6 +1281,7 @@ mod tests {
         let mut engine = WorkflowEngine::new(
             "在测试机用 mock_acp 实现登录功能",
             "",
+            "",
             backend,
             vec![client.clone()],
             vec![m],
@@ -1346,7 +1374,7 @@ mod tests {
             },
         ]);
         let mut engine =
-            WorkflowEngine::new("两步工作流", "", backend, vec![client.clone()], vec![m]);
+            WorkflowEngine::new("两步工作流", "", "", backend, vec![client.clone()], vec![m]);
         engine.start().await.unwrap();
         assert_eq!(engine.session.children.len(), 1);
         let child_id = engine.session.children[0].id.clone();
@@ -1390,8 +1418,14 @@ mod tests {
                 conclusion: Some("完成".into()),
             },
         ]);
-        let mut engine =
-            WorkflowEngine::new("任务", "", backend, vec![client.clone()], vec![m.clone()]);
+        let mut engine = WorkflowEngine::new(
+            "任务",
+            "",
+            "",
+            backend,
+            vec![client.clone()],
+            vec![m.clone()],
+        );
         engine.start().await.unwrap();
         let child_id = engine.session.children[0].id.clone();
         let saved = engine.session.clone(); // 模拟持久化
@@ -1441,6 +1475,7 @@ mod tests {
         let engine = WorkflowEngine::new(
             "计划",
             "",
+            "",
             backend,
             vec![],
             vec![MachineSummary {
@@ -1462,6 +1497,45 @@ mod tests {
         assert!(matches!(&dialog[1], DialogItem::AgentOutput { .. }));
     }
 
+    #[test]
+    fn template_as_preamble_not_in_history() {
+        // 从模板创建：模板作为系统提示词（preamble），不进入会话历史（PRD §3.7）
+        let backend = FakeBackend::new_for_tests();
+        let engine = WorkflowEngine::new(
+            "",
+            "",
+            "模板：先在测试机实现，再审查",
+            backend,
+            vec![],
+            vec![MachineSummary {
+                name: "测试机".into(),
+                harnesses: vec!["mock_acp".into()],
+            }],
+        );
+        assert!(engine.session.transcript.is_empty(), "模板不应进入会话历史");
+        assert_eq!(engine.session.preamble, "模板：先在测试机实现，再审查");
+        assert!(engine.session.title.is_empty(), "无用户目标时不生成标题");
+
+        // 用户目标 + 模板：历史只含用户目标
+        let backend = FakeBackend::new_for_tests();
+        let engine = WorkflowEngine::new(
+            "本次只做第一步",
+            "",
+            "模板：先实现后审查",
+            backend,
+            vec![],
+            vec![MachineSummary {
+                name: "测试机".into(),
+                harnesses: vec!["mock_acp".into()],
+            }],
+        );
+        assert_eq!(engine.session.transcript.len(), 1);
+        assert!(matches!(
+            &engine.session.transcript[0],
+            OrcMsg::User { text } if text == "本次只做第一步"
+        ));
+    }
+
     #[tokio::test]
     async fn unconfigured_rig_backend_records_clear_error() {
         // 编排 agent 未配置 API：start() 失败但错误写入对话历史（System 消息），
@@ -1478,6 +1552,7 @@ mod tests {
         let client = WsClient::connect("ws://127.0.0.1:1/?token=unused".into());
         let mut engine = WorkflowEngine::new(
             "计划",
+            "",
             "",
             backend,
             vec![client],
