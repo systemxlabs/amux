@@ -1871,6 +1871,8 @@ impl AmuxApp {
             SessionState::Idle => {
                 if s.closed {
                     "已关闭"
+                } else if s.interrupted {
+                    "已中断"
                 } else {
                     "空闲"
                 }
