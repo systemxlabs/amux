@@ -238,6 +238,7 @@ pub fn ops_to_actions(ops: Vec<ToolOp>, known_sessions: &[String]) -> Vec<OrcAct
 
 // ---- WorkflowEngine：状态机 ----
 
+#[derive(Clone)]
 pub struct WorkflowEngine {
     pub session: OrcSession,
     backend: Arc<dyn OrcBackend>,
@@ -590,16 +591,50 @@ impl WorkflowEngine {
         false
     }
 
-    /// 用户介入（暂停/继续/调整后续动作均为向编排会话发送指令，docs/DESIGN.md §10）。
-    pub async fn steer(&mut self, text: &str) -> Result<(), String> {
+    // ---- 异步任务与 GUI 的交接（引擎保持原位，克隆体执行异步推进）----
+    // GUI 发起异步编排任务时，引擎始终留在 self.workflows 中（会话行与对话历史
+    // 立即可见）；异步推进在克隆体上执行，完成后原位换回。以下方法维护防重入
+    // 标记与同步可见的状态。
+
+    /// 是否正在推进（异步推进进行中；GUI 据此跳过并发的自动推进/介入推进）。
+    pub fn is_advancing(&self) -> bool {
+        self.advancing
+    }
+
+    /// 异步任务开始前调用（GUI 主线程同步执行）：标记忙并上防重入锁，
+    /// 使会话行/对话历史立即显示工作状态。
+    pub fn begin_busy(&mut self) {
+        self.advancing = true;
+        self.pending_advance = false;
+        self.session.state = SessionState::Busy;
+        self.session.updated_at = now();
+    }
+
+    /// 克隆体开始推进前调用：解除 begin_busy 的防重入标记
+    /// （advance 自身会重新置位，保证克隆体内一次只跑一轮）。
+    pub fn start_advance(&mut self) {
+        self.advancing = false;
+        self.pending_advance = false;
+    }
+
+    /// 异步任务中断（oneshot 失效）时复位，避免永久卡在 Busy/防重入。
+    pub fn abort_busy(&mut self) {
+        self.advancing = false;
+        self.pending_advance = false;
+        if self.session.state == SessionState::Busy {
+            self.session.state = SessionState::Idle;
+        }
+        self.session.updated_at = now();
+    }
+
+    /// 同步记录用户介入指令（立即在 GUI 可见，不等待 LLM）。
+    /// 返回是否应触发推进：未暂停、未完成且没有推进在进行中。
+    pub fn record_user(&mut self, text: &str) -> bool {
         self.session.transcript.push(OrcMsg::User {
             text: text.to_string(),
         });
         self.session.updated_at = now();
-        if self.session.paused || self.session.done {
-            return Ok(());
-        }
-        self.advance().await
+        !self.session.paused && !self.session.done && !self.advancing
     }
 
     /// 暂停/继续。继续时返回 true（调用方应触发一次推进）。
@@ -1104,7 +1139,7 @@ mod tests {
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { .. })));
         // 介入指令在暂停时仅记录
-        engine.steer("先做 A").await.unwrap();
+        engine.record_user("先做 A");
         assert!(engine
             .session
             .transcript

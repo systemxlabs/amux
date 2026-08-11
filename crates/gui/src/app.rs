@@ -567,39 +567,44 @@ impl AmuxApp {
                         .iter()
                         .position(|wf| wf.session.children.iter().any(|c| c.id == session_id));
                     if let Some(wi) = wi {
-                        let output = this.machine(idx).and_then(|mm| {
-                            mm.dialog.iter().rev().find_map(|d| match d {
-                                DialogItem::AgentOutput { content, .. } => {
-                                    Some(block_text(content))
-                                }
-                                _ => None,
-                            })
-                        });
-                        let mut wf = this.workflows.remove(wi);
-                        let workflow_dir = this.workflow_dir.clone();
-                        let ex = output
-                            .unwrap_or_default()
-                            .chars()
-                            .take(200)
-                            .collect::<String>();
-                        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                            // 自动推进在 GUI 的 tokio runtime 上执行（rig 需要 reactor）
-                            if let Some(wf) = run_engine_on_tokio(async move {
-                                let _ = wf
-                                    .on_child_state(&session_id, SessionState::Idle, Some(ex))
-                                    .await;
-                                let _ = wf.persist(&workflow_dir);
-                                wf
-                            })
-                            .await
-                            {
-                                let _ = this.update_in(cx, |this, _window, cx| {
-                                    this.workflows.insert(wi, wf);
-                                    cx.notify();
-                                });
+                        // 已有推进进行中：跳过本次自动推进（完成情况由后续轮次带上）
+                        if !this.workflows[wi].is_advancing() {
+                            let output = this.machine(idx).and_then(|mm| {
+                                mm.dialog.iter().rev().find_map(|d| match d {
+                                    DialogItem::AgentOutput { content, .. } => {
+                                        Some(block_text(content))
+                                    }
+                                    _ => None,
+                                })
+                            });
+                            let ex = output
+                                .unwrap_or_default()
+                                .chars()
+                                .take(200)
+                                .collect::<String>();
+                            if let Some(wf) = this.workflows.get_mut(wi) {
+                                wf.begin_busy();
                             }
-                        });
-                        this._tasks.push(t);
+                            let mut wf = this.workflows[wi].clone();
+                            wf.start_advance();
+                            let wf_id = wf.session.id.clone();
+                            let workflow_dir = this.workflow_dir.clone();
+                            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                                // 自动推进在 GUI 的 tokio runtime 上执行（rig 需要 reactor）
+                                let result = run_engine_on_tokio(async move {
+                                    let _ = wf
+                                        .on_child_state(&session_id, SessionState::Idle, Some(ex))
+                                        .await;
+                                    let _ = wf.persist(&workflow_dir);
+                                    wf
+                                })
+                                .await;
+                                let _ = this.update_in(cx, |this, _window, cx| {
+                                    this.finish_engine_task(cx, wi, &wf_id, result);
+                                });
+                            });
+                            this._tasks.push(t);
+                        }
                     }
                 }
             }
@@ -1050,6 +1055,57 @@ impl AmuxApp {
         .detach();
     }
 
+    /// 编排异步任务收尾：原位换回引擎（校验 id，防删除竞态导致下标漂移）；
+    /// 中断（oneshot 失效）时复位防重入标记，避免永久卡在 Busy。
+    fn finish_engine_task(
+        &mut self,
+        cx: &mut Context<Self>,
+        wi: usize,
+        wf_id: &str,
+        result: Option<WorkflowEngine>,
+    ) {
+        match result {
+            Some(wf) => {
+                let same = self
+                    .workflows
+                    .get(wi)
+                    .map(|e| e.session.id == wf_id)
+                    .unwrap_or(false);
+                if same {
+                    // 合并推进期间（克隆体执行中）新记录的用户介入消息：
+                    // record_user 追加到原位引擎的消息不会出现在克隆体上，换回前补上
+                    let pending: Vec<OrcMsg> = self.workflows[wi]
+                        .session
+                        .transcript
+                        .iter()
+                        .skip(wf.session.transcript.len())
+                        .cloned()
+                        .collect();
+                    self.workflows[wi] = wf;
+                    if !pending.is_empty() {
+                        let w = &mut self.workflows[wi];
+                        w.session.transcript.extend(pending);
+                        w.session.updated_at = crate::workflow::now_ts();
+                    }
+                } else {
+                    // 会话已被删除（删除竞态/下标漂移）：清理刚写入的持久化文件，避免重启复活
+                    WorkflowEngine::remove(&self.workflow_dir, wf_id);
+                }
+            }
+            None => {
+                if self
+                    .workflows
+                    .get(wi)
+                    .map(|e| e.session.id == wf_id)
+                    .unwrap_or(false)
+                {
+                    self.workflows[wi].abort_busy();
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input_state.read(cx).value().to_string();
         let attachments = self.input_attachments.clone();
@@ -1108,25 +1164,34 @@ impl AmuxApp {
             }
             Selected::Workflow { engine } => {
                 // 向编排会话发送介入指令（暂停/继续/调整后续动作，docs/DESIGN.md §10）；
+                // 用户消息同步落库（立即可见），异步推进在克隆体上执行、完成后原位换回；
                 // 编排在 GUI 的 tokio runtime 上执行（rig LLM 调用需要 reactor）
-                let mut wf = self.workflows.remove(engine);
-                let text = clean_text;
-                let workflow_dir = self.workflow_dir.clone();
-                let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                    if let Some(wf) = run_engine_on_tokio(async move {
-                        let _ = wf.steer(&text).await;
-                        let _ = wf.persist(&workflow_dir);
-                        wf
-                    })
-                    .await
-                    {
-                        let _ = this.update_in(cx, |this, _window, cx| {
-                            this.workflows.insert(engine, wf);
-                            cx.notify();
-                        });
+                let should_advance = self
+                    .workflows
+                    .get_mut(engine)
+                    .map(|wf| wf.record_user(&clean_text))
+                    .unwrap_or(false);
+                if should_advance {
+                    if let Some(wf) = self.workflows.get_mut(engine) {
+                        wf.begin_busy();
                     }
-                });
-                self._tasks.push(t);
+                    let mut wf = self.workflows[engine].clone();
+                    wf.start_advance();
+                    let wf_id = wf.session.id.clone();
+                    let workflow_dir = self.workflow_dir.clone();
+                    let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                        let result = run_engine_on_tokio(async move {
+                            let _ = wf.advance().await;
+                            let _ = wf.persist(&workflow_dir);
+                            wf
+                        })
+                        .await;
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            this.finish_engine_task(cx, engine, &wf_id, result);
+                        });
+                    });
+                    self._tasks.push(t);
+                }
             }
         }
         self.input_state.update(cx, |s, cx| {
@@ -1337,33 +1402,36 @@ impl AmuxApp {
                             cx.notify();
                         });
                     // 自动推进在 GUI 的 tokio runtime 上执行（rig 需要 reactor，
-                    // 避免主线程无 runtime 崩溃）
+                    // 避免主线程无 runtime 崩溃）；引擎保持原位，克隆体推进后换回
                     for (wi, sid) in advances {
-                        let mut wf = {
-                            let mut out = None;
-                            let _ = this.update_in(cx, |this, _window, _cx| {
-                                if wi < this.workflows.len() {
-                                    out = Some(this.workflows.remove(wi));
+                        let mut picked: Option<(WorkflowEngine, String)> = None;
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            if let Some(wf) = this.workflows.get_mut(wi) {
+                                if !wf.is_advancing()
+                                    && wf.session.children.iter().any(|c| c.id == sid)
+                                {
+                                    wf.begin_busy();
+                                    let mut wf = this.workflows[wi].clone();
+                                    wf.start_advance();
+                                    let id = wf.session.id.clone();
+                                    picked = Some((wf, id));
                                 }
-                            });
-                            match out {
-                                Some(wf) => wf,
-                                None => continue,
                             }
+                            cx.notify();
+                        });
+                        let Some((mut wf, wf_id)) = picked else {
+                            continue;
                         };
                         let workflow_dir = workflow_dir.clone();
-                        if let Some(wf) = run_engine_on_tokio(async move {
+                        let result = run_engine_on_tokio(async move {
                             let _ = wf.on_child_state(&sid, SessionState::Idle, None).await;
                             let _ = wf.persist(&workflow_dir);
                             wf
                         })
-                        .await
-                        {
-                            let _ = this.update_in(cx, |this, _window, cx| {
-                                this.workflows.insert(wi, wf);
-                                cx.notify();
-                            });
-                        }
+                        .await;
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            this.finish_engine_task(cx, wi, &wf_id, result);
+                        });
                     }
                 }
             })
@@ -1426,22 +1494,24 @@ impl AmuxApp {
         self.workflows.push(engine);
         self.selected = Some(Selected::Workflow { engine: wi });
 
-        // 启动首个 turn（拆解步骤并下发指令）：编排主循环在 GUI 的 tokio runtime
-        // 上执行（rig LLM 调用需要 reactor），完成后经 oneshot 传回引擎状态
-        let mut wf = self.workflows.remove(wi);
+        // 启动首个 turn（拆解步骤并下发指令）：同步标记开始（会话行/历史立即可见），
+        // 异步推进在克隆体上执行、完成后原位换回；编排在 GUI 的 tokio runtime 上执行
+        if let Some(wf) = self.workflows.get_mut(wi) {
+            wf.begin_busy();
+        }
+        let mut wf = self.workflows[wi].clone();
+        wf.start_advance();
+        let wf_id = wf.session.id.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if let Some(wf) = run_engine_on_tokio(async move {
+            let result = run_engine_on_tokio(async move {
                 let _ = wf.start().await;
                 let _ = wf.persist(&workflow_dir);
                 wf
             })
-            .await
-            {
-                let _ = this.update_in(cx, |this, _window, cx| {
-                    this.workflows.insert(wi, wf);
-                    cx.notify();
-                });
-            }
+            .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.finish_engine_task(cx, wi, &wf_id, result);
+            });
         });
         self._tasks.push(t);
         cx.notify();
