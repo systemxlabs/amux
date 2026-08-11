@@ -37,7 +37,7 @@ use crate::config::{
     WorkflowTemplate,
 };
 use crate::logic::{compose_prompt, parse_at_references, read_path_context, InputAttachment};
-use crate::workflow::{MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
+use crate::workflow::{MachineSummary, OrcBackend, OrcMsg, RigBackend, WorkflowEngine};
 use crate::ws::{Notification, WsClient};
 
 // ---- 视图状态 ----
@@ -2511,6 +2511,22 @@ impl AmuxApp {
             Some(Selected::Session { machine, .. }) => {
                 self.machine(*machine).and_then(|m| m.live_activity.clone())
             }
+            // 编排会话：工作中显示"编排中…"
+            Some(Selected::Workflow { engine }) => {
+                let busy = self
+                    .workflows
+                    .get(*engine)
+                    .map(|wf| wf.session.state == SessionState::Busy)
+                    .unwrap_or(false);
+                if busy {
+                    Some(Activity::Thinking {
+                        timestamp: 0,
+                        content: "正在编排决策/推进…".into(),
+                    })
+                } else {
+                    None
+                }
+            }
             _ => None,
         };
         match &current {
@@ -3245,65 +3261,76 @@ impl AmuxApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (activities, live) = match &self.selected {
-            Some(Selected::Session { machine, .. }) => self
-                .machine(*machine)
-                .map(|m| (m.activities.clone(), m.live_activity.clone()))
-                .unwrap_or_default(),
-            _ => (Vec::new(), None),
-        };
-        let rows = activities
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                let (kind, detail) = match a {
-                    Activity::Thinking { content, .. } => ("思考", content.clone()),
-                    Activity::ToolCall {
-                        name,
-                        title,
-                        content,
-                        ..
-                    } => (
-                        "工具调用",
-                        format!(
-                            "{} {} {}",
-                            name,
-                            title.clone().unwrap_or_default(),
-                            content.clone().unwrap_or_default()
-                        ),
-                    ),
-                    Activity::Compaction { detail, .. } => ("压缩", detail.clone()),
-                };
-                div()
-                    .id(("act", i))
-                    .w_full()
-                    .p_1()
-                    .bg(rgb(0xf5f6f8))
-                    .rounded_md()
-                    .child(format!("[{kind}] {detail}"))
-            })
-            .collect::<Vec<_>>();
+        // 普通会话：server activities 缓存；编排会话：转录里的编排决策/系统事件
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut live: Option<Activity> = None;
+        match &self.selected {
+            Some(Selected::Session { machine, .. }) => {
+                let m = self.machine(*machine);
+                let activities = m.map(|m| m.activities.clone()).unwrap_or_default();
+                rows = activities
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let (kind, detail) = activity_display(a);
+                        div()
+                            .id(("act", i))
+                            .w_full()
+                            .p_1()
+                            .bg(rgb(0xf5f6f8))
+                            .rounded_md()
+                            .child(format!("[{kind}] {detail}"))
+                            .into_any_element()
+                    })
+                    .collect();
+                live = m.and_then(|m| m.live_activity.clone());
+            }
+            Some(Selected::Workflow { engine }) => {
+                if let Some(wf) = self.workflows.get(*engine) {
+                    for (i, m) in wf.session.transcript.iter().enumerate() {
+                        match m {
+                            // 用户消息在对话流展示，不进活动
+                            OrcMsg::User { .. } => {}
+                            OrcMsg::Orc { text } => {
+                                rows.push(
+                                    div()
+                                        .id(("wf-act", i))
+                                        .w_full()
+                                        .p_1()
+                                        .bg(rgb(0xeff6ff))
+                                        .rounded_md()
+                                        .child(format!("[编排] {text}"))
+                                        .into_any_element(),
+                                );
+                            }
+                            OrcMsg::System { text } => {
+                                rows.push(
+                                    div()
+                                        .id(("wf-act", i))
+                                        .w_full()
+                                        .p_1()
+                                        .bg(rgb(0xf5f6f8))
+                                        .rounded_md()
+                                        .child(format!("[系统] {text}"))
+                                        .into_any_element(),
+                                );
+                            }
+                        }
+                    }
+                    if wf.session.state == SessionState::Busy {
+                        live = Some(Activity::Thinking {
+                            timestamp: wf.session.updated_at,
+                            content: "正在编排决策/推进…".into(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
         // 实时活动（turn 进行中合并流式的一条，追加在历史下方）
         let mut children = rows;
         if let Some(a) = &live {
-            let (kind, detail) = match a {
-                Activity::Thinking { content, .. } => ("思考", content.clone()),
-                Activity::ToolCall {
-                    name,
-                    title,
-                    content,
-                    ..
-                } => (
-                    "工具调用",
-                    format!(
-                        "{} {} {}",
-                        name,
-                        title.clone().unwrap_or_default(),
-                        content.clone().unwrap_or_default()
-                    ),
-                ),
-                Activity::Compaction { detail, .. } => ("压缩", detail.clone()),
-            };
+            let (kind, detail) = activity_display(a);
             children.push(
                 div()
                     .id("act-live")
@@ -3314,7 +3341,8 @@ impl AmuxApp {
                     .border_color(rgb(0xfcd34d))
                     .rounded_md()
                     .child(Spinner::new())
-                    .child(format!("[{kind}] {detail}")),
+                    .child(format!("[{kind}] {detail}"))
+                    .into_any_element(),
             );
         }
         v_flex()
@@ -4047,6 +4075,28 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{t}…")
     } else {
         s.to_string()
+    }
+}
+
+/// 活动展示（种类标签 + 详情文本）。
+fn activity_display(a: &Activity) -> (String, String) {
+    match a {
+        Activity::Thinking { content, .. } => ("思考".into(), content.clone()),
+        Activity::ToolCall {
+            name,
+            title,
+            content,
+            ..
+        } => (
+            "工具调用".into(),
+            format!(
+                "{} {} {}",
+                name,
+                title.clone().unwrap_or_default(),
+                content.clone().unwrap_or_default()
+            ),
+        ),
+        Activity::Compaction { detail, .. } => ("压缩".into(), detail.clone()),
     }
 }
 
