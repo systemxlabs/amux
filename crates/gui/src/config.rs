@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(cfg.quick_commands.len(), 2);
         assert_eq!(cfg.quick_commands[0].name, "Commit & Push");
         assert_eq!(cfg.quick_commands[1].name, "Submit PR");
-        assert_eq!(cfg.orchestrator.model, "gpt-4o-mini");
+        assert_eq!(cfg.orchestrator.model, ""); // 默认留空，由用户填写
     }
 
     #[test]
@@ -641,6 +641,6 @@ mod tests {
         assert_eq!(cfg.orchestrator.model, "m");
         // 坏的 orchestrator 回退默认
         let raw2 = serde_json::json!({ "orchestrator": { "baseUrl": 1 } });
-        assert_eq!(normalize(&raw2).orchestrator.model, "gpt-4o-mini");
+        assert_eq!(normalize(&raw2).orchestrator.model, ""); // 坏配置回退为空
     }
 }

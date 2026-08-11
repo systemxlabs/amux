@@ -234,11 +234,8 @@ impl AmuxApp {
         });
         let orch_base_input = cx.new(|cx| InputState::new(window, cx).placeholder("Base URL"));
         let orch_key_input = cx.new(|cx| InputState::new(window, cx).placeholder("API key"));
-        let orch_model_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("模型")
-                .default_value("gpt-4o-mini")
-        });
+        let orch_model_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("模型，如 gpt-4o-mini"));
         let model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("默认模型（可留空）"));
         let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));

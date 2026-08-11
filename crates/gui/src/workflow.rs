@@ -733,7 +733,7 @@ impl OrcBackend for RigBackend {
             // 配置校验：Base URL / API key 缺失时给出可操作的提示（PRD §4.3）
             if !self.cfg.is_configured() {
                 return Err(
-                    "未配置编排 agent API（Base URL 与 API key）。请在设置 → 编排 agent 中配置后再创建工作流"
+                    "未配置编排 agent API（Base URL / API key / 模型）。请在设置 → 编排 agent 中配置后再创建工作流"
                         .to_string(),
                 );
             }

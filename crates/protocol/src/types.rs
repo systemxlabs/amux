@@ -63,20 +63,24 @@ pub struct OrchestratorConfig {
 
 impl Default for OrchestratorConfig {
     fn default() -> Self {
+        // 全部留空：Base URL / API key / 模型均由用户显式填写，
+        // 避免预填 OpenAI 默认值误导非 OpenAI 后端（docs/DESIGN.md §10）
         OrchestratorConfig {
             api_backend: "chat_completions".into(),
-            base_url: "https://api.openai.com/v1".into(),
+            base_url: String::new(),
             api_key: String::new(),
-            model: "gpt-4o-mini".into(),
+            model: String::new(),
         }
     }
 }
 
 impl OrchestratorConfig {
-    /// 编排 agent 是否已配置可用（PRD §4.3）：Base URL 与 API key 均非空。
+    /// 编排 agent 是否已配置可用（PRD §4.3）：Base URL、API key、模型均非空。
     /// 未配置时创建编排会话应给出提示并引导到设置页（docs/DESIGN.md §10）。
     pub fn is_configured(&self) -> bool {
-        !self.base_url.trim().is_empty() && !self.api_key.trim().is_empty()
+        !self.base_url.trim().is_empty()
+            && !self.api_key.trim().is_empty()
+            && !self.model.trim().is_empty()
     }
 }
 
@@ -483,19 +487,22 @@ mod tests {
         assert!(s.contains("\"apiBackend\":\"chat_completions\""));
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.model, orch.model);
-        // 默认配置（api_key 为空）视为未配置；填上 key 后视为已配置
+        // 默认配置（全部留空）视为未配置；Base URL / API key / 模型都填上才视为已配置
         assert!(!OrchestratorConfig::default().is_configured());
         let cfg = OrchestratorConfig {
             api_key: "sk-test".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "some-model".into(),
             ..OrchestratorConfig::default()
         };
         assert!(cfg.is_configured());
         let blank = OrchestratorConfig {
             api_key: "sk-test".into(),
-            base_url: "  ".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "  ".into(),
             ..OrchestratorConfig::default()
         };
-        assert!(!blank.is_configured(), "空白 Base URL 不算已配置");
+        assert!(!blank.is_configured(), "空白模型不算已配置");
     }
 
     #[test]
