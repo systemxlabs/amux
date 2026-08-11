@@ -3,14 +3,13 @@
 
 use std::time::Duration;
 
-use protocol::ContentBlock;
-
 // server 是 bin crate：测试用 #[path] 引入 agent 模块的真实实现
 #[path = "../src/agent.rs"]
 #[allow(dead_code)]
 mod agent;
 
-use agent::{AcpAgentDriver, AgentDriver, AgentEvent, DialogRecord};
+use agent::{AcpAgentDriver, AgentDriver, AgentEvent};
+use protocol::{ContentBlock, PassthroughEvent};
 
 /// 隔离实验：直接 tokio spawn mock + 手动读写，定位管道/runtime 问题。
 #[tokio::test]
@@ -48,8 +47,7 @@ async fn acp_driver_full_flow() {
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");
     let driver =
-        AcpAgentDriver::spawn(mock, &[state_file.to_str().unwrap()], &[])
-            .expect("spawn mock acp");
+        AcpAgentDriver::spawn(mock, &[state_file.to_str().unwrap()], &[]).expect("spawn mock acp");
 
     // create_session → session/new → mock_s_1
     let sid = driver.create_session("/tmp/work", None).expect("create");
@@ -90,28 +88,12 @@ async fn acp_driver_full_flow() {
         "request_permission 应被自动批准，状态文件: {approved:?}"
     );
 
-    // load_session → session/load 重放 → 对话内容
-    let records = driver.load_session(&sid).expect("load");
-    let output_texts: Vec<String> = records
+    // load_session → session/load 重放 → 透传事件（docs/DESIGN.md §5.1）
+    let events = driver.load_session(&sid).expect("load");
+    let has_output_chunk = events
         .iter()
-        .filter_map(|r| match r {
-            DialogRecord::AgentOutput(c) => Some(
-                c.iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(""),
-            ),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        output_texts.iter().any(|t| t.contains("完成")),
-        "load 重放应含 agent 输出: {output_texts:?}"
-    );
-
+        .any(|e| matches!(e, PassthroughEvent::OutputChunk { text, .. } if text.contains("完成")));
+    assert!(has_output_chunk, "load 重放应含 output_chunk: {events:?}");
     // list_sessions → 恢复会话列表
     let sessions = driver.list_sessions();
     assert!(

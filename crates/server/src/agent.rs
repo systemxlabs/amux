@@ -30,39 +30,75 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use protocol::ContentBlock;
-use protocol::HarnessInfo;
+use protocol::{ContentBlock, HarnessInfo, PassthroughEvent, SessionState};
 
-/// turn 过程中的 agent 事件（server 聚合为输出 + activities，docs/DESIGN.md §5）。
+/// turn 过程中的 agent 事件（docs/DESIGN.md §5.1：server 透传，GUI 应用聚合）。
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    /// agent 输出的增量片段（聚合为完整输出，非流式交付）
+    /// agent 输出的增量片段
     OutputChunk(String),
     /// 用户消息回显（load 重放用）
     UserMessage(String),
-    /// 思考活动
-    #[allow(dead_code)]
+    /// 思考片段
     Thinking(String),
-    /// 工具调用活动
-    #[allow(dead_code)]
+    /// 工具调用
     ToolCall {
         name: String,
         title: Option<String>,
         content: Option<String>,
     },
-    /// 上下文压缩活动（ACP 场景可能产生）
+    /// 上下文压缩
     #[allow(dead_code)]
     Compaction(String),
+    /// agent 自报状态（ACP `session_info_update` 透传；ACP 未携带状态时为 None）
+    SessionInfo { state: Option<SessionState> },
     /// turn 完成
     TurnEnded,
+}
+
+/// 把 driver 的 turn 事件映射为透传事件（server 不聚合，原样透传）。
+pub fn passthrough_event(ev: AgentEvent, ts: u64) -> PassthroughEvent {
+    match ev {
+        AgentEvent::OutputChunk(s) => PassthroughEvent::OutputChunk {
+            text: s,
+            timestamp: ts,
+        },
+        AgentEvent::UserMessage(c) => PassthroughEvent::UserMessage {
+            content: vec![ContentBlock::Text { text: c }],
+            timestamp: ts,
+        },
+        AgentEvent::Thinking(c) => PassthroughEvent::ThinkingChunk {
+            content: c,
+            timestamp: ts,
+        },
+        AgentEvent::ToolCall {
+            name,
+            title,
+            content,
+        } => PassthroughEvent::ToolCall {
+            name,
+            title,
+            content,
+            timestamp: ts,
+        },
+        AgentEvent::Compaction(d) => PassthroughEvent::Compaction {
+            detail: d,
+            timestamp: ts,
+        },
+        AgentEvent::SessionInfo { state } => PassthroughEvent::SessionInfo {
+            state,
+            timestamp: ts,
+        },
+        AgentEvent::TurnEnded => PassthroughEvent::TurnEnded { timestamp: ts },
+    }
 }
 
 /// 与单个 agent harness 的驱动接口（ACP v1 语义的投影）。
 pub trait AgentDriver: Send + Sync {
     /// 新建会话，返回 agent 侧会话 id
     fn create_session(&self, cwd: &str, model: Option<&str>) -> Result<String, String>;
-    /// 加载会话（ACP `session/load` 全量重放；返回对话内容）
-    fn load_session(&self, agent_session_id: &str) -> Result<Vec<DialogRecord>, String>;
+    /// 加载会话（ACP `session/load` 全量重放；返回透传事件，GUI 聚合）
+    fn load_session(&self, agent_session_id: &str) -> Result<Vec<PassthroughEvent>, String>;
     /// 发送 prompt，返回事件流（阻塞直到 turn 结束）
     fn prompt(
         &self,
@@ -81,12 +117,12 @@ pub trait AgentDriver: Send + Sync {
     fn list_skills(&self) -> Vec<String>;
 }
 
-/// 对话内容条目（load 重放的产物）。
-#[derive(Debug, Clone)]
-pub enum DialogRecord {
-    #[allow(dead_code)]
-    UserMessage(Vec<ContentBlock>),
-    AgentOutput(Vec<ContentBlock>),
+/// 当前时间戳（毫秒）。
+pub fn now_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[allow(dead_code)]
@@ -506,7 +542,7 @@ impl AgentDriver for AcpAgentDriver {
         Ok(sid)
     }
 
-    fn load_session(&self, agent_session_id: &str) -> Result<Vec<DialogRecord>, String> {
+    fn load_session(&self, agent_session_id: &str) -> Result<Vec<PassthroughEvent>, String> {
         let cwd = self
             .cwds
             .lock()
@@ -523,14 +559,9 @@ impl AgentDriver for AcpAgentDriver {
             "session/load",
             json!({ "sessionId": agent_session_id, "cwd": cwd, "mcpServers": [] }),
         );
-        let mut records = Vec::new();
+        let mut events = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             match ev {
-                AgentEvent::OutputChunk(s) => {
-                    records.push(DialogRecord::AgentOutput(vec![ContentBlock::Text {
-                        text: s,
-                    }]));
-                }
                 AgentEvent::UserMessage(s) => {
                     // 过滤 agent 内部提醒：turn 被取消后 agent 会往会话历史追加一条
                     // 系统提示（"The previous turn was interrupted by the user..."），
@@ -538,21 +569,17 @@ impl AgentDriver for AcpAgentDriver {
                     if is_internal_reminder(&s) {
                         continue;
                     }
-                    records.push(DialogRecord::UserMessage(vec![ContentBlock::Text {
-                        text: s,
-                    }]));
+                    events.push(passthrough_event(AgentEvent::UserMessage(s), now_ts()));
                 }
-                AgentEvent::Thinking(_)
-                | AgentEvent::ToolCall { .. }
-                | AgentEvent::Compaction(_) => {}
                 AgentEvent::TurnEnded => break,
+                _ => events.push(passthrough_event(ev, now_ts())),
             }
         }
         self.routes
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .remove(agent_session_id);
-        res.map(|_| records)
+        res.map(|_| events)
     }
 
     fn prompt(
@@ -887,7 +914,9 @@ fn route_update(
             title: tcu.fields.title.clone(),
             content: tcu.fields.raw_input.as_ref().map(|v| v.to_string()),
         }),
-        // SessionInfoUpdate / UsageUpdate / AvailableCommandsUpdate / CurrentModeUpdate /
+        // agent 自报状态透传（ACP v1 `session_info_update` 未携带状态字段，state=None）
+        SessionUpdate::SessionInfoUpdate(_) => Some(AgentEvent::SessionInfo { state: None }),
+        // UsageUpdate / AvailableCommandsUpdate / CurrentModeUpdate /
         // ConfigOptionUpdate / Plan 等不产生 AgentEvent
         _ => None,
     };
@@ -953,7 +982,7 @@ impl AgentDriver for StubAgentDriver {
         Ok(id)
     }
 
-    fn load_session(&self, _agent_session_id: &str) -> Result<Vec<DialogRecord>, String> {
+    fn load_session(&self, _agent_session_id: &str) -> Result<Vec<PassthroughEvent>, String> {
         Ok(Vec::new())
     }
 
@@ -1095,9 +1124,9 @@ mod tests {
         }
     }
 
-    /// 不产生 AgentEvent 的更新（session_info_update 等）忽略。
+    /// `session_info_update` → SessionInfo 事件（agent 自报状态透传，docs/DESIGN.md §5.1）。
     #[test]
-    fn route_update_ignores_irrelevant() {
+    fn route_update_session_info() {
         let (routes, mut rx) = route_with_channel();
         let notif = SessionNotification::new(
             SessionId::new("s1"),
@@ -1106,7 +1135,10 @@ mod tests {
             ),
         );
         route_update(&routes, &notif);
-        assert!(rx.try_recv().is_err(), "无关更新不应产生 AgentEvent");
+        let ev = rx
+            .try_recv()
+            .expect("session_info_update 应产生 SessionInfo 事件");
+        assert!(matches!(ev, AgentEvent::SessionInfo { state: None }));
     }
 
     /// agent 内部提醒（turn 取消后的中断提示）应被识别并过滤，不污染会话历史。

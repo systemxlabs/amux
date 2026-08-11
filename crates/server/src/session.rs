@@ -1,19 +1,18 @@
-//! 会话管理（docs/DESIGN.md §6）：会话注册表、turn 事件聚合（非流式交付 +
-//! activities 有界缓存）、通知广播、prompt 串行化。
-//! 历史权威在 agent 侧；server 不保存对话历史，仅维护会话元数据与 activities 缓存。
+//! 会话管理（docs/DESIGN.md §6）：会话注册表、事件透传（§5.1 server 不聚合，
+//! GUI 应用负责收敛/合并/派生）、通知广播、prompt 串行化。
+//! 历史权威在 agent 侧；server 不保存对话历史，仅维护会话元数据（含列表状态）。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{broadcast, Mutex};
 
 use protocol::{
-    generate_title, Activity, ContentBlock, DialogItem, HarnessInfo, SessionMeta, SessionState,
-    TurnCompleted,
+    generate_title, ContentBlock, HarnessInfo, PassthroughEvent, SessionMeta, SessionState,
 };
 
-use crate::agent::{AgentEvent, AgentRegistry, DialogRecord, SharedDriver};
+use crate::agent::{passthrough_event, AgentEvent, AgentRegistry, SharedDriver};
 
 /// server → GUI 通知（docs/DESIGN.md §4/§5）。
 #[derive(Debug, Clone)]
@@ -25,20 +24,10 @@ pub enum ServerNotification {
     SessionDeleted(SessionMeta),
     /// 会话元数据更新（标题修改等，多 GUI 同步）
     SessionUpdated(SessionMeta),
-    TurnCompleted(TurnCompleted),
-    SessionState {
+    /// 透传事件（session/update 事件、session_info_update、turn 边界；GUI 聚合，§5.1）
+    Passthrough {
         session_id: String,
-        state: SessionState,
-    },
-    UserMessage {
-        session_id: String,
-        content: Vec<ContentBlock>,
-        timestamp: u64,
-    },
-    /// turn 中的实时活动（合并后的当前活动，docs/DESIGN.md §5.3 流式）
-    Activity {
-        session_id: String,
-        activity: Activity,
+        event: PassthroughEvent,
     },
 }
 
@@ -51,12 +40,7 @@ struct SessionRecord {
 pub struct SessionManager {
     agents: Arc<AgentRegistry>,
     registry: Mutex<HashMap<String, SessionRecord>>,
-    /// 按会话的 activities 有界缓存（docs/DESIGN.md §5.3）
-    activities: Mutex<HashMap<String, VecDeque<Activity>>>,
-    /// turn 进行中的实时活动（同类事件合并，thinking 流式累积；turn 结束清空）
-    live_activities: std::sync::Mutex<HashMap<String, Activity>>,
     tx: broadcast::Sender<ServerNotification>,
-    max_activities: usize,
 }
 
 fn now() -> u64 {
@@ -66,86 +50,13 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// 把 turn 事件合并进 activities 列表（docs/DESIGN.md §5.3 事件流合并）：
-/// - 连续 thinking 块累积为一条 Thinking（流式，逐块追加内容）
-/// - 同工具（相同 kind）的 tool_call / tool_call_update 合并为一条 ToolCall
-/// - compaction 独立成条
-///
-/// 返回合并/新增后的当前活动（供实时推送；无活动产出时返回 None）。
-fn merge_activity(acts: &mut Vec<Activity>, ev: AgentEvent, ts: u64) -> Option<Activity> {
-    match ev {
-        AgentEvent::Thinking(c) => {
-            if let Some(Activity::Thinking { content, .. }) = acts.last_mut() {
-                content.push_str(&c);
-                acts.last().cloned()
-            } else {
-                let a = Activity::Thinking {
-                    timestamp: ts,
-                    content: c,
-                };
-                acts.push(a.clone());
-                Some(a)
-            }
-        }
-        AgentEvent::ToolCall {
-            name,
-            title,
-            content,
-        } => {
-            let mergeable =
-                matches!(acts.last(), Some(Activity::ToolCall { name: last, .. }) if *last == name);
-            if mergeable {
-                if let Some(Activity::ToolCall {
-                    title: t,
-                    content: c,
-                    ..
-                }) = acts.last_mut()
-                {
-                    if t.is_none() {
-                        *t = title;
-                    }
-                    if let Some(nc) = content {
-                        *c = Some(nc);
-                    }
-                }
-                acts.last().cloned()
-            } else {
-                let a = Activity::ToolCall {
-                    timestamp: ts,
-                    name,
-                    title,
-                    content,
-                };
-                acts.push(a.clone());
-                Some(a)
-            }
-        }
-        AgentEvent::Compaction(d) => {
-            let a = Activity::Compaction {
-                timestamp: ts,
-                detail: d,
-            };
-            acts.push(a.clone());
-            Some(a)
-        }
-        // OutputChunk / UserMessage / TurnEnded 不产生活动
-        _ => None,
-    }
-}
-
 impl SessionManager {
-    pub fn new(
-        agents: Arc<AgentRegistry>,
-        max_activities: usize,
-    ) -> (Self, broadcast::Receiver<ServerNotification>) {
+    pub fn new(agents: Arc<AgentRegistry>) -> (Self, broadcast::Receiver<ServerNotification>) {
         let (tx, rx) = broadcast::channel(256);
         let manager = SessionManager {
             agents,
             registry: Mutex::new(HashMap::new()),
-            activities: Mutex::new(HashMap::new()),
-            live_activities: std::sync::Mutex::new(HashMap::new()),
             tx,
-            max_activities,
         };
         (manager, rx)
     }
@@ -213,7 +124,6 @@ impl SessionManager {
                 .ok_or_else(|| format!("会话不存在: {session_id}"))?
         };
         rec.driver.delete(&rec.agent_session_id)?;
-        self.activities.lock().await.remove(session_id);
         let meta = rec.meta;
         protocol::log::info("server.session", format!("删除会话 {session_id}"));
         let _ = self.tx.send(ServerNotification::SessionDeleted(meta));
@@ -249,14 +159,15 @@ impl SessionManager {
 
     // ---- 会话数据（docs/DESIGN.md §5）----
 
-    /// 打开会话：经 driver 的 `session/load` 全量重放，聚合对话内容。
-    /// 惰性加载：默认返回最新一窗（`limit` 条），`before` 为独占上界游标向上取更早历史。
+    /// 打开会话：经 driver 的 `session/load` 全量重放，返回**透传事件**（GUI 应用聚合，
+    /// docs/DESIGN.md §5.1/§5.2）。惰性加载：默认返回最新一窗（`limit` 条），
+    /// `before` 为独占上界游标向上取更早历史。
     pub async fn open(
         &self,
         session_id: &str,
         limit: Option<usize>,
         before: Option<usize>,
-    ) -> Result<(Vec<DialogItem>, bool, usize), String> {
+    ) -> Result<(Vec<PassthroughEvent>, bool, usize), String> {
         let (driver, agent_session_id) = {
             let reg = self.registry.lock().await;
             let rec = reg
@@ -264,23 +175,10 @@ impl SessionManager {
                 .ok_or_else(|| format!("会话不存在: {session_id}"))?;
             (rec.driver.clone(), rec.agent_session_id.clone())
         };
-        let records = driver.load_session(&agent_session_id)?;
-        let items: Vec<DialogItem> = records
-            .into_iter()
-            .map(|r| match r {
-                DialogRecord::UserMessage(c) => DialogItem::UserMessage {
-                    content: c,
-                    timestamp: now(),
-                },
-                DialogRecord::AgentOutput(c) => DialogItem::AgentOutput {
-                    content: c,
-                    timestamp: now(),
-                },
-            })
-            .collect();
+        let events = driver.load_session(&agent_session_id)?;
         let limit = limit.unwrap_or(200);
-        let (start, end, has_more) = Self::window_items(items.len(), limit, before);
-        let slice = items[start..end].to_vec();
+        let (start, end, has_more) = Self::window_items(events.len(), limit, before);
+        let slice = events[start..end].to_vec();
         Ok((slice, has_more, start))
     }
 
@@ -289,46 +187,6 @@ impl SessionManager {
         let end = before.unwrap_or(len).min(len);
         let start = end.saturating_sub(limit);
         (start, end, start > 0)
-    }
-
-    pub async fn get_activities(
-        &self,
-        session_id: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<Activity>, String> {
-        // 先检查会话存在（释放锁），再取 activities——统一锁序避免死锁
-        {
-            let reg = self.registry.lock().await;
-            if !reg.contains_key(session_id) {
-                return Err(format!("会话不存在: {session_id}"));
-            }
-        }
-        let acts = self.activities.lock().await;
-        let list = acts.get(session_id).cloned().unwrap_or_default();
-        let list: Vec<Activity> = match limit {
-            Some(n) if list.len() > n => list.iter().skip(list.len() - n).cloned().collect(),
-            _ => list.into_iter().collect(),
-        };
-        Ok(list)
-    }
-
-    /// 推送合并后的实时活动（turn 进行中；仅在活动有变化时通知，避免刷屏）。
-    fn push_live_activity(&self, session_id: &str, activity: Option<Activity>) {
-        let Some(activity) = activity else {
-            return;
-        };
-        let mut live = self
-            .live_activities
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）");
-        let changed = live.get(session_id) != Some(&activity);
-        if changed {
-            live.insert(session_id.to_string(), activity.clone());
-            let _ = self.tx.send(ServerNotification::Activity {
-                session_id: session_id.to_string(),
-                activity,
-            });
-        }
     }
 
     // ---- 交互 ----
@@ -386,88 +244,44 @@ impl SessionManager {
             let _ = self.tx.send(ServerNotification::SessionUpdated(m));
         }
 
-        // 用户消息通知 + 忙状态
-        let _ = self.tx.send(ServerNotification::UserMessage {
+        // turn 开始（透传边界）+ 用户消息回显 + 列表状态标记（不推送状态通知，
+        // busy/idle 由 GUI 应用从透传事件派生，docs/DESIGN.md §5.1）
+        let ts = now();
+        let _ = self.tx.send(ServerNotification::Passthrough {
             session_id: session_id.to_string(),
-            content: input.clone(),
-            timestamp: now(),
+            event: PassthroughEvent::TurnStarted { timestamp: ts },
         });
-        self.set_state(session_id, SessionState::Busy).await;
+        let _ = self.tx.send(ServerNotification::Passthrough {
+            session_id: session_id.to_string(),
+            event: PassthroughEvent::UserMessage {
+                content: input.clone(),
+                timestamp: ts,
+            },
+        });
+        self.update_state(session_id, SessionState::Busy).await;
 
-        // 聚合 turn 事件：同类事件合并（thinking 逐块累积、同工具调用合并），
-        // 合并后的当前活动经 activity 通知实时推送（docs/DESIGN.md §5.3 流式）
+        // 事件逐条透传（不聚合输出、不合并活动、不缓存）：GUI 应用负责收敛/合并/派生
         let mut rx = driver.prompt(&agent_session_id, input);
-        let mut output: Vec<ContentBlock> = Vec::new();
-        let mut acts: Vec<Activity> = Vec::new();
         while let Some(ev) = rx.recv().await {
             match ev {
-                // 输出块直接拼接：ACP chunk 是流式片段（agent 自身文本含换行），
-                // 合并为一条文本块，避免多块间被 GUI 以换行连接（非流式交付）
-                AgentEvent::OutputChunk(s) => match output.last_mut() {
-                    Some(ContentBlock::Text { text }) => text.push_str(&s),
-                    _ => output.push(ContentBlock::Text { text: s }),
-                },
                 AgentEvent::UserMessage(_) => {
-                    // 回显：server 已发 user_message 通知，此处忽略
-                }
-                AgentEvent::Thinking(c) => {
-                    let merged = merge_activity(&mut acts, AgentEvent::Thinking(c), now());
-                    self.push_live_activity(session_id, merged);
-                }
-                AgentEvent::ToolCall {
-                    name,
-                    title,
-                    content,
-                } => {
-                    let merged = merge_activity(
-                        &mut acts,
-                        AgentEvent::ToolCall {
-                            name,
-                            title,
-                            content,
-                        },
-                        now(),
-                    );
-                    self.push_live_activity(session_id, merged);
-                }
-                AgentEvent::Compaction(d) => {
-                    let merged = merge_activity(&mut acts, AgentEvent::Compaction(d), now());
-                    self.push_live_activity(session_id, merged);
+                    // 回显：server 已发用户消息透传事件，此处忽略
                 }
                 AgentEvent::TurnEnded => break,
-            }
-        }
-        // turn 结束：清空实时活动，合并后的完整活动写入有界缓存
-        self.live_activities
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .remove(session_id);
-
-        // 写入 activities 有界缓存
-        if !acts.is_empty() {
-            let mut map = self.activities.lock().await;
-            let list = map
-                .entry(session_id.to_string())
-                .or_insert_with(VecDeque::new);
-            for a in acts {
-                if list.len() >= self.max_activities {
-                    list.pop_front();
+                _ => {
+                    let _ = self.tx.send(ServerNotification::Passthrough {
+                        session_id: session_id.to_string(),
+                        event: passthrough_event(ev, now()),
+                    });
                 }
-                list.push_back(a);
             }
         }
-
-        // 非流式交付：完整输出 + 空闲状态
-        if !output.is_empty() {
-            let _ = self
-                .tx
-                .send(ServerNotification::TurnCompleted(TurnCompleted {
-                    session_id: session_id.to_string(),
-                    output,
-                    timestamp: now(),
-                }));
-        }
-        self.set_state(session_id, SessionState::Idle).await;
+        // turn 结束（透传边界 + 列表状态标记）
+        let _ = self.tx.send(ServerNotification::Passthrough {
+            session_id: session_id.to_string(),
+            event: PassthroughEvent::TurnEnded { timestamp: now() },
+        });
+        self.update_state(session_id, SessionState::Idle).await;
         protocol::log::info(
             "server.session",
             format!(
@@ -497,18 +311,14 @@ impl SessionManager {
         r
     }
 
-    async fn set_state(&self, session_id: &str, state: SessionState) {
-        {
-            let mut reg = self.registry.lock().await;
-            if let Some(rec) = reg.get_mut(session_id) {
-                rec.meta.state = state;
-                rec.meta.last_event_at = now();
-            }
+    /// 更新会话列表的状态字段（不推送状态通知；busy/idle 由 GUI 应用从透传事件派生，
+    /// 重连时经会话列表 meta.state 补齐，docs/DESIGN.md §5.1）。
+    async fn update_state(&self, session_id: &str, state: SessionState) {
+        let mut reg = self.registry.lock().await;
+        if let Some(rec) = reg.get_mut(session_id) {
+            rec.meta.state = state;
+            rec.meta.last_event_at = now();
         }
-        let _ = self.tx.send(ServerNotification::SessionState {
-            session_id: session_id.to_string(),
-            state,
-        });
     }
 }
 
@@ -537,135 +347,74 @@ mod tests {
     }
 
     /// 测试注册表（stub 驱动接受任意 harness 名，忽略本机 PATH 发现）。
-    fn stub_manager(
-        max_activities: usize,
-    ) -> (SessionManager, broadcast::Receiver<ServerNotification>) {
+    fn stub_manager() -> (SessionManager, broadcast::Receiver<ServerNotification>) {
         let agents = Arc::new(AgentRegistry::new_for_tests());
-        SessionManager::new(agents, max_activities)
-    }
-
-    /// 事件流合并：连续 thinking 累积为一条，同工具调用合并，compaction 独立成条。
-    #[test]
-    fn merge_activity_merges_consecutive_kinds() {
-        let mut acts: Vec<Activity> = Vec::new();
-        // 连续 thinking 块 → 累积为一条
-        merge_activity(&mut acts, AgentEvent::Thinking("思考".into()), 1);
-        merge_activity(&mut acts, AgentEvent::Thinking("中…".into()), 2);
-        assert_eq!(acts.len(), 1);
-        match &acts[0] {
-            Activity::Thinking { content, .. } => assert_eq!(content, "思考中…"),
-            other => panic!("应为合并后的 Thinking，得到 {other:?}"),
-        }
-        // 同工具 tool_call + tool_call_update → 合并为一条（title/content 补全）
-        merge_activity(
-            &mut acts,
-            AgentEvent::ToolCall {
-                name: "execute".into(),
-                title: Some("运行测试".into()),
-                content: None,
-            },
-            3,
-        );
-        merge_activity(
-            &mut acts,
-            AgentEvent::ToolCall {
-                name: "execute".into(),
-                title: None,
-                content: Some("cargo test".into()),
-            },
-            4,
-        );
-        assert_eq!(acts.len(), 2);
-        match &acts[1] {
-            Activity::ToolCall {
-                name,
-                title,
-                content,
-                ..
-            } => {
-                assert_eq!(name, "execute");
-                assert_eq!(title.as_deref(), Some("运行测试"));
-                assert_eq!(content.as_deref(), Some("cargo test"));
-            }
-            other => panic!("应为合并后的 ToolCall，得到 {other:?}"),
-        }
-        // 不同工具 → 新条目
-        merge_activity(
-            &mut acts,
-            AgentEvent::ToolCall {
-                name: "read".into(),
-                title: None,
-                content: None,
-            },
-            5,
-        );
-        assert_eq!(acts.len(), 3);
-        // compaction 独立成条
-        merge_activity(&mut acts, AgentEvent::Compaction("压缩".into()), 6);
-        assert_eq!(acts.len(), 4);
-        assert!(matches!(acts[3], Activity::Compaction { .. }));
+        SessionManager::new(agents)
     }
 
     #[tokio::test]
-    async fn prompt_aggregates_output_and_activities() {
-        let (mgr, mut rx) = stub_manager(100);
+    async fn prompt_passthrough_events() {
+        let (mgr, mut rx) = stub_manager();
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
 
         mgr.prompt(&meta.id, text("hi")).await.unwrap();
 
-        // 非流式交付：turn_completed 带完整输出（docs/DESIGN.md §5.1）
-        let mut saw_output = false;
+        // 透传事件流（docs/DESIGN.md §5.1）：turn 边界 + 输出 chunk + 活动事件，无聚合交付
+        let mut events: Vec<PassthroughEvent> = Vec::new();
+        let mut saw_turn_started = false;
+        let mut saw_turn_ended = false;
         while let Ok(n) = rx.recv().await {
-            if let ServerNotification::TurnCompleted(t) = n {
-                assert!(t.output.iter().any(
-                    |b| matches!(b, ContentBlock::Text { text } if text.contains("模拟输出"))
-                ));
-                saw_output = true;
-                break;
+            match n {
+                ServerNotification::Passthrough { event, .. } => match event {
+                    PassthroughEvent::TurnStarted { .. } => saw_turn_started = true,
+                    PassthroughEvent::TurnEnded { .. } => {
+                        saw_turn_ended = true;
+                        break;
+                    }
+                    e => events.push(e),
+                },
+                // 会话生命周期通知（创建/标题更新）与透传流无关，跳过
+                ServerNotification::SessionCreated(_)
+                | ServerNotification::SessionUpdated(_)
+                | ServerNotification::SessionDeleted(_)
+                | ServerNotification::SessionInterrupted(_) => {}
             }
         }
-        assert!(saw_output, "应收到 turn_completed 通知");
-
-        // activities 缓存：thinking + tool_call
-        let acts = mgr.get_activities(&meta.id, None).await.unwrap();
-        assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
-        assert!(acts
+        assert!(saw_turn_started, "应有 turn 开始边界");
+        assert!(saw_turn_ended, "应有 turn 结束边界");
+        // 输出 chunk + thinking + tool_call 逐条透传
+        assert!(events.iter().any(
+            |e| matches!(e, PassthroughEvent::OutputChunk { text, .. } if text.contains("模拟输出"))
+        ));
+        assert!(events
             .iter()
-            .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")));
+            .any(|e| matches!(e, PassthroughEvent::ThinkingChunk { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PassthroughEvent::ToolCall { name, .. } if name == "read_file"
+        )));
 
-        // 会话回到空闲
-        let state = mgr.list().await[0].state;
-        assert_eq!(state, SessionState::Idle);
+        // 列表状态回到空闲（重连经 meta.state 补齐，docs/DESIGN.md §5.1）
+        assert_eq!(mgr.list().await[0].state, SessionState::Idle);
     }
 
     #[tokio::test]
-    async fn activities_cache_is_bounded() {
-        // 缓存上限 1：stub 每次 turn 产生 thinking + tool_call 两条，只保留最后一条
-        let (mgr, _rx) = stub_manager(1);
+    async fn open_session_returns_events() {
+        let (mgr, _rx) = stub_manager();
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
-        mgr.prompt(&meta.id, text("x")).await.unwrap();
-        let acts = mgr.get_activities(&meta.id, None).await.unwrap();
-        assert_eq!(acts.len(), 1);
-        assert!(matches!(acts[0], Activity::ToolCall { .. }));
-    }
-
-    #[tokio::test]
-    async fn open_session_returns_dialog_content() {
-        let (mgr, _rx) = stub_manager(100);
-        let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
-        let (items, _has_more, _) = mgr.open(&meta.id, None, None).await.unwrap();
-        assert!(items.is_empty()); // stub 无持久化历史（历史权威在 agent，docs/DESIGN.md §5.2）
+        let (events, _has_more, _) = mgr.open(&meta.id, None, None).await.unwrap();
+        assert!(events.is_empty()); // stub 无持久化历史（历史权威在 agent，docs/DESIGN.md §5.2）
     }
 
     #[tokio::test]
     async fn create_and_delete_lifecycle() {
-        let (mgr, mut rx) = stub_manager(100);
+        let (mgr, mut rx) = stub_manager();
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
         assert_eq!(mgr.list().await.len(), 1);
 
         mgr.delete(&meta.id).await.unwrap();
         assert!(mgr.list().await.is_empty());
-        assert!(mgr.get_activities(&meta.id, None).await.is_err());
+        assert!(mgr.open(&meta.id, None, None).await.is_err());
 
         // 删除广播 session_deleted
         let mut saw_deleted = false;
@@ -681,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_session_errors() {
-        let (mgr, _rx) = stub_manager(100);
+        let (mgr, _rx) = stub_manager();
         assert!(mgr.prompt("nope", text("x")).await.is_err());
         assert!(mgr.open("nope", None, None).await.is_err());
         assert!(mgr.delete("nope").await.is_err());
@@ -711,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_prompt_generates_title() {
-        let (mgr, mut rx) = stub_manager(100);
+        let (mgr, mut rx) = stub_manager();
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
         assert!(meta.title.is_empty());
 
@@ -741,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_default_model_persists() {
-        let (mgr, _rx) = stub_manager(100);
+        let (mgr, _rx) = stub_manager();
         mgr.set_default_model("stub", Some("gpt-4o".into()));
         let hs = mgr.harnesses();
         assert_eq!(hs.len(), 1);

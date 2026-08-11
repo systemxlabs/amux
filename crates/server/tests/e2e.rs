@@ -197,34 +197,49 @@ async fn session_lifecycle_and_activities() {
         json!({"sessionId": sid, "input": [{"type": "text", "text": "实现登录功能"}]}),
     )
     .await;
-    // 等待 turn 结束（含完整输出）
+    // 等待 turn 结束（透传边界，docs/DESIGN.md §5.1）
     let got = c
-        .wait_notification("turn_completed", |p| p["sessionId"] == json!(sid), 5000)
+        .wait_notification(
+            "passthrough",
+            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            5000,
+        )
         .await;
-    assert!(got, "应收到 turn_completed");
+    assert!(got, "应收到 turn_ended 透传边界");
 
-    // 通知序列：user_message → session_state(busy) → turn_completed → session_state(idle)
+    // 通知序列是透传事件（turn 边界 + chunk + 活动事件），无聚合交付
     let seq: Vec<&str> = c.notifications.iter().map(|(m, _)| m.as_str()).collect();
     let joined = seq.join(",");
-    assert!(seq.contains(&"user_message"), "缺少 user_message: {joined}");
-    let busy_idx = seq.iter().position(|m| *m == "session_state");
-    assert!(busy_idx.is_some(), "缺少 session_state: {joined}");
     assert!(
-        seq.contains(&"turn_completed"),
-        "缺少 turn_completed: {joined}"
+        seq.iter()
+            .all(|m| *m == "passthrough" || *m == "session_created" || *m == "session_updated"),
+        "通知应全部为透传/会话元数据: {joined}"
     );
-    // 非流式交付：turn_completed 带完整非空输出
-    let tc = c
+    let kinds: Vec<&str> = c
         .notifications
         .iter()
-        .find(|(m, _)| m == "turn_completed")
-        .unwrap()
-        .1
-        .clone();
-    let output = &tc["output"];
+        .filter(|(m, _)| m == "passthrough")
+        .filter_map(|(_, p)| p["event"]["kind"].as_str())
+        .collect();
     assert!(
-        output.as_array().is_some_and(|a| !a.is_empty()),
-        "turn_completed 应带完整输出"
+        kinds.contains(&"turn_started"),
+        "缺少 turn_started: {joined}"
+    );
+    assert!(
+        kinds.contains(&"output_chunk"),
+        "缺少 output_chunk（事件透传而非聚合完整输出）: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"thinking_chunk") && kinds.contains(&"tool_call"),
+        "应含 thinking/tool_call 透传事件: {kinds:?}"
+    );
+    // 不再有聚合交付通知（turn_completed / session_state / activity）
+    assert!(
+        !seq.iter().any(|m| matches!(
+            *m,
+            "turn_completed" | "session_state" | "activity" | "user_message"
+        )),
+        "不应有聚合交付通知: {joined}"
     );
 
     // 首条 prompt 后标题非空（按首条指令生成）
@@ -253,26 +268,29 @@ async fn session_lifecycle_and_activities() {
         .unwrap();
     assert_eq!(meta["title"], "我的标题");
 
-    // open_session：对话内容
+    // open_session：返回透传事件（GUI 聚合，docs/DESIGN.md §5.2）
     let open = c.call("open_session", json!({"sessionId": sid})).await;
-    assert!(open["result"]["items"].is_array());
-
-    // get_activities：thinking + tool_call
-    let acts = c.call("get_activities", json!({"sessionId": sid})).await;
-    let kinds: Vec<&str> = acts["result"]["activities"]
+    assert!(open["result"]["events"].is_array());
+    let kinds: Vec<&str> = open["result"]["events"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|a| a["kind"].as_str())
+        .filter_map(|e| e["kind"].as_str())
         .collect();
     assert!(
-        kinds.contains(&"thinking"),
-        "activities 应含 thinking: {kinds:?}"
+        kinds.contains(&"output_chunk"),
+        "open_session 应含 output_chunk 事件: {kinds:?}"
     );
-    assert!(
-        kinds.contains(&"tool_call"),
-        "activities 应含 tool_call: {kinds:?}"
-    );
+
+    // 列表状态回到空闲（重连经 meta.state 补齐）
+    let list = c.call("list_sessions", json!({})).await;
+    let meta = list["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == json!(sid))
+        .unwrap();
+    assert_eq!(meta["state"], "idle");
 }
 
 #[tokio::test]
@@ -301,15 +319,15 @@ async fn busy_prompt_returns_steer_unsupported() {
         json!({"sessionId": sid, "input": [{"type": "text", "text": "一"}]}),
     )
     .await;
-    // 等待 busy 状态确认
+    // 等待 turn 开始（透传边界；server 列表状态随之 busy）
     let busy = c
         .wait_notification(
-            "session_state",
-            |p| p["session_id"] == json!(sid) && p["state"] == "busy",
+            "passthrough",
+            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_started",
             3000,
         )
         .await;
-    assert!(busy, "应观察到 busy 状态");
+    assert!(busy, "应观察到 turn 开始边界");
 
     // 忙时 prompt → STEER_UNSUPPORTED (-32006)
     let second = c
@@ -323,15 +341,15 @@ async fn busy_prompt_returns_steer_unsupported() {
         "忙时 prompt 应报 steer 不支持: {second}"
     );
 
-    // 等待第一个 turn 完成，会话恢复 idle 后可继续 prompt
+    // 等待第一个 turn 结束（透传边界），会话恢复 idle 后可继续 prompt
     let idle = c
         .wait_notification(
-            "session_state",
-            |p| p["session_id"] == json!(sid) && p["state"] == "idle",
+            "passthrough",
+            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
-    assert!(idle, "turn 结束后应回到 idle");
+    assert!(idle, "turn 结束后应收到 turn_ended 边界");
     let third = c
         .call(
             "prompt",
@@ -394,8 +412,6 @@ async fn missing_session_returns_not_found() {
 
     let open = c.call("open_session", json!({"sessionId": "nope"})).await;
     assert_eq!(open["error"]["code"], -32001);
-    let acts = c.call("get_activities", json!({"sessionId": "nope"})).await;
-    assert_eq!(acts["error"]["code"], -32001);
 }
 
 #[tokio::test]
@@ -419,29 +435,27 @@ async fn multi_client_coexist() {
         .unwrap()
         .to_string();
 
-    // c1 prompt；两个客户端都应收到同一通知流
+    // c1 prompt；两个客户端都应收到同一透传事件流
     c1.fire(
         "prompt",
         json!({"sessionId": sid, "input": [{"type": "text", "text": "多客户端"}]}),
     )
     .await;
     let got1 = c1
-        .wait_notification("turn_completed", |p| p["sessionId"] == json!(sid), 5000)
-        .await;
-    let got2 = c2
-        .wait_notification("turn_completed", |p| p["sessionId"] == json!(sid), 5000)
-        .await;
-    assert!(got1 && got2, "两个客户端都应收到 turn_completed");
-
-    // 等 idle 后再由 c2 发第二条 prompt（避免 turn_completed 与 idle 之间的忙窗口竞态）
-    let idle = c1
         .wait_notification(
-            "session_state",
-            |p| p["session_id"] == json!(sid) && p["state"] == "idle",
+            "passthrough",
+            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
-    assert!(idle, "turn 后应回到 idle");
+    let got2 = c2
+        .wait_notification(
+            "passthrough",
+            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            5000,
+        )
+        .await;
+    assert!(got1 && got2, "两个客户端都应收到 turn_ended 透传边界");
     // c2 也能对同一会话 prompt（未被踢出）
     let prompt = c2
         .call(

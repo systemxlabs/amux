@@ -133,7 +133,7 @@ pub fn generate_title_max(input: &str, max_chars: usize) -> String {
 // ---- prompt 输入 ----
 
 /// prompt 输入内容块（docs/DESIGN.md §6：文本 / 内嵌资源 / 资源引用）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
@@ -165,7 +165,7 @@ pub enum ContentBlock {
 // ---- 对话内容（非流式交付，docs/DESIGN.md §5）----
 
 /// 对话内容条目：用户消息或 agent 完整输出。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DialogItem {
     UserMessage {
@@ -204,13 +204,51 @@ pub enum Activity {
 
 // ---- 通知负载 ----
 
-/// turn 完成：agent 完整输出（非流式，docs/DESIGN.md §5.1）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnCompleted {
-    pub session_id: String,
-    pub output: Vec<ContentBlock>,
-    pub timestamp: u64,
+/// server → GUI 透传事件（docs/DESIGN.md §5.1）：agent 会话事件逐条透传，由 GUI 应用聚合。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PassthroughEvent {
+    /// 用户消息（prompt 回显 / load 重放）
+    UserMessage {
+        content: Vec<ContentBlock>,
+        timestamp: u64,
+    },
+    /// agent 输出片段（GUI 应用按消息收敛拼接为完整输出）
+    OutputChunk {
+        text: String,
+        timestamp: u64,
+    },
+    /// thinking 片段（GUI 应用逐块累积为一条活动）
+    ThinkingChunk {
+        content: String,
+        timestamp: u64,
+    },
+    /// 工具调用（GUI 应用合并为一条活动）
+    ToolCall {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        timestamp: u64,
+    },
+    /// 上下文压缩
+    Compaction {
+        detail: String,
+        timestamp: u64,
+    },
+    /// agent 自报状态（ACP `session_info_update` 透传；ACP 未携带状态时为 None）
+    SessionInfo {
+        state: Option<SessionState>,
+        timestamp: u64,
+    },
+    /// turn 边界（server 从 prompt 请求生命周期反射：发出请求 = 开始，收到 result = 结束）
+    TurnStarted {
+        timestamp: u64,
+    },
+    TurnEnded {
+        timestamp: u64,
+    },
 }
 
 /// 会话状态通知（turn 边界）。
@@ -402,17 +440,12 @@ pub struct SessionResult {
 
 #[derive(Debug, Serialize)]
 pub struct OpenSessionResult {
-    /// 对话内容（一窗，非流式）
-    pub items: Vec<DialogItem>,
+    /// 重放事件（一窗，docs/DESIGN.md §5.2 按需拉取；GUI 应用聚合为对话内容与活动）
+    pub events: Vec<PassthroughEvent>,
     /// 是否还有更早的历史（GUI 显示"加载更早消息"）
     pub has_more: bool,
     /// 下一次"加载更早"应传的 before 游标
     pub next_before: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ActivitiesResult {
-    pub activities: Vec<Activity>,
 }
 
 /// agent 安装的 skills 列表（PRD §3.3）。

@@ -281,25 +281,9 @@ fn notification_frame(n: &ServerNotification) -> Option<String> {
         ServerNotification::SessionUpdated(s) => {
             (notify::SESSION_UPDATED, serde_json::json!({ "session": s }))
         }
-        ServerNotification::TurnCompleted(t) => (notify::TURN_COMPLETED, serde_json::json!(t)),
-        ServerNotification::SessionState { session_id, state } => (
-            notify::SESSION_STATE,
-            serde_json::json!({ "session_id": session_id, "state": state }),
-        ),
-        ServerNotification::UserMessage {
-            session_id,
-            content,
-            timestamp,
-        } => (
-            notify::USER_MESSAGE,
-            serde_json::json!({ "session_id": session_id, "content": content, "timestamp": timestamp }),
-        ),
-        ServerNotification::Activity {
-            session_id,
-            activity,
-        } => (
-            notify::ACTIVITY,
-            serde_json::json!({ "session_id": session_id, "activity": activity }),
+        ServerNotification::Passthrough { session_id, event } => (
+            notify::PASSTHROUGH,
+            serde_json::json!({ "session_id": session_id, "event": event }),
         ),
     };
     let frame = JsonRpcNotification {

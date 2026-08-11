@@ -14,10 +14,8 @@ pub mod method {
     pub const PROMPT: &str = "prompt";
     /// 取消进行中的工作
     pub const CANCEL: &str = "cancel";
-    /// 打开会话：server 经 ACP `session/load` 全量重放，聚合对话内容返回
+    /// 打开会话：server 经 ACP `session/load` 全量重放，返回透传事件（GUI 聚合）
     pub const OPEN_SESSION: &str = "open_session";
-    /// 获取会话活动（activities，server 有界缓存）
-    pub const GET_ACTIVITIES: &str = "get_activities";
     /// git status（cwd 非 git 仓库时返回 not_repo 标记）
     pub const GIT_STATUS: &str = "git_status";
     /// git diff
@@ -44,12 +42,6 @@ pub mod notify {
     pub const SESSION_DELETED: &str = "session_deleted";
     /// 会话元数据更新（标题修改等）
     pub const SESSION_UPDATED: &str = "session_updated";
-    /// turn 完成：agent 完整输出（非流式交付，docs/DESIGN.md §5.1）
-    pub const TURN_COMPLETED: &str = "turn_completed";
-    /// 会话状态（进行中 / 完成，turn 边界）
-    pub const SESSION_STATE: &str = "session_state";
-    /// 用户消息（GUI 本地立即渲染，可经此同步）
-    pub const USER_MESSAGE: &str = "user_message";
-    /// 实时活动（turn 中经 ACP 事件流合并的当前活动，thinking 逐块累积流式推送）
-    pub const ACTIVITY: &str = "activity";
+    /// 透传事件（docs/DESIGN.md §5.1）：session/update 事件、session_info_update、turn 边界
+    pub const PASSTHROUGH: &str = "passthrough";
 }

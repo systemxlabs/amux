@@ -1345,7 +1345,8 @@ mod tests {
             "子会话标题应非空（首条指令生成）"
         );
 
-        // 打开子会话：对话内容包含下发的指令与 mock 的完整输出（真实交付路径）
+        // 打开子会话：返回透传事件（用户消息 + 输出 chunk），GUI 聚合后含下发的指令与
+        // mock 的完整输出（真实交付路径，docs/DESIGN.md §5.1/§5.2）
         let open = client
             .request(
                 protocol::method::OPEN_SESSION,
@@ -1353,17 +1354,21 @@ mod tests {
             )
             .await
             .unwrap();
-        let items = open["items"].as_array().unwrap();
-        let texts: Vec<String> = items
+        let events = open["events"].as_array().unwrap();
+        let texts: Vec<String> = events
             .iter()
-            .filter_map(|i| {
-                i["content"]
-                    .as_array()?
-                    .iter()
-                    .filter_map(|b| b["text"].as_str().map(str::to_string))
-                    .collect::<Vec<_>>()
-                    .join("")
-                    .into()
+            .filter_map(|e| {
+                let t = match e["kind"].as_str() {
+                    Some("user_message") => e["content"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|b| b["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(""),
+                    Some("output_chunk") => e["text"].as_str()?.to_string(),
+                    _ => return None,
+                };
+                Some(t)
             })
             .collect();
         assert!(

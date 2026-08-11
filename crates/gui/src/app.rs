@@ -29,10 +29,11 @@ use gpui_component::{
 use serde_json::json;
 
 use protocol::{
-    Activity, ContentBlock, DialogItem, GitDiffFile, GitStatusResult, MachineInfo, SessionMeta,
-    SessionState,
+    Activity, ContentBlock, DialogItem, GitDiffFile, GitStatusResult, MachineInfo,
+    PassthroughEvent, SessionMeta, SessionState,
 };
 
+use crate::aggregate::SessionView;
 use crate::config::{
     machine_ws_url, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand, SkillEntry,
     WorkflowTemplate,
@@ -83,7 +84,7 @@ enum NewSessionMode {
     Workflow,
 }
 
-/// 单机器视图：独立连接 + 会话列表 + 选中会话的对话/活动 + diff 状态。
+/// 单机器视图：独立连接 + 会话列表 + 各会话聚合视图（透传事件聚合，docs/DESIGN.md §5.1）+ diff 状态。
 struct MachineView {
     config: MachineConfig,
     client: WsClient,
@@ -92,14 +93,12 @@ struct MachineView {
     info: Option<MachineInfo>,
     sessions: Vec<SessionMeta>,
     selected: Option<String>,
-    dialog: Vec<DialogItem>,
+    /// 各会话的聚合视图（输出收敛 / 活动合并 / busy 派生；显示取当前会话）
+    views: std::collections::HashMap<String, SessionView>,
     /// 惰性加载游标：下一次"加载更早消息"应传的 before
     dialog_before: usize,
     /// 是否还有更早历史
     dialog_has_more: bool,
-    activities: Vec<Activity>,
-    /// 当前打开会话的实时活动（turn 中合并流式推送，空闲时清空）
-    live_activity: Option<Activity>,
     /// 当前查看 harness 的 skills 列表
     skills: Vec<String>,
     skills_harness: Option<String>,
@@ -111,6 +110,11 @@ struct MachineView {
 }
 
 impl MachineView {
+    /// 当前选中会话的聚合视图（显示用）。
+    fn selected_view(&self) -> Option<&SessionView> {
+        self.selected.as_ref().and_then(|sid| self.views.get(sid))
+    }
+
     fn new(config: MachineConfig) -> Self {
         let url = machine_ws_url(&config);
         MachineView {
@@ -120,11 +124,9 @@ impl MachineView {
             info: None,
             sessions: Vec::new(),
             selected: None,
-            dialog: Vec::new(),
+            views: std::collections::HashMap::new(),
             dialog_before: 0,
             dialog_has_more: false,
-            activities: Vec::new(),
-            live_activity: None,
             skills: Vec::new(),
             skills_harness: None,
             diff_status: None,
@@ -474,105 +476,68 @@ impl AmuxApp {
             return;
         };
         match n.method.as_str() {
-            "turn_completed" => {
-                let output = n.params.get("output").cloned().unwrap_or_default();
-                let ts = n
+            // 透传事件（docs/DESIGN.md §5.1）：GUI 应用聚合对话/活动并派生 busy/idle
+            "passthrough" => {
+                let Some(sid) = n
                     .params
-                    .get("timestamp")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                m.dialog.push(DialogItem::AgentOutput {
-                    content: serde_json::from_value(output).unwrap_or_default(),
-                    timestamp: ts,
-                });
-                // 新输出到达自动滚到底部（最新内容）
-                this.dialog_scroll.scroll_to_bottom();
-            }
-            "user_message" => {
-                let content = n.params.get("content").cloned().unwrap_or_default();
-                let ts = n
-                    .params
-                    .get("timestamp")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                m.dialog.push(DialogItem::UserMessage {
-                    content: serde_json::from_value(content).unwrap_or_default(),
-                    timestamp: ts,
-                });
-                this.dialog_scroll.scroll_to_bottom();
-            }
-            // 实时活动：turn 中合并流式推送（thinking 逐块累积为一条）
-            "activity" => {
-                // 只跟踪当前打开会话的活动；其他会话的活动不抢占活动条
-                let sid = n.params.get("session_id").and_then(|v| v.as_str());
-                if m.selected.as_deref() != sid {
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                else {
                     return;
-                }
-                if let Some(a) = n
+                };
+                let Some(ev) = n
                     .params
-                    .get("activity")
+                    .get("event")
                     .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                {
-                    m.live_activity = Some(a);
-                    cx.notify();
-                }
-            }
-            "session_state" => {
-                let sid = n.params.get("session_id").and_then(|v| v.as_str());
-                let state = n.params.get("state").and_then(|v| v.as_str()).map(|s| {
-                    if s == "busy" {
+                    .and_then(|v| serde_json::from_value::<PassthroughEvent>(v).ok())
+                else {
+                    return;
+                };
+                // busy/idle：采信 session_info_update + turn 边界（docs/DESIGN.md §5.1）
+                let busy = match &ev {
+                    PassthroughEvent::TurnStarted { .. } => true,
+                    PassthroughEvent::TurnEnded { .. } => false,
+                    PassthroughEvent::SessionInfo { state: Some(s), .. } => {
+                        *s == SessionState::Busy
+                    }
+                    _ => m
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == sid)
+                        .map(|s| s.state == SessionState::Busy)
+                        .unwrap_or(false),
+                };
+                if let Some(s) = m.sessions.iter_mut().find(|s| s.id == sid) {
+                    s.state = if busy {
                         SessionState::Busy
                     } else {
                         SessionState::Idle
-                    }
-                });
-                let Some((sid, state)) = sid.zip(state) else {
-                    cx.notify();
-                    return;
-                };
-                // 实时更新左侧会话列表的状态（busy/idle，turn 边界推送）
-                if let Some(s) = m.sessions.iter_mut().find(|s| s.id == sid) {
-                    s.state = state;
+                    };
                 }
-                // 活动历史刷新（turn 边界拉取合并后的完整活动）；实时活动由
-                // activity 通知流式驱动（docs/DESIGN.md §5.3）
-                let client = m.client.clone();
-                let sid_owned = sid.to_string();
-                cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                    if let Ok(res) = client
-                        .request(
-                            protocol::method::GET_ACTIVITIES,
-                            Some(json!({ "sessionId": sid_owned })),
-                        )
-                        .await
-                    {
-                        let acts: Vec<Activity> = res
-                            .get("activities")
-                            .cloned()
-                            .map(|v| serde_json::from_value(v).unwrap_or_default())
-                            .unwrap_or_default();
-                        let _ = this.update_in(cx, |this, _window, cx| {
-                            if let Some(mm) = this.machines.get_mut(idx) {
-                                mm.activities = acts.clone();
-                            }
-                            cx.notify();
-                        });
-                    }
-                    // 空闲：清空实时活动
-                    if state == SessionState::Idle {
-                        let _ = this.update_in(cx, |this, _window, cx| {
-                            if let Some(mm) = this.machines.get_mut(idx) {
-                                mm.live_activity = None;
-                            }
-                            cx.notify();
-                        });
-                    }
-                })
-                .detach();
-                // 工作流自动推进：子会话变 idle → 注入完成情况并推进（docs/DESIGN.md §10）
-                if state == SessionState::Idle {
-                    let session_id = sid.to_string();
+                // 聚合进该会话视图（所有会话都聚合，工作流子会话也能取到输出）
+                let view = m.views.entry(sid.clone()).or_default();
+                crate::aggregate::merge_event(view, &ev);
+                // 当前打开会话：新输出/用户消息自动滚到底部（实时渲染）
+                if m.selected.as_deref() == Some(sid.as_str())
+                    && matches!(
+                        ev,
+                        PassthroughEvent::OutputChunk { .. } | PassthroughEvent::UserMessage { .. }
+                    )
+                {
+                    this.dialog_scroll.scroll_to_bottom();
+                }
+                // 工作流自动推进：子会话变 idle（GUI 派生状态）→ 注入完成情况并推进
+                let child_idle = matches!(ev, PassthroughEvent::TurnEnded { .. })
+                    || matches!(
+                        &ev,
+                        PassthroughEvent::SessionInfo {
+                            state: Some(SessionState::Idle),
+                            ..
+                        }
+                    );
+                if child_idle {
+                    let session_id = sid;
                     let wi = this
                         .workflows
                         .iter()
@@ -580,14 +545,17 @@ impl AmuxApp {
                     if let Some(wi) = wi {
                         // 已有推进进行中：跳过本次自动推进（完成情况由后续轮次带上）
                         if !this.workflows[wi].is_advancing() {
-                            let output = this.machine(idx).and_then(|mm| {
-                                mm.dialog.iter().rev().find_map(|d| match d {
-                                    DialogItem::AgentOutput { content, .. } => {
-                                        Some(block_text(content))
-                                    }
-                                    _ => None,
-                                })
-                            });
+                            let output = this
+                                .machine(idx)
+                                .and_then(|mm| mm.views.get(&session_id))
+                                .and_then(|v| {
+                                    v.dialog.iter().rev().find_map(|d| match d {
+                                        DialogItem::AgentOutput { content, .. } => {
+                                            Some(block_text(content))
+                                        }
+                                        _ => None,
+                                    })
+                                });
                             let ex = output
                                 .unwrap_or_default()
                                 .chars()
@@ -622,8 +590,8 @@ impl AmuxApp {
             "session_created" | "session_deleted" | "session_updated" => {
                 this.refresh_sessions(idx, window, cx);
             }
-            // 断线重连：刷新会话列表并重开选中会话（全量重放，关闭期间输出不丢，
-            // docs/DESIGN.md §5.4 打开会话与重连）
+            // 断线重连：刷新会话列表并重开选中会话（按需拉取历史，关闭期间输出不丢，
+            // docs/DESIGN.md §5.2/§5.4）
             "connected" => {
                 this.refresh_sessions(idx, window, cx);
                 this.fetch_info(idx, window, cx);
@@ -633,11 +601,15 @@ impl AmuxApp {
                     }
                 }
             }
-            // 连接断开：如实标记离线（PRD §3.3 在线状态），清空进行中活动
+            // 连接断开：如实标记离线（PRD §3.3 在线状态），清空实时活动
             "disconnected" => {
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = "离线（重连中…）".into();
-                    m.live_activity = None;
+                    if let Some(sid) = m.selected.clone() {
+                        if let Some(v) = m.views.get_mut(&sid) {
+                            v.live_activity = None;
+                        }
+                    }
                 }
                 cx.notify();
             }
@@ -828,11 +800,11 @@ impl AmuxApp {
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let mut items: Vec<DialogItem> = Vec::new();
+            let mut events: Vec<PassthroughEvent> = Vec::new();
             let mut has_more = false;
             let mut next_before = 0usize;
-            let mut acts: Vec<Activity> = Vec::new();
-            // 惰性加载：只取最新一窗（默认 200 条），顶部按需加载更早（PRD §3.2）
+            // 按需拉取：点击会话查看时才触发 session/load 重放（docs/DESIGN.md §5.2）；
+            // 返回透传事件，GUI 应用聚合为对话内容与活动
             if let Ok(res) = client
                 .request(
                     protocol::method::OPEN_SESSION,
@@ -840,10 +812,10 @@ impl AmuxApp {
                 )
                 .await
             {
-                items = res
-                    .get("items")
+                events = res
+                    .get("events")
                     .cloned()
-                    .map(|v| serde_json::from_value(v).unwrap_or_default())
+                    .and_then(|v| serde_json::from_value::<Vec<PassthroughEvent>>(v).ok())
                     .unwrap_or_default();
                 has_more = res
                     .get("hasMore")
@@ -851,27 +823,13 @@ impl AmuxApp {
                     .unwrap_or(false);
                 next_before = res.get("nextBefore").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             }
-            if let Ok(res) = client
-                .request(
-                    protocol::method::GET_ACTIVITIES,
-                    Some(json!({ "sessionId": session_id })),
-                )
-                .await
-            {
-                acts = res
-                    .get("activities")
-                    .cloned()
-                    .map(|v| serde_json::from_value(v).unwrap_or_default())
-                    .unwrap_or_default();
-            }
+            let view = crate::aggregate::aggregate_events(&events);
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(m) = this.machine_mut(machine) {
                     m.selected = Some(session_id.clone());
-                    m.dialog = items.clone();
+                    m.views.insert(session_id.clone(), view);
                     m.dialog_before = next_before;
                     m.dialog_has_more = has_more;
-                    m.activities = acts.clone();
-                    m.live_activity = None;
                 }
                 this.selected = Some(Selected::Session {
                     machine,
@@ -903,7 +861,7 @@ impl AmuxApp {
         }
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let mut older: Vec<DialogItem> = Vec::new();
+            let mut older: Vec<PassthroughEvent> = Vec::new();
             let mut has_more = false;
             let mut next_before = 0usize;
             if let Ok(res) = client
@@ -914,9 +872,9 @@ impl AmuxApp {
                 .await
             {
                 older = res
-                    .get("items")
+                    .get("events")
                     .cloned()
-                    .map(|v| serde_json::from_value(v).unwrap_or_default())
+                    .and_then(|v| serde_json::from_value::<Vec<PassthroughEvent>>(v).ok())
                     .unwrap_or_default();
                 has_more = res
                     .get("hasMore")
@@ -926,10 +884,10 @@ impl AmuxApp {
             }
             let _ = this.update_in(cx, |this, _window, cx| {
                 if let Some(m) = this.machine_mut(machine) {
-                    // 更早的历史插入到最前（时间正序）
-                    let mut merged = older;
-                    merged.extend(m.dialog.clone());
-                    m.dialog = merged;
+                    // 更早的历史前插（时间正序；跨窗同消息分块合并）
+                    if let Some(v) = m.views.get_mut(&session_id) {
+                        crate::aggregate::prepend_events(v, &older);
+                    }
                     m.dialog_before = next_before;
                     m.dialog_has_more = has_more;
                 }
@@ -2745,7 +2703,8 @@ impl AmuxApp {
         let dialog = match &self.selected {
             Some(Selected::Session { machine, id: _ }) => self
                 .machine(*machine)
-                .map(|m| m.dialog.clone())
+                .and_then(|m| m.selected_view())
+                .map(|v| v.dialog.clone())
                 .unwrap_or_default(),
             Some(Selected::Workflow { engine }) => self
                 .workflows
@@ -2872,12 +2831,13 @@ impl AmuxApp {
     }
 
     /// 中间面板下方：正在进行的活动（一条或无，空闲不显示，PRD §4.1.3）。
-    /// 实时活动来自当前打开会话的 live_activity（turn 中合并流式推送）。
+    /// 实时活动来自当前会话聚合视图的 live_activity（GUI 从透传事件合并）。
     fn render_activity_bar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let current = match &self.selected {
-            Some(Selected::Session { machine, .. }) => {
-                self.machine(*machine).and_then(|m| m.live_activity.clone())
-            }
+            Some(Selected::Session { machine, .. }) => self
+                .machine(*machine)
+                .and_then(|m| m.selected_view())
+                .and_then(|v| v.live_activity.clone()),
             // 编排会话：工作中显示"编排中…"
             Some(Selected::Workflow { engine }) => {
                 let busy = self
@@ -2998,44 +2958,8 @@ impl AmuxApp {
                             Some(Panel::Activities)
                         };
                         this.set_panel(window, cx, next);
-                        if next == Some(Panel::Activities) {
-                            if let Some(Selected::Session { machine, id }) = this.selected.clone() {
-                                this.load_activities(window, cx, machine, id);
-                            }
-                        }
                     })),
             )
-    }
-
-    fn load_activities(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        machine: usize,
-        session_id: String,
-    ) {
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if let Ok(res) = client
-                .request(
-                    protocol::method::GET_ACTIVITIES,
-                    Some(json!({ "sessionId": session_id })),
-                )
-                .await
-            {
-                let acts = res.get("activities").cloned().unwrap_or_default();
-                let _ = this.update_in(cx, |this, _window, cx| {
-                    if let Some(m) = this.machine_mut(machine) {
-                        m.activities = serde_json::from_value(acts).unwrap_or_default();
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
     }
 
     fn render_quick_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3603,13 +3527,14 @@ impl AmuxApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        // 普通会话：server activities 缓存；编排会话：转录里的编排决策/系统事件
+        // 普通会话：当前会话聚合视图的活动历史（GUI 从透传事件聚合，docs/DESIGN.md §5.3）；
+        // 编排会话：转录里的系统事件 + 实时状态
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut live: Option<Activity> = None;
         match &self.selected {
             Some(Selected::Session { machine, .. }) => {
-                let m = self.machine(*machine);
-                let activities = m.map(|m| m.activities.clone()).unwrap_or_default();
+                let view = self.machine(*machine).and_then(|m| m.selected_view());
+                let activities = view.map(|v| v.activities.clone()).unwrap_or_default();
                 rows = activities
                     .iter()
                     .enumerate()
@@ -3625,7 +3550,7 @@ impl AmuxApp {
                             .into_any_element()
                     })
                     .collect();
-                live = m.and_then(|m| m.live_activity.clone());
+                live = view.and_then(|v| v.live_activity.clone());
             }
             Some(Selected::Workflow { engine }) => {
                 if let Some(wf) = self.workflows.get(*engine) {

@@ -3,6 +3,7 @@
 
 #![recursion_limit = "512"]
 
+mod aggregate;
 mod app;
 mod config;
 mod logic;

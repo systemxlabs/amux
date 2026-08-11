@@ -70,7 +70,7 @@ async fn main() {
         cfg.data_dir.join("agent-models.json"),
     ));
 
-    let (manager, notifications) = SessionManager::new(agents, 200);
+    let (manager, notifications) = SessionManager::new(agents);
     let manager = Arc::new(manager);
 
     let handlers = Arc::new(Handlers {
