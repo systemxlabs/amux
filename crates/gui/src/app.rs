@@ -1783,7 +1783,7 @@ impl AmuxApp {
     }
 
     /// 新会话视图（PRD §4.1.2）：自然语言输入 + 选择机器与 agent + 指定工作目录，
-    /// 或切换"从工作流模板创建"。
+    /// 或切换"工作流"模式（从模板创建 / 直接输入自然语言计划）。
     fn render_new_session_view(
         &self,
         _window: &mut Window,
@@ -1805,14 +1805,14 @@ impl AmuxApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0x111827)),
             )
-            // 模式切换：直接创建 / 从工作流模板创建
+            // 模式切换：普通 / 工作流
             .child(
                 h_flex()
                     .gap_1()
                     .child(
                         Button::new("ns-mode-direct")
                             .small()
-                            .label("直接创建")
+                            .label("普通")
                             .when(mode == NewSessionMode::Direct, |b| b.primary())
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.new_session_mode = NewSessionMode::Direct;
@@ -1822,7 +1822,7 @@ impl AmuxApp {
                     .child(
                         Button::new("ns-mode-tpl")
                             .small()
-                            .label("从工作流模板创建")
+                            .label("工作流")
                             .when(mode == NewSessionMode::Workflow, |b| b.primary())
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.new_session_mode = NewSessionMode::Workflow;
@@ -1833,17 +1833,22 @@ impl AmuxApp {
         match mode {
             NewSessionMode::Direct => {
                 card = card
+                    // 机器 与 Agent 选择并列一排（PRD §4.1.2 选择机器与 agent）
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .child(Label::new("机器").text_sm().text_color(rgb(0x6b7280)))
-                            .child(self.render_machine_selector(cx)),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(Label::new("Agent").text_sm().text_color(rgb(0x6b7280)))
-                            .child(self.render_harness_selector(cx)),
+                        h_flex()
+                            .gap_6()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(Label::new("机器").text_sm().text_color(rgb(0x6b7280)))
+                                    .child(self.render_machine_selector(cx)),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(Label::new("Agent").text_sm().text_color(rgb(0x6b7280)))
+                                    .child(self.render_harness_selector(cx)),
+                            ),
                     )
                     .child(
                         v_flex()
