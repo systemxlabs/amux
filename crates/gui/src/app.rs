@@ -17,12 +17,13 @@ use gpui::*;
 use gpui_component::{
     button::*,
     collapsible::Collapsible,
+    dialog::DialogButtonProps,
     input::{Input, InputState},
     label::Label,
     radio::{Radio, RadioGroup},
     scroll::ScrollableElement as _,
     spinner::Spinner,
-    *,
+    WindowExt, *,
 };
 use serde_json::json;
 
@@ -186,8 +187,6 @@ pub struct AmuxApp {
     skill_edit_target: Option<String>,
     /// 模板编辑目标
     tpl_edit_target: Option<String>,
-    /// 删除会话确认弹窗（机器下标, 会话 id；不可恢复，PRD §3.1）
-    confirm_delete: Option<(usize, String)>,
     /// 右键会话操作菜单
     context_menu: Option<SessionContextMenu>,
     /// 正在重命名的会话（机器下标, 会话 id）
@@ -294,7 +293,6 @@ impl AmuxApp {
             qc_edit_target: None,
             skill_edit_target: None,
             tpl_edit_target: None,
-            confirm_delete: None,
             context_menu: None,
             renaming_session: None,
             new_session_machine: None,
@@ -1477,7 +1475,7 @@ impl AmuxApp {
     }
 
     /// 删除会话：历史一并移除、不可恢复（PRD §3.1）。
-    /// 调用方应先经确认弹窗（confirm_delete）。
+    /// 调用方应先经确认弹窗（confirm_delete_session）。
     fn delete_session(
         &mut self,
         window: &mut Window,
@@ -1498,7 +1496,6 @@ impl AmuxApp {
                 )
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.confirm_delete = None;
                 // 删除的是当前选中会话则回到新会话视图
                 if let Some(Selected::Session { id, .. }) = this.selected.clone() {
                     if id == session_id {
@@ -1605,9 +1602,9 @@ impl AmuxApp {
                         Button::new("ctx-delete")
                             .small()
                             .label("删除会话")
-                            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                // 弹窗确认（不可恢复，PRD §3.1）
-                                this.confirm_delete = Some((machine, sid.clone()));
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                // 专用确认弹窗（不可恢复，PRD §3.1）
+                                this.confirm_delete_session(window, cx, machine, sid.clone());
                                 this.context_menu = None;
                                 cx.notify();
                             })),
@@ -1615,83 +1612,40 @@ impl AmuxApp {
             )
     }
 
-    /// 删除会话确认弹窗（不可恢复，PRD §3.1）。
-    fn render_delete_confirm_modal(
-        &self,
+    /// 删除会话确认弹窗（专用 AlertDialog，不可恢复，PRD §3.1）。
+    fn confirm_delete_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
         machine: usize,
         session_id: String,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id("delete-confirm-backdrop")
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .id("delete-confirm-backdrop-fill")
-                    .absolute()
-                    .inset_0()
-                    .bg(hsla(0., 0., 0., 0.45))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.confirm_delete = None;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                v_flex()
-                    .id("delete-confirm-card")
-                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
-                        cx.stop_propagation();
-                    })
-                    .w(px(380.))
-                    .gap_3()
-                    .p_4()
-                    .bg(rgb(0xffffff))
-                    .rounded_md()
-                    .shadow_lg()
-                    .child(
-                        Label::new("删除会话")
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x111827)),
-                    )
-                    .child(
-                        Label::new(format!(
-                            "确定删除会话 {session_id} 吗？删除后历史一并移除，不可恢复。"
-                        ))
-                        .line_clamp(3)
-                        .text_sm()
-                        .text_color(rgb(0x6b7280)),
-                    )
-                    .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Button::new("delete-confirm-cancel")
-                                    .small()
-                                    .label("取消")
-                                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                                        this.confirm_delete = None;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("delete-confirm-ok")
-                                    .small()
-                                    .primary()
-                                    .label("确认删除")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let sid = session_id.clone();
-                                        this.delete_session(window, cx, machine, sid);
-                                    })),
-                            ),
-                    ),
-            )
+    ) {
+        let this = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let this = this.clone();
+            let sid = session_id.clone();
+            alert
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("确认删除")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .title("删除会话")
+                .description(format!(
+                    "确定删除会话 {session_id} 吗？删除后历史一并移除，不可恢复。"
+                ))
+                .on_ok(move |_ev, window, cx| {
+                    let this = this.clone();
+                    let sid = sid.clone();
+                    this.update(cx, |this, cx| {
+                        this.delete_session(window, cx, machine, sid);
+                    });
+                    true
+                })
+                .on_cancel(|_ev, _window, _cx| true)
+        });
     }
 
     // ---- 设置 ----
@@ -3893,9 +3847,6 @@ impl Render for AmuxApp {
         }
         if let Some(menu) = &self.context_menu {
             root = root.child(self.render_context_menu(menu, window, cx));
-        }
-        if let Some((machine, sid)) = &self.confirm_delete {
-            root = root.child(self.render_delete_confirm_modal(*machine, sid.clone(), window, cx));
         }
         if self.show_settings {
             root = root.child(self.render_settings_overlay(window, cx));
