@@ -134,6 +134,15 @@ enum Selected {
     Workflow { engine: usize },
 }
 
+/// 右键会话弹出的操作菜单（PRD §3.1：删除 / 重命名）。
+struct SessionContextMenu {
+    machine: usize,
+    session_id: String,
+    title: String,
+    x: f32,
+    y: f32,
+}
+
 pub struct AmuxApp {
     store: Arc<ConfigStore>,
     machines: Vec<MachineView>,
@@ -177,10 +186,12 @@ pub struct AmuxApp {
     skill_edit_target: Option<String>,
     /// 模板编辑目标
     tpl_edit_target: Option<String>,
-    /// 会话详情是否可编辑标题
-    editing_title: bool,
     /// 删除会话两步确认（记录待确认的会话 id；不可恢复，PRD §3.1）
     delete_confirm_session: Option<String>,
+    /// 右键会话操作菜单
+    context_menu: Option<SessionContextMenu>,
+    /// 正在重命名的会话（机器下标, 会话 id）
+    renaming_session: Option<(usize, String)>,
     /// 新会话视图（PRD §4.1.2）：选中的机器与 agent
     new_session_machine: Option<usize>,
     new_session_harness: Option<String>,
@@ -283,8 +294,9 @@ impl AmuxApp {
             qc_edit_target: None,
             skill_edit_target: None,
             tpl_edit_target: None,
-            editing_title: false,
             delete_confirm_session: None,
+            context_menu: None,
+            renaming_session: None,
             new_session_machine: None,
             new_session_harness: None,
             workflow_error: None,
@@ -1406,34 +1418,6 @@ impl AmuxApp {
 
     // ---- 会话标题 ----
 
-    fn save_title(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        machine: usize,
-        session_id: String,
-    ) {
-        let title = self.title_input.read(cx).value().to_string();
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let _ = client
-                .request(
-                    protocol::method::SET_SESSION_TITLE,
-                    Some(json!({ "sessionId": session_id, "title": title })),
-                )
-                .await;
-            let _ = this.update_in(cx, |this, _window, cx| {
-                this.editing_title = false;
-                cx.notify();
-            });
-        })
-        .detach();
-        self.editing_title = false;
-    }
-
     // ---- 会话关闭 / 恢复 / 删除（PRD §3.1）----
 
     /// 关闭会话：历史保留、可恢复继续。
@@ -1526,6 +1510,118 @@ impl AmuxApp {
             });
         })
         .detach();
+    }
+
+    /// 重命名会话（右键 → 重命名，PRD §3.1 用户可随时修改标题）。
+    fn rename_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+        title: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        protocol::log::info("gui.app", format!("重命名会话 {session_id} → {title}"));
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let _ = client
+                .request(
+                    protocol::method::SET_SESSION_TITLE,
+                    Some(json!({ "sessionId": session_id, "title": title })),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.renaming_session = None;
+                this.refresh_sessions(machine, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 右键会话操作菜单（删除 / 重命名，PRD §3.1）。
+    fn render_context_menu(
+        &self,
+        menu: &SessionContextMenu,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let machine = menu.machine;
+        let sid = menu.session_id.clone();
+        let sid2 = menu.session_id.clone();
+        let confirming = self.delete_confirm_session.as_deref() == Some(sid.as_str());
+        div()
+            .id("ctx-backdrop")
+            .absolute()
+            .inset_0()
+            // 点击菜单外任意处关闭
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.context_menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                v_flex()
+                    .id("session-ctx-menu")
+                    .absolute()
+                    .left(px(menu.x))
+                    .top(px(menu.y))
+                    .min_w(px(150.))
+                    .gap_0p5()
+                    .p_1()
+                    .bg(rgb(0xffffff))
+                    .rounded_md()
+                    .shadow_lg()
+                    .border_1()
+                    .border_color(rgb(0xe5e7eb))
+                    // 菜单内点击不冒泡到 backdrop（避免误关）
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        Button::new("ctx-rename")
+                            .small()
+                            .label("重命名")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                // 预填该会话当前标题后进入行内重命名
+                                let title = this
+                                    .context_menu
+                                    .as_ref()
+                                    .map(|m| m.title.clone())
+                                    .unwrap_or_default();
+                                this.title_input.update(cx, |s, cx| {
+                                    s.set_value(title, window, cx);
+                                });
+                                this.renaming_session = Some((machine, sid.clone()));
+                                this.context_menu = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("ctx-delete")
+                            .small()
+                            .label(if confirming {
+                                "确认删除？"
+                            } else {
+                                "删除会话"
+                            })
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                let sid = sid2.clone();
+                                if this.delete_confirm_session.as_deref() == Some(sid.as_str()) {
+                                    this.delete_session(window, cx, machine, sid);
+                                } else {
+                                    // 两步确认：不可恢复（PRD §3.1）
+                                    this.delete_confirm_session = Some(sid);
+                                    cx.notify();
+                                }
+                            })),
+                    ),
+            )
     }
 
     // ---- 设置 ----
@@ -1731,6 +1827,7 @@ impl AmuxApp {
             .map(|m| m.config.name.clone())
             .unwrap_or_default();
         let sid = s.id.clone();
+        let sid_open = sid.clone(); // 打开会话闭包用
         let sel = self.selected
             == Some(Selected::Session {
                 machine,
@@ -1757,9 +1854,50 @@ impl AmuxApp {
             .small()
             .label(label)
             .on_click(cx.listener(move |this, _ev, window, cx| {
-                this.open_session(window, cx, machine, sid.clone());
+                this.open_session(window, cx, machine, sid_open.clone());
             }));
-        (if sel { btn.primary() } else { btn }).into_any_element()
+        let btn = if sel { btn.primary() } else { btn };
+
+        // 正在重命名该会话：行内输入框 + 保存（右键 → 重命名）
+        if self.renaming_session.as_ref() == Some(&(machine, sid.clone())) {
+            let sid2 = sid.clone();
+            return v_flex()
+                .gap_1()
+                .child(Input::new(&self.title_input))
+                .child(
+                    Button::new(format!("rename-save-{sid}"))
+                        .small()
+                        .primary()
+                        .label("保存")
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            let title = this.title_input.read(cx).value().to_string();
+                            this.rename_session(window, cx, machine, sid2.clone(), title);
+                        })),
+                )
+                .into_any_element();
+        }
+
+        // 右键弹出操作菜单（删除 / 重命名，PRD §3.1）
+        let sid_ctx = sid.clone();
+        div()
+            .id(format!("sess-row-{machine}-{sid}"))
+            .relative()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                    this.context_menu = Some(SessionContextMenu {
+                        machine,
+                        session_id: sid_ctx.clone(),
+                        title: title.clone(),
+                        x: ev.position.x.as_f32(),
+                        y: ev.position.y.as_f32(),
+                    });
+                    this.renaming_session = None;
+                    cx.notify();
+                }),
+            )
+            .child(btn)
+            .into_any_element()
     }
 
     /// 工作流行：标题 · 子会话数 + 打开按钮 + 状态徽章 + 折叠的子会话（docs/PRD §4.1.1）。
@@ -2850,113 +2988,40 @@ impl AmuxApp {
                         "空闲"
                     },
                 ));
-        // 标题展示 + 编辑（PRD §3.1：用户可随时修改）
-        if self.editing_title {
-            body = body.child(
-                h_flex().child(Input::new(&self.title_input)).child(
-                    Button::new("save-title")
-                        .small()
-                        .label("保存")
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            if let Some(Selected::Session { machine, id }) = this.selected.clone() {
-                                this.save_title(window, cx, machine, id);
-                            }
-                        })),
-                ),
-            );
+        // 标题展示（重命名走会话列表右键菜单，PRD §3.1）
+        let title = if meta.title.is_empty() {
+            "（未命名）".to_string()
         } else {
-            let title = if meta.title.is_empty() {
-                "（未命名）".to_string()
-            } else {
-                meta.title.clone()
-            };
-            body = body.child(Label::new(format!("标题: {title}"))).child(
-                Button::new("edit-title")
-                    .small()
-                    .label("修改标题")
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        if let Some(Selected::Session { .. }) = this.selected.clone() {
-                            this.editing_title = true;
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        // 普通会话：关闭 / 恢复 / 删除（PRD §3.1：可恢复继续；可永久删除，不可恢复）
+            meta.title.clone()
+        };
+        body = body.child(Label::new(format!("标题: {title}")));
+        // 普通会话：关闭 / 恢复（删除 / 重命名在会话列表右键菜单）
         if let Some(Selected::Session { machine, id }) = self.selected.clone() {
-            let id_act = id.clone(); // 关闭/恢复用
-            let id_del = id.clone(); // 删除确认用
-            let confirming = self.delete_confirm_session.as_deref() == Some(id.as_str());
+            let id_act = id.clone();
             if meta.closed {
                 body = body.child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new("resume-session")
-                                .small()
-                                .primary()
-                                .label("恢复会话")
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    let id = id_act.clone();
-                                    this.resume_session(window, cx, machine, id);
-                                })),
-                        )
-                        .child(
-                            Button::new("delete-session")
-                                .small()
-                                .label(if confirming {
-                                    "确认删除？"
-                                } else {
-                                    "删除会话"
-                                })
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    let id = id_del.clone();
-                                    if this.delete_confirm_session.as_deref() == Some(id.as_str()) {
-                                        this.delete_session(window, cx, machine, id);
-                                    } else {
-                                        // 两步确认：不可恢复（PRD §3.1）
-                                        this.delete_confirm_session = Some(id);
-                                        cx.notify();
-                                    }
-                                })),
-                        ),
+                    Button::new("resume-session")
+                        .small()
+                        .primary()
+                        .label("恢复会话")
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            let id = id_act.clone();
+                            this.resume_session(window, cx, machine, id);
+                        })),
                 );
             } else {
                 body = body.child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new("close-session")
-                                .small()
-                                .label("关闭会话")
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    let id = id_act.clone();
-                                    this.close_session(window, cx, machine, id);
-                                })),
-                        )
-                        .child(
-                            Button::new("delete-session")
-                                .small()
-                                .label(if confirming {
-                                    "确认删除？"
-                                } else {
-                                    "删除会话"
-                                })
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    let id = id_del.clone();
-                                    if this.delete_confirm_session.as_deref() == Some(id.as_str()) {
-                                        this.delete_session(window, cx, machine, id);
-                                    } else {
-                                        // 两步确认：不可恢复（PRD §3.1）
-                                        this.delete_confirm_session = Some(id);
-                                        cx.notify();
-                                    }
-                                })),
-                        ),
+                    Button::new("close-session")
+                        .small()
+                        .label("关闭会话")
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            let id = id_act.clone();
+                            this.close_session(window, cx, machine, id);
+                        })),
                 );
             }
             body = body.child(
-                Label::new("删除不可恢复，将连同历史一并移除")
+                Label::new("删除 / 重命名：在左侧会话列表右键该会话")
                     .text_xs()
                     .text_color(rgb(0x9ca3af)),
             );
@@ -3755,6 +3820,9 @@ impl Render for AmuxApp {
             .child(self.render_main(window, cx));
         if let Some(p) = panel {
             root = root.child(p);
+        }
+        if let Some(menu) = &self.context_menu {
+            root = root.child(self.render_context_menu(menu, window, cx));
         }
         if self.show_settings {
             root = root.child(self.render_settings_overlay(window, cx));
