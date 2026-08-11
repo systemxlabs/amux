@@ -139,6 +139,7 @@ Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与
 
 - **编排 agent 会话**：工作流创建一个编排 agent 会话（GUI 内置 agent，状态存 GUI 本地），与普通会话一样支持 prompt / 状态（idle / thinking）
 - **rig 单 turn 模式**：每个 turn 调用一次 rig `Agent::prompt`（不用 `multi_turn` 长循环）——输出指令后 turn 结束、**不阻塞等待子会话**；子会话 idle 或用户介入后再启动下一 turn；会话操作（创建会话、向子会话发指令、汇总）定义为 rig 工具
+- **API 配置校验**：创建编排会话前校验编排 agent 配置，缺失时 GUI 提示并引导到设置页、不创建不可用会话；运行期 LLM 调用失败把错误作为 System 消息写入编排会话对话历史（随持久化保留），会话回到 idle 而非假忙
 - **自动推进**：GUI 监听子会话状态（server 通知）；子 agent 会话变为 idle 时，系统自动向编排 agent 会话注入 prompt（含子会话完成情况），触发其评估结果并推进下一阶段
 - **无独立状态机**：进展由编排 agent 会话内容与状态（idle / thinking）体现，用户自行判断
 - **暂停 / 继续 / 介入**：均为向会话发送指令——暂停 / 继续发给编排 agent 会话由其控制子会话；介入可发给编排 agent 或子会话

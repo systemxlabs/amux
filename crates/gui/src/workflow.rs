@@ -340,7 +340,17 @@ impl WorkflowEngine {
 
     async fn do_advance(&mut self) -> Result<(), String> {
         let ctx = self.build_context();
-        let decision = self.backend.decide(&ctx).await?;
+        let decision = match self.backend.decide(&ctx).await {
+            Ok(d) => d,
+            Err(e) => {
+                // 运行期 LLM 调用失败（未配置 API / 网络 / 鉴权等）：
+                // 写入编排会话对话历史（System 消息），GUI 可见且随持久化保留
+                self.session.transcript.push(OrcMsg::System {
+                    text: format!("编排 agent 调用失败：{e}"),
+                });
+                return Err(e);
+            }
+        };
         self.session.transcript.push(OrcMsg::Orc {
             text: decision.summary.clone(),
         });
@@ -720,6 +730,13 @@ impl OrcBackend for RigBackend {
         ctx: &'a OrcContext,
     ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>> {
         Box::pin(async move {
+            // 配置校验：Base URL / API key 缺失时给出可操作的提示（PRD §4.3）
+            if !self.cfg.is_configured() {
+                return Err(
+                    "未配置编排 agent API（Base URL 与 API key）。请在设置 → 编排 agent 中配置后再创建工作流"
+                        .to_string(),
+                );
+            }
             let preamble = self.preamble();
             let client = rig::providers::openai::Client::builder()
                 .api_key(self.cfg.api_key.clone())
@@ -1443,6 +1460,43 @@ mod tests {
         assert_eq!(dialog.len(), 2);
         assert!(matches!(&dialog[0], DialogItem::UserMessage { .. }));
         assert!(matches!(&dialog[1], DialogItem::AgentOutput { .. }));
+    }
+
+    #[tokio::test]
+    async fn unconfigured_rig_backend_records_clear_error() {
+        // 编排 agent 未配置 API：start() 失败但错误写入对话历史（System 消息），
+        // 会话不处于假忙状态、可继续操作（PRD §4.3 配置校验）
+        let backend = Arc::new(RigBackend::new(
+            OrchestratorConfig {
+                api_backend: "chat_completions".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key: String::new(), // 未配置
+                model: "gpt-4o-mini".into(),
+            },
+            vec!["测试机".into()],
+        ));
+        let client = WsClient::connect("ws://127.0.0.1:1/?token=unused".into());
+        let mut engine = WorkflowEngine::new(
+            "计划",
+            "",
+            backend,
+            vec![client],
+            vec![MachineSummary {
+                name: "测试机".into(),
+                harnesses: vec!["kimi".into()],
+            }],
+        );
+        let res = engine.start().await;
+        assert!(res.is_err(), "未配置时应失败");
+        assert!(engine.session.transcript.iter().any(
+            |m| matches!(m, OrcMsg::System { text } if text.contains("未配置编排 agent API"))
+        ));
+        assert_eq!(
+            engine.session.state,
+            SessionState::Idle,
+            "失败后不应停留在忙碌状态"
+        );
+        assert!(!engine.session.done);
     }
 
     #[tokio::test]

@@ -72,6 +72,14 @@ impl Default for OrchestratorConfig {
     }
 }
 
+impl OrchestratorConfig {
+    /// 编排 agent 是否已配置可用（PRD §4.3）：Base URL 与 API key 均非空。
+    /// 未配置时创建编排会话应给出提示并引导到设置页（docs/DESIGN.md §10）。
+    pub fn is_configured(&self) -> bool {
+        !self.base_url.trim().is_empty() && !self.api_key.trim().is_empty()
+    }
+}
+
 // ---- 会话 ----
 
 /// 会话状态（GUI 展示）：忙 = agent 正在工作，空闲 = 可接收新输入。
@@ -475,6 +483,19 @@ mod tests {
         assert!(s.contains("\"apiBackend\":\"chat_completions\""));
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.model, orch.model);
+        // 默认配置（api_key 为空）视为未配置；填上 key 后视为已配置
+        assert!(!OrchestratorConfig::default().is_configured());
+        let cfg = OrchestratorConfig {
+            api_key: "sk-test".into(),
+            ..OrchestratorConfig::default()
+        };
+        assert!(cfg.is_configured());
+        let blank = OrchestratorConfig {
+            api_key: "sk-test".into(),
+            base_url: "  ".into(),
+            ..OrchestratorConfig::default()
+        };
+        assert!(!blank.is_configured(), "空白 Base URL 不算已配置");
     }
 
     #[test]

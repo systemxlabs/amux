@@ -177,6 +177,8 @@ pub struct AmuxApp {
     /// 新会话视图（PRD §4.1.2）：选中的机器与 agent
     new_session_machine: Option<usize>,
     new_session_harness: Option<String>,
+    /// 创建编排会话时的提示（如编排 agent 未配置 API）
+    workflow_error: Option<String>,
     /// 新会话视图：首条指令输入框
     new_session_msg_input: Entity<InputState>,
     _tasks: Vec<Task<()>>,
@@ -287,6 +289,7 @@ impl AmuxApp {
             editing_title: false,
             new_session_machine: None,
             new_session_harness: None,
+            workflow_error: None,
             new_session_msg_input,
             _tasks: Vec::new(),
         };
@@ -1263,6 +1266,16 @@ impl AmuxApp {
         if description.trim().is_empty() {
             return;
         }
+        // 编排 agent 未配置 API 时不创建不可用的会话，给出提示并引导设置（PRD §4.3）
+        if !self.store.orchestrator().is_configured() {
+            self.workflow_error = Some(
+                "编排 agent 未配置 API（Base URL / API key）。请先在 设置 → 编排 agent 中配置。"
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.workflow_error = None;
         // @ 引用解析为上下文
         let (clean, refs) = parse_at_references(&description);
         let context = refs
@@ -1874,15 +1887,36 @@ impl AmuxApp {
                                     .text_color(rgb(0x6b7280)),
                             )
                             .child(Input::new(&self.workflow_input)),
-                    )
-                    .child(
-                        Button::new("ns-create-workflow")
-                            .primary()
-                            .label("创建编排会话")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.create_workflow(window, cx);
-                            })),
                     );
+                // 编排 agent 未配置 API：给出提示并引导到设置页（PRD §4.3）
+                if let Some(err) = &self.workflow_error {
+                    card = card.child(
+                        v_flex()
+                            .gap_1()
+                            .p_2()
+                            .bg(rgb(0xffe6e6))
+                            .rounded_md()
+                            .child(Label::new(err).text_color(rgb(0xb91c1c)))
+                            .child(
+                                Button::new("ns-goto-orch-settings")
+                                    .small()
+                                    .label("去配置编排 agent")
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        this.show_settings = true;
+                                        this.settings_category = SettingsCategory::Orchestrator;
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
+                card = card.child(
+                    Button::new("ns-create-workflow")
+                        .primary()
+                        .label("创建编排会话")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.create_workflow(window, cx);
+                        })),
+                );
             }
         }
         v_flex()
