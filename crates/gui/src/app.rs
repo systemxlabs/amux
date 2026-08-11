@@ -2126,12 +2126,12 @@ impl AmuxApp {
             .relative()
             .w_full()
             .rounded_md()
-            // 选中：浅蓝底 + 蓝色边框（默认主题 primary 为近黑色，不用）
-            .bg(rgb(0xbfdbfe).opacity(if sel { 0.2 } else { 0.0 }))
+            // 选中：浅灰底 + 浅灰边框（中性，默认主题 primary 为近黑、蓝边框刺眼，都不用）
+            .bg(rgb(0xe5e5e5).opacity(if sel { 1.0 } else { 0.0 }))
             // 选中会话加边框（默认无边框）
             .border_1()
             .border_color(if sel {
-                hsla(0.6, 0.8, 0.5, 1.0)
+                hsla(0.0, 0.0, 0.83, 1.0)
             } else {
                 transparent_black()
             })
@@ -2321,12 +2321,12 @@ impl AmuxApp {
             .relative()
             .w_full()
             .rounded_md()
-            // 选中：浅蓝底 + 蓝色边框（与普通会话一致）
-            .bg(rgb(0xbfdbfe).opacity(if wf_sel { 0.2 } else { 0.0 }))
+            // 选中：浅灰底 + 浅灰边框（与普通会话一致，中性不刺眼）
+            .bg(rgb(0xe5e5e5).opacity(if wf_sel { 1.0 } else { 0.0 }))
             // 选中工作流会话加边框（默认无边框）
             .border_1()
             .border_color(if wf_sel {
-                hsla(0.6, 0.8, 0.5, 1.0)
+                hsla(0.0, 0.0, 0.83, 1.0)
             } else {
                 transparent_black()
             })
