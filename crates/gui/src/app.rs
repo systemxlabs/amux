@@ -2116,16 +2116,26 @@ impl AmuxApp {
         };
         let header = h_flex()
             .id(format!("wf-header-{wi}"))
-            .gap_2()
+            .gap_1()
             .items_center()
             // 与普通会话一致：点击行即打开会话交互页
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.open_workflow(window, cx, wi);
             }))
-            .child(Label::new(format!(
-                "🧭 {title} · {} 子会话",
-                wf.session.children.len()
-            )))
+            .child(
+                Label::new(format!("🧭 {title} · {} 子会话", wf.session.children.len())).text_sm(),
+            )
+            // 特殊状态徽章（已暂停/完成）内联显示
+            .when(wf.session.paused || wf.session.done, |h| {
+                h.child(
+                    div()
+                        .px_1()
+                        .py(px(1.))
+                        .rounded_full()
+                        .bg(rgb(0xf3f4f6))
+                        .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
+                )
+            })
             .child(div().flex_1())
             // 与普通会话一致：工作中转圈（右侧）、空闲无转圈
             .child(if wf.session.state == SessionState::Busy {
@@ -2191,25 +2201,11 @@ impl AmuxApp {
         }
 
         let row = v_flex()
-            .gap_2()
-            .p_2()
-            .bg(rgb(0xffffff))
+            .gap_1()
+            .p_1()
             .rounded_md()
-            .border_1()
-            .border_color(rgb(0xe5e7eb))
-            .shadow_sm()
+            // 与普通会话一致的紧凑行；子会话折叠区作为唯一"卡片感"来源
             .child(header)
-            // 特殊状态徽章：仅 已暂停/完成 显示（工作中用转圈、空闲不显示文字）
-            .when(wf.session.paused || wf.session.done, |row| {
-                row.child(
-                    div()
-                        .px_1()
-                        .py(px(2.))
-                        .rounded_full()
-                        .bg(rgb(0xf3f4f6))
-                        .child(Label::new(state).text_xs().text_color(rgb(0x4b5563))),
-                )
-            })
             .child(Collapsible::new().open(false).content(content));
 
         // 右键弹出操作菜单（删除 / 重命名工作流，PRD §3.1）
