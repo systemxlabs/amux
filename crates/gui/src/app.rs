@@ -2100,7 +2100,6 @@ impl AmuxApp {
         let Some(wf) = self.workflows.get(wi) else {
             return div().into_any();
         };
-        let orc_sel = self.selected == Some(Selected::Workflow { engine: wi });
         let title = if wf.session.title.is_empty() {
             "新工作流".to_string()
         } else {
