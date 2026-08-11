@@ -133,6 +133,25 @@ Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与
 - **权限（yolo）**：agent 经 `session/request_permission` 请求权限；server **自动批准**（yolo 模式，既定决策延续，无审批往返），安全性依赖运行环境
 - **steer**：ACP v1 为 turn 模型，prompt 启动一个 turn、turn 结束（agent 回到就绪）后才可再 prompt。忙时 prompt 行为取决于 agent 实现（部分 agent 支持进行中注入）；若 agent 不支持进行中注入，server **直接向用户报错**（不排队、不静默降级）
 
+### 9.1 多接入方式与 agent 发现
+
+ACP 接入方式分两类：
+
+- **ACP 原生**：agent 自带 ACP 服务器（如 `kimi acp`）
+- **ACP 包装器**：agentclientprotocol 官方包装器，把不支持 ACP 的 CLI 暴露为 ACP 服务器；server 经 **npx 直接运行**（`npx -y @agentclientprotocol/codex-acp` 等），无需手动安装
+
+**每个 agent 的发现方式**：
+
+| agent | 版本（实测） | 发现方式 | 接入 |
+|---|---|---|---|
+| kimi | 0.33.0 | PATH 上 `kimi` CLI 的 `acp` 子命令探测（`kimi acp --help` 命中） | ACP 原生（`kimi acp`） |
+| claude | 2.1.218 | 本机装有 `claude` CLI 且 npx 可用 → server 启动 `npx -y @agentclientprotocol/claude-agent-acp`，harness 名映射为 `claude` | ACP 包装器 |
+| codex | 0.137.0 | 本机装有 `codex` CLI 且 npx 可用 → server 启动 `npx -y @agentclientprotocol/codex-acp`（带 `INITIAL_AGENT_MODE=agent-full-access` 环境变量，全权限自主模式），harness 名映射为 `codex` | ACP 包装器 |
+
+- 前置：server 所在机器需 node/npm（npx）；npx 首次运行会按需下载包装器（需要网络）
+- 认证（登录 / API key）由各包装器/CLI 自身管理，server 继承环境
+- 包装器按需懒加载：首次实际连接时才启动（npx 下载），发现阶段仅校验 CLI 与 npx 可用
+
 ## 10. 工作流
 
 工作流由 **GUI 内置编排 agent** 驱动（**rig 单 turn 模式**实现），基于会话原语实现，不占用协议面：
