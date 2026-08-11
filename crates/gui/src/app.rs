@@ -184,8 +184,6 @@ pub struct AmuxApp {
     new_session_harness: Option<String>,
     /// 创建编排会话时的提示（如编排 agent 未配置 API）
     workflow_error: Option<String>,
-    /// 新会话视图：首条指令输入框
-    new_session_msg_input: Entity<InputState>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -239,11 +237,6 @@ impl AmuxApp {
         let model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("默认模型（可留空）"));
         let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
-        let new_session_msg_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("用自然语言描述你的首个指令/目标…")
-                .multi_line(true)
-        });
 
         let machines = store
             .list_machines()
@@ -292,7 +285,6 @@ impl AmuxApp {
             new_session_machine: None,
             new_session_harness: None,
             workflow_error: None,
-            new_session_msg_input,
             _tasks: Vec::new(),
         };
         // 预填编排配置表单
@@ -693,9 +685,9 @@ impl AmuxApp {
             })
     }
 
-    /// 新会话视图"创建并发送"（PRD §4.1.2）：按所选机器/agent/工作目录创建会话，
-    /// 并把自然语言首条指令作为第一个 prompt 发出。
-    fn create_and_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 新会话视图"创建会话"（PRD §4.1.2）：按所选机器/agent/工作目录创建会话并跳转，
+    /// 首条指令由用户在会话交互页的输入区发送（不在此处 prompt）。
+    fn create_session_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let machine = self.new_session_machine.unwrap_or(0);
         let Some(m) = self.machine(machine) else {
             return;
@@ -715,7 +707,6 @@ impl AmuxApp {
             },
         };
         let cwd = self.session_cwd_input.read(cx).value().trim().to_string();
-        let text = self.new_session_msg_input.read(cx).value().to_string();
         if cwd.is_empty() {
             if let Some(m) = self.machine_mut(machine) {
                 m.status = "请填写工作目录".into();
@@ -723,21 +714,12 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        if text.trim().is_empty() {
-            if let Some(m) = self.machine_mut(machine) {
-                m.status = "请填写首条指令".into();
-            }
-            cx.notify();
-            return;
-        }
         let client = m.client.clone();
-        let text = text.clone();
         protocol::log::info(
             "gui.app",
             format!("创建会话（machine={machine} harness={harness} cwd={cwd}）"),
         );
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            // 1) 创建会话
             let res = client
                 .request(
                     protocol::method::CREATE_SESSION,
@@ -769,22 +751,10 @@ impl AmuxApp {
                 });
                 return;
             }
-            // 2) 立即跳转到该会话视图（不等首条指令 turn 完成；输出/活动
-            //    经 turn_completed / activity 通知流式到达，docs/DESIGN.md §5.1）
+            // 跳转到该会话视图（对话为空；用户在下方面板输入首条指令）
             let _ = this.update_in(cx, |this, window, cx| {
                 this.open_session(window, cx, machine, sid.clone());
             });
-            // 3) 发送首条指令（后台执行，不阻塞跳转）
-            protocol::log::debug("gui.app", format!("发送首条指令 session={sid}"));
-            let _ = client
-                .request(
-                    protocol::method::PROMPT,
-                    Some(json!({
-                        "sessionId": sid,
-                        "input": [{ "type": "text", "text": text }]
-                    })),
-                )
-                .await;
         })
         .detach();
     }
@@ -1899,23 +1869,19 @@ impl AmuxApp {
                             .child(Label::new("工作目录").text_sm().text_color(rgb(0x6b7280)))
                             .child(Input::new(&self.session_cwd_input)),
                     )
+                    // 只创建会话；首条指令在会话交互页的输入区由用户发送
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                Label::new("指令（自然语言）")
-                                    .text_sm()
-                                    .text_color(rgb(0x6b7280)),
-                            )
-                            .child(Input::new(&self.new_session_msg_input)),
+                        Button::new("ns-create")
+                            .primary()
+                            .label("创建会话")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.create_session_only(window, cx);
+                            })),
                     )
                     .child(
-                        Button::new("ns-create-send")
-                            .primary()
-                            .label("创建会话并发送")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.create_and_send(window, cx);
-                            })),
+                        Label::new("创建后进入会话页，在下方输入区发送首条指令")
+                            .text_xs()
+                            .text_color(rgb(0x9ca3af)),
                     );
             }
             NewSessionMode::Workflow => {
