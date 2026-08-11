@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-amux 是一个 **agent 控制平面**：GUI 桌面应用，统一调度多台机器上的 agent（Codex、Claude Code、Kimi Code），采用 Client-Server 架构，**全 Rust 实现**（GPUI 桌面应用 + Rust server + ACP v1）。产品定位见 [docs/PRD.md](docs/PRD.md)，系统架构见 [docs/DESIGN.md](docs/DESIGN.md)。
+amux 是一个 **agent 控制平面**：GUI 应用，统一调度多台机器上的 agent（Codex、Claude Code、Kimi Code），采用 Client-Server 架构，**全 Rust 实现**（GUI 应用 + Rust server + ACP v1）。产品定位见 [docs/PRD.md](docs/PRD.md)，系统架构见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 项目状态
 
@@ -15,18 +15,18 @@ amux 处于 **beta 阶段**：允许随意破坏性改动，无需向后兼容�
 - 实现过程中主动**判断框架文档是否需要完善**——发现未覆盖、表述不清或已过时的决策时，提出修订建议
 - **文档改动审核门禁**：涉及任何文档（`docs/PRD.md`、`docs/DESIGN.md` 及仓库内其他 `.md` 文档）的修改，**必须先经用户审核确认，才能提交（commit）与推送（push）**。文档改动应与代码改动分开处理：代码改动可正常提交；文档改动单独呈现给用户审阅，用户确认后再提交/推送
 
-## 仓库结构（Rust workspace）
+## 仓库结构
 
 | crate | 职责 |
 |---|---|
-| `protocol` | app↔server 协议面：方法名、参数/结果类型、通知类型。**协议的唯一来源**，GUI 与 server 均从这里导入 |
+| `protocol` | GUI 应用 ↔ server 协议面：方法名、参数/结果类型、通知类型。**协议的唯一来源**，GUI 应用与 server 均从这里导入 |
 | `server` | 每台机器的常驻进程：WebSocket 传输、JSON-RPC 分发、会话管理、会话数据聚合与 activities 缓存、git 能力；经 ACP 与 agent 通信 |
-| `gui` | GPUI 桌面应用 |
+| `gui` | GUI 应用 |
 
 关键边界：
 
 - server 与 agent 的交互**只经 ACP 协议**
-- server 之间不通信；跨机器编排在 GUI 侧完成
+- server 之间不通信；跨机器编排在 GUI 应用侧完成
 
 ## 工程原则
 
