@@ -1866,20 +1866,9 @@ impl AmuxApp {
         } else {
             s.title.clone()
         };
-        let state_label = match s.state {
-            SessionState::Busy => "● 工作中",
-            SessionState::Idle => {
-                if s.closed {
-                    "已关闭"
-                } else if s.interrupted {
-                    "已中断"
-                } else {
-                    "空闲"
-                }
-            }
-        };
-        let label: SharedString =
-            format!("{title} · {}@{machine_name} · {state_label}", s.harness).into();
+        // 状态只区分 工作中 / 空闲：工作中前缀转圈，空闲无转圈（docs/PRD §4.1.1）
+        let busy = s.state == SessionState::Busy;
+        let label: SharedString = format!("{title} · {}@{machine_name}", s.harness).into();
         let btn = Button::new(format!("sess-{machine}-{sid}"))
             .small()
             .label(label)
@@ -1926,7 +1915,20 @@ impl AmuxApp {
                     cx.notify();
                 }),
             )
-            .child(btn)
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    // 工作中转圈；空闲占位（保持对齐）
+                    .child(if busy {
+                        Spinner::new()
+                            .color(hsla(0.6, 0.8, 0.5, 1.0))
+                            .into_any_element()
+                    } else {
+                        div().w(px(14.)).h(px(14.)).into_any_element()
+                    })
+                    .child(btn),
+            )
             .into_any_element()
     }
 
