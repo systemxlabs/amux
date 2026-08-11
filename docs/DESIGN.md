@@ -107,7 +107,7 @@ Client-Server 架构：GUI 桌面应用（**GPUI**）与各机器上的 server �
 GUI 为单进程桌面应用（GPUI + gpui-component，跟踪 Zed 主线 git 依赖；跨平台 macOS / Linux / Windows）：
 
 - **布局**：三面板 **Dock 布局**（gpui-component）；右侧上下文面板（diff / 会话详情 / 会话活动）展开时**窗口向右扩展**，不压缩中间面板空间，关闭时收回
-- **对话流**：只展示用户消息与 agent 输出的消息气泡（**Markdown 渲染**，gpui-component）+ 虚拟化列表；输出为完整消息，非流式
+- **对话流**：只展示用户消息与 agent 输出的消息气泡（**Markdown 渲染**，gpui-component）+ 虚拟化列表；输出为完整消息，非流式；**气泡标注 agent 与所属机器**（`agent@机器`），编排会话气泡标注「编排」
 - **会话活动**：中间面板下方展示**正在进行的活动**（一条或无，实时）；右侧面板展示完整活动历史（上下滚动）——经 `get_activities` 获取
 - **Diff Review**：代码编辑器组件 + **Tree Sitter 语法高亮**（gpui-component）；文件列表、side-by-side/inline diff、revert 操作
 - **输入与设置**：输入区（多行、拖拽/粘贴、@ 引用）、快捷指令栏、设置页（机器管理）——gpui-component 表单/对话框组件
