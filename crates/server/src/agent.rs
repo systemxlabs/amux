@@ -1,13 +1,14 @@
-//! Agent 驱动抽象（docs/DESIGN.md §9）：server 与 agent harness 的唯一接口。
+//! Agent 驱动抽象（docs/DESIGN.md §7.2/§7.3）：server 与 agent harness 的唯一接口。
 //! 本模块提供：
 //! - `AcpAgentDriver`：真实 ACP v1 对接（官方 SDK `agent-client-protocol`，
 //!   `AcpAgent` stdio 传输 + typed 请求/通知，`codex-acp` / `claude-acp` / `kimi acp`）
 //! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
 //! - `AgentRegistry`：按 harness 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
-//!   `*-acp` 可执行（惰性 spawn，PRD §3.3「可执行路径自动发现、不手动指定」）+ 默认模型配置
+//!   agent（预热：server 启动即拉起并复用，docs/DESIGN.md §4.1/§7.3；运行期新发现
+//!   的兜底惰性拉起；PRD §3.3「可执行路径自动发现、不手动指定」）+ 默认模型配置
 //!
-//! ACP v1 语义（docs/DESIGN.md §9）：session/new、load、resume、prompt、cancel、close、
-//! delete、list 等方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
+//! ACP v1 语义（docs/DESIGN.md §7.2）：session/new、resume、prompt、cancel、delete 等
+//! 方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
 //!
 //! AcpAgentDriver 使用**专用 exec 线程**承载全部异步 IO（官方 SDK 连接、子进程 stdio、
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨 runtime
@@ -131,13 +132,24 @@ pub struct DiscoveredAgent {
     pub env: Vec<(String, String)>,
 }
 
+/// 预热结果统计（server 启动日志用；docs/DESIGN.md §4.1/§7.3）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PrewarmSummary {
+    /// 成功拉起的 ACP server 数
+    pub spawned: usize,
+    /// 拉起失败的 agent 数（不致命，仅记录；driver_for 使用时会返回明确错误）
+    pub failed: usize,
+}
+
 /// harness 注册表（PRD §3.3：agent 自动发现，可执行路径不手动指定）：
 ///
 /// - `--agent` 指定的驱动（harness 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
-/// - 自动发现（无需 `--agent`，docs/DESIGN.md §9.1）：
+/// - 自动发现（无需 `--agent`，docs/DESIGN.md §7.3）：
 ///   - 已知 CLI 的 `acp` 子命令探测（如 `kimi acp`，ACP 原生）
 ///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
-///   - 发现项惰性 spawn（按需拉起，不手动指定路径）
+///   - 发现的 agent 在 server 启动时**预热**（`prewarm`，docs/DESIGN.md §4.1/§7.3：
+///     ACP server 随 server 启动一起拉起，后续 `driver_for` 复用缓存驱动）；
+///     运行期新发现的 agent 仍走惰性拉起兜底
 /// - 演示兜底：既无 `--agent` 又无任何发现时，用内存 Stub（接受任意 harness 名）
 ///
 /// 默认模型按 harness 持久化到数据目录（`agent-models.json`），get_info 一并返回。
@@ -153,7 +165,7 @@ pub struct AgentRegistry {
     configured: Option<(String, SharedDriver)>,
     /// 自动发现的 agent（不含已配置的；可运行期刷新）
     discovered: std::sync::Mutex<Vec<DiscoveredAgent>>,
-    /// 惰性 spawn 的发现驱动
+    /// 已拉起的发现驱动（预热 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
     spawned: std::sync::Mutex<HashMap<String, SharedDriver>>,
     /// 按 harness 的默认模型配置
     models: std::sync::Mutex<HashMap<String, Option<String>>>,
@@ -280,6 +292,8 @@ impl AgentRegistry {
 
     /// 按 harness 名解析驱动；未知 harness 报错（HARNESS_UNAVAILABLE）。
     /// 未知 harness 时先运行期刷新一次发现（新装的 agent 无需重启即可用）。
+    /// 已预热的驱动直接复用缓存（不再二次 spawn）；未预热的（运行期新发现或
+    /// 预热失败的兜底重试）走共享 spawn-and-cache 惰性拉起。
     pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
         if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）")
         {
@@ -299,22 +313,76 @@ impl AgentRegistry {
             .find(|d| d.name == harness)
             .cloned();
         if let Some(d) = found {
-            let mut spawned = self
-                .spawned
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）");
-            if let Some(d) = spawned.get(harness) {
-                return Ok(d.clone());
-            }
-            let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
-            let env = d.env.clone();
-            let driver = AcpAgentDriver::spawn(&d.bin, &args, &env)
-                .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
-            let driver: SharedDriver = Arc::new(driver);
-            spawned.insert(harness.to_string(), driver.clone());
-            return Ok(driver);
+            return self.spawn_and_cache(&d);
         }
         Err(format!("本机未发现 agent: {harness}"))
+    }
+
+    /// 共享 spawn-and-cache：按 `DiscoveredAgent` 拉起 ACP server 并存入 `spawned` 缓存。
+    /// **预热与 `driver_for` 懒路径共用同一实现**——已拉起的驱动直接复用，不重复 spawn；
+    /// 拉起失败返回明确错误且不写缓存（调用方决定是否致命）。
+    fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<SharedDriver, String> {
+        let mut spawned = self
+            .spawned
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
+        if let Some(driver) = spawned.get(&d.name) {
+            return Ok(driver.clone());
+        }
+        let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
+        let env = d.env.clone();
+        let driver = AcpAgentDriver::spawn(&d.bin, &args, &env)
+            .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
+        let driver: SharedDriver = Arc::new(driver);
+        spawned.insert(d.name.clone(), driver.clone());
+        Ok(driver)
+    }
+
+    /// 预热（docs/DESIGN.md §4.1/§7.3）：server 启动时把已发现的 ACP agent **全部拉起**
+    /// （kimi 走原生 `kimi acp`，claude/codex 走 npx 包装器），结果进 `spawned` 缓存，
+    /// 后续 `driver_for` 直接复用、不再二次 spawn。
+    ///
+    /// 单 agent 拉起失败**不致命**：只记录错误并继续预热其余 agent（server 正常启动、
+    /// 其余 agent 正常使用）；实际使用失败 agent 时 `driver_for` 返回明确错误（并兜底重试）。
+    /// 尊重 `AMUX_NO_DISCOVERY=1` 与 stub/force_stub 模式（无发现则无可预热）。
+    pub fn prewarm(&self) -> PrewarmSummary {
+        // 受限/演示模式：无发现可预热（防御性检查——discovered 本就应为空）
+        if self.force_stub || self.no_discovery {
+            return PrewarmSummary::default();
+        }
+        if self
+            .stub
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_some()
+        {
+            return PrewarmSummary::default();
+        }
+        let discovered = self
+            .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .clone();
+        let mut summary = PrewarmSummary::default();
+        for d in discovered {
+            match self.spawn_and_cache(&d) {
+                Ok(_) => {
+                    summary.spawned += 1;
+                    protocol::log::info(
+                        "server.prewarm",
+                        format!("已拉起 ACP server: {}（harness={}）", d.bin, d.name),
+                    );
+                }
+                Err(e) => {
+                    summary.failed += 1;
+                    protocol::log::error(
+                        "server.prewarm",
+                        format!("ACP server 拉起失败（harness={}）: {e}", d.name),
+                    );
+                }
+            }
+        }
+        summary
     }
 
     /// 查询默认模型（get_info 用）。
@@ -357,11 +425,12 @@ fn load_models(path: &std::path::Path) -> HashMap<String, Option<String>> {
         .unwrap_or_default()
 }
 
-/// 自动发现 ACP agent（PRD §3.3：可执行路径自动发现、不手动指定；docs/DESIGN.md §9.1）：
+/// 自动发现 ACP agent（PRD §3.3：可执行路径自动发现、不手动指定；docs/DESIGN.md §7.3）：
 /// 1) 已知 CLI 的 `acp` 子命令探测（ACP 原生，如 `kimi acp`）
 /// 2) 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
 ///
 /// 不做任意 `*-acp` 扫描：只认已知 agent，避免无关可执行污染列表。
+/// 发现的 agent 由 `prewarm` 在 server 启动时拉起（docs/DESIGN.md §4.1/§7.3）。
 fn discover_acp_agents() -> Vec<DiscoveredAgent> {
     let mut found: Vec<DiscoveredAgent> = Vec::new();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -385,7 +454,7 @@ fn discover_acp_agents() -> Vec<DiscoveredAgent> {
     found
 }
 
-/// 单 CLI 的发现决策（纯逻辑，便于单测；docs/DESIGN.md §9.1）：
+/// 单 CLI 的发现决策（纯逻辑，便于单测；docs/DESIGN.md §7.3）：
 /// 已知 CLI 优先 ACP 原生（`acp` 子命令），否则回落 npx 官方包装器。
 fn discover_for_cli(
     cli: &str,
@@ -407,7 +476,7 @@ fn discover_for_cli(
     let npx = npx_bin?;
     let mut env = Vec::new();
     if cli == "codex" {
-        // 全权限自主模式（docs/DESIGN.md §9.1）
+        // 全权限自主模式（docs/DESIGN.md §7.3）
         env.push(("INITIAL_AGENT_MODE".into(), "agent-full-access".into()));
     }
     Some(DiscoveredAgent {
@@ -496,8 +565,15 @@ impl AcpAgentDriver {
     /// 启动 ACP agent 子进程（官方 SDK `AcpAgent` 管理 stdio 传输与进程生命周期）；
     /// `env` 为附加环境变量（经 from_args 的 `NAME=value` 前缀传入）；
     /// exec 线程承载全部异步 IO。
+    ///
+    /// **同步就绪握手**：阻塞等待 exec 线程完成「子进程拉起 + 连接建立 + initialize
+    /// 握手」后才返回——二进制缺失 / 进程立即退出（如 npx 不可用、无网络）在此快速
+    /// 失败并返回明确错误；健康 agent 在握手完成后立即返回。等待受
+    /// `AMUX_ACP_SPAWN_TIMEOUT_MS` 限制（默认 30s；npx 首次按需下载可能较慢，
+    /// 超时按失败处理，`driver_for` 兜底会重试）。
     pub fn spawn(bin: &str, args: &[&str], env: &[(String, String)]) -> Result<Self, String> {
         let (exec_tx, exec_rx) = std::sync::mpsc::sync_channel::<ExecReq>(32);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let routes = Arc::new(Mutex::new(HashMap::new()));
         let routes2 = routes.clone();
         let bin = bin.to_string();
@@ -508,8 +584,21 @@ impl AcpAgentDriver {
                 .enable_all()
                 .build()
                 .expect("构建 tokio runtime 失败");
-            rt.block_on(exec_main(&bin, &args, &env, exec_rx, routes2));
+            rt.block_on(exec_main(&bin, &args, &env, exec_rx, routes2, ready_tx));
         });
+        let timeout_ms = std::env::var("AMUX_ACP_SPAWN_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000);
+        match ready_rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(format!(
+                    "ACP server 启动超时（{timeout_ms}ms 内未完成连接/initialize 握手）"
+                ))
+            }
+        }
         Ok(AcpAgentDriver {
             exec_tx,
             routes,
@@ -663,12 +752,16 @@ fn pick_approve_option(options: &[PermissionOption]) -> Option<PermissionOptionI
 }
 
 /// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
+/// `ready_tx`：就绪握手——连接建立（子进程拉起）且 initialize 握手完成（成功或
+/// 协议级失败）后发送 `Ok`；若连接在建立前就失败（二进制缺失 / 进程立即退出），
+/// 在 connect_with 结束后补发 `Err`，供 `AcpAgentDriver::spawn` 同步失败。
 async fn exec_main(
     bin: &str,
     args: &[String],
     env: &[(String, String)],
     exec_rx: std::sync::mpsc::Receiver<ExecReq>,
     routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
+    ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     // std exec_rx → tokio 通道（阻塞转发，供 select 使用）
     let (req_tx, mut req_rx) = mpsc::channel::<ExecReq>(32);
@@ -680,13 +773,14 @@ async fn exec_main(
         }
     });
 
-    // SDK from_args 支持 `NAME=value` 前缀参数作为环境变量（docs/DESIGN.md §9.1）
+    // SDK from_args 支持 `NAME=value` 前缀参数作为环境变量（docs/DESIGN.md §7.3）
     let mut cmd: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     cmd.push(bin.to_string());
     cmd.extend(args.iter().cloned());
     let agent = match AcpAgent::from_args(cmd) {
         Ok(a) => a,
         Err(e) => {
+            let _ = ready_tx.send(Err(format!("解析 agent 命令失败 ({bin}): {e}")));
             protocol::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
             return;
         }
@@ -701,7 +795,14 @@ async fn exec_main(
         agent
     };
 
-    let _ = Client
+    // 就绪信号：main_fn 启动（子进程已拉起、连接已建立）后完成 initialize 握手即报告
+    // Ok（initialize 协议级失败不致命——部分 agent 不实现 initialize 也照常工作，连接
+    // 保持）；若 main_fn 从未报告（连接建立前传输层失败），由 connect_with 结果补报 Err。
+    let ready: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<(), String>>>>> =
+        Arc::new(std::sync::Mutex::new(Some(ready_tx)));
+    let ready_main = ready.clone();
+
+    let outcome = Client
         .builder()
         .name("amux-server")
         .on_receive_notification(
@@ -730,15 +831,24 @@ async fn exec_main(
         )
         .connect_with(agent, |cx: ConnectionTo<Agent>| async move {
             // 初始化握手（版本协商）。失败仅记录——部分 agent（如 mock_acp）不实现
-            // initialize 也照常工作，连接保持。
-            if let Err(e) = cx
+            // initialize 也照常工作，连接保持。握手完成（成功或协议级失败）即视为
+            // 子进程已拉起可用，报告就绪。
+            let init_result = match cx
                 .send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()
                 .await
             {
-                protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
-            } else {
-                protocol::log::debug("acp", "initialize 完成");
+                Ok(_) => {
+                    protocol::log::debug("acp", "initialize 完成");
+                    Ok(())
+                }
+                Err(e) => {
+                    protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
+                    Ok(())
+                }
+            };
+            if let Some(tx) = ready_main.lock().expect("Mutex 中毒（临界区内不应 panic）").take() {
+                let _ = tx.send(init_result);
             }
 
             // 服务循环：每个请求独立 spawn，支持并发（cancel 不必等 prompt 完成）
@@ -795,6 +905,23 @@ async fn exec_main(
             Ok(())
         })
         .await;
+
+    // 若 main_fn 从未报告就绪（连接建立前传输层失败：二进制缺失 / 进程立即退出 /
+    // npx 不可用 / 无网络），把 connect_with 的结果补报为 spawn 失败。
+    let pending_ready = ready
+        .lock()
+        .expect("Mutex 中毒（临界区内不应 panic）")
+        .take();
+    if let Some(tx) = pending_ready {
+        let desc = match &outcome {
+            Ok(()) => "连接未建立即关闭".to_string(),
+            Err(e) => e.to_string(),
+        };
+        let _ = tx.send(Err(format!("ACP 连接建立失败: {desc}")));
+    } else if let Err(e) = &outcome {
+        // 就绪已报告（连接曾可用），之后异常断开：仅记录，不影响已缓存的驱动
+        protocol::log::error("acp", format!("ACP 连接异常结束: {e}"));
+    }
 }
 
 /// 按方法名分发 ACP v1 方法调用（typed 请求，经官方 SDK 传输）。
@@ -1287,6 +1414,162 @@ mod tests {
         assert_eq!(hs[0].name, "mock_acp");
         assert!(reg
             .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
+    }
+
+    // ---- 预热（docs/DESIGN.md §4.1/§7.3：ACP server 随 server 启动一起拉起）----
+
+    /// 测试构造：给定 discovered 条目（跳过 PATH 扫描），可控制 force_stub/no_discovery/stub。
+    #[cfg(test)]
+    fn test_registry(
+        discovered: Vec<DiscoveredAgent>,
+        force_stub: bool,
+        no_discovery: bool,
+        stub: Option<SharedDriver>,
+    ) -> AgentRegistry {
+        AgentRegistry {
+            stub: std::sync::Mutex::new(stub),
+            force_stub,
+            no_discovery,
+            configured: None,
+            discovered: std::sync::Mutex::new(discovered),
+            spawned: std::sync::Mutex::new(HashMap::new()),
+            models: std::sync::Mutex::new(HashMap::new()),
+            model_file: std::path::PathBuf::new(),
+        }
+    }
+
+    /// 定位同包兄弟 bin 的可执行：测试二进制在 `target/debug/deps/` 下，
+    /// 兄弟 bin（如 mock_acp）在 `target/debug/` 下（`cargo test` 会先构建全部 bin）。
+    fn sibling_bin(name: &str) -> std::path::PathBuf {
+        let exe = std::env::current_exe().expect("当前测试可执行路径");
+        let dir = exe.parent().expect("可执行所在目录");
+        let bin_dir = if dir.ends_with("deps") {
+            dir.parent().unwrap_or(dir)
+        } else {
+            dir
+        };
+        bin_dir.join(name)
+    }
+
+    /// 预热成功：mock_acp 可执行（真实拉起）进入缓存；不存在的二进制预热失败
+    /// 但不阻断其余预热；`driver_for` 复用缓存驱动（不重复 spawn）并对失败 agent
+    /// 返回明确错误。
+    #[test]
+    fn prewarm_spawns_discovered_and_driver_for_reuses_cache() {
+        let mock = sibling_bin("mock_acp");
+        assert!(mock.exists(), "mock_acp 应已构建: {}", mock.display());
+        let reg = test_registry(
+            vec![
+                DiscoveredAgent {
+                    name: "mock_acp".into(),
+                    bin: mock.display().to_string(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                },
+                DiscoveredAgent {
+                    name: "broken".into(),
+                    bin: "/nonexistent/bin/definitely-not-here".into(),
+                    args: vec!["acp".into()],
+                    env: Vec::new(),
+                },
+            ],
+            false,
+            false,
+            None,
+        );
+
+        // 预热：成功者入缓存、失败者只记录（不 panic、不阻断）
+        let summary = reg.prewarm();
+        assert_eq!(
+            summary.spawned, 1,
+            "mock_acp 应预热成功（真实 spawn 路径）: {summary:?}"
+        );
+        assert_eq!(
+            summary.failed, 1,
+            "不存在的二进制应预热失败但不致命: {summary:?}"
+        );
+        let spawned = reg
+            .spawned
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
+        assert_eq!(spawned.len(), 1, "spawned 缓存应恰好含注入的成功条目");
+        assert!(spawned.contains_key("mock_acp"));
+        assert!(!spawned.contains_key("broken"), "失败条目不应入缓存");
+        drop(spawned);
+
+        // driver_for 复用缓存驱动（同一 Arc，不二次 spawn）
+        let d1 = reg.driver_for("mock_acp").expect("已预热驱动应直接返回");
+        let d2 = reg.driver_for("mock_acp").expect("已预热驱动应直接返回");
+        assert!(Arc::ptr_eq(&d1, &d2), "driver_for 应复用同一缓存驱动");
+
+        // 失败 agent：driver_for 返回明确错误（且不污染缓存）
+        let err = match reg.driver_for("broken") {
+            Err(e) => e,
+            Ok(_) => panic!("失败 agent 的 driver_for 应返回错误"),
+        };
+        assert!(
+            err.contains("失败") || err.contains("启动"),
+            "失败 agent 的错误应明确: {err}"
+        );
+        assert!(
+            !reg
+                .spawned
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .contains_key("broken"),
+            "失败的 spawn 不应污染缓存"
+        );
+    }
+
+    /// `AMUX_NO_DISCOVERY=1` / force_stub / stub 兜底模式：不预热（即使有 discovered 条目）。
+    #[test]
+    fn prewarm_skips_when_no_discovery_or_stub() {
+        let mock = sibling_bin("mock_acp");
+        let entry = DiscoveredAgent {
+            name: "mock_acp".into(),
+            bin: mock.display().to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+        };
+
+        // AMUX_NO_DISCOVERY=1（no_discovery=true）：即使有 discovered 条目也不预热
+        let reg = test_registry(vec![entry.clone()], false, true, None);
+        let summary = reg.prewarm();
+        assert_eq!(
+            summary.spawned + summary.failed,
+            0,
+            "AMUX_NO_DISCOVERY=1 不应预热: {summary:?}"
+        );
+        assert!(reg
+            .spawned
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
+
+        // force_stub（测试强制 stub）：跳过预热
+        let reg = test_registry(vec![entry.clone()], true, false, None);
+        let summary = reg.prewarm();
+        assert_eq!(summary.spawned + summary.failed, 0);
+        assert!(reg
+            .spawned
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
+
+        // stub 兜底模式（无发现 → stub 存在）：跳过预热
+        let reg = test_registry(
+            vec![entry.clone()],
+            false,
+            false,
+            Some(Arc::new(StubAgentDriver::new()) as SharedDriver),
+        );
+        let summary = reg.prewarm();
+        assert_eq!(summary.spawned + summary.failed, 0);
+        assert!(reg
+            .spawned
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .is_empty());

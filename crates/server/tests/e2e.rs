@@ -1,7 +1,8 @@
 //! 端到端集成测试：启动真实 server 二进制（test-server 固定用 mock_acp），
 //! 经 WebSocket + JSON-RPC 验证协议。
 //! 覆盖：会话生命周期、非流式交付（通知序列）、标题生成、忙时 steer 报错（-32006）、
-//! 多客户端共存、git status/diff/revert、agent 发现与默认模型、skills 列表。
+//! 多客户端共存、git status/diff/revert、agent 发现与默认模型、skills 列表、
+//! 启动预热（docs/DESIGN.md §4.1/§7.3：ACP server 随 server 启动拉起，失败不致命）。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -932,4 +933,138 @@ async fn history_merged_local_read_and_delete_linkage() {
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+// ---- 启动预热（docs/DESIGN.md §4.1/§7.3：ACP server 随 server 启动一起拉起）----
+
+/// 写一个假 CLI 到 fakebin（`acp --help` 命中 → 被发现）：
+/// - `delegate_to` = Some(可执行) → 拉起时 exec 它（模拟健康 ACP server：假 kimi → mock_acp）
+/// - `delegate_to` = None → 拉起时立即非零退出（模拟 npx 不可用 / 无网络的失败 agent：假 codex）
+fn write_fake_cli(fakebin: &Path, name: &str, delegate_to: Option<&Path>) {
+    let body = match delegate_to {
+        Some(target) => format!(
+            "#!/bin/sh\nif [ \"$1\" = \"acp\" ] && [ \"$2\" = \"--help\" ]; then\n  echo \"{name} acp — Agent Client Protocol server\"\n  exit 0\nfi\nexec {} \"$AMUX_MOCK_STATE\"\n",
+            target.display()
+        ),
+        None => format!(
+            "#!/bin/sh\nif [ \"$1\" = \"acp\" ] && [ \"$2\" = \"--help\" ]; then\n  echo \"{name} acp — help\"\n  exit 0\nfi\nexit 1\n"
+        ),
+    };
+    let path = fakebin.join(name);
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// 用**真实 `server` 二进制** + 定制 PATH（仅 fakebin）启动，捕获 stderr 到日志文件。
+/// PATH 只含 fakebin：隔离本机真实 agent（本机装有 kimi/claude/codex 时不会被发现）。
+async fn spawn_server_with_fakebin(
+    fakebin: &Path,
+) -> (u16, std::path::PathBuf, std::path::PathBuf, ServerGuard) {
+    let data_dir = unique_data_dir();
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let stderr_log = data_dir.join("server.log");
+    let bin = env!("CARGO_BIN_EXE_server");
+    let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+    let stderr_file = std::fs::File::create(&stderr_log).unwrap();
+    let child = tokio::process::Command::new(bin)
+        .args([
+            "--token",
+            "test-token",
+            "--port",
+            &port.to_string(),
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+        ])
+        .env("PATH", fakebin.to_str().unwrap())
+        .env("AMUX_MOCK_STATE", data_dir.join("mock.state"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn 真实 server");
+    wait_port(port).await;
+    (port, data_dir, stderr_log, ServerGuard { child })
+}
+
+/// 预热成功场景（docs/DESIGN.md §4.1/§7.3）：server 启动即拉起发现的 ACP server——
+/// 假 kimi（`acp --help` 命中）经委托 mock_acp 正常拉起；`get_info` 返回 kimi 且
+/// available=true（两轮一致）；启动日志出现针对 kimi 的「已拉起 ACP server」行。
+#[tokio::test]
+async fn prewarm_pulls_up_discovered_agent_at_startup() {
+    let fakebin = unique_data_dir();
+    std::fs::create_dir_all(&fakebin).unwrap();
+    write_fake_cli(&fakebin, "kimi", Some(Path::new(env!("CARGO_BIN_EXE_mock_acp"))));
+
+    let (port, _data_dir, stderr_log, _guard) = spawn_server_with_fakebin(&fakebin).await;
+    let mut c = Client::connect(port).await;
+
+    let info = c.call("get_info", json!({})).await;
+    let harnesses = info["result"]["harnesses"].as_array().unwrap();
+    let kimi = harnesses
+        .iter()
+        .find(|h| h["name"] == "kimi")
+        .expect("应发现 kimi: {info}");
+    assert_eq!(kimi["available"], true, "预热后 kimi 应 available=true: {info}");
+
+    // 两轮 get_info 一致（确定性；非确定性视为缺陷；仅比 result，id 必然递增）
+    let info2 = c.call("get_info", json!({})).await;
+    assert_eq!(
+        info2["result"], info["result"],
+        "两轮 get_info result 应一致: {info2} vs {info}"
+    );
+
+    // 启动日志（stderr）：针对 kimi 的「已拉起 ACP server」行 + 预热汇总
+    let log = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+    assert!(
+        log.contains("已拉起 ACP server") && log.contains("kimi"),
+        "启动日志应有 kimi 预热成功行: {log}"
+    );
+    assert!(log.contains("预热完成"), "启动日志应有预热汇总行: {log}");
+
+    // server 正常服务（会话操作可用）
+    let list = c.call("list_sessions", json!({})).await;
+    assert!(list.get("error").is_none(), "预热后会话操作应正常: {list}");
+    let _ = std::fs::remove_dir_all(&fakebin);
+}
+
+/// 单 agent 预热失败不致命（docs/DESIGN.md §4.1/§7.3）：假 codex 发现成功但拉起即失败
+/// （立即非零退出，模拟 npx 不可用 / 无网络）——server 仍监听、`get_info` 正常响应，
+/// 日志含失败记录且进程不崩溃。
+#[tokio::test]
+async fn prewarm_failure_is_non_fatal() {
+    let fakebin = unique_data_dir();
+    std::fs::create_dir_all(&fakebin).unwrap();
+    write_fake_cli(&fakebin, "codex", None);
+
+    let (port, _data_dir, stderr_log, _guard) = spawn_server_with_fakebin(&fakebin).await;
+    let mut c = Client::connect(port).await;
+
+    // server 仍监听、get_info 正常响应（不崩溃）
+    let info = c.call("get_info", json!({})).await;
+    assert!(info.get("error").is_none(), "get_info 应正常响应: {info}");
+    let codex = info["result"]["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "codex");
+    assert!(
+        codex.is_some(),
+        "发现成功的 codex 应出现在 harnesses 中: {info}"
+    );
+
+    // 日志含失败记录（失败不致命：server 照常启动、其余能力可用）
+    let log = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+    assert!(
+        log.contains("拉起失败") && log.contains("codex"),
+        "启动日志应有 codex 预热失败记录: {log}"
+    );
+    assert!(log.contains("预热完成"), "启动日志应有预热汇总行: {log}");
+
+    // server 正常服务（会话操作可用）
+    let list = c.call("list_sessions", json!({})).await;
+    assert!(list.get("error").is_none(), "预热失败后 server 仍应正常: {list}");
+    let _ = std::fs::remove_dir_all(&fakebin);
 }

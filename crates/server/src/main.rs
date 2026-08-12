@@ -73,6 +73,19 @@ async fn main() {
         cfg.data_dir.join("agent-models.json"),
     ));
 
+    // 预热（docs/DESIGN.md §4.1/§7.3）：server 启动即把已发现的 ACP server 全部拉起
+    // （kimi 原生 `kimi acp`，claude/codex 经 npx 包装器），后续 `driver_for` 复用缓存、
+    // 不再二次 spawn。单 agent 拉起失败不致命（只记录错误，server 照常启动、其余
+    // agent 正常使用）；实际使用失败 agent 时 `driver_for` 返回明确错误。
+    let prewarm = agents.prewarm();
+    protocol::log::info(
+        "server.startup",
+        format!(
+            "ACP server 预热完成：{} 个已拉起，{} 个失败",
+            prewarm.spawned, prewarm.failed
+        ),
+    );
+
     // 会话注册表（SQLite，docs/DESIGN.md §4.3）：列表与历史权威 = server；
     // 重启后会话列表从本地库恢复（不依赖 ACP `session/list`，§4.1）。
     let registry = match SessionRegistry::open(&cfg.data_dir.join("amux.db")) {
