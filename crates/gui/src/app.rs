@@ -830,6 +830,12 @@ impl AmuxApp {
             "gui.app",
             format!("创建会话（machine={machine} harness={harness} cwd={cwd}）"),
         );
+        // 立即反馈：agent 懒加载 + ACP session/new 可能耗时（首次拉起包装器），
+        // 先给用户"创建中"提示，避免误以为卡住
+        if let Some(m) = self.machine_mut(machine) {
+            m.status = "正在创建会话…".into();
+        }
+        cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
                 .request(
@@ -862,9 +868,23 @@ impl AmuxApp {
                 });
                 return;
             }
-            // 跳转到该会话视图（对话为空；用户在下方面板输入首条指令）
+            // 跳转到该会话视图：新会话历史为空，直接本地建空视图并选中，
+            // 省去 open_session 往返（与 open_session 对空历史的返回等价）
             let _ = this.update_in(cx, |this, window, cx| {
-                this.open_session(window, cx, machine, sid.clone());
+                if let Some(m) = this.machine_mut(machine) {
+                    m.selected = Some(sid.clone());
+                    m.views.insert(sid.clone(), crate::aggregate::SessionView::new());
+                    m.dialog_before = 0;
+                    m.dialog_has_more = false;
+                    m.status = "已连接".into();
+                }
+                this.selected = Some(Selected::Session {
+                    machine,
+                    id: sid.clone(),
+                });
+                this.set_panel(window, cx, None);
+                this.dialog_scroll.scroll_to_bottom();
+                cx.notify();
             });
         })
         .detach();
