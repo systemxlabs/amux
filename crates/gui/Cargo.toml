@@ -19,7 +19,12 @@ futures-util = "0.3"
 # 注意：跟踪 Zed 主线，API 可能随上游变化（docs/DESIGN.md §7）
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui_component = { package = "gpui-component", git = "https://github.com/longbridge/gpui-component" }
+# tree-sitter 语法高亮（docs/DESIGN.md §8.2 Diff Review：Tree Sitter 高亮）：
+# diff 语法渲染补丁结构，rust/js/ts/py/markdown/json 渲染变更代码内容
+gpui_component = { package = "gpui-component", git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter", "tree-sitter-diff", "tree-sitter-rust", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-python", "tree-sitter-markdown"] }
 gpui_component_assets = { package = "gpui-component-assets", git = "https://github.com/longbridge/gpui-component" }
+# SyntaxHighlighter::update 以 ropey::Rope 为入参：版本与 gpui-component 锁定的
+# 2.0.0-beta.1 一致（feature 经依赖图统一开启）
+ropey = "=2.0.0-beta.1"
 rig = "0.41"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }

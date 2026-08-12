@@ -26,6 +26,8 @@ use gpui_component::{
     text::TextView,
     WindowExt, *,
 };
+
+use crate::diff_highlight::{diff_language_for_path, diff_line_styled, highlight_diff_patch};
 use serde_json::json;
 
 use protocol::{
@@ -38,7 +40,7 @@ use crate::config::{
     machine_ws_url, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand, SkillEntry,
     WorkflowTemplate,
 };
-use crate::logic::{compose_prompt, parse_at_references, read_path_context, InputAttachment};
+use crate::logic::{compose_prompt, parse_at_references, path_attachment, read_path_context, InputAttachment};
 use crate::workflow::{MachineSummary, OrcBackend, OrcMsg, RigBackend, WorkflowEngine};
 use crate::ws::{Notification, WsClient};
 
@@ -1085,10 +1087,7 @@ impl AmuxApp {
         let (clean_text, refs) = parse_at_references(&text);
         let mut all = attachments;
         for r in refs {
-            all.push(InputAttachment::Path {
-                is_dir: std::path::Path::new(&r).is_dir(),
-                path: r,
-            });
+            all.push(path_attachment(&r));
         }
         let blocks = compose_prompt(&clean_text, &all);
 
@@ -3038,13 +3037,26 @@ impl AmuxApp {
                         div()
                             .flex_1()
                             .min_h(px(80.))
+                            .id("input-drop-zone")
                             .child(Input::new(&self.input_state))
                             // Ctrl+Enter 发送（PRD §4.2：多行输入 + 快捷键发送）
                             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                                 if ev.keystroke.modifiers.control && ev.keystroke.key == "enter" {
                                     this.send_prompt(window, cx);
                                 }
-                            })),
+                            }))
+                            // 拖拽文件/目录 → 路径附件（PRD §4.2）：与 @ 引用走同一
+                            // 附件管线（InputAttachment::Path → compose_prompt → PROMPT）
+                            .can_drop(|dragged, _window, _cx| dragged.is::<ExternalPaths>())
+                            .on_drop::<ExternalPaths>(cx.listener(
+                                |this, paths: &ExternalPaths, _window, cx| {
+                                    for p in paths.paths() {
+                                        this.input_attachments
+                                            .push(path_attachment(&p.display().to_string()));
+                                    }
+                                    cx.notify();
+                                },
+                            )),
                     )
                     .child(
                         Button::new("send")
@@ -3349,6 +3361,7 @@ impl AmuxApp {
         _machine: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let language = diff_language_for_path(&file.path);
         let mut rows = v_flex().gap_0();
         match mode {
             DiffMode::Inline => {
@@ -3359,15 +3372,21 @@ impl AmuxApp {
                         hunk.patch.clone(),
                         cx,
                     ));
+                    // Tree Sitter 语法高亮（docs/DESIGN.md §8.2）：内容行代码按文件
+                    // 语言高亮，结构行（diff --git / @@ / --- / +++）不参与
+                    let highlight = highlight_diff_patch(&hunk.patch, language);
                     for (li, line) in hunk.patch.lines().enumerate() {
-                        let (bg, text) = if line.starts_with('+') && !line.starts_with("+++") {
-                            (Some(rgb(0xe6ffe6)), line.to_string())
+                        let bg = if line.starts_with('+') && !line.starts_with("+++") {
+                            Some(rgb(0xe6ffe6))
                         } else if line.starts_with('-') && !line.starts_with("---") {
-                            (Some(rgb(0xffe6e6)), line.to_string())
+                            Some(rgb(0xffe6e6))
                         } else {
-                            (None, line.to_string())
+                            None
                         };
-                        let mut row = div().id(("diff-line", li)).w_full().child(text.clone());
+                        let mut row = div()
+                            .id(("diff-line", li))
+                            .w_full()
+                            .child(diff_line_styled(line, &highlight, li));
                         if let Some(c) = bg {
                             row = row.bg(c);
                         }
@@ -3384,23 +3403,40 @@ impl AmuxApp {
                         hunk.patch.clone(),
                         cx,
                     ));
+                    let highlight = highlight_diff_patch(&hunk.patch, language);
                     let mut left = v_flex().gap_0().flex_1();
                     let mut right = v_flex().gap_0().flex_1();
-                    for line in hunk.patch.lines() {
+                    for (li, line) in hunk.patch.lines().enumerate() {
                         if line.starts_with('-')
                             && !line.starts_with("---")
                             && !line.starts_with("diff")
                         {
-                            left = left
-                                .child(div().w_full().bg(rgb(0xffe6e6)).child(line.to_string()));
+                            left = left.child(
+                                div()
+                                    .w_full()
+                                    .bg(rgb(0xffe6e6))
+                                    .child(diff_line_styled(line, &highlight, li)),
+                            );
                             right = right.child(div().w_full().child(""));
                         } else if line.starts_with('+') && !line.starts_with("+++") {
                             left = left.child(div().w_full().child(""));
-                            right = right
-                                .child(div().w_full().bg(rgb(0xe6ffe6)).child(line.to_string()));
+                            right = right.child(
+                                div()
+                                    .w_full()
+                                    .bg(rgb(0xe6ffe6))
+                                    .child(diff_line_styled(line, &highlight, li)),
+                            );
                         } else if !line.starts_with("@@") {
-                            left = left.child(div().w_full().child(line.to_string()));
-                            right = right.child(div().w_full().child(line.to_string()));
+                            left = left.child(
+                                div()
+                                    .w_full()
+                                    .child(diff_line_styled(line, &highlight, li)),
+                            );
+                            right = right.child(
+                                div()
+                                    .w_full()
+                                    .child(diff_line_styled(line, &highlight, li)),
+                            );
                         }
                     }
                     rows = rows.child(

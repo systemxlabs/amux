@@ -12,7 +12,7 @@ use protocol::{
     generate_title, ContentBlock, HarnessInfo, PassthroughEvent, SessionMeta, SessionState,
 };
 
-use crate::agent::{passthrough_event, AgentEvent, AgentRegistry, SharedDriver};
+use crate::agent::{passthrough_event, AgentEvent, AgentRegistry, ListedSession, SharedDriver};
 
 /// server → GUI 通知（docs/DESIGN.md §4/§5）。
 #[derive(Debug, Clone)]
@@ -59,6 +59,60 @@ impl SessionManager {
             tx,
         };
         (manager, rx)
+    }
+
+    /// 重启恢复（docs/DESIGN.md §4.1）：server 无持久化状态（历史在 agent 侧、配置可重建），
+    /// 重启后重新 spawn agent 子进程，会话列表经 ACP `session/list` 从 agent 侧恢复。
+    /// 对每个可用 harness 驱动调用 `list_sessions()` 并把结果重建为注册表条目。
+    ///
+    /// agent 无法恢复的字段用保守默认：状态 idle（忙/闲由 GUI 应用从透传事件派生，
+    /// 重连时经会话列表 meta.state 补齐，docs/DESIGN.md §5.1）、非 interrupted；
+    /// 标题取 ACP `SessionInfo.title`（可缺省为空串，首条 prompt 时自动生成）。
+    /// 仅启动期调用一次（driver 方法内部为同步往返，启动期阻塞可接受）。
+    pub async fn recover(&self) {
+        for h in self.agents.harnesses() {
+            if !h.available {
+                continue;
+            }
+            let Ok(driver) = self.agents.driver_for(&h.name) else {
+                continue;
+            };
+            let listed = driver.list_sessions();
+            if listed.is_empty() {
+                continue;
+            }
+            let ts = now();
+            let mut reg = self.registry.lock().await;
+            for s in listed {
+                if s.agent_session_id.is_empty() {
+                    continue;
+                }
+                // 按 agent 会话 id 去重（重复调用 recover 不产生重复条目）
+                if reg
+                    .values()
+                    .any(|r| r.agent_session_id == s.agent_session_id)
+                {
+                    continue;
+                }
+                let meta = recovered_meta(&h.name, &s, ts);
+                protocol::log::info(
+                    "server.session",
+                    format!(
+                        "恢复会话 {}（harness={} cwd={} agent={}）",
+                        meta.id, h.name, meta.cwd, s.agent_session_id
+                    ),
+                );
+                reg.insert(
+                    meta.id.clone(),
+                    SessionRecord {
+                        meta: meta.clone(),
+                        agent_session_id: s.agent_session_id,
+                        driver: driver.clone(),
+                    },
+                );
+                let _ = self.tx.send(ServerNotification::SessionCreated(meta));
+            }
+        }
     }
 
     // ---- 机器信息 ----
@@ -333,6 +387,23 @@ fn first_text(input: &[ContentBlock]) -> String {
         .unwrap_or_default()
 }
 
+/// 把 ACP `session/list` 的单条结果映射为恢复会话的元数据（docs/DESIGN.md §4.1）。
+/// 纯函数，可单测。server 侧会话 id 重新颁发（`s_<uuid>`），agent 侧 id 存于注册表；
+/// agent 无法恢复的字段用保守默认（空标题/空模型/idle/非 interrupted）。
+pub fn recovered_meta(harness: &str, s: &ListedSession, ts: u64) -> SessionMeta {
+    SessionMeta {
+        id: format!("s_{}", uuid::Uuid::new_v4()),
+        harness: harness.to_string(),
+        cwd: s.cwd.clone(),
+        model: None,
+        state: SessionState::Idle,
+        interrupted: false,
+        title: s.title.clone().unwrap_or_default(),
+        created_at: ts,
+        last_event_at: ts,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +570,79 @@ mod tests {
         // 未知 harness 的模型配置不破坏列表
         mgr.set_default_model("nope", Some("x".into()));
         assert_eq!(mgr.harnesses().len(), 1);
+    }
+
+    /// ACP `session/list` 结果 → SessionMeta 的纯映射（docs/DESIGN.md §4.1）：
+    /// 新 server 会话 id、保留 harness/cwd、取 agent 自报标题、保守默认（idle/非 interrupted）。
+    #[test]
+    fn recovered_meta_maps_listed_session() {
+        let s = ListedSession {
+            agent_session_id: "mock_s_1".into(),
+            cwd: "/tmp/work".into(),
+            title: Some("来自 agent 的标题".into()),
+        };
+        let meta = recovered_meta("codex", &s, 42);
+        assert!(meta.id.starts_with("s_"));
+        assert_eq!(meta.harness, "codex");
+        assert_eq!(meta.cwd, "/tmp/work");
+        assert_eq!(meta.title, "来自 agent 的标题");
+        assert_eq!(meta.state, SessionState::Idle);
+        assert!(!meta.interrupted);
+        assert_eq!(meta.created_at, 42);
+        assert_eq!(meta.last_event_at, 42);
+
+        // 无标题时回退空串（首条 prompt 自动生成）
+        let s2 = ListedSession {
+            agent_session_id: "mock_s_2".into(),
+            cwd: "/tmp".into(),
+            title: None,
+        };
+        let meta2 = recovered_meta("codex", &s2, 43);
+        assert!(meta2.title.is_empty());
+        assert_ne!(meta.id, meta2.id, "每次恢复应重新颁发 server 会话 id");
+    }
+
+    /// 重启恢复：agent 侧已有会话（注册表外）经 `list_sessions` 重建为可用的会话。
+    #[tokio::test]
+    async fn recover_rebuilds_registry_from_agent() {
+        let agents = Arc::new(AgentRegistry::new_for_tests());
+        // 绕过 manager 直接经驱动在 agent 侧创建会话（模拟重启前已存在的会话）
+        let driver = agents.driver_for("stub").unwrap();
+        let sid = driver.create_session("/tmp/recover", None).unwrap();
+        let (mgr, mut rx) = SessionManager::new(agents.clone());
+
+        assert!(mgr.list().await.is_empty(), "恢复前注册表应为空");
+        mgr.recover().await;
+
+        let list = mgr.list().await;
+        assert_eq!(list.len(), 1, "应恢复 agent 侧会话");
+        assert_eq!(list[0].cwd, "/tmp/recover");
+        assert_eq!(list[0].harness, "stub");
+        assert_eq!(list[0].state, SessionState::Idle);
+
+        // 恢复出的会话可用：open_session 可重放（stub 无历史 → 空事件，不报错）
+        let (events, _, _) = mgr.open(&list[0].id, None, None).await.unwrap();
+        assert!(events.is_empty());
+
+        // 恢复广播 SessionCreated（可观测性）
+        let mut saw_created = false;
+        while let Ok(n) = rx.recv().await {
+            if let ServerNotification::SessionCreated(s) = n {
+                assert_eq!(s.cwd, "/tmp/recover");
+                saw_created = true;
+                break;
+            }
+        }
+        assert!(saw_created);
+
+        // 幂等：重复 recover 不产生重复条目（按 agent 会话 id 去重）
+        mgr.recover().await;
+        assert_eq!(mgr.list().await.len(), 1);
+
+        // agent 侧已删除的会话不再恢复（同一注册表，stub 已无该会话）
+        driver.delete(&sid).unwrap();
+        let (mgr2, _rx2) = SessionManager::new(agents.clone());
+        mgr2.recover().await;
+        assert!(mgr2.list().await.is_empty());
     }
 }

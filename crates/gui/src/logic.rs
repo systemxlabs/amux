@@ -22,6 +22,15 @@ pub enum InputAttachment {
     },
 }
 
+/// 路径 → 路径附件（PRD §4.2）。拖拽文件/目录与 `@` 引用共用：
+/// 两者产生的都是 `InputAttachment::Path`，经同一 `compose_prompt` 管线组装。
+pub fn path_attachment(path: &str) -> InputAttachment {
+    InputAttachment::Path {
+        path: path.to_string(),
+        is_dir: std::path::Path::new(path).is_dir(),
+    }
+}
+
 /// 解析输入文本中的 @ 引用（PRD §4.2：@ 引用文件或目录作为上下文）。
 /// 返回（清理后的文本，引用列表）。@ 后跟路径直到空白/行尾。
 pub fn parse_at_references(text: &str) -> (String, Vec<String>) {
@@ -212,5 +221,54 @@ mod tests {
             }],
         );
         assert_eq!(blocks.len(), 1);
+    }
+
+    /// 拖拽路径与 @ 引用路径走**同一管线**（PRD §4.2）：拖入 → `path_attachment` →
+    /// `compose_prompt` → 文本上下文块；@ 引用解析后同样转为 `path_attachment` →
+    /// `compose_prompt`。二者产出的**附件内容块一致**。
+    #[test]
+    fn dropped_path_and_at_reference_share_pipeline() {
+        // 准备一个真实文件与目录（附件读取真实内容）
+        let dir = std::env::temp_dir().join(format!("amux-drop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "拖拽内容").unwrap();
+
+        // 拖入：drop 处理器产生 Path 附件 → compose_prompt
+        let dropped = path_attachment(&file.display().to_string());
+        assert!(matches!(dropped, InputAttachment::Path { is_dir: false, .. }));
+        let drop_blocks = compose_prompt("", &[dropped.clone()]);
+
+        // @ 引用：解析出同一路径 → 同样的 Path 附件 → 同一 compose_prompt
+        let text = format!("看 @{}", file.display());
+        let (clean, refs) = parse_at_references(&text);
+        assert_eq!(refs, vec![file.display().to_string()]);
+        assert!(!clean.trim().is_empty(), "@ 引用应把路径从文本中剥离");
+        let all: Vec<InputAttachment> = refs.iter().map(|r| path_attachment(r)).collect();
+        let at_blocks = compose_prompt("", &all);
+
+        // 附件内容块完全一致（同一管线产出同一块）
+        assert_eq!(drop_blocks, at_blocks);
+        assert_eq!(drop_blocks.len(), 1);
+        let ContentBlock::Text { text } = &drop_blocks[0] else {
+            panic!("路径附件应产生文本上下文块");
+        };
+        assert!(text.contains("拖拽内容"), "附件应读取文件内容: {text}");
+
+        // 与文本混排时（真实发送路径）：文本块在前、附件块在后，附件块与纯拖入一致
+        let with_text = compose_prompt(&clean, &all);
+        assert_eq!(with_text.len(), 2);
+        assert_eq!(with_text[1], drop_blocks[0], "文本后的附件块应一致");
+
+        // 拖入目录 → is_dir=true（目录条目列表作为上下文）
+        let dir_att = path_attachment(&dir.display().to_string());
+        assert!(matches!(dir_att, InputAttachment::Path { is_dir: true, .. }));
+        let dir_blocks = compose_prompt("", &[dir_att]);
+        let ContentBlock::Text { text } = &dir_blocks[0] else {
+            panic!("目录附件应产生文本上下文块");
+        };
+        assert!(text.contains("notes.txt"), "目录附件应列出条目: {text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

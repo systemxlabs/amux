@@ -143,12 +143,33 @@ impl Drop for ServerGuard {
     }
 }
 
+/// 唯一的 mock_acp 状态文件（会话/历史持久化到 `<state>.json`）。
+/// 每个测试独立，避免 mock 持久化的会话跨测试泄漏。
+fn unique_mock_state() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "amux-e2e-mock-{}-{}.state",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ))
+}
+
 async fn spawn_server() -> (u16, ServerGuard) {
+    spawn_server_with_state(&unique_mock_state()).await
+}
+
+/// 以指定 mock 状态文件启动 server（重启恢复测试用同一状态文件启动两次）。
+async fn spawn_server_with_state(state: &std::path::Path) -> (u16, ServerGuard) {
     let bin = env!("CARGO_BIN_EXE_test-server");
     // 每测试唯一端口（并行测试不冲突）
     let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
     let child = tokio::process::Command::new(bin)
         .args(["--token", "test-token", "--port", &port.to_string()])
+        .env("AMUX_MOCK_STATE", state)
+        // 只使用 --agent 显式配置的 mock_acp：隔离本机真实 agent（如 kimi）的
+        // 自动发现与重启恢复，保证会话列表确定（AMUX_NO_DISCOVERY=1）
+        .env("AMUX_NO_DISCOVERY", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -606,4 +627,111 @@ async fn git_status_diff_revert_e2e() {
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&plain);
+}
+
+// ---- server 重启恢复（docs/DESIGN.md §4.1）----
+
+/// 真实二进制杀/启恢复：实例 A 创建并 prompt 会话 → 杀进程 → 同一 mock 状态
+/// 重启实例 B → `list_sessions` 返回重启前会话（经 ACP `session/list` 从 agent 侧恢复）、
+/// `open_session` 可重放其历史，且恢复出的会话可继续 prompt。
+#[tokio::test]
+async fn server_restart_recovers_sessions_and_replays() {
+    let state = unique_mock_state();
+
+    // ---- 实例 A：创建会话 + prompt（历史落盘到 mock 状态）----
+    let (port1, guard1) = spawn_server_with_state(&state).await;
+    let mut c1 = Client::connect(port1).await;
+    let harness = {
+        let info = c1.call("get_info", json!({})).await;
+        first_harness(&info)
+    };
+    let created = c1
+        .call(
+            "create_session",
+            json!({"harness": harness, "cwd": "/tmp/restart-work"}),
+        )
+        .await;
+    let sid1 = created["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(created["result"]["session"]["cwd"], "/tmp/restart-work");
+
+    c1.fire(
+        "prompt",
+        json!({"sessionId": sid1, "input": [{"type": "text", "text": "你好"}]}),
+    )
+    .await;
+    let got = c1
+        .wait_notification(
+            "passthrough",
+            |p| p["session_id"] == json!(sid1) && p["event"]["kind"] == "turn_ended",
+            5000,
+        )
+        .await;
+    assert!(got, "实例 A 应完成 turn（此时 mock 历史已落盘）");
+
+    // 杀掉实例 A（ServerGuard drop → SIGKILL；mock 随 stdin EOF 退出）
+    drop(guard1);
+    drop(c1);
+
+    // ---- 实例 B：同一 mock 状态重启 ----
+    let (port2, _guard2) = spawn_server_with_state(&state).await;
+    let mut c2 = Client::connect(port2).await;
+
+    // (a) list_sessions 返回重启前会话（经 ACP session/list 恢复）
+    let list = c2.call("list_sessions", json!({})).await;
+    let sessions = list["result"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "重启后应恢复 1 个会话: {list}");
+    let meta = &sessions[0];
+    assert_eq!(meta["cwd"], "/tmp/restart-work", "恢复的会话应保留工作目录");
+    assert_eq!(meta["harness"], harness);
+    assert_eq!(meta["state"], "idle", "恢复的会话应为 idle（可接收新输入）");
+    assert_ne!(
+        meta["id"].as_str().unwrap(),
+        sid1,
+        "重启后 server 应重新颁发会话 id"
+    );
+    let sid2 = meta["id"].as_str().unwrap().to_string();
+
+    // (b) open_session 可重放其历史（GUI 聚合对话内容）
+    let open = c2.call("open_session", json!({"sessionId": sid2})).await;
+    let kinds: Vec<&str> = open["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"output_chunk"),
+        "open_session 重放应含 output_chunk: {kinds:?}"
+    );
+    let chunks: Vec<&str> = open["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "output_chunk")
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(
+        chunks.iter().any(|t| t.contains("完成")),
+        "重放应含此前 prompt 的输出: {chunks:?}"
+    );
+    assert!(
+        kinds.contains(&"user_message"),
+        "重放应含用户消息: {kinds:?}"
+    );
+
+    // 恢复出的会话可用：继续 prompt 正常执行
+    let again = c2
+        .call(
+            "prompt",
+            json!({"sessionId": sid2, "input": [{"type": "text", "text": "继续"}]}),
+        )
+        .await;
+    assert!(again.get("error").is_none(), "恢复会话应可继续 prompt: {again}");
+
+    // 清理 mock 状态文件
+    let _ = std::fs::remove_file(&state);
+    let _ = std::fs::remove_file(state.with_extension("json"));
 }

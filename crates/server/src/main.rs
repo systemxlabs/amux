@@ -72,6 +72,9 @@ async fn main() {
 
     let (manager, notifications) = SessionManager::new(agents);
     let manager = Arc::new(manager);
+    // 重启恢复（docs/DESIGN.md §4.1）：经 ACP `session/list` 从 agent 侧恢复会话列表。
+    // server 无持久化状态；agent 子进程在注册表/上面的 --agent 路径已随注册表惰性/显式拉起。
+    manager.recover().await;
 
     let handlers = Arc::new(Handlers {
         manager: manager.clone(),

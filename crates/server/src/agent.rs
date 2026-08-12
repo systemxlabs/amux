@@ -93,6 +93,18 @@ pub fn passthrough_event(ev: AgentEvent, ts: u64) -> PassthroughEvent {
     }
 }
 
+/// ACP `session/list` 返回的单条会话（id + cwd + 可选标题）。
+/// server 重启后从 agent 侧恢复会话列表的数据来源（docs/DESIGN.md §4.1）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedSession {
+    /// agent 侧会话 id
+    pub agent_session_id: String,
+    /// 会话工作目录（ACP `SessionInfo.cwd`）
+    pub cwd: String,
+    /// agent 自报标题（ACP `SessionInfo.title`，可缺省）
+    pub title: Option<String>,
+}
+
 /// 与单个 agent harness 的驱动接口（ACP v1 语义的投影）。
 pub trait AgentDriver: Send + Sync {
     /// 新建会话，返回 agent 侧会话 id
@@ -109,9 +121,9 @@ pub trait AgentDriver: Send + Sync {
     fn cancel(&self, agent_session_id: &str) -> Result<(), String>;
     /// 删除会话（历史一并移除）
     fn delete(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 列出 agent 侧全部会话 id（server 重启后从 agent 恢复会话列表，docs/DESIGN.md §3）
+    /// 列出 agent 侧全部会话（server 重启后从 agent 恢复会话列表，docs/DESIGN.md §4.1）
     #[allow(dead_code)]
-    fn list_sessions(&self) -> Vec<String>;
+    fn list_sessions(&self) -> Vec<ListedSession>;
     /// 该 agent 安装的 skills 列表（PRD §3.3；agent 不支持时返回空列表）
     #[allow(dead_code)]
     fn list_skills(&self) -> Vec<String>;
@@ -155,6 +167,9 @@ pub struct AgentRegistry {
     stub: std::sync::Mutex<Option<SharedDriver>>,
     /// 测试强制 stub：跳过运行期发现（避免本机 PATH 干扰单测）
     force_stub: bool,
+    /// 禁用运行期自动发现（`AMUX_NO_DISCOVERY=1`）：只使用 `--agent` 显式配置的 agent。
+    /// 供受限环境与测试隔离（避免拉起本机未配置的 agent 并恢复其会话）。
+    no_discovery: bool,
     /// 配置驱动：harness 名 + 驱动
     configured: Option<(String, SharedDriver)>,
     /// 自动发现的 agent（不含已配置的；可运行期刷新）
@@ -171,42 +186,57 @@ impl AgentRegistry {
     /// - `configured`：`--agent` 显式指定的驱动，可为 None（由自动发现接管）
     /// - `model_file`：默认模型配置的落盘路径
     pub fn new(configured: Option<(String, SharedDriver)>, model_file: std::path::PathBuf) -> Self {
+        let no_discovery = std::env::var("AMUX_NO_DISCOVERY")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let registry = AgentRegistry {
             stub: std::sync::Mutex::new(None),
             force_stub: false,
+            no_discovery,
             configured,
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
             models: std::sync::Mutex::new(load_models(&model_file)),
             model_file,
         };
-        registry.refresh_discovery();
+        if !no_discovery {
+            registry.refresh_discovery();
+        }
         registry
     }
 
     /// 重新扫描本机 ACP agent（运行期安装的新 agent 经 get_info 刷新即可发现，PRD §3.3）。
     /// 合并新发现的 agent，保留已配置/已发现条目；无任何 agent 且无配置时启用 stub 兜底。
+    /// `AMUX_NO_DISCOVERY=1` 时跳过扫描（仅 stub 兜底逻辑仍生效）。
     fn refresh_discovery(&self) {
         if self.force_stub {
             return;
         }
-        let current = discover_acp_agents();
-        let mut disc = self
-            .discovered
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）");
-        for d in current {
-            let dup = disc.iter().any(|x| x.name == d.name)
-                || self
-                    .configured
-                    .as_ref()
-                    .map(|(c, _)| c == &d.name)
-                    .unwrap_or(false);
-            if !dup {
-                disc.push(d);
+        if !self.no_discovery {
+            let current = discover_acp_agents();
+            let mut disc = self
+                .discovered
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）");
+            for d in current {
+                let dup = disc.iter().any(|x| x.name == d.name)
+                    || self
+                        .configured
+                        .as_ref()
+                        .map(|(c, _)| c == &d.name)
+                        .unwrap_or(false);
+                if !dup {
+                    disc.push(d);
+                }
             }
         }
-        let need_stub = self.configured.is_none() && disc.is_empty();
+        let need_stub = self.configured.is_none() && {
+            let disc = self
+                .discovered
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）");
+            disc.is_empty()
+        };
         *self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）") = if need_stub {
             Some(Arc::new(StubAgentDriver::new()))
         } else {
@@ -220,6 +250,7 @@ impl AgentRegistry {
         AgentRegistry {
             stub: std::sync::Mutex::new(Some(Arc::new(StubAgentDriver::new()))),
             force_stub: true,
+            no_discovery: false,
             configured: None,
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
@@ -615,14 +646,30 @@ impl AgentDriver for AcpAgentDriver {
             .map(|_| ())
     }
 
-    fn list_sessions(&self) -> Vec<String> {
+    fn list_sessions(&self) -> Vec<ListedSession> {
         match self.call("session/list", json!({})) {
             Ok(res) => res
                 .get("sessions")
                 .and_then(|s| s.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                        .filter_map(|s| {
+                            let agent_session_id = s.get("id").and_then(|v| v.as_str())?.to_string();
+                            let cwd = s
+                                .get("cwd")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let title = s
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            Some(ListedSession {
+                                agent_session_id,
+                                cwd,
+                                title,
+                            })
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -868,7 +915,13 @@ async fn dispatch_call_inner(
             let sessions = resp
                 .sessions
                 .into_iter()
-                .map(|s| json!({ "id": s.session_id }))
+                .map(|s| {
+                    json!({
+                        "id": s.session_id,
+                        "cwd": s.cwd,
+                        "title": s.title,
+                    })
+                })
                 .collect::<Vec<_>>();
             Ok(json!({ "sessions": sessions }))
         }
@@ -958,7 +1011,7 @@ fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
 // ---- 内存 Stub（演示/无需 agent 的测试）----
 
 pub struct StubAgentDriver {
-    sessions: std::sync::Mutex<Vec<String>>,
+    sessions: std::sync::Mutex<Vec<ListedSession>>,
     pub output_prefix: String,
 }
 
@@ -975,10 +1028,11 @@ impl StubAgentDriver {
 impl AgentDriver for StubAgentDriver {
     fn create_session(&self, cwd: &str, _model: Option<&str>) -> Result<String, String> {
         let id = format!("agent_{}", cwd.replace('/', "_"));
-        self.sessions
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .push(id.clone());
+        self.sessions.lock().expect("Mutex 中毒（临界区内不应 panic）").push(ListedSession {
+            agent_session_id: id.clone(),
+            cwd: cwd.to_string(),
+            title: None,
+        });
         Ok(id)
     }
 
@@ -1020,11 +1074,11 @@ impl AgentDriver for StubAgentDriver {
         self.sessions
             .lock()
             .unwrap()
-            .retain(|s| s != agent_session_id);
+            .retain(|s| s.agent_session_id != agent_session_id);
         Ok(())
     }
 
-    fn list_sessions(&self) -> Vec<String> {
+    fn list_sessions(&self) -> Vec<ListedSession> {
         self.sessions
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
@@ -1242,5 +1296,42 @@ mod tests {
             None,
         )
         .is_none());
+    }
+
+    /// `AMUX_NO_DISCOVERY=1`：跳过运行期自动发现（只保留显式配置 / stub 兜底）。
+    /// 用于受限环境与测试隔离（避免拉起本机未配置的 agent 并恢复其会话）。
+    #[test]
+    fn no_discovery_skips_auto_discovery() {
+        let mut reg = AgentRegistry::new_for_tests();
+        reg.no_discovery = true;
+        reg.force_stub = false;
+        reg.refresh_discovery();
+        // 无配置、无发现 → stub 兜底仍生效（演示模式可用）
+        assert!(reg
+            .stub
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_some());
+        assert!(reg
+            .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
+
+        // 有显式配置时：harnesses 只含配置的驱动，不扫描 PATH
+        reg.stub = std::sync::Mutex::new(None);
+        reg.configured = Some((
+            "mock_acp".to_string(),
+            Arc::new(StubAgentDriver::new()) as SharedDriver,
+        ));
+        reg.refresh_discovery();
+        let hs = reg.harnesses();
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0].name, "mock_acp");
+        assert!(reg
+            .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
     }
 }

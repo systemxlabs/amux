@@ -16,8 +16,12 @@ use protocol::{ContentBlock, PassthroughEvent};
 async fn debug_mock_stdio() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mock = env!("CARGO_BIN_EXE_mock_acp");
+    // 唯一状态文件（mock 会持久化会话/历史到 `<state>.json`），避免跨测试泄漏
+    let state = std::env::temp_dir().join(format!("mock_state_dbg_{}", std::process::id()));
+    let _ = std::fs::remove_file(&state);
+    let _ = std::fs::remove_file(state.with_extension("json"));
     let mut child = tokio::process::Command::new(mock)
-        .arg("/tmp/mock_state_dbg")
+        .arg(&state)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
@@ -44,6 +48,8 @@ async fn debug_mock_stdio() {
 async fn acp_driver_full_flow() {
     let state_file = std::env::temp_dir().join(format!("mock_acp_state_{}", std::process::id()));
     let _ = std::fs::remove_file(&state_file);
+    // mock 的会话/历史持久化在 `<state_file>.json`，一并清理避免陈旧状态泄漏
+    let _ = std::fs::remove_file(state_file.with_extension("json"));
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");
     let driver =
@@ -94,11 +100,13 @@ async fn acp_driver_full_flow() {
         .iter()
         .any(|e| matches!(e, PassthroughEvent::OutputChunk { text, .. } if text.contains("完成")));
     assert!(has_output_chunk, "load 重放应含 output_chunk: {events:?}");
-    // list_sessions → 恢复会话列表
+    // list_sessions → 恢复会话列表（含 id + cwd，docs/DESIGN.md §4.1）
     let sessions = driver.list_sessions();
     assert!(
-        sessions.contains(&"mock_s_1".to_string()),
-        "list 应含 mock_s_1: {sessions:?}"
+        sessions
+            .iter()
+            .any(|s| s.agent_session_id == "mock_s_1" && s.cwd == "/tmp/work"),
+        "list 应含 mock_s_1（cwd=/tmp/work）: {sessions:?}"
     );
 
     // cancel / delete 帧正常
