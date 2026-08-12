@@ -23,9 +23,10 @@ amux 定位为**跨机器 agent 控制平面**：GUI 应用统一调度多台机
 
 | 术语 | 含义 |
 |---|---|
-| **GUI 应用（客户端 / 桌面应用）** | amux 桌面应用，客户端角色，全文统一称 GUI 应用 |
-| **Server** | 每台机器上的常驻进程，作为 ACP v1 client 与 agent 通信 |
-| **Agent** | 具体 agentic coding 工具（Codex / Claude / Kimi）的 ACP server 端 |
+| **GUI 应用** | amux 桌面应用，客户端角色 |
+| **Server** | 每台机器上的常驻进程 |
+| **Agent** | 具体 agentic coding 工具（Codex / Claude / Kimi） |
+| **ACP server** | agent 侧对外提供 ACP 服务的进程 |
 | **agent 会话** | 用户在指定机器上创建、由该机器 server 持有并驱动的普通会话 |
 | **编排 agent 会话 / 工作流会话** | 由 GUI 应用内置编排 agent 驱动的工作流会话，状态持久化于 GUI 应用本地 |
 | **子会话** | 工作流所驱动的 agent 会话，挂载在工作流会话下 |
@@ -34,7 +35,7 @@ amux 定位为**跨机器 agent 控制平面**：GUI 应用统一调度多台机
 
 ## 3. 架构概览
 
-Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 WebSocket 通信；server 作为 **ACP v1 client** 对接各 agent（Codex / Claude / Kimi），经 ACP 的 stdio 传输 spawn agent 子进程。
+Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 WebSocket 通信；server 负责管理并对接（基于 ACP 协议）各 agent。
 
 ```
 ┌───────────────┐   WS(JSON-RPC)  ┌───────────────┐ ACP v1 (stdio) ┌────────────┐
@@ -48,14 +49,13 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 ### 3.1 组件与边界
 
 - **GUI 应用（唯一客户端）**：amux 桌面应用，直连各已注册机器的 server——本机与远程同等对待，统一注册后连接。每条连接对应一台机器，使用同一套协议。
-- **Server**：每台机器运行一个常驻进程，是 **ACP v1 client**——spawn agent 子进程、驱动 ACP 会话、把 agent 的会话事件**透传**给 GUI 应用、直连 git；同时是**会话控制面状态的权威维护者**（会话列表注册表 + 会话历史日志，见 §3.2）。**server 之间不通信**——每个 server 只服务本机会话，对连接方一律按 GUI 应用对待。
-- **协议单一来源**：GUI 应用 ↔ server 协议（方法面、参数/结果类型、通知类型）由共享 crate 定义，GUI 应用与 server 从同一处导入——单一语言实现，无需双语言协议对齐。
+- **Server**：每台机器运行一个常驻进程，是 **ACP v1 client**——spawn ACP server（子进程）、驱动 ACP 会话、把 agent 的会话事件**透传**给 GUI 应用、直连 git；同时是**会话控制面状态的权威维护者**（会话列表注册表 + 会话历史日志，见 §3.2）。**server 之间不通信**——每个 server 只服务本机会话，对连接方一律按 GUI 应用对待。
 
 ### 3.2 职责划分
 
-- **会话列表与历史权威 = server**：会话列表由 server 本地**会话注册表**维护（会话仅能经 server 创建，注册表由构造完整），元数据存于 server 本地 SQLite（§4.3）；会话历史以 server 本地事件日志为权威（§5.2，按会话一个落盘文件）。agent 的 ACP 会话仅承担执行（自身上下文恢复 `session/resume`）；**agent 侧存在但注册表未知的旧会话不被管理**（不列出、不打开、不回填）。
+- **会话列表与历史权威 = server**：会话列表由 server 本地**会话注册表**维护，元数据存于 server 本地；会话历史以 server 本地事件日志为权威。agent 的 ACP 会话仅承担执行（自身上下文恢复 `session/resume`）；**agent 侧存在但注册表未知的旧会话不被管理**（不列出、不打开、不回填）。
 - **GUI 应用 = 聚合层**：会话列表由 GUI 应用汇总各 server（惰性加载：首次只取最近活跃会话，滚动加载更早）；跨机器工作流是 GUI 应用内部编排，基于会话原语实现，不占用协议面；远程 server 离线时其会话标为不可达。
-- **多设备共存**：任意数量的 GUI 应用可同时连接同一 server、查看并操作同一会话，互不踢出；各 GUI 应用独立加载会话数据（会话列表与历史由 server 权威维护）。
+- **多设备共存**：任意数量的 GUI 应用可同时连接同一 server、查看并操作同一会话，互不踢出；各 GUI 应用独立加载会话数据。
 - **生命周期解耦**：任何 GUI 应用断开（含 GUI 应用关闭）不停止 server、不销毁会话；会话仅由显式删除结束。
 
 ### 3.3 关键技术栈
@@ -74,14 +74,14 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 每台机器（含本机）统一运行一个 server 常驻进程（单二进制），与任何 GUI 应用连接无关：
 
 - **启动**：server 由所在机器自行启动（手动命令、系统服务或安装脚本），GUI 应用不负责拉起——连接失败即视为该机器离线；认证 token 每次启动需指定。
-- **关闭**：GUI 应用关闭只断开 socket；server 继续常驻，agent 子进程与 ACP 会话不受影响。
-- **机器重启**：server 除会话注册表与历史日志外无持久化状态（token 每次启动指定、配置可重建）——重启后**会话列表从本地注册表恢复**，历史日志在盘**直接权威使用**；agent 子进程**按需惰性 spawn**（首次实际交互时，见 §7.3）。历史日志缺失（损坏/清空）视为该会话历史为空；注册表丢失视为会话列表丢失。
+- **关闭**：GUI 应用关闭只断开 socket；server 继续常驻，ACP server 与 ACP 会话不受影响。
+- **机器重启**：server 除会话注册表与历史日志外无持久化状态（token 每次启动指定、配置可重建）——重启后**会话列表从本地注册表恢复**，历史日志在盘**直接权威使用**；ACP server **随 server 启动一起拉起**（预热，见 §7.3），agent 会话（`session/new`）仍在首条 prompt 懒创建。历史日志缺失（损坏/清空）视为该会话历史为空；注册表丢失视为会话列表丢失。
 - **GUI 应用视角**：本机与远程完全一致——注册、连接、认证、离线处理无差别。
 
 ### 4.2 GUI 应用生命周期
 
 - **启动**：GUI 应用从本地数据目录加载机器注册表、快捷指令、Skills 注册表、工作流模板与编排 agent 会话状态；按注册表逐个连接已注册的机器 server；连接失败则标记为离线并指数退避重连。
-- **关闭**：只断开与各 server 的 WebSocket；server、agent 子进程及进行中的会话均不受影响。重新打开后按注册表重新连接并恢复编排 agent 会话的自动推进。
+- **关闭**：只断开与各 server 的 WebSocket；server、ACP server 及进行中的会话均不受影响。重新打开后按注册表重新连接并恢复编排 agent 会话的自动推进。
 
 ### 4.3 本地数据
 
@@ -134,17 +134,17 @@ Server 是 ACP v1 client，同时是**会话控制面状态**的权威维护者�
 
 ### 7.1 会话交互
 
-- 交互只有两个动作：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作），经 ACP `session/prompt` / `session/cancel` 到达 agent。
+- **交互只有两个动作**：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作），经 ACP `session/prompt` / `session/cancel` 到达 agent。**prompt 是触发 ACP 交互的唯一入口**（创建会话只与 server 交互，见 §4.1）。
 - **用户输入**：GUI 应用的 prompt 经 server 转发给 agent；用户消息同时由 GUI 应用本地立即渲染（不依赖回显），并保留在对话内容中。
 - **快捷指令**（GUI 应用本地配置，无专用协议）：每条指令是一段发给 agent 的提示词，经 prompt 由 agent 执行（Commit & Push、Submit PR、skill 安装 / 更新等，见「Skills 管理」）；直连 git 的 push / undo / revert 等操作不属于快捷指令；新会话 / Kill Session 由 GUI 应用直接发起对应会话操作。
 - **多 GUI 应用并发**：server 对同一会话的所有 prompt（含各 GUI 应用的）按到达顺序串行化，保证按调用顺序送达。
 - **忙时 prompt（steer）**：行为取决于 agent 实现（ACP turn 模型，见 §7.2）；agent 不支持进行中注入时 server 直接报错（不排队、不静默降级）。
 
-### 7.2 与 Agent 通信（ACP v1）
+### 7.2 与 ACP server 通信（ACP v1）
 
-Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与各 agent 通信：
+Server 作为 **ACP v1 client** 与各机器的 **ACP server** 通信：
 
-- **传输**：ACP stdio——server spawn agent 子进程（`codex-acp` / `claude-acp` / `kimi acp`），JSON-RPC 2.0 over stdin/stdout。
+- **传输**：ACP stdio——server spawn ACP server（子进程），JSON-RPC 2.0 over stdin/stdout。
 - **会话生命周期**：
   - `session/new`：新建会话（yolo 模式启动，见下）
   - `session/resume`：对已存在会话恢复 agent 自身上下文（agent 从自身存储恢复，**不向客户端重放历史**——历史以 server 日志为权威，见 §5.2）
@@ -153,34 +153,30 @@ Server 作为 **ACP v1 client**（依赖官方 SDK `agent-client-protocol`）与
 - **权限（yolo）**：agent 经 `session/request_permission` 请求权限；server **自动批准**（yolo 模式，既定决策延续，无审批往返），安全性依赖运行环境。
 - **steer**：ACP v1 为 turn 模型——prompt 启动一个 turn，turn 结束（agent 回到就绪）后才可再 prompt；忙时 prompt 行为取决于 agent 实现（部分 agent 支持进行中注入）。
 
-### 7.3 Agent 发现与接入方式
+### 7.3 ACP server 发现与接入方式
 
 ACP 接入方式分两类：
 
-- **ACP 原生**：agent 自带 ACP 服务器（如 `kimi acp`）
-- **ACP 包装器**：agentclientprotocol 官方包装器，把不支持 ACP 的 CLI 暴露为 ACP 服务器；server 经 **npx 直接运行**（`npx -y @agentclientprotocol/codex-acp` 等），无需手动安装
+- **ACP 原生**：agent 原生支持 ACP，自带 ACP server（如 `kimi acp`）
+- **adapter**：agent 不支持 ACP 时，经 **adapter**（适配器）把 agent CLI 暴露为 ACP server，间接支持 ACP
 
 **每个 agent 的发现方式**：
 
 | agent | 发现方式 | 接入 |
 |---|---|---|
-| kimi | PATH 上 `kimi` CLI 的 `acp` 子命令探测（`kimi acp --help` 命中） | ACP 原生（`kimi acp`） |
-| claude | 本机装有 `claude` CLI 且 npx 可用 → server 启动 `npx -y @agentclientprotocol/claude-agent-acp`，harness 名映射为 `claude` | ACP 包装器 |
-| codex | 本机装有 `codex` CLI 且 npx 可用 → server 启动 `npx -y @agentclientprotocol/codex-acp`，harness 名映射为 `codex` | ACP 包装器 |
+| kimi | PATH 上 `kimi` CLI 的 `acp` 子命令探测（`kimi acp --help` 命中） | 原生（`kimi acp`） |
+| claude | 本机装有 `claude` CLI 且 npx 可用 → server 启动 `npx -y @agentclientprotocol/claude-agent-acp`，harness 名映射为 `claude` | adapter |
+| codex | 本机装有 `codex` CLI 且 npx 可用 → server 启动 `npx -y @agentclientprotocol/codex-acp`，harness 名映射为 `codex` | adapter |
 
-- 前置：server 所在机器需 node/npm（npx）；npx 首次运行会按需下载包装器（需要网络）
-- 认证（登录 / API key）由各包装器/CLI 自身管理，server 继承环境
-- 包装器按需懒加载：首次实际连接时才启动（npx 下载），发现阶段仅校验 CLI 与 npx 可用
+- 前置：server 所在机器需 node/npm（npx）；npx 首次运行会按需下载 adapter（需要网络）
+- 认证（登录 / API key）由各 agent / adapter 自身管理，server 继承环境
+- agent 发现并启动：当 server 启动并发现本机 agent，存在则直接拉起。
 
 ## 8. GUI 应用
 
 GUI 应用为单进程桌面应用（跨平台 macOS / Linux / Windows）。
 
-### 8.1 技术栈与异步模型
-
-- **UI 框架**：GPUI executor 承载 UI；WS 连接与 server 事件流经 **tokio** 运行，事件桥接进 GPUI 事件循环。
-
-### 8.2 布局与关键视图
+### 8.1 布局与关键视图
 
 - **布局**：三面板 **Dock 布局**；右侧上下文面板（diff / 会话详情 / 会话活动）展开时**窗口向右扩展**，不压缩中间面板空间，关闭时收回。
 - **对话流**：只展示用户消息与 agent 输出的消息气泡（**Markdown 渲染**）+ 虚拟化列表；输出**实时流式渲染**（增量追加），turn 结束收敛为完整消息；**气泡标注 agent 与所属机器**（`agent@机器`），编排会话气泡标注「编排」。
