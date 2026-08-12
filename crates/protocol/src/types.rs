@@ -428,9 +428,28 @@ pub struct ListAgentSkillsParams {
 
 // ---- 方法结果 ----
 
+/// 会话列表惰性分页参数（docs/DESIGN.md §3.2 / PRD §4.1.1：
+/// 首次只取最近活跃会话，滚动加载更早）。
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSessionsParams {
+    /// 窗口大小（默认 50，实现决策）
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// 独占上界游标：只返回 `last_event_at < before` 的更早一窗（None = 从最近活跃开始）
+    #[serde(default)]
+    pub before: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionsResult {
+    /// 一窗会话（按最近活跃降序）
     pub sessions: Vec<SessionMeta>,
+    /// 是否还有更早的会话（GUI 显示"加载更早"）
+    pub has_more: bool,
+    /// 下一次"加载更早"应传的 before 游标
+    pub next_before: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -439,6 +458,7 @@ pub struct SessionResult {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenSessionResult {
     /// 重放事件（一窗，docs/DESIGN.md §5.2 按需拉取；GUI 应用聚合为对话内容与活动）
     pub events: Vec<PassthroughEvent>,
@@ -589,5 +609,52 @@ mod tests {
         assert_eq!(p.model.as_deref(), Some("gpt-4o"));
         let p: ListAgentSkillsParams = serde_json::from_str(r#"{"harness":"codex"}"#).unwrap();
         assert_eq!(p.harness, "codex");
+    }
+
+    /// 会话列表惰性分页参数（docs/DESIGN.md §3.2 / PRD §4.1.1）：
+    /// 缺省（首次取最近活跃一窗）、limit、before 游标均可解析。
+    #[test]
+    fn list_sessions_params_deserialize() {
+        let p: ListSessionsParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.limit, None);
+        assert_eq!(p.before, None);
+
+        let p: ListSessionsParams =
+            serde_json::from_str(r#"{"limit":20}"#).unwrap();
+        assert_eq!(p.limit, Some(20));
+        assert_eq!(p.before, None);
+
+        let p: ListSessionsParams =
+            serde_json::from_str(r#"{"before":1786512000000}"#).unwrap();
+        assert_eq!(p.before, Some(1786512000000));
+        assert_eq!(p.limit, None);
+
+        let p: ListSessionsParams =
+            serde_json::from_str(r#"{"limit":10,"before":100}"#).unwrap();
+        assert_eq!(p.limit, Some(10));
+        assert_eq!(p.before, Some(100));
+    }
+
+    /// 分页结果序列化为 camelCase（`hasMore`/`nextBefore`，与 SessionMeta 及
+    /// GUI 读取约定一致）；open_session 结果同约定。
+    #[test]
+    fn paging_results_serialize_camel_case() {
+        let res = SessionsResult {
+            sessions: Vec::new(),
+            has_more: true,
+            next_before: Some(42),
+        };
+        let s = serde_json::to_string(&res).unwrap();
+        assert!(s.contains("\"hasMore\":true"), "{s}");
+        assert!(s.contains("\"nextBefore\":42"), "{s}");
+
+        let open = OpenSessionResult {
+            events: Vec::new(),
+            has_more: true,
+            next_before: 7,
+        };
+        let s = serde_json::to_string(&open).unwrap();
+        assert!(s.contains("\"hasMore\":true"), "{s}");
+        assert!(s.contains("\"nextBefore\":7"), "{s}");
     }
 }

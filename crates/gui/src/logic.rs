@@ -1,7 +1,8 @@
-//! GUI 纯逻辑（PRD §4.2 输入 / §3.1 会话排序）：@ 引用解析、附件 → prompt 组装、
-//! 最近活跃排序键。与 GPUI 渲染分离，可单测直驱。
+//! GUI 纯逻辑（PRD §4.2 输入 / §3.1 会话排序 / §4.1.1 会话列表惰性加载）：
+//! @ 引用解析、附件 → prompt 组装、最近活跃排序键、会话列表窗口合并。
+//! 与 GPUI 渲染分离，可单测直驱。
 
-use protocol::ContentBlock;
+use protocol::{ContentBlock, SessionMeta};
 
 /// 输入附件：@ 引用文件/目录、拖拽文件、粘贴图片、语音。
 #[derive(Debug, Clone, PartialEq)]
@@ -133,6 +134,26 @@ pub fn compose_prompt(text: &str, attachments: &[InputAttachment]) -> Vec<Conten
     blocks
 }
 
+/// 把一窗会话并入已加载列表（PRD §4.1.1 惰性加载：首次取最近活跃一窗，滚动加载更早）。
+/// - 首次加载：`existing` 为空 → 窗口即为当前列表
+/// - 追加：更早一窗按序并入（保持最近活跃在前）
+/// - 按 id 去重（并发通知 / 游标边界可能重复）
+/// 返回（合并后的列表, 是否还有更早, 下次 before 游标）。
+pub fn merge_session_window(
+    existing: &[SessionMeta],
+    window: Vec<SessionMeta>,
+    has_more: bool,
+    next_before: Option<u64>,
+) -> (Vec<SessionMeta>, bool, Option<u64>) {
+    let mut out = existing.to_vec();
+    for m in window {
+        if !out.iter().any(|s| s.id == m.id) {
+            out.push(m);
+        }
+    }
+    (out, has_more, next_before)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,8 +244,7 @@ mod tests {
         assert_eq!(blocks.len(), 1);
     }
 
-    /// 拖拽路径与 @ 引用路径走**同一管线**（PRD §4.2）：拖入 → `path_attachment` →
-    /// `compose_prompt` → 文本上下文块；@ 引用解析后同样转为 `path_attachment` →
+    /// 拖拽路径与 @ 引用路径走**同一管线**（PRD §4.2）：拖入 → `path_attachment` →    /// `compose_prompt` → 文本上下文块；@ 引用解析后同样转为 `path_attachment` →
     /// `compose_prompt`。二者产出的**附件内容块一致**。
     #[test]
     fn dropped_path_and_at_reference_share_pipeline() {
@@ -270,5 +290,52 @@ mod tests {
         assert!(text.contains("notes.txt"), "目录附件应列出条目: {text}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn smeta(id: &str, last: u64) -> SessionMeta {
+        SessionMeta {
+            id: id.into(),
+            harness: "codex".into(),
+            cwd: "/tmp".into(),
+            model: None,
+            state: protocol::SessionState::Idle,
+            interrupted: false,
+            title: String::new(),
+            created_at: 1,
+            last_event_at: last,
+        }
+    }
+
+    /// 会话列表惰性加载（PRD §4.1.1）：首次窗口 + 滚动追加 + 按 id 去重。
+    #[test]
+    fn merge_session_window_first_and_append() {
+        // 首次加载（空列表 → 一窗）
+        let window1 = vec![smeta("s3", 300), smeta("s2", 200)];
+        let (list, has_more, next) = merge_session_window(&[], window1, true, Some(200));
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "s3");
+        assert_eq!(list[1].id, "s2");
+        assert!(has_more);
+        assert_eq!(next, Some(200));
+
+        // 滚动加载更早一窗：追加（保持最近活跃在前）
+        let window2 = vec![smeta("s1", 100)];
+        let (list, has_more, next) = merge_session_window(&list, window2, false, None);
+        assert_eq!(
+            list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["s3", "s2", "s1"],
+            "更早一窗应追加在已加载之后（最近活跃在前）"
+        );
+        assert!(!has_more);
+        assert_eq!(next, None);
+
+        // 重复 id 去重（并发通知/游标边界可能重复）
+        let window3 = vec![smeta("s2", 200), smeta("s1", 100), smeta("s0", 50)];
+        let (list, _, _) = merge_session_window(&list, window3, false, None);
+        assert_eq!(
+            list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["s3", "s2", "s1", "s0"],
+            "重复 id 不应重复出现"
+        );
     }
 }

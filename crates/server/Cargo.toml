@@ -16,6 +16,8 @@ futures-util = "0.3"
 # ACP 官方 SDK（docs/DESIGN.md §9）：Client 角色 + schema v1 + AcpAgent stdio 传输
 agent-client-protocol = { version = "1", features = ["unstable"] }
 uuid.workspace = true
+# 会话注册表持久化（docs/DESIGN.md §3.3/§4.3：server 单写者，同步 API）
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[bin]]
 name = "mock_acp"

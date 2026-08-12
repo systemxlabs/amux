@@ -3,16 +3,15 @@
 //! test-server 的端到端测试。
 //!
 //! 行为要点（与协议语义对齐）：
-//! - `session/new` 返回自增的唯一 sessionId（mock_s_1、mock_s_2、…），支持多会话；
-//!   会话注册表（id → cwd）与每会话历史**持久化**到 `<state_file>.json`
-//!   （启动时加载、变更时落盘）——模拟真实 agent 的历史在磁盘、server 重启后经
-//!   `session/list` 恢复的语义（docs/DESIGN.md §4.1）；计数器从已恢复会话继续递增
-//! - `session/prompt` 记录该会话的用户指令与 agent 输出（内存 + 落盘），`session/load`
-//!   全量重放记录的历史（更接近真实 agent 的持久化语义）
+//! - `session/new` 返回自增的唯一 sessionId（mock_s_1、mock_s_2、…），支持多会话
+//! - `session/prompt` 记录该会话的用户指令与 agent 输出（内存），`session/load`
+//!   全量重放记录的历史；`session/resume` 恢复会话（no-op 响应）
 //! - `session/prompt` 先请求权限（期望 server yolo 自动批准），随后 sleep
 //!   `AMUX_MOCK_DELAY_MS`（默认 300ms）再发事件流与响应——保证忙时 prompt
 //!   （-32006）测试有确定性的 busy 窗口
 //! - `skill/list` 返回固定的 skills 列表（PRD §3.3）
+//! - 把收到的**方法名**追加到 `<state_file>.calls`（供测试断言 server 的调用面：
+//!   如 open_session 不触发 `session/load`、resume 幂等只调一次）
 //! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
 
 use std::collections::HashMap;
@@ -42,57 +41,11 @@ fn history() -> &'static std::sync::Mutex<HashMap<String, Vec<Value>>> {
     H.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// 会话注册表：session_id → cwd（与 history 一起持久化）。
+/// 会话注册表：session_id → cwd（内存；session/list 用）。
 fn sessions() -> &'static std::sync::Mutex<HashMap<String, String>> {
     use std::sync::OnceLock;
     static S: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
     S.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-/// 持久化状态（会话注册表 + 每会话历史），落盘到 `<state_file>.json`。
-#[derive(Serialize, Deserialize)]
-struct MockState {
-    sessions: HashMap<String, String>,
-    history: HashMap<String, Vec<Value>>,
-}
-
-fn history_file(state_file: &str) -> std::path::PathBuf {
-    std::path::Path::new(state_file).with_extension("json")
-}
-
-/// 启动时从磁盘加载会话注册表与历史（模拟 agent 历史在磁盘，server 重启后仍可恢复）。
-fn load_state(state_file: &str) {
-    let Ok(raw) = std::fs::read_to_string(history_file(state_file)) else {
-        return;
-    };
-    let Ok(st) = serde_json::from_str::<MockState>(&raw) else {
-        return;
-    };
-    *sessions().lock().unwrap() = st.sessions;
-    *history().lock().unwrap() = st.history;
-    // 计数器从已恢复会话的最大序号继续（避免重启后 session/new 撞 id）
-    let max_n = sessions()
-        .lock()
-        .unwrap()
-        .keys()
-        .filter_map(|k| k.strip_prefix("mock_s_").and_then(|n| n.parse::<u64>().ok()))
-        .max()
-        .unwrap_or(0);
-    if max_n > 0 {
-        SESSION_COUNTER.store(max_n, Ordering::SeqCst);
-    }
-}
-
-/// 每次会话注册表/历史变更后落盘。
-fn save_state(state_file: &str) {
-    let st = MockState {
-        sessions: sessions().lock().unwrap().clone(),
-        history: history().lock().unwrap().clone(),
-    };
-    let Ok(json) = serde_json::to_string_pretty(&st) else {
-        return;
-    };
-    let _ = std::fs::write(history_file(state_file), json);
 }
 
 fn history_len(sid: &str) -> usize {
@@ -109,6 +62,18 @@ fn delay_ms() -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(300)
+}
+
+/// 把收到的 ACP 方法名追加到 `<state_file>.calls`（测试断言 server 调用面）。
+fn record_call(calls_file: &str, method: &str) {
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(calls_file)
+        .map(|mut f| {
+            use std::io::Write;
+            let _ = writeln!(f, "{method}");
+        });
 }
 
 /// 把权限批准（outcome.selected）记录到状态文件（供测试断言 yolo 生效）。
@@ -143,10 +108,15 @@ fn main() -> Result<()> {
 
 async fn run(state_file: &str) -> Result<()> {
     let state_file = state_file.to_string();
-    load_state(&state_file);
-    let state_new = state_file.clone();
+    let calls_file = format!("{state_file}.calls");
+    let calls_new = calls_file.clone();
+    let calls_load = calls_file.clone();
+    let calls_resume = calls_file.clone();
+    let calls_prompt = calls_file.clone();
+    let calls_delete = calls_file.clone();
+    let calls_list = calls_file.clone();
+    let calls_skill = calls_file.clone();
     let state_prompt = state_file.clone();
-    let state_delete = state_file.clone();
     Agent
         .builder()
         .name("mock_acp")
@@ -161,18 +131,21 @@ async fn run(state_file: &str) -> Result<()> {
         )
         .on_receive_request(
             async move |request: NewSessionRequest, responder, _cx| {
+                record_call(&calls_new, "session/new");
                 let n = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
                 let sid = format!("mock_s_{n}");
                 let cwd = request.cwd.to_string_lossy().into_owned();
                 sessions().lock().unwrap().insert(sid.clone(), cwd);
-                save_state(&state_new);
                 responder.respond(NewSessionResponse::new(sid))
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: LoadSessionRequest, responder, cx| {
-                // 全量重放：该会话记录的历史（用户指令 + agent 输出），重放完才响应
+                // 全量重放：该会话记录的历史（用户指令 + agent 输出），重放完才响应。
+                // server 新设计不使用（历史以 server 日志为权威），保留 handler
+                // 以便测试断言「open_session 不触发 session/load」。
+                record_call(&calls_load, "session/load");
                 let sid = request.session_id.to_string();
                 let hist = history().lock().unwrap().get(&sid).cloned().unwrap_or_else(|| {
                     vec![
@@ -206,12 +179,14 @@ async fn run(state_file: &str) -> Result<()> {
         )
         .on_receive_request(
             async move |_request: ResumeSessionRequest, responder, _cx| {
+                record_call(&calls_resume, "session/resume");
                 responder.respond(ResumeSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: PromptRequest, responder, cx| {
+                record_call(&calls_prompt, "session/prompt");
                 // 记录用户指令（先取 id 再锁，避免 json! 内再次锁同一 mutex 死锁）
                 let sid = request.session_id.to_string();
                 let user_text: String = request
@@ -233,7 +208,6 @@ async fn run(state_file: &str) -> Result<()> {
                         "kind": "user",
                         "content": { "type": "text", "text": user_text }
                     }));
-                save_state(&state_prompt);
 
                 // 后台任务承载整个 turn（权限 → busy 窗口 → 事件流 → 响应），
                 // 不阻塞 SDK 事件循环（handler 内 await 会卡住连接）。
@@ -304,8 +278,6 @@ async fn run(state_file: &str) -> Result<()> {
                             "kind": "agent",
                             "content": { "type": "text", "text": "完成！" }
                         }));
-                    // turn 落盘：server 观察到 turn 结束（响应返回）前历史已持久化
-                    save_state(&state_file);
 
                     responder.respond(PromptResponse::new(StopReason::EndTurn))
                 })?;
@@ -321,17 +293,17 @@ async fn run(state_file: &str) -> Result<()> {
         )
         .on_receive_request(
             async move |request: DeleteSessionRequest, responder, _cx| {
+                record_call(&calls_delete, "session/delete");
                 let sid = request.session_id.to_string();
                 sessions().lock().unwrap().remove(&sid);
                 history().lock().unwrap().remove(&sid);
-                save_state(&state_delete);
                 responder.respond(DeleteSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |_request: ListSessionsRequest, responder, _cx| {
-                // 返回真实会话注册表（含重启前持久化的会话，docs/DESIGN.md §4.1）
+                record_call(&calls_list, "session/list");
                 let s = sessions().lock().unwrap();
                 let infos = s
                     .iter()
@@ -343,6 +315,7 @@ async fn run(state_file: &str) -> Result<()> {
         )
         .on_receive_request(
             async move |_request: SkillListRequest, responder, _cx| {
+                record_call(&calls_skill, "skill/list");
                 responder.respond(json!({
                     "skills": [
                         { "name": "web-browser" },

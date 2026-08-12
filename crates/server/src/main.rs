@@ -4,6 +4,8 @@
 mod agent;
 mod config;
 mod git;
+mod history;
+mod registry;
 mod rpc;
 mod session;
 mod transport;
@@ -13,6 +15,7 @@ use std::sync::Arc;
 use crate::agent::{AcpAgentDriver, AgentRegistry, SharedDriver};
 use crate::config::load_config;
 use crate::git::GitRunner;
+use crate::registry::SessionRegistry;
 use crate::rpc::Handlers;
 use crate::session::SessionManager;
 use crate::transport::{Transport, TransportOptions};
@@ -70,11 +73,18 @@ async fn main() {
         cfg.data_dir.join("agent-models.json"),
     ));
 
-    let (manager, notifications) = SessionManager::new(agents);
+    // 会话注册表（SQLite，docs/DESIGN.md §4.3）：列表与历史权威 = server；
+    // 重启后会话列表从本地库恢复（不依赖 ACP `session/list`，§4.1）。
+    let registry = match SessionRegistry::open(&cfg.data_dir.join("amux.db")) {
+        Ok(r) => Arc::new(r),
+        Err(e) => {
+            eprintln!("打开会话注册表失败: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let (manager, notifications) = SessionManager::new(agents, registry, cfg.data_dir.clone());
     let manager = Arc::new(manager);
-    // 重启恢复（docs/DESIGN.md §4.1）：经 ACP `session/list` 从 agent 侧恢复会话列表。
-    // server 无持久化状态；agent 子进程在注册表/上面的 --agent 路径已随注册表惰性/显式拉起。
-    manager.recover().await;
 
     let handlers = Arc::new(Handlers {
         manager: manager.clone(),

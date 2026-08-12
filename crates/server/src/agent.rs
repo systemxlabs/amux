@@ -13,14 +13,14 @@
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨 runtime
 //! 嵌套的 tokio 问题（调用方可能处于任意 tokio runtime 上下文）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock as AcpContentBlock, DeleteSessionRequest, InitializeRequest,
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent, ToolKind,
+    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification,
+    SessionUpdate, TextContent, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{
@@ -93,24 +93,13 @@ pub fn passthrough_event(ev: AgentEvent, ts: u64) -> PassthroughEvent {
     }
 }
 
-/// ACP `session/list` 返回的单条会话（id + cwd + 可选标题）。
-/// server 重启后从 agent 侧恢复会话列表的数据来源（docs/DESIGN.md §4.1）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListedSession {
-    /// agent 侧会话 id
-    pub agent_session_id: String,
-    /// 会话工作目录（ACP `SessionInfo.cwd`）
-    pub cwd: String,
-    /// agent 自报标题（ACP `SessionInfo.title`，可缺省）
-    pub title: Option<String>,
-}
-
 /// 与单个 agent harness 的驱动接口（ACP v1 语义的投影）。
 pub trait AgentDriver: Send + Sync {
     /// 新建会话，返回 agent 侧会话 id
     fn create_session(&self, cwd: &str, model: Option<&str>) -> Result<String, String>;
-    /// 加载会话（ACP `session/load` 全量重放；返回透传事件，GUI 聚合）
-    fn load_session(&self, agent_session_id: &str) -> Result<Vec<PassthroughEvent>, String>;
+    /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史；
+    /// 同一进程内对同一会话幂等——已恢复过则直接成功）
+    fn resume_session(&self, agent_session_id: &str, cwd: &str) -> Result<(), String>;
     /// 发送 prompt，返回事件流（阻塞直到 turn 结束）
     fn prompt(
         &self,
@@ -121,20 +110,9 @@ pub trait AgentDriver: Send + Sync {
     fn cancel(&self, agent_session_id: &str) -> Result<(), String>;
     /// 删除会话（历史一并移除）
     fn delete(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 列出 agent 侧全部会话（server 重启后从 agent 恢复会话列表，docs/DESIGN.md §4.1）
-    #[allow(dead_code)]
-    fn list_sessions(&self) -> Vec<ListedSession>;
     /// 该 agent 安装的 skills 列表（PRD §3.3；agent 不支持时返回空列表）
     #[allow(dead_code)]
     fn list_skills(&self) -> Vec<String>;
-}
-
-/// 当前时间戳（毫秒）。
-pub fn now_ts() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 #[allow(dead_code)]
@@ -371,14 +349,6 @@ impl AgentRegistry {
     }
 }
 
-/// 是否为 agent 内部的系统提醒（非真实用户消息）。
-/// 典型内容：turn 被取消后追加的 "The previous turn was interrupted by the user
-/// before completion; ..."，且通常以 `<system-reminder>` 包裹（kimi 等实现）。
-fn is_internal_reminder(s: &str) -> bool {
-    let t = s.trim_start();
-    t.starts_with("<system-reminder>") || s.contains("interrupted by the user before completion")
-}
-
 fn load_models(path: &std::path::Path) -> HashMap<String, Option<String>> {
     std::fs::read_to_string(path)
         .ok()
@@ -510,10 +480,13 @@ enum ExecReq {
 /// ACP v1 客户端（官方 SDK stdio 传输，docs/DESIGN.md §9）。
 pub struct AcpAgentDriver {
     exec_tx: std::sync::mpsc::SyncSender<ExecReq>,
-    /// 会话事件路由：agent sessionId -> prompt/load 的事件接收端
+    /// 会话事件路由：agent sessionId -> prompt 的事件接收端
     routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
-    /// create 时记录的会话 cwd（load/resume 需要）
+    /// create 时记录的会话 cwd（resume 需要）
     cwds: Arc<Mutex<HashMap<String, String>>>,
+    /// 本进程内已 resume 过的会话（server 重启后从注册表恢复的会话首次交互前
+    /// 经 ACP `session/resume` 恢复 agent 上下文，docs/DESIGN.md §7.2）
+    resumed: Arc<Mutex<HashSet<String>>>,
     /// exec 线程句柄（连接由 SDK 管理，线程结束即子进程清理）
     _thread: std::thread::JoinHandle<()>,
 }
@@ -540,6 +513,7 @@ impl AcpAgentDriver {
             exec_tx,
             routes,
             cwds: Arc::new(Mutex::new(HashMap::new())),
+            resumed: Arc::new(Mutex::new(HashSet::new())),
             _thread: thread,
         })
     }
@@ -570,47 +544,32 @@ impl AgentDriver for AcpAgentDriver {
             .lock()
             .unwrap()
             .insert(sid.clone(), cwd.to_string());
+        // 新会话 agent 已在内存中持有，无需 resume
+        self.resumed.lock().unwrap().insert(sid.clone());
         Ok(sid)
     }
 
-    fn load_session(&self, agent_session_id: &str) -> Result<Vec<PassthroughEvent>, String> {
-        let cwd = self
-            .cwds
-            .lock()
-            .unwrap()
-            .get(agent_session_id)
-            .cloned()
-            .unwrap_or_else(|| "/tmp".into());
-        let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
-        self.routes
-            .lock()
-            .unwrap()
-            .insert(agent_session_id.to_string(), tx);
-        let res = self.call(
-            "session/load",
-            json!({ "sessionId": agent_session_id, "cwd": cwd, "mcpServers": [] }),
-        );
-        let mut events = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            match ev {
-                AgentEvent::UserMessage(s) => {
-                    // 过滤 agent 内部提醒：turn 被取消后 agent 会往会话历史追加一条
-                    // 系统提示（"The previous turn was interrupted by the user..."），
-                    // 不是真实用户消息，展示出来会污染会话历史（docs/DESIGN.md §5）
-                    if is_internal_reminder(&s) {
-                        continue;
-                    }
-                    events.push(passthrough_event(AgentEvent::UserMessage(s), now_ts()));
-                }
-                AgentEvent::TurnEnded => break,
-                _ => events.push(passthrough_event(ev, now_ts())),
+    /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史——
+    /// 历史以 server 本地日志为权威，docs/DESIGN.md §7.2/§5.2）。
+    /// 同一进程内对同一会话幂等（已恢复过则直接成功）。
+    fn resume_session(&self, agent_session_id: &str, cwd: &str) -> Result<(), String> {
+        {
+            let mut resumed = self.resumed.lock().unwrap();
+            if resumed.contains(agent_session_id) {
+                return Ok(());
             }
+            // 提前插入：并发 prompt 场景只发起一次 resume
+            resumed.insert(agent_session_id.to_string());
         }
-        self.routes
+        self.cwds
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .remove(agent_session_id);
-        res.map(|_| events)
+            .unwrap()
+            .insert(agent_session_id.to_string(), cwd.to_string());
+        self.call(
+            "session/resume",
+            json!({ "sessionId": agent_session_id, "cwd": cwd, "mcpServers": [] }),
+        )
+        .map(|_| ())
     }
 
     fn prompt(
@@ -642,39 +601,12 @@ impl AgentDriver for AcpAgentDriver {
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .remove(agent_session_id);
+        self.resumed
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .remove(agent_session_id);
         self.call("session/delete", json!({ "sessionId": agent_session_id }))
             .map(|_| ())
-    }
-
-    fn list_sessions(&self) -> Vec<ListedSession> {
-        match self.call("session/list", json!({})) {
-            Ok(res) => res
-                .get("sessions")
-                .and_then(|s| s.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| {
-                            let agent_session_id = s.get("id").and_then(|v| v.as_str())?.to_string();
-                            let cwd = s
-                                .get("cwd")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let title = s
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string);
-                            Some(ListedSession {
-                                agent_session_id,
-                                cwd,
-                                title,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
     }
 
     /// 经 ACP `skill/list` 查询该 agent 安装的 skills（agent 不支持时返回空列表）。
@@ -886,12 +818,12 @@ async fn dispatch_call_inner(
                 .map_err(|e| format!("session/new 失败: {e}"))?;
             Ok(json!({ "sessionId": resp.session_id }))
         }
-        "session/load" => {
+        "session/resume" => {
             let cwd = params.get("cwd").and_then(|c| c.as_str()).unwrap_or("/tmp");
-            cx.send_request(LoadSessionRequest::new(sid.to_string(), cwd))
+            cx.send_request(ResumeSessionRequest::new(sid.to_string(), cwd))
                 .block_task()
                 .await
-                .map_err(|e| format!("session/load 失败: {e}"))?;
+                .map_err(|e| format!("session/resume 失败: {e}"))?;
             Ok(Value::Null)
         }
         "session/cancel" => {
@@ -905,25 +837,6 @@ async fn dispatch_call_inner(
                 .await
                 .map_err(|e| format!("session/delete 失败: {e}"))?;
             Ok(Value::Null)
-        }
-        "session/list" => {
-            let resp = cx
-                .send_request(ListSessionsRequest::new())
-                .block_task()
-                .await
-                .map_err(|e| format!("session/list 失败: {e}"))?;
-            let sessions = resp
-                .sessions
-                .into_iter()
-                .map(|s| {
-                    json!({
-                        "id": s.session_id,
-                        "cwd": s.cwd,
-                        "title": s.title,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(json!({ "sessions": sessions }))
         }
         "skill/list" => {
             let resp = cx
@@ -1011,7 +924,7 @@ fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
 // ---- 内存 Stub（演示/无需 agent 的测试）----
 
 pub struct StubAgentDriver {
-    sessions: std::sync::Mutex<Vec<ListedSession>>,
+    sessions: std::sync::Mutex<Vec<String>>,
     pub output_prefix: String,
 }
 
@@ -1028,16 +941,15 @@ impl StubAgentDriver {
 impl AgentDriver for StubAgentDriver {
     fn create_session(&self, cwd: &str, _model: Option<&str>) -> Result<String, String> {
         let id = format!("agent_{}", cwd.replace('/', "_"));
-        self.sessions.lock().expect("Mutex 中毒（临界区内不应 panic）").push(ListedSession {
-            agent_session_id: id.clone(),
-            cwd: cwd.to_string(),
-            title: None,
-        });
+        self.sessions
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .push(id.clone());
         Ok(id)
     }
 
-    fn load_session(&self, _agent_session_id: &str) -> Result<Vec<PassthroughEvent>, String> {
-        Ok(Vec::new())
+    fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
+        Ok(())
     }
 
     fn prompt(
@@ -1074,15 +986,8 @@ impl AgentDriver for StubAgentDriver {
         self.sessions
             .lock()
             .unwrap()
-            .retain(|s| s.agent_session_id != agent_session_id);
+            .retain(|s| s != agent_session_id);
         Ok(())
-    }
-
-    fn list_sessions(&self) -> Vec<ListedSession> {
-        self.sessions
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .clone()
     }
 
     fn list_skills(&self) -> Vec<String> {
@@ -1193,21 +1098,6 @@ mod tests {
             .try_recv()
             .expect("session_info_update 应产生 SessionInfo 事件");
         assert!(matches!(ev, AgentEvent::SessionInfo { state: None }));
-    }
-
-    /// agent 内部提醒（turn 取消后的中断提示）应被识别并过滤，不污染会话历史。
-    #[test]
-    fn internal_reminder_detected() {
-        assert!(is_internal_reminder(
-            "<system-reminder>\nThe previous turn was interrupted by the user before \
-             completion; any partial output shown above is incomplete. The user's next \
-             message continues the conversation.\n</system-reminder>"
-        ));
-        assert!(is_internal_reminder(
-            "The previous turn was interrupted by the user before completion; ..."
-        ));
-        assert!(!is_internal_reminder("请安装/更新以下 skill：OpenCLI"));
-        assert!(!is_internal_reminder("好的，我来分析一下这个问题。"));
     }
 
     /// 自动发现：`acp` 子命令探测逻辑（输出含 acp 才算支持）。

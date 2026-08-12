@@ -1,24 +1,27 @@
-//! 会话管理（docs/DESIGN.md §6）：会话注册表、事件透传（§5.1 server 不聚合，
-//! GUI 应用负责收敛/合并/派生）、通知广播、prompt 串行化。
-//! 历史权威在 agent 侧；server 不保存对话历史，仅维护会话元数据（含列表状态）。
+//! 会话管理（docs/DESIGN.md §3.2/§4/§5）：会话列表与历史权威 = server。
+//! - 会话注册表持久化于 SQLite（`amux.db`），列表由 server 维护（不依赖 ACP `session/list`）
+//! - 事件透传（§5.1）与历史合并落库（§5.2）：透传逐条给 GUI，落库按 turn 合并
+//! - `open_session` 从本地历史日志按窗口/游标读取，不触发 ACP 重放
 
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 
 use protocol::{
     generate_title, ContentBlock, HarnessInfo, PassthroughEvent, SessionMeta, SessionState,
 };
 
-use crate::agent::{passthrough_event, AgentEvent, AgentRegistry, ListedSession, SharedDriver};
+use crate::agent::{passthrough_event, AgentEvent, AgentRegistry};
+use crate::history::SessionLog;
+use crate::registry::{RegistryEntry, SessionRegistry};
 
 /// server → GUI 通知（docs/DESIGN.md §4/§5）。
 #[derive(Debug, Clone)]
 pub enum ServerNotification {
     SessionCreated(SessionMeta),
-    /// 崩溃恢复标记（重启后忙状态会话标 interrupted，docs/DESIGN.md §3）
+    /// 崩溃恢复标记（保留枚举位；当前无恢复语义，恒不触发）
     #[allow(dead_code)]
     SessionInterrupted(SessionMeta),
     SessionDeleted(SessionMeta),
@@ -31,15 +34,10 @@ pub enum ServerNotification {
     },
 }
 
-struct SessionRecord {
-    meta: SessionMeta,
-    agent_session_id: String,
-    driver: SharedDriver,
-}
-
 pub struct SessionManager {
     agents: Arc<AgentRegistry>,
-    registry: Mutex<HashMap<String, SessionRecord>>,
+    registry: Arc<SessionRegistry>,
+    history_dir: PathBuf,
     tx: broadcast::Sender<ServerNotification>,
 }
 
@@ -51,68 +49,42 @@ fn now() -> u64 {
 }
 
 impl SessionManager {
-    pub fn new(agents: Arc<AgentRegistry>) -> (Self, broadcast::Receiver<ServerNotification>) {
+    /// `history_dir`：历史日志目录（server 数据目录，docs/DESIGN.md §4.3）。
+    pub fn new(
+        agents: Arc<AgentRegistry>,
+        registry: Arc<SessionRegistry>,
+        history_dir: PathBuf,
+    ) -> (Self, broadcast::Receiver<ServerNotification>) {
         let (tx, rx) = broadcast::channel(256);
         let manager = SessionManager {
             agents,
-            registry: Mutex::new(HashMap::new()),
+            registry,
+            history_dir,
             tx,
         };
         (manager, rx)
     }
 
-    /// 重启恢复（docs/DESIGN.md §4.1）：server 无持久化状态（历史在 agent 侧、配置可重建），
-    /// 重启后重新 spawn agent 子进程，会话列表经 ACP `session/list` 从 agent 侧恢复。
-    /// 对每个可用 harness 驱动调用 `list_sessions()` 并把结果重建为注册表条目。
-    ///
-    /// agent 无法恢复的字段用保守默认：状态 idle（忙/闲由 GUI 应用从透传事件派生，
-    /// 重连时经会话列表 meta.state 补齐，docs/DESIGN.md §5.1）、非 interrupted；
-    /// 标题取 ACP `SessionInfo.title`（可缺省为空串，首条 prompt 时自动生成）。
-    /// 仅启动期调用一次（driver 方法内部为同步往返，启动期阻塞可接受）。
-    pub async fn recover(&self) {
-        for h in self.agents.harnesses() {
-            if !h.available {
-                continue;
-            }
-            let Ok(driver) = self.agents.driver_for(&h.name) else {
-                continue;
-            };
-            let listed = driver.list_sessions();
-            if listed.is_empty() {
-                continue;
-            }
-            let ts = now();
-            let mut reg = self.registry.lock().await;
-            for s in listed {
-                if s.agent_session_id.is_empty() {
-                    continue;
-                }
-                // 按 agent 会话 id 去重（重复调用 recover 不产生重复条目）
-                if reg
-                    .values()
-                    .any(|r| r.agent_session_id == s.agent_session_id)
-                {
-                    continue;
-                }
-                let meta = recovered_meta(&h.name, &s, ts);
-                protocol::log::info(
-                    "server.session",
-                    format!(
-                        "恢复会话 {}（harness={} cwd={} agent={}）",
-                        meta.id, h.name, meta.cwd, s.agent_session_id
-                    ),
-                );
-                reg.insert(
-                    meta.id.clone(),
-                    SessionRecord {
-                        meta: meta.clone(),
-                        agent_session_id: s.agent_session_id,
-                        driver: driver.clone(),
-                    },
-                );
-                let _ = self.tx.send(ServerNotification::SessionCreated(meta));
-            }
-        }
+    /// 会话列表惰性分页（纯函数，可单测；docs/DESIGN.md §3.2 / PRD §4.1.1）：
+    /// `all` 已按最近活跃（`last_event_at` 降序）；`before` 为独占上界游标
+    /// （只取 `last_event_at < before` 的更早会话）。返回（窗口, 是否还有更早, 下次游标）。
+    pub fn session_page(
+        all: &[RegistryEntry],
+        limit: usize,
+        before: Option<u64>,
+    ) -> (Vec<RegistryEntry>, bool, Option<u64>) {
+        let filtered: Vec<&RegistryEntry> = all
+            .iter()
+            .filter(|(m, _)| before.map(|b| m.last_event_at < b).unwrap_or(true))
+            .collect();
+        let window: Vec<RegistryEntry> = filtered.iter().take(limit).map(|e| (*e).clone()).collect();
+        let has_more = filtered.len() > limit;
+        let next_before = if has_more {
+            window.last().map(|(m, _)| m.last_event_at)
+        } else {
+            None
+        };
+        (window, has_more, next_before)
     }
 
     // ---- 机器信息 ----
@@ -156,14 +128,9 @@ impl SessionManager {
             created_at: now(),
             last_event_at: now(),
         };
-        self.registry.lock().await.insert(
-            meta.id.clone(),
-            SessionRecord {
-                meta: meta.clone(),
-                agent_session_id,
-                driver,
-            },
-        );
+        self.registry
+            .upsert(&meta, &agent_session_id)
+            .map_err(|e| format!("注册表写入失败: {e}"))?;
         let _ = self
             .tx
             .send(ServerNotification::SessionCreated(meta.clone()));
@@ -171,14 +138,19 @@ impl SessionManager {
     }
 
     pub async fn delete(&self, session_id: &str) -> Result<(), String> {
-        // 先取并移除注册表条目（释放锁），再删 activities——统一锁序避免死锁
-        let rec = {
-            let mut reg = self.registry.lock().await;
-            reg.remove(session_id)
-                .ok_or_else(|| format!("会话不存在: {session_id}"))?
-        };
-        rec.driver.delete(&rec.agent_session_id)?;
-        let meta = rec.meta;
+        let entry = self
+            .registry
+            .get(session_id)
+            .map_err(|e| format!("注册表读取失败: {e}"))?
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        let (meta, agent_session_id) = entry;
+        let driver = self.agents.driver_for(&meta.harness)?;
+        driver.delete(&agent_session_id)?;
+        // 联动：注册表条目 + 历史日志 + agent 侧 ACP 会话（docs/DESIGN.md §5.2）
+        self.registry
+            .delete(session_id)
+            .map_err(|e| format!("注册表删除失败: {e}"))?;
+        SessionLog::open(&self.history_dir, session_id).remove();
         protocol::log::info("server.session", format!("删除会话 {session_id}"));
         let _ = self.tx.send(ServerNotification::SessionDeleted(meta));
         Ok(())
@@ -186,50 +158,52 @@ impl SessionManager {
 
     /// 修改会话标题（用户可随时修改，PRD §3.1）；广播 session_updated 同步各 GUI。
     pub async fn set_session_title(&self, session_id: &str, title: &str) -> Result<(), String> {
-        let meta = {
-            let mut reg = self.registry.lock().await;
-            let rec = reg
-                .get_mut(session_id)
-                .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-            rec.meta.title = title.trim().to_string();
-            rec.meta.last_event_at = now();
-            rec.meta.clone()
-        };
+        let ts = now();
+        self.registry
+            .set_title(session_id, title.trim(), ts)
+            .map_err(|e| format!("注册表更新失败: {e}"))?;
+        let meta = self
+            .registry
+            .get(session_id)
+            .map_err(|e| format!("注册表读取失败: {e}"))?
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?
+            .0;
         let _ = self.tx.send(ServerNotification::SessionUpdated(meta));
         Ok(())
     }
 
-    pub async fn list(&self) -> Vec<SessionMeta> {
-        let mut metas: Vec<SessionMeta> = self
+    /// 惰性分页列表（docs/DESIGN.md §3.2 / PRD §4.1.1）：首次只取最近活跃一窗，
+    /// `before` 游标滚动加载更早。
+    pub async fn list(
+        &self,
+        limit: Option<usize>,
+        before: Option<u64>,
+    ) -> Result<(Vec<SessionMeta>, bool, Option<u64>), String> {
+        let all = self
             .registry
-            .lock()
-            .await
-            .values()
-            .map(|r| r.meta.clone())
-            .collect();
-        metas.sort_by_key(|m| std::cmp::Reverse(m.created_at));
-        metas
+            .list()
+            .map_err(|e| format!("注册表读取失败: {e}"))?;
+        let (window, has_more, next_before) =
+            Self::session_page(&all, limit.unwrap_or(50), before);
+        let metas = window.into_iter().map(|(m, _)| m).collect();
+        Ok((metas, has_more, next_before))
     }
 
     // ---- 会话数据（docs/DESIGN.md §5）----
 
-    /// 打开会话：经 driver 的 `session/load` 全量重放，返回**透传事件**（GUI 应用聚合，
-    /// docs/DESIGN.md §5.1/§5.2）。惰性加载：默认返回最新一窗（`limit` 条），
-    /// `before` 为独占上界游标向上取更早历史。
+    /// 打开会话：从本地历史日志读取（合并条目，按窗口/游标惰性分页），
+    /// **不触发 ACP 重放**（docs/DESIGN.md §5.2）。`before` 为独占上界游标。
     pub async fn open(
         &self,
         session_id: &str,
         limit: Option<usize>,
         before: Option<usize>,
     ) -> Result<(Vec<PassthroughEvent>, bool, usize), String> {
-        let (driver, agent_session_id) = {
-            let reg = self.registry.lock().await;
-            let rec = reg
-                .get(session_id)
-                .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-            (rec.driver.clone(), rec.agent_session_id.clone())
-        };
-        let events = driver.load_session(&agent_session_id)?;
+        self.registry
+            .get(session_id)
+            .map_err(|e| format!("注册表读取失败: {e}"))?
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        let events = SessionLog::open(&self.history_dir, session_id).read();
         let limit = limit.unwrap_or(200);
         let (start, end, has_more) = Self::window_items(events.len(), limit, before);
         let slice = events[start..end].to_vec();
@@ -245,34 +219,35 @@ impl SessionManager {
 
     // ---- 交互 ----
 
-    /// prompt：经 driver 触发 turn，聚合事件为完整输出 + activities（非流式交付）。
-    /// 忙时 prompt（steer）依赖 agent 实现；当前 agent 不支持进行中注入时直接报错
-    /// （docs/DESIGN.md §9：不排队、不静默降级）。
-    /// 首条 prompt 时为会话生成默认标题（PRD §3.1：由首条指令/目标自动生成简短摘要）。
+    /// prompt：经 driver 触发 turn；透传事件逐条给 GUI（§5.1），同时按 turn 缓冲，
+    /// 收到 result（turn 结束，含取消）时按 §5.3 语义合并落库（§5.2）。
+    /// 忙时 prompt（steer）依赖 agent 实现；不支持进行中注入时直接报错（§7.1）。
+    /// 首条 prompt 时为会话生成默认标题（PRD §3.1）。
     pub async fn prompt(&self, session_id: &str, input: Vec<ContentBlock>) -> Result<(), String> {
-        // 忙检查 + Busy 状态在同一次加锁内完成（原子），避免并发 prompt 竞态
-        let (driver, agent_session_id, title_changed) = {
-            let mut reg = self.registry.lock().await;
-            let rec = reg
-                .get_mut(session_id)
+        // 忙检查 + 标题生成 + Busy 状态一次完成（注册表为同步写，天然原子）
+        let (driver, agent_session_id, cwd, title_changed) = {
+            let (mut meta, agent_session_id) = self
+                .registry
+                .get(session_id)
+                .map_err(|e| format!("注册表读取失败: {e}"))?
                 .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-            if rec.meta.state == SessionState::Busy {
+            if meta.state == SessionState::Busy {
                 return Err("会话忙：agent 不支持进行中注入（steer），请等待当前工作结束".into());
             }
-            let title_changed = if rec.meta.title.is_empty() {
-                let t = first_text(&input);
-                rec.meta.title = generate_title(&t);
+            let title_changed = if meta.title.is_empty() {
+                meta.title = generate_title(&first_text(&input));
                 true
             } else {
                 false
             };
-            rec.meta.state = SessionState::Busy;
-            rec.meta.last_event_at = now();
-            (
-                rec.driver.clone(),
-                rec.agent_session_id.clone(),
-                title_changed,
-            )
+            meta.state = SessionState::Busy;
+            meta.last_event_at = now();
+            self.registry
+                .upsert(&meta, &agent_session_id)
+                .map_err(|e| format!("注册表写入失败: {e}"))?;
+            let driver = self.agents.driver_for(&meta.harness)?;
+            let cwd = meta.cwd.clone();
+            (driver, agent_session_id, cwd, title_changed)
         };
         let summary: String = first_text(&input).chars().take(60).collect::<String>()
             + if first_text(&input).chars().count() > 60 {
@@ -285,61 +260,86 @@ impl SessionManager {
             "server.session",
             format!("prompt 开始 {session_id}（agent={agent_session_id}）：{summary}"),
         );
-        let meta = if title_changed {
-            self.registry
-                .lock()
-                .await
+        if title_changed {
+            let meta = self
+                .registry
                 .get(session_id)
-                .map(|r| r.meta.clone())
-        } else {
-            None
-        };
-        if let Some(m) = meta {
-            let _ = self.tx.send(ServerNotification::SessionUpdated(m));
+                .ok()
+                .flatten()
+                .map(|(m, _)| m);
+            if let Some(m) = meta {
+                let _ = self.tx.send(ServerNotification::SessionUpdated(m));
+            }
         }
 
-        // turn 开始（透传边界）+ 用户消息回显 + 列表状态标记（不推送状态通知，
-        // busy/idle 由 GUI 应用从透传事件派生，docs/DESIGN.md §5.1）
+        // turn 开始（透传边界）+ 用户消息回显（透传；GUI 本地渲染，§7.1）
         let ts = now();
-        let _ = self.tx.send(ServerNotification::Passthrough {
-            session_id: session_id.to_string(),
-            event: PassthroughEvent::TurnStarted { timestamp: ts },
-        });
-        let _ = self.tx.send(ServerNotification::Passthrough {
-            session_id: session_id.to_string(),
-            event: PassthroughEvent::UserMessage {
-                content: input.clone(),
-                timestamp: ts,
-            },
-        });
+        let mut merger = crate::history::TurnMerger::new();
+        let mut forward = |tx: &broadcast::Sender<ServerNotification>,
+                           session_id: &str,
+                           event: PassthroughEvent|
+         -> PassthroughEvent {
+            merger.push(&event);
+            let _ = tx.send(ServerNotification::Passthrough {
+                session_id: session_id.to_string(),
+                event: event.clone(),
+            });
+            event
+        };
+        let turn_started = PassthroughEvent::TurnStarted { timestamp: ts };
+        forward(&self.tx, session_id, turn_started);
+        let echo = PassthroughEvent::UserMessage {
+            content: input.clone(),
+            timestamp: ts,
+        };
+        forward(&self.tx, session_id, echo);
         self.update_state(session_id, SessionState::Busy).await;
 
-        // 事件逐条透传（不聚合输出、不合并活动、不缓存）：GUI 应用负责收敛/合并/派生
+        // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文
+        // （docs/DESIGN.md §7.2；同一进程内幂等）
+        if let Err(e) = driver.resume_session(&agent_session_id, &cwd) {
+            protocol::log::error("server.session", format!("resume 失败 {session_id}: {e}"));
+            self.update_state(session_id, SessionState::Idle).await;
+            return Err(format!("恢复 agent 上下文失败: {e}"));
+        }
+
+        // 事件逐条透传（GUI 实时渲染），同时喂合并器（§5.2 按 turn 合并落库）
+        let mut turn_completed = false;
         let mut rx = driver.prompt(&agent_session_id, input);
         while let Some(ev) = rx.recv().await {
             match ev {
                 AgentEvent::UserMessage(_) => {
                     // 回显：server 已发用户消息透传事件，此处忽略
                 }
-                AgentEvent::TurnEnded => break,
+                AgentEvent::TurnEnded => {
+                    turn_completed = true;
+                    break;
+                }
                 _ => {
-                    let _ = self.tx.send(ServerNotification::Passthrough {
-                        session_id: session_id.to_string(),
-                        event: passthrough_event(ev, now()),
-                    });
+                    forward(&self.tx, session_id, passthrough_event(ev, now()));
                 }
             }
         }
-        // turn 结束（透传边界 + 列表状态标记）
+
+        // turn 结束（透传边界；收到 result 时合并落库，docs/DESIGN.md §5.2）
+        let turn_ended = PassthroughEvent::TurnEnded { timestamp: now() };
+        merger.push(&turn_ended);
         let _ = self.tx.send(ServerNotification::Passthrough {
             session_id: session_id.to_string(),
-            event: PassthroughEvent::TurnEnded { timestamp: now() },
+            event: turn_ended,
         });
+        if turn_completed {
+            let merged = merger.finalize();
+            let log = SessionLog::open(&self.history_dir, session_id);
+            if let Err(e) = log.append(&merged) {
+                protocol::log::error("server.session", format!("历史落盘失败 {session_id}: {e}"));
+            }
+        }
         self.update_state(session_id, SessionState::Idle).await;
         protocol::log::info(
             "server.session",
             format!(
-                "prompt 完成 {session_id}（{}ms）",
+                "prompt 完成 {session_id}（{}ms，turn_completed={turn_completed}）",
                 started.elapsed().as_millis()
             ),
         );
@@ -347,13 +347,12 @@ impl SessionManager {
     }
 
     pub async fn cancel(&self, session_id: &str) -> Result<(), String> {
-        let (driver, agent_session_id) = {
-            let reg = self.registry.lock().await;
-            let rec = reg
-                .get(session_id)
-                .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-            (rec.driver.clone(), rec.agent_session_id.clone())
-        };
+        let (meta, agent_session_id) = self
+            .registry
+            .get(session_id)
+            .map_err(|e| format!("注册表读取失败: {e}"))?
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        let driver = self.agents.driver_for(&meta.harness)?;
         protocol::log::info(
             "server.session",
             format!("取消 {session_id}（agent={agent_session_id}）"),
@@ -365,14 +364,12 @@ impl SessionManager {
         r
     }
 
-    /// 更新会话列表的状态字段（不推送状态通知；busy/idle 由 GUI 应用从透传事件派生，
-    /// 重连时经会话列表 meta.state 补齐，docs/DESIGN.md §5.1）。
+    /// 更新会话列表的状态字段（busy/idle 由 GUI 应用从透传事件派生，重连经
+    /// 列表 meta.state 补齐，docs/DESIGN.md §5.1）。
     async fn update_state(&self, session_id: &str, state: SessionState) {
-        let mut reg = self.registry.lock().await;
-        if let Some(rec) = reg.get_mut(session_id) {
-            rec.meta.state = state;
-            rec.meta.last_event_at = now();
-        }
+        let _ = self
+            .registry
+            .update_state(session_id, state, now());
     }
 }
 
@@ -387,27 +384,12 @@ fn first_text(input: &[ContentBlock]) -> String {
         .unwrap_or_default()
 }
 
-/// 把 ACP `session/list` 的单条结果映射为恢复会话的元数据（docs/DESIGN.md §4.1）。
-/// 纯函数，可单测。server 侧会话 id 重新颁发（`s_<uuid>`），agent 侧 id 存于注册表；
-/// agent 无法恢复的字段用保守默认（空标题/空模型/idle/非 interrupted）。
-pub fn recovered_meta(harness: &str, s: &ListedSession, ts: u64) -> SessionMeta {
-    SessionMeta {
-        id: format!("s_{}", uuid::Uuid::new_v4()),
-        harness: harness.to_string(),
-        cwd: s.cwd.clone(),
-        model: None,
-        state: SessionState::Idle,
-        interrupted: false,
-        title: s.title.clone().unwrap_or_default(),
-        created_at: ts,
-        last_event_at: ts,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::AgentRegistry;
+    use crate::history::SessionLog;
+    use crate::registry::SessionRegistry;
     use protocol::ContentBlock;
     use std::sync::Arc;
 
@@ -417,10 +399,91 @@ mod tests {
         }]
     }
 
-    /// 测试注册表（stub 驱动接受任意 harness 名，忽略本机 PATH 发现）。
+    /// 测试管理器（stub 驱动接受任意 harness 名；独立临时数据目录）。
     fn stub_manager() -> (SessionManager, broadcast::Receiver<ServerNotification>) {
         let agents = Arc::new(AgentRegistry::new_for_tests());
-        SessionManager::new(agents)
+        let dir = std::env::temp_dir().join(format!(
+            "amux-sess-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
+        SessionManager::new(agents, registry, dir)
+    }
+
+    /// 会话列表惰性分页纯函数（docs/DESIGN.md §3.2 / PRD §4.1.1）：
+    /// 按最近活跃降序切窗、before 游标取更早、has_more/next_before 边界。
+    #[test]
+    fn session_page_lazy_windows() {
+        fn entry(id: &str, last: u64) -> RegistryEntry {
+            (
+                SessionMeta {
+                    id: id.into(),
+                    harness: "codex".into(),
+                    cwd: "/tmp".into(),
+                    model: None,
+                    state: SessionState::Idle,
+                    interrupted: false,
+                    title: String::new(),
+                    created_at: 1,
+                    last_event_at: last,
+                },
+                format!("agent_{id}"),
+            )
+        }
+        // 已按最近活跃降序
+        let all = vec![
+            entry("s9", 900),
+            entry("s8", 800),
+            entry("s7", 700),
+            entry("s6", 600),
+            entry("s5", 500),
+            entry("s4", 400),
+        ];
+
+        // 首次一窗（limit=2）：最近活跃在前，has_more，next_before=800（窗口最后一条）
+        let (w, more, nb) = SessionManager::session_page(&all, 2, None);
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].0.id, "s9");
+        assert_eq!(w[1].0.id, "s8");
+        assert!(more);
+        assert_eq!(nb, Some(800));
+
+        // 更早一窗：before=800 → s7/s6，has_more，next_before=600
+        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(800));
+        assert_eq!(w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(), ["s7", "s6"]);
+        assert!(more);
+        assert_eq!(nb, Some(600));
+
+        // 取到最旧一窗：has_more=false，next_before=None
+        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(600));
+        assert_eq!(w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(), ["s5", "s4"]);
+        assert!(!more);
+        assert_eq!(nb, None);
+
+        // 空库
+        let (w, more, nb) = SessionManager::session_page(&[], 2, None);
+        assert!(w.is_empty());
+        assert!(!more);
+        assert_eq!(nb, None);
+
+        // 不足一窗
+        let (w, more, nb) = SessionManager::session_page(&all, 10, None);
+        assert_eq!(w.len(), 6);
+        assert!(!more);
+        assert_eq!(nb, None);
+
+        // 游标越界（比最旧还旧）：空窗
+        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(100));
+        assert!(w.is_empty());
+        assert!(!more);
+        assert_eq!(nb, None);
+
+        // 游标取不到更早但仍有余量：过滤后不足一窗（before 为独占上界，s7(700) 被排除）
+        let (w, more, nb) = SessionManager::session_page(&all, 10, Some(700));
+        assert_eq!(w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(), ["s6", "s5", "s4"]);
+        assert!(!more);
+        assert_eq!(nb, None);
     }
 
     #[tokio::test]
@@ -466,25 +529,48 @@ mod tests {
         )));
 
         // 列表状态回到空闲（重连经 meta.state 补齐，docs/DESIGN.md §5.1）
-        assert_eq!(mgr.list().await[0].state, SessionState::Idle);
+        let (list, _, _) = mgr.list(None, None).await.unwrap();
+        assert_eq!(list[0].state, SessionState::Idle);
     }
 
+    /// 历史按 turn 合并落库（docs/DESIGN.md §5.2）：prompt 后日志存在且为合并粒度，
+    /// open_session 返回合并条目（不触发 ACP 重放）。
     #[tokio::test]
-    async fn open_session_returns_events() {
+    async fn prompt_writes_merged_history_and_open_reads_local() {
         let (mgr, _rx) = stub_manager();
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
-        let (events, _has_more, _) = mgr.open(&meta.id, None, None).await.unwrap();
-        assert!(events.is_empty()); // stub 无持久化历史（历史权威在 agent，docs/DESIGN.md §5.2）
+
+        mgr.prompt(&meta.id, text("hi")).await.unwrap();
+
+        // 日志文件存在（历史权威在 server）
+        let log = SessionLog::open(&mgr.history_dir, &meta.id);
+        assert!(log.exists(), "prompt 完成（result）后应落库");
+
+        // open_session 从本地日志读合并条目：一条完整输出（非逐 chunk）
+        let (events, _, _) = mgr.open(&meta.id, None, None).await.unwrap();
+        assert!(events.iter().any(|e| matches!(e, PassthroughEvent::TurnStarted { .. })));
+        assert!(events.iter().any(|e| matches!(e, PassthroughEvent::TurnEnded { .. })));
+        let outputs: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                PassthroughEvent::OutputChunk { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // stub 输出："模拟输出：完成"（chunk 已收敛为一条）
+        assert!(outputs.len() == 1 && outputs[0].contains("完成"), "合并粒度应一条完整输出: {outputs:?}");
     }
 
     #[tokio::test]
     async fn create_and_delete_lifecycle() {
         let (mgr, mut rx) = stub_manager();
         let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
-        assert_eq!(mgr.list().await.len(), 1);
+        let (list, _, _) = mgr.list(None, None).await.unwrap();
+        assert_eq!(list.len(), 1);
 
         mgr.delete(&meta.id).await.unwrap();
-        assert!(mgr.list().await.is_empty());
+        let (list, _, _) = mgr.list(None, None).await.unwrap();
+        assert!(list.is_empty());
         assert!(mgr.open(&meta.id, None, None).await.is_err());
 
         // 删除广播 session_deleted
@@ -497,6 +583,19 @@ mod tests {
             }
         }
         assert!(saw_deleted);
+    }
+
+    /// 删除联动：历史日志一并清除（docs/DESIGN.md §5.2）。
+    #[tokio::test]
+    async fn delete_removes_history_log() {
+        let (mgr, _rx) = stub_manager();
+        let meta = mgr.create("codex", "/tmp/work", None).await.unwrap();
+        mgr.prompt(&meta.id, text("hi")).await.unwrap();
+        let log = SessionLog::open(&mgr.history_dir, &meta.id);
+        assert!(log.exists());
+
+        mgr.delete(&meta.id).await.unwrap();
+        assert!(!log.exists(), "删除会话应联动清除历史日志");
     }
 
     #[tokio::test]
@@ -539,8 +638,8 @@ mod tests {
             .await
             .unwrap();
 
-        let listed = mgr.list().await;
-        assert_eq!(listed[0].title, "实现登录功能");
+        let (list, _, _) = mgr.list(None, None).await.unwrap();
+        assert_eq!(list[0].title, "实现登录功能");
 
         // session_updated 通知携带新标题（GUI 刷新列表）
         let mut saw_updated = false;
@@ -556,7 +655,48 @@ mod tests {
         // 用户修改标题后，后续 prompt 不再覆盖
         mgr.set_session_title(&meta.id, "我的标题").await.unwrap();
         mgr.prompt(&meta.id, text("第二条指令")).await.unwrap();
-        assert_eq!(mgr.list().await[0].title, "我的标题");
+        let (list, _, _) = mgr.list(None, None).await.unwrap();
+        assert_eq!(list[0].title, "我的标题");
+    }
+
+    /// server 重启恢复（docs/DESIGN.md §4.1）：列表从 SQLite 注册表恢复，
+    /// 不依赖 ACP `session/list`；历史日志在盘直接可用。
+    #[tokio::test]
+    async fn restart_recovers_list_and_history_from_local_store() {
+        let agents = Arc::new(AgentRegistry::new_for_tests());
+        let dir = std::env::temp_dir().join(format!(
+            "amux-restart-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let db = dir.join("amux.db");
+
+        // 实例 A：创建 + prompt（注册表与历史落盘）
+        let sid;
+        {
+            let registry = Arc::new(SessionRegistry::open(&db).unwrap());
+            let (mgr, _rx) = SessionManager::new(agents.clone(), registry, dir.clone());
+            let meta = mgr.create("stub", "/tmp/work", None).await.unwrap();
+            sid = meta.id.clone();
+            mgr.prompt(&meta.id, text("你好")).await.unwrap();
+        }
+
+        // 实例 B（同一数据目录，模拟 server 重启）：列表与历史从本地恢复
+        let registry = Arc::new(SessionRegistry::open(&db).unwrap());
+        let (mgr2, _rx2) = SessionManager::new(agents, registry, dir.clone());
+        let (list, _, _) = mgr2.list(None, None).await.unwrap();
+        assert_eq!(list.len(), 1, "重启后列表应从注册表恢复");
+        assert_eq!(list[0].id, sid);
+        assert_eq!(list[0].cwd, "/tmp/work");
+
+        // 历史日志在盘直接可用（open 本地读，合并条目）
+        let (events, _, _) = mgr2.open(&sid, None, None).await.unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PassthroughEvent::OutputChunk { text, .. } if text.contains("完成"))),
+            "重启后历史应可从本地日志读取: {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -570,79 +710,5 @@ mod tests {
         // 未知 harness 的模型配置不破坏列表
         mgr.set_default_model("nope", Some("x".into()));
         assert_eq!(mgr.harnesses().len(), 1);
-    }
-
-    /// ACP `session/list` 结果 → SessionMeta 的纯映射（docs/DESIGN.md §4.1）：
-    /// 新 server 会话 id、保留 harness/cwd、取 agent 自报标题、保守默认（idle/非 interrupted）。
-    #[test]
-    fn recovered_meta_maps_listed_session() {
-        let s = ListedSession {
-            agent_session_id: "mock_s_1".into(),
-            cwd: "/tmp/work".into(),
-            title: Some("来自 agent 的标题".into()),
-        };
-        let meta = recovered_meta("codex", &s, 42);
-        assert!(meta.id.starts_with("s_"));
-        assert_eq!(meta.harness, "codex");
-        assert_eq!(meta.cwd, "/tmp/work");
-        assert_eq!(meta.title, "来自 agent 的标题");
-        assert_eq!(meta.state, SessionState::Idle);
-        assert!(!meta.interrupted);
-        assert_eq!(meta.created_at, 42);
-        assert_eq!(meta.last_event_at, 42);
-
-        // 无标题时回退空串（首条 prompt 自动生成）
-        let s2 = ListedSession {
-            agent_session_id: "mock_s_2".into(),
-            cwd: "/tmp".into(),
-            title: None,
-        };
-        let meta2 = recovered_meta("codex", &s2, 43);
-        assert!(meta2.title.is_empty());
-        assert_ne!(meta.id, meta2.id, "每次恢复应重新颁发 server 会话 id");
-    }
-
-    /// 重启恢复：agent 侧已有会话（注册表外）经 `list_sessions` 重建为可用的会话。
-    #[tokio::test]
-    async fn recover_rebuilds_registry_from_agent() {
-        let agents = Arc::new(AgentRegistry::new_for_tests());
-        // 绕过 manager 直接经驱动在 agent 侧创建会话（模拟重启前已存在的会话）
-        let driver = agents.driver_for("stub").unwrap();
-        let sid = driver.create_session("/tmp/recover", None).unwrap();
-        let (mgr, mut rx) = SessionManager::new(agents.clone());
-
-        assert!(mgr.list().await.is_empty(), "恢复前注册表应为空");
-        mgr.recover().await;
-
-        let list = mgr.list().await;
-        assert_eq!(list.len(), 1, "应恢复 agent 侧会话");
-        assert_eq!(list[0].cwd, "/tmp/recover");
-        assert_eq!(list[0].harness, "stub");
-        assert_eq!(list[0].state, SessionState::Idle);
-
-        // 恢复出的会话可用：open_session 可重放（stub 无历史 → 空事件，不报错）
-        let (events, _, _) = mgr.open(&list[0].id, None, None).await.unwrap();
-        assert!(events.is_empty());
-
-        // 恢复广播 SessionCreated（可观测性）
-        let mut saw_created = false;
-        while let Ok(n) = rx.recv().await {
-            if let ServerNotification::SessionCreated(s) = n {
-                assert_eq!(s.cwd, "/tmp/recover");
-                saw_created = true;
-                break;
-            }
-        }
-        assert!(saw_created);
-
-        // 幂等：重复 recover 不产生重复条目（按 agent 会话 id 去重）
-        mgr.recover().await;
-        assert_eq!(mgr.list().await.len(), 1);
-
-        // agent 侧已删除的会话不再恢复（同一注册表，stub 已无该会话）
-        driver.delete(&sid).unwrap();
-        let (mgr2, _rx2) = SessionManager::new(agents.clone());
-        mgr2.recover().await;
-        assert!(mgr2.list().await.is_empty());
     }
 }

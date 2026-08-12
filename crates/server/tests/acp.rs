@@ -1,5 +1,6 @@
 //! ACP v1 真实对接测试：起模拟 ACP agent（stdio 子进程），驱动 `AcpAgentDriver`
-//! 的真实实现——验证方法帧序列、session/update 聚合、yolo 自动批准、会话列表。
+//! 的真实实现——验证方法帧序列、session/update 聚合、yolo 自动批准、
+//! `session/resume`（恢复 agent 自身上下文，docs/DESIGN.md §7.2）。
 
 use std::time::Duration;
 
@@ -9,17 +10,17 @@ use std::time::Duration;
 mod agent;
 
 use agent::{AcpAgentDriver, AgentDriver, AgentEvent};
-use protocol::{ContentBlock, PassthroughEvent};
+use protocol::ContentBlock;
 
 /// 隔离实验：直接 tokio spawn mock + 手动读写，定位管道/runtime 问题。
 #[tokio::test]
 async fn debug_mock_stdio() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mock = env!("CARGO_BIN_EXE_mock_acp");
-    // 唯一状态文件（mock 会持久化会话/历史到 `<state>.json`），避免跨测试泄漏
+    // 唯一状态文件（mock 会把方法调用记录到 `<state>.calls`），避免跨测试泄漏
     let state = std::env::temp_dir().join(format!("mock_state_dbg_{}", std::process::id()));
     let _ = std::fs::remove_file(&state);
-    let _ = std::fs::remove_file(state.with_extension("json"));
+    let _ = std::fs::remove_file(state.with_extension("calls"));
     let mut child = tokio::process::Command::new(mock)
         .arg(&state)
         .stdin(std::process::Stdio::piped())
@@ -48,8 +49,8 @@ async fn debug_mock_stdio() {
 async fn acp_driver_full_flow() {
     let state_file = std::env::temp_dir().join(format!("mock_acp_state_{}", std::process::id()));
     let _ = std::fs::remove_file(&state_file);
-    // mock 的会话/历史持久化在 `<state_file>.json`，一并清理避免陈旧状态泄漏
-    let _ = std::fs::remove_file(state_file.with_extension("json"));
+    let calls_file = state_file.with_extension("calls");
+    let _ = std::fs::remove_file(&calls_file);
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");
     let driver =
@@ -58,6 +59,18 @@ async fn acp_driver_full_flow() {
     // create_session → session/new → mock_s_1
     let sid = driver.create_session("/tmp/work", None).expect("create");
     assert_eq!(sid, "mock_s_1");
+
+    // 本进程新建的会话 agent 已在内存中：resume 幂等直接成功（不触发 ACP 调用）
+    driver.resume_session(&sid, "/tmp/work").expect("resume");
+
+    // 未在本进程创建（模拟 server 重启后从注册表恢复）的会话：resume 触发 ACP 调用一次
+    let restored_sid = "mock_s_restored";
+    driver
+        .resume_session(restored_sid, "/tmp/work")
+        .expect("恢复会话 resume");
+    driver
+        .resume_session(restored_sid, "/tmp/work")
+        .expect("resume 幂等（不重复调用）");
 
     // prompt → session/prompt → 事件流聚合（thinking / tool_call / 输出 / 完成）
     let mut rx = driver.prompt(
@@ -94,19 +107,20 @@ async fn acp_driver_full_flow() {
         "request_permission 应被自动批准，状态文件: {approved:?}"
     );
 
-    // load_session → session/load 重放 → 透传事件（docs/DESIGN.md §5.1）
-    let events = driver.load_session(&sid).expect("load");
-    let has_output_chunk = events
-        .iter()
-        .any(|e| matches!(e, PassthroughEvent::OutputChunk { text, .. } if text.contains("完成")));
-    assert!(has_output_chunk, "load 重放应含 output_chunk: {events:?}");
-    // list_sessions → 恢复会话列表（含 id + cwd，docs/DESIGN.md §4.1）
-    let sessions = driver.list_sessions();
+    // server 调用面：本流程只触发 session/new、session/prompt、session/resume（恰好一次）
+    // （无 session/load、无 session/list——历史与列表以 server 侧为准）
+    let calls = std::fs::read_to_string(&calls_file).unwrap_or_default();
+    assert!(calls.contains("session/new"), "calls: {calls:?}");
+    assert!(calls.contains("session/prompt"), "calls: {calls:?}");
+    let resume_count = calls.lines().filter(|l| *l == "session/resume").count();
+    assert_eq!(resume_count, 1, "恢复会话应恰好 resume 一次（幂等）: {calls:?}");
     assert!(
-        sessions
-            .iter()
-            .any(|s| s.agent_session_id == "mock_s_1" && s.cwd == "/tmp/work"),
-        "list 应含 mock_s_1（cwd=/tmp/work）: {sessions:?}"
+        !calls.contains("session/load"),
+        "驱动路径不应调用 session/load: {calls:?}"
+    );
+    assert!(
+        !calls.contains("session/list"),
+        "驱动路径不应调用 session/list: {calls:?}"
     );
 
     // cancel / delete 帧正常

@@ -7,9 +7,9 @@ use serde_json::Value;
 
 use protocol::{
     method, rpc_error, server_error, CreateSessionParams, GitDiffParams, GitOpResult,
-    GitRevertParams, ListAgentSkillsParams, ListAgentSkillsResult, MachineInfo, OpenSessionParams,
-    OpenSessionResult, PromptParams, SessionIdParams, SessionResult, SessionsResult,
-    SetDefaultModelParams, SetSessionTitleParams,
+    GitRevertParams, ListAgentSkillsParams, ListAgentSkillsResult, ListSessionsParams, MachineInfo,
+    OpenSessionParams, OpenSessionResult, PromptParams, SessionIdParams, SessionResult,
+    SessionsResult, SetDefaultModelParams, SetSessionTitleParams,
 };
 
 use crate::git::GitRunner;
@@ -77,9 +77,18 @@ impl Handlers {
                 Ok(serde_json::to_value(info).map_err(|e| RpcError::internal(e.to_string()))?)
             }
             method::LIST_SESSIONS => {
-                let sessions = self.manager.list().await;
-                Ok(serde_json::to_value(SessionsResult { sessions })
-                    .map_err(|e| RpcError::internal(e.to_string()))?)
+                let p: ListSessionsParams = parse(params)?;
+                let (sessions, has_more, next_before) = self
+                    .manager
+                    .list(p.limit, p.before)
+                    .await
+                    .map_err(RpcError::internal)?;
+                Ok(serde_json::to_value(SessionsResult {
+                    sessions,
+                    has_more,
+                    next_before,
+                })
+                .map_err(|e| RpcError::internal(e.to_string()))?)
             }
             method::CREATE_SESSION => {
                 let p: CreateSessionParams = parse(params)?;

@@ -40,11 +40,17 @@ use crate::config::{
     machine_ws_url, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand, SkillEntry,
     WorkflowTemplate,
 };
-use crate::logic::{compose_prompt, parse_at_references, path_attachment, read_path_context, InputAttachment};
+use crate::logic::{
+    compose_prompt, merge_session_window, parse_at_references, path_attachment, read_path_context,
+    InputAttachment,
+};
 use crate::workflow::{MachineSummary, OrcBackend, OrcMsg, RigBackend, WorkflowEngine};
 use crate::ws::{Notification, WsClient};
 
 // ---- 视图状态 ----
+
+/// 会话列表惰性分页窗口大小（PRD §4.1.1：首次只取最近活跃一窗，滚动加载更早）。
+const SESSION_WINDOW: usize = 50;
 
 /// 右侧面板（默认折叠，悬浮按钮展开）。
 #[derive(Clone, Copy, PartialEq)]
@@ -94,6 +100,9 @@ struct MachineView {
     /// get_info 结果（agent 发现 + 默认模型）
     info: Option<MachineInfo>,
     sessions: Vec<SessionMeta>,
+    /// 会话列表惰性加载（PRD §4.1.1）：是否还有更早 + 下次 before 游标
+    sessions_has_more: bool,
+    sessions_next_before: Option<u64>,
     selected: Option<String>,
     /// 各会话的聚合视图（输出收敛 / 活动合并 / busy 派生；显示取当前会话）
     views: std::collections::HashMap<String, SessionView>,
@@ -125,6 +134,8 @@ impl MachineView {
             status: "连接中…".into(),
             info: None,
             sessions: Vec::new(),
+            sessions_has_more: false,
+            sessions_next_before: None,
             selected: None,
             views: std::collections::HashMap::new(),
             dialog_before: 0,
@@ -648,11 +659,72 @@ impl AmuxApp {
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if let Ok(res) = client.request(protocol::method::LIST_SESSIONS, None).await {
-                let sessions = res.get("sessions").cloned().unwrap_or_default();
+            // 首次只取最近活跃一窗（PRD §4.1.1 惰性加载）
+            if let Ok(res) = client
+                .request(
+                    protocol::method::LIST_SESSIONS,
+                    Some(json!({ "limit": SESSION_WINDOW })),
+                )
+                .await
+            {
+                let sessions: Vec<SessionMeta> = res
+                    .get("sessions")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                let has_more = res
+                    .get("hasMore")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let next_before = res.get("nextBefore").and_then(|v| v.as_u64());
                 let _ = this.update_in(cx, |this, _window, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
-                        m.sessions = serde_json::from_value(sessions).unwrap_or_default();
+                        let (list, has_more, next) =
+                            merge_session_window(&[], sessions, has_more, next_before);
+                        m.sessions = list;
+                        m.sessions_has_more = has_more;
+                        m.sessions_next_before = next;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 滚动加载更早的会话（PRD §4.1.1）：以 before 游标取更早一窗并追加。
+    fn load_more_sessions(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(m) = self.machines.get(idx) else {
+            return;
+        };
+        let client = m.client.clone();
+        let before = m.sessions_next_before;
+        let existing = m.sessions.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            if let Ok(res) = client
+                .request(
+                    protocol::method::LIST_SESSIONS,
+                    Some(json!({ "limit": SESSION_WINDOW, "before": before })),
+                )
+                .await
+            {
+                let sessions: Vec<SessionMeta> = res
+                    .get("sessions")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                let has_more = res
+                    .get("hasMore")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let next_before = res.get("nextBefore").and_then(|v| v.as_u64());
+                let _ = this.update_in(cx, |this, _window, cx| {
+                    if let Some(m) = this.machines.get_mut(idx) {
+                        let (list, has_more, next) =
+                            merge_session_window(&existing, sessions, has_more, next_before);
+                        m.sessions = list;
+                        m.sessions_has_more = has_more;
+                        m.sessions_next_before = next;
                     }
                     cx.notify();
                 });
@@ -1816,11 +1888,31 @@ impl AmuxApp {
         self.machines.push(view);
         let client = self.machines[idx].client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if let Ok(res) = client.request(protocol::method::LIST_SESSIONS, None).await {
-                let sessions = res.get("sessions").cloned().unwrap_or_default();
+            // 首次只取最近活跃一窗（PRD §4.1.1 惰性加载）
+            if let Ok(res) = client
+                .request(
+                    protocol::method::LIST_SESSIONS,
+                    Some(json!({ "limit": SESSION_WINDOW })),
+                )
+                .await
+            {
+                let sessions: Vec<SessionMeta> = res
+                    .get("sessions")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                let has_more = res
+                    .get("hasMore")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let next_before = res.get("nextBefore").and_then(|v| v.as_u64());
                 let _ = this.update_in(cx, |this, _window, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
-                        m.sessions = serde_json::from_value(sessions).unwrap_or_default();
+                        let (list, has_more, next) =
+                            merge_session_window(&[], sessions, has_more, next_before);
+                        m.sessions = list;
+                        m.sessions_has_more = has_more;
+                        m.sessions_next_before = next;
                     }
                     cx.notify();
                 });
@@ -1966,7 +2058,7 @@ impl AmuxApp {
         }
         items.sort_by_key(|(rec, _)| std::cmp::Reverse(*rec));
 
-        items
+        let mut rows: Vec<gpui::AnyElement> = items
             .into_iter()
             .map(|(_, item)| match item {
                 SessionListItem::Session { machine, meta } => {
@@ -1974,7 +2066,24 @@ impl AmuxApp {
                 }
                 SessionListItem::Workflow { idx } => self.render_workflow_row(cx, idx),
             })
-            .collect()
+            .collect();
+
+        // 惰性加载（PRD §4.1.1）：还有更早会话时底部显示"加载更早会话"
+        for (mi, m) in self.machines.iter().enumerate() {
+            if m.sessions_has_more {
+                let name = m.config.name.clone();
+                rows.push(
+                    Button::new(format!("sessions-more-{mi}"))
+                        .small()
+                        .label(format!("加载更早会话（{name}）"))
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.load_more_sessions(mi, window, cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        rows
     }
 
     /// 普通会话行：标题 + 状态（agent 与机器在对话气泡中展示，docs/PRD §4.1.1）。

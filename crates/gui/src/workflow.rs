@@ -1263,8 +1263,8 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn test-server");
-        // 等待端口就绪
-        for _ in 0..100 {
+        // 等待端口就绪（SQLite 打开 + mock 拉起负载下放宽到 20s）
+        for _ in 0..200 {
             if tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .is_ok()
