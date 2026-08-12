@@ -110,12 +110,12 @@ impl SessionManager {
         cwd: &str,
         model: Option<&str>,
     ) -> Result<SessionMeta, String> {
-        let driver = self.agents.driver_for(harness)?;
-        let agent_session_id = driver.create_session(cwd, model)?;
+        // 创建会话只与 server 交互（docs/DESIGN.md §4.1）：写入注册表立即返回，
+        // 不触发 ACP——agent 会话延后到首次 prompt 时懒创建（session/new）。
         let id = format!("s_{}", uuid::Uuid::new_v4());
         protocol::log::info(
             "server.session",
-            format!("创建会话 {id}（harness={harness} cwd={cwd} agent={agent_session_id}）"),
+            format!("创建会话 {id}（harness={harness} cwd={cwd}，agent 会话延后创建）"),
         );
         let meta = SessionMeta {
             id,
@@ -129,7 +129,7 @@ impl SessionManager {
             last_event_at: now(),
         };
         self.registry
-            .upsert(&meta, &agent_session_id)
+            .upsert(&meta, "")
             .map_err(|e| format!("注册表写入失败: {e}"))?;
         let _ = self
             .tx
@@ -144,9 +144,12 @@ impl SessionManager {
             .map_err(|e| format!("注册表读取失败: {e}"))?
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
         let (meta, agent_session_id) = entry;
-        let driver = self.agents.driver_for(&meta.harness)?;
-        driver.delete(&agent_session_id)?;
-        // 联动：注册表条目 + 历史日志 + agent 侧 ACP 会话（docs/DESIGN.md §5.2）
+        // 从未 prompt 过（agent 会话尚未创建）则无需 ACP 删除
+        if !agent_session_id.is_empty() {
+            let driver = self.agents.driver_for(&meta.harness)?;
+            driver.delete(&agent_session_id)?;
+        }
+        // 联动：注册表条目 + 历史日志 +（如有）agent 侧 ACP 会话（docs/DESIGN.md §5.2）
         self.registry
             .delete(session_id)
             .map_err(|e| format!("注册表删除失败: {e}"))?;
@@ -242,10 +245,21 @@ impl SessionManager {
             };
             meta.state = SessionState::Busy;
             meta.last_event_at = now();
+            let driver = self.agents.driver_for(&meta.harness)?;
+            // 创建会话时未与 ACP 交互（docs/DESIGN.md §4.1）：首条 prompt 才懒创建
+            // agent 会话（session/new）并回填注册表；已创建则沿用
+            let agent_session_id = if agent_session_id.is_empty() {
+                let sid2 = driver.create_session(&meta.cwd, meta.model.as_deref())?;
+                self.registry
+                    .set_agent_session_id(session_id, &sid2)
+                    .map_err(|e| format!("注册表写入失败: {e}"))?;
+                sid2
+            } else {
+                agent_session_id
+            };
             self.registry
                 .upsert(&meta, &agent_session_id)
                 .map_err(|e| format!("注册表写入失败: {e}"))?;
-            let driver = self.agents.driver_for(&meta.harness)?;
             let cwd = meta.cwd.clone();
             (driver, agent_session_id, cwd, title_changed)
         };
@@ -352,6 +366,10 @@ impl SessionManager {
             .get(session_id)
             .map_err(|e| format!("注册表读取失败: {e}"))?
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        // 从未 prompt 过（agent 会话尚未创建）：无进行中的工作
+        if agent_session_id.is_empty() {
+            return Ok(());
+        }
         let driver = self.agents.driver_for(&meta.harness)?;
         protocol::log::info(
             "server.session",
@@ -409,6 +427,41 @@ mod tests {
         ));
         let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
         SessionManager::new(agents, registry, dir)
+    }
+
+    /// 创建会话只与 server 交互（docs/DESIGN.md §4.1）：注册表立即写入、
+    /// agent 会话延后到首条 prompt 懒创建并回填。
+    #[tokio::test]
+    async fn create_defers_agent_session_until_prompt() {
+        let agents = Arc::new(AgentRegistry::new_for_tests());
+        let dir = std::env::temp_dir().join(format!(
+            "amux-defer-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+
+        let meta = mgr.create("codex", "/tmp/defer", None).await.unwrap();
+
+        // 创建后：注册表 agent_session_id 为空（未与 ACP 交互）
+        let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
+        assert!(aid.is_empty(), "创建会话不应触发 ACP session/new");
+
+        // 首条 prompt：懒创建 agent 会话并回填
+        mgr.prompt(&meta.id, text("你好")).await.unwrap();
+        let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
+        assert!(
+            aid.starts_with("agent_"),
+            "首条 prompt 应懒创建 agent 会话并回填: {aid:?}"
+        );
+
+        // 未 prompt 的会话可直接删除（无 ACP 会话，删除仅清注册表与日志）
+        let meta2 = mgr.create("codex", "/tmp/defer2", None).await.unwrap();
+        mgr.delete(&meta2.id).await.unwrap();
+        let (list, _, _) = mgr.list(None, None).await.unwrap();
+        assert_eq!(list.len(), 1, "未 prompt 会话删除后只剩已 prompt 的那个");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 会话列表惰性分页纯函数（docs/DESIGN.md §3.2 / PRD §4.1.1）：

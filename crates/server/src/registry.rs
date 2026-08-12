@@ -151,6 +151,17 @@ impl SessionRegistry {
         )?;
         Ok(())
     }
+
+    /// 回填 agent 侧会话 id：创建会话时未与 ACP 交互（agent 会话延后到首次
+    /// prompt 懒创建），首次 prompt 时经 `session/new` 拿到 id 后写入。
+    pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET agent_session_id = ?1 WHERE id = ?2",
+            params![agent_session_id, id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +227,24 @@ mod tests {
         assert!(reg.delete("s1").unwrap());
         assert!(!reg.delete("s1").unwrap(), "重复删除返回 false");
         assert!(reg.get("s1").unwrap().is_none());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 延后创建：先以空 agent id 落库，首次 prompt 懒创建后回填（docs/DESIGN.md §4.1）。
+    #[test]
+    fn deferred_agent_session_id_backfill() {
+        let db = tmp_db("defer");
+        let reg = SessionRegistry::open(&db).unwrap();
+        let (m, _) = meta("s1", 100);
+        // 创建时不与 ACP 交互：agent_session_id 为空串
+        reg.upsert(&m, "").unwrap();
+        let got = reg.get("s1").unwrap().unwrap();
+        assert_eq!(got.1, "", "创建时应无 agent 会话 id");
+
+        // 首次 prompt 懒创建后回填
+        reg.set_agent_session_id("s1", "mock_s_1").unwrap();
+        let got = reg.get("s1").unwrap().unwrap();
+        assert_eq!(got.1, "mock_s_1");
         let _ = std::fs::remove_file(&db);
     }
 

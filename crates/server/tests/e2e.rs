@@ -200,7 +200,7 @@ fn first_harness(info: &Value) -> String {
 
 #[tokio::test]
 async fn session_lifecycle_and_activities() {
-    let (port, _dir, _guard) = spawn_server().await;
+    let (port, data_dir, _guard) = spawn_server().await;
     let mut c = Client::connect(port).await;
 
     let info = c.call("get_info", json!({})).await;
@@ -221,6 +221,13 @@ async fn session_lifecycle_and_activities() {
     assert_eq!(created["result"]["session"]["state"], "idle");
     assert_eq!(created["result"]["session"]["harness"], harness);
 
+    // 创建会话只与 server 交互（docs/DESIGN.md §4.1）：未 prompt 前不应触发 ACP session/new
+    let calls_before = std::fs::read_to_string(mock_calls_file(&data_dir)).unwrap_or_default();
+    assert!(
+        !calls_before.contains("session/new"),
+        "创建会话不应触发 ACP session/new: {calls_before:?}"
+    );
+
     c.fire(
         "prompt",
         json!({"sessionId": sid, "input": [{"type": "text", "text": "实现登录功能"}]}),
@@ -235,6 +242,13 @@ async fn session_lifecycle_and_activities() {
         )
         .await;
     assert!(got, "应收到 turn_ended 透传边界");
+
+    // 首条 prompt 才触发 ACP session/new（懒创建 agent 会话，docs/DESIGN.md §4.1）
+    let calls_after = std::fs::read_to_string(mock_calls_file(&data_dir)).unwrap_or_default();
+    assert!(
+        calls_after.contains("session/new"),
+        "首条 prompt 应触发 ACP session/new: {calls_after:?}"
+    );
 
     // 通知序列是透传事件（turn 边界 + chunk + 活动事件），无聚合交付
     let seq: Vec<&str> = c.notifications.iter().map(|(m, _)| m.as_str()).collect();
