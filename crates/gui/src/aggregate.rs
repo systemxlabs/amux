@@ -188,6 +188,19 @@ pub fn prepend_events(view: &mut SessionView, earlier: &[PassthroughEvent]) {
     view.activities.splice(0..0, head.activities);
 }
 
+/// 判断某条 `UserMessage` 是否为**本机刚本地渲染消息的回显**（docs/DESIGN.md §7.1：
+/// 用户消息由 GUI 应用本地立即渲染、不依赖回显）。server 会把用户消息回显透传
+/// 给所有客户端（含发送方），发送方本地已渲染则按此去重，避免重复气泡。
+pub fn is_user_message_echo(view: &SessionView, content: &[ContentBlock]) -> bool {
+    matches!(
+        view.dialog.last(),
+        Some(DialogItem::UserMessage {
+            content: last,
+            ..
+        }) if last == content
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +359,23 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    /// 回显去重（docs/DESIGN.md §7.1）：视图最后一条用户消息与回显内容一致 → 判为回显。
+    #[test]
+    fn user_message_echo_detection() {
+        let mut view = SessionView::new();
+        assert!(!is_user_message_echo(&view, &[ContentBlock::Text { text: "hi".into() }]),
+            "空视图不应判为回显");
+
+        merge_event(&mut view, &user("hi", 1));
+        // 内容一致（本机本地渲染后的回显）→ 是回显
+        assert!(is_user_message_echo(&view, &[ContentBlock::Text { text: "hi".into() }]));
+        // 内容不同 → 不是回显
+        assert!(!is_user_message_echo(&view, &[ContentBlock::Text { text: "bye".into() }]));
+
+        // 视图最后是 agent 输出 → 不是回显（其他客户端发来的消息应正常显示）
+        merge_event(&mut view, &chunk("回复", 2));
+        assert!(!is_user_message_echo(&view, &[ContentBlock::Text { text: "hi".into() }]));
     }
 }

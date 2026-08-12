@@ -529,7 +529,16 @@ impl AmuxApp {
                 }
                 // 聚合进该会话视图（所有会话都聚合，工作流子会话也能取到输出）
                 let view = m.views.entry(sid.clone()).or_default();
-                crate::aggregate::merge_event(view, &ev);
+                // 回显去重（docs/DESIGN.md §7.1：本机已本地渲染的用户消息，回显跳过，
+                // 避免重复气泡；其他客户端发来的消息照常显示）
+                let is_echo = matches!(
+                    &ev,
+                    PassthroughEvent::UserMessage { content, .. }
+                        if crate::aggregate::is_user_message_echo(view, content)
+                );
+                if !is_echo {
+                    crate::aggregate::merge_event(view, &ev);
+                }
                 // 当前打开会话：新输出/用户消息自动滚到底部（实时渲染）
                 if m.selected.as_deref() == Some(sid.as_str())
                     && matches!(
@@ -1181,6 +1190,19 @@ impl AmuxApp {
                 };
                 let client = m.client.clone();
                 let input = blocks;
+                // 本地立即渲染用户消息（docs/DESIGN.md §7.1：不依赖回显）；
+                // server 回显到达时在 on_notify 按内容去重，避免重复气泡
+                if let Some(m) = self.machine_mut(machine) {
+                    let view = m.views.entry(id.clone()).or_default();
+                    crate::aggregate::merge_event(
+                        view,
+                        &PassthroughEvent::UserMessage {
+                            content: input.clone(),
+                            timestamp: crate::workflow::now_ts(),
+                        },
+                    );
+                }
+                self.dialog_scroll.scroll_to_bottom();
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     if let Err(e) = client
                         .request(
