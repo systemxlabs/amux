@@ -6,7 +6,6 @@
 mod aggregate;
 mod app;
 mod config;
-mod diff_highlight;
 mod logic;
 mod workflow;
 mod ws;

@@ -27,7 +27,6 @@ use gpui_component::{
     WindowExt, *,
 };
 
-use crate::diff_highlight::{diff_language_for_path, diff_line_styled, highlight_diff_patch};
 use serde_json::json;
 
 use protocol::{
@@ -3470,7 +3469,6 @@ impl AmuxApp {
         _machine: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let language = diff_language_for_path(&file.path);
         let mut rows = v_flex().gap_0();
         match mode {
             DiffMode::Inline => {
@@ -3481,21 +3479,15 @@ impl AmuxApp {
                         hunk.patch.clone(),
                         cx,
                     ));
-                    // Tree Sitter 语法高亮（docs/DESIGN.md §8.2）：内容行代码按文件
-                    // 语言高亮，结构行（diff --git / @@ / --- / +++）不参与
-                    let highlight = highlight_diff_patch(&hunk.patch, language);
                     for (li, line) in hunk.patch.lines().enumerate() {
-                        let bg = if line.starts_with('+') && !line.starts_with("+++") {
-                            Some(rgb(0xe6ffe6))
+                        let (bg, text) = if line.starts_with('+') && !line.starts_with("+++") {
+                            (Some(rgb(0xe6ffe6)), line.to_string())
                         } else if line.starts_with('-') && !line.starts_with("---") {
-                            Some(rgb(0xffe6e6))
+                            (Some(rgb(0xffe6e6)), line.to_string())
                         } else {
-                            None
+                            (None, line.to_string())
                         };
-                        let mut row = div()
-                            .id(("diff-line", li))
-                            .w_full()
-                            .child(diff_line_styled(line, &highlight, li));
+                        let mut row = div().id(("diff-line", li)).w_full().child(text.clone());
                         if let Some(c) = bg {
                             row = row.bg(c);
                         }
@@ -3512,40 +3504,23 @@ impl AmuxApp {
                         hunk.patch.clone(),
                         cx,
                     ));
-                    let highlight = highlight_diff_patch(&hunk.patch, language);
                     let mut left = v_flex().gap_0().flex_1();
                     let mut right = v_flex().gap_0().flex_1();
-                    for (li, line) in hunk.patch.lines().enumerate() {
+                    for line in hunk.patch.lines() {
                         if line.starts_with('-')
                             && !line.starts_with("---")
                             && !line.starts_with("diff")
                         {
-                            left = left.child(
-                                div()
-                                    .w_full()
-                                    .bg(rgb(0xffe6e6))
-                                    .child(diff_line_styled(line, &highlight, li)),
-                            );
+                            left = left
+                                .child(div().w_full().bg(rgb(0xffe6e6)).child(line.to_string()));
                             right = right.child(div().w_full().child(""));
                         } else if line.starts_with('+') && !line.starts_with("+++") {
                             left = left.child(div().w_full().child(""));
-                            right = right.child(
-                                div()
-                                    .w_full()
-                                    .bg(rgb(0xe6ffe6))
-                                    .child(diff_line_styled(line, &highlight, li)),
-                            );
+                            right = right
+                                .child(div().w_full().bg(rgb(0xe6ffe6)).child(line.to_string()));
                         } else if !line.starts_with("@@") {
-                            left = left.child(
-                                div()
-                                    .w_full()
-                                    .child(diff_line_styled(line, &highlight, li)),
-                            );
-                            right = right.child(
-                                div()
-                                    .w_full()
-                                    .child(diff_line_styled(line, &highlight, li)),
-                            );
+                            left = left.child(div().w_full().child(line.to_string()));
+                            right = right.child(div().w_full().child(line.to_string()));
                         }
                     }
                     rows = rows.child(
