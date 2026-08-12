@@ -15,6 +15,7 @@ use protocol::{
 use crate::git::GitRunner;
 use crate::session::SessionManager;
 
+#[derive(Debug)]
 pub struct RpcError {
     pub code: i32,
     pub message: String,
@@ -49,6 +50,12 @@ pub struct Handlers {
 
 fn parse<T: DeserializeOwned>(params: &Option<Value>) -> Result<T, RpcError> {
     let v = params.clone().unwrap_or(Value::Null);
+    // JSON-RPC 客户端可发送 null/缺省 params：全默认字段的结构体按空对象解析
+    let v = if v.is_null() {
+        Value::Object(Default::default())
+    } else {
+        v
+    };
     serde_json::from_value(v).map_err(|e| RpcError::invalid_params(format!("参数非法: {e}")))
 }
 
@@ -198,4 +205,31 @@ impl Handlers {
 #[derive(serde::Deserialize)]
 struct GitCwdParams {
     cwd: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::ListSessionsParams;
+
+    /// `parse` 对 null/缺省 params 按空对象解析：全默认字段的结构体得到默认值
+    /// （JSON-RPC 客户端可发 `params: null`，如 GUI 工作流恢复路径）。
+    #[test]
+    fn parse_null_params_yields_defaults() {
+        let p: ListSessionsParams = parse(&None).expect("null params 应解析为默认值");
+        assert_eq!(p.limit, None);
+        assert_eq!(p.before, None);
+
+        let p: ListSessionsParams =
+            parse(&Some(serde_json::Value::Null)).expect("显式 null 同样默认");
+        assert_eq!(p.limit, None);
+
+        let p: ListSessionsParams =
+            parse(&Some(serde_json::json!({ "limit": 10 }))).unwrap();
+        assert_eq!(p.limit, Some(10));
+        assert_eq!(p.before, None);
+
+        // 必需字段缺失仍报参数非法
+        assert!(parse::<GitCwdParams>(&Some(serde_json::json!({}))).is_err());
+    }
 }

@@ -1417,7 +1417,14 @@ impl AmuxApp {
             let client = self.machines[i].client.clone();
             let workflow_dir = self.workflow_dir.clone();
             cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                if let Ok(res) = client.request(protocol::method::LIST_SESSIONS, None).await {
+                // 工作流恢复需核对子会话状态：取较宽窗口（惰性分页默认窗口可能漏掉较旧子会话）
+                if let Ok(res) = client
+                    .request(
+                        protocol::method::LIST_SESSIONS,
+                        Some(json!({ "limit": 1000 })),
+                    )
+                    .await
+                {
                     let sessions = res.get("sessions").cloned().unwrap_or_default();
                     // 收集 idle 子会话（工作流下标 + 会话 id）
                     let mut advances: Vec<(usize, String)> = Vec::new();
