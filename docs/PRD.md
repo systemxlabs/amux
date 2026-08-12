@@ -72,7 +72,7 @@
 ### 3.5 Diff Review
 
 - 会话中实时查看当前工作区 git diff——文件列表和行数统计
-- 点击文件查看 side-by-side 或 inline diff，带语法高亮
+- 点击文件查看 side-by-side 或 inline diff
 - 对单个文件、单个 hunk 或全部变更执行 revert
 - 在 diff 视图中选中特定代码片段，直接向 agent 发送指令
 

@@ -185,7 +185,7 @@ GUI 应用为单进程桌面应用（跨平台 macOS / Linux / Windows）。
 - **布局**：三面板 **Dock 布局**；右侧上下文面板（diff / 会话详情 / 会话活动）展开时**窗口向右扩展**，不压缩中间面板空间，关闭时收回。
 - **对话流**：只展示用户消息与 agent 输出的消息气泡（**Markdown 渲染**）+ 虚拟化列表；输出**实时流式渲染**（增量追加），turn 结束收敛为完整消息；**气泡标注 agent 与所属机器**（`agent@机器`），编排会话气泡标注「编排」。
 - **会话活动**：中间面板下方展示**正在进行的活动**（一条或无，实时）；右侧面板展示完整活动历史（上下滚动）——来自 GUI 应用对 server 历史事件流（§5.2）与实时事件的聚合。
-- **Diff Review**：代码编辑器组件 + **Tree Sitter 语法高亮**；文件列表、side-by-side/inline diff、revert 操作。
+- **Diff Review**：文件列表、side-by-side/inline diff（+/- 着色）、revert 操作。
 - **输入与设置**：输入区（多行、拖拽/粘贴、@ 引用）、快捷指令栏、设置页（机器管理）——表单/对话框组件。
 
 ## 9. 工作流
@@ -208,7 +208,7 @@ GUI 应用为单进程桌面应用（跨平台 macOS / Linux / Windows）。
 
 - [Agent Client Protocol (ACP) v1](https://agentclientprotocol.com/)：server 与 agent 之间的通信协议（stdio 传输、session 生命周期、session/update 事件流、request_permission）
 - [GPUI](https://gpui.rs/)：Zed 的 GPU 加速 GUI 应用框架（Zed 主线 git 依赖）
-- [gpui-component](https://github.com/longbridge/gpui-component)：GPUI 组件库（Dock 布局、Markdown、虚拟化列表、代码编辑器 + Tree Sitter、表单/对话框）
+- [gpui-component](https://github.com/longbridge/gpui-component)：GPUI 组件库（Dock 布局、Markdown、虚拟化列表、表单/对话框）
 - [raft.build](https://raft.build)：Client-Server + WebSocket 的桌面应用架构参考
 - [herdr](https://github.com/ogulcancelik/herdr)：终端 agent 多路复用，server 常驻与 attach/reattach 模式
 - [t3code](https://github.com/pingdotgg/t3code)：agent 控制面——provider 驱动注册、按 turn 的 git checkpoint、事件溯源思路
