@@ -18,9 +18,10 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock as AcpContentBlock, DeleteSessionRequest, InitializeRequest,
-    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification,
-    SessionUpdate, TextContent, ToolKind,
+    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
+    ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{
@@ -642,6 +643,25 @@ struct SkillInfo {
 #[request(method = "skill/list", response = SkillListResponse)]
 struct SkillListRequest {}
 
+/// yolo 权限批准：从请求选项中选出要批准的选项（纯函数，可单测）。
+/// 优先 `AllowAlways` > `AllowOnce` > 任意非拒绝选项；
+/// 全为拒绝选项或列表为空 → `None`（无批准项，按取消处理）。
+fn pick_approve_option(options: &[PermissionOption]) -> Option<PermissionOptionId> {
+    options
+        .iter()
+        .find(|o| o.kind == PermissionOptionKind::AllowAlways)
+        .or_else(|| options.iter().find(|o| o.kind == PermissionOptionKind::AllowOnce))
+        .or_else(|| {
+            options.iter().find(|o| {
+                !matches!(
+                    o.kind,
+                    PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
+                )
+            })
+        })
+        .map(|o| o.option_id.clone())
+}
+
 /// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
 async fn exec_main(
     bin: &str,
@@ -693,12 +713,13 @@ async fn exec_main(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
-                // yolo：自动批准（选第一个 allow 选项；无选项则取消）
-                match request.options.first() {
-                    Some(opt) => responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                            opt.option_id.clone(),
-                        )),
+                // yolo：自动批准（docs/DESIGN.md §7.2，无审批往返）。
+                // 必须选 allow 类选项：claude-acp 等包装器的选项列表**第一项往往是
+                // 「Deny/reject」**，选第一个会被 agent 误判为用户拒绝
+                // （"User refused permission to run tool"）。
+                match pick_approve_option(&request.options) {
+                    Some(id) => responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
                     )),
                     None => responder.respond(RequestPermissionResponse::new(
                         RequestPermissionOutcome::Cancelled,
@@ -1098,6 +1119,52 @@ mod tests {
             .try_recv()
             .expect("session_info_update 应产生 SessionInfo 事件");
         assert!(matches!(ev, AgentEvent::SessionInfo { state: None }));
+    }
+
+    /// yolo 权限批准选项选择（docs/DESIGN.md §7.2）：必须选 allow 类选项——
+    /// claude-acp 等包装器把「Deny」放在选项第一项，选第一个会被误判为用户拒绝。
+    #[test]
+    fn pick_approve_option_prefers_allow() {
+        fn opt(id: &str, kind: PermissionOptionKind) -> PermissionOption {
+            PermissionOption::new(id.to_string(), id.to_string(), kind)
+        }
+
+        // claude-acp 实际选项顺序：Deny 在前
+        let opts = vec![
+            opt("reject", PermissionOptionKind::RejectOnce),
+            opt("allow", PermissionOptionKind::AllowOnce),
+            opt("allow_always", PermissionOptionKind::AllowAlways),
+        ];
+        let picked = pick_approve_option(&opts).expect("应批准");
+        assert_eq!(
+            picked.to_string(),
+            "allow_always",
+            "应优先选 AllowAlways（yolo 免重复询问）"
+        );
+
+        // 无 AllowAlways：选 AllowOnce
+        let opts = vec![
+            opt("reject", PermissionOptionKind::RejectOnce),
+            opt("allow", PermissionOptionKind::AllowOnce),
+        ];
+        assert_eq!(pick_approve_option(&opts).unwrap().to_string(), "allow");
+
+        // 仅一个 AllowOnce（mock 场景）
+        let opts = vec![opt("allow-once", PermissionOptionKind::AllowOnce)];
+        assert_eq!(
+            pick_approve_option(&opts).unwrap().to_string(),
+            "allow-once"
+        );
+
+        // 全为拒绝 → None（按取消处理）
+        let opts = vec![
+            opt("reject", PermissionOptionKind::RejectOnce),
+            opt("reject_all", PermissionOptionKind::RejectAlways),
+        ];
+        assert!(pick_approve_option(&opts).is_none());
+
+        // 空列表 → None
+        assert!(pick_approve_option(&[]).is_none());
     }
 
     /// 自动发现：`acp` 子命令探测逻辑（输出含 acp 才算支持）。
