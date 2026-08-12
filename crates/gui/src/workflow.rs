@@ -1248,16 +1248,24 @@ mod tests {
         assert!(bin.exists(), "test-server 不存在: {}", bin.display());
         let port =
             38000 + (std::process::id() % 400) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-        // 唯一 mock 状态 + 关闭自动发现：隔离本机真实 agent（避免重启恢复拉入其会话、
-        // 拖慢启动），保证测试确定性（AMUX_NO_DISCOVERY=1）
-        let state = std::env::temp_dir().join(format!(
-            "amux-wf-mock-{}-{}.state",
+        // 唯一数据目录（SQLite 注册表 + 历史日志）与 mock 状态 + 关闭自动发现：
+        // 隔离本机真实 agent 与真实 server 数据目录（避免测试会话污染
+        // ~/.amux/server），保证测试确定性（AMUX_NO_DISCOVERY=1）
+        let data_dir = std::env::temp_dir().join(format!(
+            "amux-wf-{}-{}",
             std::process::id(),
             NEXT_PORT.load(Ordering::SeqCst)
         ));
         let child = tokio::process::Command::new(bin)
-            .args(["--token", "test-token", "--port", &port.to_string()])
-            .env("AMUX_MOCK_STATE", &state)
+            .args([
+                "--token",
+                "test-token",
+                "--port",
+                &port.to_string(),
+                "--data-dir",
+                data_dir.to_str().unwrap(),
+            ])
+            .env("AMUX_MOCK_STATE", data_dir.join("mock.state"))
             .env("AMUX_NO_DISCOVERY", "1")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
