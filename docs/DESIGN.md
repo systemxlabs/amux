@@ -71,13 +71,14 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 
 ## 4. 部署与运行时
 
-### 4.1 Server 生命周期与启动
+### 4.1 Server 生命周期
 
 每台机器（含本机）统一运行一个 server 常驻进程（单二进制），与任何 GUI 应用连接无关：
 
 - **启动**：server 由所在机器自行启动（手动命令、系统服务或安装脚本），GUI 应用不负责拉起——连接失败即视为该机器离线。
 - **关闭**：GUI 应用关闭只断开 socket；server 继续常驻，ACP server 与 ACP 会话不受影响。
-- **机器重启**：server 除会话注册表与历史日志外无持久化状态（配置可重建）——重启后**会话列表从本地注册表恢复**，历史日志在盘**直接权威使用**；ACP server **随 server 启动一起拉起**（发现与启动见 §7.3），普通会话（`session/new`）仍在首条 prompt 懒创建。历史日志缺失（损坏/清空）视为该会话历史为空；注册表丢失视为会话列表丢失。
+- **机器重启**：server 除会话注册表与历史日志外无持久化状态（配置可重建）——重启后**会话列表从本地注册表恢复**，历史日志在盘**直接权威使用**；ACP server **随 server 启动一起拉起**（发现与启动见 §7.3），普通会话（`session/new`）仍在首条 prompt 懒创建。
+- **数据缺失容错**：历史日志缺失（损坏 / 清空）视为该会话历史为空；注册表丢失视为会话列表丢失。
 - **GUI 应用视角**：本机与远程完全一致——注册、连接、认证、离线处理无差别。
 
 ### 4.2 GUI 应用生命周期
@@ -97,7 +98,8 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 ### 5.1 交付模型
 
 - **事件透传**：agent 工作以 turn 为单位。server 把 agent 的 ACP `session/update` 事件（实时 turn）、`session_info_update`（agent 自报状态）与 **turn 边界事件**（server 从 prompt 请求生命周期反射：发出请求 = turn 开始，收到 result = turn 结束）**逐条透传**给 GUI 应用（typed JSON-RPC 通知），不做聚合。透传保持原始逐条事件（GUI 实时渲染需要流式）；落盘到本地历史日志的是**按 turn 合并后的条目**（§5.2），不存原始 chunk 流。
-- **GUI 聚合与状态**：对话内容（用户消息 + agent 输出）、活动（thinking / tool call / compaction）与会话状态（busy / idle）均由 GUI 应用从透传事件聚合 / 派生——输出按 chunk **增量实时渲染**，turn 结束收敛为完整消息；**同类连续事件合并为一条活动**（thinking 逐块累积为一条持续增长的思考活动，同一次工具调用的多次更新合并为一条）；busy / idle 采信 `session_info_update`（agent 自报）并辅以 turn 边界，重连时经会话列表（meta 含 state）补齐。
+- **GUI 聚合与渲染**：对话内容（用户消息 + agent 输出）与活动（thinking / tool call / compaction）由 GUI 应用从透传事件聚合——输出按 chunk **增量实时渲染**，turn 结束收敛为完整消息；**同类连续事件合并为一条活动**（thinking 逐块累积为一条持续增长的思考活动，同一次工具调用的多次更新合并为一条）。
+- **会话状态派生**：busy / idle 采信 `session_info_update`（agent 自报）并辅以 turn 边界，重连时经会话列表（meta 含 state）补齐。
 - **断线重连**：server 不为断开的连接缓冲事件——断线期间进行中的 turn 不重放已产生的流式事件，重连后自接续收到的事件起增量渲染；已完成的 turn 经历史日志（§5.2）按需补齐。
 
 ### 5.2 会话历史
@@ -105,7 +107,8 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 会话历史存于 server 本地事件日志（每会话一个事件日志文件，`~/.amux/server/history/`），**存储按 turn 合并后的条目**，GUI 应用按需读取：
 
 - **权威与完整性**：server 是 ACP v1 唯一客户端（所有 prompt 经 server 串行化送达），是会话事件的唯一观察者；会话创建即建日志文件，此后**已完成 turn 的合并条目**按序追加，事件日志按设计保证完整（所有事件经 server 串行观察、单写者追加）
-- **写入（合并落盘）**：turn 中缓冲流式事件（`session/update` chunk、thinking 块、工具调用、用户消息回显），**收到 result（turn 结束）时按 §5.1 的合并语义收敛为完整条目**后落盘（compaction 与 turn 边界独立成条）；崩溃（无 result）的 turn 视为未完成，不产生历史条目；**取消（cancel）同样以是否收到 result 为准**——agent 返回 result 则按合并语义落盘（保留已完成部分），否则视为未完成、不产生历史条目。
+- **写入（合并落盘）**：turn 中缓冲流式事件（`session/update` chunk、thinking 块、工具调用、用户消息回显），**收到 result（turn 结束）时按 §5.1 的合并语义收敛为完整条目**后落盘（compaction 与 turn 边界独立成条）。
+- **异常 turn**：崩溃（无 result）的 turn 视为未完成，不产生历史条目；**取消（cancel）同样以是否收到 result 为准**——agent 返回 result 则按合并语义落盘（保留已完成部分），否则视为未完成、不产生历史条目。
 - **读取**：GUI 应用打开会话 → server 从本地日志读取（按窗口 / 游标惰性分页）——条目已合并，GUI 无需再按 chunk 收敛
 - **会话删除**：删除会话时同步移除 server 注册表条目、删除历史日志，并释放 agent 侧资源，不可恢复
 
@@ -130,7 +133,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 
 - **交互只有两个动作**：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作），经 ACP `session/prompt` / `session/cancel` 到达 agent。**prompt 是触发 ACP 交互的唯一入口**（创建会话只与 server 交互，见 §4.1）。
 - **用户输入**：GUI 应用的 prompt 经 server 转发给 agent；用户消息同时由 GUI 应用本地立即渲染（不依赖回显），并保留在对话内容中。
-- **快捷指令**（无专用协议）：每条指令是一段发给 agent 的提示词，经 prompt 由 agent 执行（Commit & Push、Submit PR、skill 安装 / 更新等，见「Skills 管理」）；新会话 / 取消 / 删除等由 GUI 应用直接发起对应会话操作。
+- **快捷指令**（无专用协议）：每条指令是一段发给 agent 的提示词，经 prompt 由 agent 执行；新会话 / 取消 / 删除等由 GUI 应用直接发起对应会话操作。
 - **多 GUI 应用并发**：server 对同一会话的所有 prompt（含各 GUI 应用的）按到达顺序串行化，保证按调用顺序送达。
 - **忙时 prompt（steer）**：行为取决于 agent 实现（ACP turn 模型，见 §7.2）；agent 不支持进行中注入时 server 直接报错（不排队、不静默降级）。
 
@@ -141,9 +144,10 @@ Server 作为 **ACP v1 client** 与各机器的 **ACP server** 通信：
 - **传输**：ACP stdio——server spawn ACP server（子进程），JSON-RPC 2.0 over stdin/stdout。
 - **会话生命周期**：
   - `session/new`：新建会话（yolo 模式启动，见下）
-  - `session/resume`：对已存在会话恢复 agent 自身上下文（agent 从自身存储恢复，**不向客户端重放历史**——历史以 server 日志为权威，见 §5.2）；**能力门控**——agent 未声明 `sessionCapabilities.resume` 时无法恢复上下文，会话历史仍可浏览，用户 prompt 时报明确错误（不静默开新上下文）
+  - `session/resume`：对已存在会话恢复 agent 自身上下文（agent 从自身存储恢复，**不向客户端重放历史**——历史以 server 日志为权威，见 §5.2）
+    - **能力门控**：agent 未声明 `sessionCapabilities.resume` 时无法恢复上下文，会话历史仍可浏览，用户 prompt 时报明确错误（不静默开新上下文）
   - `session/prompt` / `session/cancel`
-  - `session/close`：**能力门控**（`sessionCapabilities.close`），删除会话时用于取消进行中工作并释放 agent 侧资源（见 §5.2）
+  - `session/close`：删除会话时取消进行中工作并释放 agent 侧资源（见 §5.2）
 - **状态与边界**：agent 经 `session_info_update` 自报状态；server 从 prompt 请求生命周期反射 turn 边界（发出请求 = turn 开始，收到 result = turn 结束）。
 - **权限（yolo）**：agent 经 `session/request_permission` 请求权限；server **自动批准**（yolo 模式，既定决策延续，无审批往返），安全性依赖运行环境。
 - **steer**：ACP v1 为 turn 模型——prompt 启动一个 turn，turn 结束（agent 回到 idle）后才可再 prompt；忙时 prompt 行为取决于 agent 实现（部分 agent 支持进行中注入）。
