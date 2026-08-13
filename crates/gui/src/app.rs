@@ -1535,6 +1535,8 @@ impl AmuxApp {
     fn create_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let description = self.workflow_input.read(cx).value().to_string();
         if description.trim().is_empty() {
+            self.workflow_error = Some("请先用自然语言描述执行计划".into());
+            cx.notify();
             return;
         }
         self.create_workflow_with(window, cx, description, None);
@@ -1661,8 +1663,13 @@ impl AmuxApp {
         tpl: WorkflowTemplate,
     ) {
         // 模板内置进编排 agent 的系统提示词（preamble），不进入会话历史（PRD §3.7）；
-        // 输入框中的内容（若有）作为用户的额外目标
+        // 输入框中的内容作为本次工作流的目标（PRD §3.7/§4.1.2），为空则不创建、不自动启动
         let goal = self.workflow_input.read(cx).value().to_string();
+        if goal.trim().is_empty() {
+            self.workflow_error = Some("请先在输入框填写本次工作流的目标，再选择模板".into());
+            cx.notify();
+            return;
+        }
         self.create_workflow_with(window, cx, goal, Some(tpl.description.clone()));
         self.workflow_input.update(cx, |s, cx| {
             s.set_value("", window, cx);
