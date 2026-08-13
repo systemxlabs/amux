@@ -3136,6 +3136,7 @@ impl AmuxApp {
         };
         match &current {
             Some(Activity::Thinking { content, .. }) => h_flex()
+                .w_full()
                 .gap_2()
                 .p_2()
                 .bg(rgb(0xfffbeb))
@@ -3143,9 +3144,16 @@ impl AmuxApp {
                 .border_color(rgb(0xfcd34d))
                 .rounded_md()
                 .child(Spinner::new())
-                .child(Label::new(format!("思考中：{}", content)).text_color(rgb(0x92400e)))
+                .child(
+                    Label::new(format!("思考中：{}", one_line(content, 120)))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(0x92400e)),
+                )
                 .into_any(),
             Some(Activity::ToolCall { name, title, .. }) => h_flex()
+                .w_full()
                 .gap_2()
                 .p_2()
                 .bg(rgb(0xfffbeb))
@@ -3157,19 +3165,29 @@ impl AmuxApp {
                     Label::new(format!(
                         "工具调用：{} {}",
                         name,
-                        title.clone().unwrap_or_default()
+                        one_line(title.as_deref().unwrap_or(""), 120)
                     ))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .text_color(rgb(0x92400e)),
                 )
                 .into_any(),
             Some(Activity::Compaction { detail, .. }) => h_flex()
+                .w_full()
                 .gap_2()
                 .p_2()
                 .bg(rgb(0xfffbeb))
                 .border_1()
                 .border_color(rgb(0xfcd34d))
                 .rounded_md()
-                .child(Label::new(format!("上下文压缩：{}", detail)).text_color(rgb(0x92400e)))
+                .child(
+                    Label::new(format!("上下文压缩：{}", one_line(detail, 120)))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(0x92400e)),
+                )
                 .into_any(),
             None => div().id("activity-bar-empty").into_any(),
         }
@@ -4618,6 +4636,12 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// 单行展示：折叠空白并截断（实时活动条用）。
+fn one_line(s: &str, max: usize) -> String {
+    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate(&collapsed, max)
 }
 
 /// 活动展示（种类标签 + 详情文本）。
