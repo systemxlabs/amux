@@ -248,6 +248,8 @@ pub struct AmuxApp {
     activities_scroll: ScrollHandle,
     /// 活动历史当前渲染条数（滚动加载：只渲染最近 N 条，向上加载更多）
     activities_limit: usize,
+    /// 活动历史中已展开的长条目
+    expanded_activities: std::collections::HashSet<String>,
     /// 已展开子会话的工作流（"▾"折叠指示，PRD §4.1.1）
     expanded_workflows: std::collections::HashSet<usize>,
     _tasks: Vec<Task<()>>,
@@ -359,6 +361,7 @@ impl AmuxApp {
             workflow_dialog_cache: std::cell::RefCell::new(None),
             activities_scroll: ScrollHandle::new(),
             activities_limit: 100,
+            expanded_activities: std::collections::HashSet::new(),
             expanded_workflows: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
@@ -3888,6 +3891,48 @@ impl AmuxApp {
         body.into_any()
     }
 
+    /// 单条活动历史：过长内容折叠，可展开/收起。
+    fn activity_row(
+        &self,
+        key: &str,
+        kind: &str,
+        detail: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let expanded = self.expanded_activities.contains(key);
+        let long = detail.chars().count() > 200;
+        let shown = if long && !expanded {
+            one_line(detail, 200)
+        } else {
+            detail.to_string()
+        };
+        let key_owned = key.to_string();
+        let mut row = div()
+            .id(key_owned.clone())
+            .w_full()
+            .p_1()
+            .bg(rgb(0xf5f6f8))
+            .rounded_md()
+            .v_flex()
+            .gap_1()
+            .child(Label::new(format!("[{kind}] {shown}")).text_sm());
+        if long {
+            row = row.child(
+                Button::new(format!("act-toggle-{key}"))
+                    .small()
+                    .ghost()
+                    .label(if expanded { "收起" } else { "展开" })
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        if !this.expanded_activities.remove(&key_owned) {
+                            this.expanded_activities.insert(key_owned.clone());
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        row.into_any_element()
+    }
+
     /// 会话活动历史面板（PRD §4.1.4 会话活动）。
     fn render_activities_panel(
         &self,
@@ -3907,14 +3952,7 @@ impl AmuxApp {
                     .enumerate()
                     .map(|(i, a)| {
                         let (kind, detail) = activity_display(a);
-                        div()
-                            .id(("act", i))
-                            .w_full()
-                            .p_1()
-                            .bg(rgb(0xf5f6f8))
-                            .rounded_md()
-                            .child(format!("[{kind}] {detail}"))
-                            .into_any_element()
+                        self.activity_row(&format!("act-{i}"), &kind, &detail, cx)
                     })
                     .collect();
                 live = view.and_then(|v| v.live_activity.clone());
@@ -3927,16 +3965,12 @@ impl AmuxApp {
                             // （活动只含系统事件与实时状态）
                             OrcMsg::User { .. } | OrcMsg::Orc { .. } => {}
                             OrcMsg::System { text } => {
-                                rows.push(
-                                    div()
-                                        .id(("wf-act", i))
-                                        .w_full()
-                                        .p_1()
-                                        .bg(rgb(0xf5f6f8))
-                                        .rounded_md()
-                                        .child(format!("[系统] {text}"))
-                                        .into_any_element(),
-                                );
+                                rows.push(self.activity_row(
+                                    &format!("wf-act-{i}"),
+                                    "系统",
+                                    text,
+                                    cx,
+                                ));
                             }
                         }
                     }
