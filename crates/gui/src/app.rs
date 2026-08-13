@@ -244,6 +244,10 @@ pub struct AmuxApp {
     dialog_scroll: ScrollHandle,
     /// 工作流会话对话条目缓存（键：会话 id + 转录长度；避免每次渲染重复克隆）
     workflow_dialog_cache: std::cell::RefCell<WorkflowDialogCache>,
+    /// 活动历史滚动句柄（打开面板自动滚到底部）
+    activities_scroll: ScrollHandle,
+    /// 活动历史当前渲染条数（滚动加载：只渲染最近 N 条，向上加载更多）
+    activities_limit: usize,
     /// 已展开子会话的工作流（"▾"折叠指示，PRD §4.1.1）
     expanded_workflows: std::collections::HashSet<usize>,
     _tasks: Vec<Task<()>>,
@@ -353,6 +357,8 @@ impl AmuxApp {
             workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
             workflow_dialog_cache: std::cell::RefCell::new(None),
+            activities_scroll: ScrollHandle::new(),
+            activities_limit: 100,
             expanded_workflows: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
@@ -3460,6 +3466,11 @@ impl AmuxApp {
         let bounds = window.bounds();
         // 基准宽度 = 当前宽度 - 已扩展量（手动缩放窗口时下次切换自动校正）
         let base = bounds.size.width - new_delta.into();
+        // 打开活动历史面板：重置滚动加载窗口并滚到底部（最新）
+        if panel == Some(Panel::Activities) && self.panel != Some(Panel::Activities) {
+            self.activities_limit = 100;
+            self.activities_scroll.scroll_to_bottom();
+        }
         self.panel = panel;
         self.panel_delta_px = new_delta;
         let width: gpui::Pixels = base + new_delta.into();
@@ -3876,7 +3887,7 @@ impl AmuxApp {
     fn render_activities_panel(
         &self,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         // 普通会话：当前会话聚合视图的活动历史（GUI 从透传事件聚合，docs/DESIGN.md §5.3）；
         // 工作流会话：转录里的系统事件 + 实时状态
@@ -3934,8 +3945,27 @@ impl AmuxApp {
             }
             _ => {}
         }
+        // 滚动加载：只渲染最近 `activities_limit` 条，向上加载更多
+        let total = rows.len();
+        let start = total.saturating_sub(self.activities_limit);
+        let has_more = start > 0;
+
         // 实时活动（turn 进行中合并流式的一条，追加在历史下方）
-        let mut children = rows;
+        let mut children: Vec<gpui::AnyElement> = Vec::new();
+        if has_more {
+            children.push(
+                Button::new("load-more-activities")
+                    .small()
+                    .ghost()
+                    .label(format!("加载更早活动（还有 {start} 条）"))
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.activities_limit += 100;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        children.extend(rows.into_iter().skip(start));
         if let Some(a) = &live {
             let (kind, detail) = activity_display(a);
             children.push(
@@ -3971,6 +4001,7 @@ impl AmuxApp {
                     .flex_1()
                     .gap_2()
                     .overflow_y_scroll()
+                    .track_scroll(&self.activities_scroll)
                     .children(children),
             )
             .into_any()
