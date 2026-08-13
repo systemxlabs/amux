@@ -250,6 +250,8 @@ pub struct AmuxApp {
     activities_limit: usize,
     /// 活动历史中已展开的长条目
     expanded_activities: std::collections::HashSet<String>,
+    /// 工作流会话对话流当前渲染条数（滚动加载：只渲染最近 N 条，向上加载更多）
+    workflow_dialog_limit: usize,
     /// 已展开子会话的工作流（"▾"折叠指示，PRD §4.1.1）
     expanded_workflows: std::collections::HashSet<usize>,
     _tasks: Vec<Task<()>>,
@@ -362,6 +364,7 @@ impl AmuxApp {
             activities_scroll: ScrollHandle::new(),
             activities_limit: 100,
             expanded_activities: std::collections::HashSet::new(),
+            workflow_dialog_limit: 50,
             expanded_workflows: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
@@ -2289,6 +2292,8 @@ impl AmuxApp {
     fn open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wi: usize) {
         self.selected = Some(Selected::Workflow { engine: wi });
         self.set_panel(window, cx, None);
+        // 滚动加载：打开时只渲染最近一窗
+        self.workflow_dialog_limit = 50;
         // 与普通会话一致：打开后跳到对话底部（最新内容）
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
@@ -2936,6 +2941,7 @@ impl AmuxApp {
     }
 
     fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut workflow_hidden = 0usize;
         let dialog = match &self.selected {
             Some(Selected::Session { machine, id: _ }) => self
                 .machine(*machine)
@@ -2951,7 +2957,11 @@ impl AmuxApp {
                     if cache.as_ref().map(|(k, _)| k) != Some(&key) {
                         *cache = Some((key, w.session.to_dialog_items()));
                     }
-                    cache.as_ref().map(|(_, d)| d.clone()).unwrap_or_default()
+                    let all = cache.as_ref().map(|(_, d)| d.clone()).unwrap_or_default();
+                    // 滚动加载：只渲染最近一窗，向上加载更多
+                    let start = all.len().saturating_sub(self.workflow_dialog_limit);
+                    workflow_hidden = start;
+                    all[start..].to_vec()
                 })
                 .unwrap_or_default(),
             None => Vec::new(),
@@ -3080,6 +3090,24 @@ impl AmuxApp {
                         );
                     }
                 }
+            }
+            // 工作流会话本地转录的滚动加载
+            if workflow_hidden > 0 {
+                children.push(
+                    h_flex()
+                        .w_full()
+                        .justify_center()
+                        .child(
+                            Button::new("load-earlier-workflow")
+                                .small()
+                                .label(format!("加载更早消息（还有 {workflow_hidden} 条）"))
+                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    this.workflow_dialog_limit += 50;
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element(),
+                );
             }
             children.extend(rows.into_iter().map(|r| r.into_any_element()));
             div()
