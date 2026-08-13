@@ -48,7 +48,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 
 ### 3.1 组件与边界
 
-- **GUI 应用（唯一客户端）**：amux 桌面应用，直连各已注册机器的 server——本机与远程同等对待，统一注册后连接。每条连接对应一台机器，使用同一套协议。
+- **GUI 应用（唯一客户端）**：amux 桌面应用（单进程，跨平台 macOS / Linux / Windows），直连各已注册机器的 server——本机与远程同等对待，统一注册后连接。每条连接对应一台机器，使用同一套协议。
 - **Server**：每台机器运行一个常驻进程，是 **ACP v1 client**——spawn ACP server（子进程）、驱动 ACP 会话、把 agent 的会话事件**透传**给 GUI 应用、直连 git；同时是**会话控制面状态的权威维护者**（会话列表注册表 + 会话历史日志，见 §3.2）。**server 之间不通信**——每个 server 只服务本机会话，对连接方一律按 GUI 应用对待。
 
 ### 3.2 职责划分
@@ -180,18 +180,7 @@ server 直连本机 git，提供三类操作（GUI 经协议方法调用）：
 - **安装 / 更新**：复用会话能力——新建会话（对应机器与 agent）后经 prompt 让 agent 自行下载、安装或更新（快捷指令式 prompt，无专用协议）
 - **查看已安装列表**：GUI 经 server 查询某 agent 已安装的 skills（agent 不支持时返回空列表）
 
-## 8. GUI 应用
-
-GUI 应用为单进程桌面应用（跨平台 macOS / Linux / Windows）。
-
-### 8.1 布局与渲染
-
-布局与视图交互由 PRD §4 定义，本节只记设计级决策：
-
-- **布局**：三面板 **Dock 布局**（gpui-component）。
-- **渲染**：对话流消息气泡 **Markdown 渲染** + 虚拟化列表；diff 视图、表单 / 对话框等使用 gpui-component 组件。
-
-## 9. 工作流
+## 8. 工作流
 
 工作流由 **GUI 应用内置编排 agent** 驱动（**rig 单 turn 模式**实现），基于会话原语实现：
 
@@ -199,11 +188,11 @@ GUI 应用为单进程桌面应用（跨平台 macOS / Linux / Windows）。
 - **rig 单 turn 模式**：每个 turn 调用一次 rig `Agent::prompt`（不用 `multi_turn` 长循环）——输出指令后 turn 结束、**不阻塞等待子会话**；会话操作（创建会话、向子会话发指令、汇总）定义为 rig 工具；GUI 应用从透传事件派生子会话状态，子会话 idle 时自动注入 prompt（含子会话完成情况）启动下一 turn。
 - **API 配置**：编排 agent 的 LLM 调用经 OpenAI 兼容 API 配置——Base URL、API key、模型名与 **wire API**（参考 Codex CLI 的 `model_providers.wire_api` 设计：`chat` 对应 Chat Completions、`responses` 对应 Responses API）。
 
-## 10. 可观测性
+## 9. 可观测性
 
 日志是 amux 调试的主要手段：GUI 应用 ↔ server ↔ ACP client ↔ agent 跨进程、跨机器，问题定位依赖能串起整条链路的日志。
 
-## 11. 参考
+## 10. 参考
 
 - [Agent Client Protocol (ACP) v1](https://agentclientprotocol.com/)：server 与 agent 之间的通信协议（stdio 传输、session 生命周期、session/update 事件流、request_permission）
 - [GPUI](https://gpui.rs/)：Zed 的 GPU 加速 GUI 应用框架（Zed 主线 git 依赖）
