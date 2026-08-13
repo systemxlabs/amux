@@ -1631,8 +1631,39 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 删除工作流会话（连同本地持久化状态）。
-    fn delete_workflow(&mut self, _window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+    /// 删除工作流会话：删除其所有子会话（各机器 server）并清除本地持久化状态。
+    fn delete_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+        // 先收集子会话（机器下标 + 会话 id），再异步发 DELETE_SESSION
+        let children: Vec<(usize, String)> = self
+            .workflows
+            .get(idx)
+            .map(|w| {
+                w.session
+                    .children
+                    .iter()
+                    .map(|c| (c.machine_idx, c.id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (machine, sid) in children {
+            if let Some(m) = self.machine(machine) {
+                let client = m.client.clone();
+                cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                    let _ = client
+                        .request(
+                            protocol::method::DELETE_SESSION,
+                            Some(json!({ "sessionId": sid })),
+                        )
+                        .await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.refresh_sessions(machine, window, cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+        // 删除本地工作流状态
         if let Some(wf) = self.workflows.get(idx) {
             let id = wf.session.id.clone();
             WorkflowEngine::remove(&self.workflow_dir, &id);
@@ -1646,6 +1677,39 @@ impl AmuxApp {
             }
         }
         cx.notify();
+    }
+
+    /// 删除工作流会话确认弹窗（连同所有子会话，不可恢复）。
+    fn confirm_delete_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+        let child_count = self
+            .workflows
+            .get(idx)
+            .map(|w| w.session.children.len())
+            .unwrap_or(0);
+        let this = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let this = this.clone();
+            alert
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("确认删除")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .title("删除工作流会话")
+                .description(format!(
+                    "确定删除该工作流会话吗？将同时删除其 {child_count} 个子会话，不可恢复。"
+                ))
+                .on_ok(move |_ev, window, cx| {
+                    let this = this.clone();
+                    this.update(cx, |this, cx| {
+                        this.delete_workflow(window, cx, idx);
+                    });
+                    true
+                })
+                .on_cancel(|_ev, _window, _cx| true)
+        });
     }
 
     /// 取消工作流会话及其所有子会话（终止整个工作流，PRD §3.7）。
@@ -1885,9 +1949,9 @@ impl AmuxApp {
                                             session_id.clone(),
                                         );
                                     }
-                                    // 工作流会话：GUI 本地状态，直接删除
+                                    // 工作流会话：删除本地状态并删除其所有子会话（弹窗确认）
                                     ContextMenuTarget::Workflow { engine } => {
-                                        this.delete_workflow(window, cx, *engine);
+                                        this.confirm_delete_workflow(window, cx, *engine);
                                     }
                                 }
                                 this.context_menu = None;
@@ -3705,7 +3769,7 @@ impl AmuxApp {
                         .small()
                         .label("删除工作流会话")
                         .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.delete_workflow(window, cx, engine);
+                            this.confirm_delete_workflow(window, cx, engine);
                         })),
                 );
             for c in self
