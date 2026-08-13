@@ -1535,15 +1535,20 @@ impl AmuxApp {
     }
 
     /// 创建工作流会话（PRD §3.7/§4.1.2）：输入框内容作为本次目标/执行计划；
-    /// 若已选择模板，模板作为系统提示词（preamble）、输入框内容作为本次目标。
+    /// 若已选择模板，模板作为系统提示词（preamble）；输入为空时用模板描述作为本次计划。
     fn create_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let description = self.workflow_input.read(cx).value().to_string();
-        if description.trim().is_empty() {
+        let goal = self.workflow_input.read(cx).value().to_string();
+        let preamble = self.workflow_template.take().map(|t| t.description);
+        // 目标（输入框）优先；无目标时用模板描述作为本次计划；两者都无则报错
+        let description = if !goal.trim().is_empty() {
+            goal
+        } else if let Some(p) = preamble.as_deref().filter(|p| !p.trim().is_empty()) {
+            p.to_string()
+        } else {
             self.workflow_error = Some("请先用自然语言描述执行计划".into());
             cx.notify();
             return;
-        }
-        let preamble = self.workflow_template.take().map(|t| t.description);
+        };
         self.create_workflow_with(window, cx, description, preamble);
         self.workflow_input.update(cx, |s, cx| {
             s.set_value("", window, cx);
@@ -2570,7 +2575,7 @@ impl AmuxApp {
                             .gap_1()
                             .child(
                                 Label::new(if self.workflow_template.is_some() {
-                                    "本次工作流目标（模板作为执行要求）"
+                                    "本次工作流目标（可留空，默认使用模板描述）"
                                 } else {
                                     "自然语言执行计划"
                                 })
