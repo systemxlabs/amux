@@ -186,11 +186,47 @@ server 直连本机 git，提供三类操作（GUI 经协议方法调用）：
 
 ## 8. 工作流
 
-工作流由 **GUI 应用内置编排 agent** 驱动（**rig 单 turn 模式**实现），基于会话原语实现：
+工作流由 **GUI 应用内置编排 agent** 驱动（rig 实现），基于会话原语实现：
 
-- **工作流会话**：工作流创建一个工作流会话（GUI 应用内置 agent，状态存 GUI 应用本地），与普通会话一样支持 prompt / 状态（idle / busy）。
-- **rig 单 turn 模式**：每个 turn 调用一次 rig `Agent::prompt`（不用 `multi_turn` 长循环）——输出指令后 turn 结束、**不阻塞等待子会话**；会话操作（创建会话、向子会话发指令、汇总）定义为 rig 工具；GUI 应用从透传事件派生子会话状态，子会话 idle 时自动注入 prompt（含子会话完成情况）启动下一 turn。
-- **API 配置**：编排 agent 的 LLM 调用经 OpenAI 兼容 API 配置——Base URL、API key、模型名与 **wire API**（参考 Codex CLI 的 `model_providers.wire_api` 设计：`chat` 对应 Chat Completions、`responses` 对应 Responses API）。
+### 8.1 运行模型
+
+- **工作流会话**：工作流创建一个工作流会话（GUI 应用内置 agent，状态存 GUI 应用本地），与普通会话一样支持 prompt / 状态（idle / busy）；**支持 steer**——busy 时用户输入注入当前 turn（编排 agent 为 GUI 应用内置，steer 由 GUI 应用自身实现，不依赖 ACP 能力）。
+- **rig 单 turn 模式**：每个 turn 调用一次 rig `Agent::prompt`（不用 `multi_turn` 长循环）——下达指令后 turn 结束、**不阻塞等待子会话**；下一 turn 由自动推进（§8.4）或用户输入触发。编排 agent 的会话操作定义为 rig 工具（§8.2）。
+- **API 配置**：编排 agent 的 LLM 调用经自定义 API 端点配置——Base URL、API key、模型名与 **API format**：`chat_completions` / `responses` / `messages`（分别对应 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages API）。
+
+### 8.2 编排工具
+
+编排 agent 的工具即会话原语，经 GUI 应用既有的 server 连接与协议方法执行：
+
+| 工具 | 用途 |
+|---|---|
+| `list_agents` | 已注册机器及各机器的 agent 列表：机器在线状态、agent 可用性——为每步选择机器与 agent |
+| `list_sessions` | 本工作流的子会话列表（标题、状态、最近活跃）——复用已有子会话 |
+| `create_session` | 在指定机器以指定 agent 与工作目录创建子会话，返回会话 ID |
+| `prompt_session` | 向子会话下发指令（idle 启动工作、忙时 steer） |
+| `cancel_session` | 取消子会话进行中的工作——卡住步骤的恢复手段 |
+| `get_session_state` | 查询子会话当前状态（busy / idle、机器在线与否） |
+| `read_session_history` | 按窗口 / 游标读取子会话对话内容——评估步骤结果、提取结论 |
+
+汇总与结论不需要工具——编排 agent 的文本输出即工作流会话的对话内容。
+
+### 8.3 上下文管理（auto compaction）
+
+工作流会话长期运行、轮次持续增长，发送给模型的上下文（编排 agent 自身上下文，与 ACP agent 的 compaction 无关）需自动压缩：
+
+- **历史与上下文分离**：展示用对话历史完整持久化（§4.3），压缩只影响发送给模型的上下文
+- **触发**：每个 turn 开始前估算上下文 token 数，超过模型上下文窗口的阈值比例时先压缩再调用
+- **压缩方式**：用编排 agent 自身模型把最旧的轮次压缩为一段摘要；此后上下文 = 系统提示词（含工作流模板）+ 摘要 + 未压缩的近期轮次
+- **摘要持久化**：摘要随工作流会话状态落盘，GUI 重开后直接使用，不重新压缩
+
+### 8.4 自动推进
+
+工作流推进由 GUI 应用侧触发（server 不参与）：
+
+- **触发源**：GUI 应用从透传事件派生子会话状态（§5.1），子会话 **busy → idle 跳变**（边沿触发）时向所属工作流会话注入一段 prompt
+- **注入内容**：子会话标识（ID / 标题）+ turn 结束原因（完成 / 取消 / 错误，来自 prompt result）；步骤细节由编排 agent 经 `read_session_history` 按需自取，注入保持简短
+- **busy 时注入**：注入即向工作流会话输入——idle 启动新 turn，busy 时作为 steer 注入当前 turn（§8.1）；多个子会话同时完成时合并为一次注入
+- **恢复**：工作流会话状态记录最近一次自动注入时间；GUI 重开后，进行中工作流的子会话若最近活跃晚于该时间（完成未被消费），补注入一次——即「依据子会话当前状态恢复自动推进」
 
 ## 9. 可观测性
 
