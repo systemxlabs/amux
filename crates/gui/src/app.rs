@@ -3053,6 +3053,7 @@ impl AmuxApp {
                 ),
                 DialogItem::SystemMessage { content, .. } => div().id(("row", i)).w_full().child(
                     div()
+                        .ml_auto()
                         .max_w(px(720.))
                         .p_3()
                         .v_flex()
