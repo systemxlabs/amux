@@ -21,7 +21,7 @@ use rig::completion::Prompt;
 
 use serde::{Deserialize, Serialize};
 
-use protocol::{generate_title, ContentBlock, DialogItem, SessionState};
+use protocol::{generate_title, Activity, ContentBlock, DialogItem, SessionState};
 
 use crate::config::OrchestratorConfig;
 use crate::ws::WsClient;
@@ -72,6 +72,9 @@ pub struct OrcSession {
     pub done: bool,
     pub transcript: Vec<OrcMsg>,
     pub children: Vec<ChildSession>,
+    /// 编排过程活动（创建/介入子会话等，用于活动历史）
+    #[serde(default)]
+    pub activities: Vec<Activity>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -300,6 +303,7 @@ impl WorkflowEngine {
             done: false,
             transcript,
             children: Vec::new(),
+            activities: Vec::new(),
             created_at: t,
             updated_at: t,
         };
@@ -499,12 +503,27 @@ impl WorkflowEngine {
                         });
                     }
                     let _ = self.prompt_child(&session_id, &prompt).await;
+                    self.session.activities.push(Activity::ToolCall {
+                        timestamp: now(),
+                        name: "create_session".into(),
+                        title: Some(format!(
+                            "在 {} 用 {} 创建子会话 {session_id}",
+                            self.machines[m_idx].name, harness
+                        )),
+                        content: Some(prompt.clone()),
+                    });
                 }
                 OrcAction::Steer { session, prompt } | OrcAction::Retry { session, prompt } => {
                     self.session.transcript.push(OrcMsg::System {
                         text: format!("介入子会话 {session}"),
                     });
                     let _ = self.prompt_child(&session, &prompt).await;
+                    self.session.activities.push(Activity::ToolCall {
+                        timestamp: now(),
+                        name: "prompt_session".into(),
+                        title: Some(format!("介入子会话 {session}")),
+                        content: Some(prompt.clone()),
+                    });
                 }
             }
         }

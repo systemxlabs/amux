@@ -3886,8 +3886,18 @@ impl AmuxApp {
                 live = view.and_then(|v| v.live_activity.clone());
             }
             Some(Selected::Workflow { engine }) => {
-                // 系统消息进入会话历史（气泡），不进入活动历史；活动只保留实时编排状态
+                // 系统消息进入会话历史（气泡）；活动历史展示编排过程的活动（创建/介入子会话）
                 if let Some(wf) = self.workflows.get(*engine) {
+                    rows = wf
+                        .session
+                        .activities
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| {
+                            let (kind, detail) = activity_display(a);
+                            self.activity_row(&format!("wf-act-{i}"), &kind, &detail, cx)
+                        })
+                        .collect();
                     if wf.session.state == SessionState::Busy {
                         live = Some(Activity::Thinking {
                             timestamp: wf.session.updated_at,
