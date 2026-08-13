@@ -3045,6 +3045,19 @@ impl AmuxApp {
                                 .selectable(true),
                         ),
                 ),
+                DialogItem::SystemMessage { content, .. } => div().id(("row", i)).w_full().child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .py_1()
+                        .child(
+                            Label::new(block_text(content))
+                                .text_xs()
+                                .text_color(rgb(0x9ca3af)),
+                        ),
+                ),
             })
             .collect::<Vec<_>>();
         if rows.is_empty() {

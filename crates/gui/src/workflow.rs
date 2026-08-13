@@ -704,20 +704,23 @@ fn first_line(s: &str) -> String {
 }
 
 impl OrcSession {
-    /// 工作流会话对话流：用户消息与编排输出（系统事件不进入对话流，PRD §4.1.3）。
+    /// 工作流会话对话流：用户消息、编排输出与系统事件（系统消息也进入对话历史）。
     pub fn to_dialog_items(&self) -> Vec<DialogItem> {
         self.transcript
             .iter()
-            .filter_map(|m| match m {
-                OrcMsg::User { text } => Some(DialogItem::UserMessage {
+            .map(|m| match m {
+                OrcMsg::User { text } => DialogItem::UserMessage {
                     content: vec![ContentBlock::Text { text: text.clone() }],
                     timestamp: self.updated_at,
-                }),
-                OrcMsg::Orc { text } => Some(DialogItem::AgentOutput {
+                },
+                OrcMsg::Orc { text } => DialogItem::AgentOutput {
                     content: vec![ContentBlock::Text { text: text.clone() }],
                     timestamp: self.updated_at,
-                }),
-                OrcMsg::System { .. } => None,
+                },
+                OrcMsg::System { text } => DialogItem::SystemMessage {
+                    content: vec![ContentBlock::Text { text: text.clone() }],
+                    timestamp: self.updated_at,
+                },
             })
             .collect()
     }
@@ -1692,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn orc_session_to_dialog_items_filters_system() {
+    fn orc_session_to_dialog_items_includes_system() {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "计划",
@@ -1713,10 +1716,11 @@ mod tests {
             text: "系统事件".into(),
         });
         let dialog = engine.session.to_dialog_items();
-        // 用户计划 + 编排输出；系统事件不进对话流
-        assert_eq!(dialog.len(), 2);
+        // 用户计划 + 编排输出 + 系统事件
+        assert_eq!(dialog.len(), 3);
         assert!(matches!(&dialog[0], DialogItem::UserMessage { .. }));
         assert!(matches!(&dialog[1], DialogItem::AgentOutput { .. }));
+        assert!(matches!(&dialog[2], DialogItem::SystemMessage { .. }));
     }
 
     #[test]
