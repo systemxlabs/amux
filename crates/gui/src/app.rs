@@ -575,8 +575,11 @@ impl AmuxApp {
                         .iter()
                         .position(|wf| wf.session.children.iter().any(|c| c.id == session_id));
                     if let Some(wi) = wi {
-                        // 已有推进进行中：跳过本次自动推进（完成情况由后续轮次带上）
-                        if !this.workflows[wi].is_advancing() {
+                        // 已有推进进行中，或已取消/已完成：跳过自动推进
+                        if !this.workflows[wi].is_advancing()
+                            && !this.workflows[wi].session.cancelled
+                            && !this.workflows[wi].session.done
+                        {
                             let output = this
                                 .machine(idx)
                                 .and_then(|mm| mm.views.get(&session_id))
@@ -1519,6 +1522,8 @@ impl AmuxApp {
                         let _ = this.update_in(cx, |this, _window, cx| {
                             if let Some(wf) = this.workflows.get_mut(wi) {
                                 if !wf.is_advancing()
+                                    && !wf.session.cancelled
+                                    && !wf.session.done
                                     && wf.session.children.iter().any(|c| c.id == sid)
                                 {
                                     wf.begin_busy();

@@ -580,15 +580,17 @@ impl WorkflowEngine {
         }
         child.state = state;
         if state == SessionState::Idle {
+            // 已取消/已完成的会话不再自动推进，也不追加重复的完成消息
+            if self.session.cancelled || self.session.done {
+                return false;
+            }
             let step = child.step_desc.clone();
             let last = child.last_output.clone();
             self.session.transcript.push(OrcMsg::System {
                 text: format!("子会话 {session_id} 完成（{step}）：{last}"),
             });
-            if !self.session.cancelled && !self.session.done {
-                let _ = self.advance().await;
-                return true;
-            }
+            let _ = self.advance().await;
+            return true;
         }
         false
     }
@@ -1228,6 +1230,38 @@ mod tests {
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::User { text } if text == "先做 A")));
+    }
+
+    /// 已完成/已取消的工作流在子会话 idle 时不追加完成消息、不自动推进。
+    #[tokio::test]
+    async fn on_child_state_done_does_not_push_completion() {
+        let (clients, m) = clients_with_machines();
+        let backend = FakeBackend::new(vec![Decision {
+            summary: "无动作".into(),
+            actions: vec![],
+            done: false,
+            conclusion: None,
+        }]);
+        let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        engine.session.done = true;
+        engine.session.children.push(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+            harness: "mock_acp".into(),
+            step_desc: "第一步".into(),
+            state: SessionState::Busy,
+            last_output: String::new(),
+        });
+        let advanced = engine
+            .on_child_state("s_child", SessionState::Idle, None)
+            .await;
+        assert!(!advanced, "已完成的工作流不应自动推进");
+        assert!(!engine
+            .session
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::System { text } if text.contains("完成"))));
     }
 
     #[tokio::test]
