@@ -1467,7 +1467,8 @@ impl AmuxApp {
     }
 
     /// 恢复 GUI 本地工作流会话（GUI 重开，docs/DESIGN.md §10 持久化与恢复）。
-    fn restore_workflows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 启动时不主动驱动工作流：子会话运行中变 idle 时经 passthrough 通知自动推进。
+    fn restore_workflows(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let sessions = WorkflowEngine::load_all(&self.workflow_dir);
         if sessions.is_empty() {
             return;
@@ -1482,79 +1483,6 @@ impl AmuxApp {
                 clients.clone(),
                 summaries.clone(),
             ));
-        }
-        // 依据子会话当前状态恢复自动推进：查询各机器会话列表，喂 idle 状态
-        for i in 0..self.machines.len() {
-            let client = self.machines[i].client.clone();
-            let workflow_dir = self.workflow_dir.clone();
-            cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                // 工作流恢复需核对子会话状态：取较宽窗口（惰性分页默认窗口可能漏掉较旧子会话）
-                if let Ok(res) = client
-                    .request(
-                        protocol::method::LIST_SESSIONS,
-                        Some(json!({ "limit": 1000 })),
-                    )
-                    .await
-                {
-                    let sessions = res.get("sessions").cloned().unwrap_or_default();
-                    // 收集 idle 子会话（工作流下标 + 会话 id）
-                    let mut advances: Vec<(usize, String)> = Vec::new();
-                    let _ =
-                        this.update_in(cx, |this, _window, cx| {
-                            for s in sessions.as_array().cloned().unwrap_or_default() {
-                                let sid = s["id"].as_str().unwrap_or("").to_string();
-                                let state = if s["state"].as_str() == Some("busy") {
-                                    SessionState::Busy
-                                } else {
-                                    SessionState::Idle
-                                };
-                                if state == SessionState::Idle {
-                                    if let Some(wi) = this.workflows.iter().position(|wf| {
-                                        wf.session.children.iter().any(|c| c.id == sid)
-                                    }) {
-                                        advances.push((wi, sid));
-                                    }
-                                }
-                            }
-                            cx.notify();
-                        });
-                    // 自动推进在 GUI 的 tokio runtime 上执行（rig 需要 reactor，
-                    // 避免主线程无 runtime 崩溃）；引擎保持原位，克隆体推进后换回
-                    for (wi, sid) in advances {
-                        let mut picked: Option<(WorkflowEngine, String)> = None;
-                        let _ = this.update_in(cx, |this, _window, cx| {
-                            if let Some(wf) = this.workflows.get_mut(wi) {
-                                if !wf.is_advancing()
-                                    && !wf.session.cancelled
-                                    && !wf.session.done
-                                    && wf.session.children.iter().any(|c| c.id == sid)
-                                {
-                                    wf.begin_busy();
-                                    let mut wf = this.workflows[wi].clone();
-                                    wf.start_advance();
-                                    let id = wf.session.id.clone();
-                                    picked = Some((wf, id));
-                                }
-                            }
-                            cx.notify();
-                        });
-                        let Some((mut wf, wf_id)) = picked else {
-                            continue;
-                        };
-                        let workflow_dir = workflow_dir.clone();
-                        let result = run_engine_on_tokio(async move {
-                            let _ = wf.on_child_state(&sid, SessionState::Idle, None).await;
-                            let _ = wf.persist(&workflow_dir);
-                            wf
-                        })
-                        .await;
-                        let _ = this.update_in(cx, |this, _window, cx| {
-                            this.finish_engine_task(cx, wi, &wf_id, result);
-                        });
-                    }
-                }
-            })
-            .detach();
         }
         cx.notify();
     }
