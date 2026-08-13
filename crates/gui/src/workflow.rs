@@ -744,15 +744,6 @@ impl OrcSession {
     }
 }
 
-fn excerpt(s: &str, max: usize) -> String {
-    let s = s.trim();
-    let mut out: String = s.chars().take(max).collect();
-    if s.chars().count() > max {
-        out.push('…');
-    }
-    out
-}
-
 // ---- RigBackend：真实 rig 单 turn 编排（docs/DESIGN.md §10）----
 
 pub struct RigBackend {
@@ -878,7 +869,7 @@ impl OrcBackend for RigBackend {
                             c.machine_name,
                             c.step_desc,
                             state_label(c.state),
-                            excerpt(&c.last_output, 200)
+                            crate::text::truncate(c.last_output.trim(), 200)
                         )
                     })
                     .collect::<Vec<_>>()

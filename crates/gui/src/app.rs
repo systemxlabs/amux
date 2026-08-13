@@ -39,10 +39,12 @@ use crate::config::{
     machine_ws_url, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand, SkillEntry,
     WorkflowTemplate,
 };
+use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
     compose_prompt, merge_session_window, parse_at_references, path_attachment, read_path_context,
     InputAttachment,
 };
+use crate::text::{block_text, one_line, truncate};
 use crate::workflow::{MachineSummary, OrcBackend, OrcMsg, RigBackend, WorkflowEngine};
 use crate::ws::{Notification, WsClient};
 
@@ -255,17 +257,6 @@ pub struct AmuxApp {
     /// 已展开子会话的工作流（"▾"折叠指示，PRD §4.1.1）
     expanded_workflows: std::collections::HashSet<usize>,
     _tasks: Vec<Task<()>>,
-}
-
-fn block_text(content: &[ContentBlock]) -> String {
-    content
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 impl AmuxApp {
@@ -4693,60 +4684,6 @@ impl Render for AmuxApp {
     }
 }
 
-fn short_cwd(cwd: &str) -> String {
-    cwd.rsplit('/').next().unwrap_or(cwd).to_string()
-}
-
-/// 截断长文本（日志用）。
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let t: String = s.chars().take(max).collect();
-        format!("{t}…")
-    } else {
-        s.to_string()
-    }
-}
-
-/// 单行展示：折叠空白并截断（实时活动条用）。
-fn one_line(s: &str, max: usize) -> String {
-    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate(&collapsed, max)
-}
-
-/// 活动展示（种类标签 + 详情文本）。
-fn activity_display(a: &Activity) -> (String, String) {
-    match a {
-        Activity::Thinking { content, .. } => ("思考".into(), content.clone()),
-        Activity::ToolCall {
-            name,
-            title,
-            content,
-            ..
-        } => (
-            "工具调用".into(),
-            format!(
-                "{} {} {}",
-                name,
-                title.clone().unwrap_or_default(),
-                content.clone().unwrap_or_default()
-            ),
-        ),
-        Activity::Compaction { detail, .. } => ("压缩".into(), detail.clone()),
-    }
-}
-
-/// 机器在线状态徽章（PRD §3.3 在线状态）。
-fn machine_status_badge(status: &str) -> impl IntoElement {
-    let color = if status.starts_with("已连接") {
-        rgb(0x16a34a)
-    } else if status.starts_with("连接失败") || status.starts_with("离线") {
-        rgb(0xdc2626)
-    } else {
-        rgb(0x9ca3af)
-    };
-    Label::new(status).text_xs().text_color(color)
-}
-
 /// 在 GUI 的 tokio runtime 上执行编排引擎任务（rig/reqwest 的 LLM 调用需要
 /// tokio reactor；GPUI 主线程无 runtime，docs/DESIGN.md §7「异步模型」）。
 /// 引擎状态（wf）经 oneshot 传回；中断时返回 None。
@@ -4758,21 +4695,6 @@ async fn run_engine_on_tokio<T: Send + 'static>(
         let _ = tx.send(fut.await);
     });
     rx.await.ok()
-}
-
-fn info_row(label: &str, value: &str) -> impl IntoElement {
-    h_flex()
-        .gap_2()
-        .child(
-            Label::new(format!("{}：", label))
-                .text_sm()
-                .text_color(rgb(0x6b7280)),
-        )
-        .child(
-            Label::new(value.to_string())
-                .text_sm()
-                .text_color(rgb(0x111827)),
-        )
 }
 
 fn _window_placeholder(w: &mut Window) -> &mut Window {

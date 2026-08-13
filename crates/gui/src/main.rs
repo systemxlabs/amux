@@ -6,7 +6,9 @@
 mod aggregate;
 mod app;
 mod config;
+mod display;
 mod logic;
+mod text;
 mod workflow;
 mod ws;
 

@@ -204,6 +204,7 @@ pub fn is_user_message_echo(view: &SessionView, content: &[ContentBlock]) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::block_text;
     use protocol::ContentBlock;
 
     fn chunk(text: &str, ts: u64) -> PassthroughEvent {
@@ -341,24 +342,13 @@ mod tests {
         match (&view.dialog[0], &view.dialog[1]) {
             (DialogItem::UserMessage { .. }, DialogItem::AgentOutput { content, .. }) => {
                 // 跨窗分块合并为一条完整输出
-                assert_eq!(block_text(content), "前半后半段");
+                assert_eq!(block_text(content), "前半\n后半段");
             }
             other => panic!("跨窗消息应合并为一条，得到 {other:?}"),
         }
         // 活动也前插
         assert_eq!(view.activities.len(), 2);
         assert_eq!(view.live_activity, view.activities.last().cloned());
-    }
-
-    fn block_text(content: &[ContentBlock]) -> String {
-        content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("")
     }
 
     /// 回显去重（docs/DESIGN.md §7.1）：视图最后一条用户消息与回显内容一致 → 判为回显。
