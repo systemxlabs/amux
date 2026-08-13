@@ -576,11 +576,7 @@ impl AmuxApp {
                                         _ => None,
                                     })
                                 });
-                            let ex = output
-                                .unwrap_or_default()
-                                .chars()
-                                .take(200)
-                                .collect::<String>();
+                            let ex = output.unwrap_or_default();
                             if let Some(wf) = this.workflows.get_mut(wi) {
                                 wf.begin_busy();
                             }

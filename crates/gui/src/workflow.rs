@@ -583,10 +583,7 @@ impl WorkflowEngine {
             let step = child.step_desc.clone();
             let last = child.last_output.clone();
             self.session.transcript.push(OrcMsg::System {
-                text: format!(
-                    "子会话 {session_id} 完成（{step}）：{}",
-                    excerpt(&last, 120)
-                ),
+                text: format!("子会话 {session_id} 完成（{step}）：{last}"),
             });
             if !self.session.cancelled && !self.session.done {
                 let _ = self.advance().await;
