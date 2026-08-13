@@ -3047,15 +3047,25 @@ impl AmuxApp {
                 ),
                 DialogItem::SystemMessage { content, .. } => div().id(("row", i)).w_full().child(
                     div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .py_1()
+                        .max_w(px(720.))
+                        .p_3()
+                        .v_flex()
+                        .gap_1()
+                        .rounded_md()
+                        .bg(rgb(0xf3f4f6))
+                        .border_1()
+                        .border_color(rgb(0xe5e7eb))
+                        .shadow_sm()
                         .child(
-                            Label::new(block_text(content))
-                                .text_xs()
-                                .text_color(rgb(0x9ca3af)),
+                            Label::new("系统")
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x6b7280)),
+                        )
+                        // 系统消息同样以气泡 + Markdown 渲染（与用户/编排消息一致）
+                        .child(
+                            TextView::markdown(format!("smd-{i}"), block_text(content))
+                                .selectable(true),
                         ),
                 ),
             })
