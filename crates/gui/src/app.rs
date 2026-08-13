@@ -3940,7 +3940,7 @@ impl AmuxApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         // 普通会话：当前会话聚合视图的活动历史（GUI 从透传事件聚合，docs/DESIGN.md §5.3）；
-        // 工作流会话：转录里的系统事件 + 实时状态
+        // 工作流会话：仅实时编排状态（系统消息进入会话历史，不进活动）
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut live: Option<Activity> = None;
         match &self.selected {
@@ -3958,22 +3958,8 @@ impl AmuxApp {
                 live = view.and_then(|v| v.live_activity.clone());
             }
             Some(Selected::Workflow { engine }) => {
+                // 系统消息进入会话历史（气泡），不进入活动历史；活动只保留实时编排状态
                 if let Some(wf) = self.workflows.get(*engine) {
-                    for (i, m) in wf.session.transcript.iter().enumerate() {
-                        match m {
-                            // 用户消息与编排 agent 输出在对话流以气泡展示，不进活动
-                            // （活动只含系统事件与实时状态）
-                            OrcMsg::User { .. } | OrcMsg::Orc { .. } => {}
-                            OrcMsg::System { text } => {
-                                rows.push(self.activity_row(
-                                    &format!("wf-act-{i}"),
-                                    "系统",
-                                    text,
-                                    cx,
-                                ));
-                            }
-                        }
-                    }
                     if wf.session.state == SessionState::Busy {
                         live = Some(Activity::Thinking {
                             timestamp: wf.session.updated_at,
