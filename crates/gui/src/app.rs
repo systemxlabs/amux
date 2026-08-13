@@ -2422,32 +2422,49 @@ impl AmuxApp {
         let mut content = v_flex().gap_1();
         for c in &wf.session.children {
             let cid = c.id.clone();
+            let cid_open = cid.clone();
             let step = c.step_desc.clone();
             let machine_name = c.machine_name.clone();
+            let machine_click = machine_name.clone();
             let harness = c.harness.clone();
-            let st = match c.state {
-                SessionState::Busy => "忙",
-                SessionState::Idle => "空闲",
-            };
+            let busy = c.state == SessionState::Busy;
             content = content.child(
                 h_flex()
+                    .w_full()
                     .gap_1()
                     .items_center()
+                    .px_1()
                     .child(Label::new("↳").text_color(rgb(0x9ca3af)))
                     .child(
-                        Button::new(format!("wf-child-{wi}-{cid}"))
-                            .small()
-                            .ghost()
-                            .label(format!("{step} [{harness}@{machine_name}] {st}"))
+                        h_flex()
+                            .id(format!("wf-child-title-{wi}-{cid}"))
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .items_center()
                             .on_click(cx.listener(move |this, _ev, window, cx| {
                                 let mi = this
                                     .machines
                                     .iter()
-                                    .position(|mm| mm.config.name == machine_name)
+                                    .position(|mm| mm.config.name == machine_click)
                                     .unwrap_or(0);
-                                this.open_session(window, cx, mi, cid.clone());
-                            })),
-                    ),
+                                this.open_session(window, cx, mi, cid_open.clone());
+                            }))
+                            .child(
+                                Label::new(format!("{step} [{harness}@{machine_name}]"))
+                                    .text_sm()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate(),
+                            ),
+                    )
+                    .child(if busy {
+                        Spinner::new()
+                            .color(hsla(0.6, 0.8, 0.5, 1.0))
+                            .into_any_element()
+                    } else {
+                        div().w(px(14.)).h(px(14.)).into_any_element()
+                    }),
             );
         }
 
