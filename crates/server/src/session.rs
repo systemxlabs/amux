@@ -145,10 +145,25 @@ impl SessionManager {
             .map_err(|e| format!("注册表读取失败: {e}"))?
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
         let (meta, agent_session_id) = entry;
-        // 从未 prompt 过（agent 侧会话尚未创建）则无需 ACP 删除
+        // 从未 prompt 过（agent 侧会话尚未创建）则无需 ACP 删除；
+        // ACP 删除失败不阻断本地删除（agent 侧会话可能已不存在，注册表/历史仍需清除）
         if !agent_session_id.is_empty() {
-            let driver = self.agents.driver_for(&meta.harness)?;
-            driver.delete(&agent_session_id)?;
+            match self.agents.driver_for(&meta.harness) {
+                Ok(driver) => {
+                    if let Err(e) = driver.delete(&agent_session_id) {
+                        protocol::log::error(
+                            "server.session",
+                            format!("删除 ACP 会话失败（继续本地删除）{session_id}: {e}"),
+                        );
+                    }
+                }
+                Err(e) => {
+                    protocol::log::error(
+                        "server.session",
+                        format!("解析 agent 驱动失败（继续本地删除）{session_id}: {e}"),
+                    );
+                }
+            }
         }
         // 联动：注册表条目 + 历史日志 +（如有）agent 侧 ACP 会话（docs/DESIGN.md §5.2）
         self.registry
@@ -449,6 +464,45 @@ mod tests {
         }
     }
 
+    /// 测试驱动：prompt 正常结束（写历史），但 delete 失败——
+    /// 模拟「agent 侧会话已不存在，ACP session/delete 报错」。
+    struct FailingDeleteDriver;
+
+    impl AgentDriver for FailingDeleteDriver {
+        fn create_session(&self, cwd: &str, _model: Option<&str>) -> Result<String, String> {
+            Ok(format!("agent_{}", cwd.replace('/', "_")))
+        }
+
+        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn prompt(
+            &self,
+            _agent_session_id: &str,
+            _input: Vec<ContentBlock>,
+        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx.send(AgentEvent::OutputChunk("输出".into())).await;
+                let _ = tx.send(AgentEvent::TurnEnded).await;
+            });
+            rx
+        }
+
+        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn delete(&self, _agent_session_id: &str) -> Result<(), String> {
+            Err("session not found".into())
+        }
+
+        fn list_skills(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
     /// 测试管理器（stub 驱动接受任意 harness 名；独立临时数据目录）。
     fn stub_manager() -> (SessionManager, broadcast::Receiver<ServerNotification>) {
         let agents = Arc::new(AgentRegistry::new_for_tests());
@@ -721,6 +775,38 @@ mod tests {
 
         mgr.delete(&meta.id).await.unwrap();
         assert!(!log.exists(), "删除会话应联动清除历史日志");
+    }
+
+    /// ACP 会话删除失败（如 agent 侧会话已不存在）不阻断本地删除：
+    /// 注册表条目与历史日志仍应清除。
+    #[tokio::test]
+    async fn delete_proceeds_when_acp_delete_fails() {
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "faildelete",
+            Arc::new(FailingDeleteDriver),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-faildel-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+
+        let meta = mgr.create("faildelete", "/tmp/work", None).await.unwrap();
+        mgr.prompt(&meta.id, text("hi")).await.unwrap();
+        let log = SessionLog::open(&mgr.history_dir, &meta.id);
+        assert!(log.exists(), "prompt 应写历史");
+        assert!(
+            !registry.get(&meta.id).unwrap().unwrap().1.is_empty(),
+            "prompt 后应有 agent 侧会话 id"
+        );
+
+        // ACP delete 失败（driver.delete 返回 Err），但本地删除仍应成功
+        mgr.delete(&meta.id).await.unwrap();
+        assert!(registry.get(&meta.id).unwrap().is_none(), "注册表应已删除");
+        assert!(!log.exists(), "历史日志应已清除");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
