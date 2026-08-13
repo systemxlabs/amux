@@ -179,6 +179,9 @@ struct SkillInstallDialog {
     harness: Option<String>,
 }
 
+/// 工作流会话对话条目缓存（键：会话 id + 转录长度）。
+type WorkflowDialogCache = Option<((String, usize), Vec<DialogItem>)>;
+
 pub struct AmuxApp {
     store: Arc<ConfigStore>,
     machines: Vec<MachineView>,
@@ -239,6 +242,8 @@ pub struct AmuxApp {
     workflow_template: Option<WorkflowTemplate>,
     /// 对话流滚动句柄（打开会话/新消息自动滚到底部）
     dialog_scroll: ScrollHandle,
+    /// 工作流会话对话条目缓存（键：会话 id + 转录长度；避免每次渲染重复克隆）
+    workflow_dialog_cache: std::cell::RefCell<WorkflowDialogCache>,
     /// 已展开子会话的工作流（"▾"折叠指示，PRD §4.1.1）
     expanded_workflows: std::collections::HashSet<usize>,
     _tasks: Vec<Task<()>>,
@@ -347,6 +352,7 @@ impl AmuxApp {
             workflow_error: None,
             workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
+            workflow_dialog_cache: std::cell::RefCell::new(None),
             expanded_workflows: std::collections::HashSet::new(),
             _tasks: Vec::new(),
         };
@@ -2997,7 +3003,14 @@ impl AmuxApp {
             Some(Selected::Workflow { engine }) => self
                 .workflows
                 .get(*engine)
-                .map(|w| w.session.to_dialog_items())
+                .map(|w| {
+                    let key = (w.session.id.clone(), w.session.transcript.len());
+                    let mut cache = self.workflow_dialog_cache.borrow_mut();
+                    if cache.as_ref().map(|(k, _)| k) != Some(&key) {
+                        *cache = Some((key, w.session.to_dialog_items()));
+                    }
+                    cache.as_ref().map(|(_, d)| d.clone()).unwrap_or_default()
+                })
                 .unwrap_or_default(),
             None => Vec::new(),
         };
