@@ -2341,6 +2341,8 @@ impl AmuxApp {
     fn open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wi: usize) {
         self.selected = Some(Selected::Workflow { engine: wi });
         self.set_panel(window, cx, None);
+        // 与普通会话一致：打开后跳到对话底部（最新内容）
+        self.dialog_scroll.scroll_to_bottom();
         cx.notify();
     }
 
