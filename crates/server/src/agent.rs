@@ -21,8 +21,8 @@ use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock as AcpContentBlock, DeleteSessionRequest, InitializeRequest,
     NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
-    ToolKind,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    TextContent, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{
@@ -782,7 +782,11 @@ fn pick_approve_option(options: &[PermissionOption]) -> Option<PermissionOptionI
     options
         .iter()
         .find(|o| o.kind == PermissionOptionKind::AllowAlways)
-        .or_else(|| options.iter().find(|o| o.kind == PermissionOptionKind::AllowOnce))
+        .or_else(|| {
+            options
+                .iter()
+                .find(|o| o.kind == PermissionOptionKind::AllowOnce)
+        })
         .or_else(|| {
             options.iter().find(|o| {
                 !matches!(
@@ -793,6 +797,9 @@ fn pick_approve_option(options: &[PermissionOption]) -> Option<PermissionOptionI
         })
         .map(|o| o.option_id.clone())
 }
+
+/// 就绪握手信号：一次性取出（spawn 侧 take 后置空）。
+type ReadySignal = Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<(), String>>>>>;
 
 /// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
 /// `ready_tx`：就绪握手——连接建立（子进程拉起）且 initialize 握手完成（成功或
@@ -841,8 +848,7 @@ async fn exec_main(
     // 就绪信号：main_fn 启动（子进程已拉起、连接已建立）后完成 initialize 握手即报告
     // Ok——协议级失败（agent 存活但不实现 initialize）不致命、仍视为拉起成功；若握手失败
     // 且连接已关闭（进程立即退出等传输层失败）则不报告，交由 connect_with 结果补报 Err。
-    let ready: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<(), String>>>>> =
-        Arc::new(std::sync::Mutex::new(Some(ready_tx)));
+    let ready: ReadySignal = Arc::new(std::sync::Mutex::new(Some(ready_tx)));
     let ready_main = ready.clone();
 
     let outcome = Client
@@ -903,7 +909,11 @@ async fn exec_main(
                     }
                 }
             };
-            if let Some(tx) = ready_main.lock().expect("Mutex 中毒（临界区内不应 panic）").take() {
+            if let Some(tx) = ready_main
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .take()
+            {
                 let _ = tx.send(init_result);
             }
 
@@ -1559,10 +1569,19 @@ mod tests {
 
         // get_info 的 available 反映不可用状态
         let hs = reg.harnesses();
-        let mock_info = hs.iter().find(|h| h.name == "mock_acp").expect("mock_acp 在列表");
+        let mock_info = hs
+            .iter()
+            .find(|h| h.name == "mock_acp")
+            .expect("mock_acp 在列表");
         assert!(mock_info.available, "拉起成功的 agent 应 available=true");
-        let broken_info = hs.iter().find(|h| h.name == "broken").expect("broken 在列表");
-        assert!(!broken_info.available, "拉起失败的 agent 应 available=false");
+        let broken_info = hs
+            .iter()
+            .find(|h| h.name == "broken")
+            .expect("broken 在列表");
+        assert!(
+            !broken_info.available,
+            "拉起失败的 agent 应 available=false"
+        );
 
         // driver_for 复用缓存驱动（同一 Arc，不二次 spawn）
         let d1 = reg.driver_for("mock_acp").expect("已拉起驱动应直接返回");
@@ -1574,13 +1593,9 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("不可用 agent 的 driver_for 应返回错误"),
         };
+        assert!(err.contains("不可用"), "不可用 agent 的错误应明确: {err}");
         assert!(
-            err.contains("不可用"),
-            "不可用 agent 的错误应明确: {err}"
-        );
-        assert!(
-            !reg
-                .spawned
+            !reg.spawned
                 .lock()
                 .expect("Mutex 中毒（临界区内不应 panic）")
                 .contains_key("broken"),

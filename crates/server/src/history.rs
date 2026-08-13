@@ -101,18 +101,14 @@ impl TurnMerger {
     /// 吸收一条透传事件（保持与 GUI 聚合一致的合并规则）。
     pub fn push(&mut self, ev: &PassthroughEvent) {
         match ev {
-            PassthroughEvent::OutputChunk { text, timestamp } => {
-                match &mut self.output {
-                    Some((t, _)) => t.push_str(text),
-                    None => self.output = Some((text.clone(), *timestamp)),
-                }
-            }
-            PassthroughEvent::ThinkingChunk { content, timestamp } => {
-                match &mut self.thinking {
-                    Some((t, _)) => t.push_str(content),
-                    None => self.thinking = Some((content.clone(), *timestamp)),
-                }
-            }
+            PassthroughEvent::OutputChunk { text, timestamp } => match &mut self.output {
+                Some((t, _)) => t.push_str(text),
+                None => self.output = Some((text.clone(), *timestamp)),
+            },
+            PassthroughEvent::ThinkingChunk { content, timestamp } => match &mut self.thinking {
+                Some((t, _)) => t.push_str(content),
+                None => self.thinking = Some((content.clone(), *timestamp)),
+            },
             PassthroughEvent::ToolCall {
                 name,
                 title,
@@ -213,9 +209,7 @@ mod tests {
     }
     fn user(text: &str, ts: u64) -> PassthroughEvent {
         PassthroughEvent::UserMessage {
-            content: vec![ContentBlock::Text {
-                text: text.into(),
-            }],
+            content: vec![ContentBlock::Text { text: text.into() }],
             timestamp: ts,
         }
     }
@@ -238,8 +232,12 @@ mod tests {
         // turn 边界 2 + 用户消息 1 + thinking 1 + tool 1 + 完整输出 1 = 6 条
         assert_eq!(out.len(), 6, "合并粒度应远小于原始 chunk 流: {out:?}");
 
-        assert!(out.iter().any(|e| matches!(e, PassthroughEvent::TurnStarted { .. })));
-        assert!(out.iter().any(|e| matches!(e, PassthroughEvent::TurnEnded { .. })));
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, PassthroughEvent::TurnStarted { .. })));
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, PassthroughEvent::TurnEnded { .. })));
 
         let outputs: Vec<&str> = out
             .iter()
@@ -329,7 +327,9 @@ mod tests {
         assert!(log.exists());
         let read = log.read();
         assert_eq!(read.len(), 2);
-        assert!(matches!(&read[1], PassthroughEvent::OutputChunk { text, .. } if text == "完整输出"));
+        assert!(
+            matches!(&read[1], PassthroughEvent::OutputChunk { text, .. } if text == "完整输出")
+        );
 
         // 追加第二条 turn（JSON Lines 追加语义）
         log.append(&[chunk("第二段", 3)]).unwrap();

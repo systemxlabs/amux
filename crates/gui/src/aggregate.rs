@@ -365,17 +365,28 @@ mod tests {
     #[test]
     fn user_message_echo_detection() {
         let mut view = SessionView::new();
-        assert!(!is_user_message_echo(&view, &[ContentBlock::Text { text: "hi".into() }]),
-            "空视图不应判为回显");
+        assert!(
+            !is_user_message_echo(&view, &[ContentBlock::Text { text: "hi".into() }]),
+            "空视图不应判为回显"
+        );
 
         merge_event(&mut view, &user("hi", 1));
         // 内容一致（本机本地渲染后的回显）→ 是回显
-        assert!(is_user_message_echo(&view, &[ContentBlock::Text { text: "hi".into() }]));
+        assert!(is_user_message_echo(
+            &view,
+            &[ContentBlock::Text { text: "hi".into() }]
+        ));
         // 内容不同 → 不是回显
-        assert!(!is_user_message_echo(&view, &[ContentBlock::Text { text: "bye".into() }]));
+        assert!(!is_user_message_echo(
+            &view,
+            &[ContentBlock::Text { text: "bye".into() }]
+        ));
 
         // 视图最后是 agent 输出 → 不是回显（其他客户端发来的消息应正常显示）
         merge_event(&mut view, &chunk("回复", 2));
-        assert!(!is_user_message_echo(&view, &[ContentBlock::Text { text: "hi".into() }]));
+        assert!(!is_user_message_echo(
+            &view,
+            &[ContentBlock::Text { text: "hi".into() }]
+        ));
     }
 }

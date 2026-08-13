@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use protocol::{SessionMeta, SessionState};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 /// SQLite 会话注册表（server 单写者：内部 Connection 用互斥锁串行化）。
 pub struct SessionRegistry {
@@ -133,7 +133,12 @@ impl SessionRegistry {
     }
 
     /// 更新会话状态与最近活跃时间。
-    pub fn update_state(&self, id: &str, state: SessionState, last_event_at: u64) -> rusqlite::Result<()> {
+    pub fn update_state(
+        &self,
+        id: &str,
+        state: SessionState,
+        last_event_at: u64,
+    ) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE sessions SET state = ?1, last_event_at = ?2 WHERE id = ?3",

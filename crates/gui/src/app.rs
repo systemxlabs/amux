@@ -385,21 +385,17 @@ impl AmuxApp {
         let view = cx.entity();
         RadioGroup::horizontal("orch-wire-api")
             .selected_index(Some(selected))
-            .child(
-                Radio::new("wire-chat")
-                    .label("chat")
-                    .on_click({
-                        let view = view.clone();
-                        move |checked, _window, cx| {
-                            if *checked {
-                                view.update(cx, |this, cx| {
-                                    this.orch_wire_api = "chat".into();
-                                    cx.notify();
-                                });
-                            }
-                        }
-                    }),
-            )
+            .child(Radio::new("wire-chat").label("chat").on_click({
+                let view = view.clone();
+                move |checked, _window, cx| {
+                    if *checked {
+                        view.update(cx, |this, cx| {
+                            this.orch_wire_api = "chat".into();
+                            cx.notify();
+                        });
+                    }
+                }
+            }))
             .child(Radio::new("wire-responses").label("responses").on_click({
                 let view = view.clone();
                 move |checked, _window, cx| {
@@ -873,7 +869,8 @@ impl AmuxApp {
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(m) = this.machine_mut(machine) {
                     m.selected = Some(sid.clone());
-                    m.views.insert(sid.clone(), crate::aggregate::SessionView::new());
+                    m.views
+                        .insert(sid.clone(), crate::aggregate::SessionView::new());
                     m.dialog_before = 0;
                     m.dialog_has_more = false;
                     m.status = "已连接".into();
@@ -1636,7 +1633,9 @@ impl AmuxApp {
             wf.mark_cancelled();
         }
         self.persist_workflow(idx);
-        let Some(wf) = self.workflows.get(idx).cloned() else { return };
+        let Some(wf) = self.workflows.get(idx).cloned() else {
+            return;
+        };
         let wf_id = wf.session.id.clone();
         let workflow_dir = self.workflow_dir.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -4157,11 +4156,7 @@ impl AmuxApp {
                     .p_2()
                     .bg(rgb(0xf7f8fa))
                     .rounded_md()
-                    .child(
-                        Label::new("wire API")
-                            .text_sm()
-                            .text_color(rgb(0x6b7280)),
-                    )
+                    .child(Label::new("wire API").text_sm().text_color(rgb(0x6b7280)))
                     .child(self.render_wire_api_radio(cx))
                     .child(Label::new("Base URL").text_sm().text_color(rgb(0x6b7280)))
                     .child(Input::new(&self.orch_base_input))

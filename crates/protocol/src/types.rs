@@ -619,18 +619,15 @@ mod tests {
         assert_eq!(p.limit, None);
         assert_eq!(p.before, None);
 
-        let p: ListSessionsParams =
-            serde_json::from_str(r#"{"limit":20}"#).unwrap();
+        let p: ListSessionsParams = serde_json::from_str(r#"{"limit":20}"#).unwrap();
         assert_eq!(p.limit, Some(20));
         assert_eq!(p.before, None);
 
-        let p: ListSessionsParams =
-            serde_json::from_str(r#"{"before":1786512000000}"#).unwrap();
+        let p: ListSessionsParams = serde_json::from_str(r#"{"before":1786512000000}"#).unwrap();
         assert_eq!(p.before, Some(1786512000000));
         assert_eq!(p.limit, None);
 
-        let p: ListSessionsParams =
-            serde_json::from_str(r#"{"limit":10,"before":100}"#).unwrap();
+        let p: ListSessionsParams = serde_json::from_str(r#"{"limit":10,"before":100}"#).unwrap();
         assert_eq!(p.limit, Some(10));
         assert_eq!(p.before, Some(100));
     }

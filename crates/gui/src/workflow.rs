@@ -671,14 +671,6 @@ impl WorkflowEngine {
         }
     }
 
-    /// 取消工作流会话：标记已取消并取消其所有子会话（终止整个工作流，
-    /// PRD §3.7「取消 / 继续 / 介入」）。
-    pub async fn cancel(&mut self) -> Result<(), String> {
-        self.mark_cancelled();
-        self.send_cancel_to_children().await;
-        Ok(())
-    }
-
     // ---- 持久化 ----
 
     pub fn persist(&self, dir: &Path) -> std::io::Result<()> {
@@ -1503,7 +1495,8 @@ mod tests {
             .collect();
 
         // 取消：向所有子会话发 CANCEL（真实 server 路径）并停止自动推进
-        engine.cancel().await.unwrap();
+        engine.mark_cancelled();
+        engine.send_cancel_to_children().await;
         assert!(engine.session.cancelled);
         assert_eq!(engine.session.state, SessionState::Idle);
         assert!(engine

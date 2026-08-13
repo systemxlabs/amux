@@ -113,7 +113,10 @@ async fn acp_driver_full_flow() {
     assert!(calls.contains("session/new"), "calls: {calls:?}");
     assert!(calls.contains("session/prompt"), "calls: {calls:?}");
     let resume_count = calls.lines().filter(|l| *l == "session/resume").count();
-    assert_eq!(resume_count, 1, "恢复会话应恰好 resume 一次（幂等）: {calls:?}");
+    assert_eq!(
+        resume_count, 1,
+        "恢复会话应恰好 resume 一次（幂等）: {calls:?}"
+    );
     assert!(
         !calls.contains("session/load"),
         "驱动路径不应调用 session/load: {calls:?}"

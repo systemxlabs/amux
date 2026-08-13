@@ -224,8 +224,7 @@ mod tests {
             parse(&Some(serde_json::Value::Null)).expect("显式 null 同样默认");
         assert_eq!(p.limit, None);
 
-        let p: ListSessionsParams =
-            parse(&Some(serde_json::json!({ "limit": 10 }))).unwrap();
+        let p: ListSessionsParams = parse(&Some(serde_json::json!({ "limit": 10 }))).unwrap();
         assert_eq!(p.limit, Some(10));
         assert_eq!(p.before, None);
 

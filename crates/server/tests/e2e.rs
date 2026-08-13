@@ -699,7 +699,8 @@ async fn server_restart_recovers_from_sqlite_and_resumes() {
 
     // ---- 实例 B：同一数据目录重启（SQLite 恢复，不依赖 ACP session/list）----
     let bin = env!("CARGO_BIN_EXE_test-server");
-    let port2 = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+    let port2 =
+        36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
     let child = tokio::process::Command::new(bin)
         .args([
             "--token",
@@ -833,7 +834,10 @@ async fn list_sessions_lazy_pagination_e2e() {
     assert_eq!(first["result"]["hasMore"], true);
     let next_before = first["result"]["nextBefore"].as_u64().unwrap();
     let last1 = sessions[1]["lastEventAt"].as_u64().unwrap();
-    assert_eq!(next_before, last1, "next_before 应为窗口最后一条的 last_event_at");
+    assert_eq!(
+        next_before, last1,
+        "next_before 应为窗口最后一条的 last_event_at"
+    );
 
     // 更早一窗：before=next_before → 最旧会话，has_more=false
     let second = c
@@ -996,7 +1000,11 @@ async fn spawn_server_with_fakebin(
 async fn launch_discovered_pulls_up_agent_at_startup() {
     let fakebin = unique_data_dir();
     std::fs::create_dir_all(&fakebin).unwrap();
-    write_fake_cli(&fakebin, "kimi", Some(Path::new(env!("CARGO_BIN_EXE_mock_acp"))));
+    write_fake_cli(
+        &fakebin,
+        "kimi",
+        Some(Path::new(env!("CARGO_BIN_EXE_mock_acp"))),
+    );
 
     let (port, _data_dir, stderr_log, _guard) = spawn_server_with_fakebin(&fakebin).await;
     let mut c = Client::connect(port).await;
@@ -1092,6 +1100,9 @@ async fn launch_failure_marks_agent_unavailable() {
 
     // server 正常服务（会话操作可用）
     let list = c.call("list_sessions", json!({})).await;
-    assert!(list.get("error").is_none(), "拉起失败后 server 仍应正常: {list}");
+    assert!(
+        list.get("error").is_none(),
+        "拉起失败后 server 仍应正常: {list}"
+    );
     let _ = std::fs::remove_dir_all(&fakebin);
 }

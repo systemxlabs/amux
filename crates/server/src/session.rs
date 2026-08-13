@@ -77,7 +77,8 @@ impl SessionManager {
             .iter()
             .filter(|(m, _)| before.map(|b| m.last_event_at < b).unwrap_or(true))
             .collect();
-        let window: Vec<RegistryEntry> = filtered.iter().take(limit).map(|e| (*e).clone()).collect();
+        let window: Vec<RegistryEntry> =
+            filtered.iter().take(limit).map(|e| (*e).clone()).collect();
         let has_more = filtered.len() > limit;
         let next_before = if has_more {
             window.last().map(|(m, _)| m.last_event_at)
@@ -186,8 +187,7 @@ impl SessionManager {
             .registry
             .list()
             .map_err(|e| format!("注册表读取失败: {e}"))?;
-        let (window, has_more, next_before) =
-            Self::session_page(&all, limit.unwrap_or(50), before);
+        let (window, has_more, next_before) = Self::session_page(&all, limit.unwrap_or(50), before);
         let metas = window.into_iter().map(|(m, _)| m).collect();
         Ok((metas, has_more, next_before))
     }
@@ -275,12 +275,7 @@ impl SessionManager {
             format!("prompt 开始 {session_id}（agent={agent_session_id}）：{summary}"),
         );
         if title_changed {
-            let meta = self
-                .registry
-                .get(session_id)
-                .ok()
-                .flatten()
-                .map(|(m, _)| m);
+            let meta = self.registry.get(session_id).ok().flatten().map(|(m, _)| m);
             if let Some(m) = meta {
                 let _ = self.tx.send(ServerNotification::SessionUpdated(m));
             }
@@ -385,9 +380,7 @@ impl SessionManager {
     /// 更新会话列表的状态字段（busy/idle 由 GUI 应用从透传事件派生，重连经
     /// 列表 meta.state 补齐，docs/DESIGN.md §5.1）。
     async fn update_state(&self, session_id: &str, state: SessionState) {
-        let _ = self
-            .registry
-            .update_state(session_id, state, now());
+        let _ = self.registry.update_state(session_id, state, now());
     }
 }
 
@@ -543,13 +536,19 @@ mod tests {
 
         // 更早一窗：before=800 → s7/s6，has_more，next_before=600
         let (w, more, nb) = SessionManager::session_page(&all, 2, Some(800));
-        assert_eq!(w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(), ["s7", "s6"]);
+        assert_eq!(
+            w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
+            ["s7", "s6"]
+        );
         assert!(more);
         assert_eq!(nb, Some(600));
 
         // 取到最旧一窗：has_more=false，next_before=None
         let (w, more, nb) = SessionManager::session_page(&all, 2, Some(600));
-        assert_eq!(w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(), ["s5", "s4"]);
+        assert_eq!(
+            w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
+            ["s5", "s4"]
+        );
         assert!(!more);
         assert_eq!(nb, None);
 
@@ -573,7 +572,10 @@ mod tests {
 
         // 游标取不到更早但仍有余量：过滤后不足一窗（before 为独占上界，s7(700) 被排除）
         let (w, more, nb) = SessionManager::session_page(&all, 10, Some(700));
-        assert_eq!(w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(), ["s6", "s5", "s4"]);
+        assert_eq!(
+            w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
+            ["s6", "s5", "s4"]
+        );
         assert!(!more);
         assert_eq!(nb, None);
     }
@@ -640,8 +642,12 @@ mod tests {
 
         // open_session 从本地日志读合并条目：一条完整输出（非逐 chunk）
         let (events, _, _) = mgr.open(&meta.id, None, None).await.unwrap();
-        assert!(events.iter().any(|e| matches!(e, PassthroughEvent::TurnStarted { .. })));
-        assert!(events.iter().any(|e| matches!(e, PassthroughEvent::TurnEnded { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PassthroughEvent::TurnStarted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PassthroughEvent::TurnEnded { .. })));
         let outputs: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
@@ -650,7 +656,10 @@ mod tests {
             })
             .collect();
         // stub 输出："模拟输出：完成"（chunk 已收敛为一条）
-        assert!(outputs.len() == 1 && outputs[0].contains("完成"), "合并粒度应一条完整输出: {outputs:?}");
+        assert!(
+            outputs.len() == 1 && outputs[0].contains("完成"),
+            "合并粒度应一条完整输出: {outputs:?}"
+        );
     }
 
     /// 无 result 的 turn（取消/崩溃后 agent 未返回 result）不写历史，
@@ -807,9 +816,10 @@ mod tests {
 
         // 历史日志在盘直接可用（open 本地读，合并条目）
         let (events, _, _) = mgr2.open(&sid, None, None).await.unwrap();
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, PassthroughEvent::OutputChunk { text, .. } if text.contains("完成"))),
+        assert!(
+            events.iter().any(
+                |e| matches!(e, PassthroughEvent::OutputChunk { text, .. } if text.contains("完成"))
+            ),
             "重启后历史应可从本地日志读取: {events:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);

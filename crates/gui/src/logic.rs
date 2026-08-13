@@ -138,6 +138,7 @@ pub fn compose_prompt(text: &str, attachments: &[InputAttachment]) -> Vec<Conten
 /// - 首次加载：`existing` 为空 → 窗口即为当前列表
 /// - 追加：更早一窗按序并入（保持最近活跃在前）
 /// - 按 id 去重（并发通知 / 游标边界可能重复）
+///
 /// 返回（合并后的列表, 是否还有更早, 下次 before 游标）。
 pub fn merge_session_window(
     existing: &[SessionMeta],
@@ -256,8 +257,11 @@ mod tests {
 
         // 拖入：drop 处理器产生 Path 附件 → compose_prompt
         let dropped = path_attachment(&file.display().to_string());
-        assert!(matches!(dropped, InputAttachment::Path { is_dir: false, .. }));
-        let drop_blocks = compose_prompt("", &[dropped.clone()]);
+        assert!(matches!(
+            dropped,
+            InputAttachment::Path { is_dir: false, .. }
+        ));
+        let drop_blocks = compose_prompt("", std::slice::from_ref(&dropped));
 
         // @ 引用：解析出同一路径 → 同样的 Path 附件 → 同一 compose_prompt
         let text = format!("看 @{}", file.display());
@@ -282,7 +286,10 @@ mod tests {
 
         // 拖入目录 → is_dir=true（目录条目列表作为上下文）
         let dir_att = path_attachment(&dir.display().to_string());
-        assert!(matches!(dir_att, InputAttachment::Path { is_dir: true, .. }));
+        assert!(matches!(
+            dir_att,
+            InputAttachment::Path { is_dir: true, .. }
+        ));
         let dir_blocks = compose_prompt("", &[dir_att]);
         let ContentBlock::Text { text } = &dir_blocks[0] else {
             panic!("目录附件应产生文本上下文块");
