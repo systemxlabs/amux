@@ -102,7 +102,7 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 按 server 会话 id 取条目（含 agent 会话 id）。
+    /// 按 server 会话 id 取条目（含 agent 侧会话 id）。
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<RegistryEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -152,7 +152,7 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 回填 agent 侧会话 id：创建会话时未与 ACP 交互（agent 会话延后到首次
+    /// 回填 agent 侧会话 id：创建会话时未与 ACP 交互（agent 侧会话延后到首次
     /// prompt 懒创建），首次 prompt 时经 `session/new` 拿到 id 后写入。
     pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -239,7 +239,7 @@ mod tests {
         // 创建时不与 ACP 交互：agent_session_id 为空串
         reg.upsert(&m, "").unwrap();
         let got = reg.get("s1").unwrap().unwrap();
-        assert_eq!(got.1, "", "创建时应无 agent 会话 id");
+        assert_eq!(got.1, "", "创建时应无 agent 侧会话 id");
 
         // 首次 prompt 懒创建后回填
         reg.set_agent_session_id("s1", "mock_s_1").unwrap();

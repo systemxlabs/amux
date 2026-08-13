@@ -1,12 +1,12 @@
-//! 工作流引擎（docs/DESIGN.md §10）：GUI 本地编排 agent 会话 + rig 单 turn 编排。
+//! 工作流引擎（docs/DESIGN.md §10）：GUI 本地工作流会话 + rig 单 turn 编排。
 //!
 //! 架构（纯逻辑与 IO 分离，本模块不依赖 GPUI，可被单元测试直接驱动）：
-//! - `OrcSession`：编排 agent 会话状态（标题/描述/对话历史/子会话/暂停），可序列化持久化
+//! - `OrcSession`：工作流会话状态（标题/描述/对话历史/子会话/取消），可序列化持久化
 //! - `OrcBackend`：单 turn 决策器——输入工作流上下文，输出 `Decision`（步骤动作 + 摘要）。
 //!   真实实现 `RigBackend` 用 rig `Agent::prompt`（单 turn）；会话操作定义为 rig 工具，
 //!   工具只记录动作（planning），由引擎统一执行——保证"会话操作经真实 WsClient"只有一条路径
 //! - `WorkflowEngine`：状态机——首 turn 拆解计划并创建/复用子会话下发指令；子会话 idle
-//!   通知触发自动推进（向编排会话注入完成情况）；暂停/继续/介入均为向编排会话发送指令
+//!   通知触发自动推进（向工作流会话注入完成情况）；取消/继续/介入均为向工作流会话发送指令
 //! - 持久化：OrcSession 落盘（GUI 数据目录 workflows/）；重开后恢复并按子会话当前状态续跑
 
 use std::collections::VecDeque;
@@ -26,9 +26,9 @@ use protocol::{generate_title, ContentBlock, DialogItem, SessionState};
 use crate::config::OrchestratorConfig;
 use crate::ws::WsClient;
 
-// ---- 编排会话状态（可持久化）----
+// ---- 工作流会话状态（可持久化）----
 
-/// 编排会话中的一条消息（对话历史）。
+/// 工作流会话中的一条消息（对话历史）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrcMsg {
@@ -40,7 +40,7 @@ pub enum OrcMsg {
     System { text: String },
 }
 
-/// 子会话（工作流驱动的 agent 会话，由各机器 server 持久化）。
+/// 子会话（工作流驱动的普通会话，由各机器 server 持久化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildSession {
@@ -54,7 +54,7 @@ pub struct ChildSession {
     pub last_output: String,
 }
 
-/// 编排 agent 会话（GUI 本地状态，docs/DESIGN.md §10「持久化与恢复」）。
+/// 工作流会话（GUI 本地状态，docs/DESIGN.md §10「持久化与恢复」）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrcSession {
@@ -66,7 +66,9 @@ pub struct OrcSession {
     #[serde(default)]
     pub preamble: String,
     pub state: SessionState,
-    pub paused: bool,
+    /// 已取消（终止整个工作流；替代原「暂停」语义，PRD §3.7）
+    #[serde(default)]
+    pub cancelled: bool,
     pub done: bool,
     pub transcript: Vec<OrcMsg>,
     pub children: Vec<ChildSession>,
@@ -250,8 +252,16 @@ pub struct WorkflowEngine {
     pending_advance: bool,
 }
 
+/// 取消工作流时需下发的 CANCEL 请求列表：(机器下标, 子会话 id)（纯函数，可单测）。
+pub fn cancel_requests(children: &[ChildSession]) -> Vec<(usize, String)> {
+    children
+        .iter()
+        .map(|c| (c.machine_idx, c.id.clone()))
+        .collect()
+}
+
 impl WorkflowEngine {
-    /// 新建编排会话并执行首个决策 turn。
+    /// 新建工作流会话并执行首个决策 turn。
     /// - `context`：@ 引用展开的上下文文本（附加到计划后）
     /// - `preamble`：模板/系统指令，内置进编排 agent 的系统提示词（不进入会话历史）
     pub fn new(
@@ -286,7 +296,7 @@ impl WorkflowEngine {
             description: full,
             preamble: preamble.to_string(),
             state: SessionState::Idle,
-            paused: false,
+            cancelled: false,
             done: false,
             transcript,
             children: Vec::new(),
@@ -332,7 +342,7 @@ impl WorkflowEngine {
                 self.pending_advance = true;
                 return Ok(());
             }
-            if self.session.paused || self.session.done {
+            if self.session.cancelled || self.session.done {
                 return Ok(());
             }
             self.advancing = true;
@@ -357,7 +367,7 @@ impl WorkflowEngine {
             Ok(d) => d,
             Err(e) => {
                 // 运行期 LLM 调用失败（未配置 API / 网络 / 鉴权等）：
-                // 写入编排会话对话历史（System 消息），GUI 可见且随持久化保留
+                // 写入工作流会话对话历史（System 消息），GUI 可见且随持久化保留
                 self.session.transcript.push(OrcMsg::System {
                     text: format!("编排 agent 调用失败：{e}"),
                 });
@@ -553,7 +563,7 @@ impl WorkflowEngine {
     }
 
     /// 子会话状态变更（GUI 收到 server 通知时调用）。
-    /// 子会话变 idle → 向编排会话注入完成情况并推进（docs/DESIGN.md §10 自动推进）。
+    /// 子会话变 idle → 向工作流会话注入完成情况并推进（docs/DESIGN.md §10 自动推进）。
     /// `output_excerpt`：子会话最近一次完整输出摘要（GUI 本地对话缓存）。
     /// 返回是否触发了推进。
     pub async fn on_child_state(
@@ -583,7 +593,7 @@ impl WorkflowEngine {
                     excerpt(&last, 120)
                 ),
             });
-            if !self.session.paused && !self.session.done {
+            if !self.session.cancelled && !self.session.done {
                 let _ = self.advance().await;
                 return true;
             }
@@ -634,20 +644,39 @@ impl WorkflowEngine {
             text: text.to_string(),
         });
         self.session.updated_at = now();
-        !self.session.paused && !self.session.done && !self.advancing
+        !self.session.cancelled && !self.session.done && !self.advancing
     }
 
-    /// 暂停/继续。继续时返回 true（调用方应触发一次推进）。
-    pub fn set_paused(&mut self, paused: bool) -> bool {
-        self.session.paused = paused;
+    /// 同步标记已取消：停止自动推进并写入系统消息（不涉及 IO，立即可见）。
+    pub fn mark_cancelled(&mut self) {
+        self.session.cancelled = true;
+        self.session.state = SessionState::Idle;
+        self.session.updated_at = now();
         self.session.transcript.push(OrcMsg::System {
-            text: if paused {
-                "已暂停".into()
-            } else {
-                "已继续".into()
-            },
+            text: "已取消".into(),
         });
-        !paused && !self.session.done
+    }
+
+    /// 仅向所有子会话下发 CANCEL（纯 IO，不改变本会话状态；状态已由调用方同步落下）。
+    pub async fn send_cancel_to_children(&self) {
+        for (machine_idx, session_id) in cancel_requests(&self.session.children) {
+            if let Some(client) = self.clients.get(machine_idx).cloned() {
+                let _ = client
+                    .request(
+                        protocol::method::CANCEL,
+                        Some(serde_json::json!({ "sessionId": session_id })),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// 取消工作流会话：标记已取消并取消其所有子会话（终止整个工作流，
+    /// PRD §3.7「取消 / 继续 / 介入」）。
+    pub async fn cancel(&mut self) -> Result<(), String> {
+        self.mark_cancelled();
+        self.send_cancel_to_children().await;
+        Ok(())
     }
 
     // ---- 持久化 ----
@@ -660,7 +689,7 @@ impl WorkflowEngine {
         std::fs::write(path, json)
     }
 
-    /// 加载目录下全部编排会话状态（GUI 重开恢复）。
+    /// 加载目录下全部工作流会话状态（GUI 重开恢复）。
     pub fn load_all(dir: &Path) -> Vec<OrcSession> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -673,7 +702,7 @@ impl WorkflowEngine {
             .collect()
     }
 
-    /// 删除编排会话（连同持久化文件）。
+    /// 删除工作流会话（连同持久化文件）。
     pub fn remove(dir: &Path, id: &str) {
         let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
     }
@@ -684,7 +713,7 @@ fn first_line(s: &str) -> String {
 }
 
 impl OrcSession {
-    /// 编排会话对话流：用户消息与编排输出（系统事件不进入对话流，PRD §4.1.3）。
+    /// 工作流会话对话流：用户消息与编排输出（系统事件不进入对话流，PRD §4.1.3）。
     pub fn to_dialog_items(&self) -> Vec<DialogItem> {
         self.transcript
             .iter()
@@ -728,7 +757,7 @@ impl RigBackend {
     }
 
     /// 构建 rig agent（单 turn：preamble + 规划工具）。
-    /// 泛型于模型（chat_completions / messages 两个 API Backend，PRD §4.3）。
+    /// 泛型于模型（wire API 的 chat / responses 两条分派路径，DESIGN §9）。
     /// 暴露为 pub 供测试验证 rig 装配（工具注册、模型构建）真实可用。
     pub fn build_agent<M>(&self, model: M, preamble: &str) -> rig::Agent<M>
     where
@@ -770,6 +799,21 @@ where
         .tool_context(tool_ctx)
         .await
         .map_err(|e| format!("编排 agent 调用失败: {e}"))
+}
+
+/// wire_api → 模型分派（纯决策，可单测；DESIGN §9「API 配置」）：
+/// `chat` → Chat Completions，`responses` → Responses API，未知值回落 chat。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireApiKind {
+    Chat,
+    Responses,
+}
+
+fn wire_api_kind(wire_api: &str) -> WireApiKind {
+    match wire_api {
+        "responses" => WireApiKind::Responses,
+        _ => WireApiKind::Chat,
+    }
 }
 
 impl OrcBackend for RigBackend {
@@ -835,13 +879,13 @@ impl OrcBackend for RigBackend {
                  请评估当前进展并决定本轮动作（继续创建/推进步骤，或结束）。",
                 ctx.plan, machine_list, transcript_text, children_list
             );
-            // API Backend（PRD §4.3）：chat_completions / messages 两种模型类型分别装配
-            let text = match self.cfg.api_backend.as_str() {
-                "messages" => {
+            // wire API（DESIGN §9「API 配置」）：chat → Chat Completions、responses → Responses API
+            let text = match wire_api_kind(&self.cfg.wire_api) {
+                WireApiKind::Responses => {
                     let agent = self.build_agent(client.completion_model(model), &preamble);
                     run_orc_turn(agent, input, tool_ctx).await?
                 }
-                _ => {
+                WireApiKind::Chat => {
                     let agent = self
                         .build_agent(client.completions_api().completion_model(model), &preamble);
                     run_orc_turn(agent, input, tool_ctx).await?
@@ -1081,6 +1125,34 @@ mod tests {
     }
 
     #[test]
+    fn cancel_requests_lists_all_children() {
+        let children = vec![
+            ChildSession {
+                id: "a".into(),
+                machine_idx: 0,
+                machine_name: "m0".into(),
+                harness: "h".into(),
+                step_desc: "s".into(),
+                state: SessionState::Idle,
+                last_output: String::new(),
+            },
+            ChildSession {
+                id: "b".into(),
+                machine_idx: 1,
+                machine_name: "m1".into(),
+                harness: "h".into(),
+                step_desc: "s".into(),
+                state: SessionState::Busy,
+                last_output: String::new(),
+            },
+        ];
+        assert_eq!(
+            cancel_requests(&children),
+            vec![(0, "a".to_string()), (1, "b".to_string())]
+        );
+    }
+
+    #[test]
     fn title_generated_from_description() {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
@@ -1117,10 +1189,10 @@ mod tests {
         assert!(engine.session.description.contains("src/main.rs"));
     }
 
-    // ---- 状态机：暂停/继续/介入（不依赖 server 的部分）----
+    // ---- 状态机：取消/介入（不依赖 server 的部分）----
 
     #[tokio::test]
-    async fn pause_blocks_advance_steer_records() {
+    async fn cancel_marks_cancelled_and_stops_advance() {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![Decision {
             summary: "无动作".into(),
@@ -1129,31 +1201,39 @@ mod tests {
             conclusion: None,
         }]);
         let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
-        engine.set_paused(true);
-        assert!(engine.session.paused);
-        // 暂停时不推进（决策用尽也不会被消费）
+        // 手动挂一个子会话（仅验证状态标记，不触发 RPC，避免依赖连接失败的死客户端）
+        engine.session.children.push(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+            harness: "mock_acp".into(),
+            step_desc: "第一步".into(),
+            state: SessionState::Busy,
+            last_output: String::new(),
+        });
+        engine.mark_cancelled();
+        assert!(engine.session.cancelled);
+        assert_eq!(engine.session.state, SessionState::Idle);
+        assert!(engine
+            .session
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::System { text } if text == "已取消")));
+        // 取消后不再推进（决策用尽也不会被消费）
         engine.advance().await.unwrap();
         assert!(!engine
             .session
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { .. })));
-        // 介入指令在暂停时仅记录
-        engine.record_user("先做 A");
+        // 介入指令仍可记录，但不触发推进
+        let should_advance = engine.record_user("先做 A");
+        assert!(!should_advance);
         assert!(engine
             .session
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::User { text } if text == "先做 A")));
-        // 继续后推进
-        let should_advance = engine.set_paused(false);
-        assert!(should_advance);
-        engine.advance().await.unwrap();
-        assert!(engine
-            .session
-            .transcript
-            .iter()
-            .any(|m| matches!(m, OrcMsg::Orc { text } if text == "无动作")));
     }
 
     #[tokio::test]
@@ -1399,6 +1479,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_workflow_cancels_all_children_via_real_server() {
+        let (port, _guard, m) = spawn_test_server().await;
+        let client = ws_client(port);
+        let backend = FakeBackend::new(vec![Decision {
+            summary: "创建两个子会话".into(),
+            actions: vec![
+                run("测试机", "mock_acp", "第一步"),
+                run("测试机", "mock_acp", "第二步"),
+            ],
+            done: false,
+            conclusion: None,
+        }]);
+        let mut engine =
+            WorkflowEngine::new("两步", "", "", backend, vec![client.clone()], vec![m]);
+        engine.start().await.unwrap();
+        assert_eq!(engine.session.children.len(), 2, "应创建两个子会话");
+        let child_ids: Vec<String> = engine
+            .session
+            .children
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+
+        // 取消：向所有子会话发 CANCEL（真实 server 路径）并停止自动推进
+        engine.cancel().await.unwrap();
+        assert!(engine.session.cancelled);
+        assert_eq!(engine.session.state, SessionState::Idle);
+        assert!(engine
+            .session
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::System { text } if text == "已取消")));
+
+        // 取消不删除子会话：server 上仍可查到这些会话
+        let res = client
+            .request(protocol::method::LIST_SESSIONS, Some(serde_json::json!({})))
+            .await
+            .unwrap();
+        let ids: Vec<String> = res["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["id"].as_str().map(str::to_string))
+            .collect();
+        for cid in &child_ids {
+            assert!(ids.contains(cid), "取消后子会话仍应存在: {cid}");
+        }
+    }
+
+    #[tokio::test]
     async fn child_idle_triggers_auto_advance_and_intervene() {
         let (port, _guard, m) = spawn_test_server().await;
         let client = ws_client(port);
@@ -1510,7 +1640,7 @@ mod tests {
     fn rig_backend_builds_agent_with_tools() {
         let backend = RigBackend::new(
             OrchestratorConfig {
-                api_backend: "chat_completions".into(),
+                wire_api: "chat".into(),
                 base_url: "http://127.0.0.1:9/v1".into(),
                 api_key: "sk-test".into(),
                 model: "gpt-4o-mini".into(),
@@ -1524,6 +1654,14 @@ mod tests {
             .expect("构建 openai client");
         let agent = backend.build_agent(client.completion_model("gpt-4o-mini"), "preamble");
         assert!(agent.name().is_none()); // 未设置 name
+    }
+
+    #[test]
+    fn wire_api_kind_dispatches_chat_and_responses() {
+        assert_eq!(wire_api_kind("chat"), WireApiKind::Chat);
+        assert_eq!(wire_api_kind("responses"), WireApiKind::Responses);
+        assert_eq!(wire_api_kind("unknown"), WireApiKind::Chat);
+        assert_eq!(wire_api_kind(""), WireApiKind::Chat);
     }
 
     #[test]
@@ -1599,7 +1737,7 @@ mod tests {
         // 会话不处于假忙状态、可继续操作（PRD §4.3 配置校验）
         let backend = Arc::new(RigBackend::new(
             OrchestratorConfig {
-                api_backend: "chat_completions".into(),
+                wire_api: "chat".into(),
                 base_url: "https://api.openai.com/v1".into(),
                 api_key: String::new(), // 未配置
                 model: "gpt-4o-mini".into(),

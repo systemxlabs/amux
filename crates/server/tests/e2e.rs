@@ -244,7 +244,7 @@ async fn session_lifecycle_and_activities() {
         .await;
     assert!(got, "应收到 turn_ended 透传边界");
 
-    // 首条 prompt 才触发 ACP session/new（懒创建 agent 会话，docs/DESIGN.md §4.1）
+    // 首条 prompt 才触发 ACP session/new（懒创建 agent 侧会话，docs/DESIGN.md §4.1）
     let calls_after = std::fs::read_to_string(mock_calls_file(&data_dir)).unwrap_or_default();
     assert!(
         calls_after.contains("session/new"),

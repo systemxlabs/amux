@@ -1,12 +1,12 @@
 //! amux 主视图（docs/DESIGN.md §7 / PRD §3、§4）。
 //! 三面板布局 + 多机器 + 工作流编排 + 设置浮窗（五分类）：
-//! - 左侧：会话列表（按最近活跃排序；含编排会话与折叠的子会话）+ 顶部「+」新建会话入口
+//! - 左侧：会话列表（按最近活跃排序；含工作流会话与折叠的子会话）+ 顶部「+」新建会话入口
 //!   + 底部设置入口
 //! - 中间：上方对话流（用户消息 + agent 完整输出气泡，非流式）+ 下方进行中活动条（一条或无）
 //!   + 快捷指令栏 + 输入区（多行、@ 引用、拖拽文件、粘贴图片、语音）+ 右侧竖排悬浮按钮
 //! - 右侧：上下文面板（默认折叠，悬浮按钮展开 diff / 会话详情 / 会话活动历史）
 //! - 设置浮窗：机器管理（含 agent 默认模型与 skills 列表）/ 编排 agent / 快捷指令 / Skills / 工作流模板
-//! - 工作流：GUI 本地编排 agent 会话（rig 单 turn），子会话 idle 自动推进，暂停/继续/介入，
+//! - 工作流：GUI 本地工作流会话（rig 单 turn），子会话 idle 自动推进，取消/继续/介入，
 //!   状态持久化于 GUI 本地，重开后恢复
 
 use std::path::PathBuf;
@@ -71,9 +71,9 @@ enum SettingsCategory {
 
 /// 会话列表项（统一最近活跃排序，docs/PRD §4.1.1）。
 enum SessionListItem {
-    /// 普通 agent 会话（机器下标 + 元数据）
+    /// 普通会话（机器下标 + 元数据）
     Session { machine: usize, meta: SessionMeta },
-    /// 编排会话（工作流，下标）
+    /// 工作流会话（工作流，下标）
     Workflow { idx: usize },
 }
 
@@ -149,7 +149,7 @@ impl MachineView {
     }
 }
 
-/// 当前选中的会话（普通 server 会话 或 编排会话）。
+/// 当前选中的会话（普通会话 或 工作流会话）。
 #[derive(Clone, PartialEq)]
 enum Selected {
     Session { machine: usize, id: String },
@@ -209,8 +209,8 @@ pub struct AmuxApp {
     skill_desc_input: Entity<InputState>,
     tpl_name_input: Entity<InputState>,
     tpl_desc_input: Entity<InputState>,
-    /// 编排 agent API Backend 单选（"chat_completions" | "messages"）
-    orch_backend: String,
+    /// 编排 agent wire API 单选（"chat" | "responses"）
+    orch_wire_api: String,
     orch_base_input: Entity<InputState>,
     orch_key_input: Entity<InputState>,
     orch_model_input: Entity<InputState>,
@@ -226,14 +226,14 @@ pub struct AmuxApp {
     context_menu: Option<SessionContextMenu>,
     /// 正在重命名的会话（机器下标, 会话 id）
     renaming_session: Option<(usize, String)>,
-    /// 正在重命名的编排会话（引擎下标）
+    /// 正在重命名的工作流会话（引擎下标）
     renaming_workflow: Option<usize>,
     /// 新会话视图（PRD §4.1.2）：选中的机器与 agent
     new_session_machine: Option<usize>,
     new_session_harness: Option<String>,
     /// Skills 安装目标选择对话框（None = 未打开，PRD §3.6）
     skill_install_dialog: Option<SkillInstallDialog>,
-    /// 创建编排会话时的提示（如编排 agent 未配置 API）
+    /// 创建工作流会话时的提示（如编排 agent 未配置 API）
     workflow_error: Option<String>,
     /// 对话流滚动句柄（打开会话/新消息自动滚到底部）
     dialog_scroll: ScrollHandle,
@@ -327,7 +327,7 @@ impl AmuxApp {
             skill_desc_input,
             tpl_name_input,
             tpl_desc_input,
-            orch_backend: orchestrator.api_backend.clone(),
+            orch_wire_api: orchestrator.wire_api.clone(),
             orch_base_input,
             orch_key_input,
             orch_model_input,
@@ -350,7 +350,7 @@ impl AmuxApp {
         // 预填编排配置表单
         app.fill_orchestrator_form(&orchestrator, window, cx);
         app.spawn_notify_tasks(window, cx);
-        // 启动即拉取各机器会话列表与 get_info；恢复编排会话
+        // 启动即拉取各机器会话列表与 get_info；恢复工作流会话
         for i in 0..app.machines.len() {
             app.refresh_sessions(i, window, cx);
             app.fetch_info(i, window, cx);
@@ -376,36 +376,36 @@ impl AmuxApp {
         });
     }
 
-    /// API Backend 单选（PRD §4.3：chat_completions / messages）。
-    fn render_api_backend_radio(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = match self.orch_backend.as_str() {
-            "messages" => 1,
+    /// wire API 单选（DESIGN §9：chat / responses）。
+    fn render_wire_api_radio(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = match self.orch_wire_api.as_str() {
+            "responses" => 1,
             _ => 0,
         };
         let view = cx.entity();
-        RadioGroup::horizontal("orch-backend")
+        RadioGroup::horizontal("orch-wire-api")
             .selected_index(Some(selected))
             .child(
-                Radio::new("be-chat_completions")
-                    .label("chat_completions")
+                Radio::new("wire-chat")
+                    .label("chat")
                     .on_click({
                         let view = view.clone();
                         move |checked, _window, cx| {
                             if *checked {
                                 view.update(cx, |this, cx| {
-                                    this.orch_backend = "chat_completions".into();
+                                    this.orch_wire_api = "chat".into();
                                     cx.notify();
                                 });
                             }
                         }
                     }),
             )
-            .child(Radio::new("be-messages").label("messages").on_click({
+            .child(Radio::new("wire-responses").label("responses").on_click({
                 let view = view.clone();
                 move |checked, _window, cx| {
                     if *checked {
                         view.update(cx, |this, cx| {
-                            this.orch_backend = "messages".into();
+                            this.orch_wire_api = "responses".into();
                             cx.notify();
                         });
                     }
@@ -1145,6 +1145,7 @@ impl AmuxApp {
                 if same {
                     // 合并推进期间（克隆体执行中）新记录的用户介入消息：
                     // record_user 追加到原位引擎的消息不会出现在克隆体上，换回前补上
+                    let was_cancelled = self.workflows[wi].session.cancelled;
                     let pending: Vec<OrcMsg> = self.workflows[wi]
                         .session
                         .transcript
@@ -1153,6 +1154,11 @@ impl AmuxApp {
                         .cloned()
                         .collect();
                     self.workflows[wi] = wf;
+                    if was_cancelled {
+                        // 用户取消发生在推进进行中：换回后仍保持已取消（并回到空闲）
+                        self.workflows[wi].session.cancelled = true;
+                        self.workflows[wi].session.state = SessionState::Idle;
+                    }
                     if !pending.is_empty() {
                         let w = &mut self.workflows[wi];
                         w.session.transcript.extend(pending);
@@ -1244,7 +1250,7 @@ impl AmuxApp {
                 .detach();
             }
             Selected::Workflow { engine } => {
-                // 向编排会话发送介入指令（暂停/继续/调整后续动作，docs/DESIGN.md §10）；
+                // 向工作流会话发送输入（继续/介入/调整后续动作，docs/DESIGN.md §9）；
                 // 用户消息同步落库（立即可见），异步推进在克隆体上执行、完成后原位换回；
                 // 编排在 GUI 的 tokio runtime 上执行（rig LLM 调用需要 reactor）
                 let should_advance = self
@@ -1437,7 +1443,7 @@ impl AmuxApp {
         }
     }
 
-    /// 恢复 GUI 本地编排会话（GUI 重开，docs/DESIGN.md §10 持久化与恢复）。
+    /// 恢复 GUI 本地工作流会话（GUI 重开，docs/DESIGN.md §10 持久化与恢复）。
     fn restore_workflows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let sessions = WorkflowEngine::load_all(&self.workflow_dir);
         if sessions.is_empty() {
@@ -1528,7 +1534,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 创建编排会话（PRD §3.7：自然语言描述完整执行计划）。
+    /// 创建工作流会话（PRD §3.7：自然语言描述完整执行计划）。
     fn create_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let description = self.workflow_input.read(cx).value().to_string();
         if description.trim().is_empty() {
@@ -1540,7 +1546,7 @@ impl AmuxApp {
         });
     }
 
-    /// 创建编排会话（共用实现）。
+    /// 创建工作流会话（共用实现）。
     /// `preamble`：模板/系统指令，内置进编排 agent 的系统提示词、不进入会话历史（PRD §3.7）。
     fn create_workflow_with(
         &mut self,
@@ -1605,7 +1611,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 删除编排会话（连同本地持久化状态）。
+    /// 删除工作流会话（连同本地持久化状态）。
     fn delete_workflow(&mut self, _window: &mut Window, cx: &mut Context<Self>, idx: usize) {
         if let Some(wf) = self.workflows.get(idx) {
             let id = wf.session.id.clone();
@@ -1622,15 +1628,29 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 暂停/继续编排会话。
-    fn toggle_pause_workflow(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let wf = self.workflows.get_mut(idx);
-        let Some(wf) = wf else { return };
-        let paused = wf.session.paused;
-        let should_advance = wf.set_paused(!paused);
-        let _ = should_advance;
+    /// 取消工作流会话及其所有子会话（终止整个工作流，PRD §3.7）。
+    fn cancel_workflow(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // 同步先落「已取消」状态（会话行/历史立即可见），再异步发 CANCEL 到各子会话；
+        // 克隆体执行纯 IO 后换回，与 advance 走同一收尾路径。
+        if let Some(wf) = self.workflows.get_mut(idx) {
+            wf.mark_cancelled();
+        }
         self.persist_workflow(idx);
-        let _ = window;
+        let Some(wf) = self.workflows.get(idx).cloned() else { return };
+        let wf_id = wf.session.id.clone();
+        let workflow_dir = self.workflow_dir.clone();
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let result = run_engine_on_tokio(async move {
+                wf.send_cancel_to_children().await;
+                let _ = wf.persist(&workflow_dir);
+                wf
+            })
+            .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.finish_engine_task(cx, idx, &wf_id, result);
+            });
+        });
+        self._tasks.push(t);
         cx.notify();
     }
 
@@ -1755,7 +1775,7 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 重命名编排会话（GUI 本地标题，右键 → 重命名）。
+    /// 重命名工作流会话（GUI 本地标题，右键 → 重命名）。
     fn rename_workflow(&mut self, cx: &mut Context<Self>, engine: usize, title: String) {
         if let Some(wf) = self.workflows.get_mut(engine) {
             wf.session.title = title.trim().to_string();
@@ -1766,7 +1786,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 右键会话操作菜单（删除 / 重命名，PRD §3.1；普通会话与编排会话通用）。
+    /// 右键会话操作菜单（删除 / 重命名，PRD §3.1；普通会话与工作流会话通用）。
     fn render_context_menu(
         &self,
         menu: &SessionContextMenu,
@@ -1859,7 +1879,7 @@ impl AmuxApp {
                                             session_id.clone(),
                                         );
                                     }
-                                    // 编排会话：GUI 本地状态，直接删除
+                                    // 工作流会话：GUI 本地状态，直接删除
                                     ContextMenuTarget::Workflow { engine } => {
                                         this.delete_workflow(window, cx, *engine);
                                     }
@@ -2241,7 +2261,7 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    /// 打开编排会话交互页。
+    /// 打开工作流会话交互页。
     fn open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wi: usize) {
         self.selected = Some(Selected::Workflow { engine: wi });
         self.set_panel(window, cx, None);
@@ -2258,10 +2278,10 @@ impl AmuxApp {
         } else {
             wf.session.title.clone()
         };
-        let state = if wf.session.done {
+        let state = if wf.session.cancelled {
+            "已取消"
+        } else if wf.session.done {
             "完成"
-        } else if wf.session.paused {
-            "已暂停"
         } else if wf.session.state == SessionState::Busy {
             "编排中…"
         } else {
@@ -2282,8 +2302,8 @@ impl AmuxApp {
                         this.open_workflow(window, cx, wi);
                     }))
                     .child(Label::new(title.as_str()).text_sm())
-                    // 特殊状态徽章（已暂停/完成）内联显示
-                    .when(wf.session.paused || wf.session.done, |h| {
+                    // 特殊状态徽章（已取消/完成）内联显示
+                    .when(wf.session.cancelled || wf.session.done, |h| {
                         h.child(
                             div()
                                 .px_1()
@@ -2348,7 +2368,7 @@ impl AmuxApp {
             );
         }
 
-        // 正在重命名该编排会话：行内输入框 + 保存（右键 → 重命名）
+        // 正在重命名该工作流会话：行内输入框 + 保存（右键 → 重命名）
         if self.renaming_workflow == Some(wi) {
             return v_flex()
                 .gap_1()
@@ -2589,7 +2609,7 @@ impl AmuxApp {
                 card = card.child(
                     Button::new("ns-create-workflow")
                         .primary()
-                        .label("创建编排会话")
+                        .label("创建工作流会话")
                         .on_click(cx.listener(|this, _ev, window, cx| {
                             this.create_workflow(window, cx);
                         })),
@@ -2869,7 +2889,7 @@ impl AmuxApp {
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        // agent 输出气泡标注 agent@机器（普通会话）；编排会话气泡标注"编排"
+        // agent 输出气泡标注 agent@机器（普通会话）；工作流会话气泡标注"编排"
         let agent_label: SharedString = match &self.selected {
             Some(Selected::Session { machine, id }) => self
                 .machine(*machine)
@@ -2994,7 +3014,7 @@ impl AmuxApp {
                 .machine(*machine)
                 .and_then(|m| m.selected_view())
                 .and_then(|v| v.live_activity.clone()),
-            // 编排会话：工作中显示"编排中…"
+            // 工作流会话：工作中显示"编排中…"
             Some(Selected::Workflow { engine }) => {
                 let busy = self
                     .workflows
@@ -3645,34 +3665,29 @@ impl AmuxApp {
                     .text_color(rgb(0x9ca3af)),
             );
         }
-        // 编排会话：暂停/继续/介入/子会话
+        // 工作流会话：取消/介入/子会话
         if let Some(Selected::Workflow { engine }) = self.selected.clone() {
-            let paused = self
-                .workflows
-                .get(engine)
-                .map(|w| w.session.paused)
-                .unwrap_or(false);
             let done = self
                 .workflows
                 .get(engine)
                 .map(|w| w.session.done)
                 .unwrap_or(false);
             body = body
-                .child(Label::new("— 编排会话 —"))
+                .child(Label::new("— 工作流会话 —"))
                 .child(
-                    Button::new("wf-pause")
+                    Button::new("wf-cancel")
                         .small()
-                        .label(if paused { "继续" } else { "暂停" })
+                        .label("取消")
                         .when(done, |b| b.disabled(true))
                         .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.toggle_pause_workflow(engine, window, cx);
+                            this.cancel_workflow(engine, window, cx);
                         })),
                 )
                 .child(Label::new("介入：在下方输入区输入指令发给编排 agent"))
                 .child(
                     Button::new("wf-delete")
                         .small()
-                        .label("删除编排会话")
+                        .label("删除工作流会话")
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.delete_workflow(window, cx, engine);
                         })),
@@ -3697,7 +3712,7 @@ impl AmuxApp {
         _cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         // 普通会话：当前会话聚合视图的活动历史（GUI 从透传事件聚合，docs/DESIGN.md §5.3）；
-        // 编排会话：转录里的系统事件 + 实时状态
+        // 工作流会话：转录里的系统事件 + 实时状态
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut live: Option<Activity> = None;
         match &self.selected {
@@ -4143,11 +4158,11 @@ impl AmuxApp {
                     .bg(rgb(0xf7f8fa))
                     .rounded_md()
                     .child(
-                        Label::new("API Backend")
+                        Label::new("wire API")
                             .text_sm()
                             .text_color(rgb(0x6b7280)),
                     )
-                    .child(self.render_api_backend_radio(cx))
+                    .child(self.render_wire_api_radio(cx))
                     .child(Label::new("Base URL").text_sm().text_color(rgb(0x6b7280)))
                     .child(Input::new(&self.orch_base_input))
                     .child(Label::new("API key").text_sm().text_color(rgb(0x6b7280)))
@@ -4155,7 +4170,7 @@ impl AmuxApp {
                     .child(Label::new("模型").text_sm().text_color(rgb(0x6b7280)))
                     .child(Input::new(&self.orch_model_input))
                     .child(
-                        Label::new("API Backend 取值：chat_completions / messages")
+                        Label::new("wire API 取值：chat / responses")
                             .text_xs()
                             .text_color(rgb(0x9ca3af)),
                     ),
@@ -4167,7 +4182,7 @@ impl AmuxApp {
                     .label("保存")
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         let cfg = OrchestratorConfig {
-                            api_backend: this.orch_backend.clone(),
+                            wire_api: this.orch_wire_api.clone(),
                             base_url: this.orch_base_input.read(cx).value().to_string(),
                             api_key: this.orch_key_input.read(cx).value().to_string(),
                             model: this.orch_model_input.read(cx).value().to_string(),

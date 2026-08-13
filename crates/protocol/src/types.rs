@@ -54,8 +54,8 @@ pub struct WorkflowTemplate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorConfig {
-    /// API Backend："chat_completions" | "messages"
-    pub api_backend: String,
+    /// wire API：`chat`（Chat Completions）| `responses`（Responses API）
+    pub wire_api: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -63,10 +63,10 @@ pub struct OrchestratorConfig {
 
 impl Default for OrchestratorConfig {
     fn default() -> Self {
-        // 全部留空：Base URL / API key / 模型均由用户显式填写，
-        // 避免预填 OpenAI 默认值误导非 OpenAI 后端（docs/DESIGN.md §10）
+        // wire_api 默认 chat；Base URL / API key / 模型均由用户显式填写，
+        // 避免预填 OpenAI 默认值误导非 OpenAI 后端
         OrchestratorConfig {
-            api_backend: "chat_completions".into(),
+            wire_api: "chat".into(),
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -76,7 +76,7 @@ impl Default for OrchestratorConfig {
 
 impl OrchestratorConfig {
     /// 编排 agent 是否已配置可用（PRD §4.3）：Base URL、API key、模型均非空。
-    /// 未配置时创建编排会话应给出提示并引导到设置页（docs/DESIGN.md §10）。
+    /// 未配置时创建工作流会话应给出提示并引导到设置页（docs/DESIGN.md §10）。
     pub fn is_configured(&self) -> bool {
         !self.base_url.trim().is_empty()
             && !self.api_key.trim().is_empty()
@@ -114,7 +114,7 @@ pub struct SessionMeta {
 }
 
 /// 会话标题生成（协议面共享的纯逻辑）：取首行、压缩空白、截断到 max_chars。
-/// server 在首条 prompt 时用它生成默认标题；GUI 在创建编排会话时用它生成本地标题。
+/// server 在首条 prompt 时用它生成默认标题；GUI 在创建工作流会话时用它生成本地标题。
 pub fn generate_title(input: &str) -> String {
     generate_title_max(input, 40)
 }
@@ -204,7 +204,7 @@ pub enum Activity {
 
 // ---- 通知负载 ----
 
-/// server → GUI 透传事件（docs/DESIGN.md §5.1）：agent 会话事件逐条透传，由 GUI 应用聚合。
+/// server → GUI 透传事件（docs/DESIGN.md §5.1）：普通会话事件逐条透传，由 GUI 应用聚合。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PassthroughEvent {
@@ -551,7 +551,7 @@ mod tests {
 
         let orch = OrchestratorConfig::default();
         let s = serde_json::to_string(&orch).unwrap();
-        assert!(s.contains("\"apiBackend\":\"chat_completions\""));
+        assert!(s.contains("\"wireApi\":\"chat\""));
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.model, orch.model);
         // 默认配置（全部留空）视为未配置；Base URL / API key / 模型都填上才视为已配置

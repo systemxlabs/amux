@@ -111,11 +111,11 @@ impl SessionManager {
         model: Option<&str>,
     ) -> Result<SessionMeta, String> {
         // 创建会话只与 server 交互（docs/DESIGN.md §4.1）：写入注册表立即返回，
-        // 不触发 ACP——agent 会话延后到首次 prompt 时懒创建（session/new）。
+        // 不触发 ACP——agent 侧会话延后到首次 prompt 时懒创建（session/new）。
         let id = format!("s_{}", uuid::Uuid::new_v4());
         protocol::log::info(
             "server.session",
-            format!("创建会话 {id}（harness={harness} cwd={cwd}，agent 会话延后创建）"),
+            format!("创建会话 {id}（harness={harness} cwd={cwd}，agent 侧会话延后创建）"),
         );
         let meta = SessionMeta {
             id,
@@ -144,7 +144,7 @@ impl SessionManager {
             .map_err(|e| format!("注册表读取失败: {e}"))?
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
         let (meta, agent_session_id) = entry;
-        // 从未 prompt 过（agent 会话尚未创建）则无需 ACP 删除
+        // 从未 prompt 过（agent 侧会话尚未创建）则无需 ACP 删除
         if !agent_session_id.is_empty() {
             let driver = self.agents.driver_for(&meta.harness)?;
             driver.delete(&agent_session_id)?;
@@ -247,7 +247,7 @@ impl SessionManager {
             meta.last_event_at = now();
             let driver = self.agents.driver_for(&meta.harness)?;
             // 创建会话时未与 ACP 交互（docs/DESIGN.md §4.1）：首条 prompt 才懒创建
-            // agent 会话（session/new）并回填注册表；已创建则沿用
+            // agent 侧会话（session/new）并回填注册表；已创建则沿用
             let agent_session_id = if agent_session_id.is_empty() {
                 let sid2 = driver.create_session(&meta.cwd, meta.model.as_deref())?;
                 self.registry
@@ -366,7 +366,7 @@ impl SessionManager {
             .get(session_id)
             .map_err(|e| format!("注册表读取失败: {e}"))?
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        // 从未 prompt 过（agent 会话尚未创建）：无进行中的工作
+        // 从未 prompt 过（agent 侧会话尚未创建）：无进行中的工作
         if agent_session_id.is_empty() {
             return Ok(());
         }
@@ -405,7 +405,7 @@ fn first_text(input: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentRegistry;
+    use crate::agent::{AgentDriver, AgentEvent, AgentRegistry};
     use crate::history::SessionLog;
     use crate::registry::SessionRegistry;
     use protocol::ContentBlock;
@@ -415,6 +415,45 @@ mod tests {
         vec![ContentBlock::Text {
             text: s.to_string(),
         }]
+    }
+
+    /// 测试驱动：prompt 发送部分输出后关闭通道（不发送 TurnEnded），
+    /// 模拟「agent 未返回 result」（取消/崩溃）的 turn 结束。
+    struct NoResultDriver;
+
+    impl AgentDriver for NoResultDriver {
+        fn create_session(&self, cwd: &str, _model: Option<&str>) -> Result<String, String> {
+            Ok(format!("agent_{}", cwd.replace('/', "_")))
+        }
+
+        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn prompt(
+            &self,
+            _agent_session_id: &str,
+            _input: Vec<ContentBlock>,
+        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx.send(AgentEvent::OutputChunk("部分输出".into())).await;
+                // 不发送 TurnEnded；drop tx 关闭通道（无 result）
+            });
+            rx
+        }
+
+        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn delete(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn list_skills(&self) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     /// 测试管理器（stub 驱动接受任意 harness 名；独立临时数据目录）。
@@ -430,7 +469,7 @@ mod tests {
     }
 
     /// 创建会话只与 server 交互（docs/DESIGN.md §4.1）：注册表立即写入、
-    /// agent 会话延后到首条 prompt 懒创建并回填。
+    /// agent 侧会话延后到首条 prompt 懒创建并回填。
     #[tokio::test]
     async fn create_defers_agent_session_until_prompt() {
         let agents = Arc::new(AgentRegistry::new_for_tests());
@@ -448,12 +487,12 @@ mod tests {
         let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
         assert!(aid.is_empty(), "创建会话不应触发 ACP session/new");
 
-        // 首条 prompt：懒创建 agent 会话并回填
+        // 首条 prompt：懒创建 agent 侧会话并回填
         mgr.prompt(&meta.id, text("你好")).await.unwrap();
         let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
         assert!(
             aid.starts_with("agent_"),
-            "首条 prompt 应懒创建 agent 会话并回填: {aid:?}"
+            "首条 prompt 应懒创建 agent 侧会话并回填: {aid:?}"
         );
 
         // 未 prompt 的会话可直接删除（无 ACP 会话，删除仅清注册表与日志）
@@ -612,6 +651,30 @@ mod tests {
             .collect();
         // stub 输出："模拟输出：完成"（chunk 已收敛为一条）
         assert!(outputs.len() == 1 && outputs[0].contains("完成"), "合并粒度应一条完整输出: {outputs:?}");
+    }
+
+    /// 无 result 的 turn（取消/崩溃后 agent 未返回 result）不写历史，
+    /// 与「有 result 才写、无 result 不写」的规则一致（docs/DESIGN.md §5.2）。
+    #[tokio::test]
+    async fn prompt_without_result_writes_no_history() {
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "noresult",
+            Arc::new(NoResultDriver),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-noresult-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry, dir.clone());
+
+        let meta = mgr.create("noresult", "/tmp/work", None).await.unwrap();
+        mgr.prompt(&meta.id, text("hi")).await.unwrap();
+
+        let log = SessionLog::open(&mgr.history_dir, &meta.id);
+        assert!(!log.exists(), "无 result 的 turn 不应写历史");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

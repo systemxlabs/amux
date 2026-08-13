@@ -255,6 +255,22 @@ impl AgentRegistry {
         }
     }
 
+    /// 测试构造：指定单个配置驱动并跳过运行期发现（避免 PATH 上的真实 agent 干扰单测）。
+    #[cfg(test)]
+    pub fn new_for_tests_with_driver(harness: &str, driver: SharedDriver) -> Self {
+        AgentRegistry {
+            stub: std::sync::Mutex::new(None),
+            force_stub: false,
+            no_discovery: true,
+            configured: Some((harness.to_string(), driver)),
+            discovered: std::sync::Mutex::new(Vec::new()),
+            spawned: std::sync::Mutex::new(HashMap::new()),
+            unavailable: std::sync::Mutex::new(HashSet::new()),
+            models: std::sync::Mutex::new(HashMap::new()),
+            model_file: std::path::PathBuf::new(),
+        }
+    }
+
     /// get_info 的 harness 列表（available + 默认模型）；先运行期刷新一次发现。
     /// **启动时拉起失败的 agent 标记为不可用**（available=false）。
     pub fn harnesses(&self) -> Vec<HarnessInfo> {

@@ -109,7 +109,7 @@ fn is_template(v: &serde_json::Value) -> bool {
 }
 
 fn is_orchestrator(v: &serde_json::Value) -> bool {
-    v.get("apiBackend").and_then(|x| x.as_str()).is_some()
+    v.get("wireApi").and_then(|x| x.as_str()).is_some()
         && v.get("baseUrl").and_then(|x| x.as_str()).is_some()
         && v.get("model").and_then(|x| x.as_str()).is_some()
 }
@@ -189,7 +189,7 @@ pub fn normalize(raw: &serde_json::Value) -> GuiConfig {
     if let Some(o) = raw.get("orchestrator") {
         if is_orchestrator(o) {
             cfg.orchestrator = OrchestratorConfig {
-                api_backend: o["apiBackend"].as_str().unwrap_or("").to_string(),
+                wire_api: o["wireApi"].as_str().unwrap_or("").to_string(),
                 base_url: o["baseUrl"].as_str().unwrap_or("").to_string(),
                 api_key: o["apiKey"].as_str().unwrap_or("").to_string(),
                 model: o["model"].as_str().unwrap_or("").to_string(),
@@ -610,14 +610,14 @@ mod tests {
     fn orchestrator_save_roundtrip() {
         let (store, _b) = store();
         let cfg = OrchestratorConfig {
-            api_backend: "messages".into(),
+            wire_api: "responses".into(),
             base_url: "http://localhost:8000/v1".into(),
             api_key: "sk-test".into(),
             model: "gpt-4.1".into(),
         };
         store.save_orchestrator(&cfg);
         assert_eq!(store.orchestrator().model, "gpt-4.1");
-        assert_eq!(store.orchestrator().api_backend, "messages");
+        assert_eq!(store.orchestrator().wire_api, "responses");
     }
 
     #[test]
@@ -631,7 +631,7 @@ mod tests {
             ],
             "skills": [{ "id": "s1", "name": "web", "description": "url" }],
             "workflowTemplates": [{ "id": "t1", "name": "审查", "description": "desc" }],
-            "orchestrator": { "apiBackend": "chat_completions", "baseUrl": "http://x", "apiKey": "k", "model": "m" }
+            "orchestrator": { "wireApi": "chat", "baseUrl": "http://x", "apiKey": "k", "model": "m" }
         });
         let cfg = normalize(&raw);
         assert_eq!(cfg.machines.len(), 1);
