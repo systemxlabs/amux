@@ -4,8 +4,8 @@
 //!   `AcpAgent` stdio 传输 + typed 请求/通知，`codex-acp` / `claude-acp` / `kimi acp`）
 //! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
 //! - `AgentRegistry`：按 harness 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
-//!   agent（预热：server 启动即拉起并复用，docs/DESIGN.md §4.1/§7.3；运行期新发现
-//!   的兜底惰性拉起；PRD §3.3「可执行路径自动发现、不手动指定」）+ 默认模型配置
+//!   agent（启动即拉起并复用，docs/DESIGN.md §4.1/§7.3；拉起失败标记不可用；
+//!   运行期新发现的兜底惰性拉起；PRD §3.3「可执行路径自动发现、不手动指定」）+ 默认模型配置
 //!
 //! ACP v1 语义（docs/DESIGN.md §7.2）：session/new、resume、prompt、cancel、delete 等
 //! 方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
@@ -132,12 +132,12 @@ pub struct DiscoveredAgent {
     pub env: Vec<(String, String)>,
 }
 
-/// 预热结果统计（server 启动日志用；docs/DESIGN.md §4.1/§7.3）。
+/// 启动拉起的统计（server 启动日志用；docs/DESIGN.md §4.1/§7.3）。
 #[derive(Debug, Default, Clone, Copy)]
-pub struct PrewarmSummary {
+pub struct LaunchSummary {
     /// 成功拉起的 ACP server 数
-    pub spawned: usize,
-    /// 拉起失败的 agent 数（不致命，仅记录；driver_for 使用时会返回明确错误）
+    pub started: usize,
+    /// 拉起失败的 agent 数（标记为**不可用**，get_info 的 available=false）
     pub failed: usize,
 }
 
@@ -147,8 +147,9 @@ pub struct PrewarmSummary {
 /// - 自动发现（无需 `--agent`，docs/DESIGN.md §7.3）：
 ///   - 已知 CLI 的 `acp` 子命令探测（如 `kimi acp`，ACP 原生）
 ///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
-///   - 发现的 agent 在 server 启动时**预热**（`prewarm`，docs/DESIGN.md §4.1/§7.3：
-///     ACP server 随 server 启动一起拉起，后续 `driver_for` 复用缓存驱动）；
+///   - 发现的 agent 在 server 启动时**直接拉起**（`launch_discovered`，docs/DESIGN.md
+///     §4.1/§7.3：ACP server 随 server 启动一起拉起，后续 `driver_for` 复用缓存驱动）；
+///     **拉起失败的 agent 标记为不可用**（get_info 的 available=false，使用时报明确错误）；
 ///     运行期新发现的 agent 仍走惰性拉起兜底
 /// - 演示兜底：既无 `--agent` 又无任何发现时，用内存 Stub（接受任意 harness 名）
 ///
@@ -165,8 +166,10 @@ pub struct AgentRegistry {
     configured: Option<(String, SharedDriver)>,
     /// 自动发现的 agent（不含已配置的；可运行期刷新）
     discovered: std::sync::Mutex<Vec<DiscoveredAgent>>,
-    /// 已拉起的发现驱动（预热 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
+    /// 已拉起的发现驱动（启动拉起 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
     spawned: std::sync::Mutex<HashMap<String, SharedDriver>>,
+    /// 启动时拉起失败的 agent（标记为不可用：get_info available=false、driver_for 报错）
+    unavailable: std::sync::Mutex<HashSet<String>>,
     /// 按 harness 的默认模型配置
     models: std::sync::Mutex<HashMap<String, Option<String>>>,
     model_file: std::path::PathBuf,
@@ -187,6 +190,7 @@ impl AgentRegistry {
             configured,
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
+            unavailable: std::sync::Mutex::new(HashSet::new()),
             models: std::sync::Mutex::new(load_models(&model_file)),
             model_file,
         };
@@ -245,12 +249,14 @@ impl AgentRegistry {
             configured: None,
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
+            unavailable: std::sync::Mutex::new(HashSet::new()),
             models: std::sync::Mutex::new(HashMap::new()),
             model_file: std::path::PathBuf::new(),
         }
     }
 
     /// get_info 的 harness 列表（available + 默认模型）；先运行期刷新一次发现。
+    /// **启动时拉起失败的 agent 标记为不可用**（available=false）。
     pub fn harnesses(&self) -> Vec<HarnessInfo> {
         self.refresh_discovery();
         let models = self
@@ -259,6 +265,10 @@ impl AgentRegistry {
             .expect("Mutex 中毒（临界区内不应 panic）");
         let discovered = self
             .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
+        let unavailable = self
+            .unavailable
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）");
         let mut out: Vec<HarnessInfo> = Vec::new();
@@ -283,7 +293,7 @@ impl AgentRegistry {
         for d in discovered.iter() {
             out.push(HarnessInfo {
                 name: d.name.clone(),
-                available: true,
+                available: !unavailable.contains(&d.name),
                 default_model: models.get(&d.name).cloned().flatten(),
             });
         }
@@ -292,8 +302,8 @@ impl AgentRegistry {
 
     /// 按 harness 名解析驱动；未知 harness 报错（HARNESS_UNAVAILABLE）。
     /// 未知 harness 时先运行期刷新一次发现（新装的 agent 无需重启即可用）。
-    /// 已预热的驱动直接复用缓存（不再二次 spawn）；未预热的（运行期新发现或
-    /// 预热失败的兜底重试）走共享 spawn-and-cache 惰性拉起。
+    /// 启动时已拉起的驱动直接复用缓存（不再二次 spawn）；运行期新发现或未拉起的
+    /// 走共享 spawn-and-cache 惰性拉起；**启动时拉起失败的 agent（不可用）直接报错**。
     pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
         if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）")
         {
@@ -303,6 +313,15 @@ impl AgentRegistry {
             if name == harness {
                 return Ok(d.clone());
             }
+        }
+        // 启动时拉起失败 = 不可用：直接返回明确错误，不尝试再次拉起
+        if self
+            .unavailable
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .contains(harness)
+        {
+            return Err(format!("agent 不可用（启动时拉起失败）: {harness}"));
         }
         self.refresh_discovery();
         let found = self
@@ -319,8 +338,8 @@ impl AgentRegistry {
     }
 
     /// 共享 spawn-and-cache：按 `DiscoveredAgent` 拉起 ACP server 并存入 `spawned` 缓存。
-    /// **预热与 `driver_for` 懒路径共用同一实现**——已拉起的驱动直接复用，不重复 spawn；
-    /// 拉起失败返回明确错误且不写缓存（调用方决定是否致命）。
+    /// **启动拉起与 `driver_for` 懒路径共用同一实现**——已拉起的驱动直接复用，不重复
+    /// spawn；拉起失败返回明确错误且不写缓存（调用方决定是否标记不可用）。
     fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<SharedDriver, String> {
         let mut spawned = self
             .spawned
@@ -338,17 +357,18 @@ impl AgentRegistry {
         Ok(driver)
     }
 
-    /// 预热（docs/DESIGN.md §4.1/§7.3）：server 启动时把已发现的 ACP agent **全部拉起**
+    /// 启动拉起（docs/DESIGN.md §4.1/§7.3）：server 启动时发现本机 agent 并**直接拉起**
     /// （kimi 走原生 `kimi acp`，claude/codex 走 npx 包装器），结果进 `spawned` 缓存，
     /// 后续 `driver_for` 直接复用、不再二次 spawn。
     ///
-    /// 单 agent 拉起失败**不致命**：只记录错误并继续预热其余 agent（server 正常启动、
-    /// 其余 agent 正常使用）；实际使用失败 agent 时 `driver_for` 返回明确错误（并兜底重试）。
-    /// 尊重 `AMUX_NO_DISCOVERY=1` 与 stub/force_stub 模式（无发现则无可预热）。
-    pub fn prewarm(&self) -> PrewarmSummary {
-        // 受限/演示模式：无发现可预热（防御性检查——discovered 本就应为空）
+    /// 单 agent 拉起失败**不致命且标记为不可用**：只记录错误并把该 harness 记入
+    /// `unavailable`（get_info 的 available=false，`driver_for` 返回明确错误、不尝试
+    /// 再次拉起），server 正常启动、其余 agent 正常使用；重启 server 后重新发现与拉起。
+    /// 尊重 `AMUX_NO_DISCOVERY=1` 与 stub/force_stub 模式（无发现则无需拉起）。
+    pub fn launch_discovered(&self) -> LaunchSummary {
+        // 受限/演示模式：无发现可拉起（防御性检查——discovered 本就应为空）
         if self.force_stub || self.no_discovery {
-            return PrewarmSummary::default();
+            return LaunchSummary::default();
         }
         if self
             .stub
@@ -356,28 +376,35 @@ impl AgentRegistry {
             .expect("Mutex 中毒（临界区内不应 panic）")
             .is_some()
         {
-            return PrewarmSummary::default();
+            return LaunchSummary::default();
         }
         let discovered = self
             .discovered
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .clone();
-        let mut summary = PrewarmSummary::default();
+        let mut summary = LaunchSummary::default();
         for d in discovered {
             match self.spawn_and_cache(&d) {
                 Ok(_) => {
-                    summary.spawned += 1;
+                    summary.started += 1;
                     protocol::log::info(
-                        "server.prewarm",
+                        "server.launch",
                         format!("已拉起 ACP server: {}（harness={}）", d.bin, d.name),
                     );
                 }
                 Err(e) => {
                     summary.failed += 1;
+                    self.unavailable
+                        .lock()
+                        .expect("Mutex 中毒（临界区内不应 panic）")
+                        .insert(d.name.clone());
                     protocol::log::error(
-                        "server.prewarm",
-                        format!("ACP server 拉起失败（harness={}）: {e}", d.name),
+                        "server.launch",
+                        format!(
+                            "ACP server 拉起失败（harness={}，已标记不可用）: {e}",
+                            d.name
+                        ),
                     );
                 }
             }
@@ -430,7 +457,7 @@ fn load_models(path: &std::path::Path) -> HashMap<String, Option<String>> {
 /// 2) 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
 ///
 /// 不做任意 `*-acp` 扫描：只认已知 agent，避免无关可执行污染列表。
-/// 发现的 agent 由 `prewarm` 在 server 启动时拉起（docs/DESIGN.md §4.1/§7.3）。
+/// 发现的 agent 由 `launch_discovered` 在 server 启动时拉起（docs/DESIGN.md §4.1/§7.3）。
 fn discover_acp_agents() -> Vec<DiscoveredAgent> {
     let mut found: Vec<DiscoveredAgent> = Vec::new();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -796,8 +823,8 @@ async fn exec_main(
     };
 
     // 就绪信号：main_fn 启动（子进程已拉起、连接已建立）后完成 initialize 握手即报告
-    // Ok（initialize 协议级失败不致命——部分 agent 不实现 initialize 也照常工作，连接
-    // 保持）；若 main_fn 从未报告（连接建立前传输层失败），由 connect_with 结果补报 Err。
+    // Ok——协议级失败（agent 存活但不实现 initialize）不致命、仍视为拉起成功；若握手失败
+    // 且连接已关闭（进程立即退出等传输层失败）则不报告，交由 connect_with 结果补报 Err。
     let ready: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<(), String>>>>> =
         Arc::new(std::sync::Mutex::new(Some(ready_tx)));
     let ready_main = ready.clone();
@@ -830,9 +857,12 @@ async fn exec_main(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(agent, |cx: ConnectionTo<Agent>| async move {
-            // 初始化握手（版本协商）。失败仅记录——部分 agent（如 mock_acp）不实现
-            // initialize 也照常工作，连接保持。握手完成（成功或协议级失败）即视为
-            // 子进程已拉起可用，报告就绪。
+            // 初始化握手（版本协商）。失败需区分两种情形：
+            // - **协议级失败**（agent 存活但不实现 initialize，如返回 method not
+            //   found）：仅记录、连接保持可用，视为拉起成功；
+            // - **传输层失败**（进程已退出 / 连接已死，如 npx 不可用、无网络）：拉起失败。
+            // 二者用短窗口探测连接活性区分：incoming_closed 在传输层关闭后很快完成，
+            // 超时则连接仍存活。
             let init_result = match cx
                 .send_request(InitializeRequest::new(ProtocolVersion::V1))
                 .block_task()
@@ -843,8 +873,18 @@ async fn exec_main(
                     Ok(())
                 }
                 Err(e) => {
-                    protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
-                    Ok(())
+                    let alive = tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        cx.incoming_closed(),
+                    )
+                    .await
+                    .is_err();
+                    if alive {
+                        protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
+                        Ok(())
+                    } else {
+                        Err(format!("initialize 握手失败（连接已关闭）: {e}"))
+                    }
                 }
             };
             if let Some(tx) = ready_main.lock().expect("Mutex 中毒（临界区内不应 panic）").take() {
@@ -1419,7 +1459,7 @@ mod tests {
             .is_empty());
     }
 
-    // ---- 预热（docs/DESIGN.md §4.1/§7.3：ACP server 随 server 启动一起拉起）----
+    // ---- 启动拉起（docs/DESIGN.md §4.1/§7.3：server 启动发现 agent 并直接拉起，失败标记不可用）----
 
     /// 测试构造：给定 discovered 条目（跳过 PATH 扫描），可控制 force_stub/no_discovery/stub。
     #[cfg(test)]
@@ -1436,6 +1476,7 @@ mod tests {
             configured: None,
             discovered: std::sync::Mutex::new(discovered),
             spawned: std::sync::Mutex::new(HashMap::new()),
+            unavailable: std::sync::Mutex::new(HashSet::new()),
             models: std::sync::Mutex::new(HashMap::new()),
             model_file: std::path::PathBuf::new(),
         }
@@ -1454,11 +1495,11 @@ mod tests {
         bin_dir.join(name)
     }
 
-    /// 预热成功：mock_acp 可执行（真实拉起）进入缓存；不存在的二进制预热失败
-    /// 但不阻断其余预热；`driver_for` 复用缓存驱动（不重复 spawn）并对失败 agent
-    /// 返回明确错误。
+    /// 启动拉起：mock_acp 可执行（真实拉起）进入缓存；不存在的二进制拉起失败被标记为
+    /// **不可用**（get_info 的 available=false）且不阻断其余 agent；`driver_for` 复用缓存
+    /// 驱动（不重复 spawn），对不可用 agent 返回明确错误（不尝试再次拉起）。
     #[test]
-    fn prewarm_spawns_discovered_and_driver_for_reuses_cache() {
+    fn launch_discovered_spawns_and_marks_unavailable() {
         let mock = sibling_bin("mock_acp");
         assert!(mock.exists(), "mock_acp 应已构建: {}", mock.display());
         let reg = test_registry(
@@ -1481,15 +1522,15 @@ mod tests {
             None,
         );
 
-        // 预热：成功者入缓存、失败者只记录（不 panic、不阻断）
-        let summary = reg.prewarm();
+        // 启动拉起：成功者入缓存、失败者标记不可用（不 panic、不阻断其余 agent）
+        let summary = reg.launch_discovered();
         assert_eq!(
-            summary.spawned, 1,
-            "mock_acp 应预热成功（真实 spawn 路径）: {summary:?}"
+            summary.started, 1,
+            "mock_acp 应拉起成功（真实 spawn 路径）: {summary:?}"
         );
         assert_eq!(
             summary.failed, 1,
-            "不存在的二进制应预热失败但不致命: {summary:?}"
+            "不存在的二进制应拉起失败并标记不可用: {summary:?}"
         );
         let spawned = reg
             .spawned
@@ -1500,19 +1541,26 @@ mod tests {
         assert!(!spawned.contains_key("broken"), "失败条目不应入缓存");
         drop(spawned);
 
+        // get_info 的 available 反映不可用状态
+        let hs = reg.harnesses();
+        let mock_info = hs.iter().find(|h| h.name == "mock_acp").expect("mock_acp 在列表");
+        assert!(mock_info.available, "拉起成功的 agent 应 available=true");
+        let broken_info = hs.iter().find(|h| h.name == "broken").expect("broken 在列表");
+        assert!(!broken_info.available, "拉起失败的 agent 应 available=false");
+
         // driver_for 复用缓存驱动（同一 Arc，不二次 spawn）
-        let d1 = reg.driver_for("mock_acp").expect("已预热驱动应直接返回");
-        let d2 = reg.driver_for("mock_acp").expect("已预热驱动应直接返回");
+        let d1 = reg.driver_for("mock_acp").expect("已拉起驱动应直接返回");
+        let d2 = reg.driver_for("mock_acp").expect("已拉起驱动应直接返回");
         assert!(Arc::ptr_eq(&d1, &d2), "driver_for 应复用同一缓存驱动");
 
-        // 失败 agent：driver_for 返回明确错误（且不污染缓存）
+        // 不可用 agent：driver_for 返回明确错误（不尝试再次拉起、不污染缓存）
         let err = match reg.driver_for("broken") {
             Err(e) => e,
-            Ok(_) => panic!("失败 agent 的 driver_for 应返回错误"),
+            Ok(_) => panic!("不可用 agent 的 driver_for 应返回错误"),
         };
         assert!(
-            err.contains("失败") || err.contains("启动"),
-            "失败 agent 的错误应明确: {err}"
+            err.contains("不可用"),
+            "不可用 agent 的错误应明确: {err}"
         );
         assert!(
             !reg
@@ -1520,13 +1568,13 @@ mod tests {
                 .lock()
                 .expect("Mutex 中毒（临界区内不应 panic）")
                 .contains_key("broken"),
-            "失败的 spawn 不应污染缓存"
+            "不可用 agent 不应被再次拉起"
         );
     }
 
-    /// `AMUX_NO_DISCOVERY=1` / force_stub / stub 兜底模式：不预热（即使有 discovered 条目）。
+    /// `AMUX_NO_DISCOVERY=1` / force_stub / stub 兜底模式：不启动拉起（即使有 discovered 条目）。
     #[test]
-    fn prewarm_skips_when_no_discovery_or_stub() {
+    fn launch_discovered_skips_when_no_discovery_or_stub() {
         let mock = sibling_bin("mock_acp");
         let entry = DiscoveredAgent {
             name: "mock_acp".into(),
@@ -1535,13 +1583,13 @@ mod tests {
             env: Vec::new(),
         };
 
-        // AMUX_NO_DISCOVERY=1（no_discovery=true）：即使有 discovered 条目也不预热
+        // AMUX_NO_DISCOVERY=1（no_discovery=true）：即使有 discovered 条目也不拉起
         let reg = test_registry(vec![entry.clone()], false, true, None);
-        let summary = reg.prewarm();
+        let summary = reg.launch_discovered();
         assert_eq!(
-            summary.spawned + summary.failed,
+            summary.started + summary.failed,
             0,
-            "AMUX_NO_DISCOVERY=1 不应预热: {summary:?}"
+            "AMUX_NO_DISCOVERY=1 不应拉起: {summary:?}"
         );
         assert!(reg
             .spawned
@@ -1549,25 +1597,25 @@ mod tests {
             .expect("Mutex 中毒（临界区内不应 panic）")
             .is_empty());
 
-        // force_stub（测试强制 stub）：跳过预热
+        // force_stub（测试强制 stub）：跳过启动拉起
         let reg = test_registry(vec![entry.clone()], true, false, None);
-        let summary = reg.prewarm();
-        assert_eq!(summary.spawned + summary.failed, 0);
+        let summary = reg.launch_discovered();
+        assert_eq!(summary.started + summary.failed, 0);
         assert!(reg
             .spawned
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .is_empty());
 
-        // stub 兜底模式（无发现 → stub 存在）：跳过预热
+        // stub 兜底模式（无发现 → stub 存在）：跳过启动拉起
         let reg = test_registry(
             vec![entry.clone()],
             false,
             false,
             Some(Arc::new(StubAgentDriver::new()) as SharedDriver),
         );
-        let summary = reg.prewarm();
-        assert_eq!(summary.spawned + summary.failed, 0);
+        let summary = reg.launch_discovered();
+        assert_eq!(summary.started + summary.failed, 0);
         assert!(reg
             .spawned
             .lock()

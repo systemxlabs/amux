@@ -2,7 +2,7 @@
 //! 经 WebSocket + JSON-RPC 验证协议。
 //! 覆盖：会话生命周期、非流式交付（通知序列）、标题生成、忙时 steer 报错（-32006）、
 //! 多客户端共存、git status/diff/revert、agent 发现与默认模型、skills 列表、
-//! 启动预热（docs/DESIGN.md §4.1/§7.3：ACP server 随 server 启动拉起，失败不致命）。
+//! 启动拉起（docs/DESIGN.md §4.1/§7.3：server 启动发现 agent 并直接拉起，失败标记不可用）。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -935,7 +935,7 @@ async fn history_merged_local_read_and_delete_linkage() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-// ---- 启动预热（docs/DESIGN.md §4.1/§7.3：ACP server 随 server 启动一起拉起）----
+// ---- 启动拉起（docs/DESIGN.md §4.1/§7.3：server 启动发现 agent 并直接拉起，失败标记不可用）----
 
 /// 写一个假 CLI 到 fakebin（`acp --help` 命中 → 被发现）：
 /// - `delegate_to` = Some(可执行) → 拉起时 exec 它（模拟健康 ACP server：假 kimi → mock_acp）
@@ -989,11 +989,11 @@ async fn spawn_server_with_fakebin(
     (port, data_dir, stderr_log, ServerGuard { child })
 }
 
-/// 预热成功场景（docs/DESIGN.md §4.1/§7.3）：server 启动即拉起发现的 ACP server——
+/// 拉起成功场景（docs/DESIGN.md §4.1/§7.3）：server 启动即拉起发现的 ACP server——
 /// 假 kimi（`acp --help` 命中）经委托 mock_acp 正常拉起；`get_info` 返回 kimi 且
 /// available=true（两轮一致）；启动日志出现针对 kimi 的「已拉起 ACP server」行。
 #[tokio::test]
-async fn prewarm_pulls_up_discovered_agent_at_startup() {
+async fn launch_discovered_pulls_up_agent_at_startup() {
     let fakebin = unique_data_dir();
     std::fs::create_dir_all(&fakebin).unwrap();
     write_fake_cli(&fakebin, "kimi", Some(Path::new(env!("CARGO_BIN_EXE_mock_acp"))));
@@ -1007,7 +1007,10 @@ async fn prewarm_pulls_up_discovered_agent_at_startup() {
         .iter()
         .find(|h| h["name"] == "kimi")
         .expect("应发现 kimi: {info}");
-    assert_eq!(kimi["available"], true, "预热后 kimi 应 available=true: {info}");
+    assert_eq!(
+        kimi["available"], true,
+        "拉起成功的 kimi 应 available=true: {info}"
+    );
 
     // 两轮 get_info 一致（确定性；非确定性视为缺陷；仅比 result，id 必然递增）
     let info2 = c.call("get_info", json!({})).await;
@@ -1016,25 +1019,25 @@ async fn prewarm_pulls_up_discovered_agent_at_startup() {
         "两轮 get_info result 应一致: {info2} vs {info}"
     );
 
-    // 启动日志（stderr）：针对 kimi 的「已拉起 ACP server」行 + 预热汇总
+    // 启动日志（stderr）：针对 kimi 的「已拉起 ACP server」行 + 启动汇总
     let log = std::fs::read_to_string(&stderr_log).unwrap_or_default();
     assert!(
         log.contains("已拉起 ACP server") && log.contains("kimi"),
-        "启动日志应有 kimi 预热成功行: {log}"
+        "启动日志应有 kimi 拉起成功行: {log}"
     );
-    assert!(log.contains("预热完成"), "启动日志应有预热汇总行: {log}");
+    assert!(log.contains("启动完成"), "启动日志应有启动汇总行: {log}");
 
     // server 正常服务（会话操作可用）
     let list = c.call("list_sessions", json!({})).await;
-    assert!(list.get("error").is_none(), "预热后会话操作应正常: {list}");
+    assert!(list.get("error").is_none(), "拉起后会话操作应正常: {list}");
     let _ = std::fs::remove_dir_all(&fakebin);
 }
 
-/// 单 agent 预热失败不致命（docs/DESIGN.md §4.1/§7.3）：假 codex 发现成功但拉起即失败
-/// （立即非零退出，模拟 npx 不可用 / 无网络）——server 仍监听、`get_info` 正常响应，
-/// 日志含失败记录且进程不崩溃。
+/// 单 agent 拉起失败标记**不可用**（docs/DESIGN.md §4.1/§7.3）：假 codex 发现成功但拉起即
+/// 失败（立即非零退出，模拟 npx 不可用 / 无网络）——server 仍监听、`get_info` 返回该 agent
+/// 且 available=false（使用时报「不可用」错误）、日志含失败记录且进程不崩溃。
 #[tokio::test]
-async fn prewarm_failure_is_non_fatal() {
+async fn launch_failure_marks_agent_unavailable() {
     let fakebin = unique_data_dir();
     std::fs::create_dir_all(&fakebin).unwrap();
     write_fake_cli(&fakebin, "codex", None);
@@ -1049,22 +1052,46 @@ async fn prewarm_failure_is_non_fatal() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|h| h["name"] == "codex");
-    assert!(
-        codex.is_some(),
-        "发现成功的 codex 应出现在 harnesses 中: {info}"
+        .find(|h| h["name"] == "codex")
+        .expect("发现成功的 codex 应出现在 harnesses 中: {info}");
+    assert_eq!(
+        codex["available"], false,
+        "拉起失败的 codex 应标记为不可用（available=false）: {info}"
     );
 
-    // 日志含失败记录（失败不致命：server 照常启动、其余能力可用）
+    // 使用不可用 agent：创建会话（仅与 server 交互）后可建，但首条 prompt 返回明确错误
+    let created = c
+        .call(
+            "create_session",
+            json!({"harness": "codex", "cwd": "/tmp/work"}),
+        )
+        .await;
+    let sid = created["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = c
+        .call(
+            "prompt",
+            json!({"sessionId": sid, "input": [{"type": "text", "text": "hi"}]}),
+        )
+        .await;
+    let err_msg = prompt["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        err_msg.contains("不可用"),
+        "使用不可用 agent 应报明确错误: {prompt}"
+    );
+
+    // 日志含失败记录（标记不可用，server 照常启动、其余能力可用）
     let log = std::fs::read_to_string(&stderr_log).unwrap_or_default();
     assert!(
-        log.contains("拉起失败") && log.contains("codex"),
-        "启动日志应有 codex 预热失败记录: {log}"
+        log.contains("拉起失败") && log.contains("codex") && log.contains("已标记不可用"),
+        "启动日志应有 codex 拉起失败并标记不可用的记录: {log}"
     );
-    assert!(log.contains("预热完成"), "启动日志应有预热汇总行: {log}");
+    assert!(log.contains("启动完成"), "启动日志应有启动汇总行: {log}");
 
     // server 正常服务（会话操作可用）
     let list = c.call("list_sessions", json!({})).await;
-    assert!(list.get("error").is_none(), "预热失败后 server 仍应正常: {list}");
+    assert!(list.get("error").is_none(), "拉起失败后 server 仍应正常: {list}");
     let _ = std::fs::remove_dir_all(&fakebin);
 }

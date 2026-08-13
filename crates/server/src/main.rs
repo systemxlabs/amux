@@ -73,16 +73,16 @@ async fn main() {
         cfg.data_dir.join("agent-models.json"),
     ));
 
-    // 预热（docs/DESIGN.md §4.1/§7.3）：server 启动即把已发现的 ACP server 全部拉起
+    // 启动拉起（docs/DESIGN.md §4.1/§7.3）：server 启动时发现本机 agent 并直接拉起
     // （kimi 原生 `kimi acp`，claude/codex 经 npx 包装器），后续 `driver_for` 复用缓存、
-    // 不再二次 spawn。单 agent 拉起失败不致命（只记录错误，server 照常启动、其余
-    // agent 正常使用）；实际使用失败 agent 时 `driver_for` 返回明确错误。
-    let prewarm = agents.prewarm();
+    // 不再二次 spawn。单 agent 拉起失败不致命：标记为**不可用**（get_info 的 available=
+    // false，使用时报明确错误），server 照常启动、其余 agent 正常使用。
+    let launch = agents.launch_discovered();
     protocol::log::info(
         "server.startup",
         format!(
-            "ACP server 预热完成：{} 个已拉起，{} 个失败",
-            prewarm.spawned, prewarm.failed
+            "ACP server 启动完成：{} 个已拉起，{} 个失败（标记不可用）",
+            launch.started, launch.failed
         ),
     );
 
