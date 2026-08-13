@@ -2168,12 +2168,21 @@ impl AmuxApp {
     }
 
     /// 会话列表：普通会话 + 工作流会话**统一按最近活跃排序**（docs/PRD §4.1.1；
-    /// 子会话随父会话一起参与排序）。
+    /// 子会话随父会话一起参与排序，不占顶层一行）。
     fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        // 子会话只挂在工作流会话下，顶层列表跳过
+        let child_ids: std::collections::HashSet<&str> = self
+            .workflows
+            .iter()
+            .flat_map(|wf| wf.session.children.iter().map(|c| c.id.as_str()))
+            .collect();
         // 汇总：普通会话按 last_event_at；工作流按 max(父 updated_at, 子会话 last_event_at)
         let mut items: Vec<(u64, SessionListItem)> = Vec::new();
         for (mi, m) in self.machines.iter().enumerate() {
             for s in &m.sessions {
+                if child_ids.contains(s.id.as_str()) {
+                    continue;
+                }
                 items.push((
                     s.last_event_at,
                     SessionListItem::Session {
