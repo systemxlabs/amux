@@ -2326,7 +2326,7 @@ impl AmuxApp {
                             .on_click(cx.listener(move |this, _ev, window, cx| {
                                 this.open_session(window, cx, machine, sid_open.clone());
                             }))
-                            .child(Label::new(label).text_sm()),
+                            .child(Label::new(label).text_sm().flex_1().min_w_0().truncate()),
                     )
                     // 工作中转圈（右侧）；空闲占位（保持对齐）
                     .child(if busy {
@@ -2380,7 +2380,13 @@ impl AmuxApp {
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.open_workflow(window, cx, wi);
                     }))
-                    .child(Label::new(title.as_str()).text_sm())
+                    .child(
+                        Label::new(title.as_str())
+                            .text_sm()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate(),
+                    )
                     // 特殊状态徽章（已取消/完成）内联显示
                     .when(wf.session.cancelled || wf.session.done, |h| {
                         h.child(
