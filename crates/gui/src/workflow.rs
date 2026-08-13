@@ -523,15 +523,6 @@ impl WorkflowEngine {
             .get(child.machine_idx)
             .cloned()
             .ok_or_else(|| "机器连接已失效".to_string())?;
-        let res = client
-            .request(
-                protocol::method::PROMPT,
-                Some(serde_json::json!({
-                    "sessionId": session_id,
-                    "input": [{ "type": "text", "text": text }],
-                })),
-            )
-            .await;
         if let Some(c) = self
             .session
             .children
@@ -540,15 +531,19 @@ impl WorkflowEngine {
         {
             c.state = SessionState::Busy;
         }
-        match res {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.session.transcript.push(OrcMsg::System {
-                    text: format!("下发指令失败：{e}"),
-                });
-                Err(e.to_string())
+        // 不阻塞等待子 agent 结果：下达指令后即结束本 turn（docs/DESIGN.md §9 自动推进），
+        // 子会话状态经 server 通知异步回来。
+        let sid = session_id.to_string();
+        let input = serde_json::json!({
+            "sessionId": session_id,
+            "input": [{ "type": "text", "text": text }],
+        });
+        crate::ws::runtime().spawn(async move {
+            if let Err(e) = client.request(protocol::method::PROMPT, Some(input)).await {
+                protocol::log::error("gui.workflow", format!("下发指令失败 {sid}: {e}"));
             }
-        }
+        });
+        Ok(())
     }
 
     /// 机器名 → 下标（未知机器回退第一个可用）。
@@ -1425,6 +1420,38 @@ mod tests {
         assert_eq!(child.machine_name, "测试机");
         assert_eq!(child.harness, "mock_acp");
         assert_eq!(child.step_desc, "实现登录功能");
+
+        // 指令异步下发：等待子会话「已生成标题且回到 idle」——确保首条 prompt 完成、
+        // 历史已落库（标题在 prompt 开始时生成，历史在 turn 结束时写入）
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(5000);
+        loop {
+            let res = client
+                .request(protocol::method::LIST_SESSIONS, Some(serde_json::json!({})))
+                .await
+                .unwrap();
+            let meta = res["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"].as_str() == Some(child.id.as_str()))
+                .cloned();
+            let title_ready = meta
+                .as_ref()
+                .map(|m| !m["title"].as_str().unwrap_or("").is_empty())
+                .unwrap_or(false);
+            let idle = meta
+                .as_ref()
+                .map(|m| m["state"].as_str() == Some("idle"))
+                .unwrap_or(false);
+            if title_ready && idle {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "子会话未在超时内完成首条 prompt"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
 
         let res = client
             .request(protocol::method::LIST_SESSIONS, Some(serde_json::json!({})))

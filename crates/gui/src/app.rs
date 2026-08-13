@@ -929,7 +929,16 @@ impl AmuxApp {
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(m) = this.machine_mut(machine) {
                     m.selected = Some(session_id.clone());
-                    m.views.insert(session_id.clone(), view);
+                    // 进行中的 turn 尚未落库：重放为空时保留已聚合的实时视图，
+                    // 避免打开会话时清掉编排指令回显与实时输出
+                    let keep_live = events.is_empty()
+                        && m.views
+                            .get(&session_id)
+                            .map(|v| !v.dialog.is_empty() || !v.activities.is_empty())
+                            .unwrap_or(false);
+                    if !keep_live {
+                        m.views.insert(session_id.clone(), view);
+                    }
                     m.dialog_before = next_before;
                     m.dialog_has_more = has_more;
                 }
