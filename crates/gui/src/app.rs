@@ -2317,6 +2317,7 @@ impl AmuxApp {
                         h_flex()
                             .id(format!("sess-title-{machine}-{sid}"))
                             .flex_1()
+                            .min_w_0()
                             .gap_1()
                             .items_center()
                             .on_click(cx.listener(move |this, _ev, window, cx| {
@@ -2371,6 +2372,7 @@ impl AmuxApp {
                 h_flex()
                     .id(format!("wf-title-{wi}"))
                     .flex_1()
+                    .min_w_0()
                     .gap_1()
                     .items_center()
                     .on_click(cx.listener(move |this, _ev, window, cx| {
