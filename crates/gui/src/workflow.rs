@@ -761,6 +761,9 @@ impl RigBackend {
     {
         rig::AgentBuilder::new(model)
             .preamble(preamble)
+            // 单次决策需足够轮次：模型规划工具调用 + 产出总结（rig 0.41 默认预算 1，
+            // 带工具时 tool-then-answer 至少需 2，此处放宽到 8 以支持多步骤规划）
+            .default_max_turns(8)
             .tool(PlanCreateSession)
             .tool(PlanPromptSession)
             .build()
