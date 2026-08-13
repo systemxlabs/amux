@@ -235,6 +235,8 @@ pub struct AmuxApp {
     skill_install_dialog: Option<SkillInstallDialog>,
     /// 创建工作流会话时的提示（如编排 agent 未配置 API）
     workflow_error: Option<String>,
+    /// 已选择的工作流模板（新会话视图；选择后由「创建工作流会话」按钮统一创建）
+    workflow_template: Option<WorkflowTemplate>,
     /// 对话流滚动句柄（打开会话/新消息自动滚到底部）
     dialog_scroll: ScrollHandle,
     /// 已展开子会话的工作流（"▾"折叠指示，PRD §4.1.1）
@@ -343,6 +345,7 @@ impl AmuxApp {
             new_session_harness: None,
             skill_install_dialog: None,
             workflow_error: None,
+            workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
             expanded_workflows: std::collections::HashSet::new(),
             _tasks: Vec::new(),
@@ -1531,7 +1534,8 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 创建工作流会话（PRD §3.7：自然语言描述完整执行计划）。
+    /// 创建工作流会话（PRD §3.7/§4.1.2）：输入框内容作为本次目标/执行计划；
+    /// 若已选择模板，模板作为系统提示词（preamble）、输入框内容作为本次目标。
     fn create_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let description = self.workflow_input.read(cx).value().to_string();
         if description.trim().is_empty() {
@@ -1539,7 +1543,8 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        self.create_workflow_with(window, cx, description, None);
+        let preamble = self.workflow_template.take().map(|t| t.description);
+        self.create_workflow_with(window, cx, description, preamble);
         self.workflow_input.update(cx, |s, cx| {
             s.set_value("", window, cx);
         });
@@ -1653,27 +1658,6 @@ impl AmuxApp {
         });
         self._tasks.push(t);
         cx.notify();
-    }
-
-    /// 从模板创建工作流。
-    fn create_workflow_from_template(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        tpl: WorkflowTemplate,
-    ) {
-        // 模板内置进编排 agent 的系统提示词（preamble），不进入会话历史（PRD §3.7）；
-        // 输入框中的内容作为本次工作流的目标（PRD §3.7/§4.1.2），为空则不创建、不自动启动
-        let goal = self.workflow_input.read(cx).value().to_string();
-        if goal.trim().is_empty() {
-            self.workflow_error = Some("请先在输入框填写本次工作流的目标，再选择模板".into());
-            cx.notify();
-            return;
-        }
-        self.create_workflow_with(window, cx, goal, Some(tpl.description.clone()));
-        self.workflow_input.update(cx, |s, cx| {
-            s.set_value("", window, cx);
-        });
     }
 
     // ---- 语音输入 ----
@@ -2585,9 +2569,13 @@ impl AmuxApp {
                         v_flex()
                             .gap_1()
                             .child(
-                                Label::new("或直接输入自然语言计划")
-                                    .text_sm()
-                                    .text_color(rgb(0x6b7280)),
+                                Label::new(if self.workflow_template.is_some() {
+                                    "本次工作流目标（模板作为执行要求）"
+                                } else {
+                                    "自然语言执行计划"
+                                })
+                                .text_sm()
+                                .text_color(rgb(0x6b7280)),
                             )
                             .child(Input::new(&self.workflow_input)),
                     );
@@ -2860,21 +2848,27 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    /// 工作流模板选择（新会话视图，PRD §3.7 从模板创建）。
+    /// 工作流模板选择（新会话视图，PRD §3.7 从模板创建）：点击仅选中，
+    /// 由「创建工作流会话」按钮统一创建。
     fn render_template_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let templates = self.store.list_templates();
+        let selected_id = self.workflow_template.as_ref().map(|t| t.id.clone());
         let mut row = h_flex().gap_1();
         if templates.is_empty() {
             row = row.child(Label::new("（暂无模板，可在设置中新建）"));
         }
         for t in templates {
             let tpl = t.clone();
+            let selected = selected_id.as_deref() == Some(t.id.as_str());
             row = row.child(
                 Button::new(format!("ns-tpl-{}", t.id))
                     .small()
                     .label(t.name.clone())
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.create_workflow_from_template(window, cx, tpl.clone());
+                    .when(selected, |b| b.primary())
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.workflow_template = Some(tpl.clone());
+                        this.workflow_error = None;
+                        cx.notify();
                     })),
             );
         }
