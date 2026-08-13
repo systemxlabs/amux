@@ -640,6 +640,10 @@ impl WorkflowEngine {
     /// 同步记录用户介入指令（立即在 GUI 可见，不等待 LLM）。
     /// 返回是否应触发推进：未暂停、未完成且没有推进在进行中。
     pub fn record_user(&mut self, text: &str) -> bool {
+        // 首个用户输入即本次工作流目标（创建时未填目标、之后在会话输入区继续的场景）
+        if self.session.description.trim().is_empty() {
+            self.session.description = text.trim().to_string();
+        }
         self.session.transcript.push(OrcMsg::User {
             text: text.to_string(),
         });
@@ -1722,6 +1726,32 @@ mod tests {
             &engine.session.transcript[0],
             OrcMsg::User { text } if text == "本次只做第一步"
         ));
+    }
+
+    /// 仅选模板未填目标时，首个用户输入即本次工作流目标（description 为空则回填）。
+    #[test]
+    fn record_user_sets_description_when_empty() {
+        let backend = FakeBackend::new_for_tests();
+        let mut engine = WorkflowEngine::new(
+            "",
+            "",
+            "模板：先实现后审查",
+            backend,
+            vec![],
+            vec![MachineSummary {
+                name: "测试机".into(),
+                harnesses: vec!["mock_acp".into()],
+            }],
+        );
+        assert!(engine.session.description.is_empty());
+        let should_advance = engine.record_user("实现登录功能");
+        assert_eq!(engine.session.description, "实现登录功能");
+        assert!(engine
+            .session
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::User { text } if text == "实现登录功能")));
+        assert!(should_advance, "首次输入后应触发推进");
     }
 
     #[tokio::test]

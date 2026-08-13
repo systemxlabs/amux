@@ -1535,20 +1535,18 @@ impl AmuxApp {
     }
 
     /// 创建工作流会话（PRD §3.7/§4.1.2）：输入框内容作为本次目标/执行计划；
-    /// 若已选择模板，模板作为系统提示词（preamble）；输入为空时用模板描述作为本次计划。
+    /// 若已选择模板，模板仅作为系统提示词（preamble）、不进入会话历史、不作为用户输入。
     fn create_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let goal = self.workflow_input.read(cx).value().to_string();
-        let preamble = self.workflow_template.take().map(|t| t.description);
-        // 目标（输入框）优先；无目标时用模板描述作为本次计划；两者都无则报错
-        let description = if !goal.trim().is_empty() {
-            goal
-        } else if let Some(p) = preamble.as_deref().filter(|p| !p.trim().is_empty()) {
-            p.to_string()
-        } else {
+        let template = self.workflow_template.take();
+        let description = goal.trim().to_string();
+        // 无模板时必须提供执行计划；有模板时目标可留空（之后在会话输入区继续）
+        if template.is_none() && description.is_empty() {
             self.workflow_error = Some("请先用自然语言描述执行计划".into());
             cx.notify();
             return;
-        };
+        }
+        let preamble = template.map(|t| t.description);
         self.create_workflow_with(window, cx, description, preamble);
         self.workflow_input.update(cx, |s, cx| {
             s.set_value("", window, cx);
@@ -1597,26 +1595,30 @@ impl AmuxApp {
         self.workflows.push(engine);
         self.selected = Some(Selected::Workflow { engine: wi });
 
-        // 启动首个 turn（拆解步骤并下发指令）：同步标记开始（会话行/历史立即可见），
-        // 异步推进在克隆体上执行、完成后原位换回；编排在 GUI 的 tokio runtime 上执行
-        if let Some(wf) = self.workflows.get_mut(wi) {
-            wf.begin_busy();
-        }
-        let mut wf = self.workflows[wi].clone();
-        wf.start_advance();
-        let wf_id = wf.session.id.clone();
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let result = run_engine_on_tokio(async move {
-                let _ = wf.start().await;
-                let _ = wf.persist(&workflow_dir);
-                wf
-            })
-            .await;
-            let _ = this.update_in(cx, |this, _window, cx| {
-                this.finish_engine_task(cx, wi, &wf_id, result);
+        // 只有存在实际目标/计划时才启动首个 turn；目标为空（如仅选模板未填目标）时
+        // 等用户在会话输入区输入后再推进（与普通会话一致，不自动塞入模板作为用户输入）
+        if !clean.trim().is_empty() {
+            // 启动首个 turn（拆解步骤并下发指令）：同步标记开始（会话行/历史立即可见），
+            // 异步推进在克隆体上执行、完成后原位换回；编排在 GUI 的 tokio runtime 上执行
+            if let Some(wf) = self.workflows.get_mut(wi) {
+                wf.begin_busy();
+            }
+            let mut wf = self.workflows[wi].clone();
+            wf.start_advance();
+            let wf_id = wf.session.id.clone();
+            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                let result = run_engine_on_tokio(async move {
+                    let _ = wf.start().await;
+                    let _ = wf.persist(&workflow_dir);
+                    wf
+                })
+                .await;
+                let _ = this.update_in(cx, |this, _window, cx| {
+                    this.finish_engine_task(cx, wi, &wf_id, result);
+                });
             });
-        });
-        self._tasks.push(t);
+            self._tasks.push(t);
+        }
         cx.notify();
     }
 
@@ -2575,7 +2577,7 @@ impl AmuxApp {
                             .gap_1()
                             .child(
                                 Label::new(if self.workflow_template.is_some() {
-                                    "本次工作流目标（可留空，默认使用模板描述）"
+                                    "本次工作流目标（可留空，稍后在会话中输入）"
                                 } else {
                                     "自然语言执行计划"
                                 })
