@@ -3057,30 +3057,6 @@ impl AmuxApp {
                                 .selectable(true),
                         ),
                 ),
-                DialogItem::SystemMessage { content, .. } => div().id(("row", i)).w_full().child(
-                    div()
-                        .ml_auto()
-                        .max_w(px(720.))
-                        .p_3()
-                        .v_flex()
-                        .gap_1()
-                        .rounded_md()
-                        .bg(rgb(0xf3f4f6))
-                        .border_1()
-                        .border_color(rgb(0xe5e7eb))
-                        .shadow_sm()
-                        .child(
-                            Label::new("系统")
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0x6b7280)),
-                        )
-                        // 系统消息同样以气泡 + Markdown 渲染（与用户/编排消息一致）
-                        .child(
-                            TextView::markdown(format!("smd-{i}"), block_text(content))
-                                .selectable(true),
-                        ),
-                ),
             })
             .collect::<Vec<_>>();
         if rows.is_empty() {
@@ -3920,7 +3896,7 @@ impl AmuxApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         // 普通会话：当前会话聚合视图的活动历史（GUI 从透传事件聚合，docs/DESIGN.md §5.3）；
-        // 工作流会话：仅实时编排状态（系统消息进入会话历史，不进活动）
+        // 工作流会话：仅实时编排状态（推进消息作为用户消息进入会话历史，不进活动）
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut live: Option<Activity> = None;
         match &self.selected {
@@ -3938,7 +3914,7 @@ impl AmuxApp {
                 live = view.and_then(|v| v.live_activity.clone());
             }
             Some(Selected::Workflow { engine }) => {
-                // 系统消息进入会话历史（气泡）；活动历史展示编排过程的活动（创建/介入子会话）
+                // 推进消息作为用户消息进入会话历史；活动历史展示编排过程的活动（创建/介入子会话）
                 if let Some(wf) = self.workflows.get(*engine) {
                     rows = wf
                         .session

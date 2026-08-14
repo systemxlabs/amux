@@ -32,12 +32,10 @@ use crate::ws::WsClient;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrcMsg {
-    /// 用户：计划 / 介入指令
+    /// 用户消息：计划 / 介入指令，或系统注入的推进消息（子会话完成、错误等）
     User { text: String },
     /// 编排 agent 输出（决策摘要）
     Orc { text: String },
-    /// 系统事件（子会话完成、创建、错误等）
-    System { text: String },
 }
 
 /// 子会话（工作流驱动的普通会话，由各机器 server 持久化）。
@@ -119,7 +117,7 @@ pub struct OrcContext {
     pub plan: String,
     /// 模板/系统指令（内置进编排系统提示词，不进入会话历史）
     pub preamble: String,
-    /// 对话历史（用户计划/介入、编排输出、系统事件）文本化
+    /// 对话历史（用户计划/介入/注入推进、编排输出）文本化
     pub transcript: Vec<String>,
     pub children: Vec<ChildStatus>,
     pub machines: Vec<MachineSummary>,
@@ -288,7 +286,7 @@ impl WorkflowEngine {
             });
         }
         if !context.trim().is_empty() {
-            transcript.push(OrcMsg::System {
+            transcript.push(OrcMsg::User {
                 text: "已附加 @ 引用的上下文".into(),
             });
         }
@@ -372,7 +370,7 @@ impl WorkflowEngine {
             Err(e) => {
                 // 运行期 LLM 调用失败（未配置 API / 网络 / 鉴权等）：
                 // 写入工作流会话对话历史（System 消息），GUI 可见且随持久化保留
-                self.session.transcript.push(OrcMsg::System {
+                self.session.transcript.push(OrcMsg::User {
                     text: format!("编排 agent 调用失败：{e}"),
                 });
                 return Err(e);
@@ -382,7 +380,7 @@ impl WorkflowEngine {
             text: decision.summary.clone(),
         });
         if let Some(c) = &decision.conclusion {
-            self.session.transcript.push(OrcMsg::System {
+            self.session.transcript.push(OrcMsg::User {
                 text: format!("编排结束：{c}"),
             });
             self.session.done = true;
@@ -402,7 +400,6 @@ impl WorkflowEngine {
                 .map(|m| match m {
                     OrcMsg::User { text } => format!("用户：{text}"),
                     OrcMsg::Orc { text } => format!("编排：{text}"),
-                    OrcMsg::System { text } => format!("系统：{text}"),
                 })
                 .collect(),
             children: self
@@ -435,7 +432,7 @@ impl WorkflowEngine {
                 } => {
                     let m_idx = self.resolve_machine(&machine);
                     let Ok(m_idx) = m_idx else {
-                        self.session.transcript.push(OrcMsg::System {
+                        self.session.transcript.push(OrcMsg::User {
                             text: format!("跳过步骤：{machine} 不可用（{m_idx:?}）"),
                         });
                         continue;
@@ -443,7 +440,7 @@ impl WorkflowEngine {
                     let session_id = match reuse {
                         Some(id) if self.session.children.iter().any(|c| c.id == id) => id,
                         Some(id) => {
-                            self.session.transcript.push(OrcMsg::System {
+                            self.session.transcript.push(OrcMsg::User {
                                 text: format!("跳过：复用的子会话不存在 {id}"),
                             });
                             continue;
@@ -469,7 +466,7 @@ impl WorkflowEngine {
                                     .unwrap_or("")
                                     .to_string(),
                                 Err(e) => {
-                                    self.session.transcript.push(OrcMsg::System {
+                                    self.session.transcript.push(OrcMsg::User {
                                         text: format!("创建子会话失败（{machine}/{harness}）：{e}"),
                                     });
                                     continue;
@@ -478,7 +475,7 @@ impl WorkflowEngine {
                         }
                     };
                     if session_id.is_empty() {
-                        self.session.transcript.push(OrcMsg::System {
+                        self.session.transcript.push(OrcMsg::User {
                             text: "创建子会话失败：未返回 session id".into(),
                         });
                         continue;
@@ -523,7 +520,7 @@ impl WorkflowEngine {
 
     async fn prompt_child(&mut self, session_id: &str, text: &str) -> Result<(), String> {
         let Some(child) = self.session.children.iter().find(|c| c.id == session_id) else {
-            self.session.transcript.push(OrcMsg::System {
+            self.session.transcript.push(OrcMsg::User {
                 text: format!("子会话不存在：{session_id}"),
             });
             return Err(format!("子会话不存在: {session_id}"));
@@ -596,7 +593,7 @@ impl WorkflowEngine {
             }
             let step = child.step_desc.clone();
             let last = child.last_output.clone();
-            self.session.transcript.push(OrcMsg::System {
+            self.session.transcript.push(OrcMsg::User {
                 text: format!("子会话 {session_id} 完成（{step}）：{last}"),
             });
             let _ = self.advance().await;
@@ -655,12 +652,12 @@ impl WorkflowEngine {
         !self.session.cancelled && !self.session.done && !self.advancing
     }
 
-    /// 同步标记已取消：停止自动推进并写入系统消息（不涉及 IO，立即可见）。
+    /// 同步标记已取消：停止自动推进并写入用户消息（不涉及 IO，立即可见）。
     pub fn mark_cancelled(&mut self) {
         self.session.cancelled = true;
         self.session.state = SessionState::Idle;
         self.session.updated_at = now();
-        self.session.transcript.push(OrcMsg::System {
+        self.session.transcript.push(OrcMsg::User {
             text: "已取消".into(),
         });
     }
@@ -713,7 +710,7 @@ fn first_line(s: &str) -> String {
 }
 
 impl OrcSession {
-    /// 工作流会话对话流：用户消息、编排输出与系统事件（系统消息也进入对话历史）。
+    /// 工作流会话对话流：用户消息（含系统注入的推进消息）与编排输出。
     pub fn to_dialog_items(&self) -> Vec<DialogItem> {
         self.transcript
             .iter()
@@ -723,10 +720,6 @@ impl OrcSession {
                     timestamp: self.updated_at,
                 },
                 OrcMsg::Orc { text } => DialogItem::AgentOutput {
-                    content: vec![ContentBlock::Text { text: text.clone() }],
-                    timestamp: self.updated_at,
-                },
-                OrcMsg::System { text } => DialogItem::SystemMessage {
                     content: vec![ContentBlock::Text { text: text.clone() }],
                     timestamp: self.updated_at,
                 },
@@ -1215,7 +1208,7 @@ mod tests {
             .session
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::System { text } if text == "已取消")));
+            .any(|m| matches!(m, OrcMsg::User { text } if text == "已取消")));
         // 取消后不再推进（决策用尽也不会被消费）
         engine.advance().await.unwrap();
         assert!(!engine
@@ -1262,7 +1255,7 @@ mod tests {
             .session
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::System { text } if text.contains("完成"))));
+            .any(|m| matches!(m, OrcMsg::User { text } if text.contains("完成"))));
     }
 
     #[tokio::test]
@@ -1281,7 +1274,7 @@ mod tests {
             .session
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::System { text } if text.contains("编排结束"))));
+            .any(|m| matches!(m, OrcMsg::User { text } if text.contains("编排结束"))));
     }
 
     // ---- 持久化往返 ----
@@ -1572,7 +1565,7 @@ mod tests {
             .session
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::System { text } if text == "已取消")));
+            .any(|m| matches!(m, OrcMsg::User { text } if text == "已取消")));
 
         // 取消不删除子会话：server 上仍可查到这些会话
         let res = client
@@ -1642,7 +1635,7 @@ mod tests {
                 .session
                 .transcript
                 .iter()
-                .any(|m| matches!(m, OrcMsg::System { text } if text.contains("子会话不存在"))),
+                .any(|m| matches!(m, OrcMsg::User { text } if text.contains("子会话不存在"))),
             "未知会话介入应记录告警"
         );
         assert!(engine.session.done, "conclude 后编排应结束");
@@ -1727,7 +1720,7 @@ mod tests {
     }
 
     #[test]
-    fn orc_session_to_dialog_items_includes_system() {
+    fn orc_session_to_dialog_items_maps_all_transcript_kinds() {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "计划",
@@ -1744,15 +1737,15 @@ mod tests {
         engine.session.transcript.push(OrcMsg::Orc {
             text: "决策".into(),
         });
-        engine.session.transcript.push(OrcMsg::System {
+        engine.session.transcript.push(OrcMsg::User {
             text: "系统事件".into(),
         });
         let dialog = engine.session.to_dialog_items();
-        // 用户计划 + 编排输出 + 系统事件
+        // 用户计划 + 编排输出 + 注入的用户消息
         assert_eq!(dialog.len(), 3);
         assert!(matches!(&dialog[0], DialogItem::UserMessage { .. }));
         assert!(matches!(&dialog[1], DialogItem::AgentOutput { .. }));
-        assert!(matches!(&dialog[2], DialogItem::SystemMessage { .. }));
+        assert!(matches!(&dialog[2], DialogItem::UserMessage { .. }));
     }
 
     #[test]
@@ -1847,9 +1840,11 @@ mod tests {
         );
         let res = engine.start().await;
         assert!(res.is_err(), "未配置时应失败");
-        assert!(engine.session.transcript.iter().any(
-            |m| matches!(m, OrcMsg::System { text } if text.contains("未配置编排 agent API"))
-        ));
+        assert!(engine
+            .session
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::User { text } if text.contains("未配置编排 agent API"))));
         assert_eq!(
             engine.session.state,
             SessionState::Idle,

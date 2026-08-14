@@ -164,7 +164,7 @@ pub enum ContentBlock {
 
 // ---- 对话内容（非流式交付，docs/DESIGN.md §5）----
 
-/// 对话内容条目：用户消息、agent 完整输出或系统消息（编排会话系统事件）。
+/// 对话内容条目：用户消息或 agent 完整输出。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DialogItem {
@@ -173,11 +173,6 @@ pub enum DialogItem {
         timestamp: u64,
     },
     AgentOutput {
-        content: Vec<ContentBlock>,
-        timestamp: u64,
-    },
-    /// 系统消息（如工作流会话的子会话完成、调用失败、取消等）
-    SystemMessage {
         content: Vec<ContentBlock>,
         timestamp: u64,
     },
