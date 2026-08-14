@@ -54,8 +54,9 @@ pub struct WorkflowTemplate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorConfig {
-    /// wire API：`chat`（Chat Completions）| `responses`（Responses API）
-    pub wire_api: String,
+    /// API format：`chat_completions`（OpenAI Chat Completions）
+    /// | `responses`（OpenAI Responses）| `messages`（Anthropic Messages）
+    pub api_format: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -63,10 +64,9 @@ pub struct OrchestratorConfig {
 
 impl Default for OrchestratorConfig {
     fn default() -> Self {
-        // wire_api 默认 chat；Base URL / API key / 模型均由用户显式填写，
-        // 避免预填 OpenAI 默认值误导非 OpenAI 后端
+        // api_format 默认 chat_completions；Base URL / API key / 模型均由用户显式填写
         OrchestratorConfig {
-            wire_api: "chat".into(),
+            api_format: "chat_completions".into(),
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -557,7 +557,7 @@ mod tests {
 
         let orch = OrchestratorConfig::default();
         let s = serde_json::to_string(&orch).unwrap();
-        assert!(s.contains("\"wireApi\":\"chat\""));
+        assert!(s.contains("\"apiFormat\":\"chat_completions\""));
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.model, orch.model);
         // 默认配置（全部留空）视为未配置；Base URL / API key / 模型都填上才视为已配置

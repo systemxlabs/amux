@@ -791,18 +791,21 @@ where
         .map_err(|e| format!("编排 agent 调用失败: {e}"))
 }
 
-/// wire_api → 模型分派（纯决策，可单测；DESIGN §9「API 配置」）：
-/// `chat` → Chat Completions，`responses` → Responses API，未知值回落 chat。
+/// api_format → 模型分派（纯决策，可单测；DESIGN §8.1「API 配置」）：
+/// `chat_completions` → OpenAI Chat Completions，`responses` → OpenAI Responses，
+/// `messages` → Anthropic Messages；未知值回落 chat_completions。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WireApiKind {
-    Chat,
+enum ApiFormat {
+    ChatCompletions,
     Responses,
+    Messages,
 }
 
-fn wire_api_kind(wire_api: &str) -> WireApiKind {
-    match wire_api {
-        "responses" => WireApiKind::Responses,
-        _ => WireApiKind::Chat,
+fn api_format_kind(api_format: &str) -> ApiFormat {
+    match api_format {
+        "responses" => ApiFormat::Responses,
+        "messages" => ApiFormat::Messages,
+        _ => ApiFormat::ChatCompletions,
     }
 }
 
@@ -826,11 +829,6 @@ impl OrcBackend for RigBackend {
                 preamble.push_str("【工作流模板/执行要求】\n");
                 preamble.push_str(ctx.preamble.trim());
             }
-            let client = rig::providers::openai::Client::builder()
-                .api_key(self.cfg.api_key.clone())
-                .base_url(self.cfg.base_url.clone())
-                .build()
-                .map_err(|e| format!("构建 OpenAI client 失败: {e}"))?;
             let model = self.cfg.model.clone();
             let mut tool_ctx = rig::tool::ToolContext::new();
             tool_ctx.insert(self.tool_state.clone());
@@ -869,15 +867,34 @@ impl OrcBackend for RigBackend {
                  请评估当前进展并决定本轮动作（继续创建/推进步骤，或结束）。",
                 ctx.plan, machine_list, transcript_text, children_list
             );
-            // wire API（DESIGN §9「API 配置」）：chat → Chat Completions、responses → Responses API
-            let text = match wire_api_kind(&self.cfg.wire_api) {
-                WireApiKind::Responses => {
+            // API format（DESIGN §8.1「API 配置」）分派到对应 provider 与 wire API
+            let text = match api_format_kind(&self.cfg.api_format) {
+                ApiFormat::ChatCompletions => {
+                    let client = rig::providers::openai::Client::builder()
+                        .api_key(self.cfg.api_key.clone())
+                        .base_url(self.cfg.base_url.clone())
+                        .build()
+                        .map_err(|e| format!("构建 OpenAI client 失败: {e}"))?;
+                    let agent = self
+                        .build_agent(client.completions_api().completion_model(model), &preamble);
+                    run_orc_turn(agent, input, tool_ctx).await?
+                }
+                ApiFormat::Responses => {
+                    let client = rig::providers::openai::Client::builder()
+                        .api_key(self.cfg.api_key.clone())
+                        .base_url(self.cfg.base_url.clone())
+                        .build()
+                        .map_err(|e| format!("构建 OpenAI client 失败: {e}"))?;
                     let agent = self.build_agent(client.completion_model(model), &preamble);
                     run_orc_turn(agent, input, tool_ctx).await?
                 }
-                WireApiKind::Chat => {
-                    let agent = self
-                        .build_agent(client.completions_api().completion_model(model), &preamble);
+                ApiFormat::Messages => {
+                    let client = rig::providers::anthropic::Client::builder()
+                        .api_key(self.cfg.api_key.clone())
+                        .base_url(self.cfg.base_url.clone())
+                        .build()
+                        .map_err(|e| format!("构建 Anthropic client 失败: {e}"))?;
+                    let agent = self.build_agent(client.completion_model(model), &preamble);
                     run_orc_turn(agent, input, tool_ctx).await?
                 }
             };
@@ -1695,7 +1712,7 @@ mod tests {
     fn rig_backend_builds_agent_with_tools() {
         let backend = RigBackend::new(
             OrchestratorConfig {
-                wire_api: "chat".into(),
+                api_format: "chat_completions".into(),
                 base_url: "http://127.0.0.1:9/v1".into(),
                 api_key: "sk-test".into(),
                 model: "gpt-4o-mini".into(),
@@ -1712,11 +1729,15 @@ mod tests {
     }
 
     #[test]
-    fn wire_api_kind_dispatches_chat_and_responses() {
-        assert_eq!(wire_api_kind("chat"), WireApiKind::Chat);
-        assert_eq!(wire_api_kind("responses"), WireApiKind::Responses);
-        assert_eq!(wire_api_kind("unknown"), WireApiKind::Chat);
-        assert_eq!(wire_api_kind(""), WireApiKind::Chat);
+    fn api_format_kind_dispatches_formats() {
+        assert_eq!(
+            api_format_kind("chat_completions"),
+            ApiFormat::ChatCompletions
+        );
+        assert_eq!(api_format_kind("responses"), ApiFormat::Responses);
+        assert_eq!(api_format_kind("messages"), ApiFormat::Messages);
+        assert_eq!(api_format_kind("unknown"), ApiFormat::ChatCompletions);
+        assert_eq!(api_format_kind(""), ApiFormat::ChatCompletions);
     }
 
     #[test]
@@ -1819,7 +1840,7 @@ mod tests {
         // 会话不处于假忙状态、可继续操作（PRD §4.3 配置校验）
         let backend = Arc::new(RigBackend::new(
             OrchestratorConfig {
-                wire_api: "chat".into(),
+                api_format: "chat_completions".into(),
                 base_url: "https://api.openai.com/v1".into(),
                 api_key: String::new(), // 未配置
                 model: "gpt-4o-mini".into(),

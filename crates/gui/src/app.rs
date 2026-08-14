@@ -214,8 +214,8 @@ pub struct AmuxApp {
     skill_desc_input: Entity<InputState>,
     tpl_name_input: Entity<InputState>,
     tpl_desc_input: Entity<InputState>,
-    /// 编排 agent wire API 单选（"chat" | "responses"）
-    orch_wire_api: String,
+    /// 编排 agent API format 单选（chat_completions / responses / messages）
+    orch_api_format: String,
     orch_base_input: Entity<InputState>,
     orch_key_input: Entity<InputState>,
     orch_model_input: Entity<InputState>,
@@ -333,7 +333,7 @@ impl AmuxApp {
             skill_desc_input,
             tpl_name_input,
             tpl_desc_input,
-            orch_wire_api: orchestrator.wire_api.clone(),
+            orch_api_format: orchestrator.api_format.clone(),
             orch_base_input,
             orch_key_input,
             orch_model_input,
@@ -388,32 +388,48 @@ impl AmuxApp {
         });
     }
 
-    /// wire API 单选（DESIGN §9：chat / responses）。
-    fn render_wire_api_radio(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = match self.orch_wire_api.as_str() {
+    /// API format 单选（DESIGN §8.1：chat_completions / responses / messages）。
+    fn render_api_format_radio(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = match self.orch_api_format.as_str() {
             "responses" => 1,
+            "messages" => 2,
             _ => 0,
         };
         let view = cx.entity();
-        RadioGroup::horizontal("orch-wire-api")
+        RadioGroup::horizontal("orch-api-format")
             .selected_index(Some(selected))
-            .child(Radio::new("wire-chat").label("chat").on_click({
+            .child(
+                Radio::new("fmt-chat_completions")
+                    .label("chat_completions")
+                    .on_click({
+                        let view = view.clone();
+                        move |checked, _window, cx| {
+                            if *checked {
+                                view.update(cx, |this, cx| {
+                                    this.orch_api_format = "chat_completions".into();
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    }),
+            )
+            .child(Radio::new("fmt-responses").label("responses").on_click({
                 let view = view.clone();
                 move |checked, _window, cx| {
                     if *checked {
                         view.update(cx, |this, cx| {
-                            this.orch_wire_api = "chat".into();
+                            this.orch_api_format = "responses".into();
                             cx.notify();
                         });
                     }
                 }
             }))
-            .child(Radio::new("wire-responses").label("responses").on_click({
+            .child(Radio::new("fmt-messages").label("messages").on_click({
                 let view = view.clone();
                 move |checked, _window, cx| {
                     if *checked {
                         view.update(cx, |this, cx| {
-                            this.orch_wire_api = "responses".into();
+                            this.orch_api_format = "messages".into();
                             cx.notify();
                         });
                     }
@@ -4360,8 +4376,8 @@ impl AmuxApp {
                     .p_2()
                     .bg(rgb(0xf7f8fa))
                     .rounded_md()
-                    .child(Label::new("wire API").text_sm().text_color(rgb(0x6b7280)))
-                    .child(self.render_wire_api_radio(cx))
+                    .child(Label::new("API format").text_sm().text_color(rgb(0x6b7280)))
+                    .child(self.render_api_format_radio(cx))
                     .child(Label::new("Base URL").text_sm().text_color(rgb(0x6b7280)))
                     .child(Input::new(&self.orch_base_input))
                     .child(Label::new("API key").text_sm().text_color(rgb(0x6b7280)))
@@ -4369,7 +4385,7 @@ impl AmuxApp {
                     .child(Label::new("模型").text_sm().text_color(rgb(0x6b7280)))
                     .child(Input::new(&self.orch_model_input))
                     .child(
-                        Label::new("wire API 取值：chat / responses")
+                        Label::new("API format 取值：chat_completions / responses / messages")
                             .text_xs()
                             .text_color(rgb(0x9ca3af)),
                     ),
@@ -4381,7 +4397,7 @@ impl AmuxApp {
                     .label("保存")
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         let cfg = OrchestratorConfig {
-                            wire_api: this.orch_wire_api.clone(),
+                            api_format: this.orch_api_format.clone(),
                             base_url: this.orch_base_input.read(cx).value().to_string(),
                             api_key: this.orch_key_input.read(cx).value().to_string(),
                             model: this.orch_model_input.read(cx).value().to_string(),
