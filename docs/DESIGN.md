@@ -170,6 +170,7 @@ ACP 接入方式分两类：
 - 前置：server 所在机器需 node/npm（npx）；npx 首次运行会按需下载 adapter（需要网络）
 - 认证（登录 / API key）由各 agent / adapter 自身管理，server 继承环境
 - agent 发现并启动：server 启动时发现本机 agent 并**直接拉起**，无需用户手动指定；**启动失败的 agent 标记为不可用**，使用该 agent 时报明确错误，其余 agent 不受影响（server 照常启动）；运行期新发现的 agent 按需拉起。
+- **手动重试拉起**：GUI 设置页（机器管理）可对**不可用**的 agent 触发重新发现与拉起，无需重启 server；拉起成功则恢复可用。
 
 ### 7.4 Git 能力
 
