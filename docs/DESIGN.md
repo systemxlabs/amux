@@ -17,8 +17,6 @@ amux 定位为**跨机器 agent 控制平面**：GUI 应用统一调度多台机
 - 工作流（编排 agent）的运行机制
 - 运行时生命周期、本地数据与可观测性
 
-具体的内部模块划分、数据结构、错误处理策略等实现细节不在本文档范围内。
-
 ## 2. 术语
 
 | 术语 | 含义 |
@@ -48,7 +46,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 
 ### 3.1 组件与边界
 
-- **GUI 应用（唯一客户端）**：amux 桌面应用（单进程，跨平台 macOS / Linux / Windows），直连各已注册机器的 server——本机与远程同等对待，统一注册后连接。每条连接对应一台机器，使用同一套协议。
+- **GUI 应用（唯一客户端）**：amux 桌面应用（单进程，跨平台 macOS / Linux / Windows），直连各已注册机器的 server（本机与远程同等对待，见 §4.1）。每条连接对应一台机器，使用同一套协议。
 - **Server**：每台机器运行一个常驻进程，是 **ACP v1 client**——spawn ACP server（子进程）、驱动 ACP 会话、把 agent 的会话事件**透传**给 GUI 应用、直连 git；同时是**会话控制面状态的权威维护者**（会话列表注册表 + 会话历史日志，见 §3.2）。**server 之间不通信**——每个 server 只服务本机会话，对连接方一律按 GUI 应用对待。
 
 ### 3.2 职责划分
@@ -58,7 +56,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 - **统一会话列表**：GUI 应用把各 server 返回的普通会话与 GUI 本地的工作流会话合并为一张统一列表，按最近活跃排序（工作流会话以其本地 `updated_at` 作为排序键）；子会话不进入顶层列表，仅随父会话展开显示。
 - **机器身份**：机器名是 GUI 应用本地的用户别名（随机器注册表持久化），server 不自报机器名；server 由连接地址与 token 标识。
 - **多设备共存**：任意数量的 GUI 应用可同时连接同一 server、查看并操作同一会话，互不踢出；各 GUI 应用独立加载会话数据；会话列表变更（创建 / 删除 / 重命名）经轮询同步，无专用变更通知。
-- **生命周期解耦**：任何 GUI 应用断开（含 GUI 应用关闭）不停止 server、不销毁会话；会话仅由显式删除结束。
+- **生命周期解耦**：任何 GUI 应用断开（含 GUI 应用关闭）只断开 socket，不停止 server、不销毁会话——server、ACP server 与进行中的会话均不受影响；会话仅由显式删除结束。
 
 ### 3.3 关键技术栈
 
@@ -76,7 +74,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 每台机器（含本机）统一运行一个 server 常驻进程（单二进制），与任何 GUI 应用连接无关：
 
 - **启动**：server 由所在机器自行启动（手动命令、系统服务或安装脚本），GUI 应用不负责拉起——连接失败即视为该机器离线。
-- **关闭**：GUI 应用关闭只断开 socket；server 继续常驻，ACP server 与 ACP 会话不受影响。
+- **关闭**：GUI 应用关闭不停止 server（见 §3.2 生命周期解耦）。
 - **机器重启**：server 除会话注册表与历史日志外无持久化状态（配置可重建）——重启后**会话列表从本地注册表恢复**，历史日志在盘**直接权威使用**；ACP server **随 server 启动一起拉起**（发现与启动见 §7.3），普通会话（`session/new`）仍在首条 prompt 懒创建。
 - **数据缺失容错**：历史日志缺失（损坏 / 清空）视为该会话历史为空；注册表丢失视为会话列表丢失。
 - **GUI 应用视角**：本机与远程完全一致——注册、连接、认证、离线处理无差别。
@@ -84,11 +82,11 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 ### 4.2 GUI 应用生命周期
 
 - **启动**：GUI 应用加载本地数据；按机器注册表逐个连接已注册的机器 server；连接失败或运行期断线则标记为离线并指数退避重连。
-- **关闭**：只断开与各 server 的 WebSocket；server、ACP server 及进行中的会话均不受影响。重新打开后按注册表重新连接并恢复工作流会话（不主动驱动）。
+- **关闭**：只断开与各 server 的 WebSocket（server 与 ACP 会话不受影响，见 §3.2）。重新打开后按注册表重新连接并恢复工作流会话（不主动驱动）。
 
 ### 4.3 本地数据
 
-- server 本地数据存放于 `~/.amux/server`：配置、**会话注册表**（SQLite 数据库 `amux.db`，存会话元数据，支持结构化查询与事务更新）与**会话历史存储**（`history/`，每会话一个事件日志文件）。
+- server 本地数据存放于 `~/.amux/server`：配置、**会话注册表**（SQLite 数据库 `amux.db`，存会话元数据，支持结构化查询与事务更新）与**会话历史存储**（`history/`，见 §5.2）。
 - GUI 应用本地数据存放于 `~/.amux/gui`：机器注册表（含各机器连接 token）、快捷指令、Skills 注册表、工作流模板、编排 agent API 配置、工作流会话状态。
 
 ## 5. 数据模型
@@ -97,7 +95,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 
 ### 5.1 交付模型
 
-- **事件透传**：agent 工作以 turn 为单位。server 把 agent 的 ACP `session/update` 事件（实时 turn）、`session_info_update`（agent 自报状态）与 **turn 边界事件**（server 从 prompt 请求生命周期反射：发出请求 = turn 开始，收到 result = turn 结束）**逐条透传**给 GUI 应用（typed JSON-RPC 通知），不做聚合。透传保持原始逐条事件（GUI 实时渲染需要流式）；落盘到本地历史日志的是**按 turn 合并后的条目**（§5.2），不存原始 chunk 流。
+- **事件透传**：agent 工作以 turn 为单位。server 把 agent 的 ACP `session/update` 事件（实时 turn）、`session_info_update`（agent 自报状态）与 **turn 边界事件**（server 从 prompt 请求生命周期反射，见 §7.2）**逐条透传**给 GUI 应用（typed JSON-RPC 通知），不做聚合。透传保持原始逐条事件（GUI 实时渲染需要流式）；落盘到本地历史日志的是**按 turn 合并后的条目**（§5.2），不存原始 chunk 流。
 - **GUI 聚合与渲染**：对话内容（用户消息 + agent 输出）与活动（thinking / tool call / compaction）由 GUI 应用从透传事件聚合——输出按 chunk **增量实时渲染**，turn 结束收敛为完整消息；**同类连续事件合并为一条活动**（thinking 逐块累积为一条持续增长的思考活动，同一次工具调用的多次更新合并为一条）。
 - **会话状态派生**：busy / idle 采信 `session_info_update`（agent 自报）并辅以 turn 边界，重连时经会话列表（meta 含 state）补齐。
 - **断线重连**：server 不为断开的连接缓冲事件——断线期间进行中的 turn 不重放已产生的流式事件，重连后自接续收到的事件起增量渲染；已完成的 turn 经历史日志（§5.2）按需补齐。
@@ -106,7 +104,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 
 会话历史存于 server 本地事件日志（每会话一个事件日志文件，`~/.amux/server/history/`），**存储按 turn 合并后的条目**，GUI 应用按需读取：
 
-- **权威与完整性**：server 是 ACP v1 唯一客户端（所有 prompt 经 server 串行化送达），是会话事件的唯一观察者；会话创建即建日志文件，此后**已完成 turn 的合并条目**按序追加，事件日志按设计保证完整（所有事件经 server 串行观察、单写者追加）
+- **权威与完整性**：server 是 ACP v1 唯一客户端、会话事件的唯一观察者（所有 prompt 与事件经 server 串行观察，见 §7.1）；会话创建即建日志文件，此后**已完成 turn 的合并条目**按序追加，事件日志按设计保证完整（单写者追加）
 - **写入（合并落盘）**：turn 中缓冲流式事件（`session/update` chunk、thinking 块、工具调用、用户消息回显），**收到 result（turn 结束）时按 §5.1 的合并语义收敛为完整条目**后落盘（compaction 与 turn 边界独立成条）。
 - **异常 turn**：崩溃（无 result）的 turn 视为未完成，不产生历史条目；**取消（cancel）同样以是否收到 result 为准**——agent 返回 result 则按合并语义落盘（保留已完成部分），否则视为未完成、不产生历史条目。
 - **读取**：GUI 应用打开会话 → server 从本地日志读取（按窗口 / 游标惰性分页）——条目已合并，GUI 无需再按 chunk 收敛
@@ -121,7 +119,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 
 ### 6.2 认证
 
-- 所有连接统一携带 token。**本节的 token 指 server 自身的认证 token**：不落盘，每次启动由用户指定（`--token` 或环境变量 `AMUX_TOKEN`，统一名称 token，无别名），未指定则 server 拒绝启动。GUI 应用为每台已注册机器保存的连接 token 属于 GUI 本地配置（§4.3），会持久化以支持自动重连。
+- 所有连接统一携带 token。**本节的 token 指 server 自身的认证 token**：不落盘，每次启动由用户指定（`--token` 或环境变量 `AMUX_TOKEN`，统一名称 token，无别名），未指定则 server 拒绝启动。GUI 应用为每台已注册机器保存的连接 token 持久化于 GUI 本地机器注册表（§4.3），以支持自动重连。
 
 ### 6.3 会话 ID
 
@@ -131,7 +129,7 @@ Client-Server 架构：GUI 应用与各机器上的 server 常驻进程通过 We
 
 ### 7.1 会话交互
 
-- **交互只有两个动作**：**prompt**（唯一消息入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作），经 ACP `session/prompt` / `session/cancel` 到达 agent。**prompt 是触发 ACP 交互的唯一入口**（创建会话只与 server 交互，见 §4.1）。
+- **交互只有两个动作**：**prompt**（唯一入口：idle 启动新工作、忙时 steer；输入内容为文本 / 内嵌资源 / 资源引用）与 **cancel**（取消进行中的工作），经 ACP `session/prompt` / `session/cancel` 到达 agent；创建会话只与 server 交互（见 §4.1）。
 - **用户输入**：GUI 应用的 prompt 经 server 转发给 agent；用户消息同时由 GUI 应用本地立即渲染（不依赖回显），并保留在对话内容中。
 - **快捷指令**（无专用协议）：每条指令是一段发给 agent 的提示词，经 prompt 由 agent 执行；新会话 / 取消 / 删除等由 GUI 应用直接发起对应会话操作。
 - **多 GUI 应用并发**：server 对同一会话的所有 prompt（含各 GUI 应用的）按到达顺序串行化，保证按调用顺序送达。
@@ -149,8 +147,8 @@ Server 作为 **ACP v1 client** 与各机器的 **ACP server** 通信：
   - `session/prompt` / `session/cancel`
   - `session/close`：删除会话时取消进行中工作并释放 agent 侧资源（见 §5.2）
 - **状态与边界**：agent 经 `session_info_update` 自报状态；server 从 prompt 请求生命周期反射 turn 边界（发出请求 = turn 开始，收到 result = turn 结束）。
-- **权限（yolo）**：agent 经 `session/request_permission` 请求权限；server **自动批准**（yolo 模式，既定决策延续，无审批往返），安全性依赖运行环境。
-- **steer**：ACP v1 为 turn 模型——prompt 启动一个 turn，turn 结束（agent 回到 idle）后才可再 prompt；忙时 prompt 行为取决于 agent 实现（部分 agent 支持进行中注入）。
+- **权限（yolo）**：agent 经 `session/request_permission` 请求权限；server **自动批准**（yolo 模式，既定决策延续，无审批往返）。
+- **steer**：ACP v1 为 turn 模型——prompt 启动一个 turn，turn 结束（agent 回到 idle）后才可再 prompt；是否支持进行中注入取决于 agent 实现（忙时 prompt 行为见 §7.1）。
 
 ### 7.3 ACP server 发现与接入方式
 
@@ -191,7 +189,7 @@ server 直连本机 git，提供三类操作（GUI 经协议方法调用）：
 
 ### 8.1 运行模型
 
-- **工作流会话**：工作流创建一个工作流会话（GUI 应用内置 agent，状态存 GUI 应用本地），与普通会话一样支持 prompt / 状态（idle / busy）；**支持 steer**——busy 时用户输入注入当前 turn（编排 agent 为 GUI 应用内置，steer 由 GUI 应用自身实现，不依赖 ACP 能力）。
+- **工作流会话**：工作流创建一个工作流会话（GUI 应用内置 agent，状态持久化见 §4.3），与普通会话一样支持 prompt / 状态（idle / busy）；**支持 steer**——busy 时用户输入注入当前 turn（编排 agent 为 GUI 应用内置，steer 由 GUI 应用自身实现，不依赖 ACP 能力）。
 - **rig 单 turn 模式**：每个 turn 调用一次 rig `Agent::prompt`（不用 `multi_turn` 长循环）——下达指令后 turn 结束、**不阻塞等待子会话**；下一 turn 由自动推进（§8.4）或用户输入触发。编排 agent 的会话操作定义为 rig 工具（§8.2）。
 - **API 配置**：编排 agent 的 LLM 调用经自定义 API 端点配置——Base URL、API key、模型名与 **API format**：`chat_completions` / `responses` / `messages`（分别对应 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages API）。
 
