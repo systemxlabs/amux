@@ -642,9 +642,13 @@ impl WorkflowEngine {
     /// 同步记录用户介入指令（立即在 GUI 可见，不等待 LLM）。
     /// 返回是否应触发推进：未暂停、未完成且没有推进在进行中。
     pub fn record_user(&mut self, text: &str) -> bool {
-        // 首个用户输入即本次工作流目标（创建时未填目标、之后在会话输入区继续的场景）
+        // 首个用户输入即本次工作流目标（创建时未填目标、之后在会话输入区继续的场景），
+        // 同时据此生成会话标题（标题为空时才生成，用户手动改过则保留）
         if self.session.description.trim().is_empty() {
             self.session.description = text.trim().to_string();
+        }
+        if self.session.title.trim().is_empty() {
+            self.session.title = generate_title(text);
         }
         self.session.transcript.push(OrcMsg::User {
             text: text.to_string(),
@@ -1825,8 +1829,10 @@ mod tests {
             }],
         );
         assert!(engine.session.description.is_empty());
+        assert!(engine.session.title.is_empty());
         let should_advance = engine.record_user("实现登录功能");
         assert_eq!(engine.session.description, "实现登录功能");
+        assert_eq!(engine.session.title, "实现登录功能", "首个输入应生成标题");
         assert!(engine
             .session
             .transcript
