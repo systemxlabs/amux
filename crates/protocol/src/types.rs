@@ -431,6 +431,12 @@ pub struct ListAgentSkillsParams {
     pub harness: String,
 }
 
+/// 手动重新拉起不可用的 agent（PRD §3.3/§4.3，无需重启 server）。
+#[derive(Debug, Deserialize)]
+pub struct RetryHarnessParams {
+    pub harness: String,
+}
+
 // ---- 方法结果 ----
 
 /// 会话列表惰性分页参数（docs/DESIGN.md §3.2 / PRD §4.1.1：

@@ -1452,6 +1452,39 @@ impl AmuxApp {
         .detach();
     }
 
+    /// 手动重试拉起不可用的 agent（PRD §3.3/§4.3，无需重启 server）。
+    fn retry_harness(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        harness: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let res = client
+                .request(
+                    protocol::method::RETRY_HARNESS,
+                    Some(json!({ "harness": harness })),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(m) = this.machines.get_mut(machine) {
+                    m.status = match res {
+                        Ok(_) => "已重新拉起 agent，刷新中…".into(),
+                        Err(e) => format!("重试拉起失败：{e}"),
+                    };
+                }
+                this.fetch_info(machine, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     // ---- 工作流 ----
 
     fn persist_workflow(&self, idx: usize) {
@@ -4222,6 +4255,8 @@ impl AmuxApp {
                         let mi = i;
                         let harness_a = harness.clone();
                         let harness_b = harness.clone();
+                        let harness_c = harness.clone();
+                        let available = h.available;
                         row = row
                             .child(
                                 Button::new(format!("skills-{i}-{harness}"))
@@ -4242,6 +4277,18 @@ impl AmuxApp {
                                         this.set_default_model(window, cx, mi, harness, model);
                                     })),
                             );
+                        // 不可用 agent：提供手动重试拉起（无需重启 server，PRD §3.3/§4.3）
+                        if !available {
+                            row = row.child(
+                                Button::new(format!("retry-{i}-{harness}"))
+                                    .small()
+                                    .label("重试拉起")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        let harness = harness_c.clone();
+                                        this.retry_harness(window, cx, mi, harness);
+                                    })),
+                            );
+                        }
                         item = item.child(row);
                     }
                     // 当前查看的 skills 列表（长文本两行截断）

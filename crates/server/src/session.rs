@@ -104,6 +104,11 @@ impl SessionManager {
         }
     }
 
+    /// 手动重试拉起不可用的 agent（PRD §3.3/§4.3，无需重启 server）。
+    pub fn retry_harness(&self, harness: &str) -> Result<(), String> {
+        self.agents.retry_harness(harness)
+    }
+
     // ---- 生命周期 ----
     pub async fn create(
         &self,

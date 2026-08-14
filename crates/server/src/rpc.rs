@@ -8,8 +8,8 @@ use serde_json::Value;
 use protocol::{
     method, rpc_error, server_error, CreateSessionParams, GitDiffParams, GitOpResult,
     GitRevertParams, ListAgentSkillsParams, ListAgentSkillsResult, ListSessionsParams, MachineInfo,
-    OpenSessionParams, OpenSessionResult, PromptParams, SessionIdParams, SessionResult,
-    SessionsResult, SetDefaultModelParams, SetSessionTitleParams,
+    OpenSessionParams, OpenSessionResult, PromptParams, RetryHarnessParams, SessionIdParams,
+    SessionResult, SessionsResult, SetDefaultModelParams, SetSessionTitleParams,
 };
 
 use crate::git::GitRunner;
@@ -193,6 +193,13 @@ impl Handlers {
                 let skills = self.manager.list_agent_skills(&p.harness);
                 Ok(serde_json::to_value(ListAgentSkillsResult { skills })
                     .map_err(|e| RpcError::internal(e.to_string()))?)
+            }
+            method::RETRY_HARNESS => {
+                let p: RetryHarnessParams = parse(params)?;
+                self.manager
+                    .retry_harness(&p.harness)
+                    .map_err(RpcError::internal)?;
+                Ok(Value::Null)
             }
             _ => Err(RpcError {
                 code: rpc_error::METHOD_NOT_FOUND,

@@ -428,6 +428,46 @@ impl AgentRegistry {
         summary
     }
 
+    /// 手动重试拉起指定 harness（GUI 设置页触发，PRD §3.3/§4.3）：
+    /// 移除不可用标记 → 重新发现 → 尝试拉起；再次失败则重新标记不可用。
+    pub fn retry_harness(&self, harness: &str) -> Result<(), String> {
+        self.unavailable
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .remove(harness);
+        self.refresh_discovery();
+        let found = self
+            .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .iter()
+            .find(|d| d.name == harness)
+            .cloned();
+        let Some(d) = found else {
+            return Err(format!("本机未发现 agent: {harness}"));
+        };
+        match self.spawn_and_cache(&d) {
+            Ok(_) => {
+                protocol::log::info(
+                    "server.launch",
+                    format!("手动重试拉起成功：{}（harness={}）", d.bin, d.name),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                self.unavailable
+                    .lock()
+                    .expect("Mutex 中毒（临界区内不应 panic）")
+                    .insert(harness.to_string());
+                protocol::log::error(
+                    "server.launch",
+                    format!("手动重试拉起失败（harness={}）: {e}", d.name),
+                );
+                Err(e)
+            }
+        }
+    }
+
     /// 查询默认模型（get_info 用）。
     #[allow(dead_code)]
     pub fn default_model(&self, harness: &str) -> Option<String> {

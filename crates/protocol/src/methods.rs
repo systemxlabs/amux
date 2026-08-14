@@ -30,6 +30,8 @@ pub mod method {
     pub const SET_DEFAULT_MODEL: &str = "set_default_model";
     /// 查询某 agent 安装的 skills 列表
     pub const LIST_AGENT_SKILLS: &str = "list_agent_skills";
+    /// 手动重新拉起不可用的 agent（无需重启 server）
+    pub const RETRY_HARNESS: &str = "retry_harness";
 }
 
 /// server → GUI 通知名。
