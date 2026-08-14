@@ -23,7 +23,7 @@ use gpui_component::{
     radio::{Radio, RadioGroup},
     scroll::ScrollableElement as _,
     spinner::Spinner,
-    text::TextView,
+    text::{TextView, TextViewStyle},
     WindowExt, *,
 };
 
@@ -3043,10 +3043,15 @@ impl AmuxApp {
                                 .text_color(rgb(0xffffff)),
                         )
                         // 用户消息：蓝底白字，可选中/复制（纯文本走 Markdown 解析为段落，继承白色）
+                        // 行内代码默认是主题 accent 浅底，白字看不清，改为深色半透明底（文字继承白色）
                         .child(
                             TextView::markdown(format!("umd-{i}"), block_text(content))
                                 .selectable(true)
-                                .text_color(rgb(0xffffff)),
+                                .text_color(rgb(0xffffff))
+                                .style(TextViewStyle::default().inline_code(HighlightStyle {
+                                    background_color: Some(rgba(0x1e40af80).into()),
+                                    ..Default::default()
+                                })),
                         ),
                 ),
                 DialogItem::AgentOutput { content, .. } => div().id(("row", i)).w_full().child(
