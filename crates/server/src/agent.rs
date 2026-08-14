@@ -1124,22 +1124,19 @@ fn route_update(
             title: Some(tc.title.clone()),
             content: tc.raw_input.as_ref().map(|v| v.to_string()),
         }),
-        SessionUpdate::ToolCallUpdate(tcu) => {
-            // ACP tool_call_update 的 kind 字段可选，常缺失；缺失时用标题作为展示名，
-            // 避免活动历史出现无意义的 "tool_call"
-            let name = tcu
-                .fields
-                .kind
-                .as_ref()
-                .map(tool_kind_str)
-                .or_else(|| tcu.fields.title.clone())
-                .unwrap_or_else(|| "工具".to_string());
-            Some(AgentEvent::ToolCall {
+        // ACP tool_call_update 的 kind 字段可选，常缺失；缺失时用标题作为展示名。
+        // kind 与 title 都没有的更新没有可展示标识，直接跳过（避免「工具调用 工具」空条目）。
+        SessionUpdate::ToolCallUpdate(tcu) => tcu
+            .fields
+            .kind
+            .as_ref()
+            .map(tool_kind_str)
+            .or_else(|| tcu.fields.title.clone())
+            .map(|name| AgentEvent::ToolCall {
                 name,
                 title: tcu.fields.title.clone(),
                 content: tcu.fields.raw_input.as_ref().map(|v| v.to_string()),
-            })
-        }
+            }),
         // agent 自报状态透传（ACP v1 `session_info_update` 未携带状态字段，state=None）
         SessionUpdate::SessionInfoUpdate(_) => Some(AgentEvent::SessionInfo { state: None }),
         // UsageUpdate / AvailableCommandsUpdate / CurrentModeUpdate /
