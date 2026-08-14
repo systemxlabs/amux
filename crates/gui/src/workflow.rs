@@ -495,12 +495,6 @@ impl WorkflowEngine {
                             state: SessionState::Busy,
                             last_output: String::new(),
                         });
-                        self.session.transcript.push(OrcMsg::System {
-                            text: format!(
-                                "步骤：在 {} 用 {} 创建子会话 {session_id} 并下发指令",
-                                self.machines[m_idx].name, harness
-                            ),
-                        });
                     }
                     let _ = self.prompt_child(&session_id, &prompt).await;
                     self.session.activities.push(Activity::ToolCall {
@@ -514,9 +508,6 @@ impl WorkflowEngine {
                     });
                 }
                 OrcAction::Steer { session, prompt } | OrcAction::Retry { session, prompt } => {
-                    self.session.transcript.push(OrcMsg::System {
-                        text: format!("介入子会话 {session}"),
-                    });
                     let _ = self.prompt_child(&session, &prompt).await;
                     self.session.activities.push(Activity::ToolCall {
                         timestamp: now(),
