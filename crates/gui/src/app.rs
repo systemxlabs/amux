@@ -3222,6 +3222,22 @@ impl AmuxApp {
                         .text_color(rgb(0x92400e)),
                 )
                 .into_any(),
+            Some(Activity::Error { detail, .. }) => h_flex()
+                .w_full()
+                .gap_2()
+                .p_2()
+                .bg(rgb(0xfef2f2))
+                .border_1()
+                .border_color(rgb(0xfca5a5))
+                .rounded_md()
+                .child(
+                    Label::new(format!("错误：{}", one_line(detail, 120)))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(0x991b1b)),
+                )
+                .into_any(),
             None => div().id("activity-bar-empty").into_any(),
         }
     }

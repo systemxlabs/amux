@@ -146,6 +146,9 @@ fn merge_activity(view: &mut SessionView, activity: Activity) {
             view.activities
                 .push(Activity::Compaction { detail, timestamp });
         }
+        Activity::Error { detail, timestamp } => {
+            view.activities.push(Activity::Error { detail, timestamp });
+        }
     }
     view.live_activity = view.activities.last().cloned();
 }

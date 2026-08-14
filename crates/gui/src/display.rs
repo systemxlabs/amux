@@ -29,6 +29,7 @@ pub fn activity_display(a: &Activity) -> (String, String) {
             ),
         ),
         Activity::Compaction { detail, .. } => ("压缩".into(), detail.clone()),
+        Activity::Error { detail, .. } => ("错误".into(), detail.clone()),
     }
 }
 

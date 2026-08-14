@@ -200,6 +200,11 @@ pub enum Activity {
         timestamp: u64,
         detail: String,
     },
+    /// 系统/错误活动（如编排 agent 调用失败）
+    Error {
+        timestamp: u64,
+        detail: String,
+    },
 }
 
 // ---- 通知负载 ----

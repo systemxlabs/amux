@@ -369,9 +369,10 @@ impl WorkflowEngine {
             Ok(d) => d,
             Err(e) => {
                 // 运行期 LLM 调用失败（未配置 API / 网络 / 鉴权等）：
-                // 写入工作流会话对话历史（System 消息），GUI 可见且随持久化保留
-                self.session.transcript.push(OrcMsg::User {
-                    text: format!("编排 agent 调用失败：{e}"),
+                // 以活动消息写入工作流会话活动历史，GUI 可见且随持久化保留（PRD §3.7）
+                self.session.activities.push(Activity::Error {
+                    timestamp: now(),
+                    detail: format!("编排 agent 调用失败：{e}"),
                 });
                 return Err(e);
             }
@@ -1861,11 +1862,10 @@ mod tests {
         );
         let res = engine.start().await;
         assert!(res.is_err(), "未配置时应失败");
-        assert!(engine
-            .session
-            .transcript
-            .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text.contains("未配置编排 agent API"))));
+        // LLM 失败以活动消息写入活动历史（PRD §3.7）
+        assert!(engine.session.activities.iter().any(
+            |a| matches!(a, Activity::Error { detail, .. } if detail.contains("未配置编排 agent API"))
+        ));
         assert_eq!(
             engine.session.state,
             SessionState::Idle,
