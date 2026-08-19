@@ -4,6 +4,48 @@
 
 use protocol::{ContentBlock, SessionMeta};
 
+use crate::config::RecentDirEntry;
+
+/// 常用工作目录纯逻辑（PRD §1）：目录条目的插入、按机器去重、
+/// 最近优先排序与数量上限均无 I/O，便于直接单测。
+///
+/// 合并一条新近使用记录：同机器同路径去重（移到最前），新记录置于表头，
+/// 超出 `max` 时丢弃最旧。返回新的有序列表（最近使用在前）。
+pub fn merge_recent_dir(
+    entries: &[RecentDirEntry],
+    machine_id: &str,
+    path: &str,
+    now: u64,
+    max: usize,
+) -> Vec<RecentDirEntry> {
+    let mut out: Vec<RecentDirEntry> = entries
+        .iter()
+        .filter(|e| !(e.machine_id == machine_id && e.path == path))
+        .cloned()
+        .collect();
+    out.insert(
+        0,
+        RecentDirEntry {
+            machine_id: machine_id.to_string(),
+            path: path.to_string(),
+            last_used: now,
+        },
+    );
+    out.truncate(max);
+    out
+}
+
+/// 某机器的常用目录路径（最近使用优先），用于创建会话时快速选择。
+/// 即使配置文件中该机器条目未按时间有序，也按 `last_used` 降序稳定输出。
+pub fn recent_dir_paths(entries: &[RecentDirEntry], machine_id: &str) -> Vec<String> {
+    let mut mine: Vec<&RecentDirEntry> = entries
+        .iter()
+        .filter(|e| e.machine_id == machine_id)
+        .collect();
+    mine.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    mine.into_iter().map(|e| e.path.clone()).collect()
+}
+
 /// 输入附件：@ 引用文件/目录、拖拽文件、粘贴图片、语音。
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputAttachment {
@@ -158,6 +200,7 @@ pub fn merge_session_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MAX_RECENT_DIRS_PER_MACHINE;
 
     #[test]
     fn parse_at_references_extracts_paths_and_cleans_text() {
@@ -344,5 +387,75 @@ mod tests {
             ["s3", "s2", "s1", "s0"],
             "重复 id 不应重复出现"
         );
+    }
+
+    fn rde(machine: &str, path: &str, last_used: u64) -> RecentDirEntry {
+        RecentDirEntry {
+            machine_id: machine.into(),
+            path: path.into(),
+            last_used,
+        }
+    }
+
+    /// 常用工作目录（PRD §1）：同一机器多次使用后去重并保持最近优先。
+    #[test]
+    fn merge_recent_dir_dedup_and_recent_first() {
+        let mut list = vec![
+            rde("m1", "/a", 100),
+            rde("m1", "/b", 200),
+            rde("m1", "/c", 300),
+        ];
+        // 重复使用 /a：应移到最前、其余相对顺序保持、总条数不变
+        list = merge_recent_dir(&list, "m1", "/a", 400, MAX_RECENT_DIRS_PER_MACHINE);
+        let paths: Vec<&str> = list.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["/a", "/b", "/c"], "重复目录应移到最前且其余保持相对顺序");
+        assert_eq!(list[0].last_used, 400);
+        assert_eq!(list.len(), 3, "去重后总条数不变");
+        // 每个 (machine, path) 唯一
+        let uniq: std::collections::HashSet<_> = list
+            .iter()
+            .map(|e| format!("{}:{}", e.machine_id, e.path))
+            .collect();
+        assert_eq!(uniq.len(), list.len(), "同机器同目录不应重复");
+    }
+
+    /// 新增目录置于表头；不同机器的目录互不混叠。
+    #[test]
+    fn merge_recent_dir_new_entry_on_top_and_machine_isolation() {
+        let list = vec![rde("m1", "/a", 100)];
+        let list = merge_recent_dir(&list, "m1", "/b", 200, MAX_RECENT_DIRS_PER_MACHINE);
+        let list = merge_recent_dir(&list, "m2", "/x", 300, MAX_RECENT_DIRS_PER_MACHINE);
+        // m2 的新条目置顶，且 m1 的记录依然存在（不同机器不混叠）
+        assert_eq!(list[0].machine_id, "m2");
+        assert_eq!(list[0].path, "/x");
+        assert_eq!(list.len(), 3);
+        let m1_paths: Vec<String> = recent_dir_paths(&list, "m1");
+        assert_eq!(m1_paths, vec!["/b", "/a"], "m1 的目录顺序不受 m2 影响");
+        let m2_paths: Vec<String> = recent_dir_paths(&list, "m2");
+        assert_eq!(m2_paths, vec!["/x"]);
+    }
+
+    /// 数量上限：超出时丢弃最旧，且按机器分别计数。
+    #[test]
+    fn merge_recent_dir_caps_per_machine() {
+        let mut list = Vec::new();
+        for t in 0..3 {
+            list = merge_recent_dir(&list, "m1", &format!("/d{t}"), t, 2);
+        }
+        let m1 = recent_dir_paths(&list, "m1");
+        assert_eq!(m1, vec!["/d2", "/d1"], "上限 2：最旧的 /d0 被丢弃");
+    }
+
+    /// 预填列表：即使存储顺序无序，也按 last_used 降序输出（可稳定预填创建会话）。
+    #[test]
+    fn recent_dir_paths_sorts_by_last_used_desc() {
+        let list = vec![
+            rde("m1", "/old", 100),
+            rde("m1", "/new", 300),
+            rde("m1", "/mid", 200),
+        ];
+        assert_eq!(recent_dir_paths(&list, "m1"), vec!["/new", "/mid", "/old"]);
+        // 不存在的机器返回空
+        assert!(recent_dir_paths(&list, "nope").is_empty());
     }
 }

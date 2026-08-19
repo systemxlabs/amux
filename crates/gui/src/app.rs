@@ -863,7 +863,7 @@ impl AmuxApp {
             let res = client
                 .request(
                     protocol::method::CREATE_SESSION,
-                    Some(json!({ "harness": harness, "cwd": cwd })),
+                    Some(json!({ "harness": harness, "cwd": cwd.clone() })),
                 )
                 .await;
             let Ok(res) = res else {
@@ -894,6 +894,10 @@ impl AmuxApp {
             // 跳转到该会话视图：新会话历史为空，直接本地建空视图并选中，
             // 省去 open_session 往返（与 open_session 对空历史的返回等价）
             let _ = this.update_in(cx, |this, window, cx| {
+                // 记录该机器最近使用的工作目录（PRD §1 常用工作目录）
+                if let Some(m) = this.machine(machine) {
+                    this.store.record_recent_dir(&m.config.id, &cwd);
+                }
                 if let Some(m) = this.machine_mut(machine) {
                     m.selected = Some(sid.clone());
                     m.views
@@ -2641,6 +2645,9 @@ impl AmuxApp {
                                     .child(self.render_harness_selector(cx)),
                             ),
                     )
+                    // 常用工作目录（PRD §1）：该机器最近使用的工作目录快速选择，
+                    // 点击即预填到下方输入框
+                    .child(self.render_recent_dirs(cx))
                     .child(
                         v_flex()
                             .gap_1()
@@ -2721,6 +2728,38 @@ impl AmuxApp {
             .items_center()
             .justify_center()
             .child(card)
+            .into_any()
+    }
+
+    /// 常用工作目录快速选择（PRD §1）：显示当前所选机器最近使用的工作目录，
+    /// 点击即预填到"工作目录"输入框。无记录时返回空元素（不显示该行）。
+    fn render_recent_dirs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let machine = self.new_session_machine.unwrap_or(0);
+        let Some(m) = self.machine(machine) else {
+            return v_flex().into_any();
+        };
+        let dirs = self.store.list_recent_dirs(&m.config.id);
+        if dirs.is_empty() {
+            return v_flex().into_any();
+        }
+        let mut row = h_flex().gap_1().flex_wrap();
+        for dir in dirs {
+            let label = dir.clone();
+            row = row.child(
+                Button::new(format!("ns-recent-{}", label))
+                    .small()
+                    .label(crate::display::short_cwd(&label))
+                    .tooltip(label.clone())
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.session_cwd_input.update(cx, |s, cx| s.set_value(&label, window, cx));
+                        cx.notify();
+                    })),
+            );
+        }
+        v_flex()
+            .gap_1()
+            .child(Label::new("常用工作目录").text_sm().text_color(rgb(0x6b7280)))
+            .child(row)
             .into_any()
     }
 

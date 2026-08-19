@@ -39,6 +39,20 @@ impl Default for NotifyPrefs {
     }
 }
 
+/// 常用工作目录条目（PRD §1「常用工作目录」）：按机器区分、记录使用顺序。
+/// 同一机器同一目录只会出现一条（重复使用时移到最前）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentDirEntry {
+    pub machine_id: String,
+    pub path: String,
+    /// 最近使用时间戳（排序键，用于跨机器混排后按机器筛选仍保持最近优先）。
+    pub last_used: u64,
+}
+
+/// 每机器常用工作目录数量上限（实现决策）。
+pub const MAX_RECENT_DIRS_PER_MACHINE: usize = 20;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiConfig {
@@ -53,6 +67,9 @@ pub struct GuiConfig {
     pub workflow_templates: Vec<WorkflowTemplate>,
     /// 内置编排 agent API 配置（PRD §4.3「编排 agent」）
     pub orchestrator: OrchestratorConfig,
+    /// 常用工作目录（PRD §1）：按机器区分，整体按最近使用降序存储。
+    #[serde(default)]
+    pub recent_dirs: Vec<RecentDirEntry>,
 }
 
 impl Default for GuiConfig {
@@ -77,6 +94,7 @@ impl Default for GuiConfig {
             skills: Vec::new(),
             workflow_templates: Vec::new(),
             orchestrator: OrchestratorConfig::default(),
+            recent_dirs: Vec::new(),
         }
     }
 }
@@ -112,6 +130,11 @@ fn is_orchestrator(v: &serde_json::Value) -> bool {
     v.get("apiFormat").and_then(|x| x.as_str()).is_some()
         && v.get("baseUrl").and_then(|x| x.as_str()).is_some()
         && v.get("model").and_then(|x| x.as_str()).is_some()
+}
+
+fn is_recent_dir(v: &serde_json::Value) -> bool {
+    v.get("machineId").and_then(|x| x.as_str()).is_some()
+        && v.get("path").and_then(|x| x.as_str()).is_some()
 }
 
 /// 任意输入 → 合法配置。
@@ -194,6 +217,20 @@ pub fn normalize(raw: &serde_json::Value) -> GuiConfig {
                 api_key: o["apiKey"].as_str().unwrap_or("").to_string(),
                 model: o["model"].as_str().unwrap_or("").to_string(),
             };
+        }
+    }
+    if let Some(list) = raw.get("recentDirs") {
+        if let Some(arr) = list.as_array() {
+            for v in arr {
+                if !is_recent_dir(v) {
+                    continue;
+                }
+                cfg.recent_dirs.push(RecentDirEntry {
+                    machine_id: v["machineId"].as_str().unwrap_or("").to_string(),
+                    path: v["path"].as_str().unwrap_or("").to_string(),
+                    last_used: v.get("lastUsed").and_then(|x| x.as_u64()).unwrap_or(0),
+                });
+            }
         }
     }
     cfg
@@ -433,6 +470,31 @@ impl ConfigStore {
     pub fn workflow_dir(&self) -> PathBuf {
         self.workflow_dir.clone()
     }
+
+    // ---- 常用工作目录（PRD §1）----
+
+    /// 某机器的常用工作目录（最近使用优先），用于创建会话时快速选择。
+    pub fn list_recent_dirs(&self, machine_id: &str) -> Vec<String> {
+        crate::logic::recent_dir_paths(&self.load().recent_dirs, machine_id)
+    }
+
+    /// 记录一次会话在该机器使用的工作目录：同机器同目录去重、移到最前、
+    /// 其余按最近使用排序、超出上限时丢弃最旧，随后持久化。
+    pub fn record_recent_dir(&self, machine_id: &str, path: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut cfg = self.load();
+        cfg.recent_dirs = crate::logic::merge_recent_dir(
+            &cfg.recent_dirs,
+            machine_id,
+            path,
+            now,
+            MAX_RECENT_DIRS_PER_MACHINE,
+        );
+        self.persist(&cfg);
+    }
 }
 
 #[cfg(test)]
@@ -642,5 +704,42 @@ mod tests {
         // 坏的 orchestrator 回退默认
         let raw2 = serde_json::json!({ "orchestrator": { "baseUrl": 1 } });
         assert_eq!(normalize(&raw2).orchestrator.model, ""); // 坏配置回退为空
+    }
+
+    /// 常用工作目录（PRD §1）：record/list 持久化往返，按机器隔离、去重、最近优先。
+    #[test]
+    fn recent_dirs_record_and_persist() {
+        let dir = std::env::temp_dir().join(format!("amux-gui-recent-{}", std::process::id()));
+        let path = dir.join("config.json");
+        let store = ConfigStore::new(Box::new(FileBackend::new(path.clone())));
+
+        assert!(store.list_recent_dirs("m1").is_empty());
+        store.record_recent_dir("m1", "/a");
+        store.record_recent_dir("m1", "/b");
+        store.record_recent_dir("m1", "/a"); // 重复：应移到最前
+        store.record_recent_dir("m2", "/x"); // 不同机器互不混叠
+
+        // 重新加载（落盘往返）
+        let store2 = ConfigStore::new(Box::new(FileBackend::new(path.clone())));
+        assert_eq!(store2.list_recent_dirs("m1"), vec!["/a", "/b"]);
+        assert_eq!(store2.list_recent_dirs("m2"), vec!["/x"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// normalize 读取 recentDirs，坏条目丢弃。
+    #[test]
+    fn normalize_reads_recent_dirs() {
+        let raw = serde_json::json!({
+            "recentDirs": [
+                { "machineId": "m1", "path": "/a", "lastUsed": 10 },
+                { "path": "缺 machineId" }
+            ]
+        });
+        let cfg = normalize(&raw);
+        assert_eq!(cfg.recent_dirs.len(), 1);
+        assert_eq!(cfg.recent_dirs[0].machine_id, "m1");
+        assert_eq!(cfg.recent_dirs[0].path, "/a");
+        // 缺省（无 recentDirs 字段）为空
+        assert!(normalize(&serde_json::json!({})).recent_dirs.is_empty());
     }
 }
