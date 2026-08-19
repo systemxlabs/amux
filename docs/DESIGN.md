@@ -57,9 +57,9 @@ Server 主动推送通知
 ### Server 启动
 
 Server 启动和关闭由用户手动执行，启动参数包括
-- `--host`: 监听地址
-- `--port`: 监听端口
-- `--token`：指定认证 token
+- `--host`: 监听地址，默认为 `0.0.0.0`
+- `--port`: 监听端口，默认为 `34567`
+- `--token`：指定认证 token，必传
 
 ### ACP Server 发现
 
