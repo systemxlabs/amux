@@ -35,7 +35,8 @@ Server 在未收到此认证消息并通过认证前，请求均返回认证失�
 | `session.history` | 分页查询指定普通会话的对话历史 |
 | `session.activities` | 分页查询指定普通会话的活动历史 |
 | `session.ongoing_activity` | 查询指定普通会话正在进行中的活动 |
-| `session.list` | 分页查询普通会话列表 |
+| `session.list` | 分页查询最近活跃的普通会话列表 |
+| `session.info` | 批量查询指定的普通会话列表 |
 | `workspace.diff` | 查询普通会话工作目录改动 diff |
 | `workspace.restore` | 可按文件或代码块撤销普通会话工作目录的改动 |
 
