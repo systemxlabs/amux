@@ -106,6 +106,7 @@ async fn handle_connection(
     let token = opts.token.clone();
     // 请求处理与通知发送解耦：dispatch 在独立任务，响应经通道回传
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<String>(64);
+
     loop {
         tokio::select! {
             n = notify_rx.recv() => {
@@ -130,6 +131,28 @@ async fn handle_connection(
                     }
                 };
                 let Message::Text(text) = msg else { continue };
+                // 认证请求在连接任务内串行完成；因此紧随其后的业务请求只有在
+                // auth 响应已处理后才会被派发，不会与认证发生竞态。
+                let is_auth = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("method")
+                            .and_then(|method| method.as_str())
+                            .map(|method| method == method::AUTH)
+                    })
+                    .unwrap_or(false);
+                if is_auth && !authenticated.load(Ordering::SeqCst) {
+                    if let Some(resp) = dispatch(&handlers, &text, &token, &authenticated).await {
+                        let Ok(frame) = serde_json::to_string(&resp) else {
+                            break;
+                        };
+                        if sink.send(Message::Text(frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 let handlers = handlers.clone();
                 let resp_tx = resp_tx.clone();
                 let authenticated = authenticated.clone();
@@ -169,6 +192,21 @@ async fn dispatch(
             });
         }
     };
+    if value.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return Some(protocol::JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            id: value
+                .get("id")
+                .cloned()
+                .unwrap_or(protocol::JsonRpcId::Null),
+            result: None,
+            error: Some(protocol::JsonRpcError {
+                code: protocol::rpc_error::INVALID_REQUEST,
+                message: "jsonrpc 必须为 2.0".into(),
+                data: None,
+            }),
+        });
+    }
     let method = value.get("method").and_then(|m| m.as_str());
     let Some(method) = method else {
         return Some(protocol::JsonRpcResponse {

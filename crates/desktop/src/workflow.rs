@@ -373,9 +373,9 @@ impl WorkflowEngine {
             self.session.state = SessionState::Busy;
             self.session.updated_at = now();
             let result = self.do_advance().await;
-            self.session.state = SessionState::Idle;
-            self.session.updated_at = now();
             self.advancing = false;
+            self.sync_state_from_children();
+            self.session.updated_at = now();
             if self.absorb_steer() {
                 self.pending_advance = true;
             }
@@ -609,24 +609,27 @@ impl WorkflowEngine {
         new_state: SessionState,
         output_excerpt: Option<String>,
     ) -> bool {
-        let Some(child) = self
-            .session
-            .children
-            .iter_mut()
-            .find(|c| c.id == session_id)
-        else {
-            return false;
+        let machine = {
+            let Some(child) = self
+                .session
+                .children
+                .iter_mut()
+                .find(|c| c.id == session_id)
+            else {
+                return false;
+            };
+            if let Some(o) = output_excerpt {
+                child.last_output = o;
+            }
+            child.state = new_state;
+            child.machine_name.clone()
         };
-        if let Some(o) = output_excerpt {
-            child.last_output = o;
-        }
-        child.state = new_state;
+        self.sync_state_from_children();
         if new_state == SessionState::Idle {
             // 用户取消工作流导致的子会话状态变更不注入（docs/DESIGN.md §工作流会话驱动）
             if self.session.cancelled || self.session.done {
                 return false;
             }
-            let machine = child.machine_name.clone();
             self.session.transcript.push(OrcMsg::User {
                 text: format!(
                     "关联普通会话 {session_id}@{machine} 检测到状态变更：{old} -> {new}",
@@ -650,6 +653,24 @@ impl WorkflowEngine {
         {
             child.state = state;
         }
+        self.sync_state_from_children();
+    }
+
+    fn sync_state_from_children(&mut self) {
+        if self.session.cancelled || self.session.done {
+            return;
+        }
+        self.session.state = if self.advancing
+            || self
+                .session
+                .children
+                .iter()
+                .any(|child| child.state == SessionState::Busy)
+        {
+            SessionState::Busy
+        } else {
+            SessionState::Idle
+        };
     }
 
     pub fn is_advancing(&self) -> bool {
@@ -688,8 +709,12 @@ impl WorkflowEngine {
             text: text.to_string(),
         });
         self.session.updated_at = now();
-        if self.session.cancelled || self.session.done {
+        if self.session.done {
             return false;
+        }
+        if self.session.cancelled {
+            self.session.cancelled = false;
+            self.session.state = SessionState::Idle;
         }
         if self.advancing {
             // 工作中以 steer 注入，当前 turn 结束后再跑一轮（docs/DESIGN.md 编排智能体 steer）
@@ -1582,7 +1607,7 @@ mod tests {
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { .. })));
         let should_advance = engine.record_user("先做 A");
-        assert!(!should_advance);
+        assert!(should_advance, "取消后的新指令应恢复工作流");
     }
 
     #[tokio::test]

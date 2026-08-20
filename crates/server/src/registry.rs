@@ -182,7 +182,7 @@ impl SessionRegistry {
     ) -> rusqlite::Result<Vec<(String, u64)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT id, last_active_at FROM sessions")
+            .prepare("SELECT id, last_active_at FROM sessions WHERE state = 'idle'")
             .expect("prepare idle_candidates");
         let rows = stmt
             .query_map([], |row| {

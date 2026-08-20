@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +36,12 @@ pub struct SessionManager {
     tx: broadcast::Sender<ServerNotification>,
     /// 进行中的活动（`session.ongoing_activity`；按会话 id 独立存储）
     ongoing: Mutex<HashMap<String, Activity>>,
+    controls: Mutex<HashMap<String, Arc<SessionControl>>>,
+}
+
+struct SessionControl {
+    busy: AtomicBool,
+    deleted: AtomicBool,
 }
 
 fn now() -> u64 {
@@ -60,6 +67,7 @@ impl SessionManager {
             data_dir,
             tx,
             ongoing: Mutex::new(HashMap::new()),
+            controls: Mutex::new(HashMap::new()),
         };
         (manager, rx)
     }
@@ -123,7 +131,21 @@ impl SessionManager {
         self.registry
             .upsert(&meta, "")
             .map_err(|e| format!("注册表写入失败: {e}"))?;
+        self.control(&meta.id);
         Ok(meta)
+    }
+
+    fn control(&self, session_id: &str) -> Arc<SessionControl> {
+        let mut controls = self.controls.lock().unwrap();
+        controls
+            .entry(session_id.to_string())
+            .or_insert_with(|| {
+                Arc::new(SessionControl {
+                    busy: AtomicBool::new(false),
+                    deleted: AtomicBool::new(false),
+                })
+            })
+            .clone()
     }
 
     /// 配置会话标题（用户可随时修改，PRD §3.1）。
@@ -142,6 +164,8 @@ impl SessionManager {
     /// docs/DESIGN.md「删除会话」）；ACP close 失败不阻断本地删除（agent 侧会话可能已不存在）。
     /// 联动清除注册表条目 + 历史日志 + 活动日志。
     pub async fn delete(&self, session_id: &str) -> Result<(), String> {
+        let control = self.control(session_id);
+        control.deleted.store(true, Ordering::SeqCst);
         let entry = self
             .registry
             .get(session_id)
@@ -285,8 +309,20 @@ impl SessionManager {
         if input.is_empty() {
             return Err("prompt 输入必须非空".into());
         }
+        let control = self.control(session_id);
+        if control.deleted.load(Ordering::SeqCst) {
+            return Err(format!("会话不存在: {session_id}"));
+        }
+        if control
+            .busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err("会话忙：agent 不支持进行中注入（steer），请等待当前工作结束".into());
+        }
+
         // 忙检查 + 标题生成 + Busy 状态 + 懒创建一次完成（注册表为同步写，天然原子）
-        let (driver, agent_session_id, cwd, old_state) = {
+        let setup: Result<_, String> = async {
             let (mut meta, agent_session_id) = self
                 .registry
                 .get(session_id)
@@ -316,7 +352,15 @@ impl SessionManager {
                 .upsert(&meta, &agent_session_id)
                 .map_err(|e| format!("注册表写入失败: {e}"))?;
             let cwd = meta.cwd.clone();
-            (driver, agent_session_id, cwd, old_state)
+            Ok((driver, agent_session_id, cwd, old_state))
+        }
+        .await;
+        let (driver, agent_session_id, cwd, old_state) = match setup {
+            Ok(value) => value,
+            Err(error) => {
+                control.busy.store(false, Ordering::SeqCst);
+                return Err(error);
+            }
         };
 
         // Busy 广播
@@ -337,6 +381,7 @@ impl SessionManager {
                 .registry
                 .update_state(session_id, SessionState::Idle, now());
             self.ongoing.lock().unwrap().remove(session_id);
+            control.busy.store(false, Ordering::SeqCst);
             return Err(format!("恢复 agent 上下文失败: {e}"));
         }
 
@@ -395,6 +440,16 @@ impl SessionManager {
                         },
                     );
                 }
+                AgentEvent::Error(detail) => {
+                    merger.push_error(Activity::Error {
+                        timestamp: now(),
+                        detail: detail.clone(),
+                    });
+                    protocol::log::error(
+                        "server.session",
+                        format!("agent turn 失败 {session_id}: {detail}"),
+                    );
+                }
                 AgentEvent::SessionInfo { .. } => {}
             }
         }
@@ -409,14 +464,16 @@ impl SessionManager {
             merger.push_error(err);
         }
 
+        // 删除与 prompt 并发时，旧 turn 不得在删除后重新创建历史文件。
+        let deleted = control.deleted.load(Ordering::SeqCst);
         // 落库历史 + 活动
         let (history, activities) = merger.finish();
-        if !history.is_empty() {
+        if !deleted && !history.is_empty() {
             if let Err(e) = log.append_history(&history) {
                 protocol::log::error("server.session", format!("历史落盘失败 {session_id}: {e}"));
             }
         }
-        if !activities.is_empty() {
+        if !deleted && !activities.is_empty() {
             if let Err(e) = log.append_activities(&activities) {
                 protocol::log::error("server.session", format!("活动落盘失败 {session_id}: {e}"));
             }
@@ -424,10 +481,13 @@ impl SessionManager {
 
         // 置空闲 + 清空 ongoing + 广播
         self.ongoing.lock().unwrap().remove(session_id);
-        let _ = self
-            .registry
-            .update_state(session_id, SessionState::Idle, now());
-        self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
+        control.busy.store(false, Ordering::SeqCst);
+        if !deleted {
+            let _ = self
+                .registry
+                .update_state(session_id, SessionState::Idle, now());
+            self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
+        }
         protocol::log::info(
             "server.session",
             format!(
@@ -435,7 +495,11 @@ impl SessionManager {
                 started.elapsed().as_millis()
             ),
         );
-        Ok(())
+        if deleted {
+            Err(format!("会话已删除: {session_id}"))
+        } else {
+            Ok(())
+        }
     }
 
     /// 取消指定普通会话正在进行的工作（docs/DESIGN.md「session.cancel」）。
@@ -451,12 +515,8 @@ impl SessionManager {
         let driver = self.agents.driver_for(&meta.agent)?;
         driver.cancel(&agent_session_id)?;
         // 取消后该会话视为回到空闲，广播状态变更
-        if meta.state == SessionState::Busy {
-            let _ = self
-                .registry
-                .update_state(session_id, SessionState::Idle, now());
-            self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
-        }
+        // 只请求 ACP 取消，不提前伪造 Idle；prompt 事件流结束后才释放 busy，
+        // 从而避免旧 turn 尚未结束时被新的 prompt 并发启动。
         Ok(())
     }
 
@@ -692,8 +752,8 @@ mod tests {
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
-            fn list_skills(&self) -> Vec<String> {
-                Vec::new()
+            fn list_skills(&self) -> Result<Vec<String>, String> {
+                Ok(Vec::new())
             }
             fn shutdown(&self) {}
         }

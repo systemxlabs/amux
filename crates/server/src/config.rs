@@ -10,7 +10,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub token: String,
-    /// ACP agent 可执行（如 codex-acp / `kimi acp`）；缺省时用内存 Stub（演示）
+    /// ACP agent 可执行（如 codex-acp / `kimi acp`）；缺省时由运行期自动发现
     pub agent_bin: Option<String>,
     /// ACP agent 子命令参数（如 `kimi acp` 的 `["acp"]`）
     pub agent_args: Vec<String>,

@@ -5,7 +5,7 @@
 //! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
 //! - `AgentRegistry`：按 agent 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
 //!   agent（启动即拉起并复用，docs/DESIGN.md §4.1/§7.3；拉起失败标记不可用；
-//!   运行期新发现的兜底惰性拉起）
+//!   运行期新发现的惰性拉起）
 //!
 //! ACP v1 语义（docs/DESIGN.md §7.2）：session/new、resume、prompt、cancel、close 等
 //! 方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
@@ -53,6 +53,8 @@ pub enum AgentEvent {
     Compaction(String),
     /// agent 自报状态（ACP `session_info_update` 透传；ACP 未携带状态时为 None）
     SessionInfo { state: Option<SessionState> },
+    /// ACP 请求或传输失败
+    Error(String),
     /// turn 完成
     TurnEnded,
 }
@@ -84,8 +86,8 @@ pub trait AgentDriver: Send + Sync {
     /// 关闭会话（删除/长时间无活动时释放 agent 侧资源，docs/DESIGN.md「ACP 生命周期」：
     /// server 经 ACP `session/close` 关闭 agent 侧会话）
     fn close(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 该 agent 安装的 skills 列表（agent 不支持时返回空列表）
-    fn list_skills(&self) -> Vec<String>;
+    /// 该 agent 安装的 skills 列表；查询失败必须显式返回错误。
+    fn list_skills(&self) -> Result<Vec<String>, String>;
     /// 关闭驱动自身（server 退出时释放 ACP 子进程资源，docs/DESIGN.md「ACP Server 生命周期」）
     fn shutdown(&self);
 }
@@ -115,9 +117,9 @@ pub struct DiscoveredAgent {
 ///     §4.1/§7.3：ACP server 随 server 启动一起拉起，后续 `driver_for` 复用缓存驱动）；
 ///     **拉起失败的 agent 标记为不可用**（agent.list 的 available=false，使用时报明确错误）；
 ///     运行期新发现的 agent 仍走惰性拉起兜底
-/// - 演示兜底：既无 `--agent` 又无任何发现时，用内存 Stub（接受任意 agent 名）
+/// - 生产路径不提供内置 Stub；没有发现 agent 时 `agent.list` 为空，使用未知 agent 会报错。
 pub struct AgentRegistry {
-    /// 演示模式：任意 agent 名都解析到同一个 Stub 驱动（内部可变，随发现刷新）
+    /// 仅测试使用的 Stub 驱动。
     stub: std::sync::Mutex<Option<SharedDriver>>,
     /// 测试强制 stub：跳过运行期发现（避免本机 PATH 干扰单测）
     force_stub: bool,
@@ -126,6 +128,10 @@ pub struct AgentRegistry {
     no_discovery: bool,
     /// 配置驱动：agent 名 + 驱动
     configured: Option<(String, SharedDriver)>,
+    /// 显式配置 agent 的重启参数；驱动重启后仍复用同一注册表条目。
+    configured_spec: Mutex<Option<DiscoveredAgent>>,
+    /// 显式配置 agent 最近一次重启后的驱动。
+    configured_override: Mutex<Option<SharedDriver>>,
     /// 自动发现的 agent（不含已配置的；可运行期刷新）
     discovered: std::sync::Mutex<Vec<DiscoveredAgent>>,
     /// 已拉起的发现驱动（启动拉起 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
@@ -146,6 +152,8 @@ impl AgentRegistry {
             force_stub: false,
             no_discovery,
             configured,
+            configured_spec: Mutex::new(None),
+            configured_override: Mutex::new(None),
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
             unavailable: std::sync::Mutex::new(HashSet::new()),
@@ -157,8 +165,7 @@ impl AgentRegistry {
     }
 
     /// 重新扫描本机 ACP agent（运行期安装的新 agent 经 agent.list 刷新即可发现，PRD §3.3）。
-    /// 合并新发现的 agent，保留已配置/已发现条目；无任何 agent 且无配置时启用 stub 兜底。
-    /// `AMUX_NO_DISCOVERY=1` 时跳过扫描（仅 stub 兜底逻辑仍生效）。
+    /// 合并新发现的 agent，保留已配置/已发现条目。生产路径没有 Stub 兜底。
     fn refresh_discovery(&self) {
         if self.force_stub {
             return;
@@ -181,18 +188,6 @@ impl AgentRegistry {
                 }
             }
         }
-        let need_stub = self.configured.is_none() && {
-            let disc = self
-                .discovered
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）");
-            disc.is_empty()
-        };
-        *self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）") = if need_stub {
-            Some(Arc::new(StubAgentDriver::new()))
-        } else {
-            None
-        };
     }
 
     /// 测试构造：忽略本机 PATH 发现，强制 stub 演示模式（agent 任意）。
@@ -203,6 +198,8 @@ impl AgentRegistry {
             force_stub: true,
             no_discovery: false,
             configured: None,
+            configured_spec: Mutex::new(None),
+            configured_override: Mutex::new(None),
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
             unavailable: std::sync::Mutex::new(HashSet::new()),
@@ -217,9 +214,37 @@ impl AgentRegistry {
             force_stub: false,
             no_discovery: true,
             configured: Some((harness.to_string(), driver)),
+            configured_spec: Mutex::new(None),
+            configured_override: Mutex::new(None),
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
             unavailable: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// 为显式配置的 agent 保存可重启命令。生产入口在首次拉起后调用。
+    pub fn set_configured_spec(
+        &self,
+        name: String,
+        bin: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) {
+        if self
+            .configured
+            .as_ref()
+            .map(|(configured_name, _)| configured_name == &name)
+            .unwrap_or(false)
+        {
+            *self
+                .configured_spec
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）") = Some(DiscoveredAgent {
+                name,
+                bin,
+                args,
+                env,
+            });
         }
     }
 
@@ -238,16 +263,6 @@ impl AgentRegistry {
         if let Some((name, _)) = &self.configured {
             out.push(AgentInfo {
                 name: name.clone(),
-                available: true,
-            });
-        } else if self
-            .stub
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_some()
-        {
-            out.push(AgentInfo {
-                name: "stub".into(),
                 available: true,
             });
         }
@@ -269,9 +284,22 @@ impl AgentRegistry {
         {
             return Ok(stub.clone());
         }
-        if let Some((name, d)) = &self.configured {
+        if let Some((name, _)) = &self.configured {
             if name == harness {
-                return Ok(d.clone());
+                if let Some(driver) = self
+                    .configured_override
+                    .lock()
+                    .expect("Mutex 中毒（临界区内不应 panic）")
+                    .as_ref()
+                {
+                    return Ok(driver.clone());
+                }
+                return Ok(self
+                    .configured
+                    .as_ref()
+                    .expect("配置驱动刚刚存在")
+                    .1
+                    .clone());
             }
         }
         // 启动时拉起失败 = 不可用：直接返回明确错误，不尝试再次拉起
@@ -373,6 +401,46 @@ impl AgentRegistry {
     /// 用户可从应用侧重启某一 ACP Server）：移除不可用标记 → 重新发现 → 尝试拉起；
     /// 再次失败则重新标记不可用。
     pub fn restart_agent(&self, harness: &str) -> Result<(), String> {
+        if self
+            .configured
+            .as_ref()
+            .map(|(name, _)| name == harness)
+            .unwrap_or(false)
+        {
+            let spec = self
+                .configured_spec
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .clone()
+                .ok_or_else(|| format!("显式 agent 缺少重启配置: {harness}"))?;
+            let old = self
+                .configured_override
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .take()
+                .unwrap_or_else(|| self.configured.as_ref().expect("配置驱动不存在").1.clone());
+            let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
+            let driver = match AcpAgentDriver::spawn(&spec.bin, &args, &spec.env) {
+                Ok(driver) => driver,
+                Err(e) => {
+                    *self
+                        .configured_override
+                        .lock()
+                        .expect("Mutex 中毒（临界区内不应 panic）") = Some(old);
+                    return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
+                }
+            };
+            old.shutdown();
+            *self
+                .configured_override
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）") = Some(Arc::new(driver));
+            protocol::log::info(
+                "server.launch",
+                format!("手动重启成功：{}（agent={}）", spec.bin, harness),
+            );
+            return Ok(());
+        }
         self.unavailable
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
@@ -414,7 +482,16 @@ impl AgentRegistry {
     /// Server 关闭时释放 ACP 子进程资源）。
     pub fn shutdown_all(&self) {
         if let Some((_, d)) = &self.configured {
-            d.shutdown();
+            if let Some(override_driver) = self
+                .configured_override
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .as_ref()
+            {
+                override_driver.shutdown();
+            } else {
+                d.shutdown();
+            }
         }
         if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）")
         {
@@ -659,22 +736,26 @@ impl AgentDriver for AcpAgentDriver {
     /// 同一进程内对同一会话幂等（已恢复过则直接成功）。
     fn resume_session(&self, agent_session_id: &str, cwd: &str) -> Result<(), String> {
         {
-            let mut resumed = self.resumed.lock().unwrap();
+            let resumed = self.resumed.lock().unwrap();
             if resumed.contains(agent_session_id) {
                 return Ok(());
             }
-            // 提前插入：并发 prompt 场景只发起一次 resume
-            resumed.insert(agent_session_id.to_string());
         }
         self.cwds
             .lock()
             .unwrap()
             .insert(agent_session_id.to_string(), cwd.to_string());
-        self.call(
+        let result = self.call(
             "session/resume",
             json!({ "sessionId": agent_session_id, "cwd": cwd, "mcpServers": [] }),
-        )
-        .map(|_| ())
+        );
+        if result.is_ok() {
+            self.resumed
+                .lock()
+                .unwrap()
+                .insert(agent_session_id.to_string());
+        }
+        result.map(|_| ())
     }
 
     fn prompt(
@@ -692,8 +773,13 @@ impl AgentDriver for AcpAgentDriver {
             prompt: input,
             routes: self.routes.clone(),
         };
-        if let Ok(sender) = self.sender() {
-            let _ = sender.send(req);
+        let send_result = self
+            .sender()
+            .and_then(|sender| sender.send(req).map_err(|_| "agent 已关闭".to_string()));
+        if let Err(error) = send_result {
+            self.routes.lock().unwrap().remove(agent_session_id);
+            let _ = tx.try_send(AgentEvent::Error(error));
+            let _ = tx.try_send(AgentEvent::TurnEnded);
         }
         rx
     }
@@ -720,20 +806,17 @@ impl AgentDriver for AcpAgentDriver {
             .map(|_| ())
     }
 
-    /// 经 ACP `skill/list` 查询该 agent 安装的 skills（agent 不支持时返回空列表）。
-    fn list_skills(&self) -> Vec<String> {
-        match self.call("skill/list", json!({})) {
-            Ok(res) => res
-                .get("skills")
-                .and_then(|s| s.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
+    /// 经 ACP `skill/list` 查询该 agent 安装的 skills。
+    fn list_skills(&self) -> Result<Vec<String>, String> {
+        let res = self.call("skill/list", json!({}))?;
+        res.get("skills")
+            .and_then(|s| s.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .ok_or_else(|| "skill/list 响应缺少 skills 数组".to_string())
     }
 }
 
@@ -844,7 +927,7 @@ async fn connect_main(
         .name("amux-server")
         .on_receive_notification(
             async move |notif: SessionNotification, _cx| {
-                route_update(&routes, &notif);
+                route_update(&routes, &notif).await;
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -855,11 +938,12 @@ async fn connect_main(
                 // 必须选 allow 类选项：claude-acp 等包装器的选项列表**第一项往往是
                 // 「Deny/reject」**，选第一个会被 agent 误判为用户拒绝
                 // （"User refused permission to run tool"）。
-                if let Some(id) = pick_approve_option(&request.options) {
-                    let _ = responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
-                    ));
-                }
+                let outcome = pick_approve_option(&request.options)
+                    .map(|id| {
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
+                    })
+                    .unwrap_or(RequestPermissionOutcome::Cancelled);
+                let _ = responder.respond(RequestPermissionResponse::new(outcome));
                 Ok(())
             },
             agent_client_protocol::on_receive_request!(),
@@ -930,25 +1014,46 @@ async fn connect_main(
                                     .iter()
                                     .filter_map(acp_content_block)
                                     .collect::<Vec<_>>();
-                                let _ = cx
+                                let callback_sid = sid.clone();
+                                let callback_routes = routes.clone();
+                                let result = cx
                                     .send_request(PromptRequest::new(sid.clone(), blocks))
                                     .on_receiving_result(async move |result| {
                                         // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）
-                                        if let Some(tx) = routes
+                                        let route = callback_routes
                                             .lock()
                                             .expect("Mutex 中毒（临界区内不应 panic）")
-                                            .remove(&sid)
-                                        {
-                                            let _ = tx.try_send(AgentEvent::TurnEnded);
-                                        }
-                                        if let core::result::Result::Err(e) = result {
-                                            protocol::log::error(
-                                                "acp",
-                                                format!("prompt 失败 {sid}: {e}"),
-                                            );
+                                            .remove(&callback_sid);
+                                        if let Some(tx) = route {
+                                            if let core::result::Result::Err(e) = &result {
+                                                let _ = tx
+                                                    .send(AgentEvent::Error(format!(
+                                                        "ACP prompt 失败: {e}"
+                                                    )))
+                                                    .await;
+                                            }
+                                            let _ = tx.send(AgentEvent::TurnEnded).await;
                                         }
                                         core::result::Result::Ok(())
                                     });
+                                if let Err(e) = result {
+                                    protocol::log::error(
+                                        "acp",
+                                        format!("prompt 调用失败 {sid}: {e}"),
+                                    );
+                                    let route = routes
+                                        .lock()
+                                        .expect("Mutex 中毒（临界区内不应 panic）")
+                                        .remove(&sid);
+                                    if let Some(tx) = route {
+                                        let _ = tx
+                                            .send(AgentEvent::Error(format!(
+                                                "ACP prompt 调用失败: {e}"
+                                            )))
+                                            .await;
+                                        let _ = tx.send(AgentEvent::TurnEnded).await;
+                                    }
+                                }
                             });
                         }
                     }
@@ -1034,7 +1139,7 @@ async fn dispatch_call_inner(
 }
 
 /// 把 ACP `session/update` 通知映射为 AgentEvent 并路由（docs/DESIGN.md §5 聚合）。
-fn route_update(
+async fn route_update(
     routes: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
     notif: &SessionNotification,
 ) {
@@ -1073,12 +1178,15 @@ fn route_update(
         _ => None,
     };
     if let Some(ev) = ev {
-        if let Some(tx) = routes
+        let tx = routes
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .get(notif.session_id.to_string().as_str())
-        {
-            let _ = tx.try_send(ev);
+            .cloned();
+        if let Some(tx) = tx {
+            if tx.send(ev).await.is_err() {
+                protocol::log::warn("acp", "agent 事件接收端已关闭");
+            }
         }
     }
 }
@@ -1213,8 +1321,8 @@ impl AgentDriver for StubAgentDriver {
         Ok(())
     }
 
-    fn list_skills(&self) -> Vec<String> {
-        Vec::new()
+    fn list_skills(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
     }
 
     fn shutdown(&self) {}
@@ -1239,8 +1347,8 @@ mod tests {
     }
 
     /// ACP 规范嵌套格式（params.update.sessionUpdate）的 agent_message_chunk。
-    #[test]
-    fn route_update_agent_message_chunk() {
+    #[tokio::test]
+    async fn route_update_agent_message_chunk() {
         let (routes, mut rx) = route_with_channel();
         let notif = SessionNotification::new(
             SessionId::new("s1"),
@@ -1248,14 +1356,14 @@ mod tests {
                 TextContent::new("输出"),
             ))),
         );
-        route_update(&routes, &notif);
+        route_update(&routes, &notif).await;
         let ev = rx.try_recv().expect("应收到事件");
         assert!(matches!(ev, AgentEvent::OutputChunk(s) if s == "输出"));
     }
 
     /// user_message_chunk → UserMessage。
-    #[test]
-    fn route_update_user_message_chunk() {
+    #[tokio::test]
+    async fn route_update_user_message_chunk() {
         let (routes, mut rx) = route_with_channel();
         let notif = SessionNotification::new(
             SessionId::new("s1"),
@@ -1263,14 +1371,14 @@ mod tests {
                 TextContent::new("收到"),
             ))),
         );
-        route_update(&routes, &notif);
+        route_update(&routes, &notif).await;
         let ev = rx.try_recv().expect("应收到事件");
         assert!(matches!(ev, AgentEvent::UserMessage(s) if s == "收到"));
     }
 
     /// agent_thought_chunk → Thinking。
-    #[test]
-    fn route_update_thinking() {
+    #[tokio::test]
+    async fn route_update_thinking() {
         let (routes, mut rx) = route_with_channel();
         let notif = SessionNotification::new(
             SessionId::new("s1"),
@@ -1278,21 +1386,21 @@ mod tests {
                 TextContent::new("思考中"),
             ))),
         );
-        route_update(&routes, &notif);
+        route_update(&routes, &notif).await;
         let ev = rx.try_recv().expect("应收到 thinking 事件");
         assert!(matches!(ev, AgentEvent::Thinking(s) if s == "思考中"));
     }
 
     /// tool_call → ToolCall 活动（kind / title / rawInput）。
-    #[test]
-    fn route_update_tool_call() {
+    #[tokio::test]
+    async fn route_update_tool_call() {
         let (routes, mut rx) = route_with_channel();
         let tc = ToolCall::new("tc1", "运行 cargo test")
             .kind(ToolKind::Execute)
             .status(ToolCallStatus::Pending)
             .raw_input(serde_json::json!({"command": "cargo test"}));
         let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCall(tc));
-        route_update(&routes, &notif);
+        route_update(&routes, &notif).await;
         let ev = rx.try_recv().expect("应收到 tool_call 事件");
         match ev {
             AgentEvent::ToolCall {
@@ -1309,8 +1417,8 @@ mod tests {
     }
 
     /// `session_info_update` → SessionInfo 事件（agent 自报状态透传，docs/DESIGN.md §5.1）。
-    #[test]
-    fn route_update_session_info() {
+    #[tokio::test]
+    async fn route_update_session_info() {
         let (routes, mut rx) = route_with_channel();
         let notif = SessionNotification::new(
             SessionId::new("s1"),
@@ -1318,7 +1426,7 @@ mod tests {
                 agent_client_protocol::schema::v1::SessionInfoUpdate::new(),
             ),
         );
-        route_update(&routes, &notif);
+        route_update(&routes, &notif).await;
         let ev = rx
             .try_recv()
             .expect("session_info_update 应产生 SessionInfo 事件");
@@ -1455,7 +1563,7 @@ mod tests {
         .is_none());
     }
 
-    /// `AMUX_NO_DISCOVERY=1`：跳过运行期自动发现（只保留显式配置 / stub 兜底）。
+    /// `AMUX_NO_DISCOVERY=1`：跳过运行期自动发现（只保留显式配置）。
     /// 用于受限环境与测试隔离（避免拉起本机未配置的 agent 并恢复其会话）。
     #[test]
     fn no_discovery_skips_auto_discovery() {
@@ -1463,7 +1571,7 @@ mod tests {
         reg.no_discovery = true;
         reg.force_stub = false;
         reg.refresh_discovery();
-        // 无配置、无发现 → stub 兜底仍生效（演示模式可用）
+        // 该测试构造显式注入 stub；生产构造不会注入它。
         assert!(reg
             .stub
             .lock()
@@ -1507,6 +1615,8 @@ mod tests {
             force_stub,
             no_discovery,
             configured: None,
+            configured_spec: Mutex::new(None),
+            configured_override: Mutex::new(None),
             discovered: std::sync::Mutex::new(discovered),
             spawned: std::sync::Mutex::new(HashMap::new()),
             unavailable: std::sync::Mutex::new(HashSet::new()),

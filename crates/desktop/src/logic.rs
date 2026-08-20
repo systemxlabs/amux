@@ -56,7 +56,9 @@ pub fn merge_session_window(
 ) -> (Vec<SessionMeta>, bool, Option<u64>) {
     let mut out = existing.to_vec();
     for m in window {
-        if !out.iter().any(|s| s.id == m.id) {
+        if let Some(existing) = out.iter_mut().find(|s| s.id == m.id) {
+            *existing = m;
+        } else {
             out.push(m);
         }
     }

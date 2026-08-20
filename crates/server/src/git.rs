@@ -274,7 +274,7 @@ impl GitRunner {
         // 重命名检测关闭：重命名显示为删除+新增（`git diff --no-renames` 语义）。
         let mut paths = BTreeSet::<BString>::new();
         let status = match repo.status(gix::progress::Discard).map(|s| {
-            s.untracked_files(gix::status::UntrackedFiles::None)
+            s.untracked_files(gix::status::UntrackedFiles::Files)
                 .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
                 .index_worktree_rewrites(None)
         }) {
@@ -300,7 +300,26 @@ impl GitRunner {
                 )) => {
                     paths.insert(rela_path);
                 }
-                Ok(_) => {}
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::DirectoryContents { entry, .. },
+                )) => {
+                    if matches!(
+                        entry.disk_kind,
+                        Some(gix::dir::entry::Kind::File | gix::dir::entry::Kind::Symlink)
+                    ) {
+                        paths.insert(entry.rela_path);
+                    }
+                }
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::Rewrite { dirwalk_entry, .. },
+                )) => {
+                    if matches!(
+                        dirwalk_entry.disk_kind,
+                        Some(gix::dir::entry::Kind::File | gix::dir::entry::Kind::Symlink)
+                    ) {
+                        paths.insert(dirwalk_entry.rela_path);
+                    }
+                }
                 Err(_) => return empty(),
             }
         }
@@ -532,6 +551,20 @@ mod tests {
             .files
             .iter()
             .any(|f| f.path == "new.txt" && matches!(f.status, GitChangeStatus::Added)));
+    }
+
+    #[test]
+    fn diff_includes_untracked_files() {
+        let dir = init_repo();
+        std::fs::write(dir.join("untracked.txt"), "not staged\n").unwrap();
+        let result = GitRunner::new().diff(dir.to_str().unwrap(), None);
+        let file = result
+            .files
+            .iter()
+            .find(|file| file.path == "untracked.txt")
+            .expect("未跟踪文件应出现在 diff 中");
+        assert!(matches!(file.status, GitChangeStatus::Added));
+        assert!(file.patch.contains("not staged"));
     }
 
     #[test]

@@ -103,10 +103,18 @@ impl Handlers {
 
             method::AGENT_SKILLS => {
                 let p: AgentParams = parse(params)?;
-                let skills = match self.manager.agents().driver_for(&p.agent) {
-                    Ok(d) => d.list_skills(),
-                    Err(_) => Vec::new(),
-                };
+                let driver = self
+                    .manager
+                    .agents()
+                    .driver_for(&p.agent)
+                    .map_err(|e| RpcError {
+                        code: server_error::HARNESS_UNAVAILABLE,
+                        message: e,
+                    })?;
+                let skills = driver.list_skills().map_err(|e| RpcError {
+                    code: rpc_error::INTERNAL_ERROR,
+                    message: e,
+                })?;
                 serde_json::to_value(AgentSkillsResult { skills })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }

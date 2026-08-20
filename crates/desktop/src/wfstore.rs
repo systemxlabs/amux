@@ -6,8 +6,12 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-use protocol::{Activity, ContentBlock, HistoryItem};
-use rusqlite::{params, Connection, OptionalExtension};
+#[cfg(test)]
+use protocol::Activity;
+use protocol::{ContentBlock, HistoryItem};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
+use rusqlite::{params, Connection};
 
 use crate::workflow::{ChildSession, OrcMsg, OrcSession};
 

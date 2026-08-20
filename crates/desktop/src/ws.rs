@@ -31,8 +31,8 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     rt()
 }
 
-/// 从连接 URL 查询串解析 token（认证用）。URL 形如 `ws://host:port?token=xxx`。
-/// 无 token 时返回空串（交给 server 判定认证失败）。
+/// 兼容旧测试 URL 的查询串 token 解析。生产连接通过 `connect_with_token`
+/// 显式传入机器配置中的 token，避免把凭据放进 WebSocket URL。
 fn token_from_url(url: &str) -> String {
     url.split('?')
         .nth(1)
@@ -78,13 +78,20 @@ pub struct WsClient {
 }
 
 impl WsClient {
-    /// 连接 server（后台 task 持有连接并处理收发）。url 形如 `ws://host:port?token=xxx`。
-    /// 建连后**先发 `auth`**，之后再处理其它请求。
+    /// 兼容旧调用：从 URL 查询串读取 token。
     pub fn connect(url: String) -> Self {
+        let token = token_from_url(&url);
+        Self::connect_with_token(url, token)
+    }
+
+    /// 连接 server（后台 task 持有连接并处理收发）。
+    /// 认证 token 在首个 JSON-RPC `auth` 请求中发送，不放入 URL。
+    pub fn connect_with_token(url: String, token: String) -> Self {
+        // 建连后**先发 `auth`**，之后再处理其它请求。
         let (req_tx, req_rx) = mpsc::channel::<ClientReq>(64);
         let (notify_tx, _) = broadcast::channel::<Notification>(256);
         let notify_for_task = notify_tx.clone();
-        rt().spawn(run_loop(url, req_rx, notify_for_task));
+        rt().spawn(run_loop(url, token, req_rx, notify_for_task));
         WsClient { req_tx, notify_tx }
     }
 
@@ -114,10 +121,10 @@ impl WsClient {
 
 async fn run_loop(
     url: String,
+    token: String,
     mut req_rx: mpsc::Receiver<ClientReq>,
     notify_tx: broadcast::Sender<Notification>,
 ) {
-    let token = token_from_url(&url);
     let mut attempt: u32 = 0;
     loop {
         let mut connected = false;

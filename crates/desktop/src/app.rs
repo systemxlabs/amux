@@ -32,12 +32,13 @@ use gpui_component::{
     WindowExt, *,
 };
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use protocol::{
     Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
     GitDiffFile, HistoryItem, SessionConfigureParams, SessionIdParams, SessionMeta,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionState, WorkspaceDiffResult,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionState, SkillEntry,
+    WorkspaceDiffResult,
 };
 
 use crate::aggregate::SessionView;
@@ -46,8 +47,8 @@ use crate::config::{
 };
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
-    compose_prompt, history_to_dialog, merge_session_window, parse_at_references, path_attachment,
-    read_path_context, DialogMsg, InputAttachment,
+    compose_prompt, merge_session_window, parse_at_references, path_attachment, read_path_context,
+    DialogMsg, InputAttachment,
 };
 use crate::text::{block_text, one_line, truncate};
 use crate::workflow::{now_ts, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
@@ -101,6 +102,7 @@ enum DiffMode {
 struct MachineView {
     config: MachineConfig,
     client: WsClient,
+    connection_epoch: u64,
     status: String,
     agents: Vec<AgentInfo>,
     sessions: Vec<SessionMeta>,
@@ -122,8 +124,9 @@ impl MachineView {
     fn new(config: MachineConfig) -> Self {
         let url = machine_ws_url(&config);
         MachineView {
-            client: WsClient::connect(url),
+            client: WsClient::connect_with_token(url, config.token.clone()),
             config,
+            connection_epoch: 1,
             status: "连接中…".into(),
             agents: Vec::new(),
             sessions: Vec::new(),
@@ -161,6 +164,35 @@ struct SessionContextMenu {
     title: String,
     x: f32,
     y: f32,
+}
+
+#[derive(Clone, Copy)]
+enum SkillAction {
+    Install,
+    Update,
+    Uninstall,
+}
+
+impl SkillAction {
+    fn prompt(self, skill: &SkillEntry) -> String {
+        let operation = match self {
+            SkillAction::Install => "安装",
+            SkillAction::Update => "更新",
+            SkillAction::Uninstall => "卸载",
+        };
+        format!(
+            "请在当前环境{}技能「{}」。技能说明：{}。完成后报告实际执行结果。",
+            operation, skill.name, skill.description
+        )
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SkillAction::Install => "安装",
+            SkillAction::Update => "更新",
+            SkillAction::Uninstall => "卸载",
+        }
+    }
 }
 
 pub struct AmuxApp {
@@ -518,22 +550,19 @@ impl AmuxApp {
                 let next_before = res.get("next_before").and_then(|v| v.as_u64());
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
-                        let (list, hm, nb) = merge_session_window(
-                            &m.sessions,
-                            sessions.clone(),
-                            has_more,
-                            next_before,
-                        );
+                        let (list, hm, nb) = if has_more {
+                            merge_session_window(
+                                &m.sessions,
+                                sessions.clone(),
+                                has_more,
+                                next_before,
+                            )
+                        } else {
+                            (sessions.clone(), false, None)
+                        };
                         m.sessions = list;
                         m.sessions_has_more = hm;
                         m.sessions_next_before = nb;
-                        // 用最新 meta 合并状态
-                        for s in sessions {
-                            if let Some(cur) = m.sessions.iter_mut().find(|c| c.id == s.id) {
-                                cur.state = s.state;
-                                cur.title = s.title;
-                            }
-                        }
                         crate::logic::sort_sessions_recent(&mut m.sessions);
                     }
                     cx.notify();
@@ -611,15 +640,20 @@ impl AmuxApp {
                     .cloned()
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
-                let dialog = history_to_dialog(&items);
+                let has_more = res
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let next_before = res
+                    .get("next_before")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
-                            v.set_history(&items);
+                            v.set_history_page(&items, has_more, next_before);
                         }
                     }
-                    this.dialog_scroll.scroll_to_bottom();
-                    let _ = dialog;
                     cx.notify();
                 });
             }
@@ -657,11 +691,123 @@ impl AmuxApp {
                     .cloned()
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
+                let has_more = res
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let next_before = res
+                    .get("next_before")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
-                            v.set_activities(acts);
+                            v.set_activities_page(acts, has_more, next_before);
                         }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn load_more_activities(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+            return;
+        };
+        let Some(view) = self.machines.get(machine).and_then(|m| m.views.get(&id)) else {
+            return;
+        };
+        let Some(before) = view.activities_next_before else {
+            return;
+        };
+        let client = self.machines[machine].client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionPageParams {
+                session_id: id.clone(),
+                limit: Some(PAGE_LIMIT),
+                before: Some(before),
+            };
+            if let Ok(res) = client
+                .request(
+                    protocol::method::SESSION_ACTIVITIES,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
+                .await
+            {
+                let acts: Vec<Activity> = res
+                    .get("activities")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                let has_more = res
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let next_before = res
+                    .get("next_before")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    if let Some(view) = this
+                        .machines
+                        .get_mut(machine)
+                        .and_then(|m| m.views.get_mut(&id))
+                    {
+                        view.prepend_activities_page(acts, has_more, next_before);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn load_more_history(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+            return;
+        };
+        let Some(view) = self.machines.get(machine).and_then(|m| m.views.get(&id)) else {
+            return;
+        };
+        let Some(before) = view.history_next_before else {
+            return;
+        };
+        let client = self.machines[machine].client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionPageParams {
+                session_id: id.clone(),
+                limit: Some(PAGE_LIMIT),
+                before: Some(before),
+            };
+            if let Ok(res) = client
+                .request(
+                    protocol::method::SESSION_HISTORY,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
+                .await
+            {
+                let items: Vec<HistoryItem> = res
+                    .get("items")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                let has_more = res
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let next_before = res
+                    .get("next_before")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    if let Some(view) = this
+                        .machines
+                        .get_mut(machine)
+                        .and_then(|m| m.views.get_mut(&id))
+                    {
+                        view.prepend_history_page(&items, has_more, next_before);
                     }
                     cx.notify();
                 });
@@ -758,6 +904,8 @@ impl AmuxApp {
         // 会话列表 10s（每机器）
         for i in 0..n {
             let client = self.machines[i].client.clone();
+            let machine_name = self.machines[i].config.name.clone();
+            let epoch = self.machines[i].connection_epoch;
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
                 let snapshot = client
                     .request(
@@ -768,6 +916,11 @@ impl AmuxApp {
                     .ok();
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(res) = &snapshot {
+                        let Some(i) = this.machines.iter().position(|m| {
+                            m.config.name == machine_name && m.connection_epoch == epoch
+                        }) else {
+                            return;
+                        };
                         if let Some(m) = this.machines.get_mut(i) {
                             let sessions: Vec<SessionMeta> = res
                                 .get("sessions")
@@ -779,24 +932,15 @@ impl AmuxApp {
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);
                             let next_before = res.get("next_before").and_then(|v| v.as_u64());
-                            if next_before.is_some() {
-                                let (list, hm, nb) = merge_session_window(
-                                    &m.sessions,
-                                    sessions.clone(),
-                                    has_more,
-                                    next_before,
-                                );
-                                m.sessions = list;
-                                m.sessions_has_more = hm;
-                                m.sessions_next_before = nb;
-                                for s in sessions {
-                                    if let Some(cur) = m.sessions.iter_mut().find(|c| c.id == s.id)
-                                    {
-                                        cur.state = s.state;
-                                    }
-                                }
-                                crate::logic::sort_sessions_recent(&mut m.sessions);
-                            }
+                            let (list, hm, nb) = if has_more {
+                                merge_session_window(&m.sessions, sessions, has_more, next_before)
+                            } else {
+                                (sessions, false, None)
+                            };
+                            m.sessions = list;
+                            m.sessions_has_more = hm;
+                            m.sessions_next_before = nb;
+                            crate::logic::sort_sessions_recent(&mut m.sessions);
                         }
                     }
                     cx.notify();
@@ -1068,6 +1212,11 @@ impl AmuxApp {
     }
 
     fn cancel_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Selected::Workflow { engine }) = self.selected.clone() {
+            self.cancel_workflow(window, cx, engine);
+            cx.notify();
+            return;
+        }
         let Some(Selected::Session { machine, id }) = self.selected.clone() else {
             return;
         };
@@ -1234,7 +1383,14 @@ impl AmuxApp {
     fn create_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let goal = self.workflow_input.read(cx).value().to_string();
         let template = self.workflow_template.take();
-        let description = goal.trim().to_string();
+        let description = if goal.trim().is_empty() {
+            template
+                .as_ref()
+                .map(|t| t.name.clone())
+                .unwrap_or_default()
+        } else {
+            goal.trim().to_string()
+        };
         if template.is_none() && description.is_empty() {
             self.workflow_error = Some("请先用自然语言描述执行计划".into());
             cx.notify();
@@ -1283,7 +1439,7 @@ impl AmuxApp {
         let session_dir = self.session_dir.clone();
         self.workflows.push(engine);
         self.selected = Some(Selected::Workflow { engine: wi });
-        if !clean.trim().is_empty() {
+        if !clean.trim().is_empty() || preamble.as_deref().is_some_and(|p| !p.trim().is_empty()) {
             if let Some(wf) = self.workflows.get_mut(wi) {
                 wf.begin_busy();
             }
@@ -1416,7 +1572,11 @@ impl AmuxApp {
         for (machine, sid) in children {
             if let Some(m) = self.machine(machine) {
                 let client = m.client.clone();
-                self.delete_child(client, sid);
+                self.delete_child(client, sid.clone());
+            }
+            if let Some(m) = self.machine_mut(machine) {
+                m.sessions.retain(|session| session.id != sid);
+                m.views.remove(&sid);
             }
         }
         if let Some(wf) = self.workflows.get(idx) {
@@ -1608,6 +1768,81 @@ impl AmuxApp {
                     m.skills_agent = Some(a);
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 通过普通会话执行技能操作，保留完整会话供用户继续干预。
+    fn manage_skill_on_agent(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        agent: String,
+        skill: SkillEntry,
+        action: SkillAction,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let cwd = self
+            .store
+            .recent_workspaces_for_machine(&machine_name)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| ".".into());
+        let operation_prompt = action.prompt(&skill);
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let result = async {
+                let session = client
+                    .request(
+                        protocol::method::SESSION_NEW,
+                        Some(
+                            serde_json::to_value(SessionNewParams { agent, cwd })
+                                .map_err(|e| e.to_string())?,
+                        ),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let session_id = session
+                    .get("session")
+                    .and_then(|s| s.get("id"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "创建技能操作会话响应缺少 session.id".to_string())?
+                    .to_string();
+                client
+                    .request(
+                        protocol::method::SESSION_PROMPT,
+                        Some(
+                            serde_json::to_value(SessionPromptParams {
+                                session_id: session_id.clone(),
+                                input: vec![ContentBlock::Text {
+                                    text: operation_prompt,
+                                }],
+                            })
+                            .map_err(|e| e.to_string())?,
+                        ),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<String, String>(session_id)
+            }
+            .await;
+
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(session_id) => {
+                    this.refresh_sessions(machine, window, cx);
+                    this.open_session(window, cx, machine, session_id);
+                }
+                Err(error) => {
+                    if let Some(m) = this.machines.get_mut(machine) {
+                        m.status = format!("技能{}失败：{error}", action.label());
+                    }
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -2570,7 +2805,7 @@ impl AmuxApp {
 
     // ---- 对话 / 活动 / 输入 ----
 
-    fn render_dialog(&self, _window: &mut Window, _cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let dialog: Vec<DialogMsg> = match &self.selected {
             Some(Selected::Session { machine, id }) => self
                 .machine(*machine)
@@ -2606,57 +2841,93 @@ impl AmuxApp {
             .iter()
             .enumerate()
             .map(|(i, item)| match item {
-                DialogMsg::UserMessage { content, .. } => div().id(("row", i)).w_full().child(
-                    div()
-                        .ml_auto()
-                        .max_w(px(720.))
-                        .p_3()
-                        .v_flex()
-                        .gap_1()
-                        .rounded_md()
-                        .bg(rgb(0x3b82f6))
-                        .shadow_sm()
-                        .child(
-                            Label::new("我")
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xffffff)),
-                        )
-                        .child(
-                            TextView::markdown(format!("umd-{i}"), block_text(content))
-                                .selectable(true)
-                                .text_color(rgb(0xffffff))
-                                .style(TextViewStyle::default().inline_code(HighlightStyle {
-                                    background_color: Some(rgba(0x1e40af80).into()),
-                                    ..Default::default()
-                                })),
-                        ),
-                ),
-                DialogMsg::AgentMessage { content, .. } => div().id(("row", i)).w_full().child(
-                    div()
-                        .max_w(px(720.))
-                        .p_3()
-                        .v_flex()
-                        .gap_1()
-                        .rounded_md()
-                        .bg(rgb(0xffffff))
-                        .border_1()
-                        .border_color(rgb(0xe5e7eb))
-                        .shadow_sm()
-                        .child(
-                            Label::new(agent_label.clone())
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0x6b7280)),
-                        )
-                        .child(
-                            TextView::markdown(format!("amd-{i}"), block_text(content))
-                                .selectable(true),
-                        ),
-                ),
+                DialogMsg::UserMessage { content, timestamp } => {
+                    div().id(("row", i)).w_full().child(
+                        div()
+                            .ml_auto()
+                            .max_w(px(720.))
+                            .p_3()
+                            .v_flex()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(rgb(0x3b82f6))
+                            .shadow_sm()
+                            .child(
+                                Label::new("我")
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0xffffff)),
+                            )
+                            .child(
+                                Label::new(format_timestamp(*timestamp))
+                                    .text_xs()
+                                    .text_color(rgb(0xdbeafe)),
+                            )
+                            .child(
+                                TextView::markdown(format!("umd-{i}"), block_text(content))
+                                    .selectable(true)
+                                    .text_color(rgb(0xffffff))
+                                    .style(TextViewStyle::default().inline_code(HighlightStyle {
+                                        background_color: Some(rgba(0x1e40af80).into()),
+                                        ..Default::default()
+                                    })),
+                            ),
+                    )
+                }
+                DialogMsg::AgentMessage { content, timestamp } => {
+                    div().id(("row", i)).w_full().child(
+                        div()
+                            .max_w(px(720.))
+                            .p_3()
+                            .v_flex()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(rgb(0xffffff))
+                            .border_1()
+                            .border_color(rgb(0xe5e7eb))
+                            .shadow_sm()
+                            .child(
+                                Label::new(agent_label.clone())
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x6b7280)),
+                            )
+                            .child(
+                                Label::new(format_timestamp(*timestamp))
+                                    .text_xs()
+                                    .text_color(rgb(0x9ca3af)),
+                            )
+                            .child(
+                                TextView::markdown(format!("amd-{i}"), block_text(content))
+                                    .selectable(true),
+                            ),
+                    )
+                }
             })
             .collect::<Vec<_>>();
-        if rows.is_empty() {
+        let history_has_more = match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| m.views.get(id))
+                .map(|v| v.history_has_more)
+                .unwrap_or(false),
+            _ => false,
+        };
+        let mut content = Vec::new();
+        if history_has_more {
+            content.push(
+                Button::new("load-more-history")
+                    .small()
+                    .ghost()
+                    .label("加载更早消息")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.load_more_history(window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        content.extend(rows.into_iter().map(|r| r.into_any_element()));
+        if content.is_empty() {
             div()
                 .id("dialog-empty")
                 .flex_1()
@@ -2673,7 +2944,7 @@ impl AmuxApp {
                 .p_2()
                 .overflow_y_scroll()
                 .track_scroll(&self.dialog_scroll)
-                .children(rows.into_iter().map(|r| r.into_any_element()))
+                .children(content)
                 .into_any()
         }
     }
@@ -3086,10 +3357,12 @@ impl AmuxApp {
     ) -> gpui::AnyElement {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut live: Option<Activity> = None;
+        let mut activities_has_more = false;
         match &self.selected {
             Some(Selected::Session { machine, id }) => {
                 let view = self.machine(*machine).and_then(|m| m.views.get(id));
                 let activities = view.map(|v| v.activities.clone()).unwrap_or_default();
+                activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
                 rows = activities
                     .iter()
                     .enumerate()
@@ -3123,18 +3396,21 @@ impl AmuxApp {
             _ => {}
         }
         let total = rows.len();
-        let start = total.saturating_sub(self.activities_limit);
-        let has_more = start > 0;
+        let start = if activities_has_more {
+            0
+        } else {
+            total.saturating_sub(self.activities_limit)
+        };
+        let has_more = activities_has_more || start > 0;
         let mut children: Vec<gpui::AnyElement> = Vec::new();
         if has_more {
             children.push(
                 Button::new("load-more-activities")
                     .small()
                     .ghost()
-                    .label(format!("加载更早活动（还有 {start} 条）"))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.activities_limit += 100;
-                        cx.notify();
+                    .label("加载更早活动")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.load_more_activities(window, cx);
                     }))
                     .into_any_element(),
             );
@@ -3940,50 +4216,99 @@ impl AmuxApp {
                 let name_edit = name.clone();
                 let name_del = name.clone();
                 let desc_edit = desc.clone();
+                let mut target_buttons = Vec::new();
+                for (machine_idx, machine) in self.machines.iter().enumerate() {
+                    for (agent_idx, agent_info) in machine.agents.iter().enumerate() {
+                        for action in [
+                            SkillAction::Install,
+                            SkillAction::Update,
+                            SkillAction::Uninstall,
+                        ] {
+                            let skill = s.clone();
+                            let agent = agent_info.name.clone();
+                            let label = format!(
+                                "{} {}@{}",
+                                action.label(),
+                                agent_info.name,
+                                machine.config.name
+                            );
+                            target_buttons.push(
+                                Button::new(format!(
+                                    "skill-action-{machine_idx}-{agent_idx}-{}-{}",
+                                    action.label(),
+                                    name
+                                ))
+                                .small()
+                                .label(label)
+                                .on_click(cx.listener(
+                                    move |this, _ev, window, cx| {
+                                        this.manage_skill_on_agent(
+                                            window,
+                                            cx,
+                                            machine_idx,
+                                            agent.clone(),
+                                            skill.clone(),
+                                            action,
+                                        );
+                                    },
+                                )),
+                            );
+                        }
+                    }
+                }
                 items.push(
-                    h_flex()
+                    v_flex()
                         .gap_2()
-                        .items_center()
                         .p_2()
                         .bg(rgb(0xf7f8fa))
                         .rounded_md()
                         .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Label::new(&name).text_sm().font_weight(FontWeight::MEDIUM))
+                            h_flex()
+                                .gap_2()
+                                .items_center()
                                 .child(
-                                    Label::new(&desc)
-                                        .text_xs()
-                                        .text_color(rgb(0x6b7280))
-                                        .line_clamp(2),
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            Label::new(&name)
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM),
+                                        )
+                                        .child(
+                                            Label::new(&desc)
+                                                .text_xs()
+                                                .text_color(rgb(0x6b7280))
+                                                .line_clamp(2),
+                                        ),
+                                )
+                                .child(
+                                    Button::new(format!("skill-edit-{name}"))
+                                        .small()
+                                        .label("编辑")
+                                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                                            this.skill_edit_target = Some(name_edit.clone());
+                                            let desc = desc_edit.clone();
+                                            this.skill_name_input.update(cx, |s, cx| {
+                                                s.set_value(name_edit.clone(), window, cx);
+                                            });
+                                            this.skill_desc_input.update(cx, |s, cx| {
+                                                s.set_value(desc, window, cx);
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new(format!("skill-del-{name}"))
+                                        .small()
+                                        .label("删除")
+                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                            this.store.remove_skill(&name_del);
+                                            cx.notify();
+                                        })),
                                 ),
                         )
-                        .child(
-                            Button::new(format!("skill-edit-{name}"))
-                                .small()
-                                .label("编辑")
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    this.skill_edit_target = Some(name_edit.clone());
-                                    let desc = desc_edit.clone();
-                                    this.skill_name_input.update(cx, |s, cx| {
-                                        s.set_value(name_edit.clone(), window, cx);
-                                    });
-                                    this.skill_desc_input.update(cx, |s, cx| {
-                                        s.set_value(desc, window, cx);
-                                    });
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("skill-del-{name}"))
-                                .small()
-                                .label("删除")
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                    this.store.remove_skill(&name_del);
-                                    cx.notify();
-                                })),
-                        )
+                        .child(h_flex().gap_1().flex_wrap().children(target_buttons))
                         .into_any_element(),
                 );
             }
@@ -4146,8 +4471,9 @@ impl AmuxApp {
             return;
         }
         let cfg = self.machines[idx].config.clone();
-        let client = WsClient::connect(machine_ws_url(&cfg));
+        let client = WsClient::connect_with_token(machine_ws_url(&cfg), cfg.token.clone());
         self.machines[idx].client = client.clone();
+        self.machines[idx].connection_epoch = self.machines[idx].connection_epoch.saturating_add(1);
         self.machines[idx].status = "连接中…".into();
         self.machines[idx].views.clear();
         let t = self.spawn_machine_tasks(window, cx, idx, client);
@@ -4230,4 +4556,15 @@ async fn run_engine_on_tokio<T: Send + 'static>(
         let _ = tx.send(fut.await);
     });
     rx.await.ok()
+}
+
+fn format_timestamp(timestamp_ms: u64) -> String {
+    let seconds = timestamp_ms / 1_000;
+    let day_seconds = seconds % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        day_seconds / 3_600,
+        (day_seconds % 3_600) / 60,
+        day_seconds % 60
+    )
 }
