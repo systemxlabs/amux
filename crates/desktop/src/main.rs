@@ -9,6 +9,7 @@ mod config;
 mod display;
 mod logic;
 mod text;
+mod theme;
 mod wfstore;
 mod workflow;
 mod ws;
@@ -55,10 +56,21 @@ fn main() {
     let app = gpui_platform::application().with_assets(Assets);
     app.run(move |cx| {
         gpui_component::init(cx);
-        Theme::change(ThemeMode::Light, None, cx);
+        theme::sync_appearance(None, cx);
         cx.spawn(async move |cx| {
-            let window_options = WindowOptions::default();
+            let window_options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("amux".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(Point {
+                        x: px(12.0),
+                        y: px(10.0),
+                    }),
+                }),
+                ..Default::default()
+            };
             cx.open_window(window_options, |window, cx| {
+                theme::sync_appearance(Some(window), cx);
                 let view = cx.new(|cx| AmuxApp::new(store.clone(), window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })

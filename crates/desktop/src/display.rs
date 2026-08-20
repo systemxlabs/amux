@@ -18,34 +18,44 @@ pub fn activity_display(a: &Activity) -> (String, String) {
 }
 
 /// 机器状态徽章。
-pub fn machine_status_badge(status: &str) -> impl IntoElement {
+pub fn machine_status_badge(
+    status: &str,
+    success: Hsla,
+    danger: Hsla,
+    warning: Hsla,
+) -> impl IntoElement {
     Label::new(status.to_string())
         .text_xs()
-        .text_color(color_for_status(status))
+        .text_color(color_for_status(status, success, danger, warning))
 }
 
-fn color_for_status(status: &str) -> Hsla {
+fn color_for_status(status: &str, success: Hsla, danger: Hsla, warning: Hsla) -> Hsla {
     if status.starts_with("已连接") || status.starts_with("认证成功") {
-        rgb(0x16a34a).into()
+        success
     } else if status.starts_with("连接失败") || status.starts_with("认证失败") {
-        rgb(0xb91c1c).into()
+        danger
     } else {
-        rgb(0xd97706).into()
+        warning
     }
 }
 
 /// 信息行：灰标签 + 值。
-pub fn info_row(label: &str, value: &str) -> impl IntoElement {
+pub fn info_row(
+    label: &str,
+    value: &str,
+    muted_foreground: Hsla,
+    foreground: Hsla,
+) -> impl IntoElement {
     h_flex()
         .gap_2()
         .child(
             Label::new(format!("{}：", label))
                 .text_sm()
-                .text_color(rgb(0x6b7280)),
+                .text_color(muted_foreground),
         )
         .child(
             Label::new(value.to_string())
                 .text_sm()
-                .text_color(rgb(0x111827)),
+                .text_color(foreground),
         )
 }
