@@ -97,7 +97,7 @@ Server 作为 ACP client 与 ACP servers 通信
 - 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送实际指令时，才向 ACP Server 发送 `session/new` 请求创建 agent 侧会话
 - 惰性恢复已有会话：等待用户往已有会话发送指令时，才向 ACP Server 发送 `session/resume` 请求恢复 agent 侧已有会话
 - 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
-- 删除会话：当用户删除会话时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
+- 删除会话：当用户删除会话时，如果会话已打开则，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
 
 ### 普通会话存储
 
