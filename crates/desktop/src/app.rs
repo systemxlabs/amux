@@ -27,6 +27,7 @@ use gpui_component::{
     dialog::DialogButtonProps,
     input::{Input, InputState},
     label::Label,
+    radio::RadioGroup,
     spinner::Spinner,
     text::{TextView, TextViewStyle},
     WindowExt, *,
@@ -221,7 +222,7 @@ pub struct AmuxApp {
     skill_desc_input: Entity<InputState>,
     tpl_name_input: Entity<InputState>,
     tpl_desc_input: Entity<InputState>,
-    orch_api_format_input: Entity<InputState>,
+    orch_api_format: String,
     orch_base_input: Entity<InputState>,
     orch_key_input: Entity<InputState>,
     orch_model_input: Entity<InputState>,
@@ -280,9 +281,6 @@ impl AmuxApp {
         let orch_key_input = cx.new(|cx| InputState::new(window, cx).placeholder("API Key"));
         let orch_model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("模型名（如 gpt-4.1）"));
-        let orch_api_format_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("chat_completions | responses | messages")
-        });
         let title_input = cx.new(|cx| InputState::new(window, cx));
 
         let mut app = AmuxApp {
@@ -314,7 +312,7 @@ impl AmuxApp {
             orch_base_input,
             orch_key_input,
             orch_model_input,
-            orch_api_format_input,
+            orch_api_format: "chat_completions".into(),
             orchestrator_form_error: None,
             title_input,
             qc_edit_target: None,
@@ -354,8 +352,7 @@ impl AmuxApp {
 
     fn _setup_orch_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cfg = self.store.orchestrator();
-        self.orch_api_format_input
-            .update(cx, |s, cx| s.set_value(&cfg.api_format, window, cx));
+        self.orch_api_format = cfg.api_format;
         self.orch_base_input
             .update(cx, |s, cx| s.set_value(&cfg.base_url, window, cx));
         self.orch_key_input
@@ -365,12 +362,7 @@ impl AmuxApp {
     }
 
     fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
-        let api_format = self
-            .orch_api_format_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_owned();
+        let api_format = self.orch_api_format.clone();
         let base_url = self.orch_base_input.read(cx).value().trim().to_owned();
         let api_key = self.orch_key_input.read(cx).value().trim().to_owned();
         let model = self.orch_model_input.read(cx).value().trim().to_owned();
@@ -4208,18 +4200,33 @@ impl AmuxApp {
     }
 
     fn render_orchestrator_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let selected_api_format = match self.orch_api_format.as_str() {
+            "chat_completions" => Some(0),
+            "responses" => Some(1),
+            "messages" => Some(2),
+            _ => None,
+        };
+        let api_format_options = RadioGroup::horizontal("orch-api-format")
+            .children(["chat_completions", "responses", "messages"])
+            .selected_index(selected_api_format)
+            .on_click(cx.listener(|this, selected: &usize, _window, cx| {
+                this.orch_api_format = match *selected {
+                    0 => "chat_completions",
+                    1 => "responses",
+                    2 => "messages",
+                    _ => return,
+                }
+                .into();
+                this.orchestrator_form_error = None;
+                cx.notify();
+            }));
         let mut form = v_flex()
             .gap_1()
             .p_3()
             .bg(rgb(0xf7f8fa))
             .rounded_md()
             .child(Label::new("API 格式").text_sm().text_color(rgb(0x6b7280)))
-            .child(
-                Label::new("支持：chat_completions、responses、messages")
-                    .text_xs()
-                    .text_color(rgb(0x6b7280)),
-            )
-            .child(Input::new(&self.orch_api_format_input))
+            .child(api_format_options)
             .child(Label::new("Base URL").text_sm().text_color(rgb(0x6b7280)))
             .child(Input::new(&self.orch_base_input))
             .child(Label::new("API Key").text_sm().text_color(rgb(0x6b7280)))
