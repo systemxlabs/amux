@@ -1662,14 +1662,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m]);
+        let mut engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m]);
         let id = engine.session.id.clone();
+        engine.record_user("立即保存");
         engine.persist(&dir).unwrap();
 
         let sessions = WorkflowEngine::load_all(&dir);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
         assert_eq!(sessions[0].title, "计划A");
+        assert!(sessions[0]
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::User { text } if text == "立即保存")));
 
         let backend2 = FakeBackend::new(vec![Decision {
             summary: "恢复后推进".into(),

@@ -1218,19 +1218,26 @@ impl AmuxApp {
                 .detach();
             }
             Selected::Workflow { engine } => {
-                let should_advance = self
-                    .workflows
-                    .get_mut(engine)
-                    .map(|wf| wf.record_user(&clean_text))
-                    .unwrap_or(false);
-                if should_advance {
-                    if let Some(wf) = self.workflows.get_mut(engine) {
+                let session_dir = self.session_dir.clone();
+                let should_advance = if let Some(wf) = self.workflows.get_mut(engine) {
+                    let should_advance = wf.record_user(&clean_text);
+                    if should_advance {
                         wf.begin_busy();
                     }
+                    if let Err(e) = wf.persist(&session_dir) {
+                        protocol::log::error(
+                            "gui.workflow",
+                            format!("工作流用户消息持久化失败 {}: {e}", wf.session.id),
+                        );
+                    }
+                    should_advance
+                } else {
+                    false
+                };
+                if should_advance {
                     let mut wf = self.workflows[engine].clone();
                     wf.start_advance();
                     let wf_id = wf.session.id.clone();
-                    let session_dir = self.session_dir.clone();
                     let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                         let result = run_engine_on_tokio(async move {
                             let _ = wf.advance().await;
@@ -1531,10 +1538,22 @@ impl AmuxApp {
         let session_dir = self.session_dir.clone();
         self.workflows.push(engine);
         self.selected = Some(Selected::Workflow { engine: wi });
-        if !clean.trim().is_empty() || preamble.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        let should_advance =
+            !clean.trim().is_empty() || preamble.as_deref().is_some_and(|p| !p.trim().is_empty());
+        if should_advance {
             if let Some(wf) = self.workflows.get_mut(wi) {
                 wf.begin_busy();
             }
+        }
+        if let Some(wf) = self.workflows.get(wi) {
+            if let Err(e) = wf.persist(&session_dir) {
+                protocol::log::error(
+                    "gui.workflow",
+                    format!("工作流创建后持久化失败 {}: {e}", wf.session.id),
+                );
+            }
+        }
+        if should_advance {
             let mut wf = self.workflows[wi].clone();
             wf.start_advance();
             let wf_id = wf.session.id.clone();
