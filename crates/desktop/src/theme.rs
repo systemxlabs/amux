@@ -87,7 +87,7 @@ pub fn apply(cx: &mut App) {
         theme.foreground = color(0x1d1d1f);
         theme.border = color(0xe3e3df);
         theme.ring = color(0x0a84ff);
-        theme.sidebar = color(0xedeDEA);
+        theme.sidebar = color(0xededea);
         theme.sidebar_foreground = color(0x41413d);
         theme.sidebar_border = color(0xe1e1dd);
         theme.sidebar_accent = color(0xdededa);
@@ -95,7 +95,7 @@ pub fn apply(cx: &mut App) {
         theme.sidebar_primary = color(0x0a84ff);
         theme.sidebar_primary_foreground = color(0xffffff);
         theme.list.active_highlight = true;
-        theme.list_hover = color(0xedeDEA);
+        theme.list_hover = color(0xededea);
         theme.list_active = color(0xe3ebf6);
         theme.list_active_border = color(0xe3ebf6);
         theme.list_even = color(0xf7f7f5);
@@ -119,8 +119,8 @@ pub fn apply(cx: &mut App) {
         theme.input = color(0xdadad6);
         theme.selection = translucent(0x0a7aff, 0.22);
         theme.caret = color(0x0a84ff);
-        theme.title_bar = color(0xedeDEA);
-        theme.title_bar_border = color(0xedeDEA);
+        theme.title_bar = color(0xededea);
+        theme.title_bar_border = color(0xededea);
         theme.scrollbar_thumb = color(0xd2d2cf);
         theme.scrollbar_thumb_hover = color(0xbfbfbc);
         theme.link = color(0x0a84ff);

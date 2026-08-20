@@ -230,21 +230,31 @@ impl AgentRegistry {
         args: Vec<String>,
         env: Vec<(String, String)>,
     ) {
+        *self
+            .configured_spec
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）") = Some(DiscoveredAgent {
+            name,
+            bin,
+            args,
+            env,
+        });
+    }
+
+    /// 记录显式配置的 ACP agent 启动失败。即使驱动未创建成功，也要在
+    /// `agent.list` 中保留该 agent 的不可用状态，并允许后续 `agent.restart` 重试。
+    pub fn mark_configured_unavailable(&self, name: &str) {
         if self
-            .configured
+            .configured_spec
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
             .as_ref()
-            .map(|(configured_name, _)| configured_name == &name)
-            .unwrap_or(false)
+            .is_some_and(|spec| spec.name == name)
         {
-            *self
-                .configured_spec
+            self.unavailable
                 .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）") = Some(DiscoveredAgent {
-                name,
-                bin,
-                args,
-                env,
-            });
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .insert(name.to_string());
         }
     }
 
@@ -263,10 +273,23 @@ impl AgentRegistry {
         if let Some((name, _)) = &self.configured {
             out.push(AgentInfo {
                 name: name.clone(),
-                available: true,
+                available: !unavailable.contains(name),
+            });
+        } else if let Some(spec) = self
+            .configured_spec
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .as_ref()
+        {
+            out.push(AgentInfo {
+                name: spec.name.clone(),
+                available: !unavailable.contains(&spec.name),
             });
         }
         for d in discovered.iter() {
+            if out.iter().any(|agent| agent.name == d.name) {
+                continue;
+            }
             out.push(AgentInfo {
                 name: d.name.clone(),
                 available: !unavailable.contains(&d.name),
@@ -283,6 +306,15 @@ impl AgentRegistry {
         if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）")
         {
             return Ok(stub.clone());
+        }
+        // 不可用标记必须优先于显式驱动缓存：重启失败后，旧驱动也不能继续被新请求使用。
+        if self
+            .unavailable
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .contains(harness)
+        {
+            return Err(format!("agent 不可用（启动时拉起失败）: {harness}"));
         }
         if let Some((name, _)) = &self.configured {
             if name == harness {
@@ -302,14 +334,15 @@ impl AgentRegistry {
                     .clone());
             }
         }
-        // 启动时拉起失败 = 不可用：直接返回明确错误，不尝试再次拉起
-        if self
-            .unavailable
+        if let Some(spec) = self
+            .configured_spec
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
-            .contains(harness)
+            .as_ref()
+            .filter(|spec| spec.name == harness)
+            .cloned()
         {
-            return Err(format!("agent 不可用（启动时拉起失败）: {harness}"));
+            return self.spawn_and_cache(&spec);
         }
         self.refresh_discovery();
         let found = self
@@ -401,40 +434,58 @@ impl AgentRegistry {
     /// 用户可从应用侧重启某一 ACP Server）：移除不可用标记 → 重新发现 → 尝试拉起；
     /// 再次失败则重新标记不可用。
     pub fn restart_agent(&self, harness: &str) -> Result<(), String> {
-        if self
+        let configured_name = self
             .configured
             .as_ref()
             .map(|(name, _)| name == harness)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let explicit_spec = self
+            .configured_spec
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .as_ref()
+            .filter(|spec| spec.name == harness)
+            .cloned();
+        if configured_name || explicit_spec.is_some() {
             let spec = self
                 .configured_spec
                 .lock()
                 .expect("Mutex 中毒（临界区内不应 panic）")
                 .clone()
                 .ok_or_else(|| format!("显式 agent 缺少重启配置: {harness}"))?;
-            let old = self
-                .configured_override
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .take()
-                .unwrap_or_else(|| self.configured.as_ref().expect("配置驱动不存在").1.clone());
             let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
             let driver = match AcpAgentDriver::spawn(&spec.bin, &args, &spec.env) {
                 Ok(driver) => driver,
                 Err(e) => {
-                    *self
-                        .configured_override
+                    self.unavailable
                         .lock()
-                        .expect("Mutex 中毒（临界区内不应 panic）") = Some(old);
+                        .expect("Mutex 中毒（临界区内不应 panic）")
+                        .insert(harness.to_string());
                     return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
                 }
             };
-            old.shutdown();
-            *self
-                .configured_override
+            self.unavailable
                 .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）") = Some(Arc::new(driver));
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .remove(harness);
+            if configured_name {
+                let old = self
+                    .configured_override
+                    .lock()
+                    .expect("Mutex 中毒（临界区内不应 panic）")
+                    .take()
+                    .unwrap_or_else(|| self.configured.as_ref().expect("配置驱动不存在").1.clone());
+                old.shutdown();
+                *self
+                    .configured_override
+                    .lock()
+                    .expect("Mutex 中毒（临界区内不应 panic）") = Some(Arc::new(driver));
+            } else {
+                self.spawned
+                    .lock()
+                    .expect("Mutex 中毒（临界区内不应 panic）")
+                    .insert(harness.to_string(), Arc::new(driver));
+            }
             protocol::log::info(
                 "server.launch",
                 format!("手动重启成功：{}（agent={}）", spec.bin, harness),
@@ -1715,6 +1766,36 @@ mod tests {
                 .expect("Mutex 中毒（临界区内不应 panic）")
                 .contains_key("broken"),
             "不可用 agent 不应被再次拉起"
+        );
+    }
+
+    #[test]
+    fn configured_launch_failure_remains_visible_and_restartable() {
+        let reg = test_registry(Vec::new(), false, true, None);
+        reg.set_configured_spec(
+            "broken".into(),
+            "/nonexistent/bin/definitely-not-here".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        reg.mark_configured_unavailable("broken");
+
+        let info = reg
+            .list_agents()
+            .into_iter()
+            .find(|agent| agent.name == "broken")
+            .expect("显式配置的失败 agent 应保留在列表");
+        assert!(!info.available);
+        let error = reg
+            .restart_agent("broken")
+            .expect_err("重启不存在的 agent 应失败");
+        assert!(error.contains("失败"));
+        assert!(
+            !reg.list_agents()
+                .into_iter()
+                .find(|agent| agent.name == "broken")
+                .expect("失败 agent 应仍在列表")
+                .available
         );
     }
 

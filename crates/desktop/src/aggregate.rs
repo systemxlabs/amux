@@ -56,7 +56,7 @@ impl SessionView {
             }
             self.dialog.remove(0);
         }
-        head.extend(self.dialog.drain(..));
+        head.append(&mut self.dialog);
         self.dialog = head;
     }
 
@@ -88,7 +88,7 @@ impl SessionView {
             return;
         }
         let mut head = earlier;
-        head.extend(self.activities.drain(..));
+        head.append(&mut self.activities);
         self.activities = head;
     }
 

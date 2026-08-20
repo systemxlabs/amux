@@ -62,9 +62,13 @@ async fn main() {
         protocol::log::error("server.startup", format!("创建数据目录失败: {e}"));
         std::process::exit(1);
     }
+    let configured_failed = cfg.agent_bin.is_some() && configured.is_none();
     let agents = Arc::new(AgentRegistry::new(configured));
     if let (Some(name), Some(bin)) = (configured_name, cfg.agent_bin.clone()) {
-        agents.set_configured_spec(name, bin, cfg.agent_args.clone(), Vec::new());
+        agents.set_configured_spec(name.clone(), bin, cfg.agent_args.clone(), Vec::new());
+        if configured_failed {
+            agents.mark_configured_unavailable(&name);
+        }
     }
 
     // 启动拉起（docs/DESIGN.md §4.1/§7.3）：server 启动时发现本机 agent 并直接拉起。

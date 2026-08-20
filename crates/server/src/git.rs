@@ -511,9 +511,13 @@ impl GitRunner {
             };
         }
         if let Some(target) = path {
+            let target = match validate_restore_path(cwd, target) {
+                Ok(target) => target,
+                Err(error) => return error,
+            };
             // untracked：从未提交，revert = 删除工作区文件
-            if self.is_untracked(cwd, target) {
-                return match std::fs::remove_file(std::path::Path::new(cwd).join(target)) {
+            if self.is_untracked(cwd, &target) {
+                return match std::fs::remove_file(std::path::Path::new(cwd).join(&target)) {
                     Ok(_) => OpResult {
                         ok: true,
                         message: None,
@@ -524,7 +528,7 @@ impl GitRunner {
                     },
                 };
             }
-            return match run(cwd, &["restore", "--staged", "--worktree", "--", target]) {
+            return match run(cwd, &["restore", "--staged", "--worktree", "--", &target]) {
                 Ok(_) => OpResult {
                     ok: true,
                     message: None,
@@ -583,6 +587,49 @@ impl GitRunner {
             .unwrap_or(false);
         !in_index
     }
+}
+
+fn validate_restore_path(cwd: &str, target: &str) -> Result<String, OpResult> {
+    let root = match canonical_workspace_root(cwd) {
+        Ok(root) => root,
+        Err(message) => {
+            return Err(OpResult {
+                ok: false,
+                message: Some(message),
+            })
+        }
+    };
+    let relative = Path::new(target);
+    if target.is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(OpResult {
+            ok: false,
+            message: Some("工作目录路径非法".into()),
+        });
+    }
+    let candidate = root.join(relative);
+    if candidate.exists() {
+        let canonical = match candidate.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                return Err(OpResult {
+                    ok: false,
+                    message: Some(format!("工作目录路径不可访问: {error}")),
+                })
+            }
+        };
+        if !canonical.starts_with(&root) {
+            return Err(OpResult {
+                ok: false,
+                message: Some("工作目录路径超出工作目录范围".into()),
+            });
+        }
+    }
+    Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn canonical_workspace_root(cwd: &str) -> Result<PathBuf, String> {
@@ -854,5 +901,22 @@ mod tests {
         let res = GitRunner::new().restore(dir.to_str().unwrap(), Some("scratch.txt"), None);
         assert!(res.ok, "untracked revert 失败: {:?}", res.message);
         assert!(!dir.join("scratch.txt").exists(), "untracked 应被删除");
+    }
+
+    #[test]
+    fn restore_rejects_paths_outside_workspace() {
+        let dir = init_repo();
+        let outside = dir.parent().unwrap().join("amux-restore-outside.txt");
+        std::fs::write(&outside, "must remain").unwrap();
+
+        let result = GitRunner::new().restore(
+            dir.to_str().unwrap(),
+            Some("../amux-restore-outside.txt"),
+            None,
+        );
+        assert!(!result.ok);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "must remain");
+
+        let _ = std::fs::remove_file(outside);
     }
 }

@@ -173,6 +173,9 @@ pub trait OrcBackend: Send + Sync {
     fn take_synced_children(&self) -> Option<Vec<ChildSession>> {
         None
     }
+    fn take_synced_activities(&self) -> Option<Vec<Activity>> {
+        None
+    }
 }
 
 // ---- 工具规划动作记录 ----
@@ -373,6 +376,9 @@ impl WorkflowEngine {
         self.apply_actions(decision.actions).await?;
         if let Some(kids) = self.backend.take_synced_children() {
             self.session.children = kids;
+        }
+        if let Some(activities) = self.backend.take_synced_activities() {
+            self.session.activities.extend(activities);
         }
         Ok(())
     }
@@ -759,6 +765,7 @@ struct LiveRuntime {
     machines: Vec<MachineSummary>,
     clients: Vec<WsClient>,
     children: Arc<Mutex<Vec<ChildSession>>>,
+    activities: Arc<Mutex<Vec<Activity>>>,
 }
 
 impl LiveRuntime {
@@ -786,6 +793,18 @@ impl LiveRuntime {
             .cloned()
             .ok_or_else(|| format!("关联普通会话不存在: {session_id}"))
     }
+
+    fn record_tool(&self, name: &str, title: impl Into<String>, content: impl Into<String>) {
+        self.activities
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .push(Activity::ToolCall {
+                timestamp: now(),
+                name: name.to_string(),
+                title: Some(title.into()),
+                content: Some(content.into()),
+            });
+    }
 }
 
 // ---- RigBackend：真实 rig 单 turn 编排（docs/DESIGN.md「编排智能体」）----
@@ -793,6 +812,7 @@ impl LiveRuntime {
 pub struct RigBackend {
     cfg: OrchestratorConfig,
     synced_children: Mutex<Option<Vec<ChildSession>>>,
+    synced_activities: Mutex<Option<Vec<Activity>>>,
 }
 
 impl RigBackend {
@@ -800,6 +820,7 @@ impl RigBackend {
         RigBackend {
             cfg,
             synced_children: Mutex::new(None),
+            synced_activities: Mutex::new(None),
         }
     }
 
@@ -883,6 +904,7 @@ impl OrcBackend for RigBackend {
                 machines: ctx.machines.clone(),
                 clients: ctx.clients.clone(),
                 children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
+                activities: Arc::new(Mutex::new(Vec::new())),
             };
             let mut tool_ctx = rig::tool::ToolContext::new();
             tool_ctx.insert(live.clone());
@@ -935,6 +957,15 @@ impl OrcBackend for RigBackend {
                 .synced_children
                 .lock()
                 .expect("Mutex 中毒（临界区内不应 panic）") = Some(kids);
+            let activities = live
+                .activities
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .clone();
+            *self
+                .synced_activities
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）") = Some(activities);
             Ok(Decision {
                 summary: text,
                 actions: Vec::new(),
@@ -946,6 +977,13 @@ impl OrcBackend for RigBackend {
 
     fn take_synced_children(&self) -> Option<Vec<ChildSession>> {
         self.synced_children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .take()
+    }
+
+    fn take_synced_activities(&self) -> Option<Vec<Activity>> {
+        self.synced_activities
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .take()
@@ -1041,7 +1079,10 @@ impl rig::tool::Tool for ListAgents {
                 })
             })
             .collect();
-        Ok(serde_json::to_string(&v).unwrap_or_default())
+        let output = serde_json::to_string(&v)
+            .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        live.record_tool(Self::NAME, "查询可用 agent", "");
+        Ok(output)
     }
 }
 
@@ -1090,7 +1131,10 @@ impl rig::tool::Tool for ListSessions {
                 })
             })
             .collect();
-        Ok(serde_json::to_string(&v).unwrap_or_default())
+        let output = serde_json::to_string(&v)
+            .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        live.record_tool(Self::NAME, "查询关联普通会话", "");
+        Ok(output)
     }
 }
 
@@ -1151,18 +1195,24 @@ impl rig::tool::Tool for CreateSession {
         if sid.is_empty() {
             return Err(rig::tool::ToolExecutionError::other("创建会话未返回 id"));
         }
+        let machine_name = args.machine.clone();
         live.children
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .push(ChildSession {
                 id: sid.clone(),
                 machine_idx: idx,
-                machine_name: args.machine,
+                machine_name,
                 agent: args.agent,
                 step_desc: args.cwd,
                 state: SessionState::Idle,
                 last_output: String::new(),
             });
+        live.record_tool(
+            Self::NAME,
+            "创建关联普通会话",
+            format!("{}@{}", sid, args.machine),
+        );
         Ok(sid)
     }
 }
@@ -1229,6 +1279,7 @@ impl rig::tool::Tool for PromptSession {
         {
             c.state = SessionState::Busy;
         }
+        live.record_tool(Self::NAME, "下发指令", format!("session={}", args.session));
         Ok("已下发".into())
     }
 }
@@ -1281,6 +1332,11 @@ impl rig::tool::Tool for CancelSession {
             )
             .await
             .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        live.record_tool(
+            Self::NAME,
+            "取消关联普通会话",
+            format!("session={}", args.session),
+        );
         Ok("已取消".into())
     }
 }
@@ -1388,6 +1444,16 @@ async fn page_session(
         .request(method, Some(params))
         .await
         .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+    let tool_name = if method == protocol::method::SESSION_HISTORY {
+        "read_session_history"
+    } else {
+        "read_session_activities"
+    };
+    live.record_tool(
+        tool_name,
+        "读取关联普通会话",
+        format!("method={method} session={}", args.session),
+    );
     Ok(res.to_string())
 }
 
@@ -1767,6 +1833,7 @@ mod tests {
             machines: vec![MachineSummary::named("测试机", &["mock_acp"])],
             clients: vec![client],
             children: Arc::new(Mutex::new(Vec::new())),
+            activities: Arc::new(Mutex::new(Vec::new())),
         });
         let res = CreateSession
             .call(

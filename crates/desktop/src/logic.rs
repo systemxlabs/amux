@@ -36,7 +36,7 @@ pub fn merge_recent_workspace(
 /// 某设备的常用工作目录路径（最近使用优先，按 `last_used` 降序稳定输出）。
 pub fn recent_workspaces_for_machine(entries: &[RecentWorkspace], machine: &str) -> Vec<String> {
     let mut mine: Vec<&RecentWorkspace> = entries.iter().filter(|e| e.machine == machine).collect();
-    mine.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    mine.sort_by_key(|entry| std::cmp::Reverse(entry.last_used));
     mine.into_iter().map(|e| e.workspace.clone()).collect()
 }
 
@@ -67,7 +67,7 @@ pub fn merge_session_window(
 
 /// 按最近活跃降序排序会话（列表合并后统一排序，docs/DESIGN.md「会话列表」）。
 pub fn sort_sessions_recent(meta: &mut [SessionMeta]) {
-    meta.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+    meta.sort_by_key(|entry| std::cmp::Reverse(entry.last_active_at));
 }
 
 // ---- 对话数据变换（docs/DESIGN.md「对话视图」：session.history）----

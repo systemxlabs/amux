@@ -71,7 +71,7 @@ fn history_from_transcript(transcript: &[OrcMsg], ts: u64) -> Vec<HistoryItem> {
 fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
     items
         .iter()
-        .filter_map(|h| match h {
+        .map(|h| match h {
             HistoryItem::UserMessage { content, .. } => {
                 let text = content
                     .iter()
@@ -81,7 +81,7 @@ fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                Some(OrcMsg::User { text })
+                OrcMsg::User { text }
             }
             HistoryItem::AgentMessage { content, .. } => {
                 let text = content
@@ -92,7 +92,7 @@ fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                Some(OrcMsg::Orc { text })
+                OrcMsg::Orc { text }
             }
         })
         .collect()

@@ -510,7 +510,7 @@ impl AmuxApp {
     fn active_machine(&self) -> Option<usize> {
         match &self.selected {
             Some(Selected::Session { machine, .. }) => Some(*machine),
-            _ => Some(0).filter(|_| !self.machines.is_empty()),
+            _ => (!self.machines.is_empty()).then_some(0),
         }
     }
 
