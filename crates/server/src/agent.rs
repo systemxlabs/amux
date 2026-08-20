@@ -895,7 +895,7 @@ async fn exec_main(
     };
     protocol::log::info("acp", format!("已连接 ACP agent: {bin} {}", args.join(" ")));
     // trace 级：ACP 线上原始帧（GUI ↔ server ↔ ACP client ↔ agent 全链路，docs/DESIGN.md §8）
-    let agent = if protocol::log::enabled(protocol::Level::Trace) {
+    let agent = if protocol::log::enabled_for(protocol::Level::Trace, "acp.wire") {
         agent.with_debug(|line, direction| {
             protocol::log::trace("acp.wire", format!("{direction:?} {line}"));
         })

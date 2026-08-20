@@ -7,6 +7,8 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use logforth::Filter;
+
 /// 日志级别（数值越大越详细）。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Level {
@@ -18,26 +20,28 @@ pub enum Level {
 }
 
 impl Level {
-    fn as_log(self) -> log::Level {
+    fn as_logforth(self) -> logforth::record::Level {
         match self {
-            Self::Error => log::Level::Error,
-            Self::Warn => log::Level::Warn,
-            Self::Info => log::Level::Info,
-            Self::Debug => log::Level::Debug,
-            Self::Trace => log::Level::Trace,
+            Self::Error => logforth::record::Level::Error,
+            Self::Warn => logforth::record::Level::Warn,
+            Self::Info => logforth::record::Level::Info,
+            Self::Debug => logforth::record::Level::Debug,
+            Self::Trace => logforth::record::Level::Trace,
         }
     }
 }
 
+const DEFAULT_FILTER: &str = "warn,gui=info,server=info,acp=info";
 static INITIALIZED: OnceLock<()> = OnceLock::new();
+
+fn current_filter() -> logforth::filter::EnvFilter {
+    logforth::filter::env_filter::EnvFilterBuilder::from_default_env_or(DEFAULT_FILTER).build()
+}
 
 /// 初始化 stderr 与文件日志。重复调用不会替换已经安装的全局 logger。
 pub fn init_file_output(path: &Path) {
     INITIALIZED.get_or_init(|| {
-        if std::env::var_os("RUST_LOG").is_none() {
-            std::env::set_var("RUST_LOG", "info");
-        }
-        let filter = || logforth::filter::env_filter::EnvFilterBuilder::from_default_env().build();
+        let filter = current_filter;
         let builder = logforth::starter_log::builder().dispatch(|dispatch| {
             dispatch.filter(filter()).append(
                 logforth::append::Stderr::default()
@@ -79,9 +83,17 @@ fn apply(builder: logforth::starter_log::LogStarterBuilder) {
     }
 }
 
-/// 级别是否可能被当前 logger 输出。
-pub fn enabled(level: Level) -> bool {
-    log::max_level() >= level.as_log().to_level_filter()
+/// 判断指定 target 的日志级别是否可能被当前 logger 输出。
+pub fn enabled_for(level: Level, target: &str) -> bool {
+    let filter = current_filter();
+    let criteria = logforth::record::FilterCriteria::builder()
+        .level(level.as_logforth())
+        .target(target)
+        .build();
+    matches!(
+        filter.enabled(&criteria, &[]),
+        logforth::filter::FilterResult::Accept | logforth::filter::FilterResult::Neutral
+    )
 }
 
 pub fn error(component: &str, msg: impl AsRef<str>) {
@@ -144,5 +156,26 @@ mod tests {
             params_summary(&params, &["sessionId", "input"], 5),
             "sessionId=s1 input=01234…"
         );
+    }
+
+    #[test]
+    fn default_filter_prioritizes_app_logs_over_dependencies() {
+        let filter =
+            logforth::filter::env_filter::EnvFilterBuilder::from_spec(DEFAULT_FILTER).build();
+        let allows = |level, target| {
+            let criteria = logforth::record::FilterCriteria::builder()
+                .level(level)
+                .target(target)
+                .build();
+            matches!(
+                filter.enabled(&criteria, &[]),
+                logforth::filter::FilterResult::Accept | logforth::filter::FilterResult::Neutral
+            )
+        };
+
+        assert!(allows(logforth::record::Level::Info, "server.startup"));
+        assert!(allows(logforth::record::Level::Info, "gui.ws"));
+        assert!(!allows(logforth::record::Level::Info, "tokio"));
+        assert!(allows(logforth::record::Level::Warn, "tokio"));
     }
 }
