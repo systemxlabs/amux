@@ -255,7 +255,9 @@ Server 作为 ACP client 与 ACP servers 通信
 
 ## 可观测性
 
-应用和 Server 在实现时，均需埋点丰富的日志，日志按天切片，存储最近 7 天的日志。
+应用和 Server 在实现时，均需埋点丰富的日志。日志按天切片，存储最近 7 天的日志。默认日志级别为 info，支持通过 RUST_LOG 环境变量调整。
+
+日志库采用 `logforth`。
 
 日志存储
 - 桌面应用：存放在 `~/.amux/logs/desktop.log`
