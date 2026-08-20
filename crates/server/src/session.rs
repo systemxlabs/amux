@@ -303,8 +303,9 @@ impl SessionManager {
     // ---- 交互 ----
 
     /// 发送指令（docs/DESIGN.md「session.prompt」）：busy 检查 → 首条生成标题 → 惰性创建
-    /// agent 会话（session/new）→ resume → 跑 turn（事件喂 TurnMerger，记录 ongoing）→
-    /// 写历史/活动 → 置空闲；必要时广播 `session.state_change`（Busy<->Idle）。
+    /// agent 会话（session/new）→ resume → 用户消息立即落盘 → 跑 turn（事件喂
+    /// TurnMerger，记录 ongoing）→ 写 agent 历史/活动 → 置空闲；必要时广播
+    /// `session.state_change`（Busy<->Idle）。
     pub async fn prompt(&self, session_id: &str, input: Vec<ContentBlock>) -> Result<(), String> {
         if input.is_empty() {
             return Err("prompt 输入必须非空".into());
@@ -368,6 +369,25 @@ impl SessionManager {
             self.broadcast_state_change(session_id, old_state, SessionState::Busy);
         }
 
+        let ts = now();
+        let log = SessionLog::open(&self.data_dir, session_id);
+        let user_message = HistoryItem::UserMessage {
+            content: input.clone(),
+            timestamp: ts,
+        };
+        if let Err(e) = log.append_history(std::slice::from_ref(&user_message)) {
+            protocol::log::error(
+                "server.session",
+                format!("用户消息落盘失败 {session_id}: {e}"),
+            );
+            let _ = self
+                .registry
+                .update_state(session_id, SessionState::Idle, now());
+            self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
+            control.busy.store(false, Ordering::SeqCst);
+            return Err(format!("用户消息落盘失败: {e}"));
+        }
+
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
         if let Err(e) = driver.resume_session(&agent_session_id, &cwd) {
             protocol::log::error("server.session", format!("resume 失败 {session_id}: {e}"));
@@ -385,16 +405,14 @@ impl SessionManager {
             return Err(format!("恢复 agent 上下文失败: {e}"));
         }
 
-        let ts = now();
         let mut merger = TurnMerger::new();
-        merger.push_user(input.clone(), ts);
 
         // 跑 turn：把指令发给 agent，事件喂合并器，thinking/tool_call 记为 ongoing 活动
         let mut turn_completed = false;
         let prompt_input = input;
         let started = std::time::Instant::now();
         let mut rx = driver.prompt(&agent_session_id, prompt_input);
-        // 合并器已 push_user 一次，用户回显事件（UserMessage）忽略；驱动输出经事件驱动
+        // 用户消息已单独落盘，用户回显事件（UserMessage）忽略；驱动输出经事件驱动
         while let Some(ev) = rx.recv().await {
             match ev {
                 AgentEvent::UserMessage(_) => {
@@ -455,7 +473,6 @@ impl SessionManager {
         }
 
         // 若 turn 未正常结束，记录错误活动
-        let log = SessionLog::open(&self.data_dir, session_id);
         if !turn_completed {
             let err = Activity::Error {
                 timestamp: now(),
@@ -549,6 +566,7 @@ mod tests {
     use crate::registry::SessionRegistry;
     use protocol::ContentBlock;
     use std::sync::Arc;
+    use tokio::sync::Notify;
 
     fn text(s: &str) -> Vec<ContentBlock> {
         vec![ContentBlock::Text {
@@ -716,6 +734,93 @@ mod tests {
         }
         assert!(saw, "prompt 结束应广播 busy→idle");
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
+    }
+
+    /// 用户消息应在 agent turn 结束前写入历史。
+    #[tokio::test]
+    async fn prompt_persists_user_message_before_turn_ends() {
+        struct BlockingDriver {
+            started: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        impl AgentDriver for BlockingDriver {
+            fn create_session(&self, _cwd: &str) -> Result<String, String> {
+                Ok("agent_blocking".into())
+            }
+
+            fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn prompt(
+                &self,
+                _agent_session_id: &str,
+                _input: Vec<ContentBlock>,
+            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                let started = self.started.clone();
+                let release = self.release.clone();
+                tokio::spawn(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    let _ = tx.send(AgentEvent::TurnEnded).await;
+                });
+                rx
+            }
+
+            fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn close(&self, _agent_session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn list_skills(&self) -> Result<Vec<String>, String> {
+                Ok(Vec::new())
+            }
+
+            fn shutdown(&self) {}
+        }
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "blocking",
+            Arc::new(BlockingDriver {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-immediate-history-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (manager, _rx) = SessionManager::new(agents, registry, dir.clone());
+        let manager = Arc::new(manager);
+        let meta = manager.create("blocking", "/tmp/work").await.unwrap();
+        let session_id = meta.id.clone();
+
+        let prompt_manager = manager.clone();
+        let prompt_task =
+            tokio::spawn(async move { prompt_manager.prompt(&session_id, text("立即保存")).await });
+        started.notified().await;
+
+        let log = SessionLog::open(&dir, &meta.id);
+        let history = log.read_history();
+        assert!(matches!(
+            history.as_slice(),
+            [HistoryItem::UserMessage { content, .. }]
+                if content == &text("立即保存")
+        ));
+
+        release.notify_one();
+        prompt_task.await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 删除触发 ACP session/close（driver.close 被调用），并清除注册表与日志。

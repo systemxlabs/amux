@@ -67,7 +67,7 @@ impl SessionLog {
         }
     }
 
-    /// 追加合并后的历史条目（turn 结束落盘；每行一个 HistoryItem）。
+    /// 追加历史条目（每行一个 HistoryItem）。
     pub fn append_history(&self, items: &[HistoryItem]) -> std::io::Result<()> {
         append_lines(&self.history_path, items)
     }
