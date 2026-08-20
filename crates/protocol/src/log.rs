@@ -39,9 +39,10 @@ pub fn init_file_output(path: &Path) {
         }
         let filter = || logforth::filter::env_filter::EnvFilterBuilder::from_default_env().build();
         let builder = logforth::starter_log::builder().dispatch(|dispatch| {
-            dispatch
-                .filter(filter())
-                .append(logforth::append::Stderr::default())
+            dispatch.filter(filter()).append(
+                logforth::append::Stderr::default()
+                    .with_layout(logforth::layout::TextLayout::default()),
+            )
         });
 
         let Some(parent) = path.parent() else {
@@ -55,6 +56,7 @@ pub fn init_file_output(path: &Path) {
         };
 
         let file = logforth::append::file::FileBuilder::new(parent, filename)
+            .layout(logforth::layout::TextLayout::default().no_color())
             .rollover_daily()
             .max_log_files(NonZeroUsize::new(7).expect("7 非零"))
             .build();
