@@ -15,7 +15,7 @@
 //! 活动 `session.activities` 打开才刷 10s；实时 `session.ongoing_activity` 5s；`session.state_change`
 //! 通知用于工作流驱动。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,6 +95,13 @@ enum NewSessionMode {
     Workflow,
 }
 
+#[derive(Clone, Default)]
+struct WorkspaceDirectory {
+    entries: Vec<WorkspaceEntry>,
+    has_more: bool,
+    next_offset: usize,
+}
+
 /// 单机器视图：独立 WS 连接 + agent 列表 + 会话列表 + 各会话聚合视图 + diff/skills 状态。
 struct MachineView {
     config: MachineConfig,
@@ -111,13 +118,14 @@ struct MachineView {
     diff_not_repo: bool,
     /// 代码审查面板中选中的文件/代码块：(path, None)=整文件；(path, Some(i))=第 i 个 hunk。
     diff_selection: HashSet<(String, Option<usize>)>,
-    workspace_entries: Vec<WorkspaceEntry>,
-    workspace_path: String,
+    workspace_directories: HashMap<String, WorkspaceDirectory>,
+    workspace_expanded: HashSet<String>,
+    workspace_loading: HashSet<String>,
     workspace_file: Option<String>,
     workspace_content: String,
     workspace_error: Option<String>,
-    workspace_has_more: bool,
-    workspace_next_offset: usize,
+    workspace_read_has_more: bool,
+    workspace_read_next_offset: usize,
     diff_tree_collapsed: bool,
     diff_changes_collapsed: bool,
     skills: Vec<String>,
@@ -142,13 +150,14 @@ impl MachineView {
             diff_files: Vec::new(),
             diff_not_repo: false,
             diff_selection: HashSet::new(),
-            workspace_entries: Vec::new(),
-            workspace_path: String::new(),
+            workspace_directories: HashMap::new(),
+            workspace_expanded: HashSet::new(),
+            workspace_loading: HashSet::new(),
             workspace_file: None,
             workspace_content: String::new(),
             workspace_error: None,
-            workspace_has_more: false,
-            workspace_next_offset: 0,
+            workspace_read_has_more: false,
+            workspace_read_next_offset: 0,
             diff_tree_collapsed: false,
             diff_changes_collapsed: false,
             skills: Vec::new(),
@@ -1792,7 +1801,7 @@ impl AmuxApp {
     }
 
     fn load_workspace_list(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
@@ -1814,7 +1823,11 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        if let Some(m) = self.machines.get_mut(machine) {
+            m.workspace_loading.insert(path.clone());
+        }
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let directory_path = path.clone();
             let params = json!({
                 "cwd": cwd,
                 "path": if path.is_empty() { None } else { Some(path.clone()) },
@@ -1828,20 +1841,29 @@ impl AmuxApp {
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
+                m.workspace_loading.remove(&directory_path);
                 match res {
                     Ok(value) => match serde_json::from_value::<WorkspaceListResult>(value) {
                         Ok(result) => {
                             if offset == 0 {
-                                m.workspace_entries = result.entries;
-                                m.workspace_file = None;
-                                m.workspace_content.clear();
+                                m.workspace_directories.insert(
+                                    directory_path.clone(),
+                                    WorkspaceDirectory {
+                                        entries: result.entries,
+                                        has_more: result.has_more,
+                                        next_offset: result.next_offset,
+                                    },
+                                );
                             } else {
-                                m.workspace_entries.extend(result.entries);
+                                let directory = m
+                                    .workspace_directories
+                                    .entry(directory_path.clone())
+                                    .or_default();
+                                directory.entries.extend(result.entries);
+                                directory.has_more = result.has_more;
+                                directory.next_offset = result.next_offset;
                             }
-                            m.workspace_path = result.path;
                             m.workspace_error = None;
-                            m.workspace_has_more = result.has_more;
-                            m.workspace_next_offset = result.next_offset;
                         }
                         Err(error) => {
                             m.workspace_error = Some(format!("工作目录列表失败：{error}"));
@@ -1904,8 +1926,8 @@ impl AmuxApp {
                             }
                             m.workspace_file = Some(result.path);
                             m.workspace_error = None;
-                            m.workspace_has_more = result.has_more;
-                            m.workspace_next_offset = result.next_offset;
+                            m.workspace_read_has_more = result.has_more;
+                            m.workspace_read_next_offset = result.next_offset;
                         }
                         Err(error) => {
                             m.workspace_error = Some(format!("读取文件失败：{error}"));
@@ -3746,6 +3768,130 @@ impl AmuxApp {
 
     // ---- 右侧面板内容 ----
 
+    fn render_workspace_tree(
+        &self,
+        machine_idx: usize,
+        path: &str,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(machine) = self.machine(machine_idx) else {
+            return Vec::new();
+        };
+        let Some(directory) = machine.workspace_directories.get(path) else {
+            return if machine.workspace_loading.contains(path) {
+                vec![Label::new("加载中…")
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .into_any_element()]
+            } else {
+                Vec::new()
+            };
+        };
+        let entries = directory.entries.clone();
+        let has_more = directory.has_more;
+        let next_offset = directory.next_offset;
+        let loading = machine.workspace_loading.contains(path);
+        let expanded_paths = machine.workspace_expanded.clone();
+        let indent = px(14.0 * depth as f32);
+        let mut children = Vec::new();
+
+        for entry in entries {
+            let entry_path = entry.path.clone();
+            let is_dir = entry.is_dir;
+            let expanded = is_dir && expanded_paths.contains(&entry_path);
+            let label = format!(
+                "{} {}",
+                if is_dir {
+                    if expanded {
+                        "▾"
+                    } else {
+                        "▸"
+                    }
+                } else {
+                    "·"
+                },
+                entry.name
+            );
+            let click_path = entry_path.clone();
+            let button = Button::new(format!("workspace-entry-{entry_path}"))
+                .w_full()
+                .small()
+                .ghost()
+                .label(label)
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    let Some(machine) = this.active_machine() else {
+                        return;
+                    };
+                    if is_dir {
+                        if !this
+                            .machines
+                            .get_mut(machine)
+                            .is_some_and(|m| m.workspace_expanded.remove(&click_path))
+                        {
+                            if let Some(m) = this.machines.get_mut(machine) {
+                                m.workspace_expanded.insert(click_path.clone());
+                            }
+                            let needs_load = this
+                                .machine(machine)
+                                .map(|m| !m.workspace_directories.contains_key(&click_path))
+                                .unwrap_or(false);
+                            if needs_load {
+                                this.load_workspace_list(
+                                    window,
+                                    cx,
+                                    machine,
+                                    click_path.clone(),
+                                    0,
+                                );
+                            }
+                        }
+                    } else {
+                        this.load_workspace_file(window, cx, machine, click_path.clone(), 0);
+                    }
+                    cx.notify();
+                }));
+            let mut node = v_flex().child(h_flex().w_full().child(div().w(indent)).child(button));
+            if expanded {
+                node = node.children(self.render_workspace_tree(
+                    machine_idx,
+                    &entry_path,
+                    depth + 1,
+                    cx,
+                ));
+            }
+            children.push(node.into_any_element());
+        }
+
+        if has_more {
+            let path_for_click = path.to_string();
+            children.push(
+                Button::new(format!("workspace-load-more-{path}"))
+                    .small()
+                    .ghost()
+                    .label(if loading {
+                        "加载中…"
+                    } else {
+                        "加载更多"
+                    })
+                    .disabled(loading)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some(machine) = this.active_machine() {
+                            this.load_workspace_list(
+                                window,
+                                cx,
+                                machine,
+                                path_for_click.clone(),
+                                next_offset,
+                            );
+                        }
+                    }))
+                    .into_any_element(),
+            );
+        }
+        children
+    }
+
     fn render_workspace_panel(
         &self,
         _window: &mut Window,
@@ -3763,98 +3909,23 @@ impl AmuxApp {
         let Some(machine) = self.machine(machine_idx) else {
             return div().into_any();
         };
-        let entries = machine.workspace_entries.clone();
-        let workspace_path = machine.workspace_path.clone();
         let workspace_file = machine.workspace_file.clone();
         let workspace_content = machine.workspace_content.clone();
         let workspace_error = machine.workspace_error.clone();
-        let has_more = machine.workspace_has_more;
-        let next_offset = machine.workspace_next_offset;
+        let read_has_more = machine.workspace_read_has_more;
+        let read_next_offset = machine.workspace_read_next_offset;
         let file = workspace_file.clone();
-        let parent = PathBuf::from(&workspace_path)
-            .parent()
-            .and_then(|p| (!p.as_os_str().is_empty()).then(|| p.to_string_lossy().into_owned()))
-            .unwrap_or_default();
-
-        let mut tree = v_flex().gap_1().w(px(220.0)).overflow_y_scrollbar();
-        if !workspace_path.is_empty() {
-            let parent_for_click = parent.clone();
-            tree = tree.child(
-                Button::new("workspace-parent")
-                    .small()
-                    .ghost()
-                    .label("↩ 上一级")
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        if let Some(machine) = this.active_machine() {
-                            this.load_workspace_list(
-                                window,
-                                cx,
-                                machine,
-                                parent_for_click.clone(),
-                                0,
-                            );
-                        }
-                    })),
-            );
-        }
-        for entry in entries {
-            let entry_path = entry.path.clone();
-            let is_dir = entry.is_dir;
-            let label = format!("{} {}", if is_dir { "▸" } else { "·" }, entry.name);
-            tree = tree.child(
-                Button::new(format!("workspace-entry-{}", entry.path))
-                    .small()
-                    .ghost()
-                    .label(label)
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        if let Some(machine) = this.active_machine() {
-                            if is_dir {
-                                this.load_workspace_list(
-                                    window,
-                                    cx,
-                                    machine,
-                                    entry_path.clone(),
-                                    0,
-                                );
-                            } else {
-                                this.load_workspace_file(
-                                    window,
-                                    cx,
-                                    machine,
-                                    entry_path.clone(),
-                                    0,
-                                );
-                            }
-                        }
-                    })),
-            );
-        }
-        if has_more && file.is_none() {
-            let workspace_path_for_click = workspace_path.clone();
-            tree = tree.child(
-                Button::new("workspace-load-more")
-                    .small()
-                    .ghost()
-                    .label("加载更多")
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        if let Some(machine) = this.active_machine() {
-                            this.load_workspace_list(
-                                window,
-                                cx,
-                                machine,
-                                workspace_path_for_click.clone(),
-                                next_offset,
-                            );
-                        }
-                    })),
-            );
-        }
+        let tree = v_flex()
+            .gap_1()
+            .w(px(220.0))
+            .overflow_y_scrollbar()
+            .children(self.render_workspace_tree(machine_idx, "", 0, cx));
 
         let mut content = v_flex().flex_1().min_w_0().h_full().gap_2().child(
             Label::new(
                 workspace_file
                     .clone()
-                    .unwrap_or_else(|| format!("/{}", workspace_path)),
+                    .unwrap_or_else(|| "选择文件查看内容".to_string()),
             )
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(cx.theme().foreground),
@@ -3869,7 +3940,7 @@ impl AmuxApp {
                 )
                 .selectable(true),
             );
-            if has_more {
+            if read_has_more {
                 content = content.child(
                     Button::new("workspace-read-more")
                         .small()
@@ -3882,7 +3953,7 @@ impl AmuxApp {
                                     cx,
                                     machine,
                                     path.clone(),
-                                    next_offset,
+                                    read_next_offset,
                                 );
                             }
                         })),
