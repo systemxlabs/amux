@@ -204,6 +204,8 @@ pub struct AmuxApp {
     panel: Option<Panel>,
     panel_delta_px: f32,
     show_settings: bool,
+    show_add_machine_form: bool,
+    machine_form_error: Option<String>,
     settings_category: SettingsCategory,
     new_session_mode: NewSessionMode,
     input_state: Entity<InputState>,
@@ -223,6 +225,7 @@ pub struct AmuxApp {
     orch_base_input: Entity<InputState>,
     orch_key_input: Entity<InputState>,
     orch_model_input: Entity<InputState>,
+    orchestrator_form_error: Option<String>,
     title_input: Entity<InputState>,
     qc_edit_target: Option<String>,
     skill_edit_target: Option<String>,
@@ -291,6 +294,8 @@ impl AmuxApp {
             panel: None,
             panel_delta_px: 0.0,
             show_settings: false,
+            show_add_machine_form: false,
+            machine_form_error: None,
             settings_category: SettingsCategory::Machines,
             new_session_mode: NewSessionMode::Direct,
             input_state,
@@ -310,6 +315,7 @@ impl AmuxApp {
             orch_key_input,
             orch_model_input,
             orch_api_format_input,
+            orchestrator_form_error: None,
             title_input,
             qc_edit_target: None,
             skill_edit_target: None,
@@ -356,6 +362,44 @@ impl AmuxApp {
             .update(cx, |s, cx| s.set_value(&cfg.api_key, window, cx));
         self.orch_model_input
             .update(cx, |s, cx| s.set_value(&cfg.model, window, cx));
+    }
+
+    fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
+        let api_format = self
+            .orch_api_format_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        let base_url = self.orch_base_input.read(cx).value().trim().to_owned();
+        let api_key = self.orch_key_input.read(cx).value().trim().to_owned();
+        let model = self.orch_model_input.read(cx).value().trim().to_owned();
+        let error = if !matches!(
+            api_format.as_str(),
+            "chat_completions" | "responses" | "messages"
+        ) {
+            Some("API 格式必须是 chat_completions、responses 或 messages。")
+        } else if base_url.is_empty() {
+            Some("请输入 Base URL。")
+        } else if api_key.is_empty() {
+            Some("请输入 API Key。")
+        } else if model.is_empty() {
+            Some("请输入模型名称。")
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.orchestrator_form_error = Some(error.into());
+        } else {
+            self.store.save_orchestrator(&OrchestratorConfig {
+                api_format,
+                base_url,
+                api_key,
+                model,
+            });
+            self.orchestrator_form_error = None;
+        }
+        cx.notify();
     }
 
     fn machine(&self, i: usize) -> Option<&MachineView> {
@@ -1924,7 +1968,49 @@ impl AmuxApp {
         });
     }
 
+    fn confirm_reconnect_machine(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        idx: usize,
+        name: String,
+    ) {
+        let this = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let this = this.clone();
+            alert
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("重连")
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .title("重连机器")
+                .description(format!("确定重连机器「{name}」吗？"))
+                .on_ok(move |_ev, window, cx| {
+                    let this = this.clone();
+                    this.update(cx, |this, cx| {
+                        this.reconnect_machine(window, cx, idx);
+                    });
+                    true
+                })
+                .on_cancel(|_ev, _window, _cx| true)
+        });
+    }
+
     // ---- 设置：机器管理 ----
+
+    fn close_add_machine_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_add_machine_form = false;
+        self.machine_form_error = None;
+        self.machine_name_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.machine_url_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.machine_token_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        cx.notify();
+    }
 
     fn add_machine(
         &mut self,
@@ -1933,9 +2019,20 @@ impl AmuxApp {
         name: String,
         url: String,
         token: String,
-    ) {
-        if name.trim().is_empty() || !url.starts_with("ws://") || token.trim().is_empty() {
-            return;
+    ) -> bool {
+        let validation_error = if name.trim().is_empty() {
+            Some("请输入机器名称。")
+        } else if !url.trim().starts_with("ws://") {
+            Some("连接地址必须以 ws:// 开头。")
+        } else if token.trim().is_empty() {
+            Some("请输入连接 Token。")
+        } else {
+            None
+        };
+        if let Some(error) = validation_error {
+            self.machine_form_error = Some(error.into());
+            cx.notify();
+            return false;
         }
         let machine = self
             .store
@@ -1949,7 +2046,9 @@ impl AmuxApp {
         self._tasks.push(t);
         self.fetch_agents(idx, window, cx);
         self.refresh_sessions(idx, window, cx);
+        self.machine_form_error = None;
         cx.notify();
+        true
     }
 
     fn remove_machine(&mut self, _window: &mut Window, cx: &mut Context<Self>, idx: usize) {
@@ -3727,6 +3826,9 @@ impl AmuxApp {
                     .child(self.render_settings_nav(cx))
                     .child(self.render_settings_content(cx)),
             )
+            .when(self.show_add_machine_form, |overlay| {
+                overlay.child(self.render_add_machine_dialog(window, cx))
+            })
             // skills 弹窗（盖在设置浮窗之上）
             .when(self.machines.iter().any(|m| m.show_skills.is_some()), |o| {
                 o.child(self.render_skills_dialog(window, cx))
@@ -3922,8 +4024,8 @@ impl AmuxApp {
                                     .small()
                                     .label("重连")
                                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        // 重连：断开并重连 WS（重建 MachineView 连接）
-                                        this.reconnect_machine(window, cx, i);
+                                        let name = this.machines[i].config.name.clone();
+                                        this.confirm_reconnect_machine(window, cx, i, name);
                                     })),
                             )
                             .child(
@@ -3994,77 +4096,158 @@ impl AmuxApp {
                 "接入 / 移除机器；每台机器自动发现 ACP agent，可查看 skills、重启",
             ))
             .children(machines)
-            .child(self.settings_header("＋ 添加机器", ""))
             .child(
-                v_flex()
-                    .gap_1()
-                    .p_2()
-                    .bg(rgb(0xf7f8fa))
-                    .rounded_md()
-                    .child(Label::new("名称").text_sm().text_color(rgb(0x6b7280)))
-                    .child(Input::new(&self.machine_name_input))
-                    .child(Label::new("连接地址").text_sm().text_color(rgb(0x6b7280)))
-                    .child(Input::new(&self.machine_url_input))
-                    .child(Label::new("Token").text_sm().text_color(rgb(0x6b7280)))
-                    .child(Input::new(&self.machine_token_input))
-                    .child(
-                        Button::new("settings-add")
-                            .small()
-                            .primary()
-                            .label("添加机器")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                let name = this.machine_name_input.read(cx).value().to_string();
-                                let url = this.machine_url_input.read(cx).value().to_string();
-                                let token = this.machine_token_input.read(cx).value().to_string();
-                                this.add_machine(window, cx, name, url, token);
-                            })),
-                    ),
+                h_flex().justify_end().child(
+                    Button::new("settings-add-open")
+                        .small()
+                        .primary()
+                        .label("+")
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.show_add_machine_form = true;
+                            this.machine_form_error = None;
+                            cx.notify();
+                        })),
+                ),
             )
             .into_any()
     }
 
-    fn render_orchestrator_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        v_flex()
+    fn render_add_machine_dialog(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut card = v_flex()
+            .id("add-machine-card")
+            .relative()
+            .w(px(460.))
             .gap_2()
-            .child(self.settings_header(
-                "编排智能体",
-                "内置编排 agent 的 LLM API 配置（工作流会话编排用）",
-            ))
+            .p_4()
+            .bg(rgb(0xffffff))
+            .rounded_md()
+            .shadow_lg()
             .child(
-                v_flex()
-                    .gap_1()
-                    .p_2()
-                    .bg(rgb(0xf7f8fa))
-                    .rounded_md()
-                    .child(Label::new("API 格式").text_sm().text_color(rgb(0x6b7280)))
-                    .child(Input::new(&self.orch_api_format_input))
-                    .child(Label::new("Base URL").text_sm().text_color(rgb(0x6b7280)))
-                    .child(Input::new(&self.orch_base_input))
-                    .child(Label::new("API Key").text_sm().text_color(rgb(0x6b7280)))
-                    .child(Input::new(&self.orch_key_input))
-                    .child(Label::new("模型").text_sm().text_color(rgb(0x6b7280)))
-                    .child(Input::new(&self.orch_model_input))
+                h_flex()
+                    .items_center()
+                    .child(Label::new("添加机器").font_weight(FontWeight::SEMIBOLD))
+                    .child(div().flex_1())
                     .child(
-                        Button::new("orch-save")
+                        Button::new("add-machine-close")
                             .small()
-                            .primary()
-                            .label("保存")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                let cfg = OrchestratorConfig {
-                                    api_format: this
-                                        .orch_api_format_input
-                                        .read(cx)
-                                        .value()
-                                        .to_string(),
-                                    base_url: this.orch_base_input.read(cx).value().to_string(),
-                                    api_key: this.orch_key_input.read(cx).value().to_string(),
-                                    model: this.orch_model_input.read(cx).value().to_string(),
-                                };
-                                this.store.save_orchestrator(&cfg);
-                                cx.notify();
+                            .label("✕")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.close_add_machine_form(window, cx);
                             })),
                     ),
             )
+            .child(
+                Label::new("注册一台 amux server，保存后会立即建立连接。")
+                    .text_sm()
+                    .text_color(rgb(0x6b7280)),
+            )
+            .child(Label::new("名称").text_sm().text_color(rgb(0x6b7280)))
+            .child(Input::new(&self.machine_name_input))
+            .child(Label::new("连接地址").text_sm().text_color(rgb(0x6b7280)))
+            .child(Input::new(&self.machine_url_input))
+            .child(Label::new("Token").text_sm().text_color(rgb(0x6b7280)))
+            .child(Input::new(&self.machine_token_input));
+        if let Some(error) = &self.machine_form_error {
+            card = card.child(
+                Label::new(error.clone())
+                    .text_sm()
+                    .text_color(rgb(0xb91c1c)),
+            );
+        }
+        card = card.child(
+            h_flex()
+                .justify_end()
+                .gap_1()
+                .child(
+                    Button::new("add-machine-cancel")
+                        .small()
+                        .label("取消")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.close_add_machine_form(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("add-machine-submit")
+                        .small()
+                        .primary()
+                        .label("添加机器")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            let name = this.machine_name_input.read(cx).value().to_string();
+                            let url = this.machine_url_input.read(cx).value().to_string();
+                            let token = this.machine_token_input.read(cx).value().to_string();
+                            if this.add_machine(window, cx, name, url, token) {
+                                this.close_add_machine_form(window, cx);
+                            }
+                        })),
+                ),
+        );
+        div()
+            .id("add-machine-dialog")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("add-machine-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(hsla(0., 0., 0., 0.45))
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.close_add_machine_form(window, cx);
+                    })),
+            )
+            .child(card.on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                cx.stop_propagation();
+            }))
+    }
+
+    fn render_orchestrator_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut form = v_flex()
+            .gap_1()
+            .p_3()
+            .bg(rgb(0xf7f8fa))
+            .rounded_md()
+            .child(Label::new("API 格式").text_sm().text_color(rgb(0x6b7280)))
+            .child(
+                Label::new("支持：chat_completions、responses、messages")
+                    .text_xs()
+                    .text_color(rgb(0x6b7280)),
+            )
+            .child(Input::new(&self.orch_api_format_input))
+            .child(Label::new("Base URL").text_sm().text_color(rgb(0x6b7280)))
+            .child(Input::new(&self.orch_base_input))
+            .child(Label::new("API Key").text_sm().text_color(rgb(0x6b7280)))
+            .child(Input::new(&self.orch_key_input))
+            .child(Label::new("模型名称").text_sm().text_color(rgb(0x6b7280)))
+            .child(Input::new(&self.orch_model_input));
+        if let Some(error) = &self.orchestrator_form_error {
+            form = form.child(
+                Label::new(error.clone())
+                    .text_sm()
+                    .text_color(rgb(0xb91c1c)),
+            );
+        }
+        form = form.child(
+            h_flex().justify_end().child(
+                Button::new("orch-save")
+                    .small()
+                    .primary()
+                    .label("保存")
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.save_orchestrator(cx);
+                    })),
+            ),
+        );
+        v_flex()
+            .gap_2()
+            .child(self.settings_header("编排智能体", "配置工作流编排使用的大模型供应商连接信息"))
+            .child(form)
             .into_any()
     }
 
