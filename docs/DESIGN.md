@@ -53,6 +53,7 @@ Server 主动推送通知
 - 序列化：`serde` / `serde_json`（JSON-RPC）
 - 会话元数据持久化：`rusqlite`
 - ACP：`agent-client-protocol` 官方 SDK
+- Git：`gitoxide`
 
 ### Server 启动
 
