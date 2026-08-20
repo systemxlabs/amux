@@ -3838,7 +3838,7 @@ impl AmuxApp {
         }
         v_flex()
             .gap_2()
-            .child(self.settings_header("快捷指令", "预设 + 自定义快捷指令，输入区上方一键发送"))
+            .child(self.settings_header("快捷指令", "自定义快捷指令，输入区上方一键发送"))
             .children(items)
             .child(self.settings_header("＋ 新增快捷指令", ""))
             .child(

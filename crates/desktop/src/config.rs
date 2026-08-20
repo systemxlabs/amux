@@ -200,21 +200,7 @@ impl ConfigStore {
     // ---- 快捷指令（quick_commands.json）----
 
     pub fn list_quick_commands(&self) -> Vec<QuickCommand> {
-        let mut cmds = read_file_normalized(&self.path("quick_commands.json"), normalize_quick_commands);
-        // PRD §3.4：预设两条快捷指令
-        if cmds.is_empty() {
-            cmds = vec![
-                QuickCommand {
-                    name: "Commit & Push".into(),
-                    prompt: "提交并推送当前工作区的更改：为改动写一条简洁的 commit message，commit 后 push。".into(),
-                },
-                QuickCommand {
-                    name: "Submit PR".into(),
-                    prompt: "提交一个 Pull Request：stage → commit → push → 创建 PR。".into(),
-                },
-            ];
-        }
-        cmds
+        read_file_normalized(&self.path("quick_commands.json"), normalize_quick_commands)
     }
 
     pub fn add_quick_command(&self, name: &str, prompt: &str) -> QuickCommand {
@@ -521,15 +507,6 @@ mod tests {
         assert_eq!(s2.recent_workspaces_for_machine("m1"), vec!["/a", "/b"]);
         assert_eq!(s2.recent_workspaces_for_machine("m2"), vec!["/x"]);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn quick_commands_defaults_when_empty() {
-        let s = store();
-        let cmds = s.list_quick_commands();
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(cmds[0].name, "Commit & Push");
-        assert_eq!(cmds[1].name, "Submit PR");
     }
 
     #[test]
