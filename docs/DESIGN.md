@@ -39,6 +39,8 @@ Server 在未收到此认证消息并通过认证前，请求均返回认证失�
 | `session.info` | 批量查询指定的普通会话列表 |
 | `workspace.diff` | 查询普通会话工作目录改动 diff |
 | `workspace.restore` | 可按文件或代码块撤销普通会话工作目录的改动 |
+| `workspace.list` | 分页查看普通会话工作目录指定文件夹列表 |
+| `workspace.read` | 分页查看普通会话工作目录指定路径文本文件内容 |
 
 Server 主动推送通知
 | 通知 | 描述 |
