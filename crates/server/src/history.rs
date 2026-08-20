@@ -71,6 +71,7 @@ impl SessionLog {
     }
 
     /// 读取全部合并条目；日志缺失（损坏/清空）视为该会话历史为空（docs/DESIGN.md §5.2）。
+    #[cfg(test)]
     pub fn read(&self) -> Vec<PassthroughEvent> {
         let mut events = self.read_history();
         events.extend(self.read_activities());
@@ -112,6 +113,7 @@ fn read_events(path: &Path) -> Vec<PassthroughEvent> {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn event_timestamp(event: &PassthroughEvent) -> u64 {
     match event {
         PassthroughEvent::UserMessage { timestamp, .. }
