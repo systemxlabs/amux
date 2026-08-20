@@ -50,7 +50,7 @@ use crate::logic::{
     read_path_context, DialogMsg, InputAttachment,
 };
 use crate::text::{block_text, one_line, truncate};
-use crate::workflow::{now_ts, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
+use crate::workflow::{now_ts, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification, WsClient};
 
 /// 会话列表惰性分页窗口大小（PRD §4.1.1：首次只取最近活跃一窗）。
@@ -401,7 +401,7 @@ impl AmuxApp {
     ) {
         let Some(sid) = n
             .params
-            .get("session_id")
+            .get("sessionId")
             .and_then(|v| v.as_str())
             .map(str::to_string)
         else {
@@ -409,13 +409,13 @@ impl AmuxApp {
         };
         let old_state = n
             .params
-            .get("old_state")
+            .get("oldState")
             .and_then(|v| v.as_str())
             .and_then(state_from_str)
             .unwrap_or(SessionState::Idle);
         let new_state = n
             .params
-            .get("new_state")
+            .get("newState")
             .and_then(|v| v.as_str())
             .and_then(state_from_str)
             .unwrap_or(SessionState::Idle);
@@ -1179,7 +1179,7 @@ impl AmuxApp {
         }
         let clients: Vec<WsClient> = self.machines.iter().map(|m| m.client.clone()).collect();
         let summaries = self.machine_summaries();
-        let backend = self.orchestrator_backend(&summaries);
+        let backend = self.orchestrator_backend();
         for s in sessions {
             self.workflows
                 .push(WorkflowEngine::restore(s, backend.clone(), clients.clone(), summaries.clone()));
@@ -1226,7 +1226,7 @@ impl AmuxApp {
             .join("\n");
         let clients: Vec<WsClient> = self.machines.iter().map(|m| m.client.clone()).collect();
         let summaries = self.machine_summaries();
-        let backend = self.orchestrator_backend(&summaries);
+        let backend = self.orchestrator_backend();
         let engine = WorkflowEngine::new(
             &clean,
             &context,
@@ -1403,10 +1403,9 @@ impl AmuxApp {
         });
     }
 
-    fn orchestrator_backend(&self, summaries: &[MachineSummary]) -> Arc<dyn OrcBackend> {
+    fn orchestrator_backend(&self) -> Arc<dyn OrcBackend> {
         let cfg = self.store.orchestrator();
-        let names: Vec<String> = summaries.iter().map(|m| m.name.clone()).collect();
-        Arc::new(RigBackend::new(cfg, names))
+        Arc::new(RigBackend::new(cfg))
     }
 
     fn machine_summaries(&self) -> Vec<MachineSummary> {
@@ -1414,11 +1413,15 @@ impl AmuxApp {
             .iter()
             .map(|m| MachineSummary {
                 name: m.config.name.clone(),
+                online: m.status == "已连接",
                 agents: m
                     .agents
                     .iter()
                     .filter(|a| a.available)
-                    .map(|a| a.name.clone())
+                    .map(|a| AgentSlot {
+                        name: a.name.clone(),
+                        available: true,
+                    })
                     .collect(),
             })
             .collect()
@@ -2325,6 +2328,7 @@ impl AmuxApp {
                             .text_xs()
                             .text_color(rgb(0x9ca3af)),
                     );
+            }
             }
             NewSessionMode::Workflow => {
                 card = card

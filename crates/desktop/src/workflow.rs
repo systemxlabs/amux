@@ -1003,6 +1003,7 @@ impl OrcBackend for FakeBackend {
 fn live(context: &rig::tool::ToolContext) -> Result<LiveRuntime, rig::tool::ToolExecutionError> {
     context
         .get::<LiveRuntime>()
+        .cloned()
         .ok_or_else(|| rig::tool::ToolExecutionError::other("缺少工具运行时"))
 }
 
@@ -1407,10 +1408,7 @@ mod tests {
     }
 
     fn machines() -> Vec<MachineSummary> {
-        vec![MachineSummary {
-            name: "测试机".into(),
-            agents: vec!["mock_acp".into()],
-        }]
+        vec![MachineSummary::named("测试机", &["mock_acp"])]
     }
 
     fn clients_with_machines() -> (Vec<WsClient>, MachineSummary) {
@@ -1581,7 +1579,7 @@ mod tests {
             last_output: String::new(),
         });
         let advanced = engine
-            .on_child_state("s_child", SessionState::Idle, None)
+            .on_child_state("s_child", SessionState::Busy, SessionState::Idle, None)
             .await;
         assert!(!advanced);
     }
@@ -1644,15 +1642,12 @@ mod tests {
 
     #[test]
     fn rig_backend_builds_agent_with_tools() {
-        let backend = RigBackend::new(
-            OrchestratorConfig {
-                api_format: "chat_completions".into(),
-                base_url: "http://127.0.0.1:9/v1".into(),
-                api_key: "sk-test".into(),
-                model: "gpt-4o-mini".into(),
-            },
-            vec!["测试机".into()],
-        );
+        let backend = RigBackend::new(OrchestratorConfig {
+            api_format: "chat_completions".into(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            api_key: "sk-test".into(),
+            model: "gpt-4o-mini".into(),
+        });
         let client = rig::providers::openai::Client::builder()
             .api_key("sk-test")
             .base_url("http://127.0.0.1:9/v1")
@@ -1680,10 +1675,7 @@ mod tests {
             "",
             backend,
             vec![],
-            vec![MachineSummary {
-                name: "测试机".into(),
-                agents: vec!["mock_acp".into()],
-            }],
+            vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
         let mut engine = engine;
         engine.session.transcript.push(OrcMsg::Orc { text: "决策".into() });
@@ -1702,10 +1694,7 @@ mod tests {
             "模板：先在测试机实现，再审查",
             backend,
             vec![],
-            vec![MachineSummary {
-                name: "测试机".into(),
-                agents: vec!["mock_acp".into()],
-            }],
+            vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
         assert!(engine.session.transcript.is_empty());
         assert_eq!(engine.session.preamble, "模板：先在测试机实现，再审查");
@@ -1721,10 +1710,7 @@ mod tests {
             "模板：先实现后审查",
             backend,
             vec![],
-            vec![MachineSummary {
-                name: "测试机".into(),
-                agents: vec!["mock_acp".into()],
-            }],
+            vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
         let should_advance = engine.record_user("实现登录功能");
         assert_eq!(engine.session.description, "实现登录功能");
@@ -1734,15 +1720,12 @@ mod tests {
 
     #[tokio::test]
     async fn unconfigured_rig_backend_records_clear_error() {
-        let backend = Arc::new(RigBackend::new(
-            OrchestratorConfig {
-                api_format: "chat_completions".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                api_key: String::new(),
-                model: "gpt-4o-mini".into(),
-            },
-            vec!["测试机".into()],
-        ));
+        let backend = Arc::new(RigBackend::new(OrchestratorConfig {
+            api_format: "chat_completions".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: String::new(),
+            model: "gpt-4o-mini".into(),
+        }));
         let client = WsClient::connect("ws://127.0.0.1:1/?token=unused".into());
         let mut engine = WorkflowEngine::new(
             "计划",
@@ -1750,10 +1733,7 @@ mod tests {
             "",
             backend,
             vec![client],
-            vec![MachineSummary {
-                name: "测试机".into(),
-                agents: vec!["kimi".into()],
-            }],
+            vec![MachineSummary::named("测试机", &["kimi"])],
         );
         let res = engine.start().await;
         assert!(res.is_err());
@@ -1764,26 +1744,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rig_tools_record_ops_via_tool_context() {
-        let state = ToolState::new(vec!["测试机".into()]);
+    async fn create_session_tool_requires_live_runtime() {
         let mut ctx = rig::tool::ToolContext::new();
-        ctx.insert(state.clone());
-        let res = PlanCreateSession
+        let res = CreateSession
             .call(
                 &mut ctx,
                 CreateSessionArgs {
                     machine: "测试机".into(),
                     agent: "mock_acp".into(),
                     cwd: "/tmp".into(),
-                    prompt: "实现功能".into(),
                 },
             )
-            .await
-            .expect("create_session 工具应成功");
-        assert!(res.contains("已规划"));
-        let ops = state.take_ops();
-        assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], ToolOp::Create { agent, .. } if agent == "mock_acp"));
+            .await;
+        let err = res.expect_err("缺少 LiveRuntime 应报错");
+        assert!(err.to_string().contains("缺少工具运行时"));
+    }
+
+    #[tokio::test]
+    async fn create_session_tool_rejects_unknown_machine() {
+        let client = WsClient::connect("ws://127.0.0.1:1/?token=unused".into());
+        let mut ctx = rig::tool::ToolContext::new();
+        ctx.insert(LiveRuntime {
+            machines: vec![MachineSummary::named("测试机", &["mock_acp"])],
+            clients: vec![client],
+            children: Arc::new(Mutex::new(Vec::new())),
+        });
+        let res = CreateSession
+            .call(
+                &mut ctx,
+                CreateSessionArgs {
+                    machine: "未知机器".into(),
+                    agent: "mock_acp".into(),
+                    cwd: "/tmp".into(),
+                },
+            )
+            .await;
+        let err = res.expect_err("未知机器应报错");
+        assert!(err.to_string().contains("机器不存在"));
     }
 
     /// on_child_state_local 同步更新关联普通会话 busy/idle 状态（GUI 收到 state_change 通知时调用）。
@@ -1796,10 +1793,7 @@ mod tests {
             "",
             backend,
             vec![],
-            vec![MachineSummary {
-                name: "测试机".into(),
-                agents: vec!["mock_acp".into()],
-            }],
+            vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
         let mut engine = engine;
         engine.session.children.push(ChildSession {
