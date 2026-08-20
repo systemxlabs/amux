@@ -33,19 +33,25 @@ async fn main() {
     protocol::log::init_file_output(&log_path);
 
     // 依赖组装：ACP agent 驱动（--agent 显式指定 agent 可执行与子命令参数）；未指定时由
-    // AgentRegistry 自动发现本机 ACP agent（PRD §3.3），仅当无任何发现时才用内存 Stub。
-    let configured: Option<(String, SharedDriver)> = cfg.agent_bin.clone().map(|bin| {
-        let name = std::path::Path::new(&bin)
+    // AgentRegistry 自动发现本机 ACP agent（PRD §3.3）。单个显式 agent 拉起失败不阻止
+    // Server 监听，其他已发现 agent 仍可用。
+    let configured_name = cfg.agent_bin.as_ref().map(|bin| {
+        std::path::Path::new(bin)
             .file_name()
             .and_then(|f| f.to_str())
-            .unwrap_or(&bin)
-            .to_string();
+            .unwrap_or(bin)
+            .to_string()
+    });
+    let configured: Option<(String, SharedDriver)> = cfg.agent_bin.clone().and_then(|bin| {
+        let name = configured_name.clone().expect("显式 agent 名称已计算");
         let args_ref: Vec<&str> = cfg.agent_args.iter().map(String::as_str).collect();
-        let driver: SharedDriver = Arc::new(AcpAgentDriver::spawn(&bin, &args_ref, &[]).unwrap_or_else(|e| {
-            eprintln!("启动 ACP agent ({bin}) 失败: {e}");
-            std::process::exit(1);
-        }));
-        (name, driver)
+        match AcpAgentDriver::spawn(&bin, &args_ref, &[]) {
+            Ok(driver) => Some((name, Arc::new(driver) as SharedDriver)),
+            Err(e) => {
+                eprintln!("启动 ACP agent ({bin}) 失败，Server 将继续监听: {e}");
+                None
+            }
+        }
     });
 
     // 数据目录
@@ -54,6 +60,9 @@ async fn main() {
         std::process::exit(1);
     }
     let agents = Arc::new(AgentRegistry::new(configured));
+    if let (Some(name), Some(bin)) = (configured_name, cfg.agent_bin.clone()) {
+        agents.set_configured_spec(name, bin, cfg.agent_args.clone(), Vec::new());
+    }
 
     // 启动拉起（docs/DESIGN.md §4.1/§7.3）：server 启动时发现本机 agent 并直接拉起。
     let launch = agents.launch_discovered();

@@ -35,10 +35,7 @@ pub fn merge_recent_workspace(
 
 /// 某设备的常用工作目录路径（最近使用优先，按 `last_used` 降序稳定输出）。
 pub fn recent_workspaces_for_machine(entries: &[RecentWorkspace], machine: &str) -> Vec<String> {
-    let mut mine: Vec<&RecentWorkspace> = entries
-        .iter()
-        .filter(|e| e.machine == machine)
-        .collect();
+    let mut mine: Vec<&RecentWorkspace> = entries.iter().filter(|e| e.machine == machine).collect();
     mine.sort_by(|a, b| b.last_used.cmp(&a.last_used));
     mine.into_iter().map(|e| e.workspace.clone()).collect()
 }
@@ -59,7 +56,9 @@ pub fn merge_session_window(
 ) -> (Vec<SessionMeta>, bool, Option<u64>) {
     let mut out = existing.to_vec();
     for m in window {
-        if !out.iter().any(|s| s.id == m.id) {
+        if let Some(existing) = out.iter_mut().find(|s| s.id == m.id) {
+            *existing = m;
+        } else {
             out.push(m);
         }
     }
@@ -76,8 +75,14 @@ pub fn sort_sessions_recent(meta: &mut [SessionMeta]) {
 /// 对话气泡（对话历史渲染用）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum DialogMsg {
-    UserMessage { content: Vec<ContentBlock>, timestamp: u64 },
-    AgentMessage { content: Vec<ContentBlock>, timestamp: u64 },
+    UserMessage {
+        content: Vec<ContentBlock>,
+        timestamp: u64,
+    },
+    AgentMessage {
+        content: Vec<ContentBlock>,
+        timestamp: u64,
+    },
 }
 
 /// 把 `session.history` 的对话历史条目变换为对话气泡列表（顺序保留：时间正序）。
@@ -103,7 +108,12 @@ pub fn history_to_dialog(items: &[HistoryItem]) -> Vec<DialogMsg> {
 pub fn activity_kind_detail(a: &Activity) -> (String, String) {
     match a {
         Activity::Thinking { content, .. } => ("思考".to_string(), content.clone()),
-        Activity::ToolCall { name, title, content, .. } => {
+        Activity::ToolCall {
+            name,
+            title,
+            content,
+            ..
+        } => {
             let title = title.clone().unwrap_or_default();
             let body = content.clone().unwrap_or_default();
             let combined = if title.trim().is_empty() {
@@ -125,8 +135,15 @@ pub fn activity_kind_detail(a: &Activity) -> (String, String) {
 /// 输入附件：@ 引用文件/目录、拖拽文件、粘贴图片。
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputAttachment {
-    Path { path: String, is_dir: bool },
-    Image { name: String, mime_type: String, data_base64: String },
+    Path {
+        path: String,
+        is_dir: bool,
+    },
+    Image {
+        name: String,
+        mime_type: String,
+        data_base64: String,
+    },
 }
 
 /// 路径 → 路径附件（PRD §4.2）。拖拽文件/目录与 `@` 引用共用。
@@ -282,7 +299,10 @@ mod tests {
             recent_workspaces_for_machine(&list, "m1"),
             vec!["/new", "/mid", "/old"]
         );
-        assert_eq!(recent_workspaces_for_machine(&list, "nope"), Vec::<String>::new());
+        assert_eq!(
+            recent_workspaces_for_machine(&list, "nope"),
+            Vec::<String>::new()
+        );
     }
 
     fn smeta(id: &str, last: u64) -> SessionMeta {
@@ -341,11 +361,15 @@ mod tests {
     fn history_to_dialog_maps_all_kinds() {
         let items = vec![
             HistoryItem::UserMessage {
-                content: vec![ContentBlock::Text { text: "你好".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "你好".into(),
+                }],
                 timestamp: 1,
             },
             HistoryItem::AgentMessage {
-                content: vec![ContentBlock::Text { text: "回复".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "回复".into(),
+                }],
                 timestamp: 2,
             },
         ];
@@ -362,7 +386,10 @@ mod tests {
             timestamp: 1,
             content: "思考中".into(),
         };
-        assert_eq!(activity_kind_detail(&thinking), ("思考".into(), "思考中".into()));
+        assert_eq!(
+            activity_kind_detail(&thinking),
+            ("思考".into(), "思考中".into())
+        );
         let tool = Activity::ToolCall {
             timestamp: 2,
             name: "execute".into(),

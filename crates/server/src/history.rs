@@ -42,7 +42,11 @@ fn append_lines<T: serde::Serialize>(path: &Path, entries: &[T]) -> std::io::Res
 fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
     std::fs::read_to_string(path)
         .ok()
-        .map(|s| s.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -213,7 +217,12 @@ mod tests {
     #[test]
     fn merger_merges_output_and_thinking() {
         let mut m = TurnMerger::new();
-        m.push_user(vec![ContentBlock::Text { text: "你好".into() }], 1);
+        m.push_user(
+            vec![ContentBlock::Text {
+                text: "你好".into(),
+            }],
+            1,
+        );
         m.push_thinking("x".into(), 3);
         m.push_thinking("y".into(), 4);
         m.push_output("a".into(), 5);
@@ -229,8 +238,12 @@ mod tests {
             _ => panic!("第二条应为 AgentMessage"),
         }
         assert_eq!(acts.len(), 2, "thinking 合并 + tool");
-        assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { content, .. } if content == "xy")));
-        assert!(acts.iter().any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "t")));
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "xy")));
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "t")));
     }
 
     /// 历史/活动分文件。

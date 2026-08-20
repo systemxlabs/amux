@@ -106,6 +106,7 @@ async fn handle_connection(
     let token = opts.token.clone();
     // 请求处理与通知发送解耦：dispatch 在独立任务，响应经通道回传
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<String>(64);
+
     loop {
         tokio::select! {
             n = notify_rx.recv() => {
@@ -130,6 +131,28 @@ async fn handle_connection(
                     }
                 };
                 let Message::Text(text) = msg else { continue };
+                // 认证请求在连接任务内串行完成；因此紧随其后的业务请求只有在
+                // auth 响应已处理后才会被派发，不会与认证发生竞态。
+                let is_auth = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("method")
+                            .and_then(|method| method.as_str())
+                            .map(|method| method == method::AUTH)
+                    })
+                    .unwrap_or(false);
+                if is_auth && !authenticated.load(Ordering::SeqCst) {
+                    if let Some(resp) = dispatch(&handlers, &text, &token, &authenticated).await {
+                        let Ok(frame) = serde_json::to_string(&resp) else {
+                            break;
+                        };
+                        if sink.send(Message::Text(frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 let handlers = handlers.clone();
                 let resp_tx = resp_tx.clone();
                 let authenticated = authenticated.clone();
@@ -169,11 +192,29 @@ async fn dispatch(
             });
         }
     };
+    if value.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return Some(protocol::JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            id: value
+                .get("id")
+                .cloned()
+                .unwrap_or(protocol::JsonRpcId::Null),
+            result: None,
+            error: Some(protocol::JsonRpcError {
+                code: protocol::rpc_error::INVALID_REQUEST,
+                message: "jsonrpc 必须为 2.0".into(),
+                data: None,
+            }),
+        });
+    }
     let method = value.get("method").and_then(|m| m.as_str());
     let Some(method) = method else {
         return Some(protocol::JsonRpcResponse {
             jsonrpc: "2.0".into(),
-            id: value.get("id").cloned().unwrap_or(protocol::JsonRpcId::Null),
+            id: value
+                .get("id")
+                .cloned()
+                .unwrap_or(protocol::JsonRpcId::Null),
             result: None,
             error: Some(protocol::JsonRpcError {
                 code: protocol::rpc_error::INVALID_REQUEST,
@@ -221,8 +262,18 @@ async fn dispatch(
     let (result, error) = match result {
         Ok(v) => (Some(v), None),
         Err(RpcError { code, message }) => {
-            protocol::log::error("server.transport", format!("请求 {method} 失败 [{code}]: {message}"));
-            (None, Some(protocol::JsonRpcError { code, message, data: None }))
+            protocol::log::error(
+                "server.transport",
+                format!("请求 {method} 失败 [{code}]: {message}"),
+            );
+            (
+                None,
+                Some(protocol::JsonRpcError {
+                    code,
+                    message,
+                    data: None,
+                }),
+            )
         }
     };
     protocol::log::debug(
@@ -244,13 +295,14 @@ fn handle_auth(
     authenticated: &Arc<AtomicBool>,
     id: protocol::JsonRpcId,
 ) -> protocol::JsonRpcResponse {
-    let auth: Result<AuthParams, _> = params
-        .clone()
-        .map(serde_json::from_value)
-        .unwrap_or(Err(serde_json::Error::io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "missing params",
-        ))));
+    let auth: Result<AuthParams, _> =
+        params
+            .clone()
+            .map(serde_json::from_value)
+            .unwrap_or(Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "missing params",
+            ))));
     match auth {
         Ok(params) if params.token == token => {
             authenticated.store(true, Ordering::SeqCst);
@@ -258,7 +310,11 @@ fn handle_auth(
             protocol::JsonRpcResponse {
                 jsonrpc: "2.0".into(),
                 id,
-                result: serde_json::to_value(OpResult { ok: true, message: None }).ok(),
+                result: serde_json::to_value(OpResult {
+                    ok: true,
+                    message: None,
+                })
+                .ok(),
                 error: None,
             }
         }
@@ -304,7 +360,10 @@ mod tests {
             new_state: SessionState::Busy,
         });
         let frame = notification_frame(&n).expect("应序列化");
-        assert!(frame.contains(&format!("\"method\":\"{}\"", notify::SESSION_STATE_CHANGE)), "{frame}");
+        assert!(
+            frame.contains(&format!("\"method\":\"{}\"", notify::SESSION_STATE_CHANGE)),
+            "{frame}"
+        );
         assert!(frame.contains("\"sessionId\":\"s1\""), "{frame}");
         assert!(frame.contains("\"newState\":\"busy\""), "{frame}");
     }

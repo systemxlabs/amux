@@ -246,7 +246,9 @@ pub struct SessionStateChange {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
     Resource {
         mime_type: String,
@@ -440,7 +442,8 @@ mod tests {
     fn auth_and_session_params_deserialize() {
         let a: AuthParams = serde_json::from_str(r#"{"token":"t"}"#).unwrap();
         assert_eq!(a.token, "t");
-        let s: SessionNewParams = serde_json::from_str(r#"{"agent":"codex","cwd":"/tmp"}"#).unwrap();
+        let s: SessionNewParams =
+            serde_json::from_str(r#"{"agent":"codex","cwd":"/tmp"}"#).unwrap();
         assert_eq!(s.agent, "codex");
         let id: SessionIdParams = serde_json::from_str(r#"{"sessionId":"s1"}"#).unwrap();
         assert_eq!(id.session_id, "s1");
@@ -490,7 +493,8 @@ mod tests {
             url: "ws://127.0.0.1:34567".into(),
             token: "t".into(),
         };
-        let back: MachineConfig = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        let back: MachineConfig =
+            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(back.name, "localpc");
 
         let w = RecentWorkspace {
@@ -507,7 +511,8 @@ mod tests {
             name: "审查".into(),
             plan: "用 codex 实现，claude 审查".into(),
         };
-        let back: WorkflowTemplate = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        let back: WorkflowTemplate =
+            serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(back.plan, "用 codex 实现，claude 审查");
 
         let q = QuickCommand {

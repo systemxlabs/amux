@@ -29,7 +29,9 @@ pub fn normalize_machines(raw: &serde_json::Value) -> Vec<MachineConfig> {
         .map(|arr| {
             arr.iter()
                 .filter(|v| {
-                    is_string_field(v, "name") && is_string_field(v, "url") && is_string_field(v, "token")
+                    is_string_field(v, "name")
+                        && is_string_field(v, "url")
+                        && is_string_field(v, "token")
                 })
                 .map(|v| MachineConfig {
                     name: v["name"].as_str().unwrap_or("").to_string(),
@@ -46,9 +48,7 @@ pub fn normalize_skills(raw: &serde_json::Value) -> Vec<SkillEntry> {
     raw.as_array()
         .map(|arr| {
             arr.iter()
-                .filter(|v| {
-                    is_string_field(v, "name") && is_string_field(v, "description")
-                })
+                .filter(|v| is_string_field(v, "name") && is_string_field(v, "description"))
                 .map(|v| SkillEntry {
                     name: v["name"].as_str().unwrap_or("").to_string(),
                     description: v["description"].as_str().unwrap_or("").to_string(),
@@ -78,9 +78,7 @@ pub fn normalize_recent_workspaces(raw: &serde_json::Value) -> Vec<RecentWorkspa
     raw.as_array()
         .map(|arr| {
             arr.iter()
-                .filter(|v| {
-                    is_string_field(v, "machine") && is_string_field(v, "workspace")
-                })
+                .filter(|v| is_string_field(v, "machine") && is_string_field(v, "workspace"))
                 .map(|v| RecentWorkspace {
                     machine: v["machine"].as_str().unwrap_or("").to_string(),
                     workspace: v["workspace"].as_str().unwrap_or("").to_string(),
@@ -175,7 +173,10 @@ impl ConfigStore {
             token: token.to_string(),
         };
         machines.push(m.clone());
-        write_file(&self.path("machines.json"), &serde_json::to_value(machines).unwrap());
+        write_file(
+            &self.path("machines.json"),
+            &serde_json::to_value(machines).unwrap(),
+        );
         m
     }
 
@@ -185,7 +186,10 @@ impl ConfigStore {
             .into_iter()
             .filter(|m| m.name != name)
             .collect();
-        write_file(&self.path("machines.json"), &serde_json::to_value(machines).unwrap());
+        write_file(
+            &self.path("machines.json"),
+            &serde_json::to_value(machines).unwrap(),
+        );
     }
 
     pub fn update_machine(&self, name: &str, url: &str, token: &str) {
@@ -194,7 +198,10 @@ impl ConfigStore {
             m.url = url.to_string();
             m.token = token.to_string();
         }
-        write_file(&self.path("machines.json"), &serde_json::to_value(machines).unwrap());
+        write_file(
+            &self.path("machines.json"),
+            &serde_json::to_value(machines).unwrap(),
+        );
     }
 
     // ---- 快捷指令（quick_commands.json）----
@@ -211,7 +218,10 @@ impl ConfigStore {
             prompt: prompt.to_string(),
         };
         cmds.push(c.clone());
-        write_file(&self.path("quick_commands.json"), &serde_json::to_value(cmds).unwrap());
+        write_file(
+            &self.path("quick_commands.json"),
+            &serde_json::to_value(cmds).unwrap(),
+        );
         c
     }
 
@@ -220,7 +230,10 @@ impl ConfigStore {
         if let Some(c) = cmds.iter_mut().find(|c| c.name == name) {
             c.prompt = prompt.to_string();
         }
-        write_file(&self.path("quick_commands.json"), &serde_json::to_value(cmds).unwrap());
+        write_file(
+            &self.path("quick_commands.json"),
+            &serde_json::to_value(cmds).unwrap(),
+        );
     }
 
     pub fn remove_quick_command(&self, name: &str) {
@@ -229,7 +242,10 @@ impl ConfigStore {
             .into_iter()
             .filter(|c| c.name != name)
             .collect();
-        write_file(&self.path("quick_commands.json"), &serde_json::to_value(cmds).unwrap());
+        write_file(
+            &self.path("quick_commands.json"),
+            &serde_json::to_value(cmds).unwrap(),
+        );
     }
 
     // ---- Skills（skills.json）----
@@ -246,7 +262,10 @@ impl ConfigStore {
             description: description.to_string(),
         };
         skills.push(s.clone());
-        write_file(&self.path("skills.json"), &serde_json::to_value(skills).unwrap());
+        write_file(
+            &self.path("skills.json"),
+            &serde_json::to_value(skills).unwrap(),
+        );
         s
     }
 
@@ -255,7 +274,10 @@ impl ConfigStore {
         if let Some(s) = skills.iter_mut().find(|s| s.name == name) {
             s.description = description.to_string();
         }
-        write_file(&self.path("skills.json"), &serde_json::to_value(skills).unwrap());
+        write_file(
+            &self.path("skills.json"),
+            &serde_json::to_value(skills).unwrap(),
+        );
     }
 
     pub fn remove_skill(&self, name: &str) {
@@ -264,7 +286,10 @@ impl ConfigStore {
             .into_iter()
             .filter(|s| s.name != name)
             .collect();
-        write_file(&self.path("skills.json"), &serde_json::to_value(skills).unwrap());
+        write_file(
+            &self.path("skills.json"),
+            &serde_json::to_value(skills).unwrap(),
+        );
     }
 
     // ---- 工作流模板（workflows.json）----
@@ -281,7 +306,10 @@ impl ConfigStore {
             plan: plan.to_string(),
         };
         tpls.push(t.clone());
-        write_file(&self.path("workflows.json"), &serde_json::to_value(tpls).unwrap());
+        write_file(
+            &self.path("workflows.json"),
+            &serde_json::to_value(tpls).unwrap(),
+        );
         t
     }
 
@@ -290,7 +318,10 @@ impl ConfigStore {
         if let Some(t) = tpls.iter_mut().find(|t| t.name == name) {
             t.plan = plan.to_string();
         }
-        write_file(&self.path("workflows.json"), &serde_json::to_value(tpls).unwrap());
+        write_file(
+            &self.path("workflows.json"),
+            &serde_json::to_value(tpls).unwrap(),
+        );
     }
 
     pub fn remove_template(&self, name: &str) {
@@ -299,13 +330,19 @@ impl ConfigStore {
             .into_iter()
             .filter(|t| t.name != name)
             .collect();
-        write_file(&self.path("workflows.json"), &serde_json::to_value(tpls).unwrap());
+        write_file(
+            &self.path("workflows.json"),
+            &serde_json::to_value(tpls).unwrap(),
+        );
     }
 
     // ---- 常用工作目录（recent_workspaces.json）----
 
     pub fn recent_workspaces(&self) -> Vec<RecentWorkspace> {
-        read_file_normalized(&self.path("recent_workspaces.json"), normalize_recent_workspaces)
+        read_file_normalized(
+            &self.path("recent_workspaces.json"),
+            normalize_recent_workspaces,
+        )
     }
 
     /// 某设备的常用工作目录（最近使用优先）。

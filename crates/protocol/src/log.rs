@@ -94,11 +94,7 @@ pub fn init_file_output(base_path: &Path) {
 }
 
 fn open_append(path: &Path) -> Option<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()
+    OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
 /// 若基路径已存在且不是今天的文件，则按日期归档。
@@ -208,7 +204,11 @@ fn parse_day(s: &str) -> Result<i64, ()> {
 /// 自 UNIX 纪元（1970-01-01）起的天数 → 民用日期 (year, month, day)。
 fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let z = z + 719468;
-    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+    let era = if z >= 0 {
+        z / 146097
+    } else {
+        (z - 146096) / 146097
+    };
     let doe = z - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe as i32 + era as i32 * 400;

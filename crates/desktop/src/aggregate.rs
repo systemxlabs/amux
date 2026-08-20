@@ -11,6 +11,10 @@ use crate::logic::{history_to_dialog, DialogMsg};
 pub struct SessionView {
     pub dialog: Vec<DialogMsg>,
     pub activities: Vec<Activity>,
+    pub history_has_more: bool,
+    pub history_next_before: Option<usize>,
+    pub activities_has_more: bool,
+    pub activities_next_before: Option<usize>,
     /// 当前实时活动（进行中；空闲 None）。
     pub live: Option<Activity>,
     pub busy: bool,
@@ -24,6 +28,19 @@ impl SessionView {
     /// 用一窗历史替换对话（轮询刷新：最新一窗全量覆盖）。
     pub fn set_history(&mut self, items: &[HistoryItem]) {
         self.dialog = history_to_dialog(items);
+        self.history_has_more = false;
+        self.history_next_before = None;
+    }
+
+    pub fn set_history_page(
+        &mut self,
+        items: &[HistoryItem],
+        has_more: bool,
+        next_before: Option<usize>,
+    ) {
+        self.dialog = history_to_dialog(items);
+        self.history_has_more = has_more;
+        self.history_next_before = next_before;
     }
 
     /// 前插更早一窗历史（惰性加载"更早消息"，保持时间正序）。
@@ -35,7 +52,10 @@ impl SessionView {
         // 跨窗分块：head 末尾与当前开头同属一条 AgentMessage → 合并
         let merge_tail = matches!(
             (head.last(), self.dialog.first()),
-            (Some(DialogMsg::AgentMessage { .. }), Some(DialogMsg::AgentMessage { .. }))
+            (
+                Some(DialogMsg::AgentMessage { .. }),
+                Some(DialogMsg::AgentMessage { .. })
+            )
         );
         if merge_tail {
             if let (
@@ -51,9 +71,33 @@ impl SessionView {
         self.dialog = head;
     }
 
+    pub fn prepend_history_page(
+        &mut self,
+        earlier: &[HistoryItem],
+        has_more: bool,
+        next_before: Option<usize>,
+    ) {
+        self.prepend_history(earlier);
+        self.history_has_more = has_more;
+        self.history_next_before = next_before;
+    }
+
     /// 设置活动历史（轮询刷新：全量覆盖）。
     pub fn set_activities(&mut self, activities: Vec<Activity>) {
         self.activities = activities;
+        self.activities_has_more = false;
+        self.activities_next_before = None;
+    }
+
+    pub fn set_activities_page(
+        &mut self,
+        activities: Vec<Activity>,
+        has_more: bool,
+        next_before: Option<usize>,
+    ) {
+        self.activities = activities;
+        self.activities_has_more = has_more;
+        self.activities_next_before = next_before;
     }
 
     /// 前插更早一窗活动。
@@ -64,6 +108,17 @@ impl SessionView {
         let mut head = earlier;
         head.extend(self.activities.drain(..));
         self.activities = head;
+    }
+
+    pub fn prepend_activities_page(
+        &mut self,
+        earlier: Vec<Activity>,
+        has_more: bool,
+        next_before: Option<usize>,
+    ) {
+        self.prepend_activities(earlier);
+        self.activities_has_more = has_more;
+        self.activities_next_before = next_before;
     }
 
     /// 设置实时活动。有进行中活动即视为 busy；无（None）则回到空闲。

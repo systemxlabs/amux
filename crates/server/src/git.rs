@@ -77,9 +77,15 @@ struct HunkCollector {
 impl ConsumeHunk for HunkCollector {
     type Out = Vec<(HunkHeader, Vec<(DiffLineKind, Vec<u8>)>)>;
 
-    fn consume_hunk(&mut self, header: HunkHeader, lines: &[(DiffLineKind, &[u8])]) -> std::io::Result<()> {
-        self.hunks
-            .push((header, lines.iter().map(|(k, l)| (*k, l.to_vec())).collect()));
+    fn consume_hunk(
+        &mut self,
+        header: HunkHeader,
+        lines: &[(DiffLineKind, &[u8])],
+    ) -> std::io::Result<()> {
+        self.hunks.push((
+            header,
+            lines.iter().map(|(k, l)| (*k, l.to_vec())).collect(),
+        ));
         Ok(())
     }
 
@@ -163,17 +169,34 @@ fn modified_patch(
 ) -> Option<FilePatch> {
     let new_id = gix::hash::ObjectId::null(repo.object_hash());
     cache
-        .set_resource(old_id, old_mode.into(), path, ResourceKind::OldOrSource, &repo.objects)
+        .set_resource(
+            old_id,
+            old_mode.into(),
+            path,
+            ResourceKind::OldOrSource,
+            &repo.objects,
+        )
         .ok()?;
     cache
-        .set_resource(new_id, old_mode.into(), path, ResourceKind::NewOrDestination, &repo.objects)
+        .set_resource(
+            new_id,
+            old_mode.into(),
+            path,
+            ResourceKind::NewOrDestination,
+            &repo.objects,
+        )
         .ok()?;
     let prep = cache.prepare_diff().ok()?;
     let hunks_data = match prep.operation {
         Operation::InternalDiff { algorithm } => {
             let input = prep.interned_input();
             let diff = gix::diff::blob::diff_with_slider_heuristics(algorithm, &input);
-            let ud = UnifiedDiff::new(&diff, &input, HunkCollector::default(), ContextSize::symmetrical(3));
+            let ud = UnifiedDiff::new(
+                &diff,
+                &input,
+                HunkCollector::default(),
+                ContextSize::symmetrical(3),
+            );
             ud.consume().ok()?
         }
         // 二进制等不可行内 diff 的资源：无 hunk，仅文件头（与 `git diff` 无内容时的表现一致）。
@@ -186,8 +209,14 @@ fn modified_patch(
     let mut additions = 0u32;
     let mut deletions = 0u32;
     for (h, lines) in hunks_data {
-        additions += lines.iter().filter(|(k, _)| *k == DiffLineKind::Add).count() as u32;
-        deletions += lines.iter().filter(|(k, _)| *k == DiffLineKind::Remove).count() as u32;
+        additions += lines
+            .iter()
+            .filter(|(k, _)| *k == DiffLineKind::Add)
+            .count() as u32;
+        deletions += lines
+            .iter()
+            .filter(|(k, _)| *k == DiffLineKind::Remove)
+            .count() as u32;
         let header = hunk_header_text(&h);
         let hunk_text = format!("{header}\n{}", hunk_body_text(&lines));
         hunks.push(GitDiffHunk {
@@ -241,13 +270,11 @@ impl GitRunner {
         // 收集变更路径：TreeIndex（HEAD vs index，staged）+ IndexWorktree（index vs 工作区，unstaged）。
         // 重命名检测关闭：重命名显示为删除+新增（`git diff --no-renames` 语义）。
         let mut paths = BTreeSet::<BString>::new();
-        let status = match repo
-            .status(gix::progress::Discard)
-            .map(|s| {
-                s.untracked_files(gix::status::UntrackedFiles::None)
-                    .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
-                    .index_worktree_rewrites(None)
-            }) {
+        let status = match repo.status(gix::progress::Discard).map(|s| {
+            s.untracked_files(gix::status::UntrackedFiles::Files)
+                .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
+                .index_worktree_rewrites(None)
+        }) {
             Ok(s) => s,
             Err(_) => return empty(),
         };
@@ -265,13 +292,31 @@ impl GitRunner {
                     }
                     gix::diff::index::ChangeRef::Rewrite { .. } => {}
                 },
-                Ok(gix::status::Item::IndexWorktree(gix::status::index_worktree::Item::Modification {
-                    rela_path,
-                    ..
-                })) => {
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::Modification { rela_path, .. },
+                )) => {
                     paths.insert(rela_path);
                 }
-                Ok(_) => {}
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::DirectoryContents { entry, .. },
+                )) => {
+                    if matches!(
+                        entry.disk_kind,
+                        Some(gix::dir::entry::Kind::File | gix::dir::entry::Kind::Symlink)
+                    ) {
+                        paths.insert(entry.rela_path);
+                    }
+                }
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::Rewrite { dirwalk_entry, .. },
+                )) => {
+                    if matches!(
+                        dirwalk_entry.disk_kind,
+                        Some(gix::dir::entry::Kind::File | gix::dir::entry::Kind::Symlink)
+                    ) {
+                        paths.insert(dirwalk_entry.rela_path);
+                    }
+                }
                 Err(_) => return empty(),
             }
         }
@@ -430,7 +475,11 @@ impl GitRunner {
         let in_head = repo
             .head_tree()
             .ok()
-            .and_then(|t| t.lookup_entry_by_path(gix::path::from_bstr(&full)).ok().flatten())
+            .and_then(|t| {
+                t.lookup_entry_by_path(gix::path::from_bstr(&full))
+                    .ok()
+                    .flatten()
+            })
             .is_some();
         if in_head {
             return false;
@@ -499,6 +548,20 @@ mod tests {
             .files
             .iter()
             .any(|f| f.path == "new.txt" && matches!(f.status, GitChangeStatus::Added)));
+    }
+
+    #[test]
+    fn diff_includes_untracked_files() {
+        let dir = init_repo();
+        std::fs::write(dir.join("untracked.txt"), "not staged\n").unwrap();
+        let result = GitRunner::new().diff(dir.to_str().unwrap(), None);
+        let file = result
+            .files
+            .iter()
+            .find(|file| file.path == "untracked.txt")
+            .expect("未跟踪文件应出现在 diff 中");
+        assert!(matches!(file.status, GitChangeStatus::Added));
+        assert!(file.patch.contains("not staged"));
     }
 
     #[test]

@@ -7,10 +7,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use protocol::{
-    method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams, AgentSkillsResult,
-    HistoryResult, OngoingActivityResult, OpResult, SessionConfigureParams, SessionIdParams,
-    SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult, SessionNewParams,
-    SessionPageParams, SessionPromptParams, SessionResult, WorkspaceDiffResult, WorkspaceRestoreParams,
+    method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams,
+    AgentSkillsResult, HistoryResult, OngoingActivityResult, OpResult, SessionConfigureParams,
+    SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, WorkspaceDiffResult,
+    WorkspaceRestoreParams,
 };
 
 use crate::git::GitRunner;
@@ -102,10 +103,18 @@ impl Handlers {
 
             method::AGENT_SKILLS => {
                 let p: AgentParams = parse(params)?;
-                let skills = match self.manager.agents().driver_for(&p.agent) {
-                    Ok(d) => d.list_skills(),
-                    Err(_) => Vec::new(),
-                };
+                let driver = self
+                    .manager
+                    .agents()
+                    .driver_for(&p.agent)
+                    .map_err(|e| RpcError {
+                        code: server_error::HARNESS_UNAVAILABLE,
+                        message: e,
+                    })?;
+                let skills = driver.list_skills().map_err(|e| RpcError {
+                    code: rpc_error::INTERNAL_ERROR,
+                    message: e,
+                })?;
                 serde_json::to_value(AgentSkillsResult { skills })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
@@ -250,7 +259,9 @@ impl Handlers {
 
             method::WORKSPACE_RESTORE => {
                 let p: WorkspaceRestoreParams = parse(params)?;
-                let r = self.git.restore(&p.cwd, p.path.as_deref(), p.patch.as_deref());
+                let r = self
+                    .git
+                    .restore(&p.cwd, p.path.as_deref(), p.patch.as_deref());
                 serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
             }
 
@@ -298,9 +309,7 @@ mod tests {
     /// ContentBlock 往返（协议契约）。
     #[test]
     fn content_block_roundtrip() {
-        let b = ContentBlock::Text {
-            text: "hi".into(),
-        };
+        let b = ContentBlock::Text { text: "hi".into() };
         let s = serde_json::to_string(&b).unwrap();
         let back: ContentBlock = serde_json::from_str(&s).unwrap();
         assert_eq!(back, ContentBlock::Text { text: "hi".into() });
