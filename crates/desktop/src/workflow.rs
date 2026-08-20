@@ -153,8 +153,14 @@ pub enum OrcAction {
         prompt: String,
         reuse: Option<String>,
     },
-    Steer { session: String, prompt: String },
-    Retry { session: String, prompt: String },
+    Steer {
+        session: String,
+        prompt: String,
+    },
+    Retry {
+        session: String,
+        prompt: String,
+    },
 }
 
 /// 单 turn 决策结果。
@@ -187,7 +193,10 @@ pub enum ToolOp {
         cwd: String,
         prompt: String,
     },
-    Prompt { session: String, prompt: String },
+    Prompt {
+        session: String,
+        prompt: String,
+    },
 }
 
 /// 工具共享状态：机器名列表（工具校验）+ 动作记录。
@@ -487,14 +496,18 @@ impl WorkflowEngine {
                                         .to_string();
                                     if sid.is_empty() {
                                         self.session.transcript.push(OrcMsg::User {
-                                            text: format!("创建关联普通会话失败（{machine}/{agent}）"),
+                                            text: format!(
+                                                "创建关联普通会话失败（{machine}/{agent}）"
+                                            ),
                                         });
                                     }
                                     sid
                                 }
                                 Err(e) => {
                                     self.session.transcript.push(OrcMsg::User {
-                                        text: format!("创建关联普通会话失败（{machine}/{agent}）：{e}"),
+                                        text: format!(
+                                            "创建关联普通会话失败（{machine}/{agent}）：{e}"
+                                        ),
                                     });
                                     continue;
                                 }
@@ -629,7 +642,12 @@ impl WorkflowEngine {
 
     /// 同步记录关联普通会话状态变更（不推进；widget 状态即可视化）。
     pub fn on_child_state_local(&mut self, session_id: &str, state: SessionState) {
-        if let Some(child) = self.session.children.iter_mut().find(|c| c.id == session_id) {
+        if let Some(child) = self
+            .session
+            .children
+            .iter_mut()
+            .find(|c| c.id == session_id)
+        {
             child.state = state;
         }
     }
@@ -694,9 +712,11 @@ impl WorkflowEngine {
         );
         let mut added = false;
         for text in msgs {
-            let exists = self.session.transcript.iter().any(|m| {
-                matches!(m, OrcMsg::User { text: t } if t == &text)
-            });
+            let exists = self
+                .session
+                .transcript
+                .iter()
+                .any(|m| matches!(m, OrcMsg::User { text: t } if t == &text));
             if !exists {
                 self.session.transcript.push(OrcMsg::User { text });
                 added = true;
@@ -937,8 +957,15 @@ impl OrcBackend for RigBackend {
                     run_orc_turn(agent, input, tool_ctx).await?
                 }
             };
-            let kids = live.children.lock().expect("Mutex 中毒（临界区内不应 panic）").clone();
-            *self.synced_children.lock().expect("Mutex 中毒（临界区内不应 panic）") = Some(kids);
+            let kids = live
+                .children
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .clone();
+            *self
+                .synced_children
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）") = Some(kids);
             Ok(Decision {
                 summary: text,
                 actions: Vec::new(),
@@ -1659,7 +1686,10 @@ mod tests {
 
     #[test]
     fn api_format_kind_dispatches_formats() {
-        assert_eq!(api_format_kind("chat_completions"), ApiFormat::ChatCompletions);
+        assert_eq!(
+            api_format_kind("chat_completions"),
+            ApiFormat::ChatCompletions
+        );
         assert_eq!(api_format_kind("responses"), ApiFormat::Responses);
         assert_eq!(api_format_kind("messages"), ApiFormat::Messages);
         assert_eq!(api_format_kind("unknown"), ApiFormat::ChatCompletions);
@@ -1678,7 +1708,9 @@ mod tests {
             vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
         let mut engine = engine;
-        engine.session.transcript.push(OrcMsg::Orc { text: "决策".into() });
+        engine.session.transcript.push(OrcMsg::Orc {
+            text: "决策".into(),
+        });
         let dialog = engine.session.to_dialog();
         assert_eq!(dialog.len(), 2);
         assert!(matches!(&dialog[0], DialogMsg::UserMessage { .. }));

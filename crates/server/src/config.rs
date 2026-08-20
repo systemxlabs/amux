@@ -118,7 +118,10 @@ mod tests {
         let cfg = parse_config(&env_of(&[("AMUX_TOKEN", "secret")]), &[]).unwrap();
         assert_eq!(cfg.token, "secret");
         assert_eq!(cfg.port, 34567);
-        assert_eq!(cfg.host, "0.0.0.0", "默认监听地址应为 0.0.0.0（docs/DESIGN.md）");
+        assert_eq!(
+            cfg.host, "0.0.0.0",
+            "默认监听地址应为 0.0.0.0（docs/DESIGN.md）"
+        );
     }
 
     #[test]

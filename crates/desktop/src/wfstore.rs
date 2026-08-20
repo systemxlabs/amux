@@ -12,7 +12,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::workflow::{ChildSession, OrcMsg, OrcSession};
 
 fn history_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
-    data_dir.join("sessions").join(format!("{id}_history.jsonl"))
+    data_dir
+        .join("sessions")
+        .join(format!("{id}_history.jsonl"))
 }
 
 fn activities_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
@@ -163,10 +165,7 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
         &history_path(data_dir, &session.id),
         &history_from_transcript(&session.transcript, session.updated_at),
     )?;
-    write_jsonl(
-        &activities_path(data_dir, &session.id),
-        &session.activities,
-    )?;
+    write_jsonl(&activities_path(data_dir, &session.id), &session.activities)?;
     Ok(())
 }
 
@@ -251,9 +250,7 @@ pub fn remove(data_dir: &Path, id: &str) {
 #[cfg(test)]
 pub fn get(data_dir: &Path, id: &str) -> Option<OrcSession> {
     let conn = open_db(data_dir).ok()?;
-    let mut stmt = conn
-        .prepare("SELECT id FROM sessions WHERE id = ?1")
-        .ok()?;
+    let mut stmt = conn.prepare("SELECT id FROM sessions WHERE id = ?1").ok()?;
     stmt.query_row(params![id], |_| Ok(()))
         .optional()
         .ok()
@@ -285,8 +282,12 @@ mod tests {
             cancelled: false,
             done: false,
             transcript: vec![
-                OrcMsg::User { text: "开始".into() },
-                OrcMsg::Orc { text: "已转发".into() },
+                OrcMsg::User {
+                    text: "开始".into(),
+                },
+                OrcMsg::Orc {
+                    text: "已转发".into(),
+                },
             ],
             children: vec![],
             activities: vec![Activity::Thinking {

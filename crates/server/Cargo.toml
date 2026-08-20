@@ -18,7 +18,8 @@ agent-client-protocol = { version = "1", features = ["unstable"] }
 uuid.workspace = true
 # 会话注册表持久化（docs/DESIGN.md §3.3/§4.3：server 单写者，同步 API）
 rusqlite = { version = "0.32", features = ["bundled"] }
-gix = "0.86.0"
+# git 能力（workspace.diff/restore）用 gitoxide；只开用到的特性以精简依赖树
+gix = { version = "0.86", default-features = false, features = ["basic", "status", "sha1"] }
 
 [[bin]]
 name = "mock_acp"

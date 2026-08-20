@@ -16,6 +16,7 @@ use gix::diff::blob::{ResourceKind, UnifiedDiff};
 
 use protocol::{GitChangeStatus, GitDiffFile, GitDiffHunk, OpResult, WorkspaceDiffResult};
 
+#[derive(Default)]
 pub struct GitRunner;
 
 /// git CLI 输出错误（restore 的 CLI 兜底路径用）。
@@ -69,17 +70,25 @@ struct FilePatch {
 }
 
 /// 统一 diff 渲染收集器：UnifiedDiff 逐个 hunk 回调，收集行级数据用于自拼 patch 文本。
+type HunkLines = Vec<(DiffLineKind, Vec<u8>)>;
+
 #[derive(Default)]
 struct HunkCollector {
-    hunks: Vec<(HunkHeader, Vec<(DiffLineKind, Vec<u8>)>)>,
+    hunks: Vec<(HunkHeader, HunkLines)>,
 }
 
 impl ConsumeHunk for HunkCollector {
-    type Out = Vec<(HunkHeader, Vec<(DiffLineKind, Vec<u8>)>)>;
+    type Out = Vec<(HunkHeader, HunkLines)>;
 
-    fn consume_hunk(&mut self, header: HunkHeader, lines: &[(DiffLineKind, &[u8])]) -> std::io::Result<()> {
-        self.hunks
-            .push((header, lines.iter().map(|(k, l)| (*k, l.to_vec())).collect()));
+    fn consume_hunk(
+        &mut self,
+        header: HunkHeader,
+        lines: &[(DiffLineKind, &[u8])],
+    ) -> std::io::Result<()> {
+        self.hunks.push((
+            header,
+            lines.iter().map(|(k, l)| (*k, l.to_vec())).collect(),
+        ));
         Ok(())
     }
 
@@ -163,17 +172,34 @@ fn modified_patch(
 ) -> Option<FilePatch> {
     let new_id = gix::hash::ObjectId::null(repo.object_hash());
     cache
-        .set_resource(old_id, old_mode.into(), path, ResourceKind::OldOrSource, &repo.objects)
+        .set_resource(
+            old_id,
+            old_mode.into(),
+            path,
+            ResourceKind::OldOrSource,
+            &repo.objects,
+        )
         .ok()?;
     cache
-        .set_resource(new_id, old_mode.into(), path, ResourceKind::NewOrDestination, &repo.objects)
+        .set_resource(
+            new_id,
+            old_mode.into(),
+            path,
+            ResourceKind::NewOrDestination,
+            &repo.objects,
+        )
         .ok()?;
     let prep = cache.prepare_diff().ok()?;
     let hunks_data = match prep.operation {
         Operation::InternalDiff { algorithm } => {
             let input = prep.interned_input();
             let diff = gix::diff::blob::diff_with_slider_heuristics(algorithm, &input);
-            let ud = UnifiedDiff::new(&diff, &input, HunkCollector::default(), ContextSize::symmetrical(3));
+            let ud = UnifiedDiff::new(
+                &diff,
+                &input,
+                HunkCollector::default(),
+                ContextSize::symmetrical(3),
+            );
             ud.consume().ok()?
         }
         // 二进制等不可行内 diff 的资源：无 hunk，仅文件头（与 `git diff` 无内容时的表现一致）。
@@ -186,8 +212,14 @@ fn modified_patch(
     let mut additions = 0u32;
     let mut deletions = 0u32;
     for (h, lines) in hunks_data {
-        additions += lines.iter().filter(|(k, _)| *k == DiffLineKind::Add).count() as u32;
-        deletions += lines.iter().filter(|(k, _)| *k == DiffLineKind::Remove).count() as u32;
+        additions += lines
+            .iter()
+            .filter(|(k, _)| *k == DiffLineKind::Add)
+            .count() as u32;
+        deletions += lines
+            .iter()
+            .filter(|(k, _)| *k == DiffLineKind::Remove)
+            .count() as u32;
         let header = hunk_header_text(&h);
         let hunk_text = format!("{header}\n{}", hunk_body_text(&lines));
         hunks.push(GitDiffHunk {
@@ -241,13 +273,11 @@ impl GitRunner {
         // 收集变更路径：TreeIndex（HEAD vs index，staged）+ IndexWorktree（index vs 工作区，unstaged）。
         // 重命名检测关闭：重命名显示为删除+新增（`git diff --no-renames` 语义）。
         let mut paths = BTreeSet::<BString>::new();
-        let status = match repo
-            .status(gix::progress::Discard)
-            .map(|s| {
-                s.untracked_files(gix::status::UntrackedFiles::None)
-                    .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
-                    .index_worktree_rewrites(None)
-            }) {
+        let status = match repo.status(gix::progress::Discard).map(|s| {
+            s.untracked_files(gix::status::UntrackedFiles::None)
+                .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
+                .index_worktree_rewrites(None)
+        }) {
             Ok(s) => s,
             Err(_) => return empty(),
         };
@@ -265,10 +295,9 @@ impl GitRunner {
                     }
                     gix::diff::index::ChangeRef::Rewrite { .. } => {}
                 },
-                Ok(gix::status::Item::IndexWorktree(gix::status::index_worktree::Item::Modification {
-                    rela_path,
-                    ..
-                })) => {
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::Modification { rela_path, .. },
+                )) => {
                     paths.insert(rela_path);
                 }
                 Ok(_) => {}
@@ -430,7 +459,11 @@ impl GitRunner {
         let in_head = repo
             .head_tree()
             .ok()
-            .and_then(|t| t.lookup_entry_by_path(gix::path::from_bstr(&full)).ok().flatten())
+            .and_then(|t| {
+                t.lookup_entry_by_path(gix::path::from_bstr(&full))
+                    .ok()
+                    .flatten()
+            })
             .is_some();
         if in_head {
             return false;

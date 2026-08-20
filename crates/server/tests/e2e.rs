@@ -143,7 +143,11 @@ impl Drop for ServerGuard {
     }
 }
 
-async fn spawn_server_with_delay(port: u16, data_dir: std::path::PathBuf, delay_ms: u32) -> ServerGuard {
+async fn spawn_server_with_delay(
+    port: u16,
+    data_dir: std::path::PathBuf,
+    delay_ms: u32,
+) -> ServerGuard {
     let bin = env!("CARGO_BIN_EXE_test-server");
     let child = tokio::process::Command::new(bin)
         .args([
@@ -221,7 +225,10 @@ async fn agent_list_and_skills() {
         .iter()
         .filter_map(|a| a["name"].as_str())
         .collect();
-    assert!(agents.contains(&"mock_acp"), "agent.list 应含 mock_acp: {list}");
+    assert!(
+        agents.contains(&"mock_acp"),
+        "agent.list 应含 mock_acp: {list}"
+    );
 
     let s = c.call("agent.skills", json!({"agent": "mock_acp"})).await;
     let skills: Vec<&str> = s["result"]["skills"]
@@ -230,7 +237,10 @@ async fn agent_list_and_skills() {
         .iter()
         .filter_map(|x| x.as_str())
         .collect();
-    assert!(skills.contains(&"web-browser"), "mock_acp 应返回 skills: {skills:?}");
+    assert!(
+        skills.contains(&"web-browser"),
+        "mock_acp 应返回 skills: {skills:?}"
+    );
 }
 
 // ---- 会话生命周期 + 惰性 + state_change + 删除触发 session/close ----
@@ -242,11 +252,20 @@ async fn session_lifecycle_state_change_and_delete() {
 
     // session.new 惰性：只写注册表，不触发 ACP session/new
     let created = c
-        .call("session.new", json!({"agent": "mock_acp", "cwd": "/tmp/work"}))
+        .call(
+            "session.new",
+            json!({"agent": "mock_acp", "cwd": "/tmp/work"}),
+        )
         .await;
-    let sid = created["result"]["session"]["id"].as_str().unwrap().to_string();
+    let sid = created["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(created["result"]["session"]["state"], "idle");
-    assert!(!mock_calls(&data_dir).contains("session/new"), "惰性：session.new 不应触发 ACP session/new");
+    assert!(
+        !mock_calls(&data_dir).contains("session/new"),
+        "惰性：session.new 不应触发 ACP session/new"
+    );
 
     // session.list 惰性分页
     let list = c.call("session.list", json!({})).await;
@@ -261,11 +280,11 @@ async fn session_lifecycle_state_change_and_delete() {
     )
     .await;
     let got = c
-        .wait_notification("session.state_change", |p| {
-            p["sessionId"] == json!(sid)
-                && p["oldState"] == "busy"
-                && p["newState"] == "idle"
-        }, 8000)
+        .wait_notification(
+            "session.state_change",
+            |p| p["sessionId"] == json!(sid) && p["oldState"] == "busy" && p["newState"] == "idle",
+            8000,
+        )
         .await;
     assert!(got, "prompt 结束应推送 state_change busy→idle");
     assert!(
@@ -276,30 +295,49 @@ async fn session_lifecycle_state_change_and_delete() {
     // 标题按首条指令生成 + configure 可改标题
     let list = c.call("session.list", json!({})).await;
     let meta = list["result"]["sessions"].as_array().unwrap()[0].clone();
-    assert!(!meta["title"].as_str().unwrap_or("").is_empty(), "首条 prompt 后标题非空: {meta}");
+    assert!(
+        !meta["title"].as_str().unwrap_or("").is_empty(),
+        "首条 prompt 后标题非空: {meta}"
+    );
     let r = c
-        .call("session.configure", json!({"sessionId": sid, "title": "我的标题"}))
+        .call(
+            "session.configure",
+            json!({"sessionId": sid, "title": "我的标题"}),
+        )
         .await;
     assert!(r.get("error").is_none());
     let list = c.call("session.list", json!({})).await;
-    assert_eq!(list["result"]["sessions"].as_array().unwrap()[0]["title"], "我的标题");
+    assert_eq!(
+        list["result"]["sessions"].as_array().unwrap()[0]["title"],
+        "我的标题"
+    );
 
     // session.history：用户消息 + 一条合并输出
     let h = c.call("session.history", json!({"sessionId": sid})).await;
     let items = h["result"]["items"].as_array().unwrap();
     assert!(!items.is_empty());
-    assert_eq!(items[0]["kind"], "user_message", "历史首条为用户消息: {items:?}");
+    assert_eq!(
+        items[0]["kind"], "user_message",
+        "历史首条为用户消息: {items:?}"
+    );
     assert!(items.iter().any(|i| i["kind"] == "agent_message"));
 
     // session.activities：thinking + tool_call
-    let a = c.call("session.activities", json!({"sessionId": sid})).await;
+    let a = c
+        .call("session.activities", json!({"sessionId": sid}))
+        .await;
     let acts = a["result"]["activities"].as_array().unwrap();
     assert!(acts.iter().any(|x| x["kind"] == "thinking"), "{acts:?}");
     assert!(acts.iter().any(|x| x["kind"] == "tool_call"), "{acts:?}");
 
     // ongoing_activity：空闲时为 null
-    let oa = c.call("session.ongoing_activity", json!({"sessionId": sid})).await;
-    assert!(oa["result"]["activity"].is_null(), "空闲 ongoing_activity 为 null: {oa}");
+    let oa = c
+        .call("session.ongoing_activity", json!({"sessionId": sid}))
+        .await;
+    assert!(
+        oa["result"]["activity"].is_null(),
+        "空闲 ongoing_activity 为 null: {oa}"
+    );
 
     // 删除触发 session/close
     let r = c.call("session.delete", json!({"sessionId": sid})).await;
@@ -324,10 +362,20 @@ async fn session_list_pagination() {
     let mut sids = Vec::new();
     for i in 0..3 {
         let created = c
-            .call("session.new", json!({"agent": agent, "cwd": format!("/tmp/w{i}")}))
+            .call(
+                "session.new",
+                json!({"agent": agent, "cwd": format!("/tmp/w{i}")}),
+            )
             .await;
-        let sid = created["result"]["session"]["id"].as_str().unwrap().to_string();
-        c.call("session.prompt", json!({"sessionId": sid, "input": [{"type":"text","text":format!("指令{i}")}]})).await;
+        let sid = created["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        c.call(
+            "session.prompt",
+            json!({"sessionId": sid, "input": [{"type":"text","text":format!("指令{i}")}]}),
+        )
+        .await;
         sids.push(sid);
     }
 
@@ -341,7 +389,9 @@ async fn session_list_pagination() {
     assert_eq!(sessions[1]["id"], json!(sids[1]));
 
     // before=next_before：更早一窗只剩最旧
-    let second = c.call("session.list", json!({"limit": 2, "before": next_before})).await;
+    let second = c
+        .call("session.list", json!({"limit": 2, "before": next_before}))
+        .await;
     let s2 = second["result"]["sessions"].as_array().unwrap();
     assert_eq!(s2.len(), 1);
     assert_eq!(s2[0]["id"], json!(sids[0]));
@@ -357,15 +407,25 @@ async fn workspace_diff_reflects_changes() {
     let dir = init_repo();
     std::fs::write(dir.join("a.txt"), "line1\nCHANGED\n").unwrap();
 
-    let d = c.call("workspace.diff", json!({"cwd": dir.to_str().unwrap()})).await;
+    let d = c
+        .call("workspace.diff", json!({"cwd": dir.to_str().unwrap()}))
+        .await;
     assert!(d.get("error").is_none(), "diff 失败: {d}");
     let files = d["result"]["files"].as_array().unwrap();
     assert_eq!(files[0]["path"], "a.txt");
     assert!(files[0]["patch"].as_str().unwrap().contains("diff --git"));
 
-    let r = c.call("workspace.restore", json!({"cwd": dir.to_str().unwrap(), "path": "a.txt"})).await;
+    let r = c
+        .call(
+            "workspace.restore",
+            json!({"cwd": dir.to_str().unwrap(), "path": "a.txt"}),
+        )
+        .await;
     assert_eq!(r["result"]["ok"], true, "restore 失败: {r}");
-    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "line1\nline2\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "line1\nline2\n"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -397,12 +457,20 @@ fn git(cwd: &Path, args: &[&str]) -> String {
         .args(args)
         .output()
         .unwrap();
-    assert!(out.status.success(), "git {:?} 失败: {}", args, String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {:?} 失败: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 fn init_repo() -> std::path::PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!("amux-e2e-git-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     git(&dir, &["init", "-b", "main", "-q"]);

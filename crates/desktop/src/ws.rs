@@ -152,7 +152,11 @@ async fn run_loop(
                             method: "auth_sent".into(),
                             params: Value::Null,
                         });
-                        if sink.send(Message::Text(auth_frame.to_string())).await.is_err() {
+                        if sink
+                            .send(Message::Text(auth_frame.to_string()))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }

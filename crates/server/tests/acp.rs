@@ -18,11 +18,14 @@ async fn acp_driver_full_flow() {
     let state_file_s = state_file.to_str().unwrap().to_string();
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");
-    let driver = AcpAgentDriver::spawn(mock, &[state_file_s.as_str()], &[]).expect("spawn mock acp");
+    let driver =
+        AcpAgentDriver::spawn(mock, &[state_file_s.as_str()], &[]).expect("spawn mock acp");
 
     let sid = driver.create_session("/tmp/work").expect("create");
     assert_eq!(sid, "mock_s_1");
-    driver.resume_session("mock_s_restored", "/tmp/work").expect("restore");
+    driver
+        .resume_session("mock_s_restored", "/tmp/work")
+        .expect("restore");
 
     let mut rx = driver.prompt(
         &sid,
@@ -44,17 +47,26 @@ async fn acp_driver_full_flow() {
     // yolo：request_permission 被自动批准（mock 记录到状态文件）
     tokio::time::sleep(Duration::from_millis(200)).await;
     let approved = std::fs::read_to_string(&state_file).unwrap_or_default();
-    assert!(approved.contains("approved"), "request_permission 应被自动批准, 状态文件: {approved:?}");
+    assert!(
+        approved.contains("approved"),
+        "request_permission 应被自动批准, 状态文件: {approved:?}"
+    );
 
     // 调用面：session/new、session/prompt、session/resume（恰好一次）；close 帧正常
     let calls = std::fs::read_to_string(&calls_file).unwrap_or_default();
     assert!(calls.contains("session/new"), "calls: {calls:?}");
     assert!(calls.contains("session/prompt"), "calls: {calls:?}");
     let resume_count = calls.lines().filter(|l| *l == "session/resume").count();
-    assert_eq!(resume_count, 1, "恢复会话应恰好 resume 一次（幂等）: {calls:?}");
+    assert_eq!(
+        resume_count, 1,
+        "恢复会话应恰好 resume 一次（幂等）: {calls:?}"
+    );
 
     // delete → session/close 帧（docs/DESIGN.md「ACP 生命周期」释放 agent 侧资源）
     driver.close(&sid).expect("close");
     let calls = std::fs::read_to_string(&calls_file).unwrap_or_default();
-    assert!(calls.contains("session/close"), "删除应触发 session/close: {calls:?}");
+    assert!(
+        calls.contains("session/close"),
+        "删除应触发 session/close: {calls:?}"
+    );
 }

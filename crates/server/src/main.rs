@@ -41,10 +41,12 @@ async fn main() {
             .unwrap_or(&bin)
             .to_string();
         let args_ref: Vec<&str> = cfg.agent_args.iter().map(String::as_str).collect();
-        let driver: SharedDriver = Arc::new(AcpAgentDriver::spawn(&bin, &args_ref, &[]).unwrap_or_else(|e| {
-            eprintln!("启动 ACP agent ({bin}) 失败: {e}");
-            std::process::exit(1);
-        }));
+        let driver: SharedDriver = Arc::new(
+            AcpAgentDriver::spawn(&bin, &args_ref, &[]).unwrap_or_else(|e| {
+                eprintln!("启动 ACP agent ({bin}) 失败: {e}");
+                std::process::exit(1);
+            }),
+        );
         (name, driver)
     });
 
@@ -98,7 +100,7 @@ async fn main() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let closed = cleanup_manager.close_idle(now_ms, 3600_000).await;
+            let closed = cleanup_manager.close_idle(now_ms, 3_600_000).await;
             if closed > 0 {
                 protocol::log::info(
                     "server.cleanup",

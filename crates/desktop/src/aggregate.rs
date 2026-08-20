@@ -35,7 +35,10 @@ impl SessionView {
         // 跨窗分块：head 末尾与当前开头同属一条 AgentMessage → 合并
         let merge_tail = matches!(
             (head.last(), self.dialog.first()),
-            (Some(DialogMsg::AgentMessage { .. }), Some(DialogMsg::AgentMessage { .. }))
+            (
+                Some(DialogMsg::AgentMessage { .. }),
+                Some(DialogMsg::AgentMessage { .. })
+            )
         );
         if merge_tail {
             if let (

@@ -173,7 +173,10 @@ async fn dispatch(
     let Some(method) = method else {
         return Some(protocol::JsonRpcResponse {
             jsonrpc: "2.0".into(),
-            id: value.get("id").cloned().unwrap_or(protocol::JsonRpcId::Null),
+            id: value
+                .get("id")
+                .cloned()
+                .unwrap_or(protocol::JsonRpcId::Null),
             result: None,
             error: Some(protocol::JsonRpcError {
                 code: protocol::rpc_error::INVALID_REQUEST,
@@ -221,8 +224,18 @@ async fn dispatch(
     let (result, error) = match result {
         Ok(v) => (Some(v), None),
         Err(RpcError { code, message }) => {
-            protocol::log::error("server.transport", format!("请求 {method} 失败 [{code}]: {message}"));
-            (None, Some(protocol::JsonRpcError { code, message, data: None }))
+            protocol::log::error(
+                "server.transport",
+                format!("请求 {method} 失败 [{code}]: {message}"),
+            );
+            (
+                None,
+                Some(protocol::JsonRpcError {
+                    code,
+                    message,
+                    data: None,
+                }),
+            )
         }
     };
     protocol::log::debug(
@@ -244,13 +257,14 @@ fn handle_auth(
     authenticated: &Arc<AtomicBool>,
     id: protocol::JsonRpcId,
 ) -> protocol::JsonRpcResponse {
-    let auth: Result<AuthParams, _> = params
-        .clone()
-        .map(serde_json::from_value)
-        .unwrap_or(Err(serde_json::Error::io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "missing params",
-        ))));
+    let auth: Result<AuthParams, _> =
+        params
+            .clone()
+            .map(serde_json::from_value)
+            .unwrap_or(Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "missing params",
+            ))));
     match auth {
         Ok(params) if params.token == token => {
             authenticated.store(true, Ordering::SeqCst);
@@ -258,7 +272,11 @@ fn handle_auth(
             protocol::JsonRpcResponse {
                 jsonrpc: "2.0".into(),
                 id,
-                result: serde_json::to_value(OpResult { ok: true, message: None }).ok(),
+                result: serde_json::to_value(OpResult {
+                    ok: true,
+                    message: None,
+                })
+                .ok(),
                 error: None,
             }
         }
@@ -304,7 +322,10 @@ mod tests {
             new_state: SessionState::Busy,
         });
         let frame = notification_frame(&n).expect("应序列化");
-        assert!(frame.contains(&format!("\"method\":\"{}\"", notify::SESSION_STATE_CHANGE)), "{frame}");
+        assert!(
+            frame.contains(&format!("\"method\":\"{}\"", notify::SESSION_STATE_CHANGE)),
+            "{frame}"
+        );
         assert!(frame.contains("\"sessionId\":\"s1\""), "{frame}");
         assert!(frame.contains("\"newState\":\"busy\""), "{frame}");
     }

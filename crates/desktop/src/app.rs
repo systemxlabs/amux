@@ -35,9 +35,9 @@ use gpui_component::{
 use serde_json::json;
 
 use protocol::{
-    Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock, GitDiffFile,
-    HistoryItem, SessionConfigureParams, SessionMeta, SessionNewParams, SessionPageParams,
-    SessionPromptParams, SessionState, SessionIdParams, WorkspaceDiffResult,
+    Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
+    GitDiffFile, HistoryItem, SessionConfigureParams, SessionIdParams, SessionMeta,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionState, WorkspaceDiffResult,
 };
 
 use crate::aggregate::SessionView;
@@ -232,14 +232,14 @@ impl AmuxApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("连接地址 ws://host:port"));
         let machine_token_input = cx.new(|cx| InputState::new(window, cx).placeholder("Token"));
         let qc_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("指令名"));
-        let qc_prompt_input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("提示词（发给 agent 的一段话）"));
+        let qc_prompt_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("提示词（发给 agent 的一段话）"));
         let skill_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("名称"));
         let skill_desc_input = cx
             .new(|cx| InputState::new(window, cx).placeholder("描述（仓库/资源 URL 或安装方法）"));
         let tpl_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("模板名"));
-        let tpl_desc_input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("执行计划（自然语言描述）"));
+        let tpl_desc_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("执行计划（自然语言描述）"));
         let orch_base_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Base URL（如 https://api…/v1）"));
         let orch_key_input = cx.new(|cx| InputState::new(window, cx).placeholder("API Key"));
@@ -479,7 +479,9 @@ impl AmuxApp {
         let wf_id = wf.session.id.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = run_engine_on_tokio(async move {
-                let _ = wf.on_child_state(&sid, old_state, new_state, Some(output)).await;
+                let _ = wf
+                    .on_child_state(&sid, old_state, new_state, Some(output))
+                    .await;
                 let _ = wf.persist(&session_dir);
                 Some(wf)
             })
@@ -494,7 +496,9 @@ impl AmuxApp {
     // ---- 数据拉取：会话列表（session.list）主动刷新 ----
 
     fn refresh_sessions(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(m) = self.machines.get(idx) else { return };
+        let Some(m) = self.machines.get(idx) else {
+            return;
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({ "limit": PAGE_LIMIT });
@@ -507,12 +511,19 @@ impl AmuxApp {
                     .cloned()
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
-                let has_more = res.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
+                let has_more = res
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let next_before = res.get("next_before").and_then(|v| v.as_u64());
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
-                        let (list, hm, nb) =
-                            merge_session_window(&m.sessions, sessions.clone(), has_more, next_before);
+                        let (list, hm, nb) = merge_session_window(
+                            &m.sessions,
+                            sessions.clone(),
+                            has_more,
+                            next_before,
+                        );
                         m.sessions = list;
                         m.sessions_has_more = hm;
                         m.sessions_next_before = nb;
@@ -534,7 +545,9 @@ impl AmuxApp {
 
     /// agent.list：某机器 agents。
     fn fetch_agents(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(m) = self.machines.get(idx) else { return };
+        let Some(m) = self.machines.get(idx) else {
+            return;
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| match client
             .request(protocol::method::AGENT_LIST, None)
@@ -542,13 +555,12 @@ impl AmuxApp {
         {
             Ok(res) => {
                 let result: AgentListResult =
-                    serde_json::from_value(res).unwrap_or(AgentListResult {
-                        agents: Vec::new(),
-                    });
+                    serde_json::from_value(res).unwrap_or(AgentListResult { agents: Vec::new() });
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
                         m.agents = result.agents;
-                        if m.status.starts_with("已连接") || m.status.starts_with("认证成功") {
+                        if m.status.starts_with("已连接") || m.status.starts_with("认证成功")
+                        {
                             m.status = "已连接".into();
                         }
                     }
@@ -577,7 +589,9 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else { return };
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionPageParams {
@@ -621,7 +635,9 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else { return };
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionPageParams {
@@ -662,7 +678,9 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else { return };
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionIdParams {
@@ -694,8 +712,12 @@ impl AmuxApp {
 
     /// 加载更早一窗会话（滚动到底部）。
     fn load_more_sessions(&self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
-        let Some(m) = self.machines.get(machine) else { return };
-        let Some(before) = m.sessions_next_before else { return };
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let Some(before) = m.sessions_next_before else {
+            return;
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({ "limit": PAGE_LIMIT, "before": before });
@@ -708,7 +730,10 @@ impl AmuxApp {
                     .cloned()
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
-                let has_more = res.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
+                let has_more = res
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let next_before = res.get("next_before").and_then(|v| v.as_u64());
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(machine) {
@@ -733,92 +758,88 @@ impl AmuxApp {
         // 会话列表 10s（每机器）
         for i in 0..n {
             let client = self.machines[i].client.clone();
-            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                loop {
-                    let snapshot = client
-                        .request(
-                            protocol::method::SESSION_LIST,
-                            Some(json!({ "limit": PAGE_LIMIT })),
-                        )
-                        .await
-                        .ok();
-                    let _ = this.update_in(cx, |this, _w, cx| {
-                        if let Some(res) = &snapshot {
-                            if let Some(m) = this.machines.get_mut(i) {
-                                let sessions: Vec<SessionMeta> = res
-                                    .get("sessions")
-                                    .cloned()
-                                    .and_then(|v| serde_json::from_value(v).ok())
-                                    .unwrap_or_default();
-                                let has_more = res
-                                    .get("has_more")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false);
-                                let next_before =
-                                    res.get("next_before").and_then(|v| v.as_u64());
-                                if next_before.is_some() {
-                                    let (list, hm, nb) =
-                                        merge_session_window(&m.sessions, sessions.clone(), has_more, next_before);
-                                    m.sessions = list;
-                                    m.sessions_has_more = hm;
-                                    m.sessions_next_before = nb;
-                                    for s in sessions {
-                                        if let Some(cur) =
-                                            m.sessions.iter_mut().find(|c| c.id == s.id)
-                                        {
-                                            cur.state = s.state;
-                                        }
+            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
+                let snapshot = client
+                    .request(
+                        protocol::method::SESSION_LIST,
+                        Some(json!({ "limit": PAGE_LIMIT })),
+                    )
+                    .await
+                    .ok();
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    if let Some(res) = &snapshot {
+                        if let Some(m) = this.machines.get_mut(i) {
+                            let sessions: Vec<SessionMeta> = res
+                                .get("sessions")
+                                .cloned()
+                                .and_then(|v| serde_json::from_value(v).ok())
+                                .unwrap_or_default();
+                            let has_more = res
+                                .get("has_more")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let next_before = res.get("next_before").and_then(|v| v.as_u64());
+                            if next_before.is_some() {
+                                let (list, hm, nb) = merge_session_window(
+                                    &m.sessions,
+                                    sessions.clone(),
+                                    has_more,
+                                    next_before,
+                                );
+                                m.sessions = list;
+                                m.sessions_has_more = hm;
+                                m.sessions_next_before = nb;
+                                for s in sessions {
+                                    if let Some(cur) = m.sessions.iter_mut().find(|c| c.id == s.id)
+                                    {
+                                        cur.state = s.state;
                                     }
-                                    crate::logic::sort_sessions_recent(&mut m.sessions);
                                 }
+                                crate::logic::sort_sessions_recent(&mut m.sessions);
                             }
                         }
-                        cx.notify();
-                    });
-                    cx.background_executor()
-                        .timer(Duration::from_secs(10))
-                        .await;
-                }
+                    }
+                    cx.notify();
+                });
+                cx.background_executor()
+                    .timer(Duration::from_secs(10))
+                    .await;
             });
             self._tasks.push(t);
         }
 
         // 打开会话的对话 + 活动 10s
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            loop {
-                let target = this
-                    .update_in(cx, |this, _w, _cx| this.open_session_target())
-                    .ok()
-                    .flatten();
-                if let Some((machine, id)) = target {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.refresh_dialog(window, cx, machine, id.clone());
-                        this.refresh_activities(window, cx, machine, id);
-                        cx.notify();
-                    });
-                }
-                cx.background_executor()
-                    .timer(Duration::from_secs(10))
-                    .await;
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
+            let target = this
+                .update_in(cx, |this, _w, _cx| this.open_session_target())
+                .ok()
+                .flatten();
+            if let Some((machine, id)) = target {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.refresh_dialog(window, cx, machine, id.clone());
+                    this.refresh_activities(window, cx, machine, id);
+                    cx.notify();
+                });
             }
+            cx.background_executor()
+                .timer(Duration::from_secs(10))
+                .await;
         });
         self._tasks.push(t);
 
         // 打开会话的实时活动 5s
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            loop {
-                let target = this
-                    .update_in(cx, |this, _w, _cx| this.open_session_target())
-                    .ok()
-                    .flatten();
-                if let Some((machine, id)) = target {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.refresh_ongoing(window, cx, machine, id);
-                        cx.notify();
-                    });
-                }
-                cx.background_executor().timer(Duration::from_secs(5)).await;
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
+            let target = this
+                .update_in(cx, |this, _w, _cx| this.open_session_target())
+                .ok()
+                .flatten();
+            if let Some((machine, id)) = target {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.refresh_ongoing(window, cx, machine, id);
+                    cx.notify();
+                });
             }
+            cx.background_executor().timer(Duration::from_secs(5)).await;
         });
         self._tasks.push(t);
     }
@@ -850,8 +871,10 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        self.selected =
-            Some(Selected::Session { machine, id: session_id.clone() });
+        self.selected = Some(Selected::Session {
+            machine,
+            id: session_id.clone(),
+        });
         self.set_panel(window, cx, None);
         if let Some(m) = self.machines.get_mut(machine) {
             m.views.entry(session_id.clone()).or_default();
@@ -875,7 +898,9 @@ impl AmuxApp {
 
     fn create_session_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let machine = self.new_session_machine.unwrap_or(0);
-        let Some(m) = self.machine(machine) else { return };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
         let machine_name = m.config.name.clone();
         let cwd = self.session_cwd_input.read(cx).value().to_string();
         let agent = match self.new_session_agent.clone() {
@@ -941,7 +966,9 @@ impl AmuxApp {
         };
         match target {
             Selected::Session { machine, id } => {
-                let Some(m) = self.machine(machine) else { return };
+                let Some(m) = self.machine(machine) else {
+                    return;
+                };
                 let client = m.client.clone();
                 let params = SessionPromptParams {
                     session_id: id.clone(),
@@ -998,14 +1025,17 @@ impl AmuxApp {
                 }
             }
         }
-        self.input_state.update(cx, |s, cx| s.set_value("", window, cx));
+        self.input_state
+            .update(cx, |s, cx| s.set_value("", window, cx));
         self.input_attachments.clear();
     }
 
     fn quick_command(&mut self, window: &mut Window, cx: &mut Context<Self>, cmd: &QuickCommand) {
         match self.selected.clone() {
             Some(Selected::Session { machine, id }) => {
-                let Some(m) = self.machine(machine) else { return };
+                let Some(m) = self.machine(machine) else {
+                    return;
+                };
                 let client = m.client.clone();
                 let params = SessionPromptParams {
                     session_id: id.clone(),
@@ -1041,11 +1071,15 @@ impl AmuxApp {
         let Some(Selected::Session { machine, id }) = self.selected.clone() else {
             return;
         };
-        let Some(m) = self.machine(machine) else { return };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
         let client = m.client.clone();
         let sid = id.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionIdParams { session_id: sid.clone() };
+            let params = SessionIdParams {
+                session_id: sid.clone(),
+            };
             let _ = client
                 .request(
                     protocol::method::SESSION_CANCEL,
@@ -1068,11 +1102,15 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machine(machine) else { return };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
         let client = m.client.clone();
         let sid = session_id.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionIdParams { session_id: sid.clone() };
+            let params = SessionIdParams {
+                session_id: sid.clone(),
+            };
             let _ = client
                 .request(
                     protocol::method::SESSION_DELETE,
@@ -1139,7 +1177,9 @@ impl AmuxApp {
         session_id: String,
         title: String,
     ) {
-        let Some(m) = self.machine(machine) else { return };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
         let client = m.client.clone();
         let title_trim = title.trim().to_string();
         let params = SessionConfigureParams {
@@ -1181,8 +1221,12 @@ impl AmuxApp {
         let summaries = self.machine_summaries();
         let backend = self.orchestrator_backend();
         for s in sessions {
-            self.workflows
-                .push(WorkflowEngine::restore(s, backend.clone(), clients.clone(), summaries.clone()));
+            self.workflows.push(WorkflowEngine::restore(
+                s,
+                backend.clone(),
+                clients.clone(),
+                summaries.clone(),
+            ));
         }
         cx.notify();
     }
@@ -1428,8 +1472,12 @@ impl AmuxApp {
     }
 
     fn available_agent(&self, idx: usize) -> Option<String> {
-        self.machine(idx)
-            .and_then(|m| m.agents.iter().find(|a| a.available).map(|a| a.name.clone()))
+        self.machine(idx).and_then(|m| {
+            m.agents
+                .iter()
+                .find(|a| a.available)
+                .map(|a| a.name.clone())
+        })
     }
 
     fn selected_meta(&self) -> Option<SessionMeta> {
@@ -1457,7 +1505,9 @@ impl AmuxApp {
     // ---- workspace.diff（代码审查面板）----
 
     fn load_diff(&self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
-        let Some(m) = self.machine(machine) else { return };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
         let cwd = match &self.selected {
             Some(Selected::Session { id, .. }) => m
                 .sessions
@@ -1477,8 +1527,8 @@ impl AmuxApp {
                 if let Some(m) = this.machines.get_mut(machine) {
                     match &res {
                         Ok(res) => {
-                            let r: WorkspaceDiffResult =
-                                serde_json::from_value(res.clone()).unwrap_or(WorkspaceDiffResult {
+                            let r: WorkspaceDiffResult = serde_json::from_value(res.clone())
+                                .unwrap_or(WorkspaceDiffResult {
                                     files: Vec::new(),
                                     not_repo: false,
                                 });
@@ -1507,7 +1557,9 @@ impl AmuxApp {
         path: Option<String>,
         patch: Option<String>,
     ) {
-        let Some(m) = self.machine(machine) else { return };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({ "cwd": cwd, "path": path, "patch": patch });
@@ -1531,7 +1583,9 @@ impl AmuxApp {
         machine: usize,
         agent: String,
     ) {
-        let Some(m) = self.machine(machine) else { return };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
         let client = m.client.clone();
         let a = agent.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -1545,9 +1599,7 @@ impl AmuxApp {
                 .await
             {
                 let r: AgentSkillsResult =
-                    serde_json::from_value(res).unwrap_or(AgentSkillsResult {
-                        skills: Vec::new(),
-                    });
+                    serde_json::from_value(res).unwrap_or(AgentSkillsResult { skills: Vec::new() });
                 skills = r.skills;
             }
             let _ = this.update_in(cx, |this, _w, cx| {
@@ -1568,7 +1620,9 @@ impl AmuxApp {
         machine: usize,
         agent: String,
     ) {
-        let Some(m) = self.machine(machine) else { return };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
         let client = m.client.clone();
         let params = AgentParams { agent };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -1657,12 +1711,10 @@ impl AmuxApp {
         self.machines.remove(idx);
         self.selected = match self.selected.clone() {
             Some(Selected::Session { machine, .. }) if machine == idx => None,
-            Some(Selected::Session { machine, id }) if machine > idx => {
-                Some(Selected::Session {
-                    machine: machine - 1,
-                    id,
-                })
-            }
+            Some(Selected::Session { machine, id }) if machine > idx => Some(Selected::Session {
+                machine: machine - 1,
+                id,
+            }),
             other => other,
         };
         for wf in self.workflows.iter_mut() {
@@ -1694,7 +1746,9 @@ impl AmuxApp {
                         .show_cancel(true),
                 )
                 .title("移除机器")
-                .description(format!("确定移除机器「{name}」吗？其本地注册信息将被删除。"))
+                .description(format!(
+                    "确定移除机器「{name}」吗？其本地注册信息将被删除。"
+                ))
                 .on_ok(move |_ev, window, cx| {
                     let this = this.clone();
                     this.update(cx, |this, cx| {
@@ -1879,12 +1933,11 @@ impl AmuxApp {
     ) -> gpui::AnyElement {
         let sid = s.id.clone();
         let sid_open = sid.clone();
-        let sel =
-            self.selected
-                == Some(Selected::Session {
-                    machine,
-                    id: sid.clone(),
-                });
+        let sel = self.selected
+            == Some(Selected::Session {
+                machine,
+                id: sid.clone(),
+            });
         let title = if s.title.is_empty() {
             format!("（未命名）{}", short_cwd(&s.cwd))
         } else {
@@ -2115,16 +2168,11 @@ impl AmuxApp {
                 .into_any_element();
         }
 
-        let row = v_flex()
-            .gap_1()
-            .p_1()
-            .rounded_md()
-            .child(header)
-            .child(
-                Collapsible::new()
-                    .open(self.expanded_workflows.contains(&wi))
-                    .content(content),
-            );
+        let row = v_flex().gap_1().p_1().rounded_md().child(header).child(
+            Collapsible::new()
+                .open(self.expanded_workflows.contains(&wi))
+                .content(content),
+        );
 
         let title_ctx = title.clone();
         let wf_sel = self.selected == Some(Selected::Workflow { engine: wi });
@@ -2249,35 +2297,34 @@ impl AmuxApp {
             NewSessionMode::Direct => {
                 if self.machines.is_empty() {
                     // PRD §桌面 GUI 设计：无机器时提示并引导到设置
-                    card = card
-                        .child(
-                            v_flex()
-                                .gap_2()
-                                .p_3()
-                                .bg(rgb(0xfff3cd))
-                                .rounded_md()
-                                .child(
-                                    Label::new("尚未注册机器")
-                                        .text_color(rgb(0x92400e))
-                                        .font_weight(FontWeight::SEMIBOLD),
-                                )
-                                .child(
-                                    Label::new("请先在设置 → 机器管理中注册一台 amux server。")
-                                        .text_sm()
-                                        .text_color(rgb(0x92400e)),
-                                )
-                                .child(
-                                    Button::new("ns-goto-machine-settings")
-                                        .small()
-                                        .primary()
-                                        .label("去注册机器")
-                                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                                            this.show_settings = true;
-                                            this.settings_category = SettingsCategory::Machines;
-                                            cx.notify();
-                                        })),
-                                ),
-                        );
+                    card = card.child(
+                        v_flex()
+                            .gap_2()
+                            .p_3()
+                            .bg(rgb(0xfff3cd))
+                            .rounded_md()
+                            .child(
+                                Label::new("尚未注册机器")
+                                    .text_color(rgb(0x92400e))
+                                    .font_weight(FontWeight::SEMIBOLD),
+                            )
+                            .child(
+                                Label::new("请先在设置 → 机器管理中注册一台 amux server。")
+                                    .text_sm()
+                                    .text_color(rgb(0x92400e)),
+                            )
+                            .child(
+                                Button::new("ns-goto-machine-settings")
+                                    .small()
+                                    .primary()
+                                    .label("去注册机器")
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        this.show_settings = true;
+                                        this.settings_category = SettingsCategory::Machines;
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
                 } else {
                     card = card
                         .child(
@@ -2287,9 +2334,7 @@ impl AmuxApp {
                                     v_flex()
                                         .gap_1()
                                         .child(
-                                            Label::new("机器")
-                                                .text_sm()
-                                                .text_color(rgb(0x6b7280)),
+                                            Label::new("机器").text_sm().text_color(rgb(0x6b7280)),
                                         )
                                         .child(self.render_machine_selector(cx)),
                                 )
@@ -2297,49 +2342,39 @@ impl AmuxApp {
                                     v_flex()
                                         .gap_1()
                                         .child(
-                                            Label::new("Agent")
-                                                .text_sm()
-                                                .text_color(rgb(0x6b7280)),
+                                            Label::new("Agent").text_sm().text_color(rgb(0x6b7280)),
                                         )
                                         .child(self.render_harness_selector(cx)),
                                 ),
                         )
                         .child(self.render_recent_workspaces(cx))
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                Label::new("工作目录")
-                                    .text_sm()
-                                    .text_color(rgb(0x6b7280)),
-                            )
-                            .child(Input::new(&self.session_cwd_input)),
-                    )
-                    .child(
-                        Button::new("ns-create")
-                            .primary()
-                            .label("创建会话")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.create_session_only(window, cx);
-                            })),
-                    )
-                    .child(
-                        Label::new("创建后进入会话页，在下方输入区发送首条指令")
-                            .text_xs()
-                            .text_color(rgb(0x9ca3af)),
-                    );
-            }
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(Label::new("工作目录").text_sm().text_color(rgb(0x6b7280)))
+                                .child(Input::new(&self.session_cwd_input)),
+                        )
+                        .child(
+                            Button::new("ns-create")
+                                .primary()
+                                .label("创建会话")
+                                .on_click(cx.listener(|this, _ev, window, cx| {
+                                    this.create_session_only(window, cx);
+                                })),
+                        )
+                        .child(
+                            Label::new("创建后进入会话页，在下方输入区发送首条指令")
+                                .text_xs()
+                                .text_color(rgb(0x9ca3af)),
+                        );
+                }
             }
             NewSessionMode::Workflow => {
                 card = card
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(
-                                Label::new("工作流模板")
-                                    .text_sm()
-                                    .text_color(rgb(0x6b7280)),
-                            )
+                            .child(Label::new("工作流模板").text_sm().text_color(rgb(0x6b7280)))
                             .child(self.render_template_selector(cx)),
                     )
                     .child(
@@ -2465,7 +2500,10 @@ impl AmuxApp {
         let Some(mi) = machine else {
             return row.child(Label::new("（无机器）"));
         };
-        let agents = self.machine(mi).map(|m| m.agents.clone()).unwrap_or_default();
+        let agents = self
+            .machine(mi)
+            .map(|m| m.agents.clone())
+            .unwrap_or_default();
         if agents.is_empty() {
             return row.child(Label::new("（未发现 agent）"));
         }
@@ -2481,14 +2519,12 @@ impl AmuxApp {
                 btn = btn.disabled(true);
             }
             let available = a.available;
-            row = row.child(
-                btn.on_click(cx.listener(move |this, _ev, _window, cx| {
-                    if available {
-                        this.new_session_agent = Some(name_click.clone());
-                        cx.notify();
-                    }
-                })),
-            );
+            row = row.child(btn.on_click(cx.listener(move |this, _ev, _window, cx| {
+                if available {
+                    this.new_session_agent = Some(name_click.clone());
+                    cx.notify();
+                }
+            })));
         }
         row
     }
@@ -2502,7 +2538,11 @@ impl AmuxApp {
         }
         for t in templates {
             let name = t.name.clone();
-            let sel = self.workflow_template.as_ref().map(|x| x.name == name).unwrap_or(false);
+            let sel = self
+                .workflow_template
+                .as_ref()
+                .map(|x| x.name == name)
+                .unwrap_or(false);
             row = row.child(
                 Button::new(format!("ns-tpl-{name}"))
                     .small()
@@ -2511,7 +2551,12 @@ impl AmuxApp {
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         let t = t.clone();
                         // 点击已选模板则取消选择
-                        if this.workflow_template.as_ref().map(|x| x.name == t.name).unwrap_or(false) {
+                        if this
+                            .workflow_template
+                            .as_ref()
+                            .map(|x| x.name == t.name)
+                            .unwrap_or(false)
+                        {
                             this.workflow_template = None;
                         } else {
                             this.workflow_template = Some(t);
@@ -2617,10 +2662,7 @@ impl AmuxApp {
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .child(
-                    Label::new("选择左侧会话查看对话，或输入消息开始")
-                        .text_color(rgb(0x9ca3af)),
-                )
+                .child(Label::new("选择左侧会话查看对话，或输入消息开始").text_color(rgb(0x9ca3af)))
                 .into_any()
         } else {
             div()
@@ -2916,40 +2958,41 @@ impl AmuxApp {
         let Some(meta) = self.selected_meta() else {
             return div().w(px(340.)).child(Label::new("未选择会话")).into_any();
         };
-        let mut body = v_flex()
-            .w(px(360.))
-            .h_full()
-            .gap_2()
-            .p_3()
-            .bg(rgb(0xffffff))
-            .border_l_1()
-            .border_color(rgb(0xe5e7eb))
-            .child(
-                h_flex()
-                    .items_center()
-                    .child(
-                        Label::new("会话详情")
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0x111827)),
-                    )
-                    .child(div().flex_1())
-                    .child(Button::new("close-panel2").small().label("✕").on_click(
-                        cx.listener(|this, _ev, window, cx| {
-                            this.set_panel(window, cx, None);
-                        }),
-                    )),
-            )
-            .child(info_row("ID", &meta.id))
-            .child(info_row("Agent", &meta.agent))
-            .child(info_row("工作目录", &meta.cwd))
-            .child(info_row(
-                "状态",
-                if meta.state == SessionState::Busy {
-                    "工作中"
-                } else {
-                    "空闲"
-                },
-            ));
+        let mut body =
+            v_flex()
+                .w(px(360.))
+                .h_full()
+                .gap_2()
+                .p_3()
+                .bg(rgb(0xffffff))
+                .border_l_1()
+                .border_color(rgb(0xe5e7eb))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .child(
+                            Label::new("会话详情")
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x111827)),
+                        )
+                        .child(div().flex_1())
+                        .child(Button::new("close-panel2").small().label("✕").on_click(
+                            cx.listener(|this, _ev, window, cx| {
+                                this.set_panel(window, cx, None);
+                            }),
+                        )),
+                )
+                .child(info_row("ID", &meta.id))
+                .child(info_row("Agent", &meta.agent))
+                .child(info_row("工作目录", &meta.cwd))
+                .child(info_row(
+                    "状态",
+                    if meta.state == SessionState::Busy {
+                        "工作中"
+                    } else {
+                        "空闲"
+                    },
+                ));
         let title = if meta.title.is_empty() {
             "（未命名）".to_string()
         } else {
@@ -3138,11 +3181,7 @@ impl AmuxApp {
             .into_any()
     }
 
-    fn render_diff_panel(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_diff_panel(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machine = self.active_machine();
         let files = machine
             .and_then(|i| self.machine(i))
@@ -3162,11 +3201,14 @@ impl AmuxApp {
                         .text_color(rgb(0x111827)),
                 )
                 .child(div().flex_1())
-                .child(Button::new("close-panel-diff").small().label("✕").on_click(
-                    cx.listener(|this, _ev, window, cx| {
-                        this.set_panel(window, cx, None);
-                    }),
-                ))
+                .child(
+                    Button::new("close-panel-diff")
+                        .small()
+                        .label("✕")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.set_panel(window, cx, None);
+                        })),
+                )
                 .into_any_element(),
         );
         if not_repo {
@@ -3277,7 +3319,10 @@ impl AmuxApp {
             .border_1()
             .border_color(rgb(0xe5e7eb))
             .child(match &target {
-                ContextMenuTarget::Session { machine, session_id } => match self
+                ContextMenuTarget::Session {
+                    machine,
+                    session_id,
+                } => match self
                     .machine(*machine)
                     .and_then(|m| m.sessions.iter().find(|s| &s.id == session_id))
                 {
@@ -3287,23 +3332,23 @@ impl AmuxApp {
                         let sid_delete = sid.clone();
                         let title0 = s.title.clone();
                         let machine = *machine;
-                        v_flex().gap_1()
+                        v_flex()
+                            .gap_1()
                             .child(Label::new(truncate(&title0, 30)).text_sm())
-                            .child(
-                                Button::new("ctx-rename")
-                                    .small()
-                                    .label("重命名")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        this.selected =
-                                            Some(Selected::Session { machine, id: sid_rename.clone() });
-                                        this.renaming_session = Some((machine, sid_rename.clone()));
-                                        this.context_menu = None;
-                                        this.title_input.update(cx, |s, cx| {
-                                            s.set_value(&title0, window, cx);
-                                        });
-                                        cx.notify();
-                                    })),
-                            )
+                            .child(Button::new("ctx-rename").small().label("重命名").on_click(
+                                cx.listener(move |this, _ev, window, cx| {
+                                    this.selected = Some(Selected::Session {
+                                        machine,
+                                        id: sid_rename.clone(),
+                                    });
+                                    this.renaming_session = Some((machine, sid_rename.clone()));
+                                    this.context_menu = None;
+                                    this.title_input.update(cx, |s, cx| {
+                                        s.set_value(&title0, window, cx);
+                                    });
+                                    cx.notify();
+                                }),
+                            ))
                             .child(
                                 Button::new("ctx-delete")
                                     .small()
@@ -3325,7 +3370,8 @@ impl AmuxApp {
                         .get(wi)
                         .map(|w| w.session.title.clone())
                         .unwrap_or_default();
-                    v_flex().gap_1()
+                    v_flex()
+                        .gap_1()
                         .child(Label::new(truncate(&title0, 30)).text_sm())
                         .child(
                             Button::new("ctx-wf-rename")
@@ -3397,12 +3443,9 @@ impl AmuxApp {
                     .child(self.render_settings_content(cx)),
             )
             // skills 弹窗（盖在设置浮窗之上）
-            .when(
-                self.machines
-                    .iter()
-                    .any(|m| m.show_skills.is_some()),
-                |o| o.child(self.render_skills_dialog(window, cx)),
-            )
+            .when(self.machines.iter().any(|m| m.show_skills.is_some()), |o| {
+                o.child(self.render_skills_dialog(window, cx))
+            })
     }
 
     /// skills 弹窗：可滚动显示某 agent 的 skills 列表。
@@ -3429,7 +3472,11 @@ impl AmuxApp {
             .overflow_y_scroll()
             .p_1();
         if skills.is_empty() {
-            list = list.child(Label::new("（无 skills）").text_sm().text_color(rgb(0x9ca3af)));
+            list = list.child(
+                Label::new("（无 skills）")
+                    .text_sm()
+                    .text_color(rgb(0x9ca3af)),
+            );
         }
         for s in &skills {
             let s = s.clone();
@@ -3507,18 +3554,8 @@ impl AmuxApp {
                 "快捷指令",
                 cx,
             ))
-            .child(self.settings_nav_item(
-                SettingsCategory::Skills,
-                "cat-skills",
-                "技能管理",
-                cx,
-            ))
-            .child(self.settings_nav_item(
-                SettingsCategory::Templates,
-                "cat-tpl",
-                "工作流模板",
-                cx,
-            ))
+            .child(self.settings_nav_item(SettingsCategory::Skills, "cat-skills", "技能管理", cx))
+            .child(self.settings_nav_item(SettingsCategory::Templates, "cat-tpl", "工作流模板", cx))
             .child(div().flex_1())
             .child(
                 Button::new("settings-back")
@@ -3625,43 +3662,42 @@ impl AmuxApp {
                     let agent = a.name.clone();
                     let agent_skills = agent.clone();
                     let agent_restart = agent.clone();
-                    item = item
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    Label::new(format!(
-                                        "{} · {}",
-                                        agent,
-                                        if available { "可用" } else { "不可用" }
-                                    ))
-                                    .text_sm(),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    Button::new(format!("skills-{i}-{agent}"))
-                                        .small()
-                                        .label("skills")
-                                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                                            let agent = agent_skills.clone();
-                                            this.fetch_agent_skills(window, cx, i, agent.clone());
-                                            if let Some(m) = this.machines.get_mut(i) {
-                                                m.show_skills = Some((i, agent));
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Button::new(format!("restart-agent-{i}-{agent}"))
-                                        .small()
-                                        .label("重启")
-                                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                                            let agent = agent_restart.clone();
-                                            this.confirm_restart_agent(window, cx, i, agent);
-                                        })),
-                                ),
-                        );
+                    item = item.child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Label::new(format!(
+                                    "{} · {}",
+                                    agent,
+                                    if available { "可用" } else { "不可用" }
+                                ))
+                                .text_sm(),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                Button::new(format!("skills-{i}-{agent}"))
+                                    .small()
+                                    .label("skills")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        let agent = agent_skills.clone();
+                                        this.fetch_agent_skills(window, cx, i, agent.clone());
+                                        if let Some(m) = this.machines.get_mut(i) {
+                                            m.show_skills = Some((i, agent));
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("restart-agent-{i}-{agent}"))
+                                    .small()
+                                    .label("重启")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        let agent = agent_restart.clone();
+                                        this.confirm_restart_agent(window, cx, i, agent);
+                                    })),
+                            ),
+                    );
                 }
                 item
             })
@@ -3769,8 +3805,7 @@ impl AmuxApp {
                                 .label("保存")
                                 .on_click(cx.listener(|this, _ev, _window, cx| {
                                     let name = this.qc_edit_target.clone().unwrap_or_default();
-                                    let new_name =
-                                        this.qc_name_input.read(cx).value().to_string();
+                                    let new_name = this.qc_name_input.read(cx).value().to_string();
                                     let prompt = this.qc_prompt_input.read(cx).value().to_string();
                                     if !new_name.trim().is_empty() && new_name != name {
                                         this.store.remove_quick_command(&name);
@@ -3886,7 +3921,8 @@ impl AmuxApp {
                                 .label("保存")
                                 .on_click(cx.listener(|this, _ev, _window, cx| {
                                     let old = this.skill_edit_target.clone().unwrap_or_default();
-                                    let new_name = this.skill_name_input.read(cx).value().to_string();
+                                    let new_name =
+                                        this.skill_name_input.read(cx).value().to_string();
                                     let desc = this.skill_desc_input.read(cx).value().to_string();
                                     if !new_name.trim().is_empty() && new_name != old {
                                         this.store.remove_skill(&old);

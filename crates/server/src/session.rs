@@ -76,7 +76,8 @@ impl SessionManager {
             .iter()
             .filter(|(m, _)| before.map(|b| m.last_active_at < b).unwrap_or(true))
             .collect();
-        let window: Vec<RegistryEntry> = filtered.iter().take(limit).map(|e| (*e).clone()).collect();
+        let window: Vec<RegistryEntry> =
+            filtered.iter().take(limit).map(|e| (*e).clone()).collect();
         let has_more = filtered.len() > limit;
         let next_before = if has_more {
             window.last().map(|(m, _)| m.last_active_at)
@@ -207,7 +208,10 @@ impl SessionManager {
     /// 无活动会话」）：对注册表中超过阈值的候选会话经 ACP `session/close` 关闭并清空
     /// agent 侧会话 id（元数据与历史保留）。
     pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> usize {
-        let candidates = self.registry.idle_candidates(now_ms, timeout_ms).unwrap_or_default();
+        let candidates = self
+            .registry
+            .idle_candidates(now_ms, timeout_ms)
+            .unwrap_or_default();
         let mut closed = 0;
         for (sid, _) in candidates {
             let Ok(Some((meta, aid))) = self.registry.get(&sid) else {
@@ -329,7 +333,9 @@ impl SessionManager {
             };
             let _ = SessionLog::open(&self.data_dir, session_id).append_activities(&[err]);
             self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
-            let _ = self.registry.update_state(session_id, SessionState::Idle, now());
+            let _ = self
+                .registry
+                .update_state(session_id, SessionState::Idle, now());
             self.ongoing.lock().unwrap().remove(session_id);
             return Err(format!("恢复 agent 上下文失败: {e}"));
         }
@@ -418,7 +424,9 @@ impl SessionManager {
 
         // 置空闲 + 清空 ongoing + 广播
         self.ongoing.lock().unwrap().remove(session_id);
-        let _ = self.registry.update_state(session_id, SessionState::Idle, now());
+        let _ = self
+            .registry
+            .update_state(session_id, SessionState::Idle, now());
         self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
         protocol::log::info(
             "server.session",
@@ -444,7 +452,9 @@ impl SessionManager {
         driver.cancel(&agent_session_id)?;
         // 取消后该会话视为回到空闲，广播状态变更
         if meta.state == SessionState::Busy {
-            let _ = self.registry.update_state(session_id, SessionState::Idle, now());
+            let _ = self
+                .registry
+                .update_state(session_id, SessionState::Idle, now());
             self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
         }
         Ok(())
@@ -481,7 +491,9 @@ mod tests {
     use std::sync::Arc;
 
     fn text(s: &str) -> Vec<ContentBlock> {
-        vec![ContentBlock::Text { text: s.to_string() }]
+        vec![ContentBlock::Text {
+            text: s.to_string(),
+        }]
     }
 
     /// 测试直接构造 manager（独立临时数据目录）。
@@ -557,12 +569,18 @@ mod tests {
         assert_eq!(nb, Some(800));
 
         let (w, more, nb) = SessionManager::session_page(&all, 2, Some(800));
-        assert_eq!(w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(), ["s7", "s6"]);
+        assert_eq!(
+            w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
+            ["s7", "s6"]
+        );
         assert!(more);
         assert_eq!(nb, Some(600));
 
         let (w, more, nb) = SessionManager::session_page(&all, 2, Some(600));
-        assert_eq!(w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(), ["s5", "s4"]);
+        assert_eq!(
+            w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
+            ["s5", "s4"]
+        );
         assert!(!more);
         assert_eq!(nb, None);
 
@@ -614,7 +632,9 @@ mod tests {
         // 分页读活动：thinking + tool_call
         let (acts, _, _) = mgr.activities(&meta.id, None, None).await.unwrap();
         assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
-        assert!(acts.iter().any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")));
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")));
 
         // 列表状态回到空闲
         let (list, _, _) = mgr.list(None, None).await.unwrap();
@@ -668,7 +688,8 @@ mod tests {
                 Ok(())
             }
             fn close(&self, _a: &str) -> Result<(), String> {
-                self.closed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.closed
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
             fn list_skills(&self) -> Vec<String> {
@@ -680,7 +701,9 @@ mod tests {
         let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
             "track",
-            Arc::new(Tracking { closed: closed.clone() }),
+            Arc::new(Tracking {
+                closed: closed.clone(),
+            }),
         ));
         let dir = std::env::temp_dir().join(format!(
             "amux-del-{}-{}",
@@ -710,11 +733,7 @@ mod tests {
         let (mgr, _rx) = stub_manager("codex");
         let meta = mgr.create("codex", "/tmp/noop").await.unwrap();
         mgr.delete(&meta.id).await.unwrap();
-        assert!(mgr
-            .registry
-            .get(&meta.id)
-            .unwrap()
-            .is_none());
+        assert!(mgr.registry.get(&meta.id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
     }
 

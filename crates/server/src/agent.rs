@@ -26,9 +26,7 @@ use agent_client_protocol::schema::v1::{
     TextContent, TextResourceContents, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::{
-    AcpAgent, ConnectionTo, JsonRpcRequest, JsonRpcResponse,
-};
+use agent_client_protocol::{AcpAgent, ConnectionTo, JsonRpcRequest, JsonRpcResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -363,10 +361,7 @@ impl AgentRegistry {
                         .insert(d.name.clone());
                     protocol::log::error(
                         "server.launch",
-                        format!(
-                            "ACP server 拉起失败（agent={}，已标记不可用）: {e}",
-                            d.name
-                        ),
+                        format!("ACP server 拉起失败（agent={}，已标记不可用）: {e}", d.name),
                     );
                 }
             }
@@ -421,7 +416,8 @@ impl AgentRegistry {
         if let Some((_, d)) = &self.configured {
             d.shutdown();
         }
-        if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）") {
+        if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）")
+        {
             stub.shutdown();
         }
         let spawned = self
@@ -868,93 +864,98 @@ async fn connect_main(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(agent, |cx: ConnectionTo<agent_client_protocol::Agent>| async move {
-            let req_rx = req_rx;
-            // 初始化握手（版本协商）。失败需区分两种情形：
-            // - **协议级失败**（agent 存活但不实现 initialize，如返回 method not
-            //   found）：仅记录、连接保持可用，视为拉起成功；
-            // - **传输层失败**（进程已退出 / 连接已死，如 npx 不可用、无网络）：拉起失败。
-            // 二者用短窗口探测连接活性区分：incoming_closed 在传输层关闭后很快完成，
-            // 超时则连接仍存活。
-            let init_result = match cx
-                .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                .block_task()
-                .await
-            {
-                core::result::Result::Ok(_) => {
-                    protocol::log::debug("acp", "initialize 完成");
-                    core::result::Result::Ok(())
-                }
-                core::result::Result::Err(e) => {
-                    let alive = tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
-                        cx.incoming_closed(),
-                    )
+        .connect_with(
+            agent,
+            |cx: ConnectionTo<agent_client_protocol::Agent>| async move {
+                let req_rx = req_rx;
+                // 初始化握手（版本协商）。失败需区分两种情形：
+                // - **协议级失败**（agent 存活但不实现 initialize，如返回 method not
+                //   found）：仅记录、连接保持可用，视为拉起成功；
+                // - **传输层失败**（进程已退出 / 连接已死，如 npx 不可用、无网络）：拉起失败。
+                // 二者用短窗口探测连接活性区分：incoming_closed 在传输层关闭后很快完成，
+                // 超时则连接仍存活。
+                let init_result = match cx
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
                     .await
-                    .is_err();
-                    if alive {
-                        protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
+                {
+                    core::result::Result::Ok(_) => {
+                        protocol::log::debug("acp", "initialize 完成");
                         core::result::Result::Ok(())
-                    } else {
-                        core::result::Result::Err(format!("initialize 握手失败（连接已关闭）: {e}"))
                     }
-                }
-            };
-            let _ = ready_tx.send(init_result);
-
-            // 服务循环：每个请求独立 spawn，支持并发（cancel 不必等 prompt 完成）
-            loop {
-                let Some(req) = req_rx.recv().await else {
-                    break;
+                    core::result::Result::Err(e) => {
+                        let alive = tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            cx.incoming_closed(),
+                        )
+                        .await
+                        .is_err();
+                        if alive {
+                            protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
+                            core::result::Result::Ok(())
+                        } else {
+                            core::result::Result::Err(format!(
+                                "initialize 握手失败（连接已关闭）: {e}"
+                            ))
+                        }
+                    }
                 };
-                match req {
-                    ExecReq::Call {
-                        method,
-                        params,
-                        resp,
-                    } => {
-                        let cx = cx.clone();
-                        tokio::spawn(async move {
-                            let result = dispatch_call(&cx, &method, &params).await;
-                            let _ = resp.send(result);
-                        });
-                    }
-                    ExecReq::Prompt {
-                        sid,
-                        prompt,
-                        routes,
-                    } => {
-                        let cx = cx.clone();
-                        tokio::spawn(async move {
-                            let blocks = prompt
-                                .iter()
-                                .filter_map(acp_content_block)
-                                .collect::<Vec<_>>();
-                            let _ = cx
-                                .send_request(PromptRequest::new(sid.clone(), blocks))
-                                .on_receiving_result(async move |result| {
-                                    // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）
-                                    if let Some(tx) = routes
-                                        .lock()
-                                        .expect("Mutex 中毒（临界区内不应 panic）")
-                                        .remove(&sid)
-                                    {
-                                        let _ = tx.try_send(AgentEvent::TurnEnded);
-                                    }
-                                    if let core::result::Result::Err(e) = result {
-                                        protocol::log::error(
-                                            "acp",
-                                            format!("prompt 失败 {sid}: {e}"),
-                                        );
-                                    }
-                                    core::result::Result::Ok(())
-                                });
-                        });
+                let _ = ready_tx.send(init_result);
+
+                // 服务循环：每个请求独立 spawn，支持并发（cancel 不必等 prompt 完成）
+                loop {
+                    let Some(req) = req_rx.recv().await else {
+                        break;
+                    };
+                    match req {
+                        ExecReq::Call {
+                            method,
+                            params,
+                            resp,
+                        } => {
+                            let cx = cx.clone();
+                            tokio::spawn(async move {
+                                let result = dispatch_call(&cx, &method, &params).await;
+                                let _ = resp.send(result);
+                            });
+                        }
+                        ExecReq::Prompt {
+                            sid,
+                            prompt,
+                            routes,
+                        } => {
+                            let cx = cx.clone();
+                            tokio::spawn(async move {
+                                let blocks = prompt
+                                    .iter()
+                                    .filter_map(acp_content_block)
+                                    .collect::<Vec<_>>();
+                                let _ = cx
+                                    .send_request(PromptRequest::new(sid.clone(), blocks))
+                                    .on_receiving_result(async move |result| {
+                                        // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）
+                                        if let Some(tx) = routes
+                                            .lock()
+                                            .expect("Mutex 中毒（临界区内不应 panic）")
+                                            .remove(&sid)
+                                        {
+                                            let _ = tx.try_send(AgentEvent::TurnEnded);
+                                        }
+                                        if let core::result::Result::Err(e) = result {
+                                            protocol::log::error(
+                                                "acp",
+                                                format!("prompt 失败 {sid}: {e}"),
+                                            );
+                                        }
+                                        core::result::Result::Ok(())
+                                    });
+                            });
+                        }
                     }
                 }
-            }
-            core::result::Result::Ok(())
-        })
+                core::result::Result::Ok(())
+            },
+        )
         .await
 }
 
@@ -1147,6 +1148,12 @@ pub struct StubAgentDriver {
 impl StubAgentDriver {
     #[allow(dead_code)]
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for StubAgentDriver {
+    fn default() -> Self {
         StubAgentDriver {
             sessions: std::sync::Mutex::new(Vec::new()),
             output_prefix: "模拟输出：".into(),

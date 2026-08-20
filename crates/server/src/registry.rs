@@ -117,9 +117,7 @@ impl SessionRegistry {
                  FROM sessions ORDER BY last_active_at DESC",
             )
             .expect("prepare list");
-        let rows = stmt
-            .query_map([], row_to_entry)
-            .expect("query list");
+        let rows = stmt.query_map([], row_to_entry).expect("query list");
         rows.collect()
     }
 
@@ -131,7 +129,12 @@ impl SessionRegistry {
     }
 
     /// 更新会话状态与最近活跃时间。
-    pub fn update_state(&self, id: &str, state: SessionState, last_active_at: u64) -> rusqlite::Result<()> {
+    pub fn update_state(
+        &self,
+        id: &str,
+        state: SessionState,
+        last_active_at: u64,
+    ) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE sessions SET state = ?1, last_active_at = ?2 WHERE id = ?3",
@@ -168,18 +171,25 @@ impl SessionRegistry {
             "UPDATE sessions SET state = 'idle' WHERE state = 'busy'",
             [],
         )?;
-        Ok(n as usize)
+        Ok(n)
     }
 
     /// 全部会话的会话 id 与最近活跃时间（用于无活动回收时判断长时间空闲的会话，docs/DESIGN.md「ACP 生命周期」）。
-    pub fn idle_candidates(&self, now: u64, idle_timeout_ms: u64) -> rusqlite::Result<Vec<(String, u64)>> {
+    pub fn idle_candidates(
+        &self,
+        now: u64,
+        idle_timeout_ms: u64,
+    ) -> rusqlite::Result<Vec<(String, u64)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT id, last_active_at FROM sessions")
             .expect("prepare idle_candidates");
         let rows = stmt
             .query_map([], |row| {
-                Ok((row.get::<_, String>("id")?, row.get::<_, i64>("last_active_at")? as u64))
+                Ok((
+                    row.get::<_, String>("id")?,
+                    row.get::<_, i64>("last_active_at")? as u64,
+                ))
             })
             .expect("query idle_candidates");
         Ok(rows
