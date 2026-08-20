@@ -93,13 +93,6 @@ enum NewSessionMode {
     Workflow,
 }
 
-/// diff 渲染模式（PRD §3.5）。
-#[derive(Clone, Copy, PartialEq)]
-enum DiffMode {
-    Inline,
-    SideBySide,
-}
-
 /// 单机器视图：独立 WS 连接 + agent 列表 + 会话列表 + 各会话聚合视图 + diff/skills 状态。
 struct MachineView {
     config: MachineConfig,
@@ -113,8 +106,6 @@ struct MachineView {
     /// 各会话的聚合视图（对话 / 活动 / 实时）。
     views: std::collections::HashMap<String, SessionView>,
     diff_files: Vec<GitDiffFile>,
-    diff_path: Option<String>,
-    diff_mode: DiffMode,
     diff_not_repo: bool,
     /// 代码审查面板中选中的文件/代码块：(path, None)=整文件；(path, Some(i))=第 i 个 hunk。
     diff_selection: HashSet<(String, Option<usize>)>,
@@ -138,8 +129,6 @@ impl MachineView {
             sessions_next_before: None,
             views: std::collections::HashMap::new(),
             diff_files: Vec::new(),
-            diff_path: None,
-            diff_mode: DiffMode::Inline,
             diff_not_repo: false,
             diff_selection: HashSet::new(),
             skills: Vec::new(),
@@ -166,7 +155,6 @@ enum ContextMenuTarget {
 /// 右键弹出菜单。
 struct SessionContextMenu {
     target: ContextMenuTarget,
-    title: String,
     x: f32,
     y: f32,
 }
@@ -419,6 +407,20 @@ impl AmuxApp {
             Some(Selected::Session { machine, .. }) => Some(*machine),
             _ => Some(0).filter(|_| !self.machines.is_empty()),
         }
+    }
+
+    fn selected_workspace(&self) -> Option<(usize, String)> {
+        let Selected::Session { machine, id } = self.selected.as_ref()? else {
+            return None;
+        };
+        let cwd = self
+            .machine(*machine)?
+            .sessions
+            .iter()
+            .find(|session| session.id == *id)?
+            .cwd
+            .clone();
+        Some((*machine, cwd))
     }
 
     // ---- 通知路由（connected/disconnected/auth + session.state_change 工作流驱动）----
@@ -2256,8 +2258,9 @@ impl AmuxApp {
                             .small()
                             .label("＋")
                             .tooltip("新会话 / 工作流")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                            .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.selected = None;
+                                this.set_panel(window, cx, None);
                                 cx.notify();
                             })),
                     ),
@@ -2412,7 +2415,6 @@ impl AmuxApp {
                             machine,
                             session_id: sid_ctx.clone(),
                         },
-                        title: title.clone(),
                         x: ev.position.x.as_f32(),
                         y: ev.position.y.as_f32(),
                     });
@@ -2600,7 +2602,6 @@ impl AmuxApp {
                 .content(content),
         );
 
-        let title_ctx = title.clone();
         let wf_sel = self.selected == Some(Selected::Workflow { engine: wi });
         div()
             .id(format!("wf-row-{wi}"))
@@ -2619,7 +2620,6 @@ impl AmuxApp {
                 cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                     this.context_menu = Some(SessionContextMenu {
                         target: ContextMenuTarget::Workflow { engine: wi },
-                        title: title_ctx.clone(),
                         x: ev.position.x.as_f32(),
                         y: ev.position.y.as_f32(),
                     });
@@ -2664,12 +2664,67 @@ impl AmuxApp {
         if self.selected.is_none() {
             return self.render_new_session_view(window, cx);
         }
-        h_flex()
+        v_flex()
             .flex_1()
             .min_h_0()
-            .items_stretch()
-            .child(self.render_dialog(window, cx))
-            .child(self.render_floating_buttons(window, cx))
+            .child(self.render_session_header())
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_stretch()
+                    .child(self.render_dialog(window, cx))
+                    .child(self.render_floating_buttons(window, cx)),
+            )
+            .into_any()
+    }
+
+    fn render_session_header(&self) -> impl IntoElement {
+        let (label, status) = match &self.selected {
+            Some(Selected::Session { machine, id }) => {
+                let Some(machine_view) = self.machine(*machine) else {
+                    return h_flex().into_any();
+                };
+                let Some(session) = machine_view.sessions.iter().find(|s| s.id == *id) else {
+                    return h_flex().into_any();
+                };
+                let available = machine_view.status == "已连接"
+                    && machine_view
+                        .agents
+                        .iter()
+                        .any(|agent| agent.name == session.agent && agent.available);
+                (
+                    format!("{}@{}", session.agent, machine_view.config.name),
+                    if available { "可用" } else { "不可用" },
+                )
+            }
+            Some(Selected::Workflow { engine }) => {
+                let Some(workflow) = self.workflows.get(*engine) else {
+                    return h_flex().into_any();
+                };
+                (
+                    "编排智能体".to_string(),
+                    if workflow.session.state == SessionState::Busy {
+                        "工作中"
+                    } else if self.store.orchestrator().is_configured() {
+                        "可用"
+                    } else {
+                        "不可用"
+                    },
+                )
+            }
+            None => return h_flex().into_any(),
+        };
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(rgb(0xe5e7eb))
+            .child(Label::new(label).font_weight(FontWeight::SEMIBOLD))
+            .child(machine_status_badge(status))
             .into_any()
     }
 
@@ -2796,38 +2851,27 @@ impl AmuxApp {
                 }
             }
             NewSessionMode::Workflow => {
-                card = card
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(Label::new("工作流模板").text_sm().text_color(rgb(0x6b7280)))
-                            .child(self.render_template_selector(cx)),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                Label::new(if self.workflow_template.is_some() {
-                                    "本次工作流目标（可留空，稍后在会话中输入）"
-                                } else {
-                                    "自然语言执行计划"
-                                })
-                                .text_sm()
-                                .text_color(rgb(0x6b7280)),
-                            )
-                            .child(Input::new(&self.workflow_input)),
-                    );
-                if let Some(err) = &self.workflow_error {
+                if !self.store.orchestrator().is_configured() {
                     card = card.child(
                         v_flex()
-                            .gap_1()
+                            .gap_2()
                             .p_2()
-                            .bg(rgb(0xffe6e6))
+                            .bg(rgb(0xfff3cd))
                             .rounded_md()
-                            .child(Label::new(err).text_color(rgb(0xb91c1c)))
+                            .child(
+                                Label::new("编排智能体尚未配置")
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x92400e)),
+                            )
+                            .child(
+                                Label::new("请先配置 API 格式、Base URL、API Key 和模型名称。")
+                                    .text_sm()
+                                    .text_color(rgb(0x92400e)),
+                            )
                             .child(
                                 Button::new("ns-goto-orch-settings")
                                     .small()
+                                    .primary()
                                     .label("去配置编排 agent")
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         this.show_settings = true;
@@ -2836,15 +2880,47 @@ impl AmuxApp {
                                     })),
                             ),
                     );
+                } else {
+                    card = card
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(Label::new("工作流模板").text_sm().text_color(rgb(0x6b7280)))
+                                .child(self.render_template_selector(cx)),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    Label::new(if self.workflow_template.is_some() {
+                                        "本次工作流目标（可留空，稍后在会话中输入）"
+                                    } else {
+                                        "自然语言执行计划"
+                                    })
+                                    .text_sm()
+                                    .text_color(rgb(0x6b7280)),
+                                )
+                                .child(Input::new(&self.workflow_input)),
+                        );
+                    if let Some(err) = &self.workflow_error {
+                        card = card.child(
+                            v_flex()
+                                .gap_1()
+                                .p_2()
+                                .bg(rgb(0xffe6e6))
+                                .rounded_md()
+                                .child(Label::new(err).text_color(rgb(0xb91c1c))),
+                        );
+                    }
+                    card = card.child(
+                        Button::new("ns-create-workflow")
+                            .primary()
+                            .label("创建工作流会话")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.create_workflow(window, cx);
+                            })),
+                    );
                 }
-                card = card.child(
-                    Button::new("ns-create-workflow")
-                        .primary()
-                        .label("创建工作流会话")
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            this.create_workflow(window, cx);
-                        })),
-                );
             }
         }
         v_flex()
@@ -2894,13 +2970,17 @@ impl AmuxApp {
 
     /// 机器选择（新会话视图）。
     fn render_machine_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected_machine = self
+            .new_session_machine
+            .filter(|i| *i < self.machines.len())
+            .or_else(|| (!self.machines.is_empty()).then_some(0));
         let mut row = h_flex().gap_1();
         if self.machines.is_empty() {
             row = row.child(Label::new("（请先在设置中添加机器）"));
         }
         for (i, m) in self.machines.iter().enumerate() {
             let name = m.config.name.clone();
-            let selected = self.new_session_machine == Some(i);
+            let selected = selected_machine == Some(i);
             row = row.child(
                 Button::new(format!("ns-machine-{i}"))
                     .small()
@@ -3448,7 +3528,15 @@ impl AmuxApp {
                     } else {
                         "空闲"
                     },
-                ));
+                ))
+                .child(info_row("创建时间", &format_timestamp(meta.created_at)));
+        if let Some(Selected::Session { machine, .. }) = &self.selected {
+            if let Some(machine_view) = self.machine(*machine) {
+                body = body
+                    .child(info_row("机器", &machine_view.config.name))
+                    .child(info_row("机器状态", &machine_view.status));
+            }
+        }
         let title = if meta.title.is_empty() {
             "（未命名）".to_string()
         } else {
@@ -3737,7 +3825,6 @@ impl AmuxApp {
             let file_selected = self.is_diff_selected(machine_idx, &path, None);
             let path_for_restore = path.clone();
             let patch_for_restore = patch.clone();
-
             let mut file_children: Vec<gpui::AnyElement> = Vec::new();
             file_children.push(
                 h_flex()
@@ -3756,33 +3843,18 @@ impl AmuxApp {
                                 }
                             })),
                     )
-                    .child(
-                        Label::new(summary)
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM),
-                    )
+                    .child(Label::new(summary).text_sm().font_weight(FontWeight::MEDIUM))
                     .child(div().flex_1())
                     .child(
                         Button::new(format!("restore-{path}"))
                             .small()
                             .label("撤销该文件")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
-                                if let Some(m) = this.machine(machine_idx) {
-                                    let cwd = m
-                                        .sessions
-                                        .iter()
-                                        .find(|s| {
-                                            matches!(
-                                                &this.selected,
-                                                Some(Selected::Session { id, .. }) if id == &s.id
-                                            )
-                                        })
-                                        .map(|s| s.cwd.clone())
-                                        .unwrap_or_default();
+                                if let Some((machine, cwd)) = this.selected_workspace() {
                                     this.restore_workspace(
                                         window,
                                         cx,
-                                        machine_idx,
+                                        machine,
                                         cwd,
                                         Some(path_for_restore.clone()),
                                         Some(patch_for_restore.clone()),
@@ -3792,7 +3864,11 @@ impl AmuxApp {
                     )
                     .into_any_element(),
             );
-
+            file_children.push(
+                TextView::markdown(format!("diff-{path}"), patch.clone())
+                    .selectable(true)
+                    .into_any_element(),
+            );
             for (hi, h) in f.hunks.iter().enumerate() {
                 let hunk_selected = self.is_diff_selected(machine_idx, &path, Some(hi));
                 let hunk_path = path.clone();
@@ -3836,23 +3912,13 @@ impl AmuxApp {
                                         .on_click(cx.listener({
                                             let hunk_path = hunk_path.clone();
                                             move |this, _ev, window, cx| {
-                                                if let Some(m) = this.machine(machine_idx) {
-                                                    let cwd = m
-                                                        .sessions
-                                                        .iter()
-                                                        .find(|s| {
-                                                            matches!(
-                                                                &this.selected,
-                                                                Some(Selected::Session { id, .. })
-                                                                    if id == &s.id
-                                                            )
-                                                        })
-                                                        .map(|s| s.cwd.clone())
-                                                        .unwrap_or_default();
+                                                if let Some((machine, cwd)) =
+                                                    this.selected_workspace()
+                                                {
                                                     this.restore_workspace(
                                                         window,
                                                         cx,
-                                                        machine_idx,
+                                                        machine,
                                                         cwd,
                                                         Some(hunk_path.clone()),
                                                         Some(hunk_patch.clone()),
@@ -3863,28 +3929,12 @@ impl AmuxApp {
                                 ),
                         )
                         .child(
-                            TextView::markdown(
-                                format!("diff-{path}-{hi}"),
-                                one_line(&h.patch, 200),
-                            )
-                            .selectable(true),
-                        )
-                        .into_any_element(),
-                );
-            }
-            // 没有 hunk 信息的文件直接显示完整 patch。
-            if f.hunks.is_empty() {
-                file_children.push(
-                    v_flex()
-                        .pl(px(20.))
-                        .child(
-                            TextView::markdown(format!("diff-{path}"), one_line(&patch, 200))
+                            TextView::markdown(format!("diff-{path}-{hi}"), h.patch.clone())
                                 .selectable(true),
                         )
                         .into_any_element(),
                 );
             }
-
             children.push(v_flex().gap_1().children(file_children).into_any_element());
         }
         v_flex()

@@ -192,18 +192,6 @@ impl ConfigStore {
         );
     }
 
-    pub fn update_machine(&self, name: &str, url: &str, token: &str) {
-        let mut machines = self.list_machines();
-        if let Some(m) = machines.iter_mut().find(|m| m.name == name) {
-            m.url = url.to_string();
-            m.token = token.to_string();
-        }
-        write_file(
-            &self.path("machines.json"),
-            &serde_json::to_value(machines).unwrap(),
-        );
-    }
-
     // ---- 快捷指令（quick_commands.json）----
 
     pub fn list_quick_commands(&self) -> Vec<QuickCommand> {
@@ -379,11 +367,6 @@ impl ConfigStore {
             &self.path("agent.json"),
             &serde_json::to_value(cfg).unwrap(),
         );
-    }
-
-    /// 数据目录。
-    pub fn data_dir(&self) -> &Path {
-        &self.data_dir
     }
 
     /// 工作流会话持久化目录（~/.amux/app/sessions/）。

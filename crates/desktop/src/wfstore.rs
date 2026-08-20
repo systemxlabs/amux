@@ -9,8 +9,6 @@ use std::path::Path;
 #[cfg(test)]
 use protocol::Activity;
 use protocol::{ContentBlock, HistoryItem};
-#[cfg(test)]
-use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
 
 use crate::workflow::{ChildSession, OrcMsg, OrcSession};
@@ -248,18 +246,6 @@ pub fn remove(data_dir: &Path, id: &str) {
     }
     let _ = std::fs::remove_file(history_path(data_dir, id));
     let _ = std::fs::remove_file(activities_path(data_dir, id));
-}
-
-/// 按 id 取一条（测试用）。
-#[cfg(test)]
-pub fn get(data_dir: &Path, id: &str) -> Option<OrcSession> {
-    let conn = open_db(data_dir).ok()?;
-    let mut stmt = conn.prepare("SELECT id FROM sessions WHERE id = ?1").ok()?;
-    stmt.query_row(params![id], |_| Ok(()))
-        .optional()
-        .ok()
-        .flatten()?;
-    load_all(data_dir).into_iter().find(|s| s.id == id)
 }
 
 #[cfg(test)]
