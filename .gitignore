@@ -1,10 +1,3 @@
 # Rust
 /target
 **/*.rs.bk
-
-# 本机构建 workaround（libxkbcommon-x11 链接，机器特定路径，不提交）
-/.cargo/config.toml
-
-# Node（现有 TS 目录，重构完成后清理）
-node_modules/
-dist/
