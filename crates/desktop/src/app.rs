@@ -3860,7 +3860,6 @@ impl AmuxApp {
         &self,
         machine_idx: usize,
         path: &str,
-        depth: usize,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let Some(machine) = self.machine(machine_idx) else {
@@ -3881,7 +3880,6 @@ impl AmuxApp {
         let next_offset = directory.next_offset;
         let loading = machine.workspace_loading.contains(path);
         let expanded_paths = machine.workspace_expanded.clone();
-        let indent = px(14.0 * depth as f32);
         let mut children = Vec::new();
 
         for entry in entries {
@@ -3906,6 +3904,7 @@ impl AmuxApp {
                 .w_full()
                 .small()
                 .ghost()
+                .px_2()
                 .label(label)
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     let Some(machine) = this.active_machine() else {
@@ -3939,14 +3938,9 @@ impl AmuxApp {
                     }
                     cx.notify();
                 }));
-            let mut node = v_flex().child(h_flex().w_full().child(div().w(indent)).child(button));
+            let mut node = v_flex().child(h_flex().w_full().child(button));
             if expanded {
-                node = node.children(self.render_workspace_tree(
-                    machine_idx,
-                    &entry_path,
-                    depth + 1,
-                    cx,
-                ));
+                node = node.children(self.render_workspace_tree(machine_idx, &entry_path, cx));
             }
             children.push(node.into_any_element());
         }
@@ -4004,10 +3998,13 @@ impl AmuxApp {
         let read_next_offset = machine.workspace_read_next_offset;
         let file = workspace_file.clone();
         let tree = v_flex()
-            .gap_1()
+            .gap_0()
             .w(px(220.0))
+            .p_1()
+            .bg(cx.theme().muted.opacity(0.35))
+            .rounded_md()
             .overflow_y_scrollbar()
-            .children(self.render_workspace_tree(machine_idx, "", 0, cx));
+            .children(self.render_workspace_tree(machine_idx, "", cx));
 
         let mut content = v_flex().flex_1().min_w_0().h_full().gap_2().child(
             Label::new(
