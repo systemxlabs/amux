@@ -345,7 +345,8 @@ impl AmuxApp {
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("输入消息，Ctrl+Enter 发送；@ 引用文件/目录作为上下文")
-                .multi_line(true)
+                .auto_grow(3, 8)
+                .submit_on_enter(false)
         });
         let session_cwd_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("工作目录（如 ~/projects/api-server）")
@@ -3808,7 +3809,7 @@ impl AmuxApp {
                     .child(
                         div()
                             .flex_1()
-                            .min_h(px(80.))
+                            .min_h(px(96.))
                             .id("input-drop-zone")
                             .child(Input::new(&self.input_state))
                             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
