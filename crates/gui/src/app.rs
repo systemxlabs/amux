@@ -5,7 +5,7 @@
 //! - 中间：上方对话流（用户消息 + agent 完整输出气泡，非流式）+ 下方进行中活动条（一条或无）
 //!   + 快捷指令栏 + 输入区（多行、@ 引用、拖拽文件、粘贴图片、语音）+ 右侧竖排悬浮按钮
 //! - 右侧：上下文面板（默认折叠，悬浮按钮展开 diff / 会话详情 / 会话活动历史）
-//! - 设置浮窗：机器管理（含 agent 默认模型与 skills 列表）/ 编排 agent / 快捷指令 / Skills / 工作流模板
+//! - 设置浮窗：机器管理（含 agent 列表与 skills）/ 编排 agent / 快捷指令 / Skills / 工作流模板
 //! - 工作流：GUI 本地工作流会话（rig 单 turn），子会话 idle 自动推进，取消/继续/介入，
 //!   状态持久化于 GUI 本地，重开后恢复
 
@@ -219,7 +219,6 @@ pub struct AmuxApp {
     orch_base_input: Entity<InputState>,
     orch_key_input: Entity<InputState>,
     orch_model_input: Entity<InputState>,
-    model_input: Entity<InputState>,
     title_input: Entity<InputState>,
     /// 快捷指令编辑目标（None = 新增）
     qc_edit_target: Option<String>,
@@ -295,8 +294,6 @@ impl AmuxApp {
         let orch_key_input = cx.new(|cx| InputState::new(window, cx).placeholder("API key"));
         let orch_model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("模型，如 gpt-4o-mini"));
-        let model_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("默认模型（可留空）"));
         let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
 
         let machines = store
@@ -337,7 +334,6 @@ impl AmuxApp {
             orch_base_input,
             orch_key_input,
             orch_model_input,
-            model_input,
             title_input,
             qc_edit_target: None,
             skill_edit_target: None,
@@ -1440,33 +1436,6 @@ impl AmuxApp {
                     m.skills = skills;
                     m.skills_harness = Some(harness);
                 }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn set_default_model(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        machine: usize,
-        harness: String,
-        model: String,
-    ) {
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let _ = client
-                .request(
-                    protocol::method::SET_DEFAULT_MODEL,
-                    Some(json!({ "harness": harness, "model": model })),
-                )
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.fetch_info(machine, window, cx);
                 cx.notify();
             });
         })
@@ -4243,7 +4212,7 @@ impl AmuxApp {
             .child(actions)
     }
 
-    /// 机器管理：接入/移除 + agent 默认模型 + skills 列表（PRD §4.3）。
+    /// 机器管理：接入/移除 + agent 列表 + skills 列表（PRD §4.3）。
     fn render_machines_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machines = self
             .machines
@@ -4283,58 +4252,33 @@ impl AmuxApp {
                             .text_color(rgb(0x9ca3af))
                             .truncate(),
                     );
-                // agent 发现 + 默认模型
+                // agent 发现
                 if let Some(info) = &m.info {
                     for h in &info.harnesses {
                         let mut row = h_flex().gap_2().items_center().child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_0p5()
-                                .child(
-                                    Label::new(format!(
-                                        "agent: {}（{}）",
-                                        h.name,
-                                        if h.available { "可用" } else { "不可用" }
-                                    ))
-                                    .text_sm(),
-                                )
-                                .child(
-                                    Label::new(format!(
-                                        "默认模型: {}",
-                                        h.default_model.clone().unwrap_or_else(|| "未设置".into())
-                                    ))
-                                    .text_xs()
-                                    .text_color(rgb(0x6b7280))
-                                    .truncate(),
-                                ),
+                            v_flex().flex_1().min_w_0().gap_0p5().child(
+                                Label::new(format!(
+                                    "agent: {}（{}）",
+                                    h.name,
+                                    if h.available { "可用" } else { "不可用" }
+                                ))
+                                .text_sm(),
+                            ),
                         );
                         let harness = h.name.clone();
                         let mi = i;
                         let harness_a = harness.clone();
-                        let harness_b = harness.clone();
                         let harness_c = harness.clone();
                         let available = h.available;
-                        row = row
-                            .child(
-                                Button::new(format!("skills-{i}-{harness}"))
-                                    .small()
-                                    .label("skills")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let harness = harness_a.clone();
-                                        this.fetch_agent_skills(window, cx, mi, harness);
-                                    })),
-                            )
-                            .child(
-                                Button::new(format!("model-{i}-{harness}"))
-                                    .small()
-                                    .label("设默认模型")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let harness = harness_b.clone();
-                                        let model = this.model_input.read(cx).value().to_string();
-                                        this.set_default_model(window, cx, mi, harness, model);
-                                    })),
-                            );
+                        row = row.child(
+                            Button::new(format!("skills-{i}-{harness}"))
+                                .small()
+                                .label("skills")
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    let harness = harness_a.clone();
+                                    this.fetch_agent_skills(window, cx, mi, harness);
+                                })),
+                        );
                         // 不可用 agent：提供手动重试拉起（无需重启 server，PRD §3.3/§4.3）
                         if !available {
                             row = row.child(
@@ -4374,14 +4318,8 @@ impl AmuxApp {
             .gap_2()
             .child(self.settings_header(
                 "机器管理",
-                "接入 / 移除机器；每台机器自动发现本机 ACP agent，可配置默认模型、查看 skills",
+                "接入 / 移除机器；每台机器自动发现本机 ACP agent，可查看 skills",
             ))
-            .child(
-                Label::new("默认模型输入：")
-                    .text_sm()
-                    .text_color(rgb(0x6b7280)),
-            )
-            .child(Input::new(&self.model_input))
             .children(machines)
             .child(self.settings_header("添加机器", ""))
             .child(
