@@ -6,10 +6,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # Rust workspace 门禁：fmt + clippy + 测试（protocol / server）
+  # Rust workspace 门禁：格式、lint 和所有 crate 的测试。
   check:
-    name: fmt + clippy + test
+    name: fmt + clippy + workspace test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -23,6 +30,18 @@ jobs:
             libxkbcommon-x11-dev \
             libwayland-dev \
             libx11-dev \
+            libx11-xcb-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xkb-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxinerama-dev \
+            libgtk-3-dev \
+            libdbus-1-dev \
+            libudev-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
             pkg-config
@@ -36,10 +55,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: fmt
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy -p protocol -p server -- -D warnings
+        run: cargo clippy -p protocol -p server --all-targets --locked -- -D warnings
 
-      - name: test
-        run: cargo test -p protocol -p server
+      - name: Validate lockfile
+        run: cargo metadata --locked --no-deps --format-version 1
+
+      - name: Test workspace
+        run: cargo test --workspace --all-targets --locked
