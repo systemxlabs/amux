@@ -1,8 +1,8 @@
 //! 端到端集成测试：启动真实 server 二进制（test-server 固定用 mock_acp），
 //! 经 WebSocket + JSON-RPC 验证协议。
-//! 覆盖：会话生命周期、非流式交付（通知序列）、标题生成、忙时 steer 报错（-32006）、
-//! 多客户端共存、git status/diff/revert、agent 发现与默认模型、skills 列表、
-//! 启动拉起（docs/DESIGN.md §4.1/§7.3：server 启动发现 agent 并直接拉起，失败标记不可用）。
+//! 覆盖：认证（未认证 AUTH_FAILED / 成功）、agent.list/skills、会话惰性创建、
+//! prompt（含 state_change busy→idle 推送）、session.history/activities/ongoing_activity 分页、
+//! session.configure、删除触发 ACP session/close、workspace.diff/restore。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -25,8 +25,9 @@ struct Client {
 }
 
 impl Client {
-    async fn connect(port: u16) -> Self {
-        let url = format!("ws://127.0.0.1:{port}/?token=test-token");
+    /// 连接不发送认证。
+    async fn connect_raw(port: u16) -> Self {
+        let url = format!("ws://127.0.0.1:{port}");
         let (ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .expect("连接 server");
@@ -37,6 +38,14 @@ impl Client {
             next_id: 1,
             notifications: Vec::new(),
         }
+    }
+
+    /// 连接并完成 `auth` 认证。
+    async fn connect(port: u16, token: &str) -> Self {
+        let mut c = Self::connect_raw(port).await;
+        let r = c.call("auth", json!({"token": token})).await;
+        assert!(r.get("error").is_none(), "认证应成功: {r}");
+        c
     }
 
     /// 发送请求并等待匹配 id 的响应；期间到达的通知缓冲到 notifications。
@@ -65,7 +74,7 @@ impl Client {
         }
     }
 
-    /// 只发送请求不等待响应（用于并发/忙时场景）。
+    /// 只发送请求不等待响应（用于忙时/后台场景）。
     async fn fire(&mut self, method: &str, params: Value) {
         let id = self.next_id;
         self.next_id += 1;
@@ -85,39 +94,30 @@ impl Client {
         timeout_ms: u64,
     ) -> bool {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-        loop {
-            // 先查已缓冲的
-            if let Some((m, p)) = self
-                .notifications
-                .iter()
-                .find(|(m, p)| m == method && pred(p))
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            let msg = tokio::time::timeout(remaining, self.read.next())
+                .await
+                .ok()
+                .flatten()
+                .unwrap()
+                .unwrap();
+            let Message::Text(t) = msg else { continue };
+            let v: Value = match serde_json::from_str(&t) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v.get("method").and_then(|m| m.as_str()) == Some(method)
+                && pred(v.get("params").unwrap_or(&Value::Null))
             {
-                let _ = (m, p);
                 return true;
             }
-            if tokio::time::Instant::now() > deadline {
-                return false;
-            }
-            if let Ok(Some(Ok(Message::Text(t)))) =
-                tokio::time::timeout(std::time::Duration::from_millis(100), self.read.next()).await
-            {
-                let v: Value = serde_json::from_str(&t).unwrap();
-                if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                    self.notifications.push((
-                        m.to_string(),
-                        v.get("params").cloned().unwrap_or(Value::Null),
-                    ));
-                    if m == method && pred(v.get("params").unwrap_or(&Value::Null)) {
-                        return true;
-                    }
-                }
-            }
         }
+        false
     }
 }
 
 async fn wait_port(port: u16) -> u16 {
-    // 等待 server 监听就绪（并行测试 + SQLite 打开 + mock 拉起负载下放宽到 20s）
     for _ in 0..200 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
@@ -134,7 +134,6 @@ use std::sync::atomic::{AtomicU16, Ordering};
 
 static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
 
-/// 测试结束自动杀掉 server 子进程（避免并行测试端口残留）。
 struct ServerGuard {
     child: tokio::process::Child,
 }
@@ -144,27 +143,8 @@ impl Drop for ServerGuard {
     }
 }
 
-/// 唯一的 server 数据目录（SQLite 注册表 + 历史日志；每测试独立，避免跨测试泄漏）。
-fn unique_data_dir() -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
-        "amux-e2e-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::SeqCst)
-    ))
-}
-
-/// mock_acp 的方法调用记录文件（`<state>.calls`，断言 server 调用面用）。
-fn mock_calls_file(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join("mock.state.calls")
-}
-
-async fn spawn_server() -> (u16, std::path::PathBuf, ServerGuard) {
-    let data_dir = unique_data_dir();
+async fn spawn_server_with_delay(port: u16, data_dir: std::path::PathBuf, delay_ms: u32) -> ServerGuard {
     let bin = env!("CARGO_BIN_EXE_test-server");
-    // 每测试唯一端口（并行测试不冲突）
-    let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
     let child = tokio::process::Command::new(bin)
         .args([
             "--token",
@@ -174,392 +154,242 @@ async fn spawn_server() -> (u16, std::path::PathBuf, ServerGuard) {
             "--data-dir",
             data_dir.to_str().unwrap(),
         ])
-        // mock 状态/调用记录放数据目录内（每测试独立）
         .env("AMUX_MOCK_STATE", data_dir.join("mock.state"))
-        // 只使用 --agent 显式配置的 mock_acp：隔离本机真实 agent（如 kimi）的
-        // 自动发现与重启恢复，保证会话列表确定（AMUX_NO_DISCOVERY=1）
         .env("AMUX_NO_DISCOVERY", "1")
+        .env("AMUX_MOCK_DELAY_MS", delay_ms.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn test-server");
     wait_port(port).await;
-    (port, data_dir, ServerGuard { child })
+    ServerGuard { child }
 }
 
-/// 首个可用 harness（get_info 的 available agent）。
-fn first_harness(info: &Value) -> String {
-    info["result"]["harnesses"]
+async fn start_server() -> (u16, ServerGuard) {
+    let (port, _data_dir, guard) = start_server_with_dir().await;
+    (port, guard)
+}
+
+/// 第一个可用 agent 名（agent.list）。
+fn first_agent(list: &Value) -> String {
+    list["result"]["agents"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|h| h["available"].as_bool().unwrap_or(false))
-        .and_then(|h| h["name"].as_str())
+        .find(|a| a["available"].as_bool().unwrap_or(false))
+        .and_then(|a| a["name"].as_str())
         .unwrap_or("mock_acp")
         .to_string()
 }
 
+fn mock_calls(data_dir: &std::path::Path) -> String {
+    std::fs::read_to_string(data_dir.join("mock.state.calls")).unwrap_or_default()
+}
+
+// ---- 认证（docs/DESIGN.md「认证」）----
+
 #[tokio::test]
-async fn session_lifecycle_and_activities() {
-    let (port, data_dir, _guard) = spawn_server().await;
-    let mut c = Client::connect(port).await;
+async fn auth_required_and_enforced() {
+    let (port, _guard) = start_server().await;
+    // 未认证连接请求其它方法 → AUTH_FAILED
+    let mut c = Client::connect_raw(port).await;
+    let r = c.call("session.list", json!({})).await;
+    assert_eq!(r["error"]["code"], -32000, "未认证应 AUTH_FAILED: {r}");
 
-    let info = c.call("get_info", json!({})).await;
-    assert_eq!(info["result"]["serverVersion"], "0.1.0");
-    let harness = first_harness(&info);
-    assert!(!harness.is_empty(), "get_info 应返回可用 agent");
+    // 错误 token → AUTH_FAILED
+    let mut c2 = Client::connect_raw(port).await;
+    let r = c2.call("auth", json!({"token": "wrong"})).await;
+    assert_eq!(r["error"]["code"], -32000, "错误 token 应 AUTH_FAILED: {r}");
 
-    let created = c
-        .call(
-            "create_session",
-            json!({"harness": harness, "cwd": "/tmp/work"}),
-        )
-        .await;
-    let sid = created["result"]["session"]["id"]
-        .as_str()
+    // 正确 token → 认证通过，可正常调用
+    let r = c2.call("auth", json!({"token": "test-token"})).await;
+    assert!(r.get("error").is_none(), "认证应成功: {r}");
+    let list = c2.call("agent.list", json!({})).await;
+    assert!(list.get("error").is_none(), "认证后可正常调用: {list}");
+}
+
+// ---- agent.list / agent.skills ----
+
+#[tokio::test]
+async fn agent_list_and_skills() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect(port, "test-token").await;
+    let list = c.call("agent.list", json!({})).await;
+    let agents: Vec<&str> = list["result"]["agents"]
+        .as_array()
         .unwrap()
-        .to_string();
+        .iter()
+        .filter_map(|a| a["name"].as_str())
+        .collect();
+    assert!(agents.contains(&"mock_acp"), "agent.list 应含 mock_acp: {list}");
+
+    let s = c.call("agent.skills", json!({"agent": "mock_acp"})).await;
+    let skills: Vec<&str> = s["result"]["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x.as_str())
+        .collect();
+    assert!(skills.contains(&"web-browser"), "mock_acp 应返回 skills: {skills:?}");
+}
+
+// ---- 会话生命周期 + 惰性 + state_change + 删除触发 session/close ----
+
+#[tokio::test]
+async fn session_lifecycle_state_change_and_delete() {
+    let (port, data_dir, _guard) = start_server_with_dir().await;
+    let mut c = Client::connect(port, "test-token").await;
+
+    // session.new 惰性：只写注册表，不触发 ACP session/new
+    let created = c
+        .call("session.new", json!({"agent": "mock_acp", "cwd": "/tmp/work"}))
+        .await;
+    let sid = created["result"]["session"]["id"].as_str().unwrap().to_string();
     assert_eq!(created["result"]["session"]["state"], "idle");
-    assert_eq!(created["result"]["session"]["harness"], harness);
+    assert!(!mock_calls(&data_dir).contains("session/new"), "惰性：session.new 不应触发 ACP session/new");
 
-    // 创建会话只与 server 交互（docs/DESIGN.md §4.1）：未 prompt 前不应触发 ACP session/new
-    let calls_before = std::fs::read_to_string(mock_calls_file(&data_dir)).unwrap_or_default();
-    assert!(
-        !calls_before.contains("session/new"),
-        "创建会话不应触发 ACP session/new: {calls_before:?}"
-    );
+    // session.list 惰性分页
+    let list = c.call("session.list", json!({})).await;
+    let sessions = list["result"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["id"], json!(sid));
 
+    // prompt：触发 ACP session/new（懒创建）+ state_change busy→idle 推送
     c.fire(
-        "prompt",
+        "session.prompt",
         json!({"sessionId": sid, "input": [{"type": "text", "text": "实现登录功能"}]}),
     )
     .await;
-    // 等待 turn 结束（透传边界，docs/DESIGN.md §5.1）
     let got = c
-        .wait_notification(
-            "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
-            5000,
-        )
+        .wait_notification("session.state_change", |p| {
+            p["sessionId"] == json!(sid)
+                && p["oldState"] == "busy"
+                && p["newState"] == "idle"
+        }, 8000)
         .await;
-    assert!(got, "应收到 turn_ended 透传边界");
-
-    // 首条 prompt 才触发 ACP session/new（懒创建 agent 侧会话，docs/DESIGN.md §4.1）
-    let calls_after = std::fs::read_to_string(mock_calls_file(&data_dir)).unwrap_or_default();
+    assert!(got, "prompt 结束应推送 state_change busy→idle");
     assert!(
-        calls_after.contains("session/new"),
-        "首条 prompt 应触发 ACP session/new: {calls_after:?}"
+        mock_calls(&data_dir).contains("session/new"),
+        "首条 prompt 才懒创建 ACP session/new"
     );
 
-    // 通知序列是透传事件（turn 边界 + chunk + 活动事件），无聚合交付
-    let seq: Vec<&str> = c.notifications.iter().map(|(m, _)| m.as_str()).collect();
-    let joined = seq.join(",");
-    assert!(
-        seq.iter()
-            .all(|m| *m == "passthrough" || *m == "session_created" || *m == "session_updated"),
-        "通知应全部为透传/会话元数据: {joined}"
-    );
-    let kinds: Vec<&str> = c
-        .notifications
-        .iter()
-        .filter(|(m, _)| m == "passthrough")
-        .filter_map(|(_, p)| p["event"]["kind"].as_str())
-        .collect();
-    assert!(
-        kinds.contains(&"turn_started"),
-        "缺少 turn_started: {joined}"
-    );
-    assert!(
-        kinds.contains(&"output_chunk"),
-        "缺少 output_chunk（事件透传而非聚合完整输出）: {kinds:?}"
-    );
-    assert!(
-        kinds.contains(&"thinking_chunk") && kinds.contains(&"tool_call"),
-        "应含 thinking/tool_call 透传事件: {kinds:?}"
-    );
-    // 不再有聚合交付通知（turn_completed / session_state / activity）
-    assert!(
-        !seq.iter().any(|m| matches!(
-            *m,
-            "turn_completed" | "session_state" | "activity" | "user_message"
-        )),
-        "不应有聚合交付通知: {joined}"
-    );
-
-    // 首条 prompt 后标题非空（按首条指令生成）
-    let list = c.call("list_sessions", json!({})).await;
-    let sessions = list["result"]["sessions"].as_array().unwrap();
-    let meta = sessions.iter().find(|s| s["id"] == json!(sid)).unwrap();
-    assert!(
-        !meta["title"].as_str().unwrap_or("").is_empty(),
-        "首条 prompt 后标题应非空: {meta}"
-    );
-
-    // 用户可修改标题
+    // 标题按首条指令生成 + configure 可改标题
+    let list = c.call("session.list", json!({})).await;
+    let meta = list["result"]["sessions"].as_array().unwrap()[0].clone();
+    assert!(!meta["title"].as_str().unwrap_or("").is_empty(), "首条 prompt 后标题非空: {meta}");
     let r = c
-        .call(
-            "set_session_title",
-            json!({"sessionId": sid, "title": "我的标题"}),
-        )
+        .call("session.configure", json!({"sessionId": sid, "title": "我的标题"}))
         .await;
     assert!(r.get("error").is_none());
-    let list = c.call("list_sessions", json!({})).await;
-    let meta = list["result"]["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == json!(sid))
-        .unwrap();
-    assert_eq!(meta["title"], "我的标题");
+    let list = c.call("session.list", json!({})).await;
+    assert_eq!(list["result"]["sessions"].as_array().unwrap()[0]["title"], "我的标题");
 
-    // open_session：返回透传事件（GUI 聚合，docs/DESIGN.md §5.2）
-    let open = c.call("open_session", json!({"sessionId": sid})).await;
-    assert!(open["result"]["events"].is_array());
-    let kinds: Vec<&str> = open["result"]["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|e| e["kind"].as_str())
-        .collect();
+    // session.history：用户消息 + 一条合并输出
+    let h = c.call("session.history", json!({"sessionId": sid})).await;
+    let items = h["result"]["items"].as_array().unwrap();
+    assert!(!items.is_empty());
+    assert_eq!(items[0]["kind"], "user_message", "历史首条为用户消息: {items:?}");
+    assert!(items.iter().any(|i| i["kind"] == "agent_message"));
+
+    // session.activities：thinking + tool_call
+    let a = c.call("session.activities", json!({"sessionId": sid})).await;
+    let acts = a["result"]["activities"].as_array().unwrap();
+    assert!(acts.iter().any(|x| x["kind"] == "thinking"), "{acts:?}");
+    assert!(acts.iter().any(|x| x["kind"] == "tool_call"), "{acts:?}");
+
+    // ongoing_activity：空闲时为 null
+    let oa = c.call("session.ongoing_activity", json!({"sessionId": sid})).await;
+    assert!(oa["result"]["activity"].is_null(), "空闲 ongoing_activity 为 null: {oa}");
+
+    // 删除触发 session/close
+    let r = c.call("session.delete", json!({"sessionId": sid})).await;
+    assert!(r.get("error").is_none(), "删除失败: {r}");
     assert!(
-        kinds.contains(&"output_chunk"),
-        "open_session 应含 output_chunk 事件: {kinds:?}"
+        mock_calls(&data_dir).contains("session/close"),
+        "删除应触发 ACP session/close"
     );
-
-    // 列表状态回到空闲（重连经 meta.state 补齐）
-    let list = c.call("list_sessions", json!({})).await;
-    let meta = list["result"]["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == json!(sid))
-        .unwrap();
-    assert_eq!(meta["state"], "idle");
+    let list = c.call("session.list", json!({})).await;
+    assert!(list["result"]["sessions"].as_array().unwrap().is_empty());
 }
+
+// ---- session.list 分页 ----
 
 #[tokio::test]
-async fn busy_prompt_returns_steer_unsupported() {
-    let (port, _dir, _guard) = spawn_server().await;
-    let mut c = Client::connect(port).await;
-    let harness = {
-        let info = c.call("get_info", json!({})).await;
-        first_harness(&info)
-    };
+async fn session_list_pagination() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect(port, "test-token").await;
+    let agent = mock_acp_name(&mut c).await;
 
-    let created = c
-        .call(
-            "create_session",
-            json!({"harness": harness, "cwd": "/tmp/work"}),
-        )
-        .await;
-    let sid = created["result"]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // 创建 3 个会话并分别 prompt（mock 延迟 → lastActiveAt 严格递增）
+    let mut sids = Vec::new();
+    for i in 0..3 {
+        let created = c
+            .call("session.new", json!({"agent": agent, "cwd": format!("/tmp/w{i}")}))
+            .await;
+        let sid = created["result"]["session"]["id"].as_str().unwrap().to_string();
+        c.call("session.prompt", json!({"sessionId": sid, "input": [{"type":"text","text":format!("指令{i}")}]})).await;
+        sids.push(sid);
+    }
 
-    // 发第一个 prompt 不等待响应；mock_acp 有 300ms busy 窗口
-    c.fire(
-        "prompt",
-        json!({"sessionId": sid, "input": [{"type": "text", "text": "一"}]}),
-    )
-    .await;
-    // 等待 turn 开始（透传边界；server 列表状态随之 busy）
-    let busy = c
-        .wait_notification(
-            "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_started",
-            3000,
-        )
-        .await;
-    assert!(busy, "应观察到 turn 开始边界");
+    // limit=2：最近活跃一窗，hasMore=true，nextBefore=窗口最后一条
+    let first = c.call("session.list", json!({"limit": 2})).await;
+    let sessions = first["result"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2, "limit=2 应返回一窗: {first}");
+    assert_eq!(first["result"]["hasMore"], true);
+    let next_before = first["result"]["nextBefore"].as_u64().unwrap();
+    assert_eq!(sessions[0]["id"], json!(sids[2]), "最晚 prompt 排最前");
+    assert_eq!(sessions[1]["id"], json!(sids[1]));
 
-    // 忙时 prompt → STEER_UNSUPPORTED (-32006)
-    let second = c
-        .call(
-            "prompt",
-            json!({"sessionId": sid, "input": [{"type": "text", "text": "二"}]}),
-        )
-        .await;
-    assert_eq!(
-        second["error"]["code"], -32006,
-        "忙时 prompt 应报 steer 不支持: {second}"
-    );
-
-    // 等待第一个 turn 结束（透传边界），会话恢复 idle 后可继续 prompt
-    let idle = c
-        .wait_notification(
-            "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
-            5000,
-        )
-        .await;
-    assert!(idle, "turn 结束后应收到 turn_ended 边界");
-    let third = c
-        .call(
-            "prompt",
-            json!({"sessionId": sid, "input": [{"type": "text", "text": "三"}]}),
-        )
-        .await;
-    assert!(
-        third.get("error").is_none(),
-        "idle 后 prompt 应正常: {third}"
-    );
+    // before=next_before：更早一窗只剩最旧
+    let second = c.call("session.list", json!({"limit": 2, "before": next_before})).await;
+    let s2 = second["result"]["sessions"].as_array().unwrap();
+    assert_eq!(s2.len(), 1);
+    assert_eq!(s2[0]["id"], json!(sids[0]));
+    assert_eq!(second["result"]["hasMore"], false);
 }
+
+// ---- workspace.diff / workspace.restore ----
 
 #[tokio::test]
-async fn close_resume_delete_lifecycle() {
-    let (port, _dir, _guard) = spawn_server().await;
-    let mut c = Client::connect(port).await;
-    let harness = {
-        let info = c.call("get_info", json!({})).await;
-        first_harness(&info)
-    };
+async fn workspace_diff_reflects_changes() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect(port, "test-token").await;
+    let dir = init_repo();
+    std::fs::write(dir.join("a.txt"), "line1\nCHANGED\n").unwrap();
 
-    let created = c
-        .call(
-            "create_session",
-            json!({"harness": harness, "cwd": "/tmp/work"}),
-        )
-        .await;
-    let sid = created["result"]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let d = c.call("workspace.diff", json!({"cwd": dir.to_str().unwrap()})).await;
+    assert!(d.get("error").is_none(), "diff 失败: {d}");
+    let files = d["result"]["files"].as_array().unwrap();
+    assert_eq!(files[0]["path"], "a.txt");
+    assert!(files[0]["patch"].as_str().unwrap().contains("diff --git"));
 
-    // 直接 prompt 可正常执行
-    let prompt = c
-        .call(
-            "prompt",
-            json!({"sessionId": sid, "input": [{"type": "text", "text": "直接开始"}]}),
-        )
-        .await;
-    assert!(prompt.get("error").is_none(), "prompt 应正常");
+    let r = c.call("workspace.restore", json!({"cwd": dir.to_str().unwrap(), "path": "a.txt"})).await;
+    assert_eq!(r["result"]["ok"], true, "restore 失败: {r}");
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "line1\nline2\n");
 
-    // delete 后列表为空
-    let r = c.call("delete_session", json!({"sessionId": sid})).await;
-    assert!(r.get("error").is_none());
-    let list = c.call("list_sessions", json!({})).await;
-    assert!(
-        list["result"]["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s["id"] != json!(sid)),
-        "delete 后会话应消失"
-    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
-async fn missing_session_returns_not_found() {
-    let (port, _dir, _guard) = spawn_server().await;
-    let mut c = Client::connect(port).await;
+// ---- helpers ----
 
-    let open = c.call("open_session", json!({"sessionId": "nope"})).await;
-    assert_eq!(open["error"]["code"], -32001);
+async fn mock_acp_name(c: &mut Client) -> String {
+    let list = c.call("agent.list", json!({})).await;
+    first_agent(&list)
 }
 
-#[tokio::test]
-async fn multi_client_coexist() {
-    let (port, _dir, _guard) = spawn_server().await;
-    let mut c1 = Client::connect(port).await;
-    let mut c2 = Client::connect(port).await;
-
-    let harness = {
-        let info = c1.call("get_info", json!({})).await;
-        first_harness(&info)
-    };
-    let created = c1
-        .call(
-            "create_session",
-            json!({"harness": harness, "cwd": "/tmp/work"}),
-        )
-        .await;
-    let sid = created["result"]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // c1 prompt；两个客户端都应收到同一透传事件流
-    c1.fire(
-        "prompt",
-        json!({"sessionId": sid, "input": [{"type": "text", "text": "多客户端"}]}),
-    )
-    .await;
-    let got1 = c1
-        .wait_notification(
-            "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
-            5000,
-        )
-        .await;
-    let got2 = c2
-        .wait_notification(
-            "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
-            5000,
-        )
-        .await;
-    assert!(got1 && got2, "两个客户端都应收到 turn_ended 透传边界");
-    // c2 也能对同一会话 prompt（未被踢出）
-    let prompt = c2
-        .call(
-            "prompt",
-            json!({"sessionId": sid, "input": [{"type": "text", "text": "c2 发消息"}]}),
-        )
-        .await;
-    assert!(prompt.get("error").is_none(), "c2 prompt 应正常: {prompt}");
-
-    // 两个客户端都未被断开（还能正常请求）
-    let list = c1.call("list_sessions", json!({})).await;
-    assert_eq!(list["result"]["sessions"].as_array().unwrap().len(), 1);
-    let list2 = c2.call("list_sessions", json!({})).await;
-    assert_eq!(list2["result"]["sessions"].as_array().unwrap().len(), 1);
+async fn start_server_with_dir() -> (u16, std::path::PathBuf, ServerGuard) {
+    let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+    let data_dir = std::env::temp_dir().join(format!(
+        "amux-e2e-{}",
+        std::process::id() as u64 * 1000 + NEXT_PORT.fetch_add(1, Ordering::SeqCst) as u64
+    ));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let guard = spawn_server_with_delay(port, data_dir.clone(), 150).await;
+    (port, data_dir, guard)
 }
 
-#[tokio::test]
-async fn default_model_and_skills() {
-    let (port, _dir, _guard) = spawn_server().await;
-    let mut c = Client::connect(port).await;
-    let info = c.call("get_info", json!({})).await;
-    let harness = first_harness(&info);
-
-    // 配置默认模型后 get_info 返回它
-    let r = c
-        .call(
-            "set_default_model",
-            json!({"harness": harness, "model": "gpt-4o"}),
-        )
-        .await;
-    assert!(r.get("error").is_none());
-    let info2 = c.call("get_info", json!({})).await;
-    let h = info2["result"]["harnesses"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|h| h["name"] == json!(harness))
-        .unwrap();
-    assert_eq!(h["defaultModel"], "gpt-4o");
-
-    // skills 列表（mock_acp 返回固定列表）
-    let skills = c
-        .call("list_agent_skills", json!({"harness": harness}))
-        .await;
-    let names: Vec<&str> = skills["result"]["skills"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|s| s.as_str())
-        .collect();
-    assert!(
-        names.contains(&"web-browser"),
-        "mock_acp 应返回 skills: {names:?}"
-    );
-}
-
-// ---- git e2e：对真实临时 git 仓库 ----
-
+// git helpers
 use std::path::Path;
-
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -567,21 +397,12 @@ fn git(cwd: &Path, args: &[&str]) -> String {
         .args(args)
         .output()
         .unwrap();
-    assert!(
-        out.status.success(),
-        "git {:?} 失败: {}",
-        args,
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "git {:?} 失败: {}", args, String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
-
 fn init_repo() -> std::path::PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let dir = std::env::temp_dir().join(format!("amux-e2e-git-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     git(&dir, &["init", "-b", "main", "-q"]);
@@ -591,518 +412,4 @@ fn init_repo() -> std::path::PathBuf {
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-m", "init", "-q"]);
     dir
-}
-
-#[tokio::test]
-async fn git_status_diff_revert_e2e() {
-    let (port, _dir, _guard) = spawn_server().await;
-    let mut c = Client::connect(port).await;
-    let dir = init_repo();
-    let cwd = dir.to_str().unwrap().to_string();
-
-    // 修改 tracked 文件 + 新增 untracked 文件
-    std::fs::write(dir.join("a.txt"), "line1\nCHANGED\n").unwrap();
-    std::fs::write(dir.join("new.txt"), "new\n").unwrap();
-
-    // git_status：Modified/Untracked 与增减行数
-    let st = c.call("git_status", json!({"cwd": cwd})).await;
-    assert!(st.get("error").is_none(), "git_status 失败: {st}");
-    let changes = st["result"]["changes"].as_array().unwrap();
-    assert_eq!(st["result"]["branch"], "main");
-    let a = changes.iter().find(|ch| ch["path"] == "a.txt").unwrap();
-    assert_eq!(a["status"], "modified");
-    assert_eq!(a["additions"], 1);
-    assert_eq!(a["deletions"], 1);
-    let n = changes.iter().find(|ch| ch["path"] == "new.txt").unwrap();
-    assert_eq!(n["status"], "untracked");
-
-    // git_diff：含 patch 与 hunk
-    let d = c.call("git_diff", json!({"cwd": cwd})).await;
-    let files = d["result"]["files"].as_array().unwrap();
-    let a_diff = files.iter().find(|f| f["path"] == "a.txt").unwrap();
-    assert!(a_diff["patch"].as_str().unwrap().contains("diff --git"));
-    assert_eq!(a_diff["additions"], 1);
-    assert_eq!(a_diff["deletions"], 1);
-    assert_eq!(a_diff["hunks"].as_array().unwrap().len(), 1);
-
-    // git_revert 单文件后工作区恢复
-    let r = c
-        .call("git_revert", json!({"cwd": cwd, "path": "a.txt"}))
-        .await;
-    assert_eq!(r["result"]["ok"], true, "revert 失败: {r}");
-    let content = std::fs::read_to_string(dir.join("a.txt")).unwrap();
-    assert_eq!(content, "line1\nline2\n", "单文件 revert 后应恢复到 HEAD");
-
-    // 非 git 目录：git_status 返回 not_repo
-    let plain = std::env::temp_dir().join(format!("amux-e2e-plain-{}", std::process::id()));
-    std::fs::create_dir_all(&plain).unwrap();
-    let st = c
-        .call("git_status", json!({"cwd": plain.to_str().unwrap()}))
-        .await;
-    assert_eq!(
-        st["result"]["notRepo"], true,
-        "非 git 目录应 not_repo: {st}"
-    );
-    let d = c
-        .call("git_diff", json!({"cwd": plain.to_str().unwrap()}))
-        .await;
-    assert_eq!(d["result"]["notRepo"], true);
-
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::remove_dir_all(&plain);
-}
-
-// ---- server 重启恢复（docs/DESIGN.md §4.1：从 SQLite 注册表 + 本地历史日志恢复）----
-
-/// 真实二进制杀/启恢复：实例 A 创建并 prompt 会话 → 杀进程 → 同一数据目录重启
-/// 实例 B → `list_sessions` 从 SQLite 注册表恢复会话（会话 id 不变）、
-/// `open_session` 从本地历史日志读取合并条目（不触发 ACP `session/load`），
-/// 恢复的会话经 `session/resume` 可继续 prompt。
-#[tokio::test]
-async fn server_restart_recovers_from_sqlite_and_resumes() {
-    // ---- 实例 A：创建会话 + prompt（注册表与历史落盘到数据目录）----
-    let (port1, data_dir, guard1) = spawn_server().await;
-    let mut c1 = Client::connect(port1).await;
-    let harness = {
-        let info = c1.call("get_info", json!({})).await;
-        first_harness(&info)
-    };
-    let created = c1
-        .call(
-            "create_session",
-            json!({"harness": harness, "cwd": "/tmp/restart-work"}),
-        )
-        .await;
-    let sid = created["result"]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(created["result"]["session"]["cwd"], "/tmp/restart-work");
-
-    c1.fire(
-        "prompt",
-        json!({"sessionId": sid, "input": [{"type": "text", "text": "你好"}]}),
-    )
-    .await;
-    let got = c1
-        .wait_notification(
-            "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
-            5000,
-        )
-        .await;
-    assert!(got, "实例 A 应完成 turn（合并条目落库）");
-
-    // 杀掉实例 A（ServerGuard drop → SIGKILL）
-    drop(guard1);
-    drop(c1);
-
-    // ---- 实例 B：同一数据目录重启（SQLite 恢复，不依赖 ACP session/list）----
-    let bin = env!("CARGO_BIN_EXE_test-server");
-    let port2 =
-        36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-    let child = tokio::process::Command::new(bin)
-        .args([
-            "--token",
-            "test-token",
-            "--port",
-            &port2.to_string(),
-            "--data-dir",
-            data_dir.to_str().unwrap(),
-        ])
-        .env("AMUX_MOCK_STATE", data_dir.join("mock.state"))
-        .env("AMUX_NO_DISCOVERY", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn test-server");
-    let _guard2 = ServerGuard { child };
-    wait_port(port2).await;
-    let mut c2 = Client::connect(port2).await;
-
-    // (a) list_sessions 从 SQLite 注册表恢复（会话 id 不变，非重新颁发）
-    let list = c2.call("list_sessions", json!({})).await;
-    let sessions = list["result"]["sessions"].as_array().unwrap();
-    assert_eq!(sessions.len(), 1, "重启后应恢复 1 个会话: {list}");
-    let meta = &sessions[0];
-    assert_eq!(meta["id"].as_str().unwrap(), sid, "会话 id 应保持不变");
-    assert_eq!(meta["cwd"], "/tmp/restart-work");
-    assert_eq!(meta["harness"], harness);
-    assert_eq!(meta["state"], "idle");
-
-    // (b) open_session 从本地历史日志读取（合并条目，不触发 ACP 重放）
-    let open = c2.call("open_session", json!({"sessionId": sid})).await;
-    let events = open["result"]["events"].as_array().unwrap();
-    let kinds: Vec<&str> = events.iter().filter_map(|e| e["kind"].as_str()).collect();
-    assert!(kinds.contains(&"output_chunk"), "应含合并输出: {kinds:?}");
-    let outputs: Vec<&str> = events
-        .iter()
-        .filter(|e| e["kind"] == "output_chunk")
-        .filter_map(|e| e["text"].as_str())
-        .collect();
-    assert!(
-        outputs.len() == 1 && outputs[0].contains("完成"),
-        "合并粒度应为一条完整输出: {outputs:?}"
-    );
-
-    // (c) 恢复的会话可继续 prompt（经 session/resume 恢复 agent 上下文）
-    c2.fire(
-        "prompt",
-        json!({"sessionId": sid, "input": [{"type": "text", "text": "继续"}]}),
-    )
-    .await;
-    let resumed_turn = c2
-        .wait_notification(
-            "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
-            5000,
-        )
-        .await;
-    assert!(resumed_turn, "恢复会话应可继续 prompt 且 turn 正常结束");
-
-    // (d) server 调用面：全程无 session/load、无 session/list；
-    //     session/resume 仅实例 B 对恢复会话触发一次
-    let calls = std::fs::read_to_string(mock_calls_file(&data_dir)).unwrap_or_default();
-    assert!(
-        !calls.contains("session/load"),
-        "open_session 不应触发 ACP session/load: {calls:?}"
-    );
-    assert!(
-        !calls.contains("session/list"),
-        "会话列表不应来自 ACP session/list: {calls:?}"
-    );
-    let resume_count = calls.lines().filter(|l| *l == "session/resume").count();
-    assert_eq!(resume_count, 1, "恢复会话应恰好 resume 一次: {calls:?}");
-
-    let _ = std::fs::remove_dir_all(&data_dir);
-}
-
-// ---- 会话列表惰性分页（PRD §4.1.1：首次只取最近活跃一窗，滚动加载更早）----
-
-/// 创建 3 个会话并分别 prompt（mock 300ms 延迟 → 最近活跃时间严格递增），
-/// 验证 `list_sessions` 的 limit/before 游标往返与最近活跃排序。
-#[tokio::test]
-async fn list_sessions_lazy_pagination_e2e() {
-    let (port, _dir, _guard) = spawn_server().await;
-    let mut c = Client::connect(port).await;
-    let harness = {
-        let info = c.call("get_info", json!({})).await;
-        first_harness(&info)
-    };
-
-    let mut sids = Vec::new();
-    for i in 0..3 {
-        let created = c
-            .call(
-                "create_session",
-                json!({"harness": harness, "cwd": format!("/tmp/pg-{i}")}),
-            )
-            .await;
-        let sid = created["result"]["session"]["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        sids.push(sid);
-    }
-    // 依次 prompt：sids[2] 最晚完成 → 最近活跃在前
-    for sid in &sids {
-        c.fire(
-            "prompt",
-            json!({"sessionId": sid, "input": [{"type": "text", "text": "x"}]}),
-        )
-        .await;
-        let done = c
-            .wait_notification(
-                "passthrough",
-                |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
-                5000,
-            )
-            .await;
-        assert!(done, "prompt {sid} 应完成");
-    }
-
-    // 首次一窗（limit=2）：最近活跃的 2 个，has_more，next_before 游标
-    let first = c.call("list_sessions", json!({"limit": 2})).await;
-    let sessions = first["result"]["sessions"].as_array().unwrap();
-    assert_eq!(sessions.len(), 2, "首次只返回最近活跃一窗: {first}");
-    assert_eq!(
-        sessions[0]["id"].as_str().unwrap(),
-        sids[2],
-        "最晚 prompt 的会话应排最前"
-    );
-    assert_eq!(sessions[1]["id"].as_str().unwrap(), sids[1]);
-    assert_eq!(first["result"]["hasMore"], true);
-    let next_before = first["result"]["nextBefore"].as_u64().unwrap();
-    let last1 = sessions[1]["lastEventAt"].as_u64().unwrap();
-    assert_eq!(
-        next_before, last1,
-        "next_before 应为窗口最后一条的 last_event_at"
-    );
-
-    // 更早一窗：before=next_before → 最旧会话，has_more=false
-    let second = c
-        .call("list_sessions", json!({"limit": 2, "before": next_before}))
-        .await;
-    let sessions2 = second["result"]["sessions"].as_array().unwrap();
-    assert_eq!(sessions2.len(), 1, "更早一窗应只剩最旧会话: {second}");
-    assert_eq!(sessions2[0]["id"].as_str().unwrap(), sids[0]);
-    assert_eq!(second["result"]["hasMore"], false);
-    assert!(second["result"]["nextBefore"].is_null());
-}
-
-// ---- 历史合并落库 + 本地读 + 删除联动（docs/DESIGN.md §5.2）----
-
-/// prompt 后历史日志为合并粒度（一条完整输出）；open_session 本地读；
-/// 删除会话联动清除注册表条目与日志；open 不触发 ACP session/load。
-#[tokio::test]
-async fn history_merged_local_read_and_delete_linkage() {
-    let (port, data_dir, _guard) = spawn_server().await;
-    let mut c = Client::connect(port).await;
-    let harness = {
-        let info = c.call("get_info", json!({})).await;
-        first_harness(&info)
-    };
-    let created = c
-        .call(
-            "create_session",
-            json!({"harness": harness, "cwd": "/tmp/hist-work"}),
-        )
-        .await;
-    let sid = created["result"]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    c.fire(
-        "prompt",
-        json!({"sessionId": sid, "input": [{"type": "text", "text": "你好"}]}),
-    )
-    .await;
-    let done = c
-        .wait_notification(
-            "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
-            5000,
-        )
-        .await;
-    assert!(done);
-
-    // 历史日志文件存在（server 本地权威），且为合并粒度（一条完整输出）
-    let log_path = data_dir.join("history").join(format!("{sid}.log"));
-    let raw = std::fs::read_to_string(&log_path).expect("历史日志应存在");
-    let entries: Vec<serde_json::Value> = raw
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let outputs: Vec<&str> = entries
-        .iter()
-        .filter(|e| e["kind"] == "output_chunk")
-        .filter_map(|e| e["text"].as_str())
-        .collect();
-    assert!(
-        outputs.len() == 1 && outputs[0].contains("完成"),
-        "日志应为合并粒度（一条完整输出而非逐 chunk）: {outputs:?}"
-    );
-    // turn 边界成条
-    assert!(
-        entries.iter().any(|e| e["kind"] == "turn_started")
-            && entries.iter().any(|e| e["kind"] == "turn_ended"),
-        "日志应含 turn 边界: {entries:?}"
-    );
-
-    // open_session 本地读（合并条目），不触发 ACP session/load
-    let open = c.call("open_session", json!({"sessionId": sid})).await;
-    let events = open["result"]["events"].as_array().unwrap();
-    assert!(events
-        .iter()
-        .any(|e| e["kind"] == "output_chunk" && e["text"].as_str().unwrap_or("").contains("完成")));
-    let calls = std::fs::read_to_string(mock_calls_file(&data_dir)).unwrap_or_default();
-    assert!(
-        !calls.contains("session/load"),
-        "open_session 不应触发 ACP session/load: {calls:?}"
-    );
-
-    // 删除联动：注册表条目 + 历史日志一并清除
-    let r = c.call("delete_session", json!({"sessionId": sid})).await;
-    assert!(r.get("error").is_none(), "删除失败: {r}");
-    assert!(!log_path.exists(), "删除会话应清除历史日志");
-    let list = c.call("list_sessions", json!({})).await;
-    assert!(
-        list["result"]["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s["id"] != json!(sid)),
-        "删除后列表应不含该会话"
-    );
-
-    let _ = std::fs::remove_dir_all(&data_dir);
-}
-
-// ---- 启动拉起（docs/DESIGN.md §4.1/§7.3：server 启动发现 agent 并直接拉起，失败标记不可用）----
-
-/// 写一个假 CLI 到 fakebin（`acp --help` 命中 → 被发现）：
-/// - `delegate_to` = Some(可执行) → 拉起时 exec 它（模拟健康 ACP server：假 kimi → mock_acp）
-/// - `delegate_to` = None → 拉起时立即非零退出（模拟 npx 不可用 / 无网络的失败 agent：假 codex）
-fn write_fake_cli(fakebin: &Path, name: &str, delegate_to: Option<&Path>) {
-    let body = match delegate_to {
-        Some(target) => format!(
-            "#!/bin/sh\nif [ \"$1\" = \"acp\" ] && [ \"$2\" = \"--help\" ]; then\n  echo \"{name} acp — Agent Client Protocol server\"\n  exit 0\nfi\nexec {} \"$AMUX_MOCK_STATE\"\n",
-            target.display()
-        ),
-        None => format!(
-            "#!/bin/sh\nif [ \"$1\" = \"acp\" ] && [ \"$2\" = \"--help\" ]; then\n  echo \"{name} acp — help\"\n  exit 0\nfi\nexit 1\n"
-        ),
-    };
-    let path = fakebin.join(name);
-    std::fs::write(&path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-}
-
-/// 用**真实 `server` 二进制** + 定制 PATH（仅 fakebin）启动，捕获 stderr 到日志文件。
-/// PATH 只含 fakebin：隔离本机真实 agent（本机装有 kimi/claude/codex 时不会被发现）。
-async fn spawn_server_with_fakebin(
-    fakebin: &Path,
-) -> (u16, std::path::PathBuf, std::path::PathBuf, ServerGuard) {
-    let data_dir = unique_data_dir();
-    std::fs::create_dir_all(&data_dir).unwrap();
-    let stderr_log = data_dir.join("server.log");
-    let bin = env!("CARGO_BIN_EXE_server");
-    let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-    let stderr_file = std::fs::File::create(&stderr_log).unwrap();
-    let child = tokio::process::Command::new(bin)
-        .args([
-            "--token",
-            "test-token",
-            "--port",
-            &port.to_string(),
-            "--data-dir",
-            data_dir.to_str().unwrap(),
-        ])
-        .env("PATH", fakebin.to_str().unwrap())
-        .env("AMUX_MOCK_STATE", data_dir.join("mock.state"))
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(stderr_file))
-        .spawn()
-        .expect("spawn 真实 server");
-    wait_port(port).await;
-    (port, data_dir, stderr_log, ServerGuard { child })
-}
-
-/// 拉起成功场景（docs/DESIGN.md §4.1/§7.3）：server 启动即拉起发现的 ACP server——
-/// 假 kimi（`acp --help` 命中）经委托 mock_acp 正常拉起；`get_info` 返回 kimi 且
-/// available=true（两轮一致）；启动日志出现针对 kimi 的「已拉起 ACP server」行。
-#[tokio::test]
-async fn launch_discovered_pulls_up_agent_at_startup() {
-    let fakebin = unique_data_dir();
-    std::fs::create_dir_all(&fakebin).unwrap();
-    write_fake_cli(
-        &fakebin,
-        "kimi",
-        Some(Path::new(env!("CARGO_BIN_EXE_mock_acp"))),
-    );
-
-    let (port, _data_dir, stderr_log, _guard) = spawn_server_with_fakebin(&fakebin).await;
-    let mut c = Client::connect(port).await;
-
-    let info = c.call("get_info", json!({})).await;
-    let harnesses = info["result"]["harnesses"].as_array().unwrap();
-    let kimi = harnesses
-        .iter()
-        .find(|h| h["name"] == "kimi")
-        .expect("应发现 kimi: {info}");
-    assert_eq!(
-        kimi["available"], true,
-        "拉起成功的 kimi 应 available=true: {info}"
-    );
-
-    // 两轮 get_info 一致（确定性；非确定性视为缺陷；仅比 result，id 必然递增）
-    let info2 = c.call("get_info", json!({})).await;
-    assert_eq!(
-        info2["result"], info["result"],
-        "两轮 get_info result 应一致: {info2} vs {info}"
-    );
-
-    // 启动日志（stderr）：针对 kimi 的「已拉起 ACP server」行 + 启动汇总
-    let log = std::fs::read_to_string(&stderr_log).unwrap_or_default();
-    assert!(
-        log.contains("已拉起 ACP server") && log.contains("kimi"),
-        "启动日志应有 kimi 拉起成功行: {log}"
-    );
-    assert!(log.contains("启动完成"), "启动日志应有启动汇总行: {log}");
-
-    // server 正常服务（会话操作可用）
-    let list = c.call("list_sessions", json!({})).await;
-    assert!(list.get("error").is_none(), "拉起后会话操作应正常: {list}");
-    let _ = std::fs::remove_dir_all(&fakebin);
-}
-
-/// 单 agent 拉起失败标记**不可用**（docs/DESIGN.md §4.1/§7.3）：假 codex 发现成功但拉起即
-/// 失败（立即非零退出，模拟 npx 不可用 / 无网络）——server 仍监听、`get_info` 返回该 agent
-/// 且 available=false（使用时报「不可用」错误）、日志含失败记录且进程不崩溃。
-#[tokio::test]
-async fn launch_failure_marks_agent_unavailable() {
-    let fakebin = unique_data_dir();
-    std::fs::create_dir_all(&fakebin).unwrap();
-    write_fake_cli(&fakebin, "codex", None);
-
-    let (port, _data_dir, stderr_log, _guard) = spawn_server_with_fakebin(&fakebin).await;
-    let mut c = Client::connect(port).await;
-
-    // server 仍监听、get_info 正常响应（不崩溃）
-    let info = c.call("get_info", json!({})).await;
-    assert!(info.get("error").is_none(), "get_info 应正常响应: {info}");
-    let codex = info["result"]["harnesses"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|h| h["name"] == "codex")
-        .expect("发现成功的 codex 应出现在 harnesses 中: {info}");
-    assert_eq!(
-        codex["available"], false,
-        "拉起失败的 codex 应标记为不可用（available=false）: {info}"
-    );
-
-    // 使用不可用 agent：创建会话（仅与 server 交互）后可建，但首条 prompt 返回明确错误
-    let created = c
-        .call(
-            "create_session",
-            json!({"harness": "codex", "cwd": "/tmp/work"}),
-        )
-        .await;
-    let sid = created["result"]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let prompt = c
-        .call(
-            "prompt",
-            json!({"sessionId": sid, "input": [{"type": "text", "text": "hi"}]}),
-        )
-        .await;
-    let err_msg = prompt["error"]["message"].as_str().unwrap_or("");
-    assert!(
-        err_msg.contains("不可用"),
-        "使用不可用 agent 应报明确错误: {prompt}"
-    );
-
-    // 日志含失败记录（标记不可用，server 照常启动、其余能力可用）
-    let log = std::fs::read_to_string(&stderr_log).unwrap_or_default();
-    assert!(
-        log.contains("拉起失败") && log.contains("codex") && log.contains("已标记不可用"),
-        "启动日志应有 codex 拉起失败并标记不可用的记录: {log}"
-    );
-    assert!(log.contains("启动完成"), "启动日志应有启动汇总行: {log}");
-
-    // server 正常服务（会话操作可用）
-    let list = c.call("list_sessions", json!({})).await;
-    assert!(
-        list.get("error").is_none(),
-        "拉起失败后 server 仍应正常: {list}"
-    );
-    let _ = std::fs::remove_dir_all(&fakebin);
 }

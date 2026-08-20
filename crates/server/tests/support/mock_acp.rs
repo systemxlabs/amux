@@ -114,6 +114,7 @@ async fn run(state_file: &str) -> Result<()> {
     let calls_resume = calls_file.clone();
     let calls_prompt = calls_file.clone();
     let calls_delete = calls_file.clone();
+    let calls_close = calls_file.clone();
     let calls_list = calls_file.clone();
     let calls_skill = calls_file.clone();
     let state_prompt = state_file.clone();
@@ -286,7 +287,11 @@ async fn run(state_file: &str) -> Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |_request: CloseSessionRequest, responder, _cx| {
+            async move |request: CloseSessionRequest, responder, _cx| {
+                record_call(&calls_close, "session/close");
+                let sid = request.session_id.to_string();
+                sessions().lock().unwrap().remove(&sid);
+                history().lock().unwrap().remove(&sid);
                 responder.respond(CloseSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),

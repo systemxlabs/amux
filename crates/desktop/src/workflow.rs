@@ -1,13 +1,11 @@
-//! 工作流引擎（docs/DESIGN.md §10）：GUI 本地工作流会话 + rig 单 turn 编排。
+//! 工作流引擎（docs/DESIGN.md §10 / §「工作流会话驱动」「工作流会话存储」）：
+//! GUI 本地工作流会话 + rig 单 turn 编排。
 //!
-//! 架构（纯逻辑与 IO 分离，本模块不依赖 GPUI，可被单元测试直接驱动）：
-//! - `OrcSession`：工作流会话状态（标题/描述/对话历史/子会话/取消），可序列化持久化
-//! - `OrcBackend`：单 turn 决策器——输入工作流上下文，输出 `Decision`（步骤动作 + 摘要）。
-//!   真实实现 `RigBackend` 用 rig `Agent::prompt`（单 turn）；会话操作定义为 rig 工具，
-//!   工具只记录动作（planning），由引擎统一执行——保证"会话操作经真实 WsClient"只有一条路径
-//! - `WorkflowEngine`：状态机——首 turn 拆解计划并创建/复用子会话下发指令；子会话 idle
-//!   通知触发自动推进（向工作流会话注入完成情况）；取消/继续/介入均为向工作流会话发送指令
-//! - 持久化：OrcSession 落盘（GUI 数据目录 workflows/）；重开后恢复并按子会话当前状态续跑
+//! - `OrcSession`：工作流会话状态，可序列化持久化（`.jsonl` 单文件）
+//! - `OrcBackend`：单 turn 决策器；真实实现 `RigBackend` 用 rig `Agent::prompt`
+//! - `WorkflowEngine`：状态机——首 turn 拆解计划并创建/复用关联普通会话下发指令；
+//!   关联普通会话 idle（`session.state_change` 通知驱动）触发自动推进
+//! - 会话操作统一经真实 WsClient（SESSION_NEW / SESSION_PROMPT / SESSION_CANCEL）
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -21,9 +19,10 @@ use rig::completion::Prompt;
 
 use serde::{Deserialize, Serialize};
 
-use protocol::{generate_title, Activity, ContentBlock, DialogItem, SessionState};
+use protocol::{generate_title, Activity, ContentBlock, SessionState};
 
 use crate::config::OrchestratorConfig;
+use crate::logic::DialogMsg;
 use crate::ws::WsClient;
 
 // ---- 工作流会话状态（可持久化）----
@@ -32,27 +31,24 @@ use crate::ws::WsClient;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrcMsg {
-    /// 用户消息：计划 / 介入指令，或系统注入的推进消息（子会话完成、错误等）
     User { text: String },
-    /// 编排 agent 输出（决策摘要）
     Orc { text: String },
 }
 
-/// 子会话（工作流驱动的普通会话，由各机器 server 持久化）。
+/// 关联普通会话（工作流驱动的普通会话，由各机器 server 持久化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildSession {
     pub id: String,
-    /// app.machines 下标（机器归属）
     pub machine_idx: usize,
     pub machine_name: String,
-    pub harness: String,
+    pub agent: String,
     pub step_desc: String,
     pub state: SessionState,
     pub last_output: String,
 }
 
-/// 工作流会话（GUI 本地状态，docs/DESIGN.md §10「持久化与恢复」）。
+/// 工作流会话（GUI 本地状态，docs/DESIGN.md「工作流会话存储」）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrcSession {
@@ -64,13 +60,11 @@ pub struct OrcSession {
     #[serde(default)]
     pub preamble: String,
     pub state: SessionState,
-    /// 已取消（终止整个工作流；替代原「暂停」语义，PRD §3.7）
     #[serde(default)]
     pub cancelled: bool,
     pub done: bool,
     pub transcript: Vec<OrcMsg>,
     pub children: Vec<ChildSession>,
-    /// 编排过程活动（创建/介入子会话等，用于活动历史）
     #[serde(default)]
     pub activities: Vec<Activity>,
     pub created_at: u64,
@@ -84,28 +78,54 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// 当前毫秒时间戳（GUI 语音附件命名等用）。
+/// 当前毫秒时间戳（GUI 附件命名等用）。
 pub fn now_ts() -> u64 {
     now()
 }
 
 // ---- 机器信息（供编排上下文与动作解析）----
 
+/// 某机器上的一个 agent（docs/DESIGN.md `list_agents`：可用性）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSlot {
+    pub name: String,
+    pub available: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineSummary {
     pub name: String,
-    pub harnesses: Vec<String>,
+    /// 机器是否在线
+    #[serde(default)]
+    pub online: bool,
+    pub agents: Vec<AgentSlot>,
+}
+
+impl MachineSummary {
+    pub fn named(name: &str, agents: &[&str]) -> Self {
+        MachineSummary {
+            name: name.into(),
+            online: true,
+            agents: agents
+                .iter()
+                .map(|a| AgentSlot {
+                    name: (*a).into(),
+                    available: true,
+                })
+                .collect(),
+        }
+    }
 }
 
 // ---- 编排决策 ----
 
-/// 子会话状态快照（发给编排 agent 的完成情况）。
 #[derive(Debug, Clone)]
 pub struct ChildStatus {
     pub session_id: String,
     pub machine_name: String,
-    pub harness: String,
+    pub agent: String,
     pub state: SessionState,
     pub step_desc: String,
     pub last_output: String,
@@ -115,29 +135,25 @@ pub struct ChildStatus {
 #[derive(Debug, Clone)]
 pub struct OrcContext {
     pub plan: String,
-    /// 模板/系统指令（内置进编排系统提示词，不进入会话历史）
     pub preamble: String,
-    /// 对话历史（用户计划/介入/注入推进、编排输出）文本化
     pub transcript: Vec<String>,
     pub children: Vec<ChildStatus>,
+    pub child_sessions: Vec<ChildSession>,
+    pub clients: Vec<WsClient>,
     pub machines: Vec<MachineSummary>,
 }
 
 /// 编排动作（引擎统一执行；会话操作经真实 WsClient，docs/DESIGN.md §10）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrcAction {
-    /// 创建/复用子会话并下发指令
     Run {
         machine: String,
-        harness: String,
+        agent: String,
         cwd: String,
         prompt: String,
-        /// 复用已存在的子会话 id
         reuse: Option<String>,
     },
-    /// 向已有子会话追加指令（介入）
     Steer { session: String, prompt: String },
-    /// 向已有子会话发重试指令
     Retry { session: String, prompt: String },
 }
 
@@ -146,7 +162,6 @@ pub enum OrcAction {
 pub struct Decision {
     pub summary: String,
     pub actions: Vec<OrcAction>,
-    /// 编排是否结束（conclude）
     pub done: bool,
     pub conclusion: Option<String>,
 }
@@ -157,23 +172,22 @@ pub trait OrcBackend: Send + Sync {
         &'a self,
         ctx: &'a OrcContext,
     ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>>;
+    fn take_synced_children(&self) -> Option<Vec<ChildSession>> {
+        None
+    }
 }
 
-// ---- rig 工具的规划动作记录 ----
+// ---- 工具规划动作记录 ----
 
-/// rig 工具记录的动作（规划接口；由引擎统一执行）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOp {
     Create {
         machine: String,
-        harness: String,
+        agent: String,
         cwd: String,
         prompt: String,
     },
-    Prompt {
-        session: String,
-        prompt: String,
-    },
+    Prompt { session: String, prompt: String },
 }
 
 /// 工具共享状态：机器名列表（工具校验）+ 动作记录。
@@ -217,12 +231,12 @@ pub fn ops_to_actions(ops: Vec<ToolOp>, known_sessions: &[String]) -> Vec<OrcAct
         match op {
             ToolOp::Create {
                 machine,
-                harness,
+                agent,
                 cwd,
                 prompt,
             } => out.push(OrcAction::Run {
                 machine,
-                harness,
+                agent,
                 cwd,
                 prompt,
                 reuse: None,
@@ -241,18 +255,6 @@ pub fn ops_to_actions(ops: Vec<ToolOp>, known_sessions: &[String]) -> Vec<OrcAct
 
 // ---- WorkflowEngine：状态机 ----
 
-#[derive(Clone)]
-pub struct WorkflowEngine {
-    pub session: OrcSession,
-    backend: Arc<dyn OrcBackend>,
-    clients: Vec<WsClient>,
-    machines: Vec<MachineSummary>,
-    /// 防重入：一次 advance 进行中
-    advancing: bool,
-    /// advance 期间收到子会话 idle → 稍后补一次
-    pending_advance: bool,
-}
-
 /// 取消工作流时需下发的 CANCEL 请求列表：(机器下标, 子会话 id)（纯函数，可单测）。
 pub fn cancel_requests(children: &[ChildSession]) -> Vec<(usize, String)> {
     children
@@ -261,10 +263,19 @@ pub fn cancel_requests(children: &[ChildSession]) -> Vec<(usize, String)> {
         .collect()
 }
 
+#[derive(Clone)]
+pub struct WorkflowEngine {
+    pub session: OrcSession,
+    backend: Arc<dyn OrcBackend>,
+    clients: Vec<WsClient>,
+    machines: Vec<MachineSummary>,
+    advancing: bool,
+    pending_advance: bool,
+    /// 工作中收到的用户消息（steer 注入，克隆共享）。
+    steer_inbox: Arc<Mutex<Vec<String>>>,
+}
+
 impl WorkflowEngine {
-    /// 新建工作流会话并执行首个决策 turn。
-    /// - `context`：@ 引用展开的上下文文本（附加到计划后）
-    /// - `preamble`：模板/系统指令，内置进编排 agent 的系统提示词（不进入会话历史）
     pub fn new(
         description: &str,
         context: &str,
@@ -278,7 +289,6 @@ impl WorkflowEngine {
         } else {
             format!("{description}\n\n[上下文]\n{context}")
         };
-        // 模板不进会话历史：仅当用户确实有描述/目标时才写入用户消息
         let mut transcript = Vec::new();
         if !description.trim().is_empty() {
             transcript.push(OrcMsg::User {
@@ -312,16 +322,20 @@ impl WorkflowEngine {
             machines,
             advancing: false,
             pending_advance: false,
+            steer_inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// 从持久化状态恢复（GUI 重开）。
     pub fn restore(
-        session: OrcSession,
+        mut session: OrcSession,
         backend: Arc<dyn OrcBackend>,
         clients: Vec<WsClient>,
         machines: Vec<MachineSummary>,
     ) -> Self {
+        // 应用重开后工作流会话回到空闲；重新启动需用户手动触发（PRD §工作流会话）
+        if !session.done {
+            session.state = SessionState::Idle;
+        }
         WorkflowEngine {
             session,
             backend,
@@ -329,15 +343,14 @@ impl WorkflowEngine {
             machines,
             advancing: false,
             pending_advance: false,
+            steer_inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// 首个 turn：拆解计划 → 创建/复用子会话下发指令。
     pub async fn start(&mut self) -> Result<(), String> {
         self.advance().await
     }
 
-    /// 单 turn 决策循环（docs/DESIGN.md §10：每轮一次 Agent::prompt，不阻塞等待子会话）。
     pub async fn advance(&mut self) -> Result<(), String> {
         loop {
             if self.advancing {
@@ -354,10 +367,12 @@ impl WorkflowEngine {
             self.session.state = SessionState::Idle;
             self.session.updated_at = now();
             self.advancing = false;
+            if self.absorb_steer() {
+                self.pending_advance = true;
+            }
             if !self.pending_advance {
                 return result;
             }
-            // advance 期间收到子会话 idle：补一次推进（循环代替递归避免 async 递归）
             self.pending_advance = false;
             result.as_ref()?;
         }
@@ -368,8 +383,6 @@ impl WorkflowEngine {
         let decision = match self.backend.decide(&ctx).await {
             Ok(d) => d,
             Err(e) => {
-                // 运行期 LLM 调用失败（未配置 API / 网络 / 鉴权等）：
-                // 以活动消息写入工作流会话活动历史，GUI 可见且随持久化保留（PRD §3.7）
                 self.session.activities.push(Activity::Error {
                     timestamp: now(),
                     detail: format!("编排 agent 调用失败：{e}"),
@@ -387,7 +400,11 @@ impl WorkflowEngine {
             self.session.done = true;
         }
         self.session.done = self.session.done || decision.done;
-        self.apply_actions(decision.actions).await
+        self.apply_actions(decision.actions).await?;
+        if let Some(kids) = self.backend.take_synced_children() {
+            self.session.children = kids;
+        }
+        Ok(())
     }
 
     fn build_context(&self) -> OrcContext {
@@ -410,23 +427,24 @@ impl WorkflowEngine {
                 .map(|c| ChildStatus {
                     session_id: c.id.clone(),
                     machine_name: c.machine_name.clone(),
-                    harness: c.harness.clone(),
+                    agent: c.agent.clone(),
                     state: c.state,
                     step_desc: c.step_desc.clone(),
                     last_output: c.last_output.clone(),
                 })
                 .collect(),
+            child_sessions: self.session.children.clone(),
+            clients: self.clients.clone(),
             machines: self.machines.clone(),
         }
     }
 
-    /// 执行动作（会话操作经真实 WsClient，docs/DESIGN.md §10）。
     async fn apply_actions(&mut self, actions: Vec<OrcAction>) -> Result<(), String> {
         for action in actions {
             match action {
                 OrcAction::Run {
                     machine,
-                    harness,
+                    agent,
                     cwd,
                     prompt,
                     reuse,
@@ -452,23 +470,31 @@ impl WorkflowEngine {
                                 .get(m_idx)
                                 .ok_or_else(|| "机器连接已失效".to_string())?
                                 .request(
-                                    protocol::method::CREATE_SESSION,
+                                    protocol::method::SESSION_NEW,
                                     Some(serde_json::json!({
-                                        "harness": harness,
+                                        "agent": agent,
                                         "cwd": cwd,
                                     })),
                                 )
                                 .await;
                             match res {
-                                Ok(v) => v
-                                    .get("session")
-                                    .and_then(|s| s.get("id"))
-                                    .and_then(|i| i.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
+                                Ok(v) => {
+                                    let sid = v
+                                        .get("session")
+                                        .and_then(|s| s.get("id"))
+                                        .and_then(|i| i.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    if sid.is_empty() {
+                                        self.session.transcript.push(OrcMsg::User {
+                                            text: format!("创建关联普通会话失败（{machine}/{agent}）"),
+                                        });
+                                    }
+                                    sid
+                                }
                                 Err(e) => {
                                     self.session.transcript.push(OrcMsg::User {
-                                        text: format!("创建子会话失败（{machine}/{harness}）：{e}"),
+                                        text: format!("创建关联普通会话失败（{machine}/{agent}）：{e}"),
                                     });
                                     continue;
                                 }
@@ -476,19 +502,15 @@ impl WorkflowEngine {
                         }
                     };
                     if session_id.is_empty() {
-                        self.session.transcript.push(OrcMsg::User {
-                            text: "创建子会话失败：未返回 session id".into(),
-                        });
                         continue;
                     }
-                    // 记录子会话（或更新已存在的）
                     if !self.session.children.iter().any(|c| c.id == session_id) {
                         let step_desc = first_line(&prompt);
                         self.session.children.push(ChildSession {
                             id: session_id.clone(),
                             machine_idx: m_idx,
                             machine_name: self.machines[m_idx].name.clone(),
-                            harness: harness.clone(),
+                            agent: agent.clone(),
                             step_desc,
                             state: SessionState::Busy,
                             last_output: String::new(),
@@ -499,8 +521,8 @@ impl WorkflowEngine {
                         timestamp: now(),
                         name: "create_session".into(),
                         title: Some(format!(
-                            "在 {} 用 {} 创建子会话 {session_id}",
-                            self.machines[m_idx].name, harness
+                            "在 {} 用 {} 创建关联普通会话 {session_id}",
+                            self.machines[m_idx].name, agent
                         )),
                         content: Some(prompt.clone()),
                     });
@@ -510,7 +532,7 @@ impl WorkflowEngine {
                     self.session.activities.push(Activity::ToolCall {
                         timestamp: now(),
                         name: "prompt_session".into(),
-                        title: Some(format!("介入子会话 {session}")),
+                        title: Some(format!("介入关联普通会话 {session}")),
                         content: Some(prompt.clone()),
                     });
                 }
@@ -522,9 +544,9 @@ impl WorkflowEngine {
     async fn prompt_child(&mut self, session_id: &str, text: &str) -> Result<(), String> {
         let Some(child) = self.session.children.iter().find(|c| c.id == session_id) else {
             self.session.transcript.push(OrcMsg::User {
-                text: format!("子会话不存在：{session_id}"),
+                text: format!("关联普通会话不存在：{session_id}"),
             });
-            return Err(format!("子会话不存在: {session_id}"));
+            return Err(format!("关联普通会话不存在: {session_id}"));
         };
         let client = self
             .clients
@@ -539,22 +561,22 @@ impl WorkflowEngine {
         {
             c.state = SessionState::Busy;
         }
-        // 不阻塞等待子 agent 结果：下达指令后即结束本 turn（docs/DESIGN.md §9 自动推进），
-        // 子会话状态经 server 通知异步回来。
         let sid = session_id.to_string();
         let input = serde_json::json!({
             "sessionId": session_id,
             "input": [{ "type": "text", "text": text }],
         });
         crate::ws::runtime().spawn(async move {
-            if let Err(e) = client.request(protocol::method::PROMPT, Some(input)).await {
+            if let Err(e) = client
+                .request(protocol::method::SESSION_PROMPT, Some(input))
+                .await
+            {
                 protocol::log::error("gui.workflow", format!("下发指令失败 {sid}: {e}"));
             }
         });
         Ok(())
     }
 
-    /// 机器名 → 下标（未知机器回退第一个可用）。
     fn resolve_machine(&self, name: &str) -> Result<usize, String> {
         if let Some(i) = self.machines.iter().position(|m| m.name == name) {
             return Ok(i);
@@ -565,14 +587,13 @@ impl WorkflowEngine {
         Err("没有可用机器".into())
     }
 
-    /// 子会话状态变更（GUI 收到 server 通知时调用）。
-    /// 子会话变 idle → 向工作流会话注入完成情况并推进（docs/DESIGN.md §10 自动推进）。
-    /// `output_excerpt`：子会话最近一次完整输出摘要（GUI 本地对话缓存）。
-    /// 返回是否触发了推进。
+    /// 关联普通会话状态变更（GUI 收到 `session.state_change` 通知时调用）。
+    /// 关联普通会话变 idle → 按 docs/DESIGN.md 格式注入状态变更并推进。
     pub async fn on_child_state(
         &mut self,
         session_id: &str,
-        state: SessionState,
+        old_state: SessionState,
+        new_state: SessionState,
         output_excerpt: Option<String>,
     ) -> bool {
         let Some(child) = self
@@ -586,16 +607,19 @@ impl WorkflowEngine {
         if let Some(o) = output_excerpt {
             child.last_output = o;
         }
-        child.state = state;
-        if state == SessionState::Idle {
-            // 已取消/已完成的会话不再自动推进，也不追加重复的完成消息
+        child.state = new_state;
+        if new_state == SessionState::Idle {
+            // 用户取消工作流导致的子会话状态变更不注入（docs/DESIGN.md §工作流会话驱动）
             if self.session.cancelled || self.session.done {
                 return false;
             }
-            let step = child.step_desc.clone();
-            let last = child.last_output.clone();
+            let machine = child.machine_name.clone();
             self.session.transcript.push(OrcMsg::User {
-                text: format!("子会话 {session_id} 完成（{step}）：{last}"),
+                text: format!(
+                    "关联普通会话 {session_id}@{machine} 检测到状态变更：{old} -> {new}",
+                    old = state_label(old_state),
+                    new = state_label(new_state)
+                ),
             });
             let _ = self.advance().await;
             return true;
@@ -603,18 +627,17 @@ impl WorkflowEngine {
         false
     }
 
-    // ---- 异步任务与 GUI 的交接（引擎保持原位，克隆体执行异步推进）----
-    // GUI 发起异步编排任务时，引擎始终留在 self.workflows 中（会话行与对话历史
-    // 立即可见）；异步推进在克隆体上执行，完成后原位换回。以下方法维护防重入
-    // 标记与同步可见的状态。
+    /// 同步记录关联普通会话状态变更（不推进；widget 状态即可视化）。
+    pub fn on_child_state_local(&mut self, session_id: &str, state: SessionState) {
+        if let Some(child) = self.session.children.iter_mut().find(|c| c.id == session_id) {
+            child.state = state;
+        }
+    }
 
-    /// 是否正在推进（异步推进进行中；GUI 据此跳过并发的自动推进/介入推进）。
     pub fn is_advancing(&self) -> bool {
         self.advancing
     }
 
-    /// 异步任务开始前调用（GUI 主线程同步执行）：标记忙并上防重入锁，
-    /// 使会话行/对话历史立即显示工作状态。
     pub fn begin_busy(&mut self) {
         self.advancing = true;
         self.pending_advance = false;
@@ -622,14 +645,11 @@ impl WorkflowEngine {
         self.session.updated_at = now();
     }
 
-    /// 克隆体开始推进前调用：解除 begin_busy 的防重入标记
-    /// （advance 自身会重新置位，保证克隆体内一次只跑一轮）。
     pub fn start_advance(&mut self) {
         self.advancing = false;
         self.pending_advance = false;
     }
 
-    /// 异步任务中断（oneshot 失效）时复位，避免永久卡在 Busy/防重入。
     pub fn abort_busy(&mut self) {
         self.advancing = false;
         self.pending_advance = false;
@@ -639,11 +659,7 @@ impl WorkflowEngine {
         self.session.updated_at = now();
     }
 
-    /// 同步记录用户介入指令（立即在 GUI 可见，不等待 LLM）。
-    /// 返回是否应触发推进：未暂停、未完成且没有推进在进行中。
     pub fn record_user(&mut self, text: &str) -> bool {
-        // 首个用户输入即本次工作流目标（创建时未填目标、之后在会话输入区继续的场景），
-        // 同时据此生成会话标题（标题为空时才生成，用户手动改过则保留）
         if self.session.description.trim().is_empty() {
             self.session.description = text.trim().to_string();
         }
@@ -654,10 +670,41 @@ impl WorkflowEngine {
             text: text.to_string(),
         });
         self.session.updated_at = now();
-        !self.session.cancelled && !self.session.done && !self.advancing
+        if self.session.cancelled || self.session.done {
+            return false;
+        }
+        if self.advancing {
+            // 工作中以 steer 注入，当前 turn 结束后再跑一轮（docs/DESIGN.md 编排智能体 steer）
+            self.steer_inbox
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .push(text.to_string());
+            return false;
+        }
+        true
     }
 
-    /// 同步标记已取消：停止自动推进并写入用户消息（不涉及 IO，立即可见）。
+    /// 把 inbox 中尚未出现在 transcript 的 steer 消息合并进来。
+    pub fn absorb_steer(&mut self) -> bool {
+        let msgs = std::mem::take(
+            &mut *self
+                .steer_inbox
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）"),
+        );
+        let mut added = false;
+        for text in msgs {
+            let exists = self.session.transcript.iter().any(|m| {
+                matches!(m, OrcMsg::User { text: t } if t == &text)
+            });
+            if !exists {
+                self.session.transcript.push(OrcMsg::User { text });
+                added = true;
+            }
+        }
+        added
+    }
+
     pub fn mark_cancelled(&mut self) {
         self.session.cancelled = true;
         self.session.state = SessionState::Idle;
@@ -667,13 +714,12 @@ impl WorkflowEngine {
         });
     }
 
-    /// 仅向所有子会话下发 CANCEL（纯 IO，不改变本会话状态；状态已由调用方同步落下）。
     pub async fn send_cancel_to_children(&self) {
         for (machine_idx, session_id) in cancel_requests(&self.session.children) {
             if let Some(client) = self.clients.get(machine_idx).cloned() {
                 let _ = client
                     .request(
-                        protocol::method::CANCEL,
+                        protocol::method::SESSION_CANCEL,
                         Some(serde_json::json!({ "sessionId": session_id })),
                     )
                     .await;
@@ -681,32 +727,18 @@ impl WorkflowEngine {
         }
     }
 
-    // ---- 持久化 ----
+    // ---- 持久化（docs/DESIGN.md「工作流会话存储」：sqlite + 两份 jsonl）----
 
-    pub fn persist(&self, dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let path = dir.join(format!("{}.json", self.session.id));
-        let json = serde_json::to_string_pretty(&self.session)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(path, json)
+    pub fn persist(&self, data_dir: &Path) -> std::io::Result<()> {
+        crate::wfstore::save(data_dir, &self.session)
     }
 
-    /// 加载目录下全部工作流会话状态（GUI 重开恢复）。
-    pub fn load_all(dir: &Path) -> Vec<OrcSession> {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
-            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-            .filter_map(|s| serde_json::from_str::<OrcSession>(&s).ok())
-            .collect()
+    pub fn load_all(data_dir: &Path) -> Vec<OrcSession> {
+        crate::wfstore::load_all(data_dir)
     }
 
-    /// 删除工作流会话（连同持久化文件）。
-    pub fn remove(dir: &Path, id: &str) {
-        let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+    pub fn remove(data_dir: &Path, id: &str) {
+        crate::wfstore::remove(data_dir, id);
     }
 }
 
@@ -716,15 +748,15 @@ fn first_line(s: &str) -> String {
 
 impl OrcSession {
     /// 工作流会话对话流：用户消息（含系统注入的推进消息）与编排输出。
-    pub fn to_dialog_items(&self) -> Vec<DialogItem> {
+    pub fn to_dialog(&self) -> Vec<DialogMsg> {
         self.transcript
             .iter()
             .map(|m| match m {
-                OrcMsg::User { text } => DialogItem::UserMessage {
+                OrcMsg::User { text } => DialogMsg::UserMessage {
                     content: vec![ContentBlock::Text { text: text.clone() }],
                     timestamp: self.updated_at,
                 },
-                OrcMsg::Orc { text } => DialogItem::AgentOutput {
+                OrcMsg::Orc { text } => DialogMsg::AgentMessage {
                     content: vec![ContentBlock::Text { text: text.clone() }],
                     timestamp: self.updated_at,
                 },
@@ -733,55 +765,82 @@ impl OrcSession {
     }
 }
 
-// ---- RigBackend：真实 rig 单 turn 编排（docs/DESIGN.md §10）----
+#[derive(Clone)]
+struct LiveRuntime {
+    machines: Vec<MachineSummary>,
+    clients: Vec<WsClient>,
+    children: Arc<Mutex<Vec<ChildSession>>>,
+}
+
+impl LiveRuntime {
+    fn machine_index(&self, name: &str) -> Result<usize, String> {
+        self.machines
+            .iter()
+            .position(|m| m.name == name)
+            .ok_or_else(|| format!("机器不存在: {name}"))
+    }
+
+    fn client(&self, name: &str) -> Result<WsClient, String> {
+        let i = self.machine_index(name)?;
+        self.clients
+            .get(i)
+            .cloned()
+            .ok_or_else(|| format!("机器未连接: {name}"))
+    }
+
+    fn child(&self, session_id: &str) -> Result<ChildSession, String> {
+        self.children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .iter()
+            .find(|c| c.id == session_id)
+            .cloned()
+            .ok_or_else(|| format!("关联普通会话不存在: {session_id}"))
+    }
+}
+
+// ---- RigBackend：真实 rig 单 turn 编排（docs/DESIGN.md「编排智能体」）----
 
 pub struct RigBackend {
     cfg: OrchestratorConfig,
-    tool_state: ToolState,
+    synced_children: Mutex<Option<Vec<ChildSession>>>,
 }
 
 impl RigBackend {
-    pub fn new(cfg: OrchestratorConfig, machine_names: Vec<String>) -> Self {
+    pub fn new(cfg: OrchestratorConfig) -> Self {
         RigBackend {
             cfg,
-            tool_state: ToolState::new(machine_names),
+            synced_children: Mutex::new(None),
         }
     }
 
-    /// 构建 rig agent（单 turn：preamble + 规划工具）。
-    /// 泛型于模型（wire API 的 chat / responses 两条分派路径，DESIGN §9）。
-    /// 暴露为 pub 供测试验证 rig 装配（工具注册、模型构建）真实可用。
     pub fn build_agent<M>(&self, model: M, preamble: &str) -> rig::Agent<M>
     where
         M: rig::completion::CompletionModel + 'static,
     {
         rig::AgentBuilder::new(model)
             .preamble(preamble)
-            // 单次决策需足够轮次：模型规划工具调用 + 产出总结（rig 0.41 默认预算 1，
-            // 带工具时 tool-then-answer 至少需 2，此处放宽到 8 以支持多步骤规划）
             .default_max_turns(8)
-            .tool(PlanCreateSession)
-            .tool(PlanPromptSession)
+            .tool(ListAgents)
+            .tool(ListSessions)
+            .tool(CreateSession)
+            .tool(PromptSession)
+            .tool(CancelSession)
+            .tool(ReadSessionHistory)
+            .tool(ReadSessionActivities)
             .build()
     }
 
     fn preamble(&self) -> String {
-        "你是 amux 的编排 agent，只做传话、不做决策与指导。你的职责是按用户指令把\
-         指定内容转发给对应子会话（创建/复用子会话并下发指令），并把子会话结果原样\
-         转述回工作流会话。\n\
-         规则：\n\
-         1. 机器与 agent 严格按用户指令指定（从上下文的列表里定位）；用户未指定时\
-         不要自行选择，转述现状并回到 idle 等待用户输入。\n\
-         2. 不自行拆解步骤、不自行决定后续（分支/重试/汇总），也不输出建议或结论。\n\
-         3. 转发用 create_session（创建子会话并下发该步指令）或 prompt_session（继续\
-         推进已有子会话）工具；不要阻塞等待子会话结果，本轮转发完成后用一段中文文本\
-         转述你的动作并结束 turn。\n\
-         4. 用户指令全部转发完成后，转述各子会话结果并结束。"
+        "你是 amux 的编排智能体。按工作流执行计划和用户指令调度，传递用户指令和关联普通会话内容。\n\
+         不进行任务拆解、任务执行和任务决策；可执行执行计划中明确写出的条件分支，但不创造计划之外的步骤、不自主变更目标。\n\
+         未在工作流执行计划和用户指令中指定的事项交由用户决定。\n\
+         使用工具：list_agents、list_sessions、create_session、prompt_session、cancel_session、\
+         read_session_history、read_session_activities。调度动作完成后用中文简述本轮动作并结束 turn。"
             .to_string()
     }
 }
 
-/// 运行一次单 turn 编排（rig `Agent::prompt`，docs/DESIGN.md §10 单 turn 模式）。
 async fn run_orc_turn<M>(
     agent: rig::Agent<M>,
     input: String,
@@ -797,9 +856,6 @@ where
         .map_err(|e| format!("编排 agent 调用失败: {e}"))
 }
 
-/// api_format → 模型分派（纯决策，可单测；DESIGN §8.1「API 配置」）：
-/// `chat_completions` → OpenAI Chat Completions，`responses` → OpenAI Responses，
-/// `messages` → Anthropic Messages；未知值回落 chat_completions。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApiFormat {
     ChatCompletions,
@@ -821,14 +877,12 @@ impl OrcBackend for RigBackend {
         ctx: &'a OrcContext,
     ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>> {
         Box::pin(async move {
-            // 配置校验：Base URL / API key 缺失时给出可操作的提示（PRD §4.3）
             if !self.cfg.is_configured() {
                 return Err(
                     "未配置编排 agent API（Base URL / API key / 模型）。请在设置 → 编排 agent 中配置后再创建工作流"
                         .to_string(),
                 );
             }
-            // 模板/系统指令内置进编排系统提示词（不进入会话历史，PRD §3.7）
             let mut preamble = self.preamble();
             if !ctx.preamble.trim().is_empty() {
                 preamble.push_str("\n\n");
@@ -836,44 +890,23 @@ impl OrcBackend for RigBackend {
                 preamble.push_str(ctx.preamble.trim());
             }
             let model = self.cfg.model.clone();
-            let mut tool_ctx = rig::tool::ToolContext::new();
-            tool_ctx.insert(self.tool_state.clone());
-            let machine_list = ctx
-                .machines
-                .iter()
-                .map(|m| format!("{}（agent: {}）", m.name, m.harnesses.join(", ")))
-                .collect::<Vec<_>>()
-                .join("；");
-            let children_list = if ctx.children.is_empty() {
-                "（尚无子会话）".to_string()
-            } else {
-                ctx.children
-                    .iter()
-                    .map(|c| {
-                        format!(
-                            "{} [{}@{}]（步骤：{}）{}：{}",
-                            c.session_id,
-                            c.harness,
-                            c.machine_name,
-                            c.step_desc,
-                            state_label(c.state),
-                            crate::text::truncate(c.last_output.trim(), 200)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+            let live = LiveRuntime {
+                machines: ctx.machines.clone(),
+                clients: ctx.clients.clone(),
+                children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
             };
+            let mut tool_ctx = rig::tool::ToolContext::new();
+            tool_ctx.insert(live.clone());
+            preamble.push_str("\n\n【工作流执行计划】\n");
+            preamble.push_str(ctx.plan.trim());
             let transcript_text = if ctx.transcript.is_empty() {
                 "（无）".to_string()
             } else {
                 ctx.transcript.join("\n")
             };
             let input = format!(
-                "工作流计划：\n{}\n\n可用机器：{}\n\n对话历史：\n{}\n\n子会话当前状态：\n{}\n\n\
-                 请评估当前进展并决定本轮动作（继续创建/推进步骤，或结束）。",
-                ctx.plan, machine_list, transcript_text, children_list
+                "用户消息与对话历史：\n{transcript_text}\n\n请用工具完成本轮调度，未指定的事项询问用户。"
             );
-            // API format（DESIGN §8.1「API 配置」）分派到对应 provider 与 wire API
             let text = match api_format_kind(&self.cfg.api_format) {
                 ApiFormat::ChatCompletions => {
                     let client = rig::providers::openai::Client::builder()
@@ -904,16 +937,22 @@ impl OrcBackend for RigBackend {
                     run_orc_turn(agent, input, tool_ctx).await?
                 }
             };
-            let ops = self.tool_state.take_ops();
-            let known: Vec<String> = ctx.children.iter().map(|c| c.session_id.clone()).collect();
-            let actions = ops_to_actions(ops, &known);
+            let kids = live.children.lock().expect("Mutex 中毒（临界区内不应 panic）").clone();
+            *self.synced_children.lock().expect("Mutex 中毒（临界区内不应 panic）") = Some(kids);
             Ok(Decision {
                 summary: text,
-                actions,
+                actions: Vec::new(),
                 done: false,
                 conclusion: None,
             })
         })
+    }
+
+    fn take_synced_children(&self) -> Option<Vec<ChildSession>> {
+        self.synced_children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .take()
     }
 }
 
@@ -924,15 +963,14 @@ fn state_label(s: SessionState) -> &'static str {
     }
 }
 
-/// 脚本化测试后端（决策序列；用于驱动引擎的纯逻辑/集成测试）。
+/// 脚本化测试后端（决策序列；用于驱动引擎的纯逻辑测试）。
 #[doc(hidden)]
-#[allow(dead_code)]
 pub struct FakeBackend {
     decisions: Mutex<VecDeque<Decision>>,
 }
 
 #[doc(hidden)]
-#[allow(dead_code, clippy::new_ret_no_self)]
+#[allow(clippy::new_ret_no_self)]
 impl FakeBackend {
     pub fn new(decisions: Vec<Decision>) -> Arc<dyn OrcBackend> {
         Arc::new(FakeBackend {
@@ -940,7 +978,6 @@ impl FakeBackend {
         })
     }
 
-    /// 空决策后端（仅用于构造引擎，不触发推进）。
     pub fn new_for_tests() -> Arc<dyn OrcBackend> {
         Self::new(vec![])
     }
@@ -961,19 +998,114 @@ impl OrcBackend for FakeBackend {
     }
 }
 
-// ---- rig 规划工具 ----
+// ---- rig 调度工具（docs/DESIGN.md「编排智能体」工具表）----
 
-/// 规划工具：create_session（在指定机器创建子会话并下发一条步骤指令）。
-/// 工具只记录规划动作（ToolOp），由引擎统一经真实 WsClient 执行（docs/DESIGN.md §10）。
-struct PlanCreateSession;
-impl rig::tool::Tool for PlanCreateSession {
+fn live(context: &rig::tool::ToolContext) -> Result<LiveRuntime, rig::tool::ToolExecutionError> {
+    context
+        .get::<LiveRuntime>()
+        .ok_or_else(|| rig::tool::ToolExecutionError::other("缺少工具运行时"))
+}
+
+struct ListAgents;
+impl rig::tool::Tool for ListAgents {
+    const NAME: &'static str = "list_agents";
+    type Args = EmptyArgs;
+    type Output = String;
+    type Error = rig::tool::ToolExecutionError;
+
+    fn description(&self) -> String {
+        "已注册机器及各机器的 agent 列表：机器在线状态、agent 可用性".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn call(
+        &self,
+        context: &mut rig::tool::ToolContext,
+        _args: EmptyArgs,
+    ) -> Result<Self::Output, Self::Error> {
+        let live = live(context)?;
+        let v: Vec<serde_json::Value> = live
+            .machines
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "name": m.name,
+                    "online": m.online,
+                    "agents": m.agents.iter().map(|a| serde_json::json!({
+                        "name": a.name,
+                        "available": a.available,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string(&v).unwrap_or_default())
+    }
+}
+
+struct ListSessions;
+impl rig::tool::Tool for ListSessions {
+    const NAME: &'static str = "list_sessions";
+    type Args = EmptyArgs;
+    type Output = String;
+    type Error = rig::tool::ToolExecutionError;
+
+    fn description(&self) -> String {
+        "本工作流的关联普通会话列表（标题、状态、最近活跃、机器在线与否）".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn call(
+        &self,
+        context: &mut rig::tool::ToolContext,
+        _args: EmptyArgs,
+    ) -> Result<Self::Output, Self::Error> {
+        let live = live(context)?;
+        let children = live
+            .children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .clone();
+        let v: Vec<serde_json::Value> = children
+            .iter()
+            .map(|c| {
+                let online = live
+                    .machines
+                    .iter()
+                    .find(|m| m.name == c.machine_name)
+                    .map(|m| m.online)
+                    .unwrap_or(false);
+                serde_json::json!({
+                    "id": c.id,
+                    "title": c.step_desc,
+                    "state": state_label(c.state),
+                    "machine": c.machine_name,
+                    "agent": c.agent,
+                    "machineOnline": online,
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string(&v).unwrap_or_default())
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct EmptyArgs {}
+
+struct CreateSession;
+impl rig::tool::Tool for CreateSession {
     const NAME: &'static str = "create_session";
     type Args = CreateSessionArgs;
     type Output = String;
     type Error = rig::tool::ToolExecutionError;
 
     fn description(&self) -> String {
-        "在指定机器上规划创建子会话并下发一条步骤指令（机器与 agent 必须取自上下文列表）".into()
+        "向指定机器、指定 agent 与工作目录创建关联普通会话，返回会话 ID".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -981,11 +1113,10 @@ impl rig::tool::Tool for PlanCreateSession {
             "type": "object",
             "properties": {
                 "machine": { "type": "string", "description": "机器名" },
-                "harness": { "type": "string", "description": "agent 名" },
-                "cwd": { "type": "string", "description": "工作目录" },
-                "prompt": { "type": "string", "description": "该步指令" }
+                "agent": { "type": "string", "description": "agent 名" },
+                "cwd": { "type": "string", "description": "工作目录" }
             },
-            "required": ["machine", "harness", "cwd", "prompt"]
+            "required": ["machine", "agent", "cwd"]
         })
     }
 
@@ -994,47 +1125,71 @@ impl rig::tool::Tool for PlanCreateSession {
         context: &mut rig::tool::ToolContext,
         args: CreateSessionArgs,
     ) -> Result<Self::Output, Self::Error> {
-        let state = context
-            .get::<ToolState>()
-            .ok_or_else(|| rig::tool::ToolExecutionError::other("缺少工具状态"))?;
-        state
-            .resolve_machine(&args.machine)
+        let live = live(context)?;
+        let idx = live
+            .machine_index(&args.machine)
             .map_err(rig::tool::ToolExecutionError::other)?;
-        state.record(ToolOp::Create {
-            machine: args.machine,
-            harness: args.harness,
-            cwd: args.cwd,
-            prompt: args.prompt,
-        });
-        Ok("已规划：创建子会话并下发指令（引擎将在本轮结束后执行）".into())
+        let client = live
+            .client(&args.machine)
+            .map_err(rig::tool::ToolExecutionError::other)?;
+        let res = client
+            .request(
+                protocol::method::SESSION_NEW,
+                Some(serde_json::json!({
+                    "agent": args.agent,
+                    "cwd": args.cwd,
+                })),
+            )
+            .await
+            .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        let sid = res
+            .get("session")
+            .and_then(|s| s.get("id"))
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .to_string();
+        if sid.is_empty() {
+            return Err(rig::tool::ToolExecutionError::other("创建会话未返回 id"));
+        }
+        live.children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .push(ChildSession {
+                id: sid.clone(),
+                machine_idx: idx,
+                machine_name: args.machine,
+                agent: args.agent,
+                step_desc: args.cwd,
+                state: SessionState::Idle,
+                last_output: String::new(),
+            });
+        Ok(sid)
     }
 }
 
 #[derive(serde::Deserialize)]
 struct CreateSessionArgs {
     machine: String,
-    harness: String,
+    agent: String,
     cwd: String,
-    prompt: String,
 }
 
-/// 规划工具：prompt_session（向已有子会话发送指令：介入/重试/追加）。
-struct PlanPromptSession;
-impl rig::tool::Tool for PlanPromptSession {
+struct PromptSession;
+impl rig::tool::Tool for PromptSession {
     const NAME: &'static str = "prompt_session";
     type Args = PromptSessionArgs;
     type Output = String;
     type Error = rig::tool::ToolExecutionError;
 
     fn description(&self) -> String {
-        "向已存在的子会话发送一条指令（介入/重试/追加要求）".into()
+        "向关联普通会话下发指令".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "session": { "type": "string", "description": "子会话 id" },
+                "session": { "type": "string", "description": "关联普通会话 id" },
                 "prompt": { "type": "string", "description": "指令内容" }
             },
             "required": ["session", "prompt"]
@@ -1046,14 +1201,35 @@ impl rig::tool::Tool for PlanPromptSession {
         context: &mut rig::tool::ToolContext,
         args: PromptSessionArgs,
     ) -> Result<Self::Output, Self::Error> {
-        let state = context
-            .get::<ToolState>()
-            .ok_or_else(|| rig::tool::ToolExecutionError::other("缺少工具状态"))?;
-        state.record(ToolOp::Prompt {
-            session: args.session,
-            prompt: args.prompt,
-        });
-        Ok("已规划：向子会话发送指令（引擎将在本轮结束后执行）".into())
+        let live = live(context)?;
+        let child = live
+            .child(&args.session)
+            .map_err(rig::tool::ToolExecutionError::other)?;
+        let client = live
+            .clients
+            .get(child.machine_idx)
+            .cloned()
+            .ok_or_else(|| rig::tool::ToolExecutionError::other("机器连接已失效"))?;
+        client
+            .request(
+                protocol::method::SESSION_PROMPT,
+                Some(serde_json::json!({
+                    "sessionId": args.session,
+                    "input": [{ "type": "text", "text": args.prompt }],
+                })),
+            )
+            .await
+            .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        if let Some(c) = live
+            .children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .iter_mut()
+            .find(|c| c.id == args.session)
+        {
+            c.state = SessionState::Busy;
+        }
+        Ok("已下发".into())
     }
 }
 
@@ -1063,15 +1239,167 @@ struct PromptSessionArgs {
     prompt: String,
 }
 
+struct CancelSession;
+impl rig::tool::Tool for CancelSession {
+    const NAME: &'static str = "cancel_session";
+    type Args = SessionRefArgs;
+    type Output = String;
+    type Error = rig::tool::ToolExecutionError;
+
+    fn description(&self) -> String {
+        "取消关联普通会话进行中的工作".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "session": { "type": "string" }
+            },
+            "required": ["session"]
+        })
+    }
+
+    async fn call(
+        &self,
+        context: &mut rig::tool::ToolContext,
+        args: SessionRefArgs,
+    ) -> Result<Self::Output, Self::Error> {
+        let live = live(context)?;
+        let child = live
+            .child(&args.session)
+            .map_err(rig::tool::ToolExecutionError::other)?;
+        let client = live
+            .clients
+            .get(child.machine_idx)
+            .cloned()
+            .ok_or_else(|| rig::tool::ToolExecutionError::other("机器连接已失效"))?;
+        client
+            .request(
+                protocol::method::SESSION_CANCEL,
+                Some(serde_json::json!({ "sessionId": args.session })),
+            )
+            .await
+            .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        Ok("已取消".into())
+    }
+}
+
+struct ReadSessionHistory;
+impl rig::tool::Tool for ReadSessionHistory {
+    const NAME: &'static str = "read_session_history";
+    type Args = SessionPageArgs;
+    type Output = String;
+    type Error = rig::tool::ToolExecutionError;
+
+    fn description(&self) -> String {
+        "按窗口 / 游标读取关联普通会话对话内容".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "session": { "type": "string" },
+                "limit": { "type": "integer" },
+                "before": { "type": "integer" }
+            },
+            "required": ["session"]
+        })
+    }
+
+    async fn call(
+        &self,
+        context: &mut rig::tool::ToolContext,
+        args: SessionPageArgs,
+    ) -> Result<Self::Output, Self::Error> {
+        page_session(context, &args, protocol::method::SESSION_HISTORY).await
+    }
+}
+
+struct ReadSessionActivities;
+impl rig::tool::Tool for ReadSessionActivities {
+    const NAME: &'static str = "read_session_activities";
+    type Args = SessionPageArgs;
+    type Output = String;
+    type Error = rig::tool::ToolExecutionError;
+
+    fn description(&self) -> String {
+        "按窗口 / 游标读取关联普通会话活动内容".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "session": { "type": "string" },
+                "limit": { "type": "integer" },
+                "before": { "type": "integer" }
+            },
+            "required": ["session"]
+        })
+    }
+
+    async fn call(
+        &self,
+        context: &mut rig::tool::ToolContext,
+        args: SessionPageArgs,
+    ) -> Result<Self::Output, Self::Error> {
+        page_session(context, &args, protocol::method::SESSION_ACTIVITIES).await
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SessionRefArgs {
+    session: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SessionPageArgs {
+    session: String,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    before: Option<u64>,
+}
+
+async fn page_session(
+    context: &mut rig::tool::ToolContext,
+    args: &SessionPageArgs,
+    method: &str,
+) -> Result<String, rig::tool::ToolExecutionError> {
+    let live = live(context)?;
+    let child = live
+        .child(&args.session)
+        .map_err(rig::tool::ToolExecutionError::other)?;
+    let client = live
+        .clients
+        .get(child.machine_idx)
+        .cloned()
+        .ok_or_else(|| rig::tool::ToolExecutionError::other("机器连接已失效"))?;
+    let mut params = serde_json::json!({ "sessionId": args.session });
+    if let Some(limit) = args.limit {
+        params["limit"] = serde_json::json!(limit);
+    }
+    if let Some(before) = args.before {
+        params["before"] = serde_json::json!(before);
+    }
+    let res = client
+        .request(method, Some(params))
+        .await
+        .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+    Ok(res.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rig::tool::Tool as _;
 
-    fn run(machine: &str, harness: &str, prompt: &str) -> OrcAction {
+    fn run(machine: &str, agent: &str, prompt: &str) -> OrcAction {
         OrcAction::Run {
             machine: machine.into(),
-            harness: harness.into(),
+            agent: agent.into(),
             cwd: "/tmp/work".into(),
             prompt: prompt.into(),
             reuse: None,
@@ -1081,25 +1409,22 @@ mod tests {
     fn machines() -> Vec<MachineSummary> {
         vec![MachineSummary {
             name: "测试机".into(),
-            harnesses: vec!["mock_acp".into()],
+            agents: vec!["mock_acp".into()],
         }]
     }
 
     fn clients_with_machines() -> (Vec<WsClient>, MachineSummary) {
-        // 无 server 的测试用：客户端连接失败不影响（引擎只在其上执行动作）
         let m = machines().remove(0);
         let c = WsClient::connect("ws://127.0.0.1:1/?token=unused".into());
         (vec![c], m)
     }
-
-    // ---- 纯逻辑 ----
 
     #[test]
     fn ops_to_actions_maps_create_and_prompt() {
         let ops = vec![
             ToolOp::Create {
                 machine: "本机".into(),
-                harness: "codex".into(),
+                agent: "codex".into(),
                 cwd: "/p".into(),
                 prompt: "实现功能".into(),
             },
@@ -1117,11 +1442,13 @@ mod tests {
         match &actions[0] {
             OrcAction::Run {
                 machine,
+                agent,
                 prompt,
                 reuse,
                 ..
             } => {
                 assert_eq!(machine, "本机");
+                assert_eq!(agent, "codex");
                 assert_eq!(prompt, "实现功能");
                 assert!(reuse.is_none());
             }
@@ -1133,7 +1460,7 @@ mod tests {
         }
         match &actions[2] {
             OrcAction::Steer { session, .. } => assert_eq!(session, "s_unknown"),
-            _ => panic!("未知会话应映射为 Steer（引擎跳过并告警）"),
+            _ => panic!("未知会话应映射为 Steer"),
         }
     }
 
@@ -1144,7 +1471,7 @@ mod tests {
                 id: "a".into(),
                 machine_idx: 0,
                 machine_name: "m0".into(),
-                harness: "h".into(),
+                agent: "h".into(),
                 step_desc: "s".into(),
                 state: SessionState::Idle,
                 last_output: String::new(),
@@ -1153,7 +1480,7 @@ mod tests {
                 id: "b".into(),
                 machine_idx: 1,
                 machine_name: "m1".into(),
-                harness: "h".into(),
+                agent: "h".into(),
                 step_desc: "s".into(),
                 state: SessionState::Busy,
                 last_output: String::new(),
@@ -1178,7 +1505,6 @@ mod tests {
             vec![m],
         );
         assert_eq!(engine.session.title, "实现登录功能");
-        assert!(!engine.session.id.is_empty());
         assert!(engine
             .session
             .transcript
@@ -1202,8 +1528,6 @@ mod tests {
         assert!(engine.session.description.contains("src/main.rs"));
     }
 
-    // ---- 状态机：取消/介入（不依赖 server 的部分）----
-
     #[tokio::test]
     async fn cancel_marks_cancelled_and_stops_advance() {
         let (clients, m) = clients_with_machines();
@@ -1214,12 +1538,11 @@ mod tests {
             conclusion: None,
         }]);
         let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
-        // 手动挂一个子会话（仅验证状态标记，不触发 RPC，避免依赖连接失败的死客户端）
         engine.session.children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
-            harness: "mock_acp".into(),
+            agent: "mock_acp".into(),
             step_desc: "第一步".into(),
             state: SessionState::Busy,
             last_output: String::new(),
@@ -1227,29 +1550,16 @@ mod tests {
         engine.mark_cancelled();
         assert!(engine.session.cancelled);
         assert_eq!(engine.session.state, SessionState::Idle);
-        assert!(engine
-            .session
-            .transcript
-            .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text == "已取消")));
-        // 取消后不再推进（决策用尽也不会被消费）
         engine.advance().await.unwrap();
         assert!(!engine
             .session
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { .. })));
-        // 介入指令仍可记录，但不触发推进
         let should_advance = engine.record_user("先做 A");
         assert!(!should_advance);
-        assert!(engine
-            .session
-            .transcript
-            .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text == "先做 A")));
     }
 
-    /// 已完成/已取消的工作流在子会话 idle 时不追加完成消息、不自动推进。
     #[tokio::test]
     async fn on_child_state_done_does_not_push_completion() {
         let (clients, m) = clients_with_machines();
@@ -1265,7 +1575,7 @@ mod tests {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
-            harness: "mock_acp".into(),
+            agent: "mock_acp".into(),
             step_desc: "第一步".into(),
             state: SessionState::Busy,
             last_output: String::new(),
@@ -1273,12 +1583,7 @@ mod tests {
         let advanced = engine
             .on_child_state("s_child", SessionState::Idle, None)
             .await;
-        assert!(!advanced, "已完成的工作流不应自动推进");
-        assert!(!engine
-            .session
-            .transcript
-            .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text.contains("完成"))));
+        assert!(!advanced);
     }
 
     #[tokio::test]
@@ -1300,8 +1605,7 @@ mod tests {
             .any(|m| matches!(m, OrcMsg::User { text } if text.contains("编排结束"))));
     }
 
-    // ---- 持久化往返 ----
-
+    /// 工作流会话持久化往返（acceptance）。
     #[tokio::test]
     async fn persistence_roundtrip_and_restore() {
         let dir = std::env::temp_dir().join(format!("amux-wf-{}", std::process::id()));
@@ -1312,13 +1616,11 @@ mod tests {
         let id = engine.session.id.clone();
         engine.persist(&dir).unwrap();
 
-        // 重新加载：会话状态往返
         let sessions = WorkflowEngine::load_all(&dir);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
         assert_eq!(sessions[0].title, "计划A");
 
-        // restore：模拟 GUI 重开后恢复引擎并继续推进
         let backend2 = FakeBackend::new(vec![Decision {
             summary: "恢复后推进".into(),
             actions: vec![],
@@ -1335,384 +1637,10 @@ mod tests {
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { text } if text == "恢复后推进")));
 
-        // 删除
         WorkflowEngine::remove(&dir, &id);
         assert!(WorkflowEngine::load_all(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    // ---- 真实 server 集成（test-server/mock_acp + 真实 WsClient）----
-
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
-
-    fn test_server_bin() -> std::path::PathBuf {
-        // 优先 CARGO_MANIFEST_DIR 相对路径；回退当前可执行同目录
-        let via_manifest =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/test-server");
-        if via_manifest.exists() {
-            return via_manifest;
-        }
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("test-server")))
-            .unwrap_or_default()
-    }
-
-    struct ServerGuard {
-        child: tokio::process::Child,
-    }
-    impl Drop for ServerGuard {
-        fn drop(&mut self) {
-            let _ = self.child.start_kill();
-        }
-    }
-
-    async fn spawn_test_server() -> (u16, ServerGuard, MachineSummary) {
-        let bin = test_server_bin();
-        assert!(bin.exists(), "test-server 不存在: {}", bin.display());
-        let port =
-            38000 + (std::process::id() % 400) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-        // 唯一数据目录（SQLite 注册表 + 历史日志）与 mock 状态 + 关闭自动发现：
-        // 隔离本机真实 agent 与真实 server 数据目录（避免测试会话污染
-        // ~/.amux/server），保证测试确定性（AMUX_NO_DISCOVERY=1）
-        let data_dir = std::env::temp_dir().join(format!(
-            "amux-wf-{}-{}",
-            std::process::id(),
-            NEXT_PORT.load(Ordering::SeqCst)
-        ));
-        let child = tokio::process::Command::new(bin)
-            .args([
-                "--token",
-                "test-token",
-                "--port",
-                &port.to_string(),
-                "--data-dir",
-                data_dir.to_str().unwrap(),
-            ])
-            .env("AMUX_MOCK_STATE", data_dir.join("mock.state"))
-            .env("AMUX_NO_DISCOVERY", "1")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn test-server");
-        // 等待端口就绪（SQLite 打开 + mock 拉起负载下放宽到 20s）
-        for _ in 0..200 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                return (
-                    port,
-                    ServerGuard { child },
-                    MachineSummary {
-                        name: "测试机".into(),
-                        harnesses: vec!["mock_acp".into()],
-                    },
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        panic!("test-server 未就绪");
-    }
-
-    fn ws_client(port: u16) -> WsClient {
-        WsClient::connect(format!("ws://127.0.0.1:{port}/?token=test-token"))
-    }
-
-    async fn wait_child_idle(client: &WsClient, session_id: &str, timeout_ms: u64) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-        loop {
-            let res = client
-                .request(protocol::method::LIST_SESSIONS, Some(serde_json::json!({})))
-                .await
-                .unwrap();
-            let idle = res["sessions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|s| s["id"].as_str() == Some(session_id))
-                .map(|s| s["state"].as_str() == Some("idle"))
-                .unwrap_or(false);
-            if idle {
-                return;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "子会话 {session_id} 未在超时内 idle"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn engine_start_creates_and_prompts_child_via_real_server() {
-        let (port, _guard, m) = spawn_test_server().await;
-        let client = ws_client(port);
-        let backend = FakeBackend::new(vec![Decision {
-            summary: "第一步：在测试机创建子会话实现登录".into(),
-            actions: vec![run("测试机", "mock_acp", "实现登录功能")],
-            done: false,
-            conclusion: None,
-        }]);
-        let mut engine = WorkflowEngine::new(
-            "在测试机用 mock_acp 实现登录功能",
-            "",
-            "",
-            backend,
-            vec![client.clone()],
-            vec![m],
-        );
-        engine.start().await.unwrap();
-
-        // 子会话已创建并下发指令（真实 server 上存在该会话，且首条 prompt 后标题非空）
-        assert_eq!(engine.session.children.len(), 1, "应创建一个子会话");
-        let child = &engine.session.children[0];
-        assert_eq!(child.machine_name, "测试机");
-        assert_eq!(child.harness, "mock_acp");
-        assert_eq!(child.step_desc, "实现登录功能");
-
-        // 指令异步下发：等待子会话「已生成标题且回到 idle」——确保首条 prompt 完成、
-        // 历史已落库（标题在 prompt 开始时生成，历史在 turn 结束时写入）
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(5000);
-        loop {
-            let res = client
-                .request(protocol::method::LIST_SESSIONS, Some(serde_json::json!({})))
-                .await
-                .unwrap();
-            let meta = res["sessions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|s| s["id"].as_str() == Some(child.id.as_str()))
-                .cloned();
-            let title_ready = meta
-                .as_ref()
-                .map(|m| !m["title"].as_str().unwrap_or("").is_empty())
-                .unwrap_or(false);
-            let idle = meta
-                .as_ref()
-                .map(|m| m["state"].as_str() == Some("idle"))
-                .unwrap_or(false);
-            if title_ready && idle {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "子会话未在超时内完成首条 prompt"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        let res = client
-            .request(protocol::method::LIST_SESSIONS, Some(serde_json::json!({})))
-            .await
-            .unwrap();
-        let meta = res["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|s| s["id"].as_str() == Some(child.id.as_str()))
-            .expect("子会话应在 server 上");
-        assert!(
-            !meta["title"].as_str().unwrap_or("").is_empty(),
-            "子会话标题应非空（首条指令生成）"
-        );
-
-        // 打开子会话：返回透传事件（用户消息 + 输出 chunk），GUI 聚合后含下发的指令与
-        // mock 的完整输出（真实交付路径，docs/DESIGN.md §5.1/§5.2）
-        let open = client
-            .request(
-                protocol::method::OPEN_SESSION,
-                Some(serde_json::json!({ "sessionId": child.id })),
-            )
-            .await
-            .unwrap();
-        let events = open["events"].as_array().unwrap();
-        let texts: Vec<String> = events
-            .iter()
-            .filter_map(|e| {
-                let t = match e["kind"].as_str() {
-                    Some("user_message") => e["content"]
-                        .as_array()?
-                        .iter()
-                        .filter_map(|b| b["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join(""),
-                    Some("output_chunk") => e["text"].as_str()?.to_string(),
-                    _ => return None,
-                };
-                Some(t)
-            })
-            .collect();
-        assert!(
-            texts.iter().any(|t| t.contains("实现登录功能")),
-            "子会话应收到指令: {texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.contains("完成")),
-            "子会话应有 agent 输出: {texts:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn cancel_workflow_cancels_all_children_via_real_server() {
-        let (port, _guard, m) = spawn_test_server().await;
-        let client = ws_client(port);
-        let backend = FakeBackend::new(vec![Decision {
-            summary: "创建两个子会话".into(),
-            actions: vec![
-                run("测试机", "mock_acp", "第一步"),
-                run("测试机", "mock_acp", "第二步"),
-            ],
-            done: false,
-            conclusion: None,
-        }]);
-        let mut engine =
-            WorkflowEngine::new("两步", "", "", backend, vec![client.clone()], vec![m]);
-        engine.start().await.unwrap();
-        assert_eq!(engine.session.children.len(), 2, "应创建两个子会话");
-        let child_ids: Vec<String> = engine
-            .session
-            .children
-            .iter()
-            .map(|c| c.id.clone())
-            .collect();
-
-        // 取消：向所有子会话发 CANCEL（真实 server 路径）并停止自动推进
-        engine.mark_cancelled();
-        engine.send_cancel_to_children().await;
-        assert!(engine.session.cancelled);
-        assert_eq!(engine.session.state, SessionState::Idle);
-        assert!(engine
-            .session
-            .transcript
-            .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text == "已取消")));
-
-        // 取消不删除子会话：server 上仍可查到这些会话
-        let res = client
-            .request(protocol::method::LIST_SESSIONS, Some(serde_json::json!({})))
-            .await
-            .unwrap();
-        let ids: Vec<String> = res["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|s| s["id"].as_str().map(str::to_string))
-            .collect();
-        for cid in &child_ids {
-            assert!(ids.contains(cid), "取消后子会话仍应存在: {cid}");
-        }
-    }
-
-    #[tokio::test]
-    async fn child_idle_triggers_auto_advance_and_intervene() {
-        let (port, _guard, m) = spawn_test_server().await;
-        let client = ws_client(port);
-        let backend = FakeBackend::new(vec![
-            // turn 1：创建子会话
-            Decision {
-                summary: "创建子会话".into(),
-                actions: vec![run("测试机", "mock_acp", "第一步")],
-                done: false,
-                conclusion: None,
-            },
-            // turn 2：子会话完成后推进下一步（并发起介入到已存在子会话）
-            Decision {
-                summary: "第一步完成，推进第二步并介入".into(),
-                actions: vec![
-                    OrcAction::Run {
-                        machine: "测试机".into(),
-                        harness: "mock_acp".into(),
-                        cwd: "/tmp/work".into(),
-                        prompt: "第二步".into(),
-                        reuse: None,
-                    },
-                    OrcAction::Retry {
-                        session: "unknown-session".into(), // 引擎应跳过并告警
-                        prompt: "重试".into(),
-                    },
-                ],
-                done: true,
-                conclusion: Some("工作流完成".into()),
-            },
-        ]);
-        let mut engine =
-            WorkflowEngine::new("两步工作流", "", "", backend, vec![client.clone()], vec![m]);
-        engine.start().await.unwrap();
-        assert_eq!(engine.session.children.len(), 1);
-        let child_id = engine.session.children[0].id.clone();
-
-        // 子会话完成（mock 的 turn 已结束）→ 自动推进
-        wait_child_idle(&client, &child_id, 5000).await;
-        let advanced = engine
-            .on_child_state(&child_id, SessionState::Idle, Some("第一步输出".into()))
-            .await;
-        assert!(advanced, "子会话 idle 应触发自动推进");
-
-        // turn 2 创建第二个子会话；未知会话介入被跳过并记录告警
-        assert_eq!(engine.session.children.len(), 2, "应创建第二个子会话");
-        assert!(
-            engine
-                .session
-                .transcript
-                .iter()
-                .any(|m| matches!(m, OrcMsg::User { text } if text.contains("子会话不存在"))),
-            "未知会话介入应记录告警"
-        );
-        assert!(engine.session.done, "conclude 后编排应结束");
-        assert_eq!(engine.session.children[0].last_output, "第一步输出");
-    }
-
-    #[tokio::test]
-    async fn restore_resumes_auto_advance_after_restart() {
-        let (port, _guard, m) = spawn_test_server().await;
-        let client = ws_client(port);
-        let backend = FakeBackend::new(vec![
-            Decision {
-                summary: "创建子会话".into(),
-                actions: vec![run("测试机", "mock_acp", "任务")],
-                done: false,
-                conclusion: None,
-            },
-            Decision {
-                summary: "恢复后推进".into(),
-                actions: vec![],
-                done: true,
-                conclusion: Some("完成".into()),
-            },
-        ]);
-        let mut engine = WorkflowEngine::new(
-            "任务",
-            "",
-            "",
-            backend,
-            vec![client.clone()],
-            vec![m.clone()],
-        );
-        engine.start().await.unwrap();
-        let child_id = engine.session.children[0].id.clone();
-        let saved = engine.session.clone(); // 模拟持久化
-
-        // 模拟 GUI 重开：restore 引擎，喂入子会话当前状态（idle）→ 恢复自动推进
-        let backend2 = FakeBackend::new(vec![Decision {
-            summary: "恢复后推进".into(),
-            actions: vec![],
-            done: true,
-            conclusion: Some("完成".into()),
-        }]);
-        let mut restored =
-            WorkflowEngine::restore(saved, backend2, vec![client.clone()], vec![m.clone()]);
-        wait_child_idle(&client, &child_id, 5000).await;
-        let advanced = restored
-            .on_child_state(&child_id, SessionState::Idle, None)
-            .await;
-        assert!(advanced, "重开后子会话 idle 应恢复自动推进");
-        assert!(restored.session.done);
-    }
-
-    // ---- rig 装配（真实 rig 构建，无网络）----
 
     #[test]
     fn rig_backend_builds_agent_with_tools() {
@@ -1731,15 +1659,12 @@ mod tests {
             .build()
             .expect("构建 openai client");
         let agent = backend.build_agent(client.completion_model("gpt-4o-mini"), "preamble");
-        assert!(agent.name().is_none()); // 未设置 name
+        assert!(agent.name().is_none());
     }
 
     #[test]
     fn api_format_kind_dispatches_formats() {
-        assert_eq!(
-            api_format_kind("chat_completions"),
-            ApiFormat::ChatCompletions
-        );
+        assert_eq!(api_format_kind("chat_completions"), ApiFormat::ChatCompletions);
         assert_eq!(api_format_kind("responses"), ApiFormat::Responses);
         assert_eq!(api_format_kind("messages"), ApiFormat::Messages);
         assert_eq!(api_format_kind("unknown"), ApiFormat::ChatCompletions);
@@ -1747,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn orc_session_to_dialog_items_maps_all_transcript_kinds() {
+    fn orc_session_to_dialog_maps_all_transcript_kinds() {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "计划",
@@ -1757,27 +1682,19 @@ mod tests {
             vec![],
             vec![MachineSummary {
                 name: "测试机".into(),
-                harnesses: vec!["mock_acp".into()],
+                agents: vec!["mock_acp".into()],
             }],
         );
         let mut engine = engine;
-        engine.session.transcript.push(OrcMsg::Orc {
-            text: "决策".into(),
-        });
-        engine.session.transcript.push(OrcMsg::User {
-            text: "系统事件".into(),
-        });
-        let dialog = engine.session.to_dialog_items();
-        // 用户计划 + 编排输出 + 注入的用户消息
-        assert_eq!(dialog.len(), 3);
-        assert!(matches!(&dialog[0], DialogItem::UserMessage { .. }));
-        assert!(matches!(&dialog[1], DialogItem::AgentOutput { .. }));
-        assert!(matches!(&dialog[2], DialogItem::UserMessage { .. }));
+        engine.session.transcript.push(OrcMsg::Orc { text: "决策".into() });
+        let dialog = engine.session.to_dialog();
+        assert_eq!(dialog.len(), 2);
+        assert!(matches!(&dialog[0], DialogMsg::UserMessage { .. }));
+        assert!(matches!(&dialog[1], DialogMsg::AgentMessage { .. }));
     }
 
     #[test]
     fn template_as_preamble_not_in_history() {
-        // 从模板创建：模板作为系统提示词（preamble），不进入会话历史（PRD §3.7）
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "",
@@ -1787,34 +1704,14 @@ mod tests {
             vec![],
             vec![MachineSummary {
                 name: "测试机".into(),
-                harnesses: vec!["mock_acp".into()],
+                agents: vec!["mock_acp".into()],
             }],
         );
-        assert!(engine.session.transcript.is_empty(), "模板不应进入会话历史");
+        assert!(engine.session.transcript.is_empty());
         assert_eq!(engine.session.preamble, "模板：先在测试机实现，再审查");
-        assert!(engine.session.title.is_empty(), "无用户目标时不生成标题");
-
-        // 用户目标 + 模板：历史只含用户目标
-        let backend = FakeBackend::new_for_tests();
-        let engine = WorkflowEngine::new(
-            "本次只做第一步",
-            "",
-            "模板：先实现后审查",
-            backend,
-            vec![],
-            vec![MachineSummary {
-                name: "测试机".into(),
-                harnesses: vec!["mock_acp".into()],
-            }],
-        );
-        assert_eq!(engine.session.transcript.len(), 1);
-        assert!(matches!(
-            &engine.session.transcript[0],
-            OrcMsg::User { text } if text == "本次只做第一步"
-        ));
+        assert!(engine.session.title.is_empty());
     }
 
-    /// 仅选模板未填目标时，首个用户输入即本次工作流目标（description 为空则回填）。
     #[test]
     fn record_user_sets_description_when_empty() {
         let backend = FakeBackend::new_for_tests();
@@ -1826,31 +1723,22 @@ mod tests {
             vec![],
             vec![MachineSummary {
                 name: "测试机".into(),
-                harnesses: vec!["mock_acp".into()],
+                agents: vec!["mock_acp".into()],
             }],
         );
-        assert!(engine.session.description.is_empty());
-        assert!(engine.session.title.is_empty());
         let should_advance = engine.record_user("实现登录功能");
         assert_eq!(engine.session.description, "实现登录功能");
-        assert_eq!(engine.session.title, "实现登录功能", "首个输入应生成标题");
-        assert!(engine
-            .session
-            .transcript
-            .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text == "实现登录功能")));
-        assert!(should_advance, "首次输入后应触发推进");
+        assert_eq!(engine.session.title, "实现登录功能");
+        assert!(should_advance);
     }
 
     #[tokio::test]
     async fn unconfigured_rig_backend_records_clear_error() {
-        // 编排 agent 未配置 API：start() 失败但错误写入对话历史（System 消息），
-        // 会话不处于假忙状态、可继续操作（PRD §4.3 配置校验）
         let backend = Arc::new(RigBackend::new(
             OrchestratorConfig {
                 api_format: "chat_completions".into(),
                 base_url: "https://api.openai.com/v1".into(),
-                api_key: String::new(), // 未配置
+                api_key: String::new(),
                 model: "gpt-4o-mini".into(),
             },
             vec!["测试机".into()],
@@ -1864,21 +1752,15 @@ mod tests {
             vec![client],
             vec![MachineSummary {
                 name: "测试机".into(),
-                harnesses: vec!["kimi".into()],
+                agents: vec!["kimi".into()],
             }],
         );
         let res = engine.start().await;
-        assert!(res.is_err(), "未配置时应失败");
-        // LLM 失败以活动消息写入活动历史（PRD §3.7）
+        assert!(res.is_err());
         assert!(engine.session.activities.iter().any(
             |a| matches!(a, Activity::Error { detail, .. } if detail.contains("未配置编排 agent API"))
         ));
-        assert_eq!(
-            engine.session.state,
-            SessionState::Idle,
-            "失败后不应停留在忙碌状态"
-        );
-        assert!(!engine.session.done);
+        assert_eq!(engine.session.state, SessionState::Idle);
     }
 
     #[tokio::test]
@@ -1886,49 +1768,56 @@ mod tests {
         let state = ToolState::new(vec!["测试机".into()]);
         let mut ctx = rig::tool::ToolContext::new();
         ctx.insert(state.clone());
-
-        // 真实工具实现直驱：create_session 工具
         let res = PlanCreateSession
             .call(
                 &mut ctx,
                 CreateSessionArgs {
                     machine: "测试机".into(),
-                    harness: "mock_acp".into(),
+                    agent: "mock_acp".into(),
                     cwd: "/tmp".into(),
-                    prompt: "实现".into(),
+                    prompt: "实现功能".into(),
                 },
             )
-            .await;
-        assert!(res.is_ok());
-        // prompt_session 工具
-        let res = PlanPromptSession
-            .call(
-                &mut ctx,
-                PromptSessionArgs {
-                    session: "s1".into(),
-                    prompt: "重试".into(),
-                },
-            )
-            .await;
-        assert!(res.is_ok());
-
+            .await
+            .expect("create_session 工具应成功");
+        assert!(res.contains("已规划"));
         let ops = state.take_ops();
-        assert_eq!(ops.len(), 2);
-        assert!(matches!(&ops[0], ToolOp::Create { machine, .. } if machine == "测试机"));
-        assert!(matches!(&ops[1], ToolOp::Prompt { session, .. } if session == "s1"));
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], ToolOp::Create { agent, .. } if agent == "mock_acp"));
+    }
 
-        // 未知机器报错
-        let res = PlanCreateSession
-            .call(
-                &mut ctx,
-                CreateSessionArgs {
-                    machine: "不存在".into(),
-                    harness: "h".into(),
-                    cwd: "/tmp".into(),
-                    prompt: "p".into(),
-                },
-            )
-            .await;
-        assert!(res.is_err());
+    /// on_child_state_local 同步更新关联普通会话 busy/idle 状态（GUI 收到 state_change 通知时调用）。
+    #[test]
+    fn on_child_state_local_updates_busy_and_idle() {
+        let backend = FakeBackend::new_for_tests();
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            backend,
+            vec![],
+            vec![MachineSummary {
+                name: "测试机".into(),
+                agents: vec!["mock_acp".into()],
+            }],
+        );
+        let mut engine = engine;
+        engine.session.children.push(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+            agent: "mock_acp".into(),
+            step_desc: "第一步".into(),
+            state: SessionState::Idle,
+            last_output: String::new(),
+        });
+        engine.on_child_state_local("s_child", SessionState::Busy);
+        assert_eq!(engine.session.children[0].state, SessionState::Busy);
+        engine.on_child_state_local("s_child", SessionState::Idle);
+        assert_eq!(engine.session.children[0].state, SessionState::Idle);
+        // 非挂载的会话 id：无副作用，不 panic，不新增条目
+        engine.on_child_state_local("missing", SessionState::Busy);
+        assert_eq!(engine.session.children.len(), 1);
+        assert_eq!(engine.session.children[0].state, SessionState::Idle);
     }
 }

@@ -1,6 +1,6 @@
 [package]
-name = "gui"
-description = "GPUI 桌面应用：三面板视图（Dock 布局）、对话流、会话活动页、diff 编辑器、侧边栏、设置页；会话历史本地缓存"
+name = "desktop"
+description = "GPUI 桌面应用（docs/DESIGN.md / PRD §桌面 GUI 设计）：三面板视图、对话流、会话活动页、diff 编辑器、侧边栏、设置页；会话历史本地缓存"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,7 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 uuid.workspace = true
 futures-util = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # GPUI（Zed 主线 git）+ gpui-component（longbridge）
 # 注意：跟踪 Zed 主线，API 可能随上游变化（docs/DESIGN.md §7）

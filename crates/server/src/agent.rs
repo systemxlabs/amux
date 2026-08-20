@@ -1,13 +1,13 @@
-//! Agent 驱动抽象（docs/DESIGN.md §7.2/§7.3）：server 与 agent harness 的唯一接口。
+//! Agent 驱动抽象（docs/DESIGN.md §7.2/§7.3）：server 与 agent 的唯一接口。
 //! 本模块提供：
 //! - `AcpAgentDriver`：真实 ACP v1 对接（官方 SDK `agent-client-protocol`，
 //!   `AcpAgent` stdio 传输 + typed 请求/通知，`codex-acp` / `claude-acp` / `kimi acp`）
 //! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
-//! - `AgentRegistry`：按 harness 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
+//! - `AgentRegistry`：按 agent 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
 //!   agent（启动即拉起并复用，docs/DESIGN.md §4.1/§7.3；拉起失败标记不可用；
-//!   运行期新发现的兜底惰性拉起；PRD §3.3「可执行路径自动发现、不手动指定」）+ 默认模型配置
+//!   运行期新发现的兜底惰性拉起）
 //!
-//! ACP v1 语义（docs/DESIGN.md §7.2）：session/new、resume、prompt、cancel、delete 等
+//! ACP v1 语义（docs/DESIGN.md §7.2）：session/new、resume、prompt、cancel、close 等
 //! 方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
 //!
 //! AcpAgentDriver 使用**专用 exec 线程**承载全部异步 IO（官方 SDK 连接、子进程 stdio、
@@ -18,21 +18,22 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock as AcpContentBlock, DeleteSessionRequest, InitializeRequest,
-    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    BlobResourceContents, CancelNotification, CloseSessionRequest, ContentBlock as AcpContentBlock,
+    EmbeddedResource, EmbeddedResourceResource, InitializeRequest, NewSessionRequest,
+    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    TextContent, ToolKind,
+    TextContent, TextResourceContents, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{
-    AcpAgent, Agent, Client, ConnectionTo, JsonRpcRequest, JsonRpcResponse,
+    AcpAgent, ConnectionTo, JsonRpcRequest, JsonRpcResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use protocol::{ContentBlock, HarnessInfo, PassthroughEvent, SessionState};
+use protocol::{AgentInfo, ContentBlock, SessionState};
 
 /// turn 过程中的 agent 事件（docs/DESIGN.md §5.1：server 透传，GUI 应用聚合）。
 #[derive(Debug, Clone)]
@@ -58,47 +59,19 @@ pub enum AgentEvent {
     TurnEnded,
 }
 
-/// 把 driver 的 turn 事件映射为透传事件（server 不聚合，原样透传）。
-pub fn passthrough_event(ev: AgentEvent, ts: u64) -> PassthroughEvent {
-    match ev {
-        AgentEvent::OutputChunk(s) => PassthroughEvent::OutputChunk {
-            text: s,
-            timestamp: ts,
-        },
-        AgentEvent::UserMessage(c) => PassthroughEvent::UserMessage {
-            content: vec![ContentBlock::Text { text: c }],
-            timestamp: ts,
-        },
-        AgentEvent::Thinking(c) => PassthroughEvent::ThinkingChunk {
-            content: c,
-            timestamp: ts,
-        },
-        AgentEvent::ToolCall {
-            name,
-            title,
-            content,
-        } => PassthroughEvent::ToolCall {
-            name,
-            title,
-            content,
-            timestamp: ts,
-        },
-        AgentEvent::Compaction(d) => PassthroughEvent::Compaction {
-            detail: d,
-            timestamp: ts,
-        },
-        AgentEvent::SessionInfo { state } => PassthroughEvent::SessionInfo {
-            state,
-            timestamp: ts,
-        },
-        AgentEvent::TurnEnded => PassthroughEvent::TurnEnded { timestamp: ts },
-    }
+/// 拉起的统计（server 启动日志用；docs/DESIGN.md §4.1/§7.3）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LaunchSummary {
+    /// 成功拉起的 ACP server 数
+    pub started: usize,
+    /// 拉起失败的 agent 数（标记为**不可用**，agent.list 的 available=false）
+    pub failed: usize,
 }
 
-/// 与单个 agent harness 的驱动接口（ACP v1 语义的投影）。
+/// 与单个 agent 的驱动接口（ACP v1 语义的投影）。
 pub trait AgentDriver: Send + Sync {
     /// 新建会话，返回 agent 侧会话 id
-    fn create_session(&self, cwd: &str, model: Option<&str>) -> Result<String, String>;
+    fn create_session(&self, cwd: &str) -> Result<String, String>;
     /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史；
     /// 同一进程内对同一会话幂等——已恢复过则直接成功）
     fn resume_session(&self, agent_session_id: &str, cwd: &str) -> Result<(), String>;
@@ -110,17 +83,19 @@ pub trait AgentDriver: Send + Sync {
     ) -> mpsc::Receiver<AgentEvent>;
     /// 取消进行中的工作
     fn cancel(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 删除会话（历史一并移除）
-    fn delete(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 该 agent 安装的 skills 列表（PRD §3.3；agent 不支持时返回空列表）
-    #[allow(dead_code)]
+    /// 关闭会话（删除/长时间无活动时释放 agent 侧资源，docs/DESIGN.md「ACP 生命周期」：
+    /// server 经 ACP `session/close` 关闭 agent 侧会话）
+    fn close(&self, agent_session_id: &str) -> Result<(), String>;
+    /// 该 agent 安装的 skills 列表（agent 不支持时返回空列表）
     fn list_skills(&self) -> Vec<String>;
+    /// 关闭驱动自身（server 退出时释放 ACP 子进程资源，docs/DESIGN.md「ACP Server 生命周期」）
+    fn shutdown(&self);
 }
 
 #[allow(dead_code)]
 pub type SharedDriver = Arc<dyn AgentDriver>;
 
-// ---- AgentRegistry：harness 名 → 驱动 ----
+// ---- AgentRegistry：agent 名 → 驱动 ----
 
 /// 自动发现的 ACP agent（含 ACP 子命令参数 / npx 包装器参数与附加环境变量）。
 #[derive(Debug, Clone)]
@@ -132,54 +107,39 @@ pub struct DiscoveredAgent {
     pub env: Vec<(String, String)>,
 }
 
-/// 启动拉起的统计（server 启动日志用；docs/DESIGN.md §4.1/§7.3）。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LaunchSummary {
-    /// 成功拉起的 ACP server 数
-    pub started: usize,
-    /// 拉起失败的 agent 数（标记为**不可用**，get_info 的 available=false）
-    pub failed: usize,
-}
-
-/// harness 注册表（PRD §3.3：agent 自动发现，可执行路径不手动指定）：
+/// agent 注册表（PRD §3.3：agent 自动发现，可执行路径不手动指定）：
 ///
-/// - `--agent` 指定的驱动（harness 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
+/// - `--agent` 指定的驱动（agent 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
 /// - 自动发现（无需 `--agent`，docs/DESIGN.md §7.3）：
 ///   - 已知 CLI 的 `acp` 子命令探测（如 `kimi acp`，ACP 原生）
 ///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
 ///   - 发现的 agent 在 server 启动时**直接拉起**（`launch_discovered`，docs/DESIGN.md
 ///     §4.1/§7.3：ACP server 随 server 启动一起拉起，后续 `driver_for` 复用缓存驱动）；
-///     **拉起失败的 agent 标记为不可用**（get_info 的 available=false，使用时报明确错误）；
+///     **拉起失败的 agent 标记为不可用**（agent.list 的 available=false，使用时报明确错误）；
 ///     运行期新发现的 agent 仍走惰性拉起兜底
-/// - 演示兜底：既无 `--agent` 又无任何发现时，用内存 Stub（接受任意 harness 名）
-///
-/// 默认模型按 harness 持久化到数据目录（`agent-models.json`），get_info 一并返回。
+/// - 演示兜底：既无 `--agent` 又无任何发现时，用内存 Stub（接受任意 agent 名）
 pub struct AgentRegistry {
-    /// 演示模式：任意 harness 名都解析到同一个 Stub 驱动（内部可变，随发现刷新）
+    /// 演示模式：任意 agent 名都解析到同一个 Stub 驱动（内部可变，随发现刷新）
     stub: std::sync::Mutex<Option<SharedDriver>>,
     /// 测试强制 stub：跳过运行期发现（避免本机 PATH 干扰单测）
     force_stub: bool,
     /// 禁用运行期自动发现（`AMUX_NO_DISCOVERY=1`）：只使用 `--agent` 显式配置的 agent。
     /// 供受限环境与测试隔离（避免拉起本机未配置的 agent 并恢复其会话）。
     no_discovery: bool,
-    /// 配置驱动：harness 名 + 驱动
+    /// 配置驱动：agent 名 + 驱动
     configured: Option<(String, SharedDriver)>,
     /// 自动发现的 agent（不含已配置的；可运行期刷新）
     discovered: std::sync::Mutex<Vec<DiscoveredAgent>>,
     /// 已拉起的发现驱动（启动拉起 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
     spawned: std::sync::Mutex<HashMap<String, SharedDriver>>,
-    /// 启动时拉起失败的 agent（标记为不可用：get_info available=false、driver_for 报错）
+    /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 available=false、driver_for 报错）
     unavailable: std::sync::Mutex<HashSet<String>>,
-    /// 按 harness 的默认模型配置
-    models: std::sync::Mutex<HashMap<String, Option<String>>>,
-    model_file: std::path::PathBuf,
 }
 
 impl AgentRegistry {
     /// 构建注册表（生产路径：自动发现本机 ACP agent）。
     /// - `configured`：`--agent` 显式指定的驱动，可为 None（由自动发现接管）
-    /// - `model_file`：默认模型配置的落盘路径
-    pub fn new(configured: Option<(String, SharedDriver)>, model_file: std::path::PathBuf) -> Self {
+    pub fn new(configured: Option<(String, SharedDriver)>) -> Self {
         let no_discovery = std::env::var("AMUX_NO_DISCOVERY")
             .map(|v| v == "1")
             .unwrap_or(false);
@@ -191,8 +151,6 @@ impl AgentRegistry {
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
             unavailable: std::sync::Mutex::new(HashSet::new()),
-            models: std::sync::Mutex::new(load_models(&model_file)),
-            model_file,
         };
         if !no_discovery {
             registry.refresh_discovery();
@@ -200,7 +158,7 @@ impl AgentRegistry {
         registry
     }
 
-    /// 重新扫描本机 ACP agent（运行期安装的新 agent 经 get_info 刷新即可发现，PRD §3.3）。
+    /// 重新扫描本机 ACP agent（运行期安装的新 agent 经 agent.list 刷新即可发现，PRD §3.3）。
     /// 合并新发现的 agent，保留已配置/已发现条目；无任何 agent 且无配置时启用 stub 兜底。
     /// `AMUX_NO_DISCOVERY=1` 时跳过扫描（仅 stub 兜底逻辑仍生效）。
     fn refresh_discovery(&self) {
@@ -239,7 +197,7 @@ impl AgentRegistry {
         };
     }
 
-    /// 测试构造：忽略本机 PATH 发现，强制 stub 演示模式（harness 任意）。
+    /// 测试构造：忽略本机 PATH 发现，强制 stub 演示模式（agent 任意）。
     #[cfg(test)]
     pub fn new_for_tests() -> Self {
         AgentRegistry {
@@ -250,8 +208,6 @@ impl AgentRegistry {
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
             unavailable: std::sync::Mutex::new(HashSet::new()),
-            models: std::sync::Mutex::new(HashMap::new()),
-            model_file: std::path::PathBuf::new(),
         }
     }
 
@@ -266,19 +222,12 @@ impl AgentRegistry {
             discovered: std::sync::Mutex::new(Vec::new()),
             spawned: std::sync::Mutex::new(HashMap::new()),
             unavailable: std::sync::Mutex::new(HashSet::new()),
-            models: std::sync::Mutex::new(HashMap::new()),
-            model_file: std::path::PathBuf::new(),
         }
     }
 
-    /// get_info 的 harness 列表（available + 默认模型）；先运行期刷新一次发现。
-    /// **启动时拉起失败的 agent 标记为不可用**（available=false）。
-    pub fn harnesses(&self) -> Vec<HarnessInfo> {
+    /// `agent.list` 的 agent 列表（名称 + 可用性）。**启动时拉起失败的 agent 标记为不可用**。
+    pub fn list_agents(&self) -> Vec<AgentInfo> {
         self.refresh_discovery();
-        let models = self
-            .models
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）");
         let discovered = self
             .discovered
             .lock()
@@ -287,12 +236,11 @@ impl AgentRegistry {
             .unavailable
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）");
-        let mut out: Vec<HarnessInfo> = Vec::new();
+        let mut out: Vec<AgentInfo> = Vec::new();
         if let Some((name, _)) = &self.configured {
-            out.push(HarnessInfo {
+            out.push(AgentInfo {
                 name: name.clone(),
                 available: true,
-                default_model: models.get(name).cloned().flatten(),
             });
         } else if self
             .stub
@@ -300,24 +248,22 @@ impl AgentRegistry {
             .expect("Mutex 中毒（临界区内不应 panic）")
             .is_some()
         {
-            out.push(HarnessInfo {
+            out.push(AgentInfo {
                 name: "stub".into(),
                 available: true,
-                default_model: models.get("stub").cloned().flatten(),
             });
         }
         for d in discovered.iter() {
-            out.push(HarnessInfo {
+            out.push(AgentInfo {
                 name: d.name.clone(),
                 available: !unavailable.contains(&d.name),
-                default_model: models.get(&d.name).cloned().flatten(),
             });
         }
         out
     }
 
-    /// 按 harness 名解析驱动；未知 harness 报错（HARNESS_UNAVAILABLE）。
-    /// 未知 harness 时先运行期刷新一次发现（新装的 agent 无需重启即可用）。
+    /// 按 agent 名解析驱动；未知 agent 报错（agent 不可用/未发现）。
+    /// 未知 agent 时先运行期刷新一次发现（新装的 agent 无需重启即可用）。
     /// 启动时已拉起的驱动直接复用缓存（不再二次 spawn）；运行期新发现或未拉起的
     /// 走共享 spawn-and-cache 惰性拉起；**启动时拉起失败的 agent（不可用）直接报错**。
     pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
@@ -378,7 +324,7 @@ impl AgentRegistry {
     /// 后续 `driver_for` 直接复用、不再二次 spawn。
     ///
     /// 单 agent 拉起失败**不致命且标记为不可用**：只记录错误并把该 harness 记入
-    /// `unavailable`（get_info 的 available=false，`driver_for` 返回明确错误、不尝试
+    /// `unavailable`（agent.list 的 available=false，`driver_for` 返回明确错误、不尝试
     /// 再次拉起），server 正常启动、其余 agent 正常使用；重启 server 后重新发现与拉起。
     /// 尊重 `AMUX_NO_DISCOVERY=1` 与 stub/force_stub 模式（无发现则无需拉起）。
     pub fn launch_discovered(&self) -> LaunchSummary {
@@ -406,7 +352,7 @@ impl AgentRegistry {
                     summary.started += 1;
                     protocol::log::info(
                         "server.launch",
-                        format!("已拉起 ACP server: {}（harness={}）", d.bin, d.name),
+                        format!("已拉起 ACP server: {}（agent={}）", d.bin, d.name),
                     );
                 }
                 Err(e) => {
@@ -418,7 +364,7 @@ impl AgentRegistry {
                     protocol::log::error(
                         "server.launch",
                         format!(
-                            "ACP server 拉起失败（harness={}，已标记不可用）: {e}",
+                            "ACP server 拉起失败（agent={}，已标记不可用）: {e}",
                             d.name
                         ),
                     );
@@ -428,9 +374,10 @@ impl AgentRegistry {
         summary
     }
 
-    /// 手动重试拉起指定 harness（GUI 设置页触发，PRD §3.3/§4.3）：
-    /// 移除不可用标记 → 重新发现 → 尝试拉起；再次失败则重新标记不可用。
-    pub fn retry_harness(&self, harness: &str) -> Result<(), String> {
+    /// 手动重试拉起指定 agent（`agent.restart`，docs/DESIGN.md「ACP Server 生命周期」：
+    /// 用户可从应用侧重启某一 ACP Server）：移除不可用标记 → 重新发现 → 尝试拉起；
+    /// 再次失败则重新标记不可用。
+    pub fn restart_agent(&self, harness: &str) -> Result<(), String> {
         self.unavailable
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
@@ -450,7 +397,7 @@ impl AgentRegistry {
             Ok(_) => {
                 protocol::log::info(
                     "server.launch",
-                    format!("手动重试拉起成功：{}（harness={}）", d.bin, d.name),
+                    format!("手动重启成功：{}（agent={}）", d.bin, d.name),
                 );
                 Ok(())
             }
@@ -461,51 +408,31 @@ impl AgentRegistry {
                     .insert(harness.to_string());
                 protocol::log::error(
                     "server.launch",
-                    format!("手动重试拉起失败（harness={}）: {e}", d.name),
+                    format!("手动重启失败（agent={}）: {e}", d.name),
                 );
                 Err(e)
             }
         }
     }
 
-    /// 查询默认模型（get_info 用）。
-    #[allow(dead_code)]
-    pub fn default_model(&self, harness: &str) -> Option<String> {
-        self.models
+    /// 关闭所有已拉起的 ACP 驱动（docs/DESIGN.md「ACP Server 生命周期」：
+    /// Server 关闭时释放 ACP 子进程资源）。
+    pub fn shutdown_all(&self) {
+        if let Some((_, d)) = &self.configured {
+            d.shutdown();
+        }
+        if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）") {
+            stub.shutdown();
+        }
+        let spawned = self
+            .spawned
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
-            .get(harness)
-            .cloned()
-            .flatten()
-    }
-
-    /// 配置默认模型并落盘（PRD §3.3）。
-    pub fn set_default_model(&self, harness: &str, model: Option<String>) {
-        self.models
-            .lock()
-            .unwrap()
-            .insert(harness.to_string(), model);
-        self.save_models();
-    }
-
-    fn save_models(&self) {
-        let models = self
-            .models
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）");
-        let json = serde_json::to_string_pretty(&*models).unwrap_or_default();
-        if let Some(parent) = self.model_file.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            .clone();
+        for (_, d) in spawned {
+            d.shutdown();
         }
-        let _ = std::fs::write(&self.model_file, json);
     }
-}
-
-fn load_models(path: &std::path::Path) -> HashMap<String, Option<String>> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<HashMap<String, Option<String>>>(&s).ok())
-        .unwrap_or_default()
 }
 
 /// 自动发现 ACP agent（PRD §3.3：可执行路径自动发现、不手动指定；docs/DESIGN.md §7.3）：
@@ -632,7 +559,8 @@ enum ExecReq {
 
 /// ACP v1 客户端（官方 SDK stdio 传输，docs/DESIGN.md §9）。
 pub struct AcpAgentDriver {
-    exec_tx: std::sync::mpsc::SyncSender<ExecReq>,
+    /// 主线程 → exec 线程的请求发送端；shutdown 时置 None 以优雅结束 exec 线程
+    exec_tx: Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>,
     /// 会话事件路由：agent sessionId -> prompt 的事件接收端
     routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
     /// create 时记录的会话 cwd（resume 需要）
@@ -683,7 +611,7 @@ impl AcpAgentDriver {
             }
         }
         Ok(AcpAgentDriver {
-            exec_tx,
+            exec_tx: Mutex::new(Some(exec_tx)),
             routes,
             cwds: Arc::new(Mutex::new(HashMap::new())),
             resumed: Arc::new(Mutex::new(HashSet::new())),
@@ -691,10 +619,18 @@ impl AcpAgentDriver {
         })
     }
 
+    fn sender(&self) -> Result<std::sync::mpsc::SyncSender<ExecReq>, String> {
+        self.exec_tx
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .clone()
+            .ok_or_else(|| "agent 已关闭".to_string())
+    }
+
     /// 同步方法调用：请求发往 exec 线程，阻塞等待响应。
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Value, String>>(1);
-        self.exec_tx
+        self.sender()?
             .send(ExecReq::Call {
                 method: method.to_string(),
                 params,
@@ -706,7 +642,7 @@ impl AcpAgentDriver {
 }
 
 impl AgentDriver for AcpAgentDriver {
-    fn create_session(&self, cwd: &str, _model: Option<&str>) -> Result<String, String> {
+    fn create_session(&self, cwd: &str) -> Result<String, String> {
         let res = self.call("session/new", json!({ "cwd": cwd, "mcpServers": [] }))?;
         let sid = res
             .get("sessionId")
@@ -760,8 +696,14 @@ impl AgentDriver for AcpAgentDriver {
             prompt: input,
             routes: self.routes.clone(),
         };
-        let _ = self.exec_tx.send(req);
+        if let Ok(sender) = self.sender() {
+            let _ = sender.send(req);
+        }
         rx
+    }
+
+    fn shutdown(&self) {
+        let _ = self.exec_tx.lock().unwrap().take();
     }
 
     fn cancel(&self, agent_session_id: &str) -> Result<(), String> {
@@ -769,7 +711,7 @@ impl AgentDriver for AcpAgentDriver {
             .map(|_| ())
     }
 
-    fn delete(&self, agent_session_id: &str) -> Result<(), String> {
+    fn close(&self, agent_session_id: &str) -> Result<(), String> {
         self.cwds
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
@@ -778,7 +720,7 @@ impl AgentDriver for AcpAgentDriver {
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .remove(agent_session_id);
-        self.call("session/delete", json!({ "sessionId": agent_session_id }))
+        self.call("session/close", json!({ "sessionId": agent_session_id }))
             .map(|_| ())
     }
 
@@ -838,9 +780,6 @@ fn pick_approve_option(options: &[PermissionOption]) -> Option<PermissionOptionI
         .map(|o| o.option_id.clone())
 }
 
-/// 就绪握手信号：一次性取出（spawn 侧 take 后置空）。
-type ReadySignal = Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<(), String>>>>>;
-
 /// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
 /// `ready_tx`：就绪握手——连接建立（子进程拉起）且 initialize 握手完成（成功或
 /// 协议级失败）后发送 `Ok`；若连接在建立前就失败（二进制缺失 / 进程立即退出），
@@ -887,11 +826,24 @@ async fn exec_main(
 
     // 就绪信号：main_fn 启动（子进程已拉起、连接已建立）后完成 initialize 握手即报告
     // Ok——协议级失败（agent 存活但不实现 initialize）不致命、仍视为拉起成功；若握手失败
-    // 且连接已关闭（进程立即退出等传输层失败）则不报告，交由 connect_with 结果补报 Err。
-    let ready: ReadySignal = Arc::new(std::sync::Mutex::new(Some(ready_tx)));
-    let ready_main = ready.clone();
+    // 且连接已关闭（进程立即退出），在 connect_with 结束后补报为 spawn 失败。
+    let result = connect_main(agent, &mut req_rx, routes, &ready_tx).await;
 
-    let outcome = Client
+    // 若 main_fn 从未报告就绪（连接建立前传输层失败：二进制缺失 / 进程立即退出 /
+    // npx 不可用 / 无网络），把 connect_with 的结果补报为 spawn 失败；若已报过就绪，
+    // 之后的连接异常仅记录，不影响已缓存的驱动。
+    if let core::result::Result::Err(e) = &result {
+        protocol::log::error("acp", format!("ACP 连接异常结束: {e}"));
+    }
+}
+
+async fn connect_main(
+    agent: AcpAgent,
+    req_rx: &mut mpsc::Receiver<ExecReq>,
+    routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
+    ready_tx: &std::sync::mpsc::Sender<Result<(), String>>,
+) -> agent_client_protocol::Result<()> {
+    agent_client_protocol::Client
         .builder()
         .name("amux-server")
         .on_receive_notification(
@@ -907,18 +859,17 @@ async fn exec_main(
                 // 必须选 allow 类选项：claude-acp 等包装器的选项列表**第一项往往是
                 // 「Deny/reject」**，选第一个会被 agent 误判为用户拒绝
                 // （"User refused permission to run tool"）。
-                match pick_approve_option(&request.options) {
-                    Some(id) => responder.respond(RequestPermissionResponse::new(
+                if let Some(id) = pick_approve_option(&request.options) {
+                    let _ = responder.respond(RequestPermissionResponse::new(
                         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
-                    )),
-                    None => responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Cancelled,
-                    )),
+                    ));
                 }
+                Ok(())
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(agent, |cx: ConnectionTo<Agent>| async move {
+        .connect_with(agent, |cx: ConnectionTo<agent_client_protocol::Agent>| async move {
+            let req_rx = req_rx;
             // 初始化握手（版本协商）。失败需区分两种情形：
             // - **协议级失败**（agent 存活但不实现 initialize，如返回 method not
             //   found）：仅记录、连接保持可用，视为拉起成功；
@@ -930,11 +881,11 @@ async fn exec_main(
                 .block_task()
                 .await
             {
-                Ok(_) => {
+                core::result::Result::Ok(_) => {
                     protocol::log::debug("acp", "initialize 完成");
-                    Ok(())
+                    core::result::Result::Ok(())
                 }
-                Err(e) => {
+                core::result::Result::Err(e) => {
                     let alive = tokio::time::timeout(
                         std::time::Duration::from_millis(500),
                         cx.incoming_closed(),
@@ -943,19 +894,13 @@ async fn exec_main(
                     .is_err();
                     if alive {
                         protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
-                        Ok(())
+                        core::result::Result::Ok(())
                     } else {
-                        Err(format!("initialize 握手失败（连接已关闭）: {e}"))
+                        core::result::Result::Err(format!("initialize 握手失败（连接已关闭）: {e}"))
                     }
                 }
             };
-            if let Some(tx) = ready_main
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .take()
-            {
-                let _ = tx.send(init_result);
-            }
+            let _ = ready_tx.send(init_result);
 
             // 服务循环：每个请求独立 spawn，支持并发（cancel 不必等 prompt 完成）
             loop {
@@ -996,43 +941,26 @@ async fn exec_main(
                                     {
                                         let _ = tx.try_send(AgentEvent::TurnEnded);
                                     }
-                                    if let Err(e) = result {
+                                    if let core::result::Result::Err(e) = result {
                                         protocol::log::error(
                                             "acp",
                                             format!("prompt 失败 {sid}: {e}"),
                                         );
                                     }
-                                    Ok(())
+                                    core::result::Result::Ok(())
                                 });
                         });
                     }
                 }
             }
-            Ok(())
+            core::result::Result::Ok(())
         })
-        .await;
-
-    // 若 main_fn 从未报告就绪（连接建立前传输层失败：二进制缺失 / 进程立即退出 /
-    // npx 不可用 / 无网络），把 connect_with 的结果补报为 spawn 失败。
-    let pending_ready = ready
-        .lock()
-        .expect("Mutex 中毒（临界区内不应 panic）")
-        .take();
-    if let Some(tx) = pending_ready {
-        let desc = match &outcome {
-            Ok(()) => "连接未建立即关闭".to_string(),
-            Err(e) => e.to_string(),
-        };
-        let _ = tx.send(Err(format!("ACP 连接建立失败: {desc}")));
-    } else if let Err(e) = &outcome {
-        // 就绪已报告（连接曾可用），之后异常断开：仅记录，不影响已缓存的驱动
-        protocol::log::error("acp", format!("ACP 连接异常结束: {e}"));
-    }
+        .await
 }
 
 /// 按方法名分发 ACP v1 方法调用（typed 请求，经官方 SDK 传输）。
 async fn dispatch_call(
-    cx: &ConnectionTo<Agent>,
+    cx: &ConnectionTo<agent_client_protocol::Agent>,
     method: &str,
     params: &Value,
 ) -> Result<Value, String> {
@@ -1057,7 +985,7 @@ async fn dispatch_call(
 }
 
 async fn dispatch_call_inner(
-    cx: &ConnectionTo<Agent>,
+    cx: &ConnectionTo<agent_client_protocol::Agent>,
     method: &str,
     params: &Value,
     sid: &str,
@@ -1085,11 +1013,11 @@ async fn dispatch_call_inner(
                 .map_err(|e| format!("session/cancel 失败: {e}"))?;
             Ok(Value::Null)
         }
-        "session/delete" => {
-            cx.send_request(DeleteSessionRequest::new(sid.to_string()))
+        "session/close" => {
+            cx.send_request(CloseSessionRequest::new(sid.to_string()))
                 .block_task()
                 .await
-                .map_err(|e| format!("session/delete 失败: {e}"))?;
+                .map_err(|e| format!("session/close 失败: {e}"))?;
             Ok(Value::Null)
         }
         "skill/list" => {
@@ -1170,11 +1098,42 @@ fn tool_kind_str(kind: &ToolKind) -> String {
         .unwrap_or_else(|| "tool_call".to_string())
 }
 
-/// protocol::ContentBlock → SDK ContentBlock（MCP 兼容；无 SDK 等价的类型忽略）。
+/// protocol::ContentBlock → SDK ContentBlock（MCP 兼容）。
 fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
     match b {
         ContentBlock::Text { text } => Some(AcpContentBlock::Text(TextContent::new(text.clone()))),
-        ContentBlock::Resource { .. } | ContentBlock::ResourceLink { .. } => None,
+        ContentBlock::Resource {
+            mime_type,
+            uri,
+            text,
+            blob,
+        } => {
+            let uri = uri.clone().unwrap_or_default();
+            let resource = if let Some(blob) = blob {
+                EmbeddedResourceResource::BlobResourceContents(
+                    BlobResourceContents::new(blob.clone(), uri.clone())
+                        .mime_type(mime_type.clone()),
+                )
+            } else {
+                EmbeddedResourceResource::TextResourceContents(
+                    TextResourceContents::new(text.clone().unwrap_or_default(), uri.clone())
+                        .mime_type(mime_type.clone()),
+                )
+            };
+            Some(AcpContentBlock::Resource(EmbeddedResource::new(resource)))
+        }
+        ContentBlock::ResourceLink {
+            uri,
+            name,
+            mime_type,
+            title,
+            description,
+        } => Some(AcpContentBlock::ResourceLink(
+            ResourceLink::new(name.clone(), uri.clone())
+                .mime_type(mime_type.clone())
+                .title(title.clone())
+                .description(description.clone()),
+        )),
     }
 }
 
@@ -1196,7 +1155,7 @@ impl StubAgentDriver {
 }
 
 impl AgentDriver for StubAgentDriver {
-    fn create_session(&self, cwd: &str, _model: Option<&str>) -> Result<String, String> {
+    fn create_session(&self, cwd: &str) -> Result<String, String> {
         let id = format!("agent_{}", cwd.replace('/', "_"));
         self.sessions
             .lock()
@@ -1239,7 +1198,7 @@ impl AgentDriver for StubAgentDriver {
         Ok(())
     }
 
-    fn delete(&self, agent_session_id: &str) -> Result<(), String> {
+    fn close(&self, agent_session_id: &str) -> Result<(), String> {
         self.sessions
             .lock()
             .unwrap()
@@ -1250,6 +1209,8 @@ impl AgentDriver for StubAgentDriver {
     fn list_skills(&self) -> Vec<String> {
         Vec::new()
     }
+
+    fn shutdown(&self) {}
 }
 
 #[cfg(test)]
@@ -1406,16 +1367,12 @@ mod tests {
     /// 自动发现：`acp` 子命令探测逻辑（输出含 acp 才算支持）。
     #[test]
     fn has_acp_subcommand_detects() {
-        // 用当前测试二进制自身不可能触发，直接验证判别逻辑：
-        // `kimi acp --help` 在装有 kimi 的机器上命中；此处只验证函数对
-        // 不存在二进制的安全返回 false。
         assert!(!has_acp_subcommand("/nonexistent/bin/definitely-not-here"));
     }
 
     /// 发现决策：ACP 原生优先；无 acp 子命令时回落 npx 包装器（docs/DESIGN.md §9.1）。
     #[test]
     fn discover_for_cli_prefers_native_acp() {
-        // kimi：ACP 原生（`kimi acp`），无附加 env
         let d = discover_for_cli(
             "kimi",
             None,
@@ -1511,16 +1468,16 @@ mod tests {
             .expect("Mutex 中毒（临界区内不应 panic）")
             .is_empty());
 
-        // 有显式配置时：harnesses 只含配置的驱动，不扫描 PATH
+        // 有显式配置时：agents 列表只含配置的驱动，不扫描 PATH
         reg.stub = std::sync::Mutex::new(None);
         reg.configured = Some((
             "mock_acp".to_string(),
             Arc::new(StubAgentDriver::new()) as SharedDriver,
         ));
         reg.refresh_discovery();
-        let hs = reg.harnesses();
-        assert_eq!(hs.len(), 1);
-        assert_eq!(hs[0].name, "mock_acp");
+        let agents = reg.list_agents();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "mock_acp");
         assert!(reg
             .discovered
             .lock()
@@ -1546,8 +1503,6 @@ mod tests {
             discovered: std::sync::Mutex::new(discovered),
             spawned: std::sync::Mutex::new(HashMap::new()),
             unavailable: std::sync::Mutex::new(HashSet::new()),
-            models: std::sync::Mutex::new(HashMap::new()),
-            model_file: std::path::PathBuf::new(),
         }
     }
 
@@ -1565,7 +1520,7 @@ mod tests {
     }
 
     /// 启动拉起：mock_acp 可执行（真实拉起）进入缓存；不存在的二进制拉起失败被标记为
-    /// **不可用**（get_info 的 available=false）且不阻断其余 agent；`driver_for` 复用缓存
+    /// **不可用**（agent.list 的 available=false）且不阻断其余 agent；`driver_for` 复用缓存
     /// 驱动（不重复 spawn），对不可用 agent 返回明确错误（不尝试再次拉起）。
     #[test]
     fn launch_discovered_spawns_and_marks_unavailable() {
@@ -1610,16 +1565,16 @@ mod tests {
         assert!(!spawned.contains_key("broken"), "失败条目不应入缓存");
         drop(spawned);
 
-        // get_info 的 available 反映不可用状态
-        let hs = reg.harnesses();
-        let mock_info = hs
+        // agent.list 的 available 反映不可用状态
+        let agents = reg.list_agents();
+        let mock_info = agents
             .iter()
-            .find(|h| h.name == "mock_acp")
+            .find(|a| a.name == "mock_acp")
             .expect("mock_acp 在列表");
         assert!(mock_info.available, "拉起成功的 agent 应 available=true");
-        let broken_info = hs
+        let broken_info = agents
             .iter()
-            .find(|h| h.name == "broken")
+            .find(|a| a.name == "broken")
             .expect("broken 在列表");
         assert!(
             !broken_info.available,
@@ -1686,7 +1641,7 @@ mod tests {
             vec![entry.clone()],
             false,
             false,
-            Some(Arc::new(StubAgentDriver::new()) as SharedDriver),
+            Some(Arc::new(StubAgentDriver::new())),
         );
         let summary = reg.launch_discovered();
         assert_eq!(summary.started + summary.failed, 0);

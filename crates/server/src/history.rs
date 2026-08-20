@@ -1,343 +1,266 @@
-//! 会话历史存储（docs/DESIGN.md §5.2）：server 本地事件日志为权威。
-//! - 每会话一个日志文件（`~/.amux/server/history/<会话>.log`，JSON Lines）
-//! - **按 turn 合并后落盘**：透传事件按 §5.3 语义合并（与 GUI `aggregate.rs` 对齐），
-//!   收到 result（turn 结束，含取消）时写入；无 result 的 turn 视为未完成、不落库
-//! - `open_session` 从本地日志按窗口/游标读取，**不触发 ACP 重放**
+//! 会话数据存储（docs/DESIGN.md「普通会话存储」）：server 本地日志为权威。
+//! - 对话历史：`data_dir/sessions/<session_id>_history.jsonl`，每行一个 `HistoryItem`
+//!   （仅用户输入 `UserMessage` 与 agent 输出 `AgentMessage`，流式输出合并后写入）
+//! - 活动：`data_dir/sessions/<session_id>_activities.jsonl`，每行一个 `Activity`
+//!   （thinking / tool_call / compaction / error）
 
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use protocol::PassthroughEvent;
+use protocol::{Activity, ContentBlock, HistoryItem};
 
-/// 每会话历史日志（JSON Lines：每行一个合并条目）。
+fn sessions_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("sessions")
+}
+
+/// 按会话的数据文件（历史 + 活动，docs/DESIGN.md「普通会话存储」）。
 #[derive(Debug, Clone)]
 pub struct SessionLog {
-    path: PathBuf,
+    history_path: PathBuf,
+    activities_path: PathBuf,
+}
+
+fn append_lines<T: serde::Serialize>(path: &Path, entries: &[T]) -> std::io::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    for e in entries {
+        let line = serde_json::to_string(e)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        std::io::Write::write_all(&mut f, line.as_bytes())?;
+        std::io::Write::write_all(&mut f, b"\n")?;
+    }
+    Ok(())
+}
+
+fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
+        .unwrap_or_default()
 }
 
 impl SessionLog {
-    /// 日志文件路径：`<data_dir>/history/<session_id>.log`
-    pub fn path(data_dir: &Path, session_id: &str) -> PathBuf {
-        data_dir.join("history").join(format!("{session_id}.log"))
+    /// 历史文件路径：`<data_dir>/sessions/<session_id>_history.jsonl`
+    pub fn history_path(data_dir: &Path, session_id: &str) -> PathBuf {
+        sessions_dir(data_dir).join(format!("{session_id}_history.jsonl"))
+    }
+    /// 活动文件路径：`<data_dir>/sessions/<session_id>_activities.jsonl`
+    pub fn activities_path(data_dir: &Path, session_id: &str) -> PathBuf {
+        sessions_dir(data_dir).join(format!("{session_id}_activities.jsonl"))
     }
 
     pub fn open(data_dir: &Path, session_id: &str) -> Self {
         SessionLog {
-            path: Self::path(data_dir, session_id),
+            history_path: Self::history_path(data_dir, session_id),
+            activities_path: Self::activities_path(data_dir, session_id),
         }
     }
 
-    /// 追加合并条目（turn 结束落盘；每行一个 JSON）。
-    pub fn append(&self, entries: &[PassthroughEvent]) -> std::io::Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        for e in entries {
-            let line = serde_json::to_string(e)
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-            std::io::Write::write_all(&mut f, line.as_bytes())?;
-            std::io::Write::write_all(&mut f, b"\n")?;
-        }
-        Ok(())
+    /// 追加合并后的历史条目（turn 结束落盘；每行一个 HistoryItem）。
+    pub fn append_history(&self, items: &[HistoryItem]) -> std::io::Result<()> {
+        append_lines(&self.history_path, items)
     }
 
-    /// 读取全部合并条目；日志缺失（损坏/清空）视为该会话历史为空（docs/DESIGN.md §5.2）。
-    pub fn read(&self) -> Vec<PassthroughEvent> {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .map(|s| {
-                s.lines()
-                    .filter_map(|l| serde_json::from_str(l).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// 追加活动条目（turn 结束落盘；每行一个 Activity）。
+    pub fn append_activities(&self, items: &[Activity]) -> std::io::Result<()> {
+        append_lines(&self.activities_path, items)
     }
 
-    /// 日志文件是否存在（会话删除联动 / 测试断言）。
-    #[allow(dead_code)]
-    pub fn exists(&self) -> bool {
-        self.path.exists()
+    /// 读取全部历史条目；日志缺失视为空。
+    pub fn read_history(&self) -> Vec<HistoryItem> {
+        read(&self.history_path)
     }
 
-    /// 删除日志（会话删除联动）。
+    /// 读取全部活动条目；日志缺失视为空。
+    pub fn read_activities(&self) -> Vec<Activity> {
+        read(&self.activities_path)
+    }
+
+    /// 历史文件是否存在（删除联动 / 测试断言）。
+    pub fn history_exists(&self) -> bool {
+        self.history_path.exists()
+    }
+
+    /// 活动文件是否存在（删除联动 / 测试断言）。
+    pub fn activities_exists(&self) -> bool {
+        self.activities_path.exists()
+    }
+
+    /// 任一数据文件是否存在。
+    pub fn exists_any(&self) -> bool {
+        self.history_path.exists() || self.activities_path.exists()
+    }
+
+    /// 删除数据文件（会话删除联动）。
     pub fn remove(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.history_path);
+        let _ = std::fs::remove_file(&self.activities_path);
     }
 }
 
-/// 按 turn 合并器（docs/DESIGN.md §5.3，语义与 GUI `aggregate.rs` 对齐）：
-/// - 输出 chunk 收敛为一条完整 agent 消息（OutputChunk）
-/// - thinking 逐块累积为一条（ThinkingChunk）
-/// - 同工具调用合并为一条（ToolCall）
-/// - compaction / 用户消息 / turn 边界各自成条
-///
-/// turn 中缓冲，收到 result（TurnEnded）时 `finalize()` 收敛为合并条目；
-/// 崩溃（无 TurnEnded）时缓冲丢弃、不落库。
-#[derive(Debug, Default)]
+/// 单 turn 聚合：把 turn 期间的驱动事件转换为历史 + 活动（docs/DESIGN.md「普通会话存储」）：
+/// - 用户输入 → `HistoryItem::UserMessage`
+/// - agent 输出合并为一条 `HistoryItem::AgentMessage`
+/// - thinking 累积为一条 `Activity::Thinking`，工具调用为 `Activity::ToolCall`
+#[derive(Default)]
 pub struct TurnMerger {
-    /// 累积的完整输出：(文本, 首 chunk 时间戳)
     output: Option<(String, u64)>,
-    /// 累积的 thinking：(文本, 首块时间戳)
     thinking: Option<(String, u64)>,
-    /// 合并中的工具调用：(name, title, content, 首次时间戳)
-    tool: Option<(String, Option<String>, Option<String>, u64)>,
-    /// 已定稿条目
-    merged: Vec<PassthroughEvent>,
+    history: Vec<HistoryItem>,
+    activities: Vec<Activity>,
 }
 
 impl TurnMerger {
-    /// 新建合并器（turn 开始）。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 吸收一条透传事件（保持与 GUI 聚合一致的合并规则）。
-    pub fn push(&mut self, ev: &PassthroughEvent) {
-        match ev {
-            PassthroughEvent::OutputChunk { text, timestamp } => match &mut self.output {
-                Some((t, _)) => t.push_str(text),
-                None => self.output = Some((text.clone(), *timestamp)),
-            },
-            PassthroughEvent::ThinkingChunk { content, timestamp } => match &mut self.thinking {
-                Some((t, _)) => t.push_str(content),
-                None => self.thinking = Some((content.clone(), *timestamp)),
-            },
-            PassthroughEvent::ToolCall {
-                name,
-                title,
-                content,
-                timestamp,
-            } => {
-                let mergeable = matches!(
-                    &self.tool,
-                    Some((n, _, _, _)) if n == name
-                );
-                if mergeable {
-                    if let Some((_, t, c, _)) = &mut self.tool {
-                        if t.is_none() {
-                            *t = title.clone();
-                        }
-                        if let Some(nc) = content {
-                            *c = Some(nc.clone());
-                        }
-                    }
-                } else {
-                    self.flush_tool();
-                    self.tool = Some((name.clone(), title.clone(), content.clone(), *timestamp));
-                }
+    /// 追加用户消息。
+    pub fn push_user(&mut self, content: Vec<ContentBlock>, timestamp: u64) {
+        self.finish_output();
+        self.finish_thinking();
+        self.history
+            .push(HistoryItem::UserMessage { content, timestamp });
+    }
+
+    /// 追加 agent 输出（合并）。
+    pub fn push_output(&mut self, text: String, timestamp: u64) {
+        if let Some((t, first)) = &mut self.output {
+            if *first == 0 {
+                *first = timestamp;
             }
-            // 打断当前累积并各自成条
-            PassthroughEvent::Compaction { .. }
-            | PassthroughEvent::UserMessage { .. }
-            | PassthroughEvent::TurnStarted { .. }
-            | PassthroughEvent::TurnEnded { .. } => {
-                self.flush_pending();
-                self.merged.push(ev.clone());
-            }
-            // 状态透传不落历史
-            PassthroughEvent::SessionInfo { .. } => {}
+            t.push_str(&text);
+        } else {
+            self.output = Some((text, timestamp));
         }
     }
 
-    /// 收到 result（turn 结束，含取消）：收敛缓冲并返回合并条目。
-    pub fn finalize(mut self) -> Vec<PassthroughEvent> {
-        self.flush_pending();
-        self.merged
-    }
-}
-
-impl TurnMerger {
-    fn flush_tool(&mut self) {
-        if let Some((name, title, content, ts)) = self.tool.take() {
-            self.merged.push(PassthroughEvent::ToolCall {
-                name,
-                title,
-                content,
-                timestamp: ts,
+    fn finish_output(&mut self) {
+        if let Some((text, first)) = self.output.take() {
+            self.history.push(HistoryItem::AgentMessage {
+                content: vec![ContentBlock::Text { text }],
+                timestamp: first,
             });
         }
     }
 
-    fn flush_pending(&mut self) {
-        if let Some((text, ts)) = self.output.take() {
-            self.merged.push(PassthroughEvent::OutputChunk {
-                text,
-                timestamp: ts,
-            });
+    /// 追加 thinking（合并连续 thinking）。
+    pub fn push_thinking(&mut self, content: String, timestamp: u64) {
+        if let Some((c, first)) = &mut self.thinking {
+            if *first == 0 {
+                *first = timestamp;
+            }
+            c.push_str(&content);
+        } else {
+            self.thinking = Some((content, timestamp));
         }
+    }
+
+    fn finish_thinking(&mut self) {
         if let Some((content, ts)) = self.thinking.take() {
-            self.merged.push(PassthroughEvent::ThinkingChunk {
-                content,
+            self.activities.push(Activity::Thinking {
                 timestamp: ts,
+                content,
             });
         }
-        self.flush_tool();
+    }
+
+    /// 追加工具调用。
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_tool_call(
+        &mut self,
+        name: String,
+        title: Option<String>,
+        content: Option<String>,
+        timestamp: u64,
+    ) {
+        self.activities.push(Activity::ToolCall {
+            timestamp,
+            name,
+            title,
+            content,
+        });
+    }
+
+    /// 追加执行错误。
+    pub fn push_error(&mut self, activity: Activity) {
+        self.activities.push(activity);
+    }
+
+    /// 完成一个 turn：收拢缓冲并返回（历史, 活动）。
+    pub fn finish(&mut self) -> (Vec<HistoryItem>, Vec<Activity>) {
+        self.finish_output();
+        self.finish_thinking();
+        (
+            std::mem::take(&mut self.history),
+            std::mem::take(&mut self.activities),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::ContentBlock;
 
-    fn chunk(text: &str, ts: u64) -> PassthroughEvent {
-        PassthroughEvent::OutputChunk {
-            text: text.into(),
-            timestamp: ts,
-        }
-    }
-    fn think(content: &str, ts: u64) -> PassthroughEvent {
-        PassthroughEvent::ThinkingChunk {
-            content: content.into(),
-            timestamp: ts,
-        }
-    }
-    fn tool(name: &str, title: Option<&str>, content: Option<&str>, ts: u64) -> PassthroughEvent {
-        PassthroughEvent::ToolCall {
-            name: name.into(),
-            title: title.map(str::to_string),
-            content: content.map(str::to_string),
-            timestamp: ts,
-        }
-    }
-    fn user(text: &str, ts: u64) -> PassthroughEvent {
-        PassthroughEvent::UserMessage {
-            content: vec![ContentBlock::Text { text: text.into() }],
-            timestamp: ts,
-        }
-    }
-
-    /// 合并器：输出 chunk 收敛为一条完整消息、thinking 累积一条、同工具合并一条（§5.3）。
+    /// 合并器：输出合并、thinking 合并、工具各自成条。
     #[test]
-    fn merger_merges_streaming_events() {
+    fn merger_merges_output_and_thinking() {
         let mut m = TurnMerger::new();
-        m.push(&PassthroughEvent::TurnStarted { timestamp: 1 });
-        m.push(&user("帮我改代码", 2));
-        m.push(&think("思考", 3));
-        m.push(&think("中…", 4));
-        m.push(&tool("execute", Some("运行测试"), None, 5));
-        m.push(&tool("execute", None, Some("cargo test"), 6));
-        m.push(&chunk("第一", 7));
-        m.push(&chunk("段输出", 8));
-        m.push(&PassthroughEvent::TurnEnded { timestamp: 9 });
-
-        let out = m.finalize();
-        // turn 边界 2 + 用户消息 1 + thinking 1 + tool 1 + 完整输出 1 = 6 条
-        assert_eq!(out.len(), 6, "合并粒度应远小于原始 chunk 流: {out:?}");
-
-        assert!(out
-            .iter()
-            .any(|e| matches!(e, PassthroughEvent::TurnStarted { .. })));
-        assert!(out
-            .iter()
-            .any(|e| matches!(e, PassthroughEvent::TurnEnded { .. })));
-
-        let outputs: Vec<&str> = out
-            .iter()
-            .filter_map(|e| match e {
-                PassthroughEvent::OutputChunk { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(outputs, vec!["第一段输出"], "chunk 应收敛为一条完整消息");
-
-        let thinks: Vec<&str> = out
-            .iter()
-            .filter_map(|e| match e {
-                PassthroughEvent::ThinkingChunk { content, .. } => Some(content.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(thinks, vec!["思考中…"], "thinking 应累积为一条");
-
-        let tools: Vec<&PassthroughEvent> = out
-            .iter()
-            .filter(|e| matches!(e, PassthroughEvent::ToolCall { .. }))
-            .collect();
-        assert_eq!(tools.len(), 1, "同工具调用应合并为一条");
-        match &tools[0] {
-            PassthroughEvent::ToolCall {
-                name,
-                title,
-                content,
-                ..
-            } => {
-                assert_eq!(name, "execute");
-                assert_eq!(title.as_deref(), Some("运行测试"));
-                assert_eq!(content.as_deref(), Some("cargo test"));
+        m.push_user(vec![ContentBlock::Text { text: "你好".into() }], 1);
+        m.push_thinking("x".into(), 3);
+        m.push_thinking("y".into(), 4);
+        m.push_output("a".into(), 5);
+        m.push_output("b".into(), 6);
+        m.push_tool_call("t".into(), None, None, 7);
+        let (hist, acts) = m.finish();
+        assert_eq!(hist.len(), 2, "用户 + 一条合并输出");
+        match &hist[1] {
+            HistoryItem::AgentMessage { content, timestamp } => {
+                assert_eq!(content[0], ContentBlock::Text { text: "ab".into() });
+                assert_eq!(*timestamp, 5);
             }
-            _ => unreachable!(),
+            _ => panic!("第二条应为 AgentMessage"),
         }
+        assert_eq!(acts.len(), 2, "thinking 合并 + tool");
+        assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { content, .. } if content == "xy")));
+        assert!(acts.iter().any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "t")));
     }
 
-    /// 合并器：不同工具调用各自成条；compaction 独立成条并打断累积。
+    /// 历史/活动分文件。
     #[test]
-    fn merger_splits_distinct_kinds() {
-        let mut m = TurnMerger::new();
-        m.push(&tool("read", None, None, 1));
-        m.push(&tool("execute", None, None, 2));
-        m.push(&chunk("a", 3));
-        m.push(&PassthroughEvent::Compaction {
-            detail: "压缩".into(),
-            timestamp: 4,
-        });
-        m.push(&chunk("b", 5));
-        let out = m.finalize();
-        let tools = out
-            .iter()
-            .filter(|e| matches!(e, PassthroughEvent::ToolCall { .. }))
-            .count();
-        assert_eq!(tools, 2, "不同工具应各自成条");
-        let compactions = out
-            .iter()
-            .filter(|e| matches!(e, PassthroughEvent::Compaction { .. }))
-            .count();
-        assert_eq!(compactions, 1);
-        let outputs: Vec<&str> = out
-            .iter()
-            .filter_map(|e| match e {
-                PassthroughEvent::OutputChunk { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(outputs, vec!["a", "b"], "compaction 应打断输出累积");
-    }
-
-    /// 日志读写往返 + 缺失视为空 + 追加语义。
-    #[test]
-    fn session_log_append_read_remove() {
+    fn history_activities_separate_files() {
         let dir = std::env::temp_dir().join(format!(
-            "amux-hist-{}-{}",
+            "amux-log-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
         let log = SessionLog::open(&dir, "s1");
-        assert!(!log.exists());
-        assert!(log.read().is_empty(), "日志缺失视为历史为空");
+        assert!(!log.exists_any());
+        assert!(log.read_history().is_empty());
+        assert!(log.read_activities().is_empty());
 
-        let entries = vec![user("hi", 1), chunk("完整输出", 2)];
-        log.append(&entries).unwrap();
-        assert!(log.exists());
-        let read = log.read();
-        assert_eq!(read.len(), 2);
-        assert!(
-            matches!(&read[1], PassthroughEvent::OutputChunk { text, .. } if text == "完整输出")
-        );
+        log.append_history(&[HistoryItem::UserMessage {
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+            timestamp: 1,
+        }])
+        .unwrap();
+        assert!(log.history_exists());
+        assert!(!log.activities_exists());
 
-        // 追加第二条 turn（JSON Lines 追加语义）
-        log.append(&[chunk("第二段", 3)]).unwrap();
-        assert_eq!(log.read().len(), 3);
+        log.append_activities(&[Activity::Thinking {
+            timestamp: 1,
+            content: "想".into(),
+        }])
+        .unwrap();
+        assert!(log.activities_exists());
 
-        log.remove();
-        assert!(!log.exists());
-        assert!(log.read().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

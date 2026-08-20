@@ -23,7 +23,7 @@ pub fn parse_config(
     args: &[String],
 ) -> Result<ServerConfig, String> {
     let get = |k: &str| env.get(k).cloned();
-    let mut host = get("AMUX_HOST").unwrap_or_else(|| "127.0.0.1".into());
+    let mut host = get("AMUX_HOST").unwrap_or_else(|| "0.0.0.0".into());
     let mut port: u16 = get("AMUX_PORT")
         .and_then(|p| p.parse().ok())
         .unwrap_or(34567);
@@ -118,6 +118,7 @@ mod tests {
         let cfg = parse_config(&env_of(&[("AMUX_TOKEN", "secret")]), &[]).unwrap();
         assert_eq!(cfg.token, "secret");
         assert_eq!(cfg.port, 34567);
+        assert_eq!(cfg.host, "0.0.0.0", "默认监听地址应为 0.0.0.0（docs/DESIGN.md）");
     }
 
     #[test]

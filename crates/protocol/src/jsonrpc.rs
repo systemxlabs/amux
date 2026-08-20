@@ -50,6 +50,7 @@ pub mod rpc_error {
 
 /// 业务错误码（-32000..-32099）。
 pub mod server_error {
+    pub const AUTH_FAILED: i32 = -32000;
     pub const SESSION_NOT_FOUND: i32 = -32001;
     pub const HARNESS_UNAVAILABLE: i32 = -32002;
     pub const SESSION_BUSY: i32 = -32003;
@@ -67,12 +68,12 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: serde_json::json!(1),
-            method: "get_info".into(),
+            method: "session.list".into(),
             params: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: JsonRpcRequest = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.method, "get_info");
+        assert_eq!(back.method, "session.list");
         assert_eq!(back.id, serde_json::json!(1));
     }
 

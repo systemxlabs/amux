@@ -1,24 +1,19 @@
 //! WebSocket 传输层（docs/DESIGN.md §4）：token 认证、连接管理、JSON-RPC 分发、
-//! 通知广播（多客户端同一份流、互不踢出）。
+//! 通知广播（仅 `session.state_change`；多客户端同一份流、互不踢出）。
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-use tokio_tungstenite::tungstenite::{
-    handshake::server::{ErrorResponse, Request, Response},
-    Message,
-};
+use tokio_tungstenite::tungstenite::Message;
 
-use protocol::{notify, JsonRpcNotification, JsonRpcResponse};
+use protocol::{method, notify, server_error, AuthParams, OpResult};
 
 use crate::rpc::{Handlers, RpcError};
 use crate::session::ServerNotification;
-
-/// 认证失败关闭码（与旧实现一致：4401）。
-const AUTH_CLOSE_CODE: u16 = 4401;
 
 pub struct TransportOptions {
     pub host: String,
@@ -53,7 +48,7 @@ impl Transport {
             .map_err(|e| format!("监听失败: {e}"))?;
         log(&self.opts, format!("amux server listening on ws://{addr}"));
 
-        // 广播任务：把会话通知序列化为 JSON-RPC notification 发给所有连接
+        // 广播任务：把会话通知序列化为 JSON-RPC notification（仅 session.state_change）发给所有连接
         let (tx, _) = broadcast::channel::<String>(256);
         let tx_clone = tx.clone();
         let mut notify_rx = self.opts.notifications.resubscribe();
@@ -82,20 +77,11 @@ impl Transport {
                 logger: self.opts.logger.clone(),
             };
             let notify_rx = tx.subscribe();
-            tokio::spawn(handle_connection(stream, peer, opts, notify_rx));
+            tokio::spawn(async move {
+                handle_connection(stream, peer, opts, notify_rx).await;
+            });
         }
     }
-}
-
-fn authorized(query: &str, token: &str) -> bool {
-    // 简单解析 token 查询参数（浏览器 WebSocket 无法自定义头）
-    let mut ok = false;
-    for (k, v) in query.split('&').filter_map(|p| p.split_once('=')) {
-        if k == "token" && v == token {
-            ok = true;
-        }
-    }
-    ok
 }
 
 async fn handle_connection(
@@ -104,57 +90,26 @@ async fn handle_connection(
     opts: TransportOptions,
     mut notify_rx: tokio::sync::broadcast::Receiver<String>,
 ) {
-    // 从握手请求 URL 提取 token（浏览器 WebSocket 无法自定义头，经查询参数携带）
-    let query_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let holder = query_holder.clone();
-    // Callback trait 固定签名（tungstenite 握手），Err 变体较大无法避免
-    #[allow(clippy::result_large_err)]
-    let callback = move |req: &Request, response: Response| -> Result<Response, ErrorResponse> {
-        *holder.lock().expect("Mutex 中毒（临界区内不应 panic）") =
-            req.uri().query().map(str::to_string);
-        Ok(response)
-    };
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+    let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
             log(&opts, format!("ws 握手失败 ({peer}): {e}"));
             return;
         }
     };
-    let query = query_holder
-        .lock()
-        .expect("Mutex 中毒（临界区内不应 panic）")
-        .clone()
-        .unwrap_or_default();
-    if !authorized(&query, &opts.token) {
-        log(&opts, format!("拒绝连接 ({peer}): token 无效"));
-        let mut ws = ws;
-        let _ = ws
-            .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(
-                    AUTH_CLOSE_CODE,
-                ),
-                reason: "unauthorized".into(),
-            }))
-            .await;
-        return;
-    }
-    let (mut sink, mut source) = ws.split();
     log(&opts, format!("连接: {peer}"));
 
+    let (mut sink, mut source) = ws.split();
     let handlers = opts.handlers.clone();
-    // 请求处理与通知发送解耦：dispatch（如 prompt 聚合整个 turn）在独立任务，
-    // 响应经通道回传，避免阻塞本连接的会话通知（docs/DESIGN.md §5.1）
+    // 每连接「已认证」标志：建连后必须先发 `auth` 消息（docs/DESIGN.md「认证」）
+    let authenticated = Arc::new(AtomicBool::new(false));
+    let token = opts.token.clone();
+    // 请求处理与通知发送解耦：dispatch 在独立任务，响应经通道回传
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<String>(64);
     loop {
         tokio::select! {
             n = notify_rx.recv() => {
                 let Ok(frame) = n else { break };
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&frame) {
-                    if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                        protocol::log::debug("server.transport", format!("通知 {m}"));
-                    }
-                }
                 if sink.send(Message::Text(frame)).await.is_err() {
                     break;
                 }
@@ -177,8 +132,10 @@ async fn handle_connection(
                 let Message::Text(text) = msg else { continue };
                 let handlers = handlers.clone();
                 let resp_tx = resp_tx.clone();
+                let authenticated = authenticated.clone();
+                let token = token.clone();
                 tokio::spawn(async move {
-                    if let Some(resp) = dispatch(&handlers, &text).await {
+                    if let Some(resp) = dispatch(&handlers, &text, &token, &authenticated).await {
                         let frame = serde_json::to_string(&resp).unwrap_or_default();
                         let _ = resp_tx.send(frame).await;
                     }
@@ -190,13 +147,19 @@ async fn handle_connection(
 }
 
 /// 分发一帧 JSON-RPC 消息；请求返回响应，通知返回 None。
-async fn dispatch(handlers: &Handlers, text: &str) -> Option<JsonRpcResponse> {
+/// 未认证连接只接受 `auth` 方法，其余一律返回 AUTH_FAILED（docs/DESIGN.md「认证」）。
+async fn dispatch(
+    handlers: &Handlers,
+    text: &str,
+    token: &str,
+    authenticated: &Arc<AtomicBool>,
+) -> Option<protocol::JsonRpcResponse> {
     let value: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => {
-            return Some(JsonRpcResponse {
+            return Some(protocol::JsonRpcResponse {
                 jsonrpc: "2.0".into(),
-                id: serde_json::Value::Null,
+                id: protocol::JsonRpcId::Null,
                 result: None,
                 error: Some(protocol::JsonRpcError {
                     code: protocol::rpc_error::PARSE_ERROR,
@@ -208,10 +171,9 @@ async fn dispatch(handlers: &Handlers, text: &str) -> Option<JsonRpcResponse> {
     };
     let method = value.get("method").and_then(|m| m.as_str());
     let Some(method) = method else {
-        protocol::log::error("server.transport", "收到非法请求（无 method）");
-        return Some(JsonRpcResponse {
+        return Some(protocol::JsonRpcResponse {
             jsonrpc: "2.0".into(),
-            id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            id: value.get("id").cloned().unwrap_or(protocol::JsonRpcId::Null),
             result: None,
             error: Some(protocol::JsonRpcError {
                 code: protocol::rpc_error::INVALID_REQUEST,
@@ -220,76 +182,130 @@ async fn dispatch(handlers: &Handlers, text: &str) -> Option<JsonRpcResponse> {
             }),
         });
     };
+    let id = value.get("id").cloned();
     let params = value.get("params").cloned();
 
-    if let Some(id) = value.get("id").cloned() {
-        // 请求：记录方法 + 关键参数（长文本截断；docs/DESIGN.md §8 全链路日志）
-        let summary = protocol::log::params_summary(
-            params.as_ref().unwrap_or(&serde_json::Value::Null),
-            &["sessionId", "harness", "cwd", "input", "session_id"],
-            60,
-        );
-        protocol::log::debug("server.transport", format!("请求 {method} {summary}"));
-        let started = std::time::Instant::now();
-        let result = handlers.handle(method, &params).await;
-        let (result, error) = match result {
-            Ok(v) => (Some(v), None),
-            Err(RpcError { code, message }) => {
-                protocol::log::error(
-                    "server.transport",
-                    format!("请求 {method} 失败 [{code}]: {message}"),
-                );
-                (
-                    None,
-                    Some(protocol::JsonRpcError {
-                        code,
-                        message,
-                        data: None,
-                    }),
-                )
-            }
-        };
-        protocol::log::debug(
+    let Some(id) = id else {
+        // 客户端发起的通知：当前无 client→server 通知
+        return None;
+    };
+
+    if method == method::AUTH {
+        return Some(handle_auth(&params, token, authenticated, id));
+    }
+    if !authenticated.load(Ordering::SeqCst) {
+        protocol::log::error(
             "server.transport",
-            format!("响应 {method}（{}ms）", started.elapsed().as_millis()),
+            format!("未认证连接请求 {method} → AUTH_FAILED"),
         );
-        Some(JsonRpcResponse {
+        return Some(protocol::JsonRpcResponse {
             jsonrpc: "2.0".into(),
             id,
-            result,
-            error,
-        })
-    } else {
-        // 通知（当前无客户端发起的通知）
-        None
+            result: None,
+            error: Some(protocol::JsonRpcError {
+                code: server_error::AUTH_FAILED,
+                message: "未认证：请先发送 auth 消息".into(),
+                data: None,
+            }),
+        });
+    }
+
+    let summary = protocol::log::params_summary(
+        params.as_ref().unwrap_or(&protocol::JsonRpcId::Null),
+        &["sessionId", "agent", "cwd", "input"],
+        60,
+    );
+    protocol::log::debug("server.transport", format!("请求 {method} {summary}"));
+    let started = std::time::Instant::now();
+    let result = handlers.handle(method, &params).await;
+    let (result, error) = match result {
+        Ok(v) => (Some(v), None),
+        Err(RpcError { code, message }) => {
+            protocol::log::error("server.transport", format!("请求 {method} 失败 [{code}]: {message}"));
+            (None, Some(protocol::JsonRpcError { code, message, data: None }))
+        }
+    };
+    protocol::log::debug(
+        "server.transport",
+        format!("响应 {method}（{}ms）", started.elapsed().as_millis()),
+    );
+    Some(protocol::JsonRpcResponse {
+        jsonrpc: "2.0".into(),
+        id,
+        result,
+        error,
+    })
+}
+
+/// 处理 `auth` 消息：比较 token，匹配则标记认证通过并返回结果，否则 AUTH_FAILED。
+fn handle_auth(
+    params: &Option<protocol::JsonRpcId>,
+    token: &str,
+    authenticated: &Arc<AtomicBool>,
+    id: protocol::JsonRpcId,
+) -> protocol::JsonRpcResponse {
+    let auth: Result<AuthParams, _> = params
+        .clone()
+        .map(serde_json::from_value)
+        .unwrap_or(Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "missing params",
+        ))));
+    match auth {
+        Ok(params) if params.token == token => {
+            authenticated.store(true, Ordering::SeqCst);
+            protocol::log::debug("server.transport", "认证通过");
+            protocol::JsonRpcResponse {
+                jsonrpc: "2.0".into(),
+                id,
+                result: serde_json::to_value(OpResult { ok: true, message: None }).ok(),
+                error: None,
+            }
+        }
+        _ => {
+            protocol::log::error("server.transport", "认证失败：token 不匹配");
+            protocol::JsonRpcResponse {
+                jsonrpc: "2.0".into(),
+                id,
+                result: None,
+                error: Some(protocol::JsonRpcError {
+                    code: server_error::AUTH_FAILED,
+                    message: "认证失败".into(),
+                    data: None,
+                }),
+            }
+        }
     }
 }
 
-/// 会话通知 → JSON-RPC notification 帧。
+/// 会话状态变更通知 → JSON-RPC notification 帧（docs/DESIGN.md 唯一主动推送）。
 fn notification_frame(n: &ServerNotification) -> Option<String> {
-    let (method, params) = match n {
-        ServerNotification::SessionCreated(s) => {
-            (notify::SESSION_CREATED, serde_json::json!({ "session": s }))
-        }
-        ServerNotification::SessionInterrupted(s) => (
-            notify::SESSION_INTERRUPTED,
-            serde_json::json!({ "session": s }),
-        ),
-        ServerNotification::SessionDeleted(s) => {
-            (notify::SESSION_DELETED, serde_json::json!({ "session": s }))
-        }
-        ServerNotification::SessionUpdated(s) => {
-            (notify::SESSION_UPDATED, serde_json::json!({ "session": s }))
-        }
-        ServerNotification::Passthrough { session_id, event } => (
-            notify::PASSTHROUGH,
-            serde_json::json!({ "session_id": session_id, "event": event }),
-        ),
-    };
-    let frame = JsonRpcNotification {
-        jsonrpc: "2.0".into(),
-        method: method.to_string(),
-        params: Some(params),
+    let frame = match n {
+        ServerNotification::StateChange(state_change) => protocol::JsonRpcNotification {
+            jsonrpc: "2.0".into(),
+            method: notify::SESSION_STATE_CHANGE.to_string(),
+            params: Some(serde_json::to_value(state_change.clone()).ok()?),
+        },
     };
     serde_json::to_string(&frame).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::{SessionState, SessionStateChange};
+
+    /// 状态变更通知帧：方法名与 camelCase 负载（docs/DESIGN.md 唯一主动推送）。
+    #[test]
+    fn state_change_frame() {
+        let n = ServerNotification::StateChange(SessionStateChange {
+            session_id: "s1".into(),
+            old_state: SessionState::Idle,
+            new_state: SessionState::Busy,
+        });
+        let frame = notification_frame(&n).expect("应序列化");
+        assert!(frame.contains(&format!("\"method\":\"{}\"", notify::SESSION_STATE_CHANGE)), "{frame}");
+        assert!(frame.contains("\"sessionId\":\"s1\""), "{frame}");
+        assert!(frame.contains("\"newState\":\"busy\""), "{frame}");
+    }
 }

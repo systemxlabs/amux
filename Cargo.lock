@@ -2820,6 +2820,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui_platform",
+ "protocol",
+ "reqwest 0.13.4",
+ "rig",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "uuid",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4198,25 +4218,6 @@ checksum = "d03f81ad4732830d85cfd417a9f62cde6dadda4354d37d078a6084a19560aa2d"
 dependencies = [
  "arraydeque",
  "smallvec",
-]
-
-[[package]]
-name = "gui"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
- "gpui_platform",
- "protocol",
- "reqwest 0.13.4",
- "rig",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.24.0",
- "uuid",
 ]
 
 [[package]]

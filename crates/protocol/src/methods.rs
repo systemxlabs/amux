@@ -1,49 +1,43 @@
-//! 方法名与通知名（协议面，单一来源）。
+//! 方法名与通知名（协议面，单一来源）。依据 docs/DESIGN.md「Client-Server 通信」协议。
 
-/// JSON-RPC 请求方法名。
+/// JSON-RPC 请求方法名（docs/DESIGN.md 协议表）。
 pub mod method {
-    /// 机器信息（server 版本 + harness 列表）
-    pub const GET_INFO: &str = "get_info";
-    /// 会话列表
-    pub const LIST_SESSIONS: &str = "list_sessions";
-    /// 新建会话
-    pub const CREATE_SESSION: &str = "create_session";
-    /// 删除会话（历史一并移除）
-    pub const DELETE_SESSION: &str = "delete_session";
-    /// 发送 prompt（idle 启动新工作、忙时 steer）
-    pub const PROMPT: &str = "prompt";
-    /// 取消进行中的工作
-    pub const CANCEL: &str = "cancel";
-    /// 打开会话：server 经 ACP `session/load` 全量重放，返回透传事件（GUI 聚合）
-    pub const OPEN_SESSION: &str = "open_session";
-    /// git status（cwd 非 git 仓库时返回 not_repo 标记）
-    pub const GIT_STATUS: &str = "git_status";
-    /// git diff
-    pub const GIT_DIFF: &str = "git_diff";
-    /// git push
-    pub const GIT_PUSH: &str = "git_push";
-    /// git revert（undo；需工作区间结束）
-    pub const GIT_REVERT: &str = "git_revert";
-    /// 修改会话标题（用户可随时修改）
-    pub const SET_SESSION_TITLE: &str = "set_session_title";
-    /// 配置 agent 默认模型（server 侧持久化）
-    pub const SET_DEFAULT_MODEL: &str = "set_default_model";
-    /// 查询某 agent 安装的 skills 列表
-    pub const LIST_AGENT_SKILLS: &str = "list_agent_skills";
-    /// 手动重新拉起不可用的 agent（无需重启 server）
-    pub const RETRY_HARNESS: &str = "retry_harness";
+    /// 认证（建连后首个消息，docs/DESIGN.md「认证」）
+    pub const AUTH: &str = "auth";
+    /// 查询当前机器的 agents（名称与可用性）
+    pub const AGENT_LIST: &str = "agent.list";
+    /// 重启指定 agent
+    pub const AGENT_RESTART: &str = "agent.restart";
+    /// 查询指定 agent 的技能列表
+    pub const AGENT_SKILLS: &str = "agent.skills";
+    /// 新建一个普通会话（惰性：仅 server 侧写入，不触发 ACP）
+    pub const SESSION_NEW: &str = "session.new";
+    /// 往指定普通会话发送指令
+    pub const SESSION_PROMPT: &str = "session.prompt";
+    /// 取消指定普通会话正在进行的工作
+    pub const SESSION_CANCEL: &str = "session.cancel";
+    /// 删除指定普通会话
+    pub const SESSION_DELETE: &str = "session.delete";
+    /// 配置指定普通会话（会话标题）
+    pub const SESSION_CONFIGURE: &str = "session.configure";
+    /// 分页查询指定普通会话的对话历史
+    pub const SESSION_HISTORY: &str = "session.history";
+    /// 分页查询指定普通会话的活动历史
+    pub const SESSION_ACTIVITIES: &str = "session.activities";
+    /// 查询指定普通会话正在进行中的活动
+    pub const SESSION_ONGOING_ACTIVITY: &str = "session.ongoing_activity";
+    /// 分页查询普通会话列表
+    pub const SESSION_LIST: &str = "session.list";
+    /// 批量查询指定的普通会话列表
+    pub const SESSION_INFO: &str = "session.info";
+    /// 查询普通会话工作目录改动 diff
+    pub const WORKSPACE_DIFF: &str = "workspace.diff";
+    /// 按文件或代码块撤销普通会话工作目录的改动
+    pub const WORKSPACE_RESTORE: &str = "workspace.restore";
 }
 
-/// server → GUI 通知名。
+/// server → GUI 通知名（docs/DESIGN.md：唯一主动推送 `session.state_change`）。
 pub mod notify {
-    /// 会话创建
-    pub const SESSION_CREATED: &str = "session_created";
-    /// 会话中断（崩溃恢复标记）
-    pub const SESSION_INTERRUPTED: &str = "session_interrupted";
-    /// 会话删除
-    pub const SESSION_DELETED: &str = "session_deleted";
-    /// 会话元数据更新（标题修改等）
-    pub const SESSION_UPDATED: &str = "session_updated";
-    /// 透传事件（docs/DESIGN.md §5.1）：session/update 事件、session_info_update、turn 边界
-    pub const PASSTHROUGH: &str = "passthrough";
+    /// 普通会话状态变更事件（工作流驱动等依赖它）
+    pub const SESSION_STATE_CHANGE: &str = "session.state_change";
 }

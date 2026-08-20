@@ -1,12 +1,10 @@
-//! git 直连运行器（docs/DESIGN.md §6）：只读 status/diff、写操作 push/revert。
-//! cwd 非 git 仓库时 status 返回 `not_repo` 标记（GUI 不提供 diff 按钮）。
+//! git 直连运行器（docs/DESIGN.md「workspace.diff」「workspace.restore」）：
+//! 查询会话工作目录改动 diff、按文件/代码块撤销改动。
+//! cwd 非 git 仓库时 diff 返回 `not_repo` 标记。
 
 use std::process::Command;
 
-use protocol::{
-    GitChange, GitChangeStatus, GitDiffFile, GitDiffHunk, GitDiffResult, GitOpResult,
-    GitStatusResult,
-};
+use protocol::{GitChangeStatus, GitDiffFile, GitDiffHunk, OpResult, WorkspaceDiffResult};
 
 pub struct GitRunner;
 
@@ -154,70 +152,8 @@ impl GitRunner {
         GitRunner
     }
 
-    pub fn status(&self, cwd: &str) -> Result<GitStatusResult, GitError> {
-        let branch = match run(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]) {
-            Ok(b) => b.trim().to_string(),
-            Err(e) if is_not_repo(&e) => {
-                return Ok(GitStatusResult {
-                    branch: String::new(),
-                    changes: Vec::new(),
-                    not_repo: true,
-                })
-            }
-            Err(e) => return Err(e),
-        };
-        let porcelain = run(cwd, &["status", "--porcelain=v1"])?;
-        let numstat = self.numstat(cwd);
-        let mut changes = Vec::new();
-        for line in porcelain.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let xy = &line[..2];
-            let rest = line[3..].to_string();
-            if xy == "??" {
-                changes.push(GitChange {
-                    path: rest,
-                    status: GitChangeStatus::Untracked,
-                    staged: false,
-                    additions: 0,
-                    deletions: 0,
-                });
-                continue;
-            }
-            let x = xy.chars().nth(0).unwrap_or(' ');
-            let y = xy.chars().nth(1).unwrap_or(' ');
-            let path = rest
-                .rsplit(" -> ")
-                .next()
-                .unwrap_or(rest.as_str())
-                .to_string();
-            let status = if x == 'A' || y == 'A' {
-                GitChangeStatus::Added
-            } else if x == 'D' || y == 'D' {
-                GitChangeStatus::Deleted
-            } else if x == 'R' || y == 'R' {
-                GitChangeStatus::Renamed
-            } else {
-                GitChangeStatus::Modified
-            };
-            let staged = x != ' ' && x != '?';
-            let (adds, dels) = numstat.get(&path).copied().unwrap_or((0, 0));
-            changes.push(GitChange {
-                path,
-                status,
-                staged,
-                additions: adds,
-                deletions: dels,
-            });
-        }
-        Ok(GitStatusResult {
-            branch,
-            changes,
-            not_repo: false,
-        })
-    }
-
+    /// 保留：按文件统计增减行数（供 git status 类查询聚合使用）。
+    #[allow(dead_code)]
     fn numstat(&self, cwd: &str) -> std::collections::HashMap<String, (u32, u32)> {
         let mut map = std::collections::HashMap::new();
         let Ok(stdout) = run(cwd, &["diff", "HEAD", "--numstat"]) else {
@@ -235,18 +171,18 @@ impl GitRunner {
         map
     }
 
-    /// 结构化 diff（PRD §3.5）：按文件拆分，含每文件增减行数、完整 patch 与 hunk 列表。
+    /// 结构化 diff（docs/DESIGN.md「workspace.diff」）：按文件拆分，含每文件增减行数、完整 patch 与 hunk 列表。
     /// cwd 非 git 仓库时返回 `not_repo` 标记。
-    pub fn diff(&self, cwd: &str, path: Option<&str>) -> GitDiffResult {
-        // 先确认是 git 仓库（非仓库时返回 not_repo，与 status 一致）
+    pub fn diff(&self, cwd: &str, path: Option<&str>) -> WorkspaceDiffResult {
+        // 先确认是 git 仓库（非仓库时返回 not_repo）
         if let Err(e) = run(cwd, &["rev-parse", "--git-dir"]) {
             if is_not_repo(&e) {
-                return GitDiffResult {
+                return WorkspaceDiffResult {
                     files: Vec::new(),
                     not_repo: true,
                 };
             }
-            return GitDiffResult {
+            return WorkspaceDiffResult {
                 files: Vec::new(),
                 not_repo: false,
             };
@@ -257,52 +193,39 @@ impl GitRunner {
             args.push(p);
         }
         let Ok(raw) = run(cwd, &args) else {
-            return GitDiffResult {
+            return WorkspaceDiffResult {
                 files: Vec::new(),
                 not_repo: false,
             };
         };
-        GitDiffResult {
+        WorkspaceDiffResult {
             files: parse_diff(&raw),
             not_repo: false,
         }
     }
 
-    pub fn push(&self, cwd: &str) -> GitOpResult {
-        match run(cwd, &["push", "origin", "HEAD"]) {
-            Ok(_) => GitOpResult {
-                ok: true,
-                message: None,
-            },
-            Err(e) => GitOpResult {
-                ok: false,
-                message: Some(e.stderr.trim().to_string()),
-            },
-        }
-    }
-
-    /// 撤销工作区变更（undo 语义；调用方须保证会话空闲，docs/DESIGN.md §6）。
+    /// 撤销工作区变更（docs/DESIGN.md「workspace.restore」）。
     /// - `patch`：单 hunk/单文件 patch 反向应用（`git apply --reverse`）
     /// - `path`：单文件——tracked 用 restore；untracked 直接删除（从未提交，revert = 移除）
     /// - 都不给：全部变更——restore 全部 tracked 变更 + clean 全部 untracked
-    pub fn revert(&self, cwd: &str, path: Option<&str>, patch: Option<&str>) -> GitOpResult {
+    pub fn restore(&self, cwd: &str, path: Option<&str>, patch: Option<&str>) -> OpResult {
         if let Some(p) = patch {
             // 唯一临时目录（并发 revert 不互相覆盖；uuid v4）
             let dir = std::env::temp_dir().join(format!("amux-revert-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).ok();
             let patch_file = dir.join("revert.patch");
             if std::fs::write(&patch_file, p).is_err() {
-                return GitOpResult {
+                return OpResult {
                     ok: false,
                     message: Some("写入 patch 失败".into()),
                 };
             }
             return match run(cwd, &["apply", "--reverse", &patch_file.to_string_lossy()]) {
-                Ok(_) => GitOpResult {
+                Ok(_) => OpResult {
                     ok: true,
                     message: None,
                 },
-                Err(e) => GitOpResult {
+                Err(e) => OpResult {
                     ok: false,
                     message: Some(e.stderr.trim().to_string()),
                 },
@@ -312,22 +235,22 @@ impl GitRunner {
             // untracked：从未提交，revert = 删除工作区文件
             if self.is_untracked(cwd, target) {
                 return match std::fs::remove_file(std::path::Path::new(cwd).join(target)) {
-                    Ok(_) => GitOpResult {
+                    Ok(_) => OpResult {
                         ok: true,
                         message: None,
                     },
-                    Err(e) => GitOpResult {
+                    Err(e) => OpResult {
                         ok: false,
                         message: Some(format!("删除 untracked 文件失败: {e}")),
                     },
                 };
             }
             return match run(cwd, &["restore", "--staged", "--worktree", "--", target]) {
-                Ok(_) => GitOpResult {
+                Ok(_) => OpResult {
                     ok: true,
                     message: None,
                 },
-                Err(e) => GitOpResult {
+                Err(e) => OpResult {
                     ok: false,
                     message: Some(e.stderr.trim().to_string()),
                 },
@@ -335,17 +258,17 @@ impl GitRunner {
         }
         // 全部变更：restore tracked + clean untracked
         if let Err(e) = run(cwd, &["restore", "--staged", "--worktree", "--", "."]) {
-            return GitOpResult {
+            return OpResult {
                 ok: false,
                 message: Some(e.stderr.trim().to_string()),
             };
         }
         match run(cwd, &["clean", "-fd"]) {
-            Ok(_) => GitOpResult {
+            Ok(_) => OpResult {
                 ok: true,
                 message: None,
             },
-            Err(e) => GitOpResult {
+            Err(e) => OpResult {
                 ok: false,
                 message: Some(e.stderr.trim().to_string()),
             },
@@ -400,34 +323,30 @@ mod tests {
     }
 
     #[test]
-    fn status_lists_changes() {
+    fn diff_lists_changes() {
         let dir = init_repo();
         std::fs::write(dir.join("a.txt"), "line1\nCHANGED\n").unwrap();
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        git(&dir, &["add", "new.txt"]);
         let r = GitRunner::new();
-        let st = r.status(dir.to_str().unwrap()).unwrap();
+        let st = r.diff(dir.to_str().unwrap(), None);
         assert!(!st.not_repo);
-        assert_eq!(st.branch, "main");
         assert!(st
-            .changes
+            .files
             .iter()
-            .any(|c| c.path == "a.txt" && matches!(c.status, GitChangeStatus::Modified)));
+            .any(|f| f.path == "a.txt" && matches!(f.status, GitChangeStatus::Modified)));
         assert!(st
-            .changes
+            .files
             .iter()
-            .any(|c| c.path == "new.txt" && matches!(c.status, GitChangeStatus::Untracked)));
+            .any(|f| f.path == "new.txt" && matches!(f.status, GitChangeStatus::Added)));
     }
 
     #[test]
     fn non_repo_marks_not_repo() {
         let dir = unique_dir("amux-plain");
         std::fs::create_dir_all(&dir).unwrap();
-        let st = GitRunner::new().status(dir.to_str().unwrap()).unwrap();
-        assert!(st.not_repo);
-        // git_diff 同样返回 not_repo（GUI 不提供 diff 按钮）
-        let d = GitRunner::new().diff(dir.to_str().unwrap(), None);
-        assert!(d.not_repo);
-        assert!(d.files.is_empty());
+        let st = GitRunner::new().diff(dir.to_str().unwrap(), None).not_repo;
+        assert!(st);
     }
 
     #[test]
@@ -462,12 +381,12 @@ mod tests {
         let dir = init_repo();
         std::fs::write(dir.join("a.txt"), "line1\nCHANGED\n").unwrap();
         let r = GitRunner::new();
-        let res = r.revert(dir.to_str().unwrap(), Some("a.txt"), None);
+        let res = r.restore(dir.to_str().unwrap(), Some("a.txt"), None);
         assert!(res.ok, "revert 失败: {:?}", res.message);
         let content = std::fs::read_to_string(dir.join("a.txt")).unwrap();
         assert_eq!(content, "line1\nline2\n", "工作区应恢复到 HEAD");
         // 已无变更时 restore 是幂等成功（no-op）
-        let res = r.revert(dir.to_str().unwrap(), Some("a.txt"), None);
+        let res = r.restore(dir.to_str().unwrap(), Some("a.txt"), None);
         assert!(res.ok, "幂等 revert 应成功: {:?}", res.message);
     }
 
@@ -491,7 +410,7 @@ mod tests {
         let d = GitRunner::new().diff(dir.to_str().unwrap(), Some("a.txt"));
         assert_eq!(d.files[0].hunks.len(), 2, "两处改动应为两个 hunk");
         let hunk = &d.files[0].hunks[0];
-        let res = GitRunner::new().revert(dir.to_str().unwrap(), None, Some(&hunk.patch));
+        let res = GitRunner::new().restore(dir.to_str().unwrap(), None, Some(&hunk.patch));
         assert!(res.ok, "hunk revert 失败: {:?}", res.message);
         let content = std::fs::read_to_string(dir.join("a.txt")).unwrap();
         let expected: Vec<String> = (1..=20)
@@ -515,7 +434,7 @@ mod tests {
     fn revert_untracked_file_removes_it() {
         let dir = init_repo();
         std::fs::write(dir.join("scratch.txt"), "temp\n").unwrap();
-        let res = GitRunner::new().revert(dir.to_str().unwrap(), Some("scratch.txt"), None);
+        let res = GitRunner::new().restore(dir.to_str().unwrap(), Some("scratch.txt"), None);
         assert!(res.ok, "untracked revert 失败: {:?}", res.message);
         assert!(!dir.join("scratch.txt").exists(), "untracked 应被删除");
     }

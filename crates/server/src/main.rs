@@ -1,26 +1,18 @@
 //! amux server 常驻进程入口（docs/DESIGN.md §3）。
 //! 启动流程：配置 → token → 依赖组装 → 监听 WebSocket。
 
-mod agent;
-mod config;
-mod git;
-mod history;
-mod registry;
-mod rpc;
-mod session;
-mod transport;
+// server crate 的模块全部在 lib.rs 声明（main.rs 复用它，避免重复编译）。
 
 use std::sync::Arc;
 
-use crate::agent::{AcpAgentDriver, AgentRegistry, SharedDriver};
-use crate::config::load_config;
-use crate::git::GitRunner;
-use crate::registry::SessionRegistry;
-use crate::rpc::Handlers;
-use crate::session::SessionManager;
-use crate::transport::{Transport, TransportOptions};
+use server::agent::{AcpAgentDriver, AgentRegistry, SharedDriver};
+use server::config::load_config;
+use server::git::GitRunner;
 
-pub const SERVER_VERSION: &str = "0.1.0";
+use server::registry::SessionRegistry;
+use server::rpc::Handlers;
+use server::session::SessionManager;
+use server::transport::{Transport, TransportOptions};
 
 #[tokio::main]
 async fn main() {
@@ -32,51 +24,38 @@ async fn main() {
         }
     };
 
-    // 依赖组装：ACP agent 驱动（--agent 显式指定 agent 可执行与子命令参数，如
-    // `--agent "kimi acp"` 或 `--agent /path/codex-acp`）；未指定时由 AgentRegistry
-    // 自动发现本机 ACP agent（PRD §3.3），仅当无任何发现时才回落内存 Stub。docs/DESIGN.md §9
-    let configured: Option<(String, SharedDriver)> = match &cfg.agent_bin {
-        Some(bin) => {
-            let args: Vec<&str> = cfg.agent_args.iter().map(String::as_str).collect();
-            match AcpAgentDriver::spawn(bin, &args, &[]) {
-                Ok(d) => {
-                    let name = std::path::Path::new(bin)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("agent")
-                        .to_string();
-                    println!(
-                        "已连接 ACP agent: {bin} {}（harness: {name}）",
-                        cfg.agent_args.join(" ")
-                    );
-                    Some((name, Arc::new(d)))
-                }
-                Err(e) => {
-                    eprintln!("启动 ACP agent ({bin}) 失败: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        None => {
-            println!("未指定 --agent，将自动发现本机 ACP agent");
-            None
-        }
-    };
+    // 初始化文件日志（按天切片、保留 7 天，docs/DESIGN.md §8）
+    let log_path = cfg
+        .data_dir
+        .parent()
+        .map(|p| p.join("logs").join("server.log"))
+        .unwrap_or_else(|| cfg.data_dir.join("server.log"));
+    protocol::log::init_file_output(&log_path);
 
-    // 数据目录（docs/DESIGN.md §5.5）
+    // 依赖组装：ACP agent 驱动（--agent 显式指定 agent 可执行与子命令参数）；未指定时由
+    // AgentRegistry 自动发现本机 ACP agent（PRD §3.3），仅当无任何发现时才用内存 Stub。
+    let configured: Option<(String, SharedDriver)> = cfg.agent_bin.clone().map(|bin| {
+        let name = std::path::Path::new(&bin)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(&bin)
+            .to_string();
+        let args_ref: Vec<&str> = cfg.agent_args.iter().map(String::as_str).collect();
+        let driver: SharedDriver = Arc::new(AcpAgentDriver::spawn(&bin, &args_ref, &[]).unwrap_or_else(|e| {
+            eprintln!("启动 ACP agent ({bin}) 失败: {e}");
+            std::process::exit(1);
+        }));
+        (name, driver)
+    });
+
+    // 数据目录
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
         eprintln!("创建数据目录失败: {e}");
         std::process::exit(1);
     }
-    let agents = Arc::new(AgentRegistry::new(
-        configured,
-        cfg.data_dir.join("agent-models.json"),
-    ));
+    let agents = Arc::new(AgentRegistry::new(configured));
 
-    // 启动拉起（docs/DESIGN.md §4.1/§7.3）：server 启动时发现本机 agent 并直接拉起
-    // （kimi 原生 `kimi acp`，claude/codex 经 npx 包装器），后续 `driver_for` 复用缓存、
-    // 不再二次 spawn。单 agent 拉起失败不致命：标记为**不可用**（get_info 的 available=
-    // false，使用时报明确错误），server 照常启动、其余 agent 正常使用。
+    // 启动拉起（docs/DESIGN.md §4.1/§7.3）：server 启动时发现本机 agent 并直接拉起。
     let launch = agents.launch_discovered();
     protocol::log::info(
         "server.startup",
@@ -86,9 +65,8 @@ async fn main() {
         ),
     );
 
-    // 会话注册表（SQLite，docs/DESIGN.md §4.3）：列表与历史权威 = server；
-    // 重启后会话列表从本地库恢复（不依赖 ACP `session/list`，§4.1）。
-    let registry = match SessionRegistry::open(&cfg.data_dir.join("amux.db")) {
+    // 会话注册表（SQLite，docs/DESIGN.md「普通会话存储」：session.sqlite）。
+    let registry = match SessionRegistry::open(&cfg.data_dir.join("session.sqlite")) {
         Ok(r) => Arc::new(r),
         Err(e) => {
             eprintln!("打开会话注册表失败: {e}");
@@ -96,13 +74,43 @@ async fn main() {
         }
     };
 
+    // 保留 agents 引用用于退出时关闭 ACP 子进程（docs/DESIGN.md「ACP Server 生命周期」）
+    let shutdown_agents = agents.clone();
+
     let (manager, notifications) = SessionManager::new(agents, registry, cfg.data_dir.clone());
     let manager = Arc::new(manager);
+
+    // 捕获 Ctrl+C 等退出信号，优雅关闭 ACP 子进程资源
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        protocol::log::info("server.shutdown", "收到退出信号，正在关闭 ACP 子进程…");
+        shutdown_agents.shutdown_all();
+        std::process::exit(0);
+    });
+
+    // 定时清理长时间无活动会话（>1h，docs/DESIGN.md「主动关闭长时间无活动会话」）
+    let cleanup_manager = manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let closed = cleanup_manager.close_idle(now_ms, 3600_000).await;
+            if closed > 0 {
+                protocol::log::info(
+                    "server.cleanup",
+                    format!("关闭 {closed} 个长时间无活动会话"),
+                );
+            }
+        }
+    });
 
     let handlers = Arc::new(Handlers {
         manager: manager.clone(),
         git: GitRunner::new(),
-        server_version: SERVER_VERSION.to_string(),
     });
 
     let transport = Transport::new(TransportOptions {
@@ -111,11 +119,11 @@ async fn main() {
         token: cfg.token.clone(),
         handlers: handlers.clone(),
         notifications,
-        logger: Some(Arc::new(|line| println!("{line}"))),
+        logger: Some(Arc::new(|line| eprintln!("{line}"))),
     });
 
     if let Err(e) = transport.run().await {
-        eprintln!("启动失败: {e}");
+        eprintln!("server 出错: {e}");
         std::process::exit(1);
     }
 }

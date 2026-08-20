@@ -1,0 +1,315 @@
+//! 工作流会话存储（docs/DESIGN.md「工作流会话存储」）：
+//! - 元数据：`~/.amux/app/session.sqlite`
+//! - 对话历史：`~/.amux/app/sessions/<session_id>_history.jsonl`
+//! - 活动历史：`~/.amux/app/sessions/<session_id>_activities.jsonl`
+
+use std::io::{self, Write};
+use std::path::Path;
+
+use protocol::{Activity, ContentBlock, HistoryItem};
+use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::workflow::{ChildSession, OrcMsg, OrcSession};
+
+fn history_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
+    data_dir.join("sessions").join(format!("{id}_history.jsonl"))
+}
+
+fn activities_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
+    data_dir
+        .join("sessions")
+        .join(format!("{id}_activities.jsonl"))
+}
+
+fn sqlite_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("session.sqlite")
+}
+
+fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::File::create(path)?;
+    for item in items {
+        let line = serde_json::to_string(item).map_err(io::Error::other)?;
+        writeln!(f, "{line}")?;
+    }
+    Ok(())
+}
+
+fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn history_from_transcript(transcript: &[OrcMsg], ts: u64) -> Vec<HistoryItem> {
+    transcript
+        .iter()
+        .map(|m| match m {
+            OrcMsg::User { text } => HistoryItem::UserMessage {
+                content: vec![ContentBlock::Text { text: text.clone() }],
+                timestamp: ts,
+            },
+            OrcMsg::Orc { text } => HistoryItem::AgentMessage {
+                content: vec![ContentBlock::Text { text: text.clone() }],
+                timestamp: ts,
+            },
+        })
+        .collect()
+}
+
+fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
+    items
+        .iter()
+        .filter_map(|h| match h {
+            HistoryItem::UserMessage { content, .. } => {
+                let text = content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                Some(OrcMsg::User { text })
+            }
+            HistoryItem::AgentMessage { content, .. } => {
+                let text = content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                Some(OrcMsg::Orc { text })
+            }
+        })
+        .collect()
+}
+
+fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
+    std::fs::create_dir_all(data_dir).ok();
+    let conn = Connection::open(sqlite_path(data_dir))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            state TEXT NOT NULL,
+            last_active_at INTEGER NOT NULL,
+            children TEXT NOT NULL,
+            description TEXT NOT NULL,
+            preamble TEXT NOT NULL,
+            cancelled INTEGER NOT NULL,
+            done INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );",
+    )?;
+    Ok(conn)
+}
+
+fn state_str(s: protocol::SessionState) -> &'static str {
+    match s {
+        protocol::SessionState::Idle => "idle",
+        protocol::SessionState::Busy => "busy",
+    }
+}
+
+fn state_from(s: &str) -> protocol::SessionState {
+    match s {
+        "busy" => protocol::SessionState::Busy,
+        _ => protocol::SessionState::Idle,
+    }
+}
+
+/// 将工作流会话写入 sqlite + 两份 jsonl。
+pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
+    let children = serde_json::to_string(&session.children).map_err(io::Error::other)?;
+    let conn = open_db(data_dir).map_err(io::Error::other)?;
+    conn.execute(
+        "INSERT INTO sessions
+            (id, title, state, last_active_at, children, description, preamble,
+             cancelled, done, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(id) DO UPDATE SET
+            title=excluded.title, state=excluded.state,
+            last_active_at=excluded.last_active_at, children=excluded.children,
+            description=excluded.description, preamble=excluded.preamble,
+            cancelled=excluded.cancelled, done=excluded.done,
+            created_at=excluded.created_at, updated_at=excluded.updated_at",
+        params![
+            session.id,
+            session.title,
+            state_str(session.state),
+            session.updated_at as i64,
+            children,
+            session.description,
+            session.preamble,
+            session.cancelled as i64,
+            session.done as i64,
+            session.created_at as i64,
+            session.updated_at as i64,
+        ],
+    )
+    .map_err(io::Error::other)?;
+    write_jsonl(
+        &history_path(data_dir, &session.id),
+        &history_from_transcript(&session.transcript, session.updated_at),
+    )?;
+    write_jsonl(
+        &activities_path(data_dir, &session.id),
+        &session.activities,
+    )?;
+    Ok(())
+}
+
+/// 加载全部工作流会话（按最近活跃降序）。
+pub fn load_all(data_dir: &Path) -> Vec<OrcSession> {
+    let Ok(conn) = open_db(data_dir) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, title, state, last_active_at, children, description, preamble,
+                cancelled, done, created_at, updated_at
+         FROM sessions ORDER BY last_active_at DESC",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)? as u64,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, i64>(7)? != 0,
+            row.get::<_, i64>(8)? != 0,
+            row.get::<_, i64>(9)? as u64,
+            row.get::<_, i64>(10)? as u64,
+        ))
+    });
+    let Ok(rows) = rows else {
+        return Vec::new();
+    };
+    rows.flatten()
+        .map(
+            |(
+                id,
+                title,
+                state,
+                last_active_at,
+                children,
+                description,
+                preamble,
+                cancelled,
+                done,
+                created_at,
+                updated_at,
+            )| {
+                let children: Vec<ChildSession> =
+                    serde_json::from_str(&children).unwrap_or_default();
+                let transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, &id)));
+                let activities = read_jsonl(&activities_path(data_dir, &id));
+                OrcSession {
+                    id,
+                    title,
+                    description,
+                    preamble,
+                    state: state_from(&state),
+                    cancelled,
+                    done,
+                    transcript,
+                    children,
+                    activities,
+                    created_at,
+                    updated_at: last_active_at.max(updated_at),
+                }
+            },
+        )
+        .collect()
+}
+
+/// 删除工作流会话元数据与 jsonl。
+pub fn remove(data_dir: &Path, id: &str) {
+    if let Ok(conn) = open_db(data_dir) {
+        let _ = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]);
+    }
+    let _ = std::fs::remove_file(history_path(data_dir, id));
+    let _ = std::fs::remove_file(activities_path(data_dir, id));
+}
+
+/// 按 id 取一条（测试用）。
+#[cfg(test)]
+pub fn get(data_dir: &Path, id: &str) -> Option<OrcSession> {
+    let conn = open_db(data_dir).ok()?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM sessions WHERE id = ?1")
+        .ok()?;
+    stmt.query_row(params![id], |_| Ok(()))
+        .optional()
+        .ok()
+        .flatten()?;
+    load_all(data_dir).into_iter().find(|s| s.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::SessionState;
+
+    fn temp() -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::env::temp_dir().join(format!("amux-wfstore-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn save_load_remove_matches_design_layout() {
+        let dir = temp();
+        let _ = std::fs::remove_dir_all(&dir);
+        let session = OrcSession {
+            id: "orc_1".into(),
+            title: "计划A".into(),
+            description: "做完再审查".into(),
+            preamble: "模板".into(),
+            state: SessionState::Idle,
+            cancelled: false,
+            done: false,
+            transcript: vec![
+                OrcMsg::User { text: "开始".into() },
+                OrcMsg::Orc { text: "已转发".into() },
+            ],
+            children: vec![],
+            activities: vec![Activity::Thinking {
+                timestamp: 1,
+                content: "想".into(),
+            }],
+            created_at: 10,
+            updated_at: 20,
+        };
+        save(&dir, &session).unwrap();
+        assert!(dir.join("session.sqlite").is_file());
+        assert!(dir.join("sessions/orc_1_history.jsonl").is_file());
+        assert!(dir.join("sessions/orc_1_activities.jsonl").is_file());
+
+        let loaded = load_all(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].title, "计划A");
+        assert_eq!(loaded[0].transcript.len(), 2);
+        assert_eq!(loaded[0].activities.len(), 1);
+        assert_eq!(loaded[0].preamble, "模板");
+
+        remove(&dir, "orc_1");
+        assert!(load_all(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
