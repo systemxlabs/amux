@@ -7,6 +7,7 @@
 //!   关联普通会话 idle（`session.state_change` 通知驱动）触发自动推进
 //! - 会话操作统一经真实 WsClient（SESSION_NEW / SESSION_PROMPT / SESSION_CANCEL）
 
+#[cfg(test)]
 use std::collections::VecDeque;
 use std::future::Future;
 use std::path::Path;
@@ -104,6 +105,7 @@ pub struct MachineSummary {
 }
 
 impl MachineSummary {
+    #[cfg(test)]
     pub fn named(name: &str, agents: &[&str]) -> Self {
         MachineSummary {
             name: name.into(),
@@ -121,29 +123,19 @@ impl MachineSummary {
 
 // ---- 编排决策 ----
 
-#[derive(Debug, Clone)]
-pub struct ChildStatus {
-    pub session_id: String,
-    pub machine_name: String,
-    pub agent: String,
-    pub state: SessionState,
-    pub step_desc: String,
-    pub last_output: String,
-}
-
 /// 编排上下文（每次 decide 的输入）。
 #[derive(Debug, Clone)]
 pub struct OrcContext {
     pub plan: String,
     pub preamble: String,
     pub transcript: Vec<String>,
-    pub children: Vec<ChildStatus>,
     pub child_sessions: Vec<ChildSession>,
     pub clients: Vec<WsClient>,
     pub machines: Vec<MachineSummary>,
 }
 
 /// 编排动作（引擎统一执行；会话操作经真实 WsClient，docs/DESIGN.md §10）。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrcAction {
     Run {
@@ -185,6 +177,7 @@ pub trait OrcBackend: Send + Sync {
 
 // ---- 工具规划动作记录 ----
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOp {
     Create {
@@ -199,41 +192,8 @@ pub enum ToolOp {
     },
 }
 
-/// 工具共享状态：机器名列表（工具校验）+ 动作记录。
-#[derive(Clone)]
-pub struct ToolState {
-    machine_names: Vec<String>,
-    ops: Arc<Mutex<Vec<ToolOp>>>,
-}
-
-impl ToolState {
-    pub fn new(machine_names: Vec<String>) -> Self {
-        ToolState {
-            machine_names,
-            ops: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn record(&self, op: ToolOp) {
-        self.ops
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .push(op);
-    }
-
-    pub fn take_ops(&self) -> Vec<ToolOp> {
-        std::mem::take(&mut *self.ops.lock().expect("Mutex 中毒（临界区内不应 panic）"))
-    }
-
-    pub fn resolve_machine(&self, name: &str) -> Result<usize, String> {
-        self.machine_names
-            .iter()
-            .position(|n| n == name)
-            .ok_or_else(|| format!("机器不存在: {name}"))
-    }
-}
-
 /// 规划动作 → 引擎动作（纯逻辑，可单测）。
+#[allow(dead_code)]
 pub fn ops_to_actions(ops: Vec<ToolOp>, known_sessions: &[String]) -> Vec<OrcAction> {
     let mut out = Vec::new();
     for op in ops {
@@ -356,6 +316,7 @@ impl WorkflowEngine {
         }
     }
 
+    #[cfg(test)]
     pub async fn start(&mut self) -> Result<(), String> {
         self.advance().await
     }
@@ -427,19 +388,6 @@ impl WorkflowEngine {
                 .map(|m| match m {
                     OrcMsg::User { text } => format!("用户：{text}"),
                     OrcMsg::Orc { text } => format!("编排：{text}"),
-                })
-                .collect(),
-            children: self
-                .session
-                .children
-                .iter()
-                .map(|c| ChildStatus {
-                    session_id: c.id.clone(),
-                    machine_name: c.machine_name.clone(),
-                    agent: c.agent.clone(),
-                    state: c.state,
-                    step_desc: c.step_desc.clone(),
-                    last_output: c.last_output.clone(),
                 })
                 .collect(),
             child_sessions: self.session.children.clone(),
@@ -671,10 +619,6 @@ impl WorkflowEngine {
         } else {
             SessionState::Idle
         };
-    }
-
-    pub fn is_advancing(&self) -> bool {
-        self.advancing
     }
 
     pub fn begin_busy(&mut self) {
@@ -1016,12 +960,14 @@ fn state_label(s: SessionState) -> &'static str {
 }
 
 /// 脚本化测试后端（决策序列；用于驱动引擎的纯逻辑测试）。
+#[cfg(test)]
 #[doc(hidden)]
 pub struct FakeBackend {
     decisions: Mutex<VecDeque<Decision>>,
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 #[allow(clippy::new_ret_no_self)]
 impl FakeBackend {
     pub fn new(decisions: Vec<Decision>) -> Arc<dyn OrcBackend> {
@@ -1035,6 +981,7 @@ impl FakeBackend {
     }
 }
 
+#[cfg(test)]
 impl OrcBackend for FakeBackend {
     fn decide<'a>(
         &'a self,
@@ -1448,16 +1395,6 @@ async fn page_session(
 mod tests {
     use super::*;
     use rig::tool::Tool as _;
-
-    fn run(machine: &str, agent: &str, prompt: &str) -> OrcAction {
-        OrcAction::Run {
-            machine: machine.into(),
-            agent: agent.into(),
-            cwd: "/tmp/work".into(),
-            prompt: prompt.into(),
-            reuse: None,
-        }
-    }
 
     fn machines() -> Vec<MachineSummary> {
         vec![MachineSummary::named("测试机", &["mock_acp"])]

@@ -33,6 +33,7 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
 
 /// 兼容旧测试 URL 的查询串 token 解析。生产连接通过 `connect_with_token`
 /// 显式传入机器配置中的 token，避免把凭据放进 WebSocket URL。
+#[cfg(test)]
 fn token_from_url(url: &str) -> String {
     url.split('?')
         .nth(1)
@@ -79,6 +80,7 @@ pub struct WsClient {
 
 impl WsClient {
     /// 兼容旧调用：从 URL 查询串读取 token。
+    #[cfg(test)]
     pub fn connect(url: String) -> Self {
         let token = token_from_url(&url);
         Self::connect_with_token(url, token)

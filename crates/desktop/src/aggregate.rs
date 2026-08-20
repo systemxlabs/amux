@@ -21,17 +21,6 @@ pub struct SessionView {
 }
 
 impl SessionView {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 用一窗历史替换对话（轮询刷新：最新一窗全量覆盖）。
-    pub fn set_history(&mut self, items: &[HistoryItem]) {
-        self.dialog = history_to_dialog(items);
-        self.history_has_more = false;
-        self.history_next_before = None;
-    }
-
     pub fn set_history_page(
         &mut self,
         items: &[HistoryItem],
@@ -80,13 +69,6 @@ impl SessionView {
         self.prepend_history(earlier);
         self.history_has_more = has_more;
         self.history_next_before = next_before;
-    }
-
-    /// 设置活动历史（轮询刷新：全量覆盖）。
-    pub fn set_activities(&mut self, activities: Vec<Activity>) {
-        self.activities = activities;
-        self.activities_has_more = false;
-        self.activities_next_before = None;
     }
 
     pub fn set_activities_page(
@@ -153,19 +135,19 @@ mod tests {
 
     #[test]
     fn set_history_replaces_dialog() {
-        let mut view = SessionView::new();
-        view.set_history(&[user("你好", 1), agent("回复", 2)]);
+        let mut view = SessionView::default();
+        view.set_history_page(&[user("你好", 1), agent("回复", 2)], false, None);
         assert_eq!(view.dialog.len(), 2);
         // 刷新覆盖
-        view.set_history(&[agent("新回复", 3)]);
+        view.set_history_page(&[agent("新回复", 3)], false, None);
         assert_eq!(view.dialog.len(), 1);
         assert!(matches!(&view.dialog[0], DialogMsg::AgentMessage { .. }));
     }
 
     #[test]
     fn prepend_history_merges_split_agent_message() {
-        let mut view = SessionView::new();
-        view.set_history(&[agent("后半", 20)]);
+        let mut view = SessionView::default();
+        view.set_history_page(&[agent("后半", 20)], false, None);
         view.prepend_history(&[user("更早", 1), agent("前半", 2)]);
         assert_eq!(view.dialog.len(), 2);
         assert!(matches!(&view.dialog[0], DialogMsg::UserMessage { .. }));
@@ -179,11 +161,15 @@ mod tests {
 
     #[test]
     fn activities_set_and_prepend() {
-        let mut view = SessionView::new();
-        view.set_activities(vec![Activity::Compaction {
-            timestamp: 2,
-            detail: "压缩".into(),
-        }]);
+        let mut view = SessionView::default();
+        view.set_activities_page(
+            vec![Activity::Compaction {
+                timestamp: 2,
+                detail: "压缩".into(),
+            }],
+            false,
+            None,
+        );
         assert_eq!(view.activities.len(), 1);
         view.prepend_activities(vec![Activity::Error {
             timestamp: 1,
@@ -195,7 +181,7 @@ mod tests {
 
     #[test]
     fn live_activity_marks_busy() {
-        let mut view = SessionView::new();
+        let mut view = SessionView::default();
         view.set_live(Some(Activity::Thinking {
             timestamp: 1,
             content: "x".into(),

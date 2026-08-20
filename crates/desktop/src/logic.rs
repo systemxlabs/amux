@@ -139,6 +139,7 @@ pub enum InputAttachment {
         path: String,
         is_dir: bool,
     },
+    #[allow(dead_code)]
     Image {
         name: String,
         mime_type: String,
