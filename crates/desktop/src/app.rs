@@ -29,6 +29,7 @@ use gpui_component::{
     input::{Input, InputState},
     label::Label,
     radio::RadioGroup,
+    scroll::ScrollableElement,
     spinner::Spinner,
     text::{TextView, TextViewStyle},
     WindowExt, *,
@@ -40,7 +41,7 @@ use protocol::{
     Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
     GitDiffFile, HistoryItem, SessionConfigureParams, SessionIdParams, SessionMeta,
     SessionNewParams, SessionPageParams, SessionPromptParams, SessionState, SkillEntry,
-    WorkspaceDiffResult,
+    WorkspaceDiffResult, WorkspaceEntry, WorkspaceListResult, WorkspaceReadResult,
 };
 
 use crate::aggregate::SessionView;
@@ -71,6 +72,7 @@ fn state_from_str(s: &str) -> Option<SessionState> {
 /// 右侧面板（默认折叠，悬浮按钮展开）。
 #[derive(Clone, Copy, PartialEq)]
 enum Panel {
+    Workspace,
     Diff,
     Detail,
     Activities,
@@ -109,6 +111,15 @@ struct MachineView {
     diff_not_repo: bool,
     /// 代码审查面板中选中的文件/代码块：(path, None)=整文件；(path, Some(i))=第 i 个 hunk。
     diff_selection: HashSet<(String, Option<usize>)>,
+    workspace_entries: Vec<WorkspaceEntry>,
+    workspace_path: String,
+    workspace_file: Option<String>,
+    workspace_content: String,
+    workspace_error: Option<String>,
+    workspace_has_more: bool,
+    workspace_next_offset: usize,
+    diff_tree_collapsed: bool,
+    diff_changes_collapsed: bool,
     skills: Vec<String>,
     skills_agent: Option<String>,
     /// skills 弹窗的引用来源（机器下标 + agent 名）。
@@ -131,6 +142,15 @@ impl MachineView {
             diff_files: Vec::new(),
             diff_not_repo: false,
             diff_selection: HashSet::new(),
+            workspace_entries: Vec::new(),
+            workspace_path: String::new(),
+            workspace_file: None,
+            workspace_content: String::new(),
+            workspace_error: None,
+            workspace_has_more: false,
+            workspace_next_offset: 0,
+            diff_tree_collapsed: false,
+            diff_changes_collapsed: false,
             skills: Vec::new(),
             skills_agent: None,
             show_skills: None,
@@ -196,6 +216,8 @@ pub struct AmuxApp {
     selected: Option<Selected>,
     panel: Option<Panel>,
     panel_delta_px: f32,
+    panel_resize_origin: Option<f32>,
+    panel_resize_initial: f32,
     show_settings: bool,
     show_add_machine_form: bool,
     machine_form_error: Option<String>,
@@ -232,6 +254,7 @@ pub struct AmuxApp {
     workflow_template: Option<WorkflowTemplate>,
     dialog_scroll: ScrollHandle,
     activities_scroll: ScrollHandle,
+    diff_scroll: ScrollHandle,
     workflow_dialog_limit: usize,
     activities_limit: usize,
     expanded_activities: std::collections::HashSet<String>,
@@ -283,6 +306,8 @@ impl AmuxApp {
             selected: None,
             panel: None,
             panel_delta_px: 0.0,
+            panel_resize_origin: None,
+            panel_resize_initial: 0.0,
             show_settings: false,
             show_add_machine_form: false,
             machine_form_error: None,
@@ -319,6 +344,7 @@ impl AmuxApp {
             workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
             activities_scroll: ScrollHandle::new(),
+            diff_scroll: ScrollHandle::new(),
             workflow_dialog_limit: 50,
             activities_limit: 100,
             expanded_activities: std::collections::HashSet::new(),
@@ -1765,6 +1791,136 @@ impl AmuxApp {
         .detach();
     }
 
+    fn load_workspace_list(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        path: String,
+        offset: usize,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let cwd = match &self.selected {
+            Some(Selected::Session { id, .. }) => m
+                .sessions
+                .iter()
+                .find(|s| &s.id == id)
+                .map(|s| s.cwd.clone()),
+            _ => None,
+        };
+        let Some(cwd) = cwd else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = json!({
+                "cwd": cwd,
+                "path": if path.is_empty() { None } else { Some(path.clone()) },
+                "offset": offset,
+                "limit": 200,
+            });
+            let res = client
+                .request(protocol::method::WORKSPACE_LIST, Some(params))
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                let Some(m) = this.machines.get_mut(machine) else {
+                    return;
+                };
+                match res {
+                    Ok(value) => match serde_json::from_value::<WorkspaceListResult>(value) {
+                        Ok(result) => {
+                            if offset == 0 {
+                                m.workspace_entries = result.entries;
+                                m.workspace_file = None;
+                                m.workspace_content.clear();
+                            } else {
+                                m.workspace_entries.extend(result.entries);
+                            }
+                            m.workspace_path = result.path;
+                            m.workspace_error = None;
+                            m.workspace_has_more = result.has_more;
+                            m.workspace_next_offset = result.next_offset;
+                        }
+                        Err(error) => {
+                            m.workspace_error = Some(format!("工作目录列表失败：{error}"));
+                        }
+                    },
+                    Err(error) => {
+                        m.workspace_error = Some(format!("工作目录列表失败：{error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_workspace_file(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        path: String,
+        offset: usize,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let cwd = match &self.selected {
+            Some(Selected::Session { id, .. }) => m
+                .sessions
+                .iter()
+                .find(|s| &s.id == id)
+                .map(|s| s.cwd.clone()),
+            _ => None,
+        };
+        let Some(cwd) = cwd else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = json!({
+                "cwd": cwd,
+                "path": path,
+                "offset": offset,
+                "limit": 400,
+            });
+            let res = client
+                .request(protocol::method::WORKSPACE_READ, Some(params))
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                let Some(m) = this.machines.get_mut(machine) else {
+                    return;
+                };
+                match res {
+                    Ok(value) => match serde_json::from_value::<WorkspaceReadResult>(value) {
+                        Ok(result) => {
+                            if offset == 0 {
+                                m.workspace_content = result.content;
+                            } else {
+                                m.workspace_content.push_str(&result.content);
+                            }
+                            m.workspace_file = Some(result.path);
+                            m.workspace_error = None;
+                            m.workspace_has_more = result.has_more;
+                            m.workspace_next_offset = result.next_offset;
+                        }
+                        Err(error) => {
+                            m.workspace_error = Some(format!("读取文件失败：{error}"));
+                        }
+                    },
+                    Err(error) => {
+                        m.workspace_error = Some(format!("读取文件失败：{error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn restore_workspace(
         &self,
         window: &mut Window,
@@ -2193,6 +2349,7 @@ impl AmuxApp {
     /// 面板逻辑宽度（px）。
     fn panel_width_logical(panel: Panel) -> f32 {
         match panel {
+            Panel::Workspace => 520.0,
             Panel::Diff => 460.0,
             Panel::Detail => 360.0,
             Panel::Activities => 400.0,
@@ -2210,6 +2367,8 @@ impl AmuxApp {
         }
         self.panel = panel;
         self.panel_delta_px = new_delta;
+        self.panel_resize_origin = None;
+        self.panel_resize_initial = new_delta;
         let width: gpui::Pixels = base + new_delta.into();
         window.resize(gpui::Size::new(width, bounds.size.height));
         cx.notify();
@@ -2220,12 +2379,45 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        match self.panel {
-            Some(Panel::Diff) => Some(self.render_diff_panel(window, cx)),
-            Some(Panel::Detail) => Some(self.render_detail_panel(window, cx)),
-            Some(Panel::Activities) => Some(self.render_activities_panel(window, cx)),
-            None => None,
-        }
+        let panel = match self.panel {
+            Some(Panel::Workspace) => self.render_workspace_panel(window, cx),
+            Some(Panel::Diff) => self.render_diff_panel(window, cx),
+            Some(Panel::Detail) => self.render_detail_panel(window, cx),
+            Some(Panel::Activities) => self.render_activities_panel(window, cx),
+            None => return None,
+        };
+        let handle = div()
+            .id("panel-resize-handle")
+            .w(px(5.0))
+            .h_full()
+            .bg(cx.theme().border.opacity(0.35))
+            .hover(|d| d.bg(cx.theme().primary))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, _cx| {
+                    this.panel_resize_origin = Some(event.position.x.as_f32());
+                    this.panel_resize_initial = this.panel_delta_px;
+                }),
+            )
+            .on_drag((), |_, _, _, cx| cx.new(|_| Empty))
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<()>, window, cx| {
+                let Some(origin) = this.panel_resize_origin else {
+                    return;
+                };
+                let next = (this.panel_resize_initial + origin - event.event.position.x.as_f32())
+                    .clamp(300.0 * window.scale_factor(), 800.0 * window.scale_factor());
+                this.resize_panel(window, cx, next);
+            }));
+        Some(h_flex().h_full().child(handle).child(panel).into_any())
+    }
+
+    fn resize_panel(&mut self, window: &mut Window, cx: &mut Context<Self>, width: f32) {
+        let current = self.panel_delta_px;
+        let bounds = window.bounds();
+        let base = bounds.size.width - current.into();
+        self.panel_delta_px = width;
+        window.resize(gpui::Size::new(base + width.into(), bounds.size.height));
+        cx.notify();
     }
 }
 
@@ -3381,9 +3573,28 @@ impl AmuxApp {
             .border_color(cx.theme().border)
             .shadow_sm()
             .child(
+                Button::new("float-workspace")
+                    .small()
+                    .label("目录")
+                    .when(panel == Some(Panel::Workspace), |b| b.primary())
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        let next = if this.panel == Some(Panel::Workspace) {
+                            None
+                        } else {
+                            Some(Panel::Workspace)
+                        };
+                        this.set_panel(window, cx, next);
+                        if next == Some(Panel::Workspace) {
+                            if let Some(machine) = this.active_machine() {
+                                this.load_workspace_list(window, cx, machine, String::new(), 0);
+                            }
+                        }
+                    })),
+            )
+            .child(
                 Button::new("float-diff")
                     .small()
-                    .label("Diff")
+                    .label("改动")
                     .when(panel == Some(Panel::Diff), |b| b.primary())
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         let next = if this.panel == Some(Panel::Diff) {
@@ -3534,6 +3745,194 @@ impl AmuxApp {
     }
 
     // ---- 右侧面板内容 ----
+
+    fn render_workspace_panel(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(machine_idx) = self.active_machine() else {
+            return v_flex()
+                .w(px(520.0))
+                .h_full()
+                .p_3()
+                .bg(cx.theme().popover)
+                .child(Label::new("未选择会话"))
+                .into_any();
+        };
+        let Some(machine) = self.machine(machine_idx) else {
+            return div().into_any();
+        };
+        let entries = machine.workspace_entries.clone();
+        let workspace_path = machine.workspace_path.clone();
+        let workspace_file = machine.workspace_file.clone();
+        let workspace_content = machine.workspace_content.clone();
+        let workspace_error = machine.workspace_error.clone();
+        let has_more = machine.workspace_has_more;
+        let next_offset = machine.workspace_next_offset;
+        let file = workspace_file.clone();
+        let parent = PathBuf::from(&workspace_path)
+            .parent()
+            .and_then(|p| (!p.as_os_str().is_empty()).then(|| p.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+
+        let mut tree = v_flex().gap_1().w(px(220.0)).overflow_y_scrollbar();
+        if !workspace_path.is_empty() {
+            let parent_for_click = parent.clone();
+            tree = tree.child(
+                Button::new("workspace-parent")
+                    .small()
+                    .ghost()
+                    .label("↩ 上一级")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some(machine) = this.active_machine() {
+                            this.load_workspace_list(
+                                window,
+                                cx,
+                                machine,
+                                parent_for_click.clone(),
+                                0,
+                            );
+                        }
+                    })),
+            );
+        }
+        for entry in entries {
+            let entry_path = entry.path.clone();
+            let is_dir = entry.is_dir;
+            let label = format!("{} {}", if is_dir { "▸" } else { "·" }, entry.name);
+            tree = tree.child(
+                Button::new(format!("workspace-entry-{}", entry.path))
+                    .small()
+                    .ghost()
+                    .label(label)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some(machine) = this.active_machine() {
+                            if is_dir {
+                                this.load_workspace_list(
+                                    window,
+                                    cx,
+                                    machine,
+                                    entry_path.clone(),
+                                    0,
+                                );
+                            } else {
+                                this.load_workspace_file(
+                                    window,
+                                    cx,
+                                    machine,
+                                    entry_path.clone(),
+                                    0,
+                                );
+                            }
+                        }
+                    })),
+            );
+        }
+        if has_more && file.is_none() {
+            let workspace_path_for_click = workspace_path.clone();
+            tree = tree.child(
+                Button::new("workspace-load-more")
+                    .small()
+                    .ghost()
+                    .label("加载更多")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some(machine) = this.active_machine() {
+                            this.load_workspace_list(
+                                window,
+                                cx,
+                                machine,
+                                workspace_path_for_click.clone(),
+                                next_offset,
+                            );
+                        }
+                    })),
+            );
+        }
+
+        let mut content = v_flex().flex_1().min_w_0().h_full().gap_2().child(
+            Label::new(
+                workspace_file
+                    .clone()
+                    .unwrap_or_else(|| format!("/{}", workspace_path)),
+            )
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(cx.theme().foreground),
+        );
+        if let Some(error) = workspace_error {
+            content = content.child(Label::new(error).text_sm().text_color(cx.theme().danger));
+        } else if let Some(path) = file {
+            content = content.child(
+                TextView::markdown(
+                    "workspace-file-content",
+                    format!("```text\n{}\n```", workspace_content),
+                )
+                .selectable(true),
+            );
+            if has_more {
+                content = content.child(
+                    Button::new("workspace-read-more")
+                        .small()
+                        .ghost()
+                        .label("加载更多内容")
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            if let Some(machine) = this.active_machine() {
+                                this.load_workspace_file(
+                                    window,
+                                    cx,
+                                    machine,
+                                    path.clone(),
+                                    next_offset,
+                                );
+                            }
+                        })),
+                );
+            }
+        } else {
+            content = content.child(
+                Label::new("选择文件查看文本内容")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            );
+        }
+
+        v_flex()
+            .w(px(520.0))
+            .h_full()
+            .gap_2()
+            .p_3()
+            .bg(cx.theme().popover)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Label::new("工作目录")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("close-panel-workspace")
+                            .small()
+                            .label("✕")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.set_panel(window, cx, None);
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_2()
+                    .child(tree)
+                    .child(content),
+            )
+            .into_any()
+    }
 
     fn render_detail_panel(
         &self,
@@ -3825,60 +4224,103 @@ impl AmuxApp {
             .and_then(|i| self.machine(i))
             .is_some_and(|m| !m.diff_selection.is_empty());
         let can_send = matches!(&self.selected, Some(Selected::Session { .. }));
-        let mut children: Vec<gpui::AnyElement> = Vec::new();
-        children.push(
-            h_flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    Label::new("代码审查")
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground),
-                )
-                .child(div().flex_1())
-                .when(has_selection && can_send, |h| {
-                    h.child(
-                        Button::new("diff-send-selected")
-                            .small()
-                            .primary()
-                            .label("发送选中到会话")
-                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                if let Some(machine) = this.active_machine() {
-                                    this.send_selected_diff(window, cx, machine);
-                                }
-                            })),
-                    )
-                    .child(
-                        Button::new("diff-clear-selection")
-                            .small()
-                            .label("清空选择")
-                            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                if let Some(machine) = this.active_machine() {
-                                    this.clear_diff_selection(machine, cx);
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                })
-                .child(
-                    Button::new("close-panel-diff")
+        let diff_tree_collapsed = machine
+            .and_then(|i| self.machine(i))
+            .map(|m| m.diff_tree_collapsed)
+            .unwrap_or(false);
+        let diff_changes_collapsed = machine
+            .and_then(|i| self.machine(i))
+            .map(|m| m.diff_changes_collapsed)
+            .unwrap_or(false);
+        let diff_scroll = self.diff_scroll.clone();
+        let mut content_children: Vec<gpui::AnyElement> = Vec::new();
+        let toolbar = h_flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Label::new("改动审查")
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground),
+            )
+            .child(div().flex_1())
+            .when(has_selection && can_send, |h| {
+                h.child(
+                    Button::new("diff-send-selected")
                         .small()
-                        .label("✕")
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            this.set_panel(window, cx, None);
+                        .primary()
+                        .label("发送选中到会话")
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            if let Some(machine) = this.active_machine() {
+                                this.send_selected_diff(window, cx, machine);
+                            }
                         })),
                 )
-                .into_any_element(),
-        );
+                .child(
+                    Button::new("diff-clear-selection")
+                        .small()
+                        .label("清空选择")
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            if let Some(machine) = this.active_machine() {
+                                this.clear_diff_selection(machine, cx);
+                                cx.notify();
+                            }
+                        })),
+                )
+            })
+            .child(
+                Button::new("diff-toggle-tree")
+                    .small()
+                    .ghost()
+                    .label(if diff_tree_collapsed {
+                        "展开文件树"
+                    } else {
+                        "折叠文件树"
+                    })
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        if let Some(machine) = this.active_machine() {
+                            if let Some(view) = this.machines.get_mut(machine) {
+                                view.diff_tree_collapsed = !view.diff_tree_collapsed;
+                            }
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(
+                Button::new("diff-toggle-changes")
+                    .small()
+                    .ghost()
+                    .label(if diff_changes_collapsed {
+                        "展开改动"
+                    } else {
+                        "折叠改动"
+                    })
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        if let Some(machine) = this.active_machine() {
+                            if let Some(view) = this.machines.get_mut(machine) {
+                                view.diff_changes_collapsed = !view.diff_changes_collapsed;
+                            }
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(
+                Button::new("close-panel-diff")
+                    .small()
+                    .label("✕")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.set_panel(window, cx, None);
+                    })),
+            )
+            .into_any_element();
         if not_repo {
-            children.push(
+            content_children.push(
                 Label::new("当前工作目录不是 git 仓库")
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .into_any_element(),
             );
         } else if files.is_empty() {
-            children.push(
+            content_children.push(
                 Label::new("暂无改动")
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
@@ -3894,9 +4336,10 @@ impl AmuxApp {
                 .bg(cx.theme().popover)
                 .border_l_1()
                 .border_color(cx.theme().border)
-                .children(children)
+                .child(toolbar)
                 .into_any();
         };
+        let mut tree_items: Vec<gpui::AnyElement> = Vec::new();
         for (fi, f) in files.iter().enumerate() {
             let path = f.path.clone();
             let patch = f.patch.clone();
@@ -4013,15 +4456,43 @@ impl AmuxApp {
                                         })),
                                 ),
                         )
-                        .child(
-                            TextView::markdown(format!("diff-{path}-{hi}"), h.patch.clone())
-                                .selectable(true),
-                        )
                         .into_any_element(),
                 );
             }
-            children.push(v_flex().gap_1().children(file_children).into_any_element());
+            let tree_path = path.clone();
+            let diff_scroll = diff_scroll.clone();
+            tree_items.push(
+                Button::new(format!("diff-tree-{fi}"))
+                    .small()
+                    .ghost()
+                    .label(format!("{}  (+{additions}/-{deletions})", tree_path))
+                    .on_click(cx.listener(move |_this, _ev, _window, _cx| {
+                        diff_scroll.scroll_to_top_of_item(fi);
+                    }))
+                    .into_any_element(),
+            );
+            content_children.push(v_flex().gap_1().children(file_children).into_any_element());
         }
+        let tree = if diff_tree_collapsed {
+            v_flex()
+                .w(px(28.0))
+                .child(Label::new("树"))
+                .into_any_element()
+        } else {
+            v_flex()
+                .w(px(190.0))
+                .gap_1()
+                .p_1()
+                .bg(cx.theme().muted)
+                .rounded_md()
+                .child(
+                    Label::new("改动文件")
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .children(tree_items)
+                .into_any_element()
+        };
         v_flex()
             .w(px(460.))
             .h_full()
@@ -4030,14 +4501,18 @@ impl AmuxApp {
             .bg(cx.theme().popover)
             .border_l_1()
             .border_color(cx.theme().border)
+            .child(toolbar)
             .child(
-                div()
-                    .id("diff-panel")
-                    .v_flex()
-                    .flex_1()
-                    .gap_2()
-                    .overflow_y_scroll()
-                    .children(children),
+                h_flex().flex_1().min_h_0().gap_2().child(tree).child(
+                    div()
+                        .id("diff-panel")
+                        .v_flex()
+                        .flex_1()
+                        .gap_2()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.diff_scroll)
+                        .when(!diff_changes_collapsed, |d| d.children(content_children)),
+                ),
             )
             .into_any()
     }

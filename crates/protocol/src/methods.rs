@@ -34,6 +34,10 @@ pub mod method {
     pub const WORKSPACE_DIFF: &str = "workspace.diff";
     /// 按文件或代码块撤销普通会话工作目录的改动
     pub const WORKSPACE_RESTORE: &str = "workspace.restore";
+    /// 分页查看工作目录指定文件夹内容
+    pub const WORKSPACE_LIST: &str = "workspace.list";
+    /// 分页读取工作目录文本文件内容
+    pub const WORKSPACE_READ: &str = "workspace.read";
 }
 
 /// server → GUI 通知名（docs/DESIGN.md：唯一主动推送 `session.state_change`）。

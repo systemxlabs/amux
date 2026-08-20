@@ -11,7 +11,7 @@ use protocol::{
     AgentSkillsResult, HistoryResult, OngoingActivityResult, OpResult, SessionConfigureParams,
     SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
     SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, WorkspaceDiffResult,
-    WorkspaceRestoreParams,
+    WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
 use crate::git::GitRunner;
@@ -262,6 +262,24 @@ impl Handlers {
                 let r = self
                     .git
                     .restore(&p.cwd, p.path.as_deref(), p.patch.as_deref());
+                serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
+            }
+
+            method::WORKSPACE_LIST => {
+                let p: WorkspaceListParams = parse(params)?;
+                let r = self
+                    .git
+                    .list_workspace(&p.cwd, p.path.as_deref(), p.limit, p.offset)
+                    .map_err(RpcError::internal)?;
+                serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
+            }
+
+            method::WORKSPACE_READ => {
+                let p: WorkspaceReadParams = parse(params)?;
+                let r = self
+                    .git
+                    .read_workspace(&p.cwd, &p.path, p.offset, p.limit)
+                    .map_err(RpcError::internal)?;
                 serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
             }
 

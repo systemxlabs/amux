@@ -430,6 +430,114 @@ async fn workspace_diff_reflects_changes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn workspace_list_and_read_browse_session_directory() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect(port, "test-token").await;
+    let dir = init_repo();
+    std::fs::create_dir(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.join("README.md"), "one\ntwo\nthree\n").unwrap();
+
+    let root = c
+        .call(
+            "workspace.list",
+            json!({"cwd": dir.to_str().unwrap(), "limit": 10}),
+        )
+        .await;
+    assert!(root.get("error").is_none(), "list 失败: {root}");
+    assert_eq!(root["result"]["path"], "");
+    assert!(root["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == "src" && entry["isDir"] == true));
+
+    let nested = c
+        .call(
+            "workspace.list",
+            json!({"cwd": dir.to_str().unwrap(), "path": "src"}),
+        )
+        .await;
+    assert_eq!(nested["result"]["entries"][0]["path"], "src/main.rs");
+
+    let first = c
+        .call(
+            "workspace.read",
+            json!({"cwd": dir.to_str().unwrap(), "path": "README.md", "limit": 2}),
+        )
+        .await;
+    assert_eq!(first["result"]["content"], "one\ntwo\n");
+    assert_eq!(first["result"]["hasMore"], true);
+    let second = c
+        .call(
+            "workspace.read",
+            json!({
+                "cwd": dir.to_str().unwrap(),
+                "path": "README.md",
+                "offset": first["result"]["nextOffset"],
+                "limit": 2
+            }),
+        )
+        .await;
+    assert_eq!(second["result"]["content"], "three\n");
+    assert_eq!(second["result"]["hasMore"], false);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn workspace_read_rejects_invalid_and_binary_paths() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect(port, "test-token").await;
+    let dir = init_repo();
+    std::fs::write(dir.join("binary.dat"), [0xff, 0xfe, 0xfd]).unwrap();
+
+    let traversal = c
+        .call(
+            "workspace.read",
+            json!({"cwd": dir.to_str().unwrap(), "path": "../outside.txt"}),
+        )
+        .await;
+    assert!(
+        traversal.get("error").is_some(),
+        "应拒绝越界路径: {traversal}"
+    );
+
+    let binary = c
+        .call(
+            "workspace.read",
+            json!({"cwd": dir.to_str().unwrap(), "path": "binary.dat"}),
+        )
+        .await;
+    assert!(
+        binary.get("error").is_some(),
+        "应拒绝非 UTF-8 文件: {binary}"
+    );
+
+    #[cfg(unix)]
+    {
+        let outside =
+            std::env::temp_dir().join(format!("amux-e2e-workspace-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+        let symlink = c
+            .call(
+                "workspace.read",
+                json!({"cwd": dir.to_str().unwrap(), "path": "link/secret.txt"}),
+            )
+            .await;
+        assert!(
+            symlink.get("error").is_some(),
+            "应拒绝越界 symlink: {symlink}"
+        );
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- helpers ----
 
 async fn mock_acp_name(c: &mut Client) -> String {

@@ -393,6 +393,69 @@ pub struct WorkspaceRestoreParams {
     pub patch: Option<String>,
 }
 
+/// `workspace.list` 参数。path 始终是相对 cwd 的目录路径。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceListParams {
+    pub cwd: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "workspace_page_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+/// 工作目录中的一个目录项。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+/// `workspace.list` 结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceListResult {
+    pub path: String,
+    pub entries: Vec<WorkspaceEntry>,
+    pub has_more: bool,
+    pub next_offset: usize,
+}
+
+/// `workspace.read` 参数。offset/limit 按 UTF-8 文本行分页。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceReadParams {
+    pub cwd: String,
+    pub path: String,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "workspace_read_limit")]
+    pub limit: usize,
+}
+
+/// `workspace.read` 结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceReadResult {
+    pub path: String,
+    pub content: String,
+    pub has_more: bool,
+    pub next_offset: usize,
+}
+
+fn workspace_page_limit() -> usize {
+    200
+}
+
+fn workspace_read_limit() -> usize {
+    400
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -483,6 +546,30 @@ mod tests {
         let s = serde_json::to_string(&n).unwrap();
         assert!(s.contains("\"sessionId\":\"s1\""), "{s}");
         assert!(s.contains("\"newState\":\"idle\""), "{s}");
+    }
+
+    #[test]
+    fn workspace_params_and_results_use_documented_json_shape() {
+        let list: WorkspaceListParams =
+            serde_json::from_str(r#"{"cwd":"/tmp/project","path":"src"}"#).unwrap();
+        assert_eq!(list.cwd, "/tmp/project");
+        assert_eq!(list.path.as_deref(), Some("src"));
+        assert_eq!(list.limit, 200);
+        assert_eq!(list.offset, 0);
+
+        let read: WorkspaceReadParams =
+            serde_json::from_str(r#"{"cwd":"/tmp/project","path":"README.md"}"#).unwrap();
+        assert_eq!(read.limit, 400);
+
+        let result = WorkspaceReadResult {
+            path: "README.md".into(),
+            content: "hello\n".into(),
+            has_more: false,
+            next_offset: 1,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"hasMore\":false"), "{json}");
+        assert!(json.contains("\"nextOffset\":1"), "{json}");
     }
 
     /// 配置形状往返：MachineConfig/SkillEntry/WorkflowTemplate/QuickCommand/RecentWorkspace/OrchestratorConfig。
