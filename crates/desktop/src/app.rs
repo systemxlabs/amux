@@ -3843,7 +3843,11 @@ impl AmuxApp {
                                 }
                             })),
                     )
-                    .child(Label::new(summary).text_sm().font_weight(FontWeight::MEDIUM))
+                    .child(
+                        Label::new(summary)
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM),
+                    )
                     .child(div().flex_1())
                     .child(
                         Button::new(format!("restore-{path}"))
