@@ -178,4 +178,9 @@ agent 更适合交由模型厂商来做，模型厂商可根据自身模型来�
 
 #### 编排智能体设置
 
-主要配置编排智能体的大模型供应商连接配置，包含 API 格式、Base URL、API Key 和模型名称。
+配置大模型供应商连接，布局包括
+- API 格式单选框：chat_completions / responses / messages
+- Base URL 输入框
+- API Key 输入框
+- 模型名称输入框
+- 保存按钮
