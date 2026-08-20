@@ -1,5 +1,5 @@
 //! 会话管理（docs/DESIGN.md §3.2/§4/§5）：会话列表与历史权威 = server。
-//! - 会话注册表持久化于 SQLite（`amux.db`），列表由 server 维护（不依赖 ACP `session/list`）
+//! - 会话注册表持久化于 SQLite（`session.sqlite`），列表由 server 维护（不依赖 ACP `session/list`）
 //! - 事件透传（§5.1）与历史合并落库（§5.2）：透传逐条给 GUI，落库按 turn 合并
 //! - `open_session` 从本地历史日志按窗口/游标读取，不触发 ACP 重放
 
@@ -20,6 +20,7 @@ use crate::registry::{RegistryEntry, SessionRegistry};
 /// server → GUI 通知（docs/DESIGN.md §4/§5）。
 #[derive(Debug, Clone)]
 pub enum ServerNotification {
+    SessionStateChanged(SessionMeta),
     SessionCreated(SessionMeta),
     /// 崩溃恢复标记（保留枚举位；当前无恢复语义，恒不触发）
     #[allow(dead_code)]
@@ -140,6 +141,9 @@ impl SessionManager {
         let _ = self
             .tx
             .send(ServerNotification::SessionCreated(meta.clone()));
+        let _ = self
+            .tx
+            .send(ServerNotification::SessionStateChanged(meta.clone()));
         Ok(meta)
     }
 
@@ -212,6 +216,19 @@ impl SessionManager {
         Ok((metas, has_more, next_before))
     }
 
+    pub async fn info(&self, session_ids: &[String]) -> Result<Vec<SessionMeta>, String> {
+        let mut sessions = Vec::with_capacity(session_ids.len());
+        for id in session_ids {
+            let entry = self
+                .registry
+                .get(id)
+                .map_err(|e| format!("注册表读取失败: {e}"))?
+                .ok_or_else(|| format!("会话不存在: {id}"))?;
+            sessions.push(entry.0);
+        }
+        Ok(sessions)
+    }
+
     // ---- 会话数据（docs/DESIGN.md §5）----
 
     /// 打开会话：从本地历史日志读取（合并条目，按窗口/游标惰性分页），
@@ -226,11 +243,54 @@ impl SessionManager {
             .get(session_id)
             .map_err(|e| format!("注册表读取失败: {e}"))?
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        let events = SessionLog::open(&self.history_dir, session_id).read();
+        let events = SessionLog::open(&self.history_dir, session_id).read_history();
         let limit = limit.unwrap_or(200);
         let (start, end, has_more) = Self::window_items(events.len(), limit, before);
         let slice = events[start..end].to_vec();
         Ok((slice, has_more, start))
+    }
+
+    pub async fn activities(
+        &self,
+        session_id: &str,
+        limit: Option<usize>,
+        before: Option<usize>,
+    ) -> Result<(Vec<PassthroughEvent>, bool, Option<usize>), String> {
+        let activities: Vec<_> = SessionLog::open(&self.history_dir, session_id)
+            .read_activities()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    PassthroughEvent::ThinkingChunk { .. }
+                        | PassthroughEvent::ToolCall { .. }
+                        | PassthroughEvent::Compaction { .. }
+                )
+            })
+            .collect();
+        let limit = limit.unwrap_or(200);
+        let (start, end, has_more) = Self::window_items(activities.len(), limit, before);
+        Ok((
+            activities[start..end].to_vec(),
+            has_more,
+            has_more.then_some(start),
+        ))
+    }
+
+    pub async fn ongoing_activity(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<PassthroughEvent>, String> {
+        let (meta, _) = self
+            .registry
+            .get(session_id)
+            .map_err(|e| format!("注册表读取失败: {e}"))?
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        // The current ACP projection does not expose a stable activity id. The
+        // busy state is still authoritative, while detailed events arrive via
+        // session.update notifications.
+        let _ = meta;
+        Ok(None)
     }
 
     /// 惰性加载切窗（纯函数）：按 limit 与 before 游标计算 [start, end) 与是否还有更早。
@@ -400,7 +460,16 @@ impl SessionManager {
     /// 更新会话列表的状态字段（busy/idle 由 GUI 应用从透传事件派生，重连经
     /// 列表 meta.state 补齐，docs/DESIGN.md §5.1）。
     async fn update_state(&self, session_id: &str, state: SessionState) {
-        let _ = self.registry.update_state(session_id, state, now());
+        let timestamp = now();
+        if self
+            .registry
+            .update_state(session_id, state, timestamp)
+            .is_ok()
+        {
+            if let Ok(Some((meta, _))) = self.registry.get(session_id) {
+                let _ = self.tx.send(ServerNotification::SessionStateChanged(meta));
+            }
+        }
     }
 }
 
@@ -516,7 +585,7 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         SessionManager::new(agents, registry, dir)
     }
 
@@ -530,7 +599,7 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
 
         let meta = mgr.create("codex", "/tmp/defer", None).await.unwrap();
@@ -661,7 +730,8 @@ mod tests {
                     e => events.push(e),
                 },
                 // 会话生命周期通知（创建/标题更新）与透传流无关，跳过
-                ServerNotification::SessionCreated(_)
+                ServerNotification::SessionStateChanged(_)
+                | ServerNotification::SessionCreated(_)
                 | ServerNotification::SessionUpdated(_)
                 | ServerNotification::SessionDeleted(_)
                 | ServerNotification::SessionInterrupted(_) => {}
@@ -701,12 +771,18 @@ mod tests {
 
         // open_session 从本地日志读合并条目：一条完整输出（非逐 chunk）
         let (events, _, _) = mgr.open(&meta.id, None, None).await.unwrap();
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, PassthroughEvent::TurnStarted { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, PassthroughEvent::TurnEnded { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PassthroughEvent::TurnStarted { .. })),
+            "持久化历史不应包含 turn 边界"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PassthroughEvent::TurnEnded { .. })),
+            "持久化历史不应包含 turn 边界"
+        );
         let outputs: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
@@ -734,7 +810,7 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         let (mgr, _rx) = SessionManager::new(agents, registry, dir.clone());
 
         let meta = mgr.create("noresult", "/tmp/work", None).await.unwrap();
@@ -795,7 +871,7 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let registry = Arc::new(SessionRegistry::open(&dir.join("amux.db")).unwrap());
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
 
         let meta = mgr.create("faildelete", "/tmp/work", None).await.unwrap();
@@ -885,7 +961,7 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let db = dir.join("amux.db");
+        let db = dir.join("session.sqlite");
 
         // 实例 A：创建 + prompt（注册表与历史落盘）
         let sid;

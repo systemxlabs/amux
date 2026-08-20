@@ -116,6 +116,39 @@ async fn run_loop(
                         params: Value::Null,
                     });
                     let (mut sink, mut source) = ws.split();
+                    let token = url
+                        .split_once('?')
+                        .and_then(|(_, query)| {
+                            query
+                                .split('&')
+                                .find_map(|part| part.strip_prefix("token="))
+                        })
+                        .unwrap_or_default();
+                    let auth = json!({
+                        "jsonrpc": "2.0",
+                        "id": 0,
+                        "method": protocol::method::AUTH,
+                        "params": {"token": token}
+                    });
+                    if sink.send(Message::Text(auth.to_string())).await.is_err() {
+                        continue;
+                    }
+                    let authenticated = match source.next().await {
+                        Some(Ok(Message::Text(text))) => serde_json::from_str::<Value>(&text)
+                            .ok()
+                            .and_then(|v| v.get("result")?.get("authenticated")?.as_bool())
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    if !authenticated {
+                        let _ = notify_tx.send(Notification {
+                            method: "auth_failed".into(),
+                            params: Value::Null,
+                        });
+                        attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
                     let mut pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> =
                         HashMap::new();
                     let mut next_id: u64 = 1;

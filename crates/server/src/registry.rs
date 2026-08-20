@@ -1,5 +1,5 @@
 //! 会话注册表（docs/DESIGN.md §3.2/§4.3）：会话列表由 server 权威维护，
-//! 元数据持久化于 SQLite（`~/.amux/server/amux.db`）。server 单写者场景，
+//! 元数据持久化于 SQLite（`~/.amux/server/session.sqlite`）。server 单写者场景，
 //! 使用 rusqlite 同步 API（连接置于互斥锁内，短临界区）。
 //!
 //! 会话仅能经 server 创建（create_session），注册表由构造完整；

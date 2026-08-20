@@ -1,5 +1,6 @@
 //! 会话历史存储（docs/DESIGN.md §5.2）：server 本地事件日志为权威。
-//! - 每会话一个日志文件（`~/.amux/server/history/<会话>.log`，JSON Lines）
+//! - 对话与活动分别写入 `<session>_history.jsonl` 与
+//!   `<session>_activities.jsonl`（JSON Lines）
 //! - **按 turn 合并后落盘**：透传事件按 §5.3 语义合并（与 GUI `aggregate.rs` 对齐），
 //!   收到 result（turn 结束，含取消）时写入；无 result 的 turn 视为未完成、不落库
 //! - `open_session` 从本地日志按窗口/游标读取，**不触发 ACP 重放**
@@ -12,18 +13,24 @@ use protocol::PassthroughEvent;
 /// 每会话历史日志（JSON Lines：每行一个合并条目）。
 #[derive(Debug, Clone)]
 pub struct SessionLog {
-    path: PathBuf,
+    history_path: PathBuf,
+    activities_path: PathBuf,
 }
 
 impl SessionLog {
-    /// 日志文件路径：`<data_dir>/history/<session_id>.log`
+    /// 对话历史文件路径：`<data_dir>/sessions/<session_id>_history.jsonl`
     pub fn path(data_dir: &Path, session_id: &str) -> PathBuf {
-        data_dir.join("history").join(format!("{session_id}.log"))
+        data_dir
+            .join("sessions")
+            .join(format!("{session_id}_history.jsonl"))
     }
 
     pub fn open(data_dir: &Path, session_id: &str) -> Self {
         SessionLog {
-            path: Self::path(data_dir, session_id),
+            history_path: Self::path(data_dir, session_id),
+            activities_path: data_dir
+                .join("sessions")
+                .join(format!("{session_id}_activities.jsonl")),
         }
     }
 
@@ -32,43 +39,89 @@ impl SessionLog {
         if entries.is_empty() {
             return Ok(());
         }
-        if let Some(parent) = self.path.parent() {
+        if let Some(parent) = self.history_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut f = std::fs::OpenOptions::new()
+        let mut history = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)?;
+            .open(&self.history_path)?;
+        let mut activities = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.activities_path)?;
         for e in entries {
             let line = serde_json::to_string(e)
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-            std::io::Write::write_all(&mut f, line.as_bytes())?;
-            std::io::Write::write_all(&mut f, b"\n")?;
+            let target = match e {
+                PassthroughEvent::UserMessage { .. } | PassthroughEvent::OutputChunk { .. } => {
+                    &mut history
+                }
+                PassthroughEvent::ThinkingChunk { .. }
+                | PassthroughEvent::ToolCall { .. }
+                | PassthroughEvent::Compaction { .. } => &mut activities,
+                PassthroughEvent::SessionInfo { .. }
+                | PassthroughEvent::TurnStarted { .. }
+                | PassthroughEvent::TurnEnded { .. } => continue,
+            };
+            std::io::Write::write_all(target, line.as_bytes())?;
+            std::io::Write::write_all(target, b"\n")?;
         }
         Ok(())
     }
 
     /// 读取全部合并条目；日志缺失（损坏/清空）视为该会话历史为空（docs/DESIGN.md §5.2）。
     pub fn read(&self) -> Vec<PassthroughEvent> {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .map(|s| {
-                s.lines()
-                    .filter_map(|l| serde_json::from_str(l).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut events = self.read_history();
+        events.extend(self.read_activities());
+        events.sort_by_key(event_timestamp);
+        events
+    }
+
+    /// 读取对话历史：仅包含用户输入和 agent 输出。
+    pub fn read_history(&self) -> Vec<PassthroughEvent> {
+        read_events(&self.history_path)
+    }
+
+    /// 读取活动历史：仅包含 thinking、工具调用和上下文压缩。
+    pub fn read_activities(&self) -> Vec<PassthroughEvent> {
+        read_events(&self.activities_path)
     }
 
     /// 日志文件是否存在（会话删除联动 / 测试断言）。
     #[allow(dead_code)]
     pub fn exists(&self) -> bool {
-        self.path.exists()
+        self.history_path.exists() || self.activities_path.exists()
     }
 
     /// 删除日志（会话删除联动）。
     pub fn remove(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.history_path);
+        let _ = std::fs::remove_file(&self.activities_path);
+    }
+}
+
+fn read_events(path: &Path) -> Vec<PassthroughEvent> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn event_timestamp(event: &PassthroughEvent) -> u64 {
+    match event {
+        PassthroughEvent::UserMessage { timestamp, .. }
+        | PassthroughEvent::OutputChunk { timestamp, .. }
+        | PassthroughEvent::ThinkingChunk { timestamp, .. }
+        | PassthroughEvent::ToolCall { timestamp, .. }
+        | PassthroughEvent::Compaction { timestamp, .. }
+        | PassthroughEvent::SessionInfo { timestamp, .. }
+        | PassthroughEvent::TurnStarted { timestamp }
+        | PassthroughEvent::TurnEnded { timestamp } => *timestamp,
     }
 }
 

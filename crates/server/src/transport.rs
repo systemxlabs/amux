@@ -2,23 +2,18 @@
 //! 通知广播（多客户端同一份流、互不踢出）。
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
+use serde_json::Value;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-use tokio_tungstenite::tungstenite::{
-    handshake::server::{ErrorResponse, Request, Response},
-    Message,
-};
+use tokio_tungstenite::tungstenite::Message;
 
-use protocol::{notify, JsonRpcNotification, JsonRpcResponse};
+use protocol::{method, notify, AuthParams, JsonRpcNotification, JsonRpcResponse};
 
 use crate::rpc::{Handlers, RpcError};
 use crate::session::ServerNotification;
-
-/// 认证失败关闭码（与旧实现一致：4401）。
-const AUTH_CLOSE_CODE: u16 = 4401;
 
 pub struct TransportOptions {
     pub host: String,
@@ -87,58 +82,19 @@ impl Transport {
     }
 }
 
-fn authorized(query: &str, token: &str) -> bool {
-    // 简单解析 token 查询参数（浏览器 WebSocket 无法自定义头）
-    let mut ok = false;
-    for (k, v) in query.split('&').filter_map(|p| p.split_once('=')) {
-        if k == "token" && v == token {
-            ok = true;
-        }
-    }
-    ok
-}
-
 async fn handle_connection(
     stream: TcpStream,
     peer: SocketAddr,
     opts: TransportOptions,
     mut notify_rx: tokio::sync::broadcast::Receiver<String>,
 ) {
-    // 从握手请求 URL 提取 token（浏览器 WebSocket 无法自定义头，经查询参数携带）
-    let query_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let holder = query_holder.clone();
-    // Callback trait 固定签名（tungstenite 握手），Err 变体较大无法避免
-    #[allow(clippy::result_large_err)]
-    let callback = move |req: &Request, response: Response| -> Result<Response, ErrorResponse> {
-        *holder.lock().expect("Mutex 中毒（临界区内不应 panic）") =
-            req.uri().query().map(str::to_string);
-        Ok(response)
-    };
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+    let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
             log(&opts, format!("ws 握手失败 ({peer}): {e}"));
             return;
         }
     };
-    let query = query_holder
-        .lock()
-        .expect("Mutex 中毒（临界区内不应 panic）")
-        .clone()
-        .unwrap_or_default();
-    if !authorized(&query, &opts.token) {
-        log(&opts, format!("拒绝连接 ({peer}): token 无效"));
-        let mut ws = ws;
-        let _ = ws
-            .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(
-                    AUTH_CLOSE_CODE,
-                ),
-                reason: "unauthorized".into(),
-            }))
-            .await;
-        return;
-    }
     let (mut sink, mut source) = ws.split();
     log(&opts, format!("连接: {peer}"));
 
@@ -146,6 +102,7 @@ async fn handle_connection(
     // 请求处理与通知发送解耦：dispatch（如 prompt 聚合整个 turn）在独立任务，
     // 响应经通道回传，避免阻塞本连接的会话通知（docs/DESIGN.md §5.1）
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let mut authenticated = false;
     loop {
         tokio::select! {
             n = notify_rx.recv() => {
@@ -175,6 +132,47 @@ async fn handle_connection(
                     }
                 };
                 let Message::Text(text) = msg else { continue };
+                let value = match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        continue;
+                    }
+                };
+                let request_method = value.get("method").and_then(|m| m.as_str());
+                if !authenticated {
+                    if request_method != Some(method::AUTH) {
+                        let response = auth_error(value.get("id").cloned().unwrap_or(Value::Null));
+                        if sink.send(Message::Text(response)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    let valid = value
+                        .get("params")
+                        .cloned()
+                        .and_then(|p| serde_json::from_value::<AuthParams>(p).ok())
+                        .map(|p| p.token == opts.token)
+                        .unwrap_or(false);
+                    let id = value.get("id").cloned().unwrap_or(Value::Null);
+                    if !valid {
+                        log(&opts, format!("认证失败 ({peer})"));
+                        let response = auth_error(id);
+                        let _ = sink.send(Message::Text(response)).await;
+                        let _ = sink.close().await;
+                        break;
+                    }
+                    authenticated = true;
+                    let response = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"authenticated": true}
+                    })
+                    .to_string();
+                    if sink.send(Message::Text(response)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
                 let handlers = handlers.clone();
                 let resp_tx = resp_tx.clone();
                 tokio::spawn(async move {
@@ -187,6 +185,18 @@ async fn handle_connection(
         }
     }
     log(&opts, format!("断开: {peer}"));
+}
+
+fn auth_error(id: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": protocol::server_error::AUTH_REQUIRED,
+            "message": "认证失败"
+        }
+    })
+    .to_string()
 }
 
 /// 分发一帧 JSON-RPC 消息；请求返回响应，通知返回 None。
@@ -268,6 +278,13 @@ async fn dispatch(handlers: &Handlers, text: &str) -> Option<JsonRpcResponse> {
 /// 会话通知 → JSON-RPC notification 帧。
 fn notification_frame(n: &ServerNotification) -> Option<String> {
     let (method, params) = match n {
+        ServerNotification::SessionStateChanged(s) => (
+            notify::SESSION_STATE_CHANGE,
+            serde_json::json!({
+                "sessionId": s.id,
+                "state": s.state,
+            }),
+        ),
         ServerNotification::SessionCreated(s) => {
             (notify::SESSION_CREATED, serde_json::json!({ "session": s }))
         }
@@ -283,7 +300,7 @@ fn notification_frame(n: &ServerNotification) -> Option<String> {
         }
         ServerNotification::Passthrough { session_id, event } => (
             notify::PASSTHROUGH,
-            serde_json::json!({ "session_id": session_id, "event": event }),
+            serde_json::json!({ "sessionId": session_id, "event": event }),
         ),
     };
     let frame = JsonRpcNotification {

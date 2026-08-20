@@ -408,7 +408,11 @@ mod tests {
         // 重复使用 /a：应移到最前、其余相对顺序保持、总条数不变
         list = merge_recent_dir(&list, "m1", "/a", 400, MAX_RECENT_DIRS_PER_MACHINE);
         let paths: Vec<&str> = list.iter().map(|e| e.path.as_str()).collect();
-        assert_eq!(paths, ["/a", "/b", "/c"], "重复目录应移到最前且其余保持相对顺序");
+        assert_eq!(
+            paths,
+            ["/a", "/b", "/c"],
+            "重复目录应移到最前且其余保持相对顺序"
+        );
         assert_eq!(list[0].last_used, 400);
         assert_eq!(list.len(), 3, "去重后总条数不变");
         // 每个 (machine, path) 唯一

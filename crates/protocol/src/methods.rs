@@ -2,48 +2,65 @@
 
 /// JSON-RPC 请求方法名。
 pub mod method {
-    /// 机器信息（server 版本 + harness 列表）
-    pub const GET_INFO: &str = "get_info";
-    /// 会话列表
-    pub const LIST_SESSIONS: &str = "list_sessions";
-    /// 新建会话
-    pub const CREATE_SESSION: &str = "create_session";
-    /// 删除会话（历史一并移除）
-    pub const DELETE_SESSION: &str = "delete_session";
-    /// 发送 prompt（idle 启动新工作、忙时 steer）
-    pub const PROMPT: &str = "prompt";
-    /// 取消进行中的工作
-    pub const CANCEL: &str = "cancel";
-    /// 打开会话：server 经 ACP `session/load` 全量重放，返回透传事件（GUI 聚合）
-    pub const OPEN_SESSION: &str = "open_session";
-    /// git status（cwd 非 git 仓库时返回 not_repo 标记）
-    pub const GIT_STATUS: &str = "git_status";
-    /// git diff
-    pub const GIT_DIFF: &str = "git_diff";
-    /// git push
-    pub const GIT_PUSH: &str = "git_push";
-    /// git revert（undo；需工作区间结束）
-    pub const GIT_REVERT: &str = "git_revert";
-    /// 修改会话标题（用户可随时修改）
-    pub const SET_SESSION_TITLE: &str = "set_session_title";
-    /// 配置 agent 默认模型（server 侧持久化）
-    pub const SET_DEFAULT_MODEL: &str = "set_default_model";
-    /// 查询某 agent 安装的 skills 列表
-    pub const LIST_AGENT_SKILLS: &str = "list_agent_skills";
-    /// 手动重新拉起不可用的 agent（无需重启 server）
-    pub const RETRY_HARNESS: &str = "retry_harness";
+    pub const AUTH: &str = "auth";
+    pub const AGENT_LIST: &str = "agent.list";
+    pub const AGENT_RESTART: &str = "agent.restart";
+    pub const AGENT_SKILLS: &str = "agent.skills";
+    pub const SESSION_NEW: &str = "session.new";
+    pub const SESSION_PROMPT: &str = "session.prompt";
+    pub const SESSION_CANCEL: &str = "session.cancel";
+    pub const SESSION_DELETE: &str = "session.delete";
+    pub const SESSION_CONFIGURE: &str = "session.configure";
+    pub const SESSION_HISTORY: &str = "session.history";
+    pub const SESSION_ACTIVITIES: &str = "session.activities";
+    pub const SESSION_ONGOING_ACTIVITY: &str = "session.ongoing_activity";
+    pub const SESSION_LIST: &str = "session.list";
+    pub const SESSION_INFO: &str = "session.info";
+    pub const WORKSPACE_DIFF: &str = "workspace.diff";
+    pub const WORKSPACE_RESTORE: &str = "workspace.restore";
+
+    // Canonical aliases used by the existing client implementation.
+    pub const GET_INFO: &str = AGENT_LIST;
+    pub const LIST_SESSIONS: &str = SESSION_LIST;
+    pub const CREATE_SESSION: &str = SESSION_NEW;
+    pub const DELETE_SESSION: &str = SESSION_DELETE;
+    pub const PROMPT: &str = SESSION_PROMPT;
+    pub const CANCEL: &str = SESSION_CANCEL;
+    pub const OPEN_SESSION: &str = SESSION_HISTORY;
+    pub const GIT_STATUS: &str = "workspace.status";
+    pub const GIT_DIFF: &str = WORKSPACE_DIFF;
+    pub const GIT_PUSH: &str = "workspace.push";
+    pub const GIT_REVERT: &str = WORKSPACE_RESTORE;
+    pub const SET_SESSION_TITLE: &str = SESSION_CONFIGURE;
+    pub const SET_DEFAULT_MODEL: &str = "agent.configure";
+    pub const LIST_AGENT_SKILLS: &str = AGENT_SKILLS;
+    pub const RETRY_HARNESS: &str = AGENT_RESTART;
+
+    // Accepted only for clients from the pre-Design protocol. New clients must
+    // use the dotted names above.
+    pub const LEGACY_GET_INFO: &str = "get_info";
+    pub const LEGACY_LIST_SESSIONS: &str = "list_sessions";
+    pub const LEGACY_CREATE_SESSION: &str = "create_session";
+    pub const LEGACY_DELETE_SESSION: &str = "delete_session";
+    pub const LEGACY_PROMPT: &str = "prompt";
+    pub const LEGACY_CANCEL: &str = "cancel";
+    pub const LEGACY_OPEN_SESSION: &str = "open_session";
+    pub const LEGACY_GIT_STATUS: &str = "git_status";
+    pub const LEGACY_GIT_DIFF: &str = "git_diff";
+    pub const LEGACY_GIT_PUSH: &str = "git_push";
+    pub const LEGACY_GIT_REVERT: &str = "git_revert";
+    pub const LEGACY_SET_SESSION_TITLE: &str = "set_session_title";
+    pub const LEGACY_SET_DEFAULT_MODEL: &str = "set_default_model";
+    pub const LEGACY_LIST_AGENT_SKILLS: &str = "list_agent_skills";
+    pub const LEGACY_RETRY_HARNESS: &str = "retry_harness";
 }
 
 /// server → GUI 通知名。
 pub mod notify {
-    /// 会话创建
+    pub const SESSION_STATE_CHANGE: &str = "session.state_change";
     pub const SESSION_CREATED: &str = "session_created";
-    /// 会话中断（崩溃恢复标记）
     pub const SESSION_INTERRUPTED: &str = "session_interrupted";
-    /// 会话删除
     pub const SESSION_DELETED: &str = "session_deleted";
-    /// 会话元数据更新（标题修改等）
     pub const SESSION_UPDATED: &str = "session_updated";
-    /// 透传事件（docs/DESIGN.md §5.1）：session/update 事件、session_info_update、turn 边界
     pub const PASSTHROUGH: &str = "passthrough";
 }

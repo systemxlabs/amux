@@ -50,6 +50,7 @@ pub mod rpc_error {
 
 /// 业务错误码（-32000..-32099）。
 pub mod server_error {
+    pub const AUTH_REQUIRED: i32 = -32000;
     pub const SESSION_NOT_FOUND: i32 = -32001;
     pub const HARNESS_UNAVAILABLE: i32 = -32002;
     pub const SESSION_BUSY: i32 = -32003;

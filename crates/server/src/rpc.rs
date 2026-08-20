@@ -6,10 +6,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use protocol::{
-    method, rpc_error, server_error, CreateSessionParams, GitDiffParams, GitOpResult,
-    GitRevertParams, ListAgentSkillsParams, ListAgentSkillsResult, ListSessionsParams, MachineInfo,
-    OpenSessionParams, OpenSessionResult, PromptParams, RetryHarnessParams, SessionIdParams,
-    SessionResult, SessionsResult, SetDefaultModelParams, SetSessionTitleParams,
+    method, rpc_error, server_error, ActivityResult, CreateSessionParams, GitDiffParams,
+    GitOpResult, GitRevertParams, ListAgentSkillsResult, ListSessionsParams, MachineInfo,
+    OpenSessionParams, OpenSessionResult, PromptParams, SessionIdParams, SessionInfoParams,
+    SessionInfoResult, SessionResult, SessionsResult, SetDefaultModelParams, SetSessionTitleParams,
 };
 
 use crate::git::GitRunner;
@@ -76,14 +76,19 @@ fn map_session_err(e: String) -> RpcError {
 impl Handlers {
     pub async fn handle(&self, method: &str, params: &Option<Value>) -> Result<Value, RpcError> {
         match method {
-            method::GET_INFO => {
+            method::AGENT_LIST | method::LEGACY_GET_INFO => {
+                let harnesses = self.manager.harnesses();
                 let info = MachineInfo {
                     server_version: self.server_version.clone(),
-                    harnesses: self.manager.harnesses(),
+                    harnesses: harnesses.clone(),
                 };
-                Ok(serde_json::to_value(info).map_err(|e| RpcError::internal(e.to_string()))?)
+                Ok(serde_json::json!({
+                    "serverVersion": info.server_version,
+                    "agents": harnesses,
+                    "harnesses": info.harnesses,
+                }))
             }
-            method::LIST_SESSIONS => {
+            method::SESSION_LIST | method::LEGACY_LIST_SESSIONS => {
                 let p: ListSessionsParams = parse(params)?;
                 let (sessions, has_more, next_before) = self
                     .manager
@@ -97,7 +102,7 @@ impl Handlers {
                 })
                 .map_err(|e| RpcError::internal(e.to_string()))?)
             }
-            method::CREATE_SESSION => {
+            method::SESSION_NEW | method::LEGACY_CREATE_SESSION => {
                 let p: CreateSessionParams = parse(params)?;
                 let session = self
                     .manager
@@ -107,7 +112,7 @@ impl Handlers {
                 Ok(serde_json::to_value(SessionResult { session })
                     .map_err(|e| RpcError::internal(e.to_string()))?)
             }
-            method::DELETE_SESSION => {
+            method::SESSION_DELETE | method::LEGACY_DELETE_SESSION => {
                 let p: SessionIdParams = parse(params)?;
                 self.manager
                     .delete(&p.session_id)
@@ -115,7 +120,7 @@ impl Handlers {
                     .map_err(map_session_err)?;
                 Ok(Value::Null)
             }
-            method::PROMPT => {
+            method::SESSION_PROMPT | method::LEGACY_PROMPT => {
                 let p: PromptParams = parse(params)?;
                 if p.input.is_empty() {
                     return Err(RpcError::invalid_params("prompt 输入必须非空"));
@@ -126,7 +131,7 @@ impl Handlers {
                     .map_err(map_session_err)?;
                 Ok(Value::Null)
             }
-            method::CANCEL => {
+            method::SESSION_CANCEL | method::LEGACY_CANCEL => {
                 let p: SessionIdParams = parse(params)?;
                 self.manager
                     .cancel(&p.session_id)
@@ -134,7 +139,7 @@ impl Handlers {
                     .map_err(map_session_err)?;
                 Ok(Value::Null)
             }
-            method::OPEN_SESSION => {
+            method::SESSION_HISTORY | method::LEGACY_OPEN_SESSION => {
                 let p: OpenSessionParams = parse(params)?;
                 let (events, has_more, next_before) = self
                     .manager
@@ -148,7 +153,7 @@ impl Handlers {
                 })
                 .map_err(|e| RpcError::internal(e.to_string()))?)
             }
-            method::GIT_STATUS => {
+            method::GIT_STATUS | method::LEGACY_GIT_STATUS => {
                 let cwd = parse::<GitCwdParams>(params)?.cwd;
                 match self.git.status(&cwd) {
                     Ok(st) => {
@@ -158,24 +163,24 @@ impl Handlers {
                     Err(e) => Err(RpcError::internal(format!("git status 失败: {e}"))),
                 }
             }
-            method::GIT_DIFF => {
+            method::WORKSPACE_DIFF | method::LEGACY_GIT_DIFF => {
                 let p: GitDiffParams = parse(params)?;
                 let r = self.git.diff(&p.cwd, p.path.as_deref());
                 Ok(serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))?)
             }
-            method::GIT_PUSH => {
+            method::GIT_PUSH | method::LEGACY_GIT_PUSH => {
                 let cwd = parse::<GitCwdParams>(params)?.cwd;
                 let r = self.git.push(&cwd);
                 Ok(serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))?)
             }
-            method::GIT_REVERT => {
+            method::WORKSPACE_RESTORE | method::LEGACY_GIT_REVERT => {
                 let p: GitRevertParams = parse(params)?;
                 let r: GitOpResult = self
                     .git
                     .revert(&p.cwd, p.path.as_deref(), p.patch.as_deref());
                 Ok(serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))?)
             }
-            method::SET_SESSION_TITLE => {
+            method::SESSION_CONFIGURE | method::LEGACY_SET_SESSION_TITLE => {
                 let p: SetSessionTitleParams = parse(params)?;
                 self.manager
                     .set_session_title(&p.session_id, &p.title)
@@ -183,23 +188,66 @@ impl Handlers {
                     .map_err(map_session_err)?;
                 Ok(Value::Null)
             }
-            method::SET_DEFAULT_MODEL => {
+            method::SET_DEFAULT_MODEL | method::LEGACY_SET_DEFAULT_MODEL => {
                 let p: SetDefaultModelParams = parse(params)?;
                 self.manager.set_default_model(&p.harness, p.model);
                 Ok(Value::Null)
             }
-            method::LIST_AGENT_SKILLS => {
-                let p: ListAgentSkillsParams = parse(params)?;
-                let skills = self.manager.list_agent_skills(&p.harness);
+            method::AGENT_SKILLS | method::LEGACY_LIST_AGENT_SKILLS => {
+                let raw = params.clone().unwrap_or(Value::Null);
+                let name = raw
+                    .get("name")
+                    .or_else(|| raw.get("harness"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| RpcError::invalid_params("缺少 agent name"))?;
+                let skills = self.manager.list_agent_skills(name);
                 Ok(serde_json::to_value(ListAgentSkillsResult { skills })
                     .map_err(|e| RpcError::internal(e.to_string()))?)
             }
-            method::RETRY_HARNESS => {
-                let p: RetryHarnessParams = parse(params)?;
+            method::AGENT_RESTART | method::LEGACY_RETRY_HARNESS => {
+                let raw = params.clone().unwrap_or(Value::Null);
+                let name = raw
+                    .get("name")
+                    .or_else(|| raw.get("harness"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| RpcError::invalid_params("缺少 agent name"))?;
                 self.manager
-                    .retry_harness(&p.harness)
+                    .retry_harness(name)
                     .map_err(RpcError::internal)?;
                 Ok(Value::Null)
+            }
+            method::SESSION_INFO => {
+                let p: SessionInfoParams = parse(params)?;
+                let sessions = self
+                    .manager
+                    .info(&p.session_ids)
+                    .await
+                    .map_err(map_session_err)?;
+                Ok(serde_json::to_value(SessionInfoResult { sessions })
+                    .map_err(|e| RpcError::internal(e.to_string()))?)
+            }
+            method::SESSION_ACTIVITIES => {
+                let p: OpenSessionParams = parse(params)?;
+                let (activities, has_more, next_before) = self
+                    .manager
+                    .activities(&p.session_id, p.limit, p.before)
+                    .await
+                    .map_err(map_session_err)?;
+                Ok(serde_json::to_value(ActivityResult {
+                    activities,
+                    has_more,
+                    next_before,
+                })
+                .map_err(|e| RpcError::internal(e.to_string()))?)
+            }
+            method::SESSION_ONGOING_ACTIVITY => {
+                let p: SessionIdParams = parse(params)?;
+                let activity = self
+                    .manager
+                    .ongoing_activity(&p.session_id)
+                    .await
+                    .map_err(map_session_err)?;
+                Ok(serde_json::json!({ "activity": activity }))
             }
             _ => Err(RpcError {
                 code: rpc_error::METHOD_NOT_FOUND,

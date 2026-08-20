@@ -352,6 +352,21 @@ pub struct GitDiffResult {
 // ---- 方法参数 ----
 
 #[derive(Debug, Deserialize)]
+pub struct AuthParams {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthResult {
+    pub authenticated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentNameParams {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateSessionParams {
     pub harness: String,
     pub cwd: String,
@@ -415,6 +430,33 @@ pub struct GitRevertParams {
 pub struct SetSessionTitleParams {
     pub session_id: String,
     pub title: String,
+}
+
+pub type SessionConfigureParams = SetSessionTitleParams;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfoParams {
+    pub session_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfoResult {
+    pub sessions: Vec<SessionMeta>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityResult {
+    pub activities: Vec<PassthroughEvent>,
+    pub has_more: bool,
+    pub next_before: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OngoingActivityResult {
+    pub activity: Option<PassthroughEvent>,
 }
 
 /// 配置 agent 默认模型（PRD §3.3，server 侧持久化）。

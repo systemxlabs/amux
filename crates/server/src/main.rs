@@ -88,7 +88,7 @@ async fn main() {
 
     // 会话注册表（SQLite，docs/DESIGN.md §4.3）：列表与历史权威 = server；
     // 重启后会话列表从本地库恢复（不依赖 ACP `session/list`，§4.1）。
-    let registry = match SessionRegistry::open(&cfg.data_dir.join("amux.db")) {
+    let registry = match SessionRegistry::open(&cfg.data_dir.join("session.sqlite")) {
         Ok(r) => Arc::new(r),
         Err(e) => {
             eprintln!("打开会话注册表失败: {e}");

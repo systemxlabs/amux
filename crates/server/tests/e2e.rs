@@ -30,7 +30,16 @@ impl Client {
         let (ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .expect("连接 server");
-        let (write, read) = ws.split();
+        let (mut write, mut read) = ws.split();
+        write
+            .send(Message::Text(
+                json!({"jsonrpc":"2.0","id":0,"method":"auth","params":{"token":"test-token"}})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        let auth = read.next().await.unwrap().unwrap();
+        assert!(matches!(auth, Message::Text(ref text) if text.contains("\"authenticated\":true")));
         Client {
             write,
             read,
@@ -238,7 +247,7 @@ async fn session_lifecycle_and_activities() {
     let got = c
         .wait_notification(
             "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
@@ -255,8 +264,12 @@ async fn session_lifecycle_and_activities() {
     let seq: Vec<&str> = c.notifications.iter().map(|(m, _)| m.as_str()).collect();
     let joined = seq.join(",");
     assert!(
-        seq.iter()
-            .all(|m| *m == "passthrough" || *m == "session_created" || *m == "session_updated"),
+        seq.iter().all(|m| {
+            *m == "passthrough"
+                || *m == "session_created"
+                || *m == "session_updated"
+                || *m == "session.state_change"
+        }),
         "通知应全部为透传/会话元数据: {joined}"
     );
     let kinds: Vec<&str> = c
@@ -367,7 +380,7 @@ async fn busy_prompt_returns_steer_unsupported() {
     let busy = c
         .wait_notification(
             "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_started",
+            |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_started",
             3000,
         )
         .await;
@@ -389,7 +402,7 @@ async fn busy_prompt_returns_steer_unsupported() {
     let idle = c
         .wait_notification(
             "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
@@ -488,14 +501,14 @@ async fn multi_client_coexist() {
     let got1 = c1
         .wait_notification(
             "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
     let got2 = c2
         .wait_notification(
             "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
@@ -687,7 +700,7 @@ async fn server_restart_recovers_from_sqlite_and_resumes() {
     let got = c1
         .wait_notification(
             "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
@@ -754,7 +767,7 @@ async fn server_restart_recovers_from_sqlite_and_resumes() {
     let resumed_turn = c2
         .wait_notification(
             "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
@@ -814,7 +827,7 @@ async fn list_sessions_lazy_pagination_e2e() {
         let done = c
             .wait_notification(
                 "passthrough",
-                |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+                |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_ended",
                 5000,
             )
             .await;
@@ -881,14 +894,16 @@ async fn history_merged_local_read_and_delete_linkage() {
     let done = c
         .wait_notification(
             "passthrough",
-            |p| p["session_id"] == json!(sid) && p["event"]["kind"] == "turn_ended",
+            |p| p["sessionId"] == json!(sid) && p["event"]["kind"] == "turn_ended",
             5000,
         )
         .await;
     assert!(done);
 
     // 历史日志文件存在（server 本地权威），且为合并粒度（一条完整输出）
-    let log_path = data_dir.join("history").join(format!("{sid}.log"));
+    let log_path = data_dir
+        .join("sessions")
+        .join(format!("{sid}_history.jsonl"));
     let raw = std::fs::read_to_string(&log_path).expect("历史日志应存在");
     let entries: Vec<serde_json::Value> = raw
         .lines()
@@ -903,11 +918,12 @@ async fn history_merged_local_read_and_delete_linkage() {
         outputs.len() == 1 && outputs[0].contains("完成"),
         "日志应为合并粒度（一条完整输出而非逐 chunk）: {outputs:?}"
     );
-    // turn 边界成条
+    // 持久化对话历史只包含用户消息和 agent 输出，不包含 turn 边界。
     assert!(
-        entries.iter().any(|e| e["kind"] == "turn_started")
-            && entries.iter().any(|e| e["kind"] == "turn_ended"),
-        "日志应含 turn 边界: {entries:?}"
+        !entries
+            .iter()
+            .any(|e| { e["kind"] == "turn_started" || e["kind"] == "turn_ended" }),
+        "对话历史不应含 turn 边界: {entries:?}"
     );
 
     // open_session 本地读（合并条目），不触发 ACP session/load

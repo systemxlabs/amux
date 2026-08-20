@@ -513,10 +513,11 @@ impl AmuxApp {
         };
         match n.method.as_str() {
             // 透传事件（docs/DESIGN.md §5.1）：GUI 应用聚合对话/活动并派生 busy/idle
-            "passthrough" => {
+            "session.update" | "passthrough" => {
                 let Some(sid) = n
                     .params
-                    .get("session_id")
+                    .get("sessionId")
+                    .or_else(|| n.params.get("session_id"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
                 else {
@@ -631,7 +632,7 @@ impl AmuxApp {
                     }
                 }
             }
-            "session_created" | "session_deleted" | "session_updated" => {
+            "session.state_change" | "session_created" | "session_deleted" | "session_updated" => {
                 this.refresh_sessions(idx, window, cx);
             }
             // 断线重连：刷新会话列表并重开选中会话（按需拉取历史，关闭期间输出不丢，
@@ -2751,14 +2752,19 @@ impl AmuxApp {
                     .label(crate::display::short_cwd(&label))
                     .tooltip(label.clone())
                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.session_cwd_input.update(cx, |s, cx| s.set_value(&label, window, cx));
+                        this.session_cwd_input
+                            .update(cx, |s, cx| s.set_value(&label, window, cx));
                         cx.notify();
                     })),
             );
         }
         v_flex()
             .gap_1()
-            .child(Label::new("常用工作目录").text_sm().text_color(rgb(0x6b7280)))
+            .child(
+                Label::new("常用工作目录")
+                    .text_sm()
+                    .text_color(rgb(0x6b7280)),
+            )
             .child(row)
             .into_any()
     }
