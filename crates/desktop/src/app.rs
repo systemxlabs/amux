@@ -15,6 +15,7 @@
 //! 活动 `session.activities` 打开才刷 10s；实时 `session.ongoing_activity` 5s；`session.state_change`
 //! 通知用于工作流驱动。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,6 +116,8 @@ struct MachineView {
     diff_path: Option<String>,
     diff_mode: DiffMode,
     diff_not_repo: bool,
+    /// 代码审查面板中选中的文件/代码块：(path, None)=整文件；(path, Some(i))=第 i 个 hunk。
+    diff_selection: HashSet<(String, Option<usize>)>,
     skills: Vec<String>,
     skills_agent: Option<String>,
     /// skills 弹窗的引用来源（机器下标 + agent 名）。
@@ -138,6 +141,7 @@ impl MachineView {
             diff_path: None,
             diff_mode: DiffMode::Inline,
             diff_not_repo: false,
+            diff_selection: HashSet::new(),
             skills: Vec::new(),
             skills_agent: None,
             show_skills: None,
@@ -1783,6 +1787,87 @@ impl AmuxApp {
             });
         })
         .detach();
+    }
+
+    /// 切换 diff 面板中某个文件或 hunk 的选中状态。
+    fn toggle_diff_selection(
+        &mut self,
+        machine: usize,
+        path: String,
+        hunk: Option<usize>,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some(m) = self.machines.get_mut(machine) else {
+            return;
+        };
+        let key = (path, hunk);
+        if !m.diff_selection.remove(&key) {
+            m.diff_selection.insert(key);
+        }
+    }
+
+    fn is_diff_selected(&self, machine: usize, path: &str, hunk: Option<usize>) -> bool {
+        self.machine(machine)
+            .is_some_and(|m| m.diff_selection.contains(&(path.to_string(), hunk)))
+    }
+
+    fn clear_diff_selection(&mut self, machine: usize, _cx: &mut Context<Self>) {
+        if let Some(m) = self.machines.get_mut(machine) {
+            m.diff_selection.clear();
+        }
+    }
+
+    /// 把 diff 面板选中的 patch 作为用户消息发送到当前普通会话。
+    fn send_selected_diff(&mut self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        let selection: HashSet<(String, Option<usize>)> = m.diff_selection.clone();
+        let files = m.diff_files.clone();
+        let Some(Selected::Session { id, .. }) = self.selected.clone() else {
+            return;
+        };
+        let session_id = id.clone();
+
+        let mut patches: Vec<String> = Vec::new();
+        for f in &files {
+            let file_selected = selection.contains(&(f.path.clone(), None));
+            for (i, h) in f.hunks.iter().enumerate() {
+                if file_selected || selection.contains(&(f.path.clone(), Some(i))) {
+                    patches.push(format!("// {}\n{}", f.path, h.patch));
+                }
+            }
+            // 没有拆分 hunk 时（如新增/删除整文件），整文件选中用完整 patch。
+            if file_selected && f.hunks.is_empty() {
+                patches.push(format!("// {}\n{}", f.path, f.patch));
+            }
+        }
+        if patches.is_empty() {
+            return;
+        }
+        let prompt = format!(
+            "请审查以下选中的代码改动并给出意见或执行所需修改：\n```diff\n{}\n```",
+            patches.join("\n")
+        );
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionPromptParams {
+                session_id: session_id.clone(),
+                input: vec![ContentBlock::Text { text: prompt }],
+            };
+            let _ = client
+                .request(
+                    protocol::method::SESSION_PROMPT,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, w, cx| {
+                this.refresh_dialog(w, cx, machine, session_id);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     // ---- agent 操作（skills / 重启）----
@@ -3567,16 +3652,45 @@ impl AmuxApp {
             .and_then(|i| self.machine(i))
             .map(|m| m.diff_not_repo)
             .unwrap_or(false);
+        let has_selection = machine
+            .and_then(|i| self.machine(i))
+            .is_some_and(|m| !m.diff_selection.is_empty());
+        let can_send = matches!(&self.selected, Some(Selected::Session { .. }));
         let mut children: Vec<gpui::AnyElement> = Vec::new();
         children.push(
             h_flex()
                 .items_center()
+                .gap_2()
                 .child(
                     Label::new("代码审查")
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(0x111827)),
                 )
                 .child(div().flex_1())
+                .when(has_selection && can_send, |h| {
+                    h.child(
+                        Button::new("diff-send-selected")
+                            .small()
+                            .primary()
+                            .label("发送选中到会话")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                if let Some(machine) = this.active_machine() {
+                                    this.send_selected_diff(window, cx, machine);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("diff-clear-selection")
+                            .small()
+                            .label("清空选择")
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                if let Some(machine) = this.active_machine() {
+                                    this.clear_diff_selection(machine, cx);
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                })
                 .child(
                     Button::new("close-panel-diff")
                         .small()
@@ -3602,54 +3716,176 @@ impl AmuxApp {
                     .into_any_element(),
             );
         }
-        for f in &files {
+        let Some(machine_idx) = machine else {
+            return v_flex()
+                .w(px(460.))
+                .h_full()
+                .gap_2()
+                .p_3()
+                .bg(rgb(0xffffff))
+                .border_l_1()
+                .border_color(rgb(0xe5e7eb))
+                .children(children)
+                .into_any();
+        };
+        for (fi, f) in files.iter().enumerate() {
             let path = f.path.clone();
             let patch = f.patch.clone();
             let additions = f.additions;
             let deletions = f.deletions;
             let summary = format!("{path}  (+{additions}/-{deletions})");
-            let path2 = path.clone();
-            let patch2 = patch.clone();
-            children.push(
-                v_flex()
-                    .gap_1()
-                    .child(Label::new(summary).text_sm().font_weight(FontWeight::MEDIUM))
+            let file_selected = self.is_diff_selected(machine_idx, &path, None);
+            let path_for_restore = path.clone();
+            let patch_for_restore = patch.clone();
+
+            let mut file_children: Vec<gpui::AnyElement> = Vec::new();
+            file_children.push(
+                h_flex()
+                    .gap_2()
+                    .items_center()
                     .child(
-                        TextView::markdown(format!("diff-{path}"), one_line(&patch, 200))
-                            .selectable(true),
+                        Button::new(format!("diff-sel-file-{fi}"))
+                            .small()
+                            .ghost()
+                            .label(if file_selected { "☑" } else { "☐" })
+                            .on_click(cx.listener({
+                                let path = path.clone();
+                                move |this, _ev, _window, cx| {
+                                    this.toggle_diff_selection(machine_idx, path.clone(), None, cx);
+                                    cx.notify();
+                                }
+                            })),
                     )
+                    .child(
+                        Label::new(summary)
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM),
+                    )
+                    .child(div().flex_1())
                     .child(
                         Button::new(format!("restore-{path}"))
                             .small()
                             .label("撤销该文件")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
-                                if let Some(machine) = this.active_machine() {
-                                    if let Some(m) = this.machine(machine) {
-                                        let cwd = m
-                                            .sessions
-                                            .iter()
-                                            .find(|s| {
-                                                matches!(
-                                                    &this.selected,
-                                                    Some(Selected::Session { id, .. }) if id == &s.id
-                                                )
-                                            })
-                                            .map(|s| s.cwd.clone())
-                                            .unwrap_or_default();
-                                        this.restore_workspace(
-                                            window,
-                                            cx,
-                                            machine,
-                                            cwd,
-                                            Some(path2.clone()),
-                                            Some(patch2.clone()),
-                                        );
-                                    }
+                                if let Some(m) = this.machine(machine_idx) {
+                                    let cwd = m
+                                        .sessions
+                                        .iter()
+                                        .find(|s| {
+                                            matches!(
+                                                &this.selected,
+                                                Some(Selected::Session { id, .. }) if id == &s.id
+                                            )
+                                        })
+                                        .map(|s| s.cwd.clone())
+                                        .unwrap_or_default();
+                                    this.restore_workspace(
+                                        window,
+                                        cx,
+                                        machine_idx,
+                                        cwd,
+                                        Some(path_for_restore.clone()),
+                                        Some(patch_for_restore.clone()),
+                                    );
                                 }
                             })),
                     )
                     .into_any_element(),
             );
+
+            for (hi, h) in f.hunks.iter().enumerate() {
+                let hunk_selected = self.is_diff_selected(machine_idx, &path, Some(hi));
+                let hunk_path = path.clone();
+                let hunk_patch = h.patch.clone();
+                file_children.push(
+                    v_flex()
+                        .gap_1()
+                        .pl(px(20.))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    Button::new(format!("diff-sel-hunk-{fi}-{hi}"))
+                                        .small()
+                                        .ghost()
+                                        .label(if hunk_selected { "☑" } else { "☐" })
+                                        .on_click(cx.listener({
+                                            let hunk_path = hunk_path.clone();
+                                            move |this, _ev, _window, cx| {
+                                                this.toggle_diff_selection(
+                                                    machine_idx,
+                                                    hunk_path.clone(),
+                                                    Some(hi),
+                                                    cx,
+                                                );
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                                .child(
+                                    Label::new(h.header.clone())
+                                        .text_xs()
+                                        .text_color(rgb(0x6b7280)),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new(format!("restore-hunk-{fi}-{hi}"))
+                                        .small()
+                                        .label("撤销此块")
+                                        .on_click(cx.listener({
+                                            let hunk_path = hunk_path.clone();
+                                            move |this, _ev, window, cx| {
+                                                if let Some(m) = this.machine(machine_idx) {
+                                                    let cwd = m
+                                                        .sessions
+                                                        .iter()
+                                                        .find(|s| {
+                                                            matches!(
+                                                                &this.selected,
+                                                                Some(Selected::Session { id, .. })
+                                                                    if id == &s.id
+                                                            )
+                                                        })
+                                                        .map(|s| s.cwd.clone())
+                                                        .unwrap_or_default();
+                                                    this.restore_workspace(
+                                                        window,
+                                                        cx,
+                                                        machine_idx,
+                                                        cwd,
+                                                        Some(hunk_path.clone()),
+                                                        Some(hunk_patch.clone()),
+                                                    );
+                                                }
+                                            }
+                                        })),
+                                ),
+                        )
+                        .child(
+                            TextView::markdown(
+                                format!("diff-{path}-{hi}"),
+                                one_line(&h.patch, 200),
+                            )
+                            .selectable(true),
+                        )
+                        .into_any_element(),
+                );
+            }
+            // 没有 hunk 信息的文件直接显示完整 patch。
+            if f.hunks.is_empty() {
+                file_children.push(
+                    v_flex()
+                        .pl(px(20.))
+                        .child(
+                            TextView::markdown(format!("diff-{path}"), one_line(&patch, 200))
+                                .selectable(true),
+                        )
+                        .into_any_element(),
+                );
+            }
+
+            children.push(v_flex().gap_1().children(file_children).into_any_element());
         }
         v_flex()
             .w(px(460.))
