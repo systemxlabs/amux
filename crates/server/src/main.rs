@@ -48,7 +48,10 @@ async fn main() {
         match AcpAgentDriver::spawn(&bin, &args_ref, &[]) {
             Ok(driver) => Some((name, Arc::new(driver) as SharedDriver)),
             Err(e) => {
-                eprintln!("启动 ACP agent ({bin}) 失败，Server 将继续监听: {e}");
+                protocol::log::warn(
+                    "server.startup",
+                    format!("启动 ACP agent ({bin}) 失败，Server 将继续监听: {e}"),
+                );
                 None
             }
         }
@@ -56,7 +59,7 @@ async fn main() {
 
     // 数据目录
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
-        eprintln!("创建数据目录失败: {e}");
+        protocol::log::error("server.startup", format!("创建数据目录失败: {e}"));
         std::process::exit(1);
     }
     let agents = Arc::new(AgentRegistry::new(configured));
@@ -78,7 +81,7 @@ async fn main() {
     let registry = match SessionRegistry::open(&cfg.data_dir.join("session.sqlite")) {
         Ok(r) => Arc::new(r),
         Err(e) => {
-            eprintln!("打开会话注册表失败: {e}");
+            protocol::log::error("server.startup", format!("打开会话注册表失败: {e}"));
             std::process::exit(1);
         }
     };
@@ -128,11 +131,13 @@ async fn main() {
         token: cfg.token.clone(),
         handlers: handlers.clone(),
         notifications,
-        logger: Some(Arc::new(|line| eprintln!("{line}"))),
+        logger: Some(Arc::new(|line| {
+            protocol::log::info("server.transport", line)
+        })),
     });
 
     if let Err(e) = transport.run().await {
-        eprintln!("server 出错: {e}");
+        protocol::log::error("server", format!("server 出错: {e}"));
         std::process::exit(1);
     }
 }

@@ -1566,6 +1566,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
+name = "colored"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6854,7 +6863,75 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 dependencies = [
  "serde_core",
+ "sval",
+ "sval_ref",
  "value-bag",
+]
+
+[[package]]
+name = "logforth"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40c105c59828d07aeb95b06f9a345b12869ddc249d44a7302697a66da439076f"
+dependencies = [
+ "logforth-append-file",
+ "logforth-bridge-log",
+ "logforth-core",
+ "logforth-layout-json",
+ "logforth-layout-text",
+]
+
+[[package]]
+name = "logforth-append-file"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d2ccb8b7e501c114e80069eb2b83c02a48039c23a7037e717b5b09a4ed306fb"
+dependencies = [
+ "jiff",
+ "logforth-core",
+]
+
+[[package]]
+name = "logforth-bridge-log"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4aa6ca548389fd166a995b5940e15b0dacbdd5a30f2f24eac9aa4bf664bda5c"
+dependencies = [
+ "log",
+ "logforth-core",
+]
+
+[[package]]
+name = "logforth-core"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a77869b8dba38c67ed19e1753e59d9faefdcc60557bc4e84db0348606a304ac5"
+dependencies = [
+ "anyhow",
+ "value-bag",
+]
+
+[[package]]
+name = "logforth-layout-json"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01b80d310e0670560404a825f64dbd78a8761c5bb7da952513e90ba9dd525bd2"
+dependencies = [
+ "jiff",
+ "logforth-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "logforth-layout-text"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2a4674e549a59eeac8e301584143186c433181bdc5460046a130becedef6a3d"
+dependencies = [
+ "colored",
+ "jiff",
+ "logforth-core",
 ]
 
 [[package]]
@@ -8590,6 +8667,8 @@ dependencies = [
 name = "protocol"
 version = "0.1.0"
 dependencies = [
+ "log",
+ "logforth",
  "serde",
  "serde_json",
 ]
@@ -9959,6 +10038,16 @@ dependencies = [
  "serde_core",
  "smallvec",
  "zmij",
+]
+
+[[package]]
+name = "serde_buf"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58b57892601430298e96ce14d68f61dff758b648da87f3d491fbe5ec523e749e"
+dependencies = [
+ "serde_core",
+ "zerocopy",
 ]
 
 [[package]]
@@ -11845,6 +11934,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "417d6197dd0ee696783d6be4276ac6ea74b985e00024c85ccfb37aff4f2bed82"
 dependencies = [
  "erased-serde",
+ "serde_buf",
  "serde_core",
  "serde_fmt",
 ]
