@@ -1211,6 +1211,21 @@ impl AmuxApp {
         }
     }
 
+    /// 当前选中项是否正在工作中，可被取消。
+    fn can_cancel(&self) -> bool {
+        match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
+                .is_some_and(|s| s.state == SessionState::Busy),
+            Some(Selected::Workflow { engine }) => self
+                .workflows
+                .get(*engine)
+                .is_some_and(|wf| wf.session.state == SessionState::Busy && !wf.session.done),
+            None => false,
+        }
+    }
+
     fn cancel_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Selected::Workflow { engine }) = self.selected.clone() {
             self.cancel_workflow(window, cx, engine);
@@ -3129,20 +3144,7 @@ impl AmuxApp {
                     })),
             );
         }
-        row.child(
-            Button::new("cancel-work")
-                .small()
-                .label("✕ 取消")
-                .on_click(cx.listener(|this, _ev, window, cx| {
-                    if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
-                        if let Some(m) = this.machine(machine) {
-                            let client = m.client.clone();
-                            let _ = client;
-                        }
-                    }
-                    this.cancel_work(window, cx);
-                })),
-        )
+        row
     }
 
     /// 输入区：多行文本 + 附件 + 发送。
@@ -3207,6 +3209,13 @@ impl AmuxApp {
                                 this.send_prompt(window, cx);
                             })),
                     )
+                    .when(self.can_cancel(), |this| {
+                        this.child(Button::new("cancel-work").small().label("✕ 取消").on_click(
+                            cx.listener(|this, _ev, window, cx| {
+                                this.cancel_work(window, cx);
+                            }),
+                        ))
+                    })
                     .child(
                         Button::new("clear-attachments")
                             .small()
