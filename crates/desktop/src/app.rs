@@ -4570,7 +4570,8 @@ impl AmuxApp {
                 .into_any_element()
         } else {
             v_flex()
-                .w(px(190.0))
+                .w_full()
+                .max_h(px(220.0))
                 .gap_1()
                 .p_1()
                 .bg(cx.theme().muted)
@@ -4593,11 +4594,12 @@ impl AmuxApp {
             .border_color(cx.theme().border)
             .child(toolbar)
             .child(
-                h_flex().flex_1().min_h_0().gap_2().child(tree).child(
+                v_flex().flex_1().min_h_0().gap_2().child(tree).child(
                     div()
                         .id("diff-panel")
                         .v_flex()
                         .flex_1()
+                        .min_h_0()
                         .gap_2()
                         .overflow_y_scroll()
                         .track_scroll(&self.diff_scroll)
