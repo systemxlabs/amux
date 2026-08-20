@@ -39,9 +39,10 @@ use serde_json::{json, Value};
 
 use protocol::{
     Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
-    GitDiffFile, HistoryItem, SessionConfigureParams, SessionIdParams, SessionMeta,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionState, SkillEntry,
-    WorkspaceDiffResult, WorkspaceEntry, WorkspaceListResult, WorkspaceReadResult,
+    GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryItem, SessionConfigureParams,
+    SessionIdParams, SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams,
+    SessionState, SkillEntry, WorkspaceDiffResult, WorkspaceEntry, WorkspaceListResult,
+    WorkspaceReadResult,
 };
 
 use crate::aggregate::SessionView;
@@ -76,6 +77,74 @@ enum Panel {
     Diff,
     Detail,
     Activities,
+}
+
+#[derive(Clone, Copy)]
+enum DiffLineKind {
+    Context,
+    Addition,
+    Deletion,
+}
+
+struct DiffLine {
+    old_number: Option<usize>,
+    new_number: Option<usize>,
+    kind: DiffLineKind,
+    content: String,
+}
+
+fn hunk_start(header: &str, prefix: char) -> usize {
+    header
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(prefix))
+        .and_then(|range| range.split(',').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or(1)
+}
+
+fn diff_lines(hunk: &GitDiffHunk) -> Vec<DiffLine> {
+    let mut in_body = false;
+    let mut old_number = hunk_start(&hunk.header, '-');
+    let mut new_number = hunk_start(&hunk.header, '+');
+    let mut lines = Vec::new();
+
+    for line in hunk.patch.lines() {
+        if !in_body {
+            in_body = line.starts_with("@@ ");
+            continue;
+        }
+        let Some(prefix) = line.chars().next() else {
+            continue;
+        };
+        let content = &line[prefix.len_utf8()..];
+        let (kind, old, new) = match prefix {
+            '+' => {
+                let number = new_number;
+                new_number += 1;
+                (DiffLineKind::Addition, None, Some(number))
+            }
+            '-' => {
+                let number = old_number;
+                old_number += 1;
+                (DiffLineKind::Deletion, Some(number), None)
+            }
+            ' ' => {
+                let old = old_number;
+                let new = new_number;
+                old_number += 1;
+                new_number += 1;
+                (DiffLineKind::Context, Some(old), Some(new))
+            }
+            _ => continue,
+        };
+        lines.push(DiffLine {
+            old_number: old,
+            new_number: new,
+            kind,
+            content: content.to_string(),
+        });
+    }
+    lines
 }
 
 /// 设置浮窗分类（PRD §4.3 五分类）。
@@ -4435,15 +4504,23 @@ impl AmuxApp {
             let patch = f.patch.clone();
             let additions = f.additions;
             let deletions = f.deletions;
-            let summary = format!("{path}  (+{additions}/-{deletions})");
             let file_selected = self.is_diff_selected(machine_idx, &path, None);
             let path_for_restore = path.clone();
             let patch_for_restore = patch.clone();
             let mut file_children: Vec<gpui::AnyElement> = Vec::new();
+            let (status_label, status_color) = match &f.status {
+                GitChangeStatus::Added | GitChangeStatus::Untracked => ("A", cx.theme().success),
+                GitChangeStatus::Deleted => ("D", cx.theme().danger),
+                GitChangeStatus::Renamed => ("R", cx.theme().primary),
+                GitChangeStatus::Modified => ("M", cx.theme().warning),
+            };
             file_children.push(
                 h_flex()
+                    .w_full()
+                    .p_2()
                     .gap_2()
                     .items_center()
+                    .bg(cx.theme().muted.opacity(0.35))
                     .child(
                         Button::new(format!("diff-sel-file-{fi}"))
                             .small()
@@ -4458,11 +4535,29 @@ impl AmuxApp {
                             })),
                     )
                     .child(
-                        Label::new(summary)
+                        Label::new(path.clone())
+                            .flex_1()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM),
                     )
-                    .child(div().flex_1())
+                    .child(
+                        Label::new(format!("+{additions}"))
+                            .text_xs()
+                            .text_color(cx.theme().success),
+                    )
+                    .child(
+                        Label::new(format!("-{deletions}"))
+                            .text_xs()
+                            .text_color(cx.theme().danger),
+                    )
+                    .child(
+                        Label::new(status_label)
+                            .w(px(20.))
+                            .text_center()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(status_color),
+                    )
                     .child(
                         Button::new(format!("restore-{path}"))
                             .small()
@@ -4482,70 +4577,146 @@ impl AmuxApp {
                     )
                     .into_any_element(),
             );
-            file_children.push(
-                TextView::markdown(format!("diff-{path}"), patch.clone())
-                    .selectable(true)
-                    .into_any_element(),
-            );
             for (hi, h) in f.hunks.iter().enumerate() {
                 let hunk_selected = self.is_diff_selected(machine_idx, &path, Some(hi));
                 let hunk_path = path.clone();
                 let hunk_patch = h.patch.clone();
+                let mut hunk_children: Vec<gpui::AnyElement> = Vec::new();
+                hunk_children.push(
+                    h_flex()
+                        .w_full()
+                        .h(px(28.))
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .bg(cx.theme().primary.opacity(0.12))
+                        .child(
+                            Button::new(format!("diff-sel-hunk-{fi}-{hi}"))
+                                .small()
+                                .ghost()
+                                .label(if hunk_selected { "☑" } else { "☐" })
+                                .on_click(cx.listener({
+                                    let hunk_path = hunk_path.clone();
+                                    move |this, _ev, _window, cx| {
+                                        this.toggle_diff_selection(
+                                            machine_idx,
+                                            hunk_path.clone(),
+                                            Some(hi),
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .child(
+                            Label::new(h.header.clone())
+                                .text_xs()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(cx.theme().primary),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new(format!("restore-hunk-{fi}-{hi}"))
+                                .small()
+                                .label("撤销此块")
+                                .on_click(cx.listener({
+                                    let hunk_path = hunk_path.clone();
+                                    move |this, _ev, window, cx| {
+                                        if let Some((machine, cwd)) = this.selected_workspace() {
+                                            this.restore_workspace(
+                                                window,
+                                                cx,
+                                                machine,
+                                                cwd,
+                                                Some(hunk_path.clone()),
+                                                Some(hunk_patch.clone()),
+                                            );
+                                        }
+                                    }
+                                })),
+                        )
+                        .into_any_element(),
+                );
+                for line in diff_lines(h) {
+                    let (background, marker, marker_color) = match line.kind {
+                        DiffLineKind::Addition => {
+                            (cx.theme().success.opacity(0.16), "+", cx.theme().success)
+                        }
+                        DiffLineKind::Deletion => {
+                            (cx.theme().danger.opacity(0.16), "-", cx.theme().danger)
+                        }
+                        DiffLineKind::Context => {
+                            (cx.theme().popover, " ", cx.theme().muted_foreground)
+                        }
+                    };
+                    hunk_children.push(
+                        h_flex()
+                            .w_full()
+                            .min_h(px(22.))
+                            .items_center()
+                            .bg(background)
+                            .child(
+                                div()
+                                    .w(px(48.))
+                                    .h_full()
+                                    .px_2()
+                                    .justify_end()
+                                    .border_r_1()
+                                    .border_color(cx.theme().border.opacity(0.45))
+                                    .child(
+                                        Label::new(
+                                            line.old_number
+                                                .map(|number| number.to_string())
+                                                .unwrap_or_default(),
+                                        )
+                                        .text_xs()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(cx.theme().muted_foreground),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(48.))
+                                    .h_full()
+                                    .px_2()
+                                    .justify_end()
+                                    .border_r_1()
+                                    .border_color(cx.theme().border.opacity(0.45))
+                                    .child(
+                                        Label::new(
+                                            line.new_number
+                                                .map(|number| number.to_string())
+                                                .unwrap_or_default(),
+                                        )
+                                        .text_xs()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(cx.theme().muted_foreground),
+                                    ),
+                            )
+                            .child(
+                                div().w(px(24.)).h_full().justify_center().child(
+                                    Label::new(marker)
+                                        .text_xs()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(marker_color),
+                                ),
+                            )
+                            .child(
+                                Label::new(line.content)
+                                    .text_xs()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .whitespace_nowrap()
+                                    .flex_shrink_0(),
+                            )
+                            .into_any_element(),
+                    );
+                }
                 file_children.push(
                     v_flex()
-                        .gap_1()
-                        .pl(px(20.))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    Button::new(format!("diff-sel-hunk-{fi}-{hi}"))
-                                        .small()
-                                        .ghost()
-                                        .label(if hunk_selected { "☑" } else { "☐" })
-                                        .on_click(cx.listener({
-                                            let hunk_path = hunk_path.clone();
-                                            move |this, _ev, _window, cx| {
-                                                this.toggle_diff_selection(
-                                                    machine_idx,
-                                                    hunk_path.clone(),
-                                                    Some(hi),
-                                                    cx,
-                                                );
-                                                cx.notify();
-                                            }
-                                        })),
-                                )
-                                .child(
-                                    Label::new(h.header.clone())
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    Button::new(format!("restore-hunk-{fi}-{hi}"))
-                                        .small()
-                                        .label("撤销此块")
-                                        .on_click(cx.listener({
-                                            let hunk_path = hunk_path.clone();
-                                            move |this, _ev, window, cx| {
-                                                if let Some((machine, cwd)) =
-                                                    this.selected_workspace()
-                                                {
-                                                    this.restore_workspace(
-                                                        window,
-                                                        cx,
-                                                        machine,
-                                                        cwd,
-                                                        Some(hunk_path.clone()),
-                                                        Some(hunk_patch.clone()),
-                                                    );
-                                                }
-                                            }
-                                        })),
-                                ),
-                        )
+                        .w_full()
+                        .gap_0()
+                        .children(hunk_children)
                         .into_any_element(),
                 );
             }
@@ -4561,7 +4732,18 @@ impl AmuxApp {
                     }))
                     .into_any_element(),
             );
-            content_children.push(v_flex().gap_1().children(file_children).into_any_element());
+            content_children.push(
+                v_flex()
+                    .id(format!("diff-file-{fi}"))
+                    .w_full()
+                    .gap_0()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .overflow_hidden()
+                    .children(file_children)
+                    .into_any_element(),
+            );
         }
         let tree = if diff_tree_collapsed {
             v_flex()
