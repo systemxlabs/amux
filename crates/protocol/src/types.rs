@@ -185,9 +185,9 @@ pub struct SessionConfigureParams {
 pub struct SessionListParams {
     #[serde(default)]
     pub limit: Option<usize>,
-    /// 窗口游标：表示当前窗口之后剩余的更早条目数
+    /// 不透明游标：由服务端根据最近活跃时间和会话 ID 生成。
     #[serde(default)]
-    pub before: Option<u64>,
+    pub before: Option<String>,
 }
 
 /// `session.history` / `session.activities` 惰性分页参数。
@@ -214,7 +214,7 @@ pub struct SessionResult {
 pub struct SessionListResult {
     pub sessions: Vec<SessionMeta>,
     pub has_more: bool,
-    pub next_before: Option<u64>,
+    pub next_before: Option<String>,
 }
 
 /// `session.info` 参数：批量查询指定会话。
@@ -516,9 +516,10 @@ mod tests {
         let cfg: SessionConfigureParams =
             serde_json::from_str(r#"{"sessionId":"s1","title":"实现登录"}"#).unwrap();
         assert_eq!(cfg.title, "实现登录");
-        let p: SessionListParams = serde_json::from_str(r#"{"limit":10,"before":5}"#).unwrap();
+        let p: SessionListParams =
+            serde_json::from_str(r#"{"limit":10,"before":"100:s1"}"#).unwrap();
         assert_eq!(p.limit, Some(10));
-        assert_eq!(p.before, Some(5));
+        assert_eq!(p.before.as_deref(), Some("100:s1"));
         let page: SessionPageParams = serde_json::from_str(r#"{"sessionId":"s1"}"#).unwrap();
         assert_eq!(page.session_id, "s1");
         assert_eq!(page.before, None);
@@ -530,11 +531,11 @@ mod tests {
         let res = SessionListResult {
             sessions: Vec::new(),
             has_more: true,
-            next_before: Some(42),
+            next_before: Some("100:s1".into()),
         };
         let s = serde_json::to_string(&res).unwrap();
         assert!(s.contains("\"hasMore\":true"), "{s}");
-        assert!(s.contains("\"nextBefore\":42"), "{s}");
+        assert!(s.contains("\"nextBefore\":\"100:s1\""), "{s}");
         assert!(s.contains("\"sessions\":[]"), "{s}");
     }
 

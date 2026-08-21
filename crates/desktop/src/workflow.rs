@@ -1,7 +1,7 @@
 //! 工作流引擎（docs/DESIGN.md §10 / §「工作流会话驱动」「工作流会话存储」）：
 //! GUI 本地工作流会话 + rig 单 turn 编排。
 //!
-//! - `OrcSession`：工作流会话状态，可序列化持久化（`.jsonl` 单文件）
+//! - `OrcSession`：工作流会话状态，可序列化持久化到 SQLite 和两份 JSONL 日志
 //! - `OrcBackend`：单 turn 决策器；真实实现 `RigBackend` 用 rig `Agent::prompt`
 //! - `WorkflowEngine`：状态机——首 turn 拆解计划并创建/复用关联普通会话下发指令；
 //!   关联普通会话 idle（`session.state_change` 通知驱动）触发自动推进

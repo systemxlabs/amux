@@ -180,7 +180,7 @@ struct MachineView {
     agents: Vec<AgentInfo>,
     sessions: Vec<SessionMeta>,
     sessions_has_more: bool,
-    sessions_next_before: Option<u64>,
+    sessions_next_before: Option<String>,
     /// 各会话的聚合视图（对话 / 活动 / 实时）。
     views: std::collections::HashMap<String, SessionView>,
     diff_files: Vec<GitDiffFile>,
@@ -779,7 +779,10 @@ impl AmuxApp {
                     .get("has_more")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let next_before = res.get("next_before").and_then(|v| v.as_u64());
+                let next_before = res
+                    .get("next_before")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
                         let (list, hm, nb) = if has_more {
@@ -1093,7 +1096,7 @@ impl AmuxApp {
         let Some(m) = self.machines.get(machine) else {
             return;
         };
-        let Some(before) = m.sessions_next_before else {
+        let Some(before) = m.sessions_next_before.clone() else {
             return;
         };
         let client = m.client.clone();
@@ -1112,7 +1115,10 @@ impl AmuxApp {
                     .get("has_more")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let next_before = res.get("next_before").and_then(|v| v.as_u64());
+                let next_before = res
+                    .get("next_before")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(machine) {
                         let (list, hm, nb) =
@@ -1163,7 +1169,10 @@ impl AmuxApp {
                                 .get("has_more")
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);
-                            let next_before = res.get("next_before").and_then(|v| v.as_u64());
+                            let next_before = res
+                                .get("next_before")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned);
                             let (list, hm, nb) = if has_more {
                                 merge_session_window(&m.sessions, sessions, has_more, next_before)
                             } else {

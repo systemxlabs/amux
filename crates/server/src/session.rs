@@ -2,8 +2,9 @@
 //! - 会话元数据持久化于 SQLite（`session.sqlite`），列表由 server 维护
 //! - busy/idle 状态在 server 维护并存注册表；每次 Busy<->Idle 变更广播 `session.state_change`
 //! - 惰性会话：`session.new` 只写注册表，agent 侧会话延后到首条指令（`session.prompt`）
-//!   懒创建（ACP `session/new`）并 `session/resume`
-//! - 删除会话与长时间无活动（>1h）时经 ACP `session/close` 关闭 agent 侧会话
+//!   懒创建（ACP `session/new`），已有 agent 会话先经 `session/resume` 恢复
+//! - 删除会话先经 ACP `session/close` 释放资源，再尝试 `session/delete`；长时间无活动
+//!   会话只经 `session/close` 关闭并保留 server 历史
 //! - 对话历史与活动历史落 `data_dir/sessions/<id>_history.jsonl` / `<id>_activities.jsonl`
 
 use std::collections::HashMap;
@@ -75,21 +76,31 @@ impl SessionManager {
     }
 
     /// 会话列表惰性分页（纯函数，可单测；docs/DESIGN.md「session.list」）：
-    /// `all` 已按最近活跃降序；`before` 是窗口之后剩余的更早条目数，而不是时间戳。
-    /// 使用稳定排序下的下标可覆盖相同毫秒时间戳的会话，不会因严格时间比较跳过条目。
+    /// `all` 已按最近活跃时间和会话 ID 降序排列；`before` 是上一页末尾生成的
+    /// 不透明游标。复合游标避免会话列表变化或时间戳相同时重复、跳过条目。
     pub fn session_page(
         all: &[RegistryEntry],
         limit: usize,
-        before: Option<u64>,
-    ) -> (Vec<RegistryEntry>, bool, Option<u64>) {
+        before: Option<&str>,
+    ) -> (Vec<RegistryEntry>, bool, Option<String>) {
         let start = before
-            .and_then(|value| usize::try_from(value).ok())
-            .map(|remaining| all.len().saturating_sub(remaining))
+            .and_then(|cursor| cursor.split_once(':'))
+            .and_then(|(timestamp, id)| Some((timestamp.parse::<u64>().ok()?, id)))
+            .and_then(|(timestamp, id)| {
+                all.iter().position(|(meta, _)| {
+                    meta.last_active_at < timestamp
+                        || (meta.last_active_at == timestamp && meta.id.as_str() < id)
+                })
+            })
             .unwrap_or(0);
+        let limit = limit.max(1);
         let end = start.saturating_add(limit).min(all.len());
         let window = all[start..end].to_vec();
         let has_more = end < all.len();
-        let next_before = has_more.then_some((all.len() - end) as u64);
+        let next_before = has_more
+            .then(|| window.last())
+            .flatten()
+            .map(|(meta, _)| format!("{}:{}", meta.last_active_at, meta.id));
         (window, has_more, next_before)
     }
 
@@ -158,8 +169,8 @@ impl SessionManager {
         Ok(())
     }
 
-    /// 删除会话：若已有 agent 侧会话，先经 ACP `session/close` 关闭（释放 agent 侧资源，
-    /// docs/DESIGN.md「删除会话」）；ACP close 失败不阻断本地删除（agent 侧会话可能已不存在）。
+    /// 删除会话：若已有 agent 侧会话，先经 ACP `session/close` 释放资源，再尝试
+    /// `session/delete`（docs/DESIGN.md「删除会话」）；ACP 操作失败不阻断本地删除。
     /// 联动清除注册表条目 + 历史日志 + 活动日志。
     pub async fn delete(&self, session_id: &str) -> Result<(), String> {
         let control = self.control(session_id);
@@ -210,13 +221,14 @@ impl SessionManager {
     pub async fn list(
         &self,
         limit: Option<usize>,
-        before: Option<u64>,
-    ) -> Result<(Vec<SessionMeta>, bool, Option<u64>), String> {
+        before: Option<String>,
+    ) -> Result<(Vec<SessionMeta>, bool, Option<String>), String> {
         let all = self
             .registry
             .list()
             .map_err(|e| format!("注册表读取失败: {e}"))?;
-        let (window, has_more, next_before) = Self::session_page(&all, limit.unwrap_or(50), before);
+        let (window, has_more, next_before) =
+            Self::session_page(&all, limit.unwrap_or(50), before.as_deref());
         let metas = window.into_iter().map(|(m, _)| m).collect();
         Ok((metas, has_more, next_before))
     }
@@ -719,17 +731,17 @@ mod tests {
         assert_eq!(w[0].0.id, "s9");
         assert_eq!(w[1].0.id, "s8");
         assert!(more);
-        assert_eq!(nb, Some(4));
+        assert_eq!(nb, Some("800:s8".into()));
 
-        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(4));
+        let (w, more, nb) = SessionManager::session_page(&all, 2, Some("800:s8"));
         assert_eq!(
             w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
             ["s7", "s6"]
         );
         assert!(more);
-        assert_eq!(nb, Some(2));
+        assert_eq!(nb, Some("600:s6".into()));
 
-        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(2));
+        let (w, more, nb) = SessionManager::session_page(&all, 2, Some("600:s6"));
         assert_eq!(
             w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
             ["s5", "s4"]
@@ -763,13 +775,49 @@ mod tests {
         let (first, more, cursor) = SessionManager::session_page(&all, 2, None);
         assert_eq!(first.len(), 2);
         assert!(more);
-        let (second, more, next) = SessionManager::session_page(&all, 2, cursor);
+        let (second, more, next) = SessionManager::session_page(&all, 2, cursor.as_deref());
         assert_eq!(
             second.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
             ["s1"]
         );
         assert!(!more);
         assert_eq!(next, None);
+    }
+
+    #[test]
+    fn session_page_cursor_survives_newer_session() {
+        let entry = |id: &str, last_active_at| {
+            (
+                SessionMeta {
+                    id: id.into(),
+                    agent: "codex".into(),
+                    cwd: "/tmp".into(),
+                    state: SessionState::Idle,
+                    title: String::new(),
+                    created_at: 1,
+                    last_active_at,
+                },
+                String::new(),
+            )
+        };
+        let first_snapshot = vec![entry("s3", 300), entry("s2", 200), entry("s1", 100)];
+        let (first, _, cursor) = SessionManager::session_page(&first_snapshot, 2, None);
+        assert_eq!(first.last().unwrap().0.id, "s2");
+
+        let changed_snapshot = vec![
+            entry("new", 400),
+            entry("s3", 300),
+            entry("s2", 200),
+            entry("s1", 100),
+        ];
+        let (second, _, _) = SessionManager::session_page(&changed_snapshot, 2, cursor.as_deref());
+        assert_eq!(
+            second
+                .iter()
+                .map(|entry| entry.0.id.as_str())
+                .collect::<Vec<_>>(),
+            ["s1"]
+        );
     }
 
     /// 历史惰性加载切窗（纯函数）。
@@ -927,7 +975,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 删除触发 ACP session/close（driver.close 被调用），并清除注册表与日志。
+    /// 删除触发 ACP session/close（driver.close 被调用），并清除注册表与本地日志。
     #[tokio::test]
     async fn delete_triggers_driver_close() {
         // 用计数关闭驱动验证 close 被调用

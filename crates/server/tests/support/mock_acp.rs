@@ -10,8 +10,8 @@
 //!   `AMUX_MOCK_DELAY_MS`（默认 300ms）再发事件流与响应——保证忙时 prompt
 //!   （-32006）测试有确定性的 busy 窗口
 //! - `skill/list` 返回固定的 skills 列表（PRD §3.3）
-//! - 把收到的**方法名**追加到 `<state_file>.calls`（供测试断言 server 的调用面：
-//!   如 open_session 不触发 `session/load`、resume 幂等只调一次）
+//! - 把收到的**方法名**追加到 `<state_file>.calls`（供测试断言 server 的 ACP 调用面，
+//!   包括 open_session 不触发 `session/load`、resume 幂等只调一次及 close/delete）。
 //! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
 
 use std::collections::HashMap;
@@ -144,7 +144,7 @@ async fn run(state_file: &str) -> Result<()> {
         .on_receive_request(
             async move |request: LoadSessionRequest, responder, cx| {
                 // 全量重放：该会话记录的历史（用户指令 + agent 输出），重放完才响应。
-                // server 新设计不使用（历史以 server 日志为权威），保留 handler
+                // server 以本地历史为权威，不依赖 agent 的 load 结果；handler 仍用于协议完整性。
                 // 以便测试断言「open_session 不触发 session/load」。
                 record_call(&calls_load, "session/load");
                 let sid = request.session_id.to_string();

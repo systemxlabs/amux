@@ -1,7 +1,8 @@
 //! ACP v1 真实对接测试：起模拟 ACP agent（stdio 子进程），驱动 `AcpAgentDriver`
 //! 的真实实现——验证方法帧序列、session/update 聚合、yolo 自动批准、
 //! `session/resume`（恢复 agent 自身上下文，docs/DESIGN.md §7.2）。
-//! 删除/关闭会话经 `session/close` 帧释放 agent 侧资源（docs/DESIGN.md「ACP 生命周期」）。
+//! 关闭会话经 `session/close` 帧释放 agent 侧资源，删除经 `session/delete` 清理远端记录
+//!（docs/DESIGN.md「ACP 生命周期」）。
 
 use std::time::Duration;
 
@@ -52,7 +53,7 @@ async fn acp_driver_full_flow() {
         "request_permission 应被自动批准, 状态文件: {approved:?}"
     );
 
-    // 调用面：session/new、session/prompt、session/resume（恰好一次）；close 帧正常
+    // 调用面：session/new、session/prompt、session/resume（恰好一次）
     let calls = std::fs::read_to_string(&calls_file).unwrap_or_default();
     assert!(calls.contains("session/new"), "calls: {calls:?}");
     assert!(calls.contains("session/prompt"), "calls: {calls:?}");
@@ -62,11 +63,16 @@ async fn acp_driver_full_flow() {
         "恢复会话应恰好 resume 一次（幂等）: {calls:?}"
     );
 
-    // delete → session/close 帧（docs/DESIGN.md「ACP 生命周期」释放 agent 侧资源）
+    // 删除先 close 释放运行资源，再 delete 清理远端记录。
     driver.close(&sid).expect("close");
+    driver.delete(&sid).expect("delete");
     let calls = std::fs::read_to_string(&calls_file).unwrap_or_default();
     assert!(
         calls.contains("session/close"),
-        "删除应触发 session/close: {calls:?}"
+        "关闭应触发 session/close: {calls:?}"
+    );
+    assert!(
+        calls.contains("session/delete"),
+        "删除应触发 session/delete: {calls:?}"
     );
 }

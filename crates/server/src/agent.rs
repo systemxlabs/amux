@@ -83,8 +83,8 @@ pub trait AgentDriver: Send + Sync {
     ) -> mpsc::Receiver<AgentEvent>;
     /// 取消进行中的工作
     fn cancel(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 关闭会话（删除/长时间无活动时释放 agent 侧资源，docs/DESIGN.md「ACP 生命周期」：
-    /// server 经 ACP `session/close` 关闭 agent 侧会话）
+    /// 关闭会话以释放 agent 侧运行资源；删除流程随后可再调用 `delete` 清理远端记录
+    ///（docs/DESIGN.md「ACP 生命周期」）。
     fn close(&self, agent_session_id: &str) -> Result<(), String>;
     /// 删除 agent 侧会话；不支持时返回错误，调用方可保留已关闭的远端会话。
     fn delete(&self, _agent_session_id: &str) -> Result<(), String> {

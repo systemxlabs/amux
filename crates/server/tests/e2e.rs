@@ -2,7 +2,7 @@
 //! 经 WebSocket + JSON-RPC 验证协议。
 //! 覆盖：认证（未认证 AUTH_FAILED / 成功）、agent.list/skills、会话惰性创建、
 //! prompt（含 state_change busy→idle 推送）、session.history/activities/ongoing_activity 分页、
-//! session.configure、删除触发 ACP session/close、workspace.diff/restore。
+//! session.configure、删除触发 ACP session/close + session/delete、workspace.diff/restore。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -243,7 +243,7 @@ async fn agent_list_and_skills() {
     );
 }
 
-// ---- 会话生命周期 + 惰性 + state_change + 删除触发 session/close ----
+// ---- 会话生命周期 + 惰性 + state_change + 删除触发 ACP close/delete ----
 
 #[tokio::test]
 async fn session_lifecycle_state_change_and_delete() {
@@ -339,7 +339,7 @@ async fn session_lifecycle_state_change_and_delete() {
         "空闲 ongoing_activity 为 null: {oa}"
     );
 
-    // 删除触发 session/close
+    // 删除先触发 session/close，再尝试 session/delete
     let r = c.call("session.delete", json!({"sessionId": sid})).await;
     assert!(r.get("error").is_none(), "删除失败: {r}");
     assert!(
@@ -379,12 +379,12 @@ async fn session_list_pagination() {
         sids.push(sid);
     }
 
-    // limit=2：最近活跃一窗，hasMore=true，nextBefore=窗口最后一条
+    // limit=2：最近活跃一窗，hasMore=true，nextBefore 是窗口末尾的复合游标
     let first = c.call("session.list", json!({"limit": 2})).await;
     let sessions = first["result"]["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 2, "limit=2 应返回一窗: {first}");
     assert_eq!(first["result"]["hasMore"], true);
-    let next_before = first["result"]["nextBefore"].as_u64().unwrap();
+    let next_before = first["result"]["nextBefore"].as_str().unwrap();
     assert_eq!(sessions[0]["id"], json!(sids[2]), "最晚 prompt 排最前");
     assert_eq!(sessions[1]["id"], json!(sids[1]));
 

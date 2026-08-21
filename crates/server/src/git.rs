@@ -338,7 +338,7 @@ impl GitRunner {
         };
         let repo = match gix::discover(cwd) {
             Ok(r) => r,
-            // 非仓库（向上查找无 .git）或仓库不可用 → 与旧实现 `rev-parse` 失败一致
+            // 非仓库（向上查找无 .git）或仓库不可用时，按 workspace.diff 协议返回 not_repo。
             Err(_) => {
                 return WorkspaceDiffResult {
                     files: Vec::new(),

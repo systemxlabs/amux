@@ -52,8 +52,8 @@ pub fn merge_session_window(
     existing: &[SessionMeta],
     window: Vec<SessionMeta>,
     has_more: bool,
-    next_before: Option<u64>,
-) -> (Vec<SessionMeta>, bool, Option<u64>) {
+    next_before: Option<String>,
+) -> (Vec<SessionMeta>, bool, Option<String>) {
     let mut out = existing.to_vec();
     for m in window {
         if let Some(existing) = out.iter_mut().find(|s| s.id == m.id) {
@@ -376,11 +376,12 @@ mod tests {
     #[test]
     fn merge_session_window_first_append_dedup() {
         let window1 = vec![smeta("s3", 300), smeta("s2", 200)];
-        let (list, has_more, next) = merge_session_window(&[], window1, true, Some(200));
+        let (list, has_more, next) =
+            merge_session_window(&[], window1, true, Some("200:s2".into()));
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "s3");
         assert!(has_more);
-        assert_eq!(next, Some(200));
+        assert_eq!(next.as_deref(), Some("200:s2"));
 
         let window2 = vec![smeta("s1", 100)];
         let (list, has_more, next) = merge_session_window(&list, window2, false, None);
