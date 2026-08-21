@@ -27,6 +27,7 @@ use gpui_component::{
     dialog::DialogButtonProps,
     input::{Input, InputState},
     label::Label,
+    notification::Notification as UiNotification,
     radio::RadioGroup,
     scroll::ScrollableElement,
     spinner::Spinner,
@@ -55,7 +56,7 @@ use crate::logic::{
 };
 use crate::text::{block_text, one_line, truncate};
 use crate::workflow::{now_ts, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
-use crate::ws::{Notification, WsClient};
+use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小（PRD §4.1.1：首次只取最近活跃一窗）。
 const PAGE_LIMIT: usize = 50;
@@ -479,7 +480,7 @@ impl AmuxApp {
             .update(cx, |s, cx| s.set_value(&cfg.model, window, cx));
     }
 
-    fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
+    fn save_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let api_format = self.orch_api_format.clone();
         let base_url = self.orch_base_input.read(cx).value().trim().to_owned();
         let api_key = self.orch_key_input.read(cx).value().trim().to_owned();
@@ -501,6 +502,10 @@ impl AmuxApp {
         if let Some(error) = error {
             self.orchestrator_form_error = Some(error.into());
             self.orchestrator_form_status = None;
+            window.push_notification(
+                UiNotification::error(error).title("编排智能体设置保存失败"),
+                cx,
+            );
         } else {
             let result = self.store.save_orchestrator(&OrchestratorConfig {
                 api_format,
@@ -512,10 +517,19 @@ impl AmuxApp {
                 Ok(()) => {
                     self.orchestrator_form_error = None;
                     self.orchestrator_form_status = Some("已保存。".into());
+                    window.push_notification(
+                        UiNotification::success("编排智能体设置已保存").title("保存成功"),
+                        cx,
+                    );
                 }
                 Err(error) => {
-                    self.orchestrator_form_error = Some(format!("保存失败：{error}"));
+                    let message = format!("保存失败：{error}");
+                    self.orchestrator_form_error = Some(message.clone());
                     self.orchestrator_form_status = None;
+                    window.push_notification(
+                        UiNotification::error(message).title("编排智能体设置保存失败"),
+                        cx,
+                    );
                 }
             }
         }
@@ -566,7 +580,7 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
         idx: usize,
-        n: &Notification,
+        n: &WsNotification,
     ) {
         match n.method.as_str() {
             "connected" | "auth_ok" => {
@@ -607,7 +621,7 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
         idx: usize,
-        n: &Notification,
+        n: &WsNotification,
     ) {
         let Some(sid) = n
             .params
@@ -6225,8 +6239,8 @@ impl AmuxApp {
                     .small()
                     .primary()
                     .label("保存")
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.save_orchestrator(cx);
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.save_orchestrator(window, cx);
                     })),
             ),
         );
