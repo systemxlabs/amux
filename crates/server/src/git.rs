@@ -26,8 +26,6 @@ pub struct GitRunner;
 #[derive(Debug)]
 pub struct GitError {
     pub message: String,
-    #[allow(dead_code)]
-    pub stdout: String,
     pub stderr: String,
 }
 
@@ -45,12 +43,10 @@ fn run(cwd: &str, args: &[&str]) -> Result<String, GitError> {
         Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
         Ok(o) => Err(GitError {
             message: format!("git {} 失败", args.join(" ")),
-            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
         }),
         Err(e) => Err(GitError {
             message: format!("git 执行失败: {e}"),
-            stdout: String::new(),
             stderr: String::new(),
         }),
     }
@@ -61,6 +57,21 @@ fn repo_relative_path(workdir: &Path, cwd: &str, p: &str) -> String {
     match Path::new(cwd).strip_prefix(workdir) {
         Ok(rel) if !rel.as_os_str().is_empty() => rel.join(p).to_string_lossy().into_owned(),
         _ => p.to_string(),
+    }
+}
+
+/// 把仓库根相对路径换算为相对 cwd 的路径——diff 结果的 path 与 workspace.list/read
+/// 同基准（相对 cwd），GUI 侧才能把 diff 文件直接喂回浏览/读取接口。
+fn cwd_relative_path(workdir: &Path, cwd: &str, repo_path: &str) -> String {
+    match Path::new(cwd).strip_prefix(workdir) {
+        Ok(rel) if !rel.as_os_str().is_empty() => {
+            match Path::new(repo_path).strip_prefix(rel) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                // cwd 之外（如 ../x）的改动保持仓库根表示
+                _ => repo_path.to_string(),
+            }
+        }
+        _ => repo_path.to_string(),
     }
 }
 
@@ -469,7 +480,7 @@ impl GitRunner {
                 _ => GitChangeStatus::Modified,
             };
             files.push(GitDiffFile {
-                path: p_str,
+                path: cwd_relative_path(workdir, cwd, &p_str),
                 status,
                 additions: fp.additions,
                 deletions: fp.deletions,
@@ -485,6 +496,7 @@ impl GitRunner {
 
     /// 撤销工作区变更（docs/DESIGN.md「workspace.restore」）。
     /// - `patch`：单 hunk/单文件 patch 反向应用——gitoxide 无 patch 应用引擎，保留 `git apply --reverse`
+    ///   （diff patch 的 a/ b/ 头为仓库根相对路径，故从仓库根执行 apply，cwd 为子目录时同样正确）
     /// - `path`：单文件——tracked 用 `git restore`；untracked 直接删除（从未提交，revert = 移除）
     /// - 都不给：全部变更——`git restore` 全部 tracked 变更 + `git clean` 全部 untracked
     pub fn restore(&self, cwd: &str, path: Option<&str>, patch: Option<&str>) -> OpResult {
@@ -499,7 +511,15 @@ impl GitRunner {
                     message: Some("写入 patch 失败".into()),
                 };
             }
-            return match run(cwd, &["apply", "--reverse", &patch_file.to_string_lossy()]) {
+            // patch 路径以仓库根为基准：从仓库根应用（cwd 为其子目录时也正确）
+            let apply_dir = gix::discover(cwd)
+                .ok()
+                .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                .unwrap_or_else(|| std::path::PathBuf::from(cwd));
+            return match run(
+                apply_dir.to_string_lossy().as_ref(),
+                &["apply", "--reverse", patch_file.to_string_lossy().as_ref()],
+            ) {
                 Ok(_) => OpResult {
                     ok: true,
                     message: None,

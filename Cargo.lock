@@ -10212,6 +10212,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "uuid",

@@ -71,15 +71,7 @@ async fn main() {
         }
     }
 
-    // 启动拉起（docs/DESIGN.md §4.1/§7.3）：server 启动时发现本机 agent 并直接拉起。
-    let launch = agents.launch_discovered();
-    protocol::log::info(
-        "server.startup",
-        format!(
-            "ACP server 启动完成：{} 个已拉起，{} 个失败（标记不可用）",
-            launch.started, launch.failed
-        ),
-    );
+    // 启动拉起移至监听之后（见 transport.run 前）：bind 失败路径不再遗留已拉起的子进程。
 
     // 会话注册表（SQLite，docs/DESIGN.md「普通会话存储」：session.sqlite）。
     let registry = match SessionRegistry::open(&cfg.data_dir.join("session.sqlite")) {
@@ -93,14 +85,28 @@ async fn main() {
     // 保留 agents 引用用于退出时关闭 ACP 子进程（docs/DESIGN.md「ACP Server 生命周期」）
     let shutdown_agents = agents.clone();
 
-    let (manager, notifications) = SessionManager::new(agents, registry, cfg.data_dir.clone());
+    let (manager, notifications) =
+        SessionManager::new(agents.clone(), registry, cfg.data_dir.clone());
     let manager = Arc::new(manager);
 
-    // 捕获 Ctrl+C 等退出信号，优雅关闭 ACP 子进程资源
+    // 退出信号（Ctrl+C 与 SIGTERM）：优雅关闭 ACP 子进程资源。
+    // 看门狗：个别 agent 挂死时 join 可能不返回，5s 后强制退出兜底。
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("注册 SIGTERM 处理失败");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
         protocol::log::info("server.shutdown", "收到退出信号，正在关闭 ACP 子进程…");
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            protocol::log::error("server.shutdown", "关闭超时，强制退出");
+            std::process::exit(0);
+        });
         shutdown_agents.shutdown_all();
+        protocol::log::info("server.shutdown", "ACP 子进程已全部关闭");
         std::process::exit(0);
     });
 
@@ -125,7 +131,7 @@ async fn main() {
                     );
                 }
                 Ok(_) => {}
-                Err(e) => protocol::log::error("server.cleanup", e),
+                Err(e) => protocol::log::error("server.cleanup", e.to_string()),
             }
         }
     });
@@ -144,6 +150,21 @@ async fn main() {
         logger: Some(Arc::new(|line| {
             protocol::log::info("server.transport", line)
         })),
+    });
+
+    // 启动拉起（docs/DESIGN.md「同时启动」）：并行拉起已发现 agent。放在监听之后
+    // 后台执行——bind 失败路径不再遗留子进程，agent 握手（最坏 30s/个）不阻塞
+    // server 就绪；可用性经 agent.list 反映。
+    let launch_agents = agents.clone();
+    std::thread::spawn(move || {
+        let launch = launch_agents.launch_discovered();
+        protocol::log::info(
+            "server.startup",
+            format!(
+                "ACP server 启动完成：{} 个已拉起，{} 个失败（标记不可用）",
+                launch.started, launch.failed
+            ),
+        );
     });
 
     if let Err(e) = transport.run().await {

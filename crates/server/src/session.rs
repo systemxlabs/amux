@@ -21,6 +21,7 @@ use protocol::{
 };
 
 use crate::agent::{AgentEvent, AgentRegistry};
+use crate::error::SessionError;
 use crate::history::{SessionLog, TurnMerger};
 use crate::registry::{RegistryEntry, SessionRegistry};
 
@@ -38,6 +39,17 @@ pub struct SessionManager {
     /// 进行中的活动（`session.ongoing_activity`；按会话 id 独立存储）
     ongoing: Mutex<HashMap<String, Activity>>,
     controls: Mutex<HashMap<String, Arc<SessionControl>>>,
+    /// 已解析历史缓存（GUI 每 10s 轮询打开的会话；文件未变时免全量 JSONL 重解析）
+    history_cache: Mutex<HashMap<String, LogCache<HistoryItem>>>,
+    /// 已解析活动缓存（同上）
+    activities_cache: Mutex<HashMap<String, LogCache<Activity>>>,
+}
+
+/// 日志解析缓存条目：以文件字节长度为新鲜度依据——日志 append-only 不截断，
+/// 长度不变即内容不变；任何追加后由写入方失效。
+struct LogCache<T> {
+    items: Arc<Vec<T>>,
+    source_len: u64,
 }
 
 struct SessionControl {
@@ -71,6 +83,8 @@ impl SessionManager {
             tx,
             ongoing: Mutex::new(HashMap::new()),
             controls: Mutex::new(HashMap::new()),
+            history_cache: Mutex::new(HashMap::new()),
+            activities_cache: Mutex::new(HashMap::new()),
         };
         (manager, rx)
     }
@@ -121,7 +135,7 @@ impl SessionManager {
 
     /// 新建普通会话（**惰性**：只写注册表立即返回，不触发 ACP；agent 侧会话延后到
     /// 首条指令时经 `session/new` 懒创建，docs/DESIGN.md「惰性创建新会话」）。
-    pub async fn create(&self, agent: &str, cwd: &str) -> Result<SessionMeta, String> {
+    pub async fn create(&self, agent: &str, cwd: &str) -> Result<SessionMeta, SessionError> {
         let id = format!("s_{}", uuid::Uuid::new_v4());
         let ts = now();
         protocol::log::info(
@@ -137,9 +151,7 @@ impl SessionManager {
             created_at: ts,
             last_active_at: ts,
         };
-        self.registry
-            .upsert(&meta, "")
-            .map_err(|e| format!("注册表写入失败: {e}"))?;
+        self.registry.upsert(&meta, "")?;
         self.control(&meta.id);
         Ok(meta)
     }
@@ -158,32 +170,26 @@ impl SessionManager {
     }
 
     /// 配置会话标题（用户可随时修改，PRD §3.1）。
-    pub async fn configure(&self, session_id: &str, title: &str) -> Result<(), String> {
-        self.registry
-            .get(session_id)
-            .map_err(|e| format!("注册表读取失败: {e}"))?
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        self.registry
-            .set_title(session_id, title.trim(), now())
-            .map_err(|e| format!("注册表更新失败: {e}"))?;
+    pub async fn configure(&self, session_id: &str, title: &str) -> Result<(), SessionError> {
+        self.get_entry(session_id)?;
+        self.registry.set_title(session_id, title.trim(), now())?;
         Ok(())
     }
 
-    /// 删除会话：若已有 agent 侧会话，先经 ACP `session/close` 释放资源，再尝试
-    /// `session/delete`（docs/DESIGN.md「删除会话」）；ACP 操作失败不阻断本地删除。
-    /// 联动清除注册表条目 + 历史日志 + 活动日志。
-    pub async fn delete(&self, session_id: &str) -> Result<(), String> {
+    /// 删除会话（docs/DESIGN.md「删除会话」）：若已有 agent 侧会话，先经 ACP
+    /// `session/close` 关闭；若 ACP Server 支持会话删除，再发 `session/delete`
+    /// （不支持删除的 agent 报错，按「不支持」忽略）。ACP 失败不阻断本地删除。
+    /// 联动清除注册表条目 + 历史日志 + 活动日志 + 进行中控制块。
+    /// 幂等：会话已不存在时仅清理残留日志（部分工作流清理失败后可安全重试）。
+    pub async fn delete(&self, session_id: &str) -> Result<(), SessionError> {
         let control = self.control(session_id);
         control.deleted.store(true, Ordering::SeqCst);
         let log = SessionLog::open(&self.data_dir, session_id);
-        let entry = self
-            .registry
-            .get(session_id)
-            .map_err(|e| format!("注册表读取失败: {e}"))?;
+        let entry = self.registry.get(session_id)?;
         let Some((meta, agent_session_id)) = entry else {
-            // DELETE is idempotent so clients can safely retry after a partial
-            // workflow cleanup.
-            return log.remove().map_err(|e| format!("会话日志删除失败: {e}"));
+            return log
+                .remove()
+                .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
         };
         if !agent_session_id.is_empty() {
             match self.agents.driver_for(&meta.agent) {
@@ -194,10 +200,11 @@ impl SessionManager {
                             format!("关闭 ACP 会话失败（继续本地删除）{session_id}: {e}"),
                         );
                     }
-                    if let Err(e) = driver.delete(&agent_session_id) {
+                    // 支持删除的 agent 同步删除 agent 侧会话；不支持删除的报错忽略
+                    if let Err(e) = driver.delete_session(&agent_session_id) {
                         protocol::log::debug(
                             "server.session",
-                            format!("ACP 不支持删除会话（本地删除继续）{session_id}: {e}"),
+                            format!("agent 不支持或删除 ACP 会话失败（忽略）{session_id}: {e}"),
                         );
                     }
                 }
@@ -209,10 +216,13 @@ impl SessionManager {
                 }
             }
         }
-        self.registry
-            .delete(session_id)
-            .map_err(|e| format!("注册表删除失败: {e}"))?;
-        log.remove().map_err(|e| format!("会话日志删除失败: {e}"))?;
+        self.registry.delete(session_id)?;
+        log.remove()
+            .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")))?;
+        self.invalidate_log_caches(session_id);
+        // 控制块出 map：进行中的 prompt 持有 Arc 克隆仍能看到 deleted 标志；
+        // 新请求将得到全新（未删除）的控制块——但会话已不在注册表，NotFound 兜底。
+        self.controls.lock().unwrap().remove(session_id);
         protocol::log::info("server.session", format!("删除会话 {session_id}"));
         Ok(())
     }
@@ -222,103 +232,76 @@ impl SessionManager {
         &self,
         limit: Option<usize>,
         before: Option<String>,
-    ) -> Result<(Vec<SessionMeta>, bool, Option<String>), String> {
-        let all = self
-            .registry
-            .list()
-            .map_err(|e| format!("注册表读取失败: {e}"))?;
+    ) -> Result<(Vec<SessionMeta>, bool, Option<String>), SessionError> {
+        let all = self.registry.list()?;
         let (window, has_more, next_before) =
             Self::session_page(&all, limit.unwrap_or(50), before.as_deref());
         let metas = window.into_iter().map(|(m, _)| m).collect();
         Ok((metas, has_more, next_before))
     }
 
-    /// 批量查询指定会话（docs/DESIGN.md「session.info」）。
-    pub async fn info(&self, session_ids: &[String]) -> Result<Vec<SessionMeta>, String> {
+    /// 批量查询指定会话（docs/DESIGN.md「session.info」）。不存在的 id 静默跳过。
+    pub async fn info(&self, session_ids: &[String]) -> Result<Vec<SessionMeta>, SessionError> {
         let mut metas = Vec::new();
         for id in session_ids {
-            if let Some((meta, _)) = self
-                .registry
-                .get(id)
-                .map_err(|e| format!("注册表读取失败: {e}"))?
-            {
-                metas.push(meta);
+            if self.registry.get(id)?.is_some() {
+                metas.push(self.get_entry(id)?.0);
             }
         }
         Ok(metas)
     }
 
+    /// 注册表单条读取：不存在 → NotFound，存储故障 → Storage。
+    fn get_entry(&self, session_id: &str) -> Result<(SessionMeta, String), SessionError> {
+        self.registry
+            .get(session_id)?
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
+    }
+
     /// 返回普通会话绑定的工作目录。workspace RPC 不接受调用方自带 cwd，
     /// 避免借助已知 session id 浏览或修改另一目录。
-    pub fn workspace_cwd(&self, session_id: &str) -> Result<String, String> {
-        self.registry
-            .get(session_id)
-            .map_err(|e| format!("注册表读取失败: {e}"))?
-            .map(|(meta, _)| meta.cwd)
-            .ok_or_else(|| format!("会话不存在: {session_id}"))
+    pub fn workspace_cwd(&self, session_id: &str) -> Result<String, SessionError> {
+        Ok(self.get_entry(session_id)?.0.cwd)
     }
 
     /// 关闭长时间无活动的 agent 侧会话（>timeout_ms，docs/DESIGN.md「主动关闭长时间
-    /// 无活动会话」）：对注册表中超过阈值的候选会话经 ACP `session/close` 关闭并清空
-    /// agent 侧会话 id（元数据与历史保留）。
-    pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> Result<usize, String> {
+    /// 无活动会话」）。候选选出后复核状态：已回到 Busy 的会话跳过本轮
+    /// （避免关掉正在进行中的 turn 的 agent 侧会话）。
+    pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> Result<usize, SessionError> {
         let candidates = self
             .registry
             .idle_candidates(now_ms, timeout_ms)
-            .map_err(|e| format!("查询空闲会话失败: {e}"))?;
+            .unwrap_or_default();
         let mut closed = 0;
-        let mut errors = Vec::new();
         for (sid, _) in candidates {
-            let Some((meta, aid)) = self
-                .registry
-                .get(&sid)
-                .map_err(|e| format!("读取会话失败 {sid}: {e}"))?
-            else {
+            let Ok(Some((meta, aid))) = self.registry.get(&sid) else {
                 continue;
             };
-            if aid.is_empty() {
+            if aid.is_empty() || meta.state == SessionState::Busy {
                 continue;
             }
-            let driver = match self.agents.driver_for(&meta.agent) {
-                Ok(driver) => driver,
-                Err(e) => {
-                    errors.push(format!("解析 agent 驱动失败 {sid}: {e}"));
-                    continue;
+            if let Ok(driver) = self.agents.driver_for(&meta.agent) {
+                if driver.close(&aid).is_ok() {
+                    if let Ok(()) = self.registry.set_agent_session_id(&sid, "") {
+                        closed += 1;
+                    }
                 }
-            };
-            if let Err(e) = driver.close(&aid) {
-                errors.push(format!("关闭 agent 会话失败 {sid}: {e}"));
-                continue;
-            }
-            if let Err(e) = self.registry.set_agent_session_id(&sid, "") {
-                errors.push(format!("清理 agent 会话状态失败 {sid}: {e}"));
-            } else {
-                closed += 1;
             }
         }
-        if errors.is_empty() {
-            Ok(closed)
-        } else {
-            Err(errors.join("; "))
-        }
+        Ok(closed)
     }
 
     // ---- 会话数据 ----
 
-    /// 分页读对话历史（docs/DESIGN.md「session.history」）：`before` 为独占上界游标（行号索引，转为 u64 便于协议层统一）。
+    /// 分页读对话历史（docs/DESIGN.md「session.history」）：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
     pub async fn history(
         &self,
         session_id: &str,
         limit: Option<usize>,
         before: Option<u64>,
-    ) -> Result<(Vec<HistoryItem>, bool, Option<u64>), String> {
-        self.registry
-            .get(session_id)
-            .map_err(|e| format!("注册表读取失败: {e}"))?
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        let items = SessionLog::open(&self.data_dir, session_id)
-            .read_history()
-            .map_err(|e| format!("会话历史读取失败: {e}"))?;
+    ) -> Result<(Vec<HistoryItem>, bool, Option<u64>), SessionError> {
+        self.get_entry(session_id)?;
+        let items = self.cached_history(session_id)?;
         let limit = limit.unwrap_or(200);
         let before_usize = before.map(|b| b as usize);
         let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
@@ -326,20 +309,15 @@ impl SessionManager {
         Ok((items[start..end].to_vec(), has_more, next_before))
     }
 
-    /// 分页读活动历史（docs/DESIGN.md「session.activities」）：`before` 为独占上界游标（行号索引，转为 u64 便于协议层统一）。
+    /// 分页读活动历史（docs/DESIGN.md「session.activities」）：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
     pub async fn activities(
         &self,
         session_id: &str,
         limit: Option<usize>,
         before: Option<u64>,
-    ) -> Result<(Vec<Activity>, bool, Option<u64>), String> {
-        self.registry
-            .get(session_id)
-            .map_err(|e| format!("注册表读取失败: {e}"))?
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        let items = SessionLog::open(&self.data_dir, session_id)
-            .read_activities()
-            .map_err(|e| format!("会话活动读取失败: {e}"))?;
+    ) -> Result<(Vec<Activity>, bool, Option<u64>), SessionError> {
+        self.get_entry(session_id)?;
+        let items = self.cached_activities(session_id)?;
         let limit = limit.unwrap_or(200);
         let before_usize = before.map(|b| b as usize);
         let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
@@ -347,12 +325,69 @@ impl SessionManager {
         Ok((items[start..end].to_vec(), has_more, next_before))
     }
 
+    /// 带缓存的对话历史读取：文件长度未变时复用上次解析结果
+    /// （GUI 每 10s 轮询打开的会话；日志 append-only，长度不变即内容不变）。
+    fn cached_history(&self, session_id: &str) -> Result<Arc<Vec<HistoryItem>>, SessionError> {
+        let path = SessionLog::history_path(&self.data_dir, session_id);
+        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let mut cache = self.history_cache.lock().unwrap();
+        if let Some(c) = cache.get(session_id) {
+            if c.source_len == file_len {
+                return Ok(c.items.clone());
+            }
+        }
+        let items = Arc::new(
+            SessionLog::open(&self.data_dir, session_id)
+                .read_history()
+                .map_err(|e| SessionError::Storage(format!("会话历史读取失败: {e}")))?,
+        );
+        cache.insert(
+            session_id.to_string(),
+            LogCache {
+                items: items.clone(),
+                source_len: file_len,
+            },
+        );
+        Ok(items)
+    }
+
+    /// 带缓存的活动读取：文件长度未变时复用上次解析结果。
+    fn cached_activities(&self, session_id: &str) -> Result<Arc<Vec<Activity>>, SessionError> {
+        let path = SessionLog::activities_path(&self.data_dir, session_id);
+        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let mut cache = self.activities_cache.lock().unwrap();
+        if let Some(c) = cache.get(session_id) {
+            if c.source_len == file_len {
+                return Ok(c.items.clone());
+            }
+        }
+        let items = Arc::new(
+            SessionLog::open(&self.data_dir, session_id)
+                .read_activities()
+                .map_err(|e| SessionError::Storage(format!("会话活动读取失败: {e}")))?,
+        );
+        cache.insert(
+            session_id.to_string(),
+            LogCache {
+                items: items.clone(),
+                source_len: file_len,
+            },
+        );
+        Ok(items)
+    }
+
+    /// 追加后失效缓存（下次读取重新解析一次，之后恢复命中）。
+    fn invalidate_log_caches(&self, session_id: &str) {
+        self.history_cache.lock().unwrap().remove(session_id);
+        self.activities_cache.lock().unwrap().remove(session_id);
+    }
+
     /// 查询正在进行中的活动（docs/DESIGN.md「session.ongoing_activity」；无则 None）。
-    pub async fn ongoing_activity(&self, session_id: &str) -> Result<Option<Activity>, String> {
-        self.registry
-            .get(session_id)
-            .map_err(|e| format!("注册表读取失败: {e}"))?
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    pub async fn ongoing_activity(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Activity>, SessionError> {
+        self.get_entry(session_id)?;
         Ok(self.ongoing.lock().unwrap().get(session_id).cloned())
     }
 
@@ -361,60 +396,32 @@ impl SessionManager {
     /// 发送指令（docs/DESIGN.md「session.prompt」）：busy 检查 → 首条生成标题 → 惰性创建
     /// agent 会话（session/new）→ resume → 用户消息立即落盘 → 跑 turn（事件喂
     /// TurnMerger，记录 ongoing）→ 写 agent 历史/活动 → 置空闲；必要时广播
-    /// `session.state_change`（Busy<->Idle）。
-    pub async fn prompt(&self, session_id: &str, input: Vec<ContentBlock>) -> Result<(), String> {
+    /// `session.state_change`（Busy<->Idle）。落盘失败向上传播（GUI 可见）。
+    pub async fn prompt(
+        &self,
+        session_id: &str,
+        input: Vec<ContentBlock>,
+    ) -> Result<(), SessionError> {
         if input.is_empty() {
-            return Err("prompt 输入必须非空".into());
+            return Err(SessionError::EmptyInput);
         }
         let control = self.control(session_id);
         if control.deleted.load(Ordering::SeqCst) {
-            return Err(format!("会话不存在: {session_id}"));
+            return Err(SessionError::NotFound(session_id.to_string()));
         }
         if control
             .busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Err("会话忙：agent 不支持进行中注入（steer），请等待当前工作结束".into());
+            return Err(SessionError::Busy);
         }
 
-        // 忙检查 + 标题生成 + Busy 状态 + 懒创建一次完成（注册表为同步写，天然原子）
-        let setup: Result<_, String> = async {
-            let (mut meta, agent_session_id) = self
-                .registry
-                .get(session_id)
-                .map_err(|e| format!("注册表读取失败: {e}"))?
-                .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-            let old_state = meta.state;
-            if meta.state == SessionState::Busy {
-                return Err("会话忙：agent 不支持进行中注入（steer），请等待当前工作结束".into());
-            }
-            if meta.title.is_empty() {
-                meta.title = generate_title(&first_text(&input));
-            }
-            meta.state = SessionState::Busy;
-            meta.last_active_at = now();
-            let driver = self.agents.driver_for(&meta.agent)?;
-            // 惰性创建 agent 侧会话（session/new）并回填；已创建则沿用
-            let agent_session_id = if agent_session_id.is_empty() {
-                let sid2 = driver.create_session(&meta.cwd)?;
-                self.registry
-                    .set_agent_session_id(session_id, &sid2)
-                    .map_err(|e| format!("注册表写入失败: {e}"))?;
-                sid2
-            } else {
-                agent_session_id
-            };
-            self.registry
-                .upsert(&meta, &agent_session_id)
-                .map_err(|e| format!("注册表写入失败: {e}"))?;
-            let cwd = meta.cwd.clone();
-            Ok((driver, agent_session_id, cwd, old_state))
-        }
-        .await;
+        let setup = self.setup_prompt(session_id, &input).await;
         let (driver, agent_session_id, cwd, old_state) = match setup {
             Ok(value) => value,
             Err(error) => {
+                // 尚未进入 Busy 广播，只需释放 busy 标志
                 control.busy.store(false, Ordering::SeqCst);
                 return Err(error);
             }
@@ -436,19 +443,10 @@ impl SessionManager {
                 "server.session",
                 format!("用户消息落盘失败 {session_id}: {e}"),
             );
-            if let Err(e) = self
-                .registry
-                .update_state(session_id, SessionState::Idle, now())
-            {
-                protocol::log::error(
-                    "server.session",
-                    format!("恢复失败后更新状态失败 {session_id}: {e}"),
-                );
-            }
-            self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
-            control.busy.store(false, Ordering::SeqCst);
-            return Err(format!("用户消息落盘失败: {e}"));
+            self.finalize_turn(session_id, &control, false);
+            return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
         }
+        self.invalidate_log_caches(session_id);
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
         if let Err(e) = driver.resume_session(&agent_session_id, &cwd) {
@@ -457,42 +455,91 @@ impl SessionManager {
                 timestamp: now(),
                 detail: format!("恢复 agent 上下文失败: {e}"),
             };
-            if let Err(log_error) =
-                SessionLog::open(&self.data_dir, session_id).append_activities(&[err])
-            {
+            if let Err(log_error) = log.append_activities(&[err]) {
                 protocol::log::error(
                     "server.session",
                     format!("resume 错误活动落盘失败 {session_id}: {log_error}"),
                 );
             }
-            self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
-            if let Err(state_error) =
-                self.registry
-                    .update_state(session_id, SessionState::Idle, now())
-            {
-                protocol::log::error(
-                    "server.session",
-                    format!("resume 失败后更新状态失败 {session_id}: {state_error}"),
-                );
-            }
-            self.ongoing.lock().unwrap().remove(session_id);
-            control.busy.store(false, Ordering::SeqCst);
-            return Err(format!("恢复 agent 上下文失败: {e}"));
+            self.invalidate_log_caches(session_id);
+            self.finalize_turn(session_id, &control, false);
+            return Err(SessionError::AgentUnavailable(format!(
+                "恢复 agent 上下文失败: {e}"
+            )));
         }
 
-        let mut merger = TurnMerger::new();
-
-        // 跑 turn：把指令发给 agent，事件喂合并器，thinking/tool_call 记为 ongoing 活动
-        let mut turn_completed = false;
-        let prompt_input = input;
         let started = std::time::Instant::now();
-        let mut rx = driver.prompt(&agent_session_id, prompt_input);
-        // 用户消息已单独落盘，用户回显事件（UserMessage）忽略；驱动输出经事件驱动
+        let storage_error =
+            self.run_turn(session_id, &driver, &agent_session_id, input, &control)
+                .await;
+
+        self.finalize_turn(session_id, &control, false);
+        protocol::log::info(
+            "server.session",
+            format!(
+                "prompt 完成 {session_id}（{}ms）",
+                started.elapsed().as_millis()
+            ),
+        );
+        match (control.deleted.load(Ordering::SeqCst), storage_error) {
+            (true, _) => Err(SessionError::NotFound(format!("{session_id}（已删除）"))),
+            (false, Some(e)) => Err(e),
+            (false, None) => Ok(()),
+        }
+    }
+
+    /// prompt 前置准备：读元数据、生成标题、置 Busy、惰性创建 agent 侧会话。
+    async fn setup_prompt(
+        &self,
+        session_id: &str,
+        input: &[ContentBlock],
+    ) -> Result<(crate::agent::SharedDriver, String, String, SessionState), SessionError> {
+        let (mut meta, agent_session_id) = self.get_entry(session_id)?;
+        let old_state = meta.state;
+        if meta.state == SessionState::Busy {
+            return Err(SessionError::Busy);
+        }
+        if meta.title.is_empty() {
+            meta.title = generate_title(&first_text(input));
+        }
+        meta.state = SessionState::Busy;
+        meta.last_active_at = now();
+        let driver = self
+            .agents
+            .driver_for(&meta.agent)
+            .map_err(SessionError::AgentUnavailable)?;
+        // 惰性创建 agent 侧会话（session/new）并回填；已创建则沿用
+        let agent_session_id = if agent_session_id.is_empty() {
+            let sid2 = driver
+                .create_session(&meta.cwd)
+                .map_err(SessionError::AgentUnavailable)?;
+            self.registry.set_agent_session_id(session_id, &sid2)?;
+            sid2
+        } else {
+            agent_session_id
+        };
+        self.registry.upsert(&meta, &agent_session_id)?;
+        let cwd = meta.cwd.clone();
+        Ok((driver, agent_session_id, cwd, old_state))
+    }
+
+    /// 跑单个 turn：指令发给 agent，事件喂合并器，thinking/tool_call 记为 ongoing。
+    /// 返回落盘阶段的存储错误（如有）。删除与 prompt 并发时，
+    /// 旧 turn 不得在删除后重新创建历史文件。
+    async fn run_turn(
+        &self,
+        session_id: &str,
+        driver: &crate::agent::SharedDriver,
+        agent_session_id: &str,
+        input: Vec<ContentBlock>,
+        control: &SessionControl,
+    ) -> Option<SessionError> {
+        let log = SessionLog::open(&self.data_dir, session_id);
+        let mut merger = TurnMerger::new();
+        let mut rx = driver.prompt(agent_session_id, input);
+        let mut turn_completed = false;
         while let Some(ev) = rx.recv().await {
             match ev {
-                AgentEvent::UserMessage(_) => {
-                    // 回显：合并器已 push_user，此处忽略
-                }
                 AgentEvent::TurnEnded => {
                     turn_completed = true;
                     break;
@@ -524,19 +571,6 @@ impl SessionManager {
                         },
                     );
                 }
-                AgentEvent::Compaction(detail) => {
-                    merger.push_activity(Activity::Compaction {
-                        timestamp: now(),
-                        detail: detail.clone(),
-                    });
-                    self.ongoing.lock().unwrap().insert(
-                        session_id.to_string(),
-                        Activity::Compaction {
-                            timestamp: now(),
-                            detail,
-                        },
-                    );
-                }
                 AgentEvent::Error(detail) => {
                     merger.push_error(Activity::Error {
                         timestamp: now(),
@@ -547,11 +581,9 @@ impl SessionManager {
                         format!("agent turn 失败 {session_id}: {detail}"),
                     );
                 }
-                AgentEvent::SessionInfo { .. } => {}
             }
         }
-
-        // 若 turn 未正常结束，记录错误活动
+        // turn 未正常结束（连接中断或被异常终止）：记录错误活动
         if !turn_completed {
             let err = Activity::Error {
                 timestamp: now(),
@@ -560,69 +592,56 @@ impl SessionManager {
             merger.push_error(err);
         }
 
-        // 删除与 prompt 并发时，旧 turn 不得在删除后重新创建历史文件。
         let deleted = control.deleted.load(Ordering::SeqCst);
-        // 落库历史 + 活动
         let (history, activities) = merger.finish();
-        let mut storage_error = None;
+        let mut storage_error: Option<SessionError> = None;
         if !deleted && !history.is_empty() {
             if let Err(e) = log.append_history(&history) {
                 protocol::log::error("server.session", format!("历史落盘失败 {session_id}: {e}"));
-                storage_error = Some(format!("历史落盘失败: {e}"));
+                storage_error = Some(SessionError::Storage(format!("历史落盘失败: {e}")));
             }
         }
         if !deleted && !activities.is_empty() {
             if let Err(e) = log.append_activities(&activities) {
                 protocol::log::error("server.session", format!("活动落盘失败 {session_id}: {e}"));
-                storage_error = Some(format!("活动落盘失败: {e}"));
+                storage_error = Some(SessionError::Storage(format!("活动落盘失败: {e}")));
             }
         }
+        if !deleted && (!history.is_empty() || !activities.is_empty()) {
+            self.invalidate_log_caches(session_id);
+        }
+        storage_error
+    }
 
-        // 置空闲 + 清空 ongoing + 广播
+    /// turn 统一收尾：清 ongoing、释放 busy、置 Idle 并广播（deleted 时跳过状态回写，
+    /// 避免已删除会话在注册表中复活）。
+    fn finalize_turn(&self, session_id: &str, control: &SessionControl, deleted: bool) {
         self.ongoing.lock().unwrap().remove(session_id);
         control.busy.store(false, Ordering::SeqCst);
         if !deleted {
-            if let Err(e) = self
-                .registry
-                .update_state(session_id, SessionState::Idle, now())
-            {
+            if let Err(e) = self.registry.update_state(session_id, SessionState::Idle, now()) {
                 protocol::log::error(
                     "server.session",
                     format!("更新空闲状态失败 {session_id}: {e}"),
                 );
-                storage_error = Some(format!("更新空闲状态失败: {e}"));
             }
             self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
-        }
-        protocol::log::info(
-            "server.session",
-            format!(
-                "prompt 完成 {session_id}（{}ms，turn_completed={turn_completed}）",
-                started.elapsed().as_millis()
-            ),
-        );
-        if deleted {
-            Err(format!("会话已删除: {session_id}"))
-        } else if let Some(error) = storage_error {
-            Err(error)
-        } else {
-            Ok(())
         }
     }
 
     /// 取消指定普通会话正在进行的工作（docs/DESIGN.md「session.cancel」）。
-    pub async fn cancel(&self, session_id: &str) -> Result<(), String> {
-        let (meta, agent_session_id) = self
-            .registry
-            .get(session_id)
-            .map_err(|e| format!("注册表读取失败: {e}"))?
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    pub async fn cancel(&self, session_id: &str) -> Result<(), SessionError> {
+        let (meta, agent_session_id) = self.get_entry(session_id)?;
         if agent_session_id.is_empty() {
             return Ok(());
         }
-        let driver = self.agents.driver_for(&meta.agent)?;
-        driver.cancel(&agent_session_id)?;
-        // 取消后该会话视为回到空闲，广播状态变更
+        let driver = self
+            .agents
+            .driver_for(&meta.agent)
+            .map_err(SessionError::AgentUnavailable)?;
+        driver
+            .cancel(&agent_session_id)
+            .map_err(SessionError::AgentUnavailable)?;
         // 只请求 ACP 取消，不提前伪造 Idle；prompt 事件流结束后才释放 busy，
         // 从而避免旧 turn 尚未结束时被新的 prompt 并发启动。
         Ok(())
@@ -636,6 +655,7 @@ impl SessionManager {
         };
         let _ = self.tx.send(ServerNotification::StateChange(payload));
     }
+
 }
 
 /// 取输入的首个文本块（标题生成用）。
@@ -739,7 +759,7 @@ mod tests {
 
         let (w, more, nb) = SessionManager::session_page(&all, 2, Some("800:s8"));
         assert_eq!(
-            w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
+            w.iter().map(|(m, _)| m.id.as_str()).collect::<Vec<_>>(),
             ["s7", "s6"]
         );
         assert!(more);
@@ -747,7 +767,7 @@ mod tests {
 
         let (w, more, nb) = SessionManager::session_page(&all, 2, Some("600:s6"));
         assert_eq!(
-            w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
+            w.iter().map(|(m, _)| m.id.as_str()).collect::<Vec<_>>(),
             ["s5", "s4"]
         );
         assert!(!more);
@@ -933,6 +953,10 @@ mod tests {
                 Ok(())
             }
 
+            fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+
             fn list_skills(&self) -> Result<Vec<String>, String> {
                 Ok(Vec::new())
             }
@@ -1012,6 +1036,10 @@ mod tests {
                 self.closed
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
+            }
+            fn delete_session(&self, _a: &str) -> Result<(), String> {
+                // 模拟不支持删除的 agent：返回错误，删除路径应忽略
+                Err("method not found".into())
             }
             fn list_skills(&self) -> Result<Vec<String>, String> {
                 Ok(Vec::new())

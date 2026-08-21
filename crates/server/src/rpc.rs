@@ -15,6 +15,7 @@ use protocol::{
     WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
+use crate::error::SessionError;
 use crate::git::GitRunner;
 use crate::session::SessionManager;
 
@@ -57,27 +58,17 @@ fn parse<T: DeserializeOwned>(params: &Option<Value>) -> Result<T, RpcError> {
 }
 
 /// 把会话操作错误映射到协议错误码（docs/DESIGN.md 协议表错误语义）。
-fn map_session_err(e: String) -> RpcError {
-    if e.starts_with("会话不存在") {
-        RpcError::session_not_found(e)
-    } else if e.starts_with("会话忙") {
-        RpcError {
-            code: server_error::SESSION_BUSY,
-            message: e,
-        }
-    } else if e.contains("不可用") || e.contains("未发现 agent") {
-        RpcError {
-            code: server_error::HARNESS_UNAVAILABLE,
-            message: e,
-        }
-    } else if e.starts_with("prompt 输入必须非空") {
-        RpcError {
-            code: server_error::INVALID_INPUT,
-            message: e,
-        }
-    } else {
-        RpcError::internal(e)
-    }
+/// 强类型一次映射，替代按中文文案前缀反推。
+fn map_session_err(e: SessionError) -> RpcError {
+    let message = e.to_string();
+    let code = match &e {
+        SessionError::NotFound(_) => server_error::SESSION_NOT_FOUND,
+        SessionError::Busy => server_error::SESSION_BUSY,
+        SessionError::AgentUnavailable(_) => server_error::HARNESS_UNAVAILABLE,
+        SessionError::EmptyInput => server_error::INVALID_INPUT,
+        SessionError::Storage(_) => rpc_error::INTERNAL_ERROR,
+    };
+    RpcError { code, message }
 }
 
 fn ok_op() -> Result<Value, RpcError> {
@@ -134,11 +125,7 @@ impl Handlers {
 
             method::SESSION_NEW => {
                 let p: SessionNewParams = parse(params)?;
-                let session = self
-                    .manager
-                    .create(&p.agent, &p.cwd)
-                    .await
-                    .map_err(RpcError::internal)?;
+                let session = self.manager.create(&p.agent, &p.cwd).await.map_err(map_session_err)?;
                 serde_json::to_value(SessionResult { session })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
@@ -232,7 +219,7 @@ impl Handlers {
                     .manager
                     .list(p.limit, p.before)
                     .await
-                    .map_err(RpcError::internal)?;
+                    .map_err(map_session_err)?;
                 serde_json::to_value(SessionListResult {
                     sessions,
                     has_more,
@@ -247,7 +234,7 @@ impl Handlers {
                     .manager
                     .info(&p.session_ids)
                     .await
-                    .map_err(RpcError::internal)?;
+                    .map_err(map_session_err)?;
                 serde_json::to_value(SessionInfoResult { sessions })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
@@ -326,18 +313,18 @@ mod tests {
         assert!(parse::<SessionNewParams>(&Some(serde_json::json!({}))).is_err());
     }
 
-    /// 会话操作错误映射：会话不存在 → SESSION_NOT_FOUND。
+    /// 会话操作错误映射（强类型一次映射）。
     #[test]
     fn map_session_err_codes() {
-        let e = map_session_err("会话不存在: nope".into());
+        let e = map_session_err(SessionError::NotFound("nope".into()));
         assert_eq!(e.code, server_error::SESSION_NOT_FOUND);
-        let e = map_session_err("会话忙：请等待".into());
+        let e = map_session_err(SessionError::Busy);
         assert_eq!(e.code, server_error::SESSION_BUSY);
-        let e = map_session_err("agent 不可用（启动时拉起失败）: x".into());
+        let e = map_session_err(SessionError::AgentUnavailable("x".into()));
         assert_eq!(e.code, server_error::HARNESS_UNAVAILABLE);
-        let e = map_session_err("prompt 输入必须非空".into());
+        let e = map_session_err(SessionError::EmptyInput);
         assert_eq!(e.code, server_error::INVALID_INPUT);
-        let e = map_session_err("其他错误".into());
+        let e = map_session_err(SessionError::Storage("db".into()));
         assert_eq!(e.code, rpc_error::INTERNAL_ERROR);
     }
 

@@ -1,8 +1,11 @@
 //! amux server crate（docs/DESIGN.md §3）。二进制入口在 `main.rs`；模块导出供
 //! 集成测试（tests/）复用实现（如 `AcpAgentDriver`）。
 
+pub mod acp;
 pub mod agent;
 pub mod config;
+pub mod discovery;
+pub mod error;
 pub mod git;
 pub mod history;
 pub mod registry;

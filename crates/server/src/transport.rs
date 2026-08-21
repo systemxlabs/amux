@@ -20,18 +20,28 @@ pub struct TransportOptions {
     pub port: u16,
     pub token: String,
     pub handlers: Arc<Handlers>,
+    /// 会话通知流（server 级独占消费；每连接只收序列化后的帧）
     pub notifications: broadcast::Receiver<ServerNotification>,
     pub logger: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
-pub struct Transport {
-    opts: TransportOptions,
+/// 每连接共享的上下文（从 TransportOptions 派生；不含仅 server 级的 notifications）。
+struct ConnectionCtx {
+    token: String,
+    handlers: Arc<Handlers>,
+    logger: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
-fn log(opts: &TransportOptions, line: String) {
-    if let Some(l) = &opts.logger {
-        l(line);
+impl ConnectionCtx {
+    fn log(&self, line: String) {
+        if let Some(l) = &self.logger {
+            l(line);
+        }
     }
+}
+
+pub struct Transport {
+    opts: TransportOptions,
 }
 
 impl Transport {
@@ -40,18 +50,30 @@ impl Transport {
     }
 
     pub async fn run(self) -> Result<(), String> {
-        let addr: SocketAddr = format!("{}:{}", self.opts.host, self.opts.port)
+        // 解构后 notifications 独占消费，其余字段进入连接上下文
+        let TransportOptions {
+            host,
+            port,
+            token,
+            handlers,
+            notifications,
+            logger,
+        } = self.opts;
+        let addr: SocketAddr = format!("{host}:{port}")
             .parse()
             .map_err(|e| format!("地址非法: {e}"))?;
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| format!("监听失败: {e}"))?;
-        log(&self.opts, format!("amux server listening on ws://{addr}"));
+        if let Some(l) = &logger {
+            l(format!("amux server listening on ws://{addr}"));
+        }
 
-        // 广播任务：把会话通知序列化为 JSON-RPC notification（仅 session.state_change）发给所有连接
+        // 广播任务：把会话通知序列化为 JSON-RPC notification（仅 session.state_change）发给所有连接。
+        // ServerNotification 接收端在此独占消费；每连接只订阅序列化后的帧通道。
         let (tx, _) = broadcast::channel::<String>(256);
         let tx_clone = tx.clone();
-        let mut notify_rx = self.opts.notifications.resubscribe();
+        let mut notify_rx = notifications;
         tokio::spawn(async move {
             while let Ok(n) = notify_rx.recv().await {
                 if let Some(frame) = notification_frame(&n) {
@@ -60,25 +82,27 @@ impl Transport {
             }
         });
 
+        let ctx = ConnectionCtx {
+            token,
+            handlers,
+            logger,
+        };
         loop {
             let (stream, peer) = match listener.accept().await {
                 Ok(v) => v,
                 Err(e) => {
-                    log(&self.opts, format!("accept 失败: {e}"));
+                    ctx.log(format!("accept 失败: {e}"));
                     continue;
                 }
             };
-            let opts = TransportOptions {
-                host: self.opts.host.clone(),
-                port: self.opts.port,
-                token: self.opts.token.clone(),
-                handlers: self.opts.handlers.clone(),
-                notifications: self.opts.notifications.resubscribe(),
-                logger: self.opts.logger.clone(),
+            let conn = ConnectionCtx {
+                token: ctx.token.clone(),
+                handlers: ctx.handlers.clone(),
+                logger: ctx.logger.clone(),
             };
             let notify_rx = tx.subscribe();
             tokio::spawn(async move {
-                handle_connection(stream, peer, opts, notify_rx).await;
+                handle_connection(stream, peer, conn, notify_rx).await;
             });
         }
     }
@@ -87,17 +111,17 @@ impl Transport {
 async fn handle_connection(
     stream: TcpStream,
     peer: SocketAddr,
-    opts: TransportOptions,
+    opts: ConnectionCtx,
     mut notify_rx: tokio::sync::broadcast::Receiver<String>,
 ) {
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
-            log(&opts, format!("ws 握手失败 ({peer}): {e}"));
+            opts.log(format!("ws 握手失败 ({peer}): {e}"));
             return;
         }
     };
-    log(&opts, format!("连接: {peer}"));
+    opts.log(format!("连接: {peer}"));
 
     let (mut sink, mut source) = ws.split();
     let handlers = opts.handlers.clone();
@@ -110,9 +134,17 @@ async fn handle_connection(
     loop {
         tokio::select! {
             n = notify_rx.recv() => {
-                let Ok(frame) = n else { break };
-                if sink.send(Message::Text(frame)).await.is_err() {
-                    break;
+                match n {
+                    Ok(frame) => {
+                        if sink.send(Message::Text(frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Lagged：慢客户端积压超限，丢弃错过通知继续服务（断连代价更高）
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        opts.log(format!("通知积压，跳过 {missed} 条"));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             resp = resp_rx.recv() => {
@@ -126,7 +158,7 @@ async fn handle_connection(
                 let msg = match msg {
                     Ok(m) => m,
                     Err(e) => {
-                        log(&opts, format!("连接错误 ({peer}): {e}"));
+                        opts.log(format!("连接错误 ({peer}): {e}"));
                         break;
                     }
                 };
@@ -169,7 +201,7 @@ async fn handle_connection(
             }
         }
     }
-    log(&opts, format!("断开: {peer}"));
+    opts.log(format!("断开: {peer}"));
 }
 
 /// Parse error 响应（id 未知，恒为 Null）。
@@ -277,6 +309,18 @@ async fn dispatch(
     })
 }
 
+/// 常数时间字符串比较（token 校验）：避免逐字节短路泄漏前缀匹配长度。
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 /// 处理 `auth` 消息：比较 token，匹配则标记认证通过并返回结果，否则 AUTH_FAILED。
 fn handle_auth(
     params: &Option<serde_json::Value>,
@@ -293,7 +337,7 @@ fn handle_auth(
                 "missing params",
             ))));
     match auth {
-        Ok(params) if params.token == token => {
+        Ok(params) if constant_time_eq(&params.token, token) => {
             authenticated.store(true, Ordering::SeqCst);
             protocol::log::debug("server.transport", "认证通过");
             protocol::JsonRpcResponse {

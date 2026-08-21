@@ -65,7 +65,7 @@ async fn acp_driver_full_flow() {
 
     // 删除先 close 释放运行资源，再 delete 清理远端记录。
     driver.close(&sid).expect("close");
-    driver.delete(&sid).expect("delete");
+    driver.delete_session(&sid).expect("delete");
     let calls = std::fs::read_to_string(&calls_file).unwrap_or_default();
     assert!(
         calls.contains("session/close"),
