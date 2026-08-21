@@ -293,6 +293,9 @@ pub struct AmuxApp {
     session_dir: PathBuf,
     selected: Option<Selected>,
     panel: Option<Panel>,
+    sidebar_width_px: f32,
+    sidebar_resize_origin: Option<f32>,
+    sidebar_resize_initial: f32,
     panel_delta_px: f32,
     panel_resize_origin: Option<f32>,
     panel_resize_initial: f32,
@@ -384,6 +387,9 @@ impl AmuxApp {
             session_dir: PathBuf::new(),
             selected: None,
             panel: None,
+            sidebar_width_px: crate::theme::SIDEBAR_WIDTH * window.scale_factor(),
+            sidebar_resize_origin: None,
+            sidebar_resize_initial: crate::theme::SIDEBAR_WIDTH * window.scale_factor(),
             panel_delta_px: 0.0,
             panel_resize_origin: None,
             panel_resize_initial: 0.0,
@@ -2457,6 +2463,8 @@ impl AmuxApp {
 
     // ---- 右侧面板 ----
 
+    const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
+
     /// 面板逻辑宽度（px）。
     fn panel_width_logical(panel: Panel) -> f32 {
         match panel {
@@ -2469,7 +2477,11 @@ impl AmuxApp {
 
     /// 打开/切换/关闭右侧上下文面板：窗口向右扩展（中间面板宽度不变）。
     fn set_panel(&mut self, window: &mut Window, cx: &mut Context<Self>, panel: Option<Panel>) {
-        let new_delta = panel.map(Self::panel_width_logical).unwrap_or(0.0) * window.scale_factor();
+        let new_delta = panel
+            .map(Self::panel_width_logical)
+            .map(|width| width + Self::PANEL_RESIZE_HANDLE_WIDTH)
+            .unwrap_or(0.0)
+            * window.scale_factor();
         let bounds = window.bounds();
         // 当前窗口宽度已经包含旧面板；先还原中间区域宽度，再应用新面板宽度。
         // 直接用 new_delta 计算会让 resize 成为 no-op，导致面板覆盖中间区域的悬浮按钮。
@@ -2499,9 +2511,11 @@ impl AmuxApp {
             Some(Panel::Activities) => self.render_activities_panel(window, cx),
             None => return None,
         };
+        let panel_width =
+            self.panel_delta_px / window.scale_factor() - Self::PANEL_RESIZE_HANDLE_WIDTH;
         let handle = div()
             .id("panel-resize-handle")
-            .w(px(5.0))
+            .w(px(Self::PANEL_RESIZE_HANDLE_WIDTH))
             .h_full()
             .bg(cx.theme().border.opacity(0.35))
             .hover(|d| d.bg(cx.theme().primary))
@@ -2518,10 +2532,19 @@ impl AmuxApp {
                     return;
                 };
                 let next = (this.panel_resize_initial + origin - event.event.position.x.as_f32())
-                    .clamp(300.0 * window.scale_factor(), 800.0 * window.scale_factor());
+                    .clamp(
+                        (300.0 + Self::PANEL_RESIZE_HANDLE_WIDTH) * window.scale_factor(),
+                        (800.0 + Self::PANEL_RESIZE_HANDLE_WIDTH) * window.scale_factor(),
+                    );
                 this.resize_panel(window, cx, next);
             }));
-        Some(h_flex().h_full().child(handle).child(panel).into_any())
+        Some(
+            h_flex()
+                .h_full()
+                .child(handle)
+                .child(div().w(px(panel_width)).h_full().min_w_0().child(panel))
+                .into_any(),
+        )
     }
 
     fn resize_panel(&mut self, window: &mut Window, cx: &mut Context<Self>, width: f32) {
@@ -2537,12 +2560,14 @@ impl AmuxApp {
 impl AmuxApp {
     // ---- 左侧边栏 ----
 
-    fn render_sidebar(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
         let foreground = cx.theme().foreground;
-        v_flex()
-            .w(px(crate::theme::SIDEBAR_WIDTH))
+        let sidebar_width = self.sidebar_width_px / window.scale_factor();
+        let sidebar_content = v_flex()
+            .flex_1()
+            .min_w_0()
             .h_full()
             .gap(crate::theme::SPACE_SM)
             .p(crate::theme::SPACE_MD)
@@ -2595,7 +2620,36 @@ impl AmuxApp {
                             cx.notify();
                         })),
                 ),
+            );
+        let resize_handle = div()
+            .id("sidebar-resize-handle")
+            .w(px(5.0))
+            .h_full()
+            .bg(sidebar_border.opacity(0.6))
+            .hover(|d| d.bg(cx.theme().primary))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, _cx| {
+                    this.sidebar_resize_origin = Some(event.position.x.as_f32());
+                    this.sidebar_resize_initial = this.sidebar_width_px;
+                }),
             )
+            .on_drag((), |_, _, _, cx| cx.new(|_| Empty))
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<()>, window, cx| {
+                let Some(origin) = this.sidebar_resize_origin else {
+                    return;
+                };
+                let next = (this.sidebar_resize_initial
+                    + (event.event.position.x.as_f32() - origin))
+                    .clamp(180.0 * window.scale_factor(), 420.0 * window.scale_factor());
+                this.sidebar_width_px = next;
+                cx.notify();
+            }));
+        h_flex()
+            .w(px(sidebar_width))
+            .h_full()
+            .child(sidebar_content)
+            .child(resize_handle)
     }
 
     /// 会话列表：普通会话 + 工作流会话统一按最近活跃排序；工作流挂载的关联普通会话折叠。
@@ -3990,7 +4044,7 @@ impl AmuxApp {
     ) -> gpui::AnyElement {
         let Some(machine_idx) = self.active_machine() else {
             return v_flex()
-                .w(px(520.0))
+                .w_full()
                 .h_full()
                 .p_3()
                 .bg(cx.theme().popover)
@@ -4062,7 +4116,7 @@ impl AmuxApp {
         }
 
         v_flex()
-            .w(px(520.0))
+            .w_full()
             .h_full()
             .gap_2()
             .p_3()
@@ -4105,11 +4159,11 @@ impl AmuxApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(meta) = self.selected_meta() else {
-            return div().w(px(340.)).child(Label::new("未选择会话")).into_any();
+            return div().w_full().child(Label::new("未选择会话")).into_any();
         };
         let mut body =
             v_flex()
-                .w(px(360.))
+                .w_full()
                 .h_full()
                 .gap_2()
                 .p_3()
@@ -4351,7 +4405,7 @@ impl AmuxApp {
             );
         }
         v_flex()
-            .w(px(400.))
+            .w_full()
             .h_full()
             .gap_2()
             .p_3()
@@ -4507,7 +4561,7 @@ impl AmuxApp {
         }
         let Some(machine_idx) = machine else {
             return v_flex()
-                .w(px(460.))
+                .w_full()
                 .h_full()
                 .gap_2()
                 .p_3()
@@ -4786,7 +4840,7 @@ impl AmuxApp {
                 .into_any_element()
         };
         v_flex()
-            .w(px(460.))
+            .w_full()
             .h_full()
             .gap_2()
             .p_3()
