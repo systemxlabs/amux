@@ -344,7 +344,7 @@ impl AmuxApp {
     pub fn new(store: Arc<ConfigStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("输入消息，Ctrl+Enter 发送；@ 引用文件/目录作为上下文")
+                .placeholder("输入消息，Enter 发送；Ctrl+Enter 换行；@ 引用文件/目录作为上下文")
                 .auto_grow(3, 8)
                 .submit_on_enter(false)
         });
@@ -3815,7 +3815,13 @@ impl AmuxApp {
                             .id("input-drop-zone")
                             .child(Input::new(&self.input_state))
                             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                                if ev.keystroke.modifiers.control && ev.keystroke.key == "enter" {
+                                if ev.keystroke.key == "enter"
+                                    && !ev.keystroke.modifiers.control
+                                    && !ev.keystroke.modifiers.shift
+                                    && !ev.keystroke.modifiers.alt
+                                    && !ev.keystroke.modifiers.platform
+                                {
+                                    window.prevent_default();
                                     this.send_prompt(window, cx);
                                 }
                             }))
