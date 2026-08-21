@@ -31,20 +31,6 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     rt()
 }
 
-/// 兼容旧测试 URL 的查询串 token 解析。生产连接通过 `connect_with_token`
-/// 显式传入机器配置中的 token，避免把凭据放进 WebSocket URL。
-#[cfg(test)]
-fn token_from_url(url: &str) -> String {
-    url.split('?')
-        .nth(1)
-        .and_then(|q| {
-            q.split('&')
-                .find_map(|kv| kv.strip_prefix("token="))
-                .map(str::to_string)
-        })
-        .unwrap_or_default()
-}
-
 #[derive(Debug)]
 pub struct RpcError {
     pub code: i32,
@@ -79,13 +65,6 @@ pub struct WsClient {
 }
 
 impl WsClient {
-    /// 兼容旧调用：从 URL 查询串读取 token。
-    #[cfg(test)]
-    pub fn connect(url: String) -> Self {
-        let token = token_from_url(&url);
-        Self::connect_with_token(url, token)
-    }
-
     /// 连接 server（后台 task 持有连接并处理收发）。
     /// 认证 token 在首个 JSON-RPC `auth` 请求中发送，不放入 URL。
     pub fn connect_with_token(url: String, token: String) -> Self {
@@ -147,7 +126,7 @@ async fn run_loop(
                     // 认证成功后才放行普通请求（docs/DESIGN.md「认证」）。
                     let mut authed = false;
                     // 认证：建连后首个消息必须是 auth（docs/DESIGN.md「认证」）。
-                    // tokens 由 URL 提供；认证响应到达前其余请求一律返回认证失败。
+                    // token 由连接配置显式传入；认证响应到达前其余请求一律返回认证失败。
                     let auth_id = next_id;
                     next_id += 1;
                     let auth_frame = json!({
@@ -275,21 +254,6 @@ async fn run_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn token_parsed_from_url_query() {
-        assert_eq!(token_from_url("ws://127.0.0.1:34567?token=abc"), "abc");
-        assert_eq!(
-            token_from_url("ws://h:1/?token=tok&x=1"),
-            "tok",
-            "多个查询参数正确取值"
-        );
-        // 无 token → 空串
-        assert_eq!(token_from_url("ws://127.0.0.1:34567"), "");
-        assert_eq!(token_from_url("ws://h:1/?x=1"), "");
-    }
-
     #[test]
     fn auth_failed_error_code_matches_protocol() {
         assert_eq!(

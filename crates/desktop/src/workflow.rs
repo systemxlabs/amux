@@ -1468,7 +1468,7 @@ mod tests {
 
     fn clients_with_machines() -> (Vec<WsClient>, MachineSummary) {
         let m = machines().remove(0);
-        let c = WsClient::connect("ws://127.0.0.1:1/?token=unused".into());
+        let c = WsClient::connect_with_token("ws://127.0.0.1:1".into(), "unused".into());
         (vec![c], m)
     }
 
@@ -1791,7 +1791,7 @@ mod tests {
             api_key: String::new(),
             model: "gpt-4o-mini".into(),
         }));
-        let client = WsClient::connect("ws://127.0.0.1:1/?token=unused".into());
+        let client = WsClient::connect_with_token("ws://127.0.0.1:1".into(), "unused".into());
         let mut engine = WorkflowEngine::new(
             "计划",
             "",
@@ -1827,7 +1827,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_tool_rejects_unknown_machine() {
-        let client = WsClient::connect("ws://127.0.0.1:1/?token=unused".into());
+        let client = WsClient::connect_with_token("ws://127.0.0.1:1".into(), "unused".into());
         let mut ctx = rig::tool::ToolContext::new();
         ctx.insert(LiveRuntime {
             machines: vec![MachineSummary::named("测试机", &["mock_acp"])],

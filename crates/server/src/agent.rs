@@ -1258,7 +1258,7 @@ fn tool_kind_str(kind: &ToolKind) -> String {
         .unwrap_or_else(|| "tool_call".to_string())
 }
 
-/// protocol::ContentBlock → SDK ContentBlock（MCP 兼容）。
+/// protocol::ContentBlock → SDK ContentBlock。
 fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
     match b {
         ContentBlock::Text { text } => Some(AcpContentBlock::Text(TextContent::new(text.clone()))),
