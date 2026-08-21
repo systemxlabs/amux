@@ -336,6 +336,7 @@ pub struct AmuxApp {
     renaming_workflow: Option<usize>,
     new_session_machine: Option<usize>,
     new_session_agent: Option<String>,
+    new_session_error: Option<String>,
     workflow_error: Option<String>,
     workflow_template: Option<WorkflowTemplate>,
     dialog_scroll: ScrollHandle,
@@ -436,6 +437,7 @@ impl AmuxApp {
             renaming_workflow: None,
             new_session_machine: None,
             new_session_agent: None,
+            new_session_error: None,
             workflow_error: None,
             workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
@@ -1220,7 +1222,13 @@ impl AmuxApp {
             return;
         };
         let machine_name = m.config.name.clone();
-        let cwd = self.session_cwd_input.read(cx).value().to_string();
+        let cwd = self.session_cwd_input.read(cx).value().trim().to_owned();
+        if cwd.is_empty() {
+            self.new_session_error = Some("请输入工作目录，或选择一个常用工作目录。".into());
+            cx.notify();
+            return;
+        }
+        self.new_session_error = None;
         let agent = match self.new_session_agent.clone() {
             Some(a) => a,
             None => match self.available_agent(machine) {
@@ -3537,12 +3545,15 @@ impl AmuxApp {
                             v_flex()
                                 .gap_1()
                                 .child(
-                                    Label::new("工作目录")
+                                    Label::new("工作目录（可手动输入或选择常用目录）")
                                         .text_sm()
                                         .text_color(muted_foreground),
                                 )
                                 .child(Input::new(&self.session_cwd_input)),
                         )
+                        .when_some(self.new_session_error.clone(), |view, error| {
+                            view.child(Label::new(error).text_sm().text_color(danger))
+                        })
                         .child(
                             Button::new("ns-create")
                                 .primary()
@@ -3665,6 +3676,7 @@ impl AmuxApp {
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.session_cwd_input
                             .update(cx, |s, cx| s.set_value(&label, window, cx));
+                        this.new_session_error = None;
                         cx.notify();
                     })),
             );
@@ -3692,15 +3704,25 @@ impl AmuxApp {
         }
         for (i, m) in self.machines.iter().enumerate() {
             let name = m.config.name.clone();
+            let machine_name = name.clone();
             let selected = selected_machine == Some(i);
             row = row.child(
                 Button::new(format!("ns-machine-{i}"))
                     .small()
                     .label(name)
                     .when(selected, |b| b.primary())
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.new_session_machine = Some(i);
                         this.new_session_agent = None;
+                        let cwd = this
+                            .store
+                            .recent_workspaces_for_machine(&machine_name)
+                            .into_iter()
+                            .next()
+                            .unwrap_or_default();
+                        this.session_cwd_input
+                            .update(cx, |s, cx| s.set_value(&cwd, window, cx));
+                        this.new_session_error = None;
                         cx.notify();
                     })),
             );
