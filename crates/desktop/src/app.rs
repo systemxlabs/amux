@@ -7,9 +7,8 @@
 //!   选中会话显示对话历史气泡 + 实时活动条 + 快捷按钮栏 + 输入区（含取消）+ 右侧竖向悬浮按钮
 //! - 右侧：代码审查 / 会话详情 / 会话活动，默认折叠，点悬浮按钮展开
 //! - 设置浮窗：半透明遮罩 + 分类导航侧边栏（机器管理 / 编排智能体 / 快捷指令 / 技能管理 /
-//!   工作流模板）+ 右侧内容；机器管理为竖向堆叠卡片式（机器头名称+状态徽章+移除+重连+URL
-//!   单行截断；每 agent 一行=名称+可用/不可用+skills+重启；底部「+」弹表单；移除/重连/重启
-//!   确认弹窗；skills 弹窗可滚动）
+//!   工作流模板）+ 右侧内容；设置项为竖向堆叠卡片式，新增入口位于卡片区右上角，编辑/新增
+//!   使用弹窗，删除/机器操作需要确认；skills 操作弹窗选择目标机器和 agent）
 //!
 //! 数据为拉取式：会话列表 `session.list` 定时 10s + 主动；对话 `session.history` 打开才刷 10s；
 //! 活动 `session.activities` 打开才刷 10s；实时 `session.ongoing_activity` 5s；`session.state_change`
@@ -323,10 +322,15 @@ pub struct AmuxApp {
     orch_model_input: Entity<InputState>,
     orchestrator_form_error: Option<String>,
     orchestrator_form_status: Option<String>,
+    settings_form_error: Option<String>,
     title_input: Entity<InputState>,
     qc_edit_target: Option<String>,
     skill_edit_target: Option<String>,
     tpl_edit_target: Option<String>,
+    show_quick_command_form: bool,
+    show_skill_form: bool,
+    show_template_form: bool,
+    skill_action_dialog: Option<(SkillEntry, SkillAction)>,
     context_menu: Option<SessionContextMenu>,
     renaming_session: Option<(usize, String)>,
     renaming_workflow: Option<usize>,
@@ -418,10 +422,15 @@ impl AmuxApp {
             orch_api_format: "chat_completions".into(),
             orchestrator_form_error: None,
             orchestrator_form_status: None,
+            settings_form_error: None,
             title_input,
             qc_edit_target: None,
             skill_edit_target: None,
             tpl_edit_target: None,
+            show_quick_command_form: false,
+            show_skill_form: false,
+            show_template_form: false,
+            skill_action_dialog: None,
             context_menu: None,
             renaming_session: None,
             renaming_workflow: None,
@@ -2466,6 +2475,303 @@ impl AmuxApp {
                     let this = this.clone();
                     this.update(cx, |this, cx| {
                         this.remove_machine(window, cx, idx);
+                    });
+                    true
+                })
+                .on_cancel(|_ev, _window, _cx| true)
+        });
+    }
+
+    fn open_quick_command_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        target: Option<(String, String)>,
+    ) {
+        self.qc_edit_target = target.as_ref().map(|(name, _)| name.clone());
+        self.qc_name_input.update(cx, |s, cx| {
+            s.set_value(
+                target.as_ref().map(|(name, _)| name.as_str()).unwrap_or(""),
+                window,
+                cx,
+            );
+        });
+        self.qc_prompt_input.update(cx, |s, cx| {
+            s.set_value(
+                target
+                    .as_ref()
+                    .map(|(_, prompt)| prompt.as_str())
+                    .unwrap_or(""),
+                window,
+                cx,
+            );
+        });
+        self.settings_form_error = None;
+        self.show_quick_command_form = true;
+        cx.notify();
+    }
+
+    fn close_quick_command_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_quick_command_form = false;
+        self.qc_edit_target = None;
+        self.qc_name_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.qc_prompt_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.settings_form_error = None;
+        cx.notify();
+    }
+
+    fn save_quick_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.qc_name_input.read(cx).value().trim().to_owned();
+        let prompt = self.qc_prompt_input.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.settings_form_error = Some("请输入指令名称。".into());
+        } else if prompt.is_empty() {
+            self.settings_form_error = Some("请输入指令内容。".into());
+        } else {
+            if let Some(old) = self.qc_edit_target.clone() {
+                if old != name {
+                    self.store.remove_quick_command(&old);
+                    self.store.add_quick_command(&name, &prompt);
+                } else {
+                    self.store.update_quick_command(&old, &prompt);
+                }
+            } else {
+                self.store.add_quick_command(&name, &prompt);
+            }
+            self.close_quick_command_form(window, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    fn confirm_remove_quick_command(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        name: String,
+    ) {
+        let this = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let this = this.clone();
+            let name_ok = name.clone();
+            alert
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("确认删除")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .title("删除快捷指令")
+                .description(format!("确定删除快捷指令「{name}」吗？"))
+                .on_ok(move |_ev, _window, cx| {
+                    let name = name_ok.clone();
+                    this.update(cx, |this, cx| {
+                        this.store.remove_quick_command(&name);
+                        cx.notify();
+                    });
+                    true
+                })
+                .on_cancel(|_ev, _window, _cx| true)
+        });
+    }
+
+    fn open_skill_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        target: Option<SkillEntry>,
+    ) {
+        self.skill_edit_target = target.as_ref().map(|skill| skill.name.clone());
+        self.skill_name_input.update(cx, |s, cx| {
+            s.set_value(
+                target
+                    .as_ref()
+                    .map(|skill| skill.name.as_str())
+                    .unwrap_or(""),
+                window,
+                cx,
+            );
+        });
+        self.skill_desc_input.update(cx, |s, cx| {
+            s.set_value(
+                target
+                    .as_ref()
+                    .map(|skill| skill.description.as_str())
+                    .unwrap_or(""),
+                window,
+                cx,
+            );
+        });
+        self.settings_form_error = None;
+        self.show_skill_form = true;
+        cx.notify();
+    }
+
+    fn close_skill_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_skill_form = false;
+        self.skill_edit_target = None;
+        self.skill_name_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.skill_desc_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.settings_form_error = None;
+        cx.notify();
+    }
+
+    fn save_skill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.skill_name_input.read(cx).value().trim().to_owned();
+        let description = self.skill_desc_input.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.settings_form_error = Some("请输入技能名称。".into());
+        } else {
+            if let Some(old) = self.skill_edit_target.clone() {
+                if old != name {
+                    self.store.remove_skill(&old);
+                    self.store.add_skill(&name, &description);
+                } else {
+                    self.store.update_skill(&old, &description);
+                }
+            } else {
+                self.store.add_skill(&name, &description);
+            }
+            self.close_skill_form(window, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    fn confirm_remove_skill(&mut self, window: &mut Window, cx: &mut Context<Self>, name: String) {
+        let this = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let this = this.clone();
+            let name_ok = name.clone();
+            alert
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("确认删除")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .title("删除技能")
+                .description(format!("确定删除技能「{name}」吗？"))
+                .on_ok(move |_ev, _window, cx| {
+                    let name = name_ok.clone();
+                    this.update(cx, |this, cx| {
+                        this.store.remove_skill(&name);
+                        cx.notify();
+                    });
+                    true
+                })
+                .on_cancel(|_ev, _window, _cx| true)
+        });
+    }
+
+    fn open_skill_action_dialog(
+        &mut self,
+        skill: SkillEntry,
+        action: SkillAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.skill_action_dialog = Some((skill, action));
+        cx.notify();
+    }
+
+    fn open_template_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        target: Option<WorkflowTemplate>,
+    ) {
+        self.tpl_edit_target = target.as_ref().map(|template| template.name.clone());
+        self.tpl_name_input.update(cx, |s, cx| {
+            s.set_value(
+                target
+                    .as_ref()
+                    .map(|template| template.name.as_str())
+                    .unwrap_or(""),
+                window,
+                cx,
+            );
+        });
+        self.tpl_desc_input.update(cx, |s, cx| {
+            s.set_value(
+                target
+                    .as_ref()
+                    .map(|template| template.plan.as_str())
+                    .unwrap_or(""),
+                window,
+                cx,
+            );
+        });
+        self.settings_form_error = None;
+        self.show_template_form = true;
+        cx.notify();
+    }
+
+    fn close_template_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_template_form = false;
+        self.tpl_edit_target = None;
+        self.tpl_name_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.tpl_desc_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.settings_form_error = None;
+        cx.notify();
+    }
+
+    fn save_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.tpl_name_input.read(cx).value().trim().to_owned();
+        let plan = self.tpl_desc_input.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.settings_form_error = Some("请输入模板名称。".into());
+        } else if plan.is_empty() {
+            self.settings_form_error = Some("请输入模板内容。".into());
+        } else {
+            if let Some(old) = self.tpl_edit_target.clone() {
+                if old != name {
+                    self.store.remove_template(&old);
+                    self.store.add_template(&name, &plan);
+                } else {
+                    self.store.update_template(&old, &plan);
+                }
+            } else {
+                self.store.add_template(&name, &plan);
+            }
+            self.close_template_form(window, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    fn confirm_remove_template(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        name: String,
+    ) {
+        let this = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let this = this.clone();
+            let name_ok = name.clone();
+            alert
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("确认删除")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .title("删除工作流模板")
+                .description(format!("确定删除工作流模板「{name}」吗？"))
+                .on_ok(move |_ev, _window, cx| {
+                    let name = name_ok.clone();
+                    this.update(cx, |this, cx| {
+                        this.store.remove_template(&name);
+                        cx.notify();
                     });
                     true
                 })
@@ -5028,6 +5334,18 @@ impl AmuxApp {
             .when(self.show_add_machine_form, |overlay| {
                 overlay.child(self.render_add_machine_dialog(window, cx))
             })
+            .when(self.show_quick_command_form, |overlay| {
+                overlay.child(self.render_quick_command_dialog(window, cx))
+            })
+            .when(self.show_skill_form, |overlay| {
+                overlay.child(self.render_skill_dialog(window, cx))
+            })
+            .when(self.show_template_form, |overlay| {
+                overlay.child(self.render_template_dialog(window, cx))
+            })
+            .when(self.skill_action_dialog.is_some(), |overlay| {
+                overlay.child(self.render_skill_action_dialog(window, cx))
+            })
             // skills 弹窗（盖在设置浮窗之上）
             .when(self.machines.iter().any(|m| m.show_skills.is_some()), |o| {
                 o.child(self.render_skills_dialog(window, cx))
@@ -5295,25 +5613,28 @@ impl AmuxApp {
             .collect::<Vec<_>>();
         v_flex()
             .gap_2()
-            .child(self.settings_header(
-                "机器管理",
-                "接入 / 移除机器；每台机器自动发现 ACP agent，可查看 skills、重启",
-                cx.theme().muted_foreground,
-            ))
-            .children(machines)
             .child(
-                h_flex().justify_end().child(
-                    Button::new("settings-add-open")
-                        .small()
-                        .primary()
-                        .label("+")
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.show_add_machine_form = true;
-                            this.machine_form_error = None;
-                            cx.notify();
-                        })),
-                ),
+                h_flex()
+                    .items_center()
+                    .child(self.settings_header(
+                        "机器管理",
+                        "接入 / 移除机器；每台机器自动发现 ACP agent，可查看 skills、重启",
+                        cx.theme().muted_foreground,
+                    ))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("settings-add-open")
+                            .small()
+                            .primary()
+                            .label("+")
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.show_add_machine_form = true;
+                                this.machine_form_error = None;
+                                cx.notify();
+                            })),
+                    ),
             )
+            .children(machines)
             .into_any()
     }
 
@@ -5424,6 +5745,352 @@ impl AmuxApp {
             }))
     }
 
+    fn render_quick_command_dialog(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let title = if self.qc_edit_target.is_some() {
+            "编辑快捷指令"
+        } else {
+            "新增快捷指令"
+        };
+        let mut card = v_flex()
+            .id("quick-command-card")
+            .relative()
+            .w(px(520.))
+            .gap_2()
+            .p_4()
+            .bg(cx.theme().popover)
+            .rounded_lg()
+            .shadow_lg()
+            .child(Label::new(title).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                Label::new("指令名称")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.qc_name_input))
+            .child(
+                Label::new("指令内容")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.qc_prompt_input));
+        if let Some(error) = &self.settings_form_error {
+            card = card.child(
+                Label::new(error.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger),
+            );
+        }
+        card = card.child(
+            h_flex()
+                .justify_end()
+                .gap_1()
+                .child(
+                    Button::new("qc-form-cancel")
+                        .small()
+                        .label("取消")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.close_quick_command_form(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("qc-form-save")
+                        .small()
+                        .primary()
+                        .label("保存")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.save_quick_command(window, cx);
+                        })),
+                ),
+        );
+        div()
+            .id("quick-command-dialog")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("quick-command-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().overlay)
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.close_quick_command_form(window, cx);
+                    })),
+            )
+            .child(card.on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                cx.stop_propagation();
+            }))
+    }
+
+    fn render_skill_dialog(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let title = if self.skill_edit_target.is_some() {
+            "编辑技能"
+        } else {
+            "新增技能"
+        };
+        let mut card = v_flex()
+            .id("skill-form-card")
+            .relative()
+            .w(px(520.))
+            .gap_2()
+            .p_4()
+            .bg(cx.theme().popover)
+            .rounded_lg()
+            .shadow_lg()
+            .child(Label::new(title).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                Label::new("技能名称")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.skill_name_input))
+            .child(
+                Label::new("技能描述")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.skill_desc_input));
+        if let Some(error) = &self.settings_form_error {
+            card = card.child(
+                Label::new(error.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger),
+            );
+        }
+        card = card.child(
+            h_flex()
+                .justify_end()
+                .gap_1()
+                .child(
+                    Button::new("skill-form-cancel")
+                        .small()
+                        .label("取消")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.close_skill_form(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("skill-form-save")
+                        .small()
+                        .primary()
+                        .label("保存")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.save_skill(window, cx);
+                        })),
+                ),
+        );
+        div()
+            .id("skill-form-dialog")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("skill-form-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().overlay)
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.close_skill_form(window, cx);
+                    })),
+            )
+            .child(card.on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                cx.stop_propagation();
+            }))
+    }
+
+    fn render_skill_action_dialog(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some((skill, action)) = &self.skill_action_dialog else {
+            return div().into_any_element();
+        };
+        let action = *action;
+        let mut targets = Vec::new();
+        for (machine_idx, machine) in self.machines.iter().enumerate() {
+            for agent in &machine.agents {
+                let skill = skill.clone();
+                let agent_name = agent.name.clone();
+                let label = format!("{} · {}", machine.config.name, agent.name);
+                targets.push(
+                    Button::new(format!(
+                        "skill-target-{machine_idx}-{}-{}",
+                        action.label(),
+                        agent.name
+                    ))
+                    .small()
+                    .label(label)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.skill_action_dialog = None;
+                        this.manage_skill_on_agent(
+                            window,
+                            cx,
+                            machine_idx,
+                            agent_name.clone(),
+                            skill.clone(),
+                            action,
+                        );
+                        cx.notify();
+                    })),
+                );
+            }
+        }
+        let mut card = v_flex()
+            .id("skill-action-card")
+            .relative()
+            .w(px(520.))
+            .gap_2()
+            .p_4()
+            .bg(cx.theme().popover)
+            .rounded_lg()
+            .shadow_lg()
+            .child(Label::new(format!("{}技能", action.label())).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                Label::new(format!("选择执行技能「{}」的机器和 agent", skill.name))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            );
+        if targets.is_empty() {
+            card = card.child(
+                Label::new("当前没有可用的机器 agent。")
+                    .text_sm()
+                    .text_color(cx.theme().danger),
+            );
+        } else {
+            card = card.child(h_flex().gap_1().flex_wrap().children(targets));
+        }
+        card = card.child(
+            h_flex().justify_end().child(
+                Button::new("skill-action-cancel")
+                    .small()
+                    .label("取消")
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.skill_action_dialog = None;
+                        cx.notify();
+                    })),
+            ),
+        );
+        div()
+            .id("skill-action-dialog")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("skill-action-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().overlay)
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.skill_action_dialog = None;
+                        cx.notify();
+                    })),
+            )
+            .child(card.on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                cx.stop_propagation();
+            }))
+            .into_any_element()
+    }
+
+    fn render_template_dialog(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let title = if self.tpl_edit_target.is_some() {
+            "编辑工作流模板"
+        } else {
+            "新增工作流模板"
+        };
+        let mut card = v_flex()
+            .id("template-form-card")
+            .relative()
+            .w(px(560.))
+            .gap_2()
+            .p_4()
+            .bg(cx.theme().popover)
+            .rounded_lg()
+            .shadow_lg()
+            .child(Label::new(title).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                Label::new("模板名称")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.tpl_name_input))
+            .child(
+                Label::new("模板内容")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.tpl_desc_input));
+        if let Some(error) = &self.settings_form_error {
+            card = card.child(
+                Label::new(error.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger),
+            );
+        }
+        card = card.child(
+            h_flex()
+                .justify_end()
+                .gap_1()
+                .child(
+                    Button::new("template-form-cancel")
+                        .small()
+                        .label("取消")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.close_template_form(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("template-form-save")
+                        .small()
+                        .primary()
+                        .label("保存")
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.save_template(window, cx);
+                        })),
+                ),
+        );
+        div()
+            .id("template-form-dialog")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("template-form-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().overlay)
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.close_template_form(window, cx);
+                    })),
+            )
+            .child(card.on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                cx.stop_propagation();
+            }))
+    }
+
     fn render_orchestrator_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let selected_api_format = match self.orch_api_format.as_str() {
             "chat_completions" => Some(0),
@@ -5513,425 +6180,245 @@ impl AmuxApp {
 
     fn render_quick_commands_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let commands = self.store.list_quick_commands();
-        let mut items: Vec<gpui::AnyElement> = Vec::new();
-        for c in &commands {
-            let name = c.name.clone();
-            let prompt = c.prompt.clone();
-            let existing = self.qc_edit_target.as_deref() == Some(name.as_str());
-            if existing {
-                items.push(
-                    v_flex()
-                        .gap_1()
-                        .child(
-                            Label::new("名称")
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(Input::new(&self.qc_name_input))
-                        .child(
-                            Label::new("提示词")
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(Input::new(&self.qc_prompt_input))
-                        .child(
-                            Button::new("qc-save")
-                                .small()
-                                .primary()
-                                .label("保存")
-                                .on_click(cx.listener(|this, _ev, _window, cx| {
-                                    let name = this.qc_edit_target.clone().unwrap_or_default();
-                                    let new_name = this.qc_name_input.read(cx).value().to_string();
-                                    let prompt = this.qc_prompt_input.read(cx).value().to_string();
-                                    if !new_name.trim().is_empty() && new_name != name {
-                                        this.store.remove_quick_command(&name);
-                                        this.store.add_quick_command(new_name.trim(), &prompt);
-                                    } else {
-                                        this.store.update_quick_command(&name, &prompt);
-                                    }
-                                    this.qc_edit_target = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .into_any_element(),
-                );
-            } else {
-                let name_edit = name.clone();
-                let name_del = name.clone();
-                let prompt_edit = prompt.clone();
-                items.push(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .p_2()
-                        .bg(cx.theme().muted)
-                        .rounded_md()
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Label::new(&name).text_sm().font_weight(FontWeight::MEDIUM))
-                                .child(
-                                    Label::new(&prompt)
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .line_clamp(2),
-                                ),
-                        )
-                        .child(
-                            Button::new(format!("qc-edit-{name}"))
-                                .small()
-                                .label("编辑")
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    this.qc_edit_target = Some(name_edit.clone());
-                                    let prompt = prompt_edit.clone();
-                                    this.qc_name_input.update(cx, |s, cx| {
-                                        s.set_value(name_edit.clone(), window, cx);
-                                    });
-                                    this.qc_prompt_input.update(cx, |s, cx| {
-                                        s.set_value(prompt, window, cx);
-                                    });
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("qc-del-{name}"))
-                                .small()
-                                .label("删除")
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                    this.store.remove_quick_command(&name_del);
-                                    cx.notify();
-                                })),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
+        let items = commands
+            .iter()
+            .map(|command| {
+                let edit = command.clone();
+                let delete = command.name.clone();
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .p_2()
+                    .bg(cx.theme().muted)
+                    .rounded_md()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Label::new(&command.name)
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(
+                                Label::new(&command.prompt)
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .line_clamp(2),
+                            ),
+                    )
+                    .child(
+                        Button::new(format!("qc-edit-{}", command.name))
+                            .small()
+                            .label("编辑")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.open_quick_command_form(
+                                    window,
+                                    cx,
+                                    Some((edit.name.clone(), edit.prompt.clone())),
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("qc-del-{}", command.name))
+                            .small()
+                            .label("删除")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.confirm_remove_quick_command(window, cx, delete.clone());
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         v_flex()
             .gap_2()
-            .child(self.settings_header(
-                "快捷指令",
-                "自定义快捷指令，输入区上方一键发送",
-                cx.theme().muted_foreground,
-            ))
-            .children(items)
-            .child(self.settings_header("＋ 新增快捷指令", "", cx.theme().muted_foreground))
             .child(
-                v_flex()
-                    .gap_1()
+                h_flex()
+                    .items_center()
+                    .child(self.settings_header(
+                        "快捷指令",
+                        "自定义快捷指令，输入区上方一键发送",
+                        cx.theme().muted_foreground,
+                    ))
+                    .child(div().flex_1())
                     .child(
-                        Label::new("指令名")
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(Input::new(&self.qc_name_input))
-                    .child(
-                        Label::new("提示词")
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(Input::new(&self.qc_prompt_input))
-                    .child(
-                        Button::new("qc-add")
+                        Button::new("qc-add-open")
                             .small()
                             .primary()
-                            .label("添加")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                let name = this.qc_name_input.read(cx).value().to_string();
-                                let prompt = this.qc_prompt_input.read(cx).value().to_string();
-                                if !name.trim().is_empty() && !prompt.trim().is_empty() {
-                                    this.store.add_quick_command(name.trim(), prompt.trim());
-                                }
-                                cx.notify();
+                            .label("+")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.open_quick_command_form(window, cx, None);
                             })),
                     ),
             )
+            .children(items)
             .into_any()
     }
 
     fn render_skills_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let skills = self.store.list_skills();
-        let mut items: Vec<gpui::AnyElement> = Vec::new();
-        for s in &skills {
-            let name = s.name.clone();
-            let desc = s.description.clone();
-            let existing = self.skill_edit_target.as_deref() == Some(name.as_str());
-            if existing {
-                items.push(
-                    v_flex()
-                        .gap_1()
-                        .child(Input::new(&self.skill_name_input))
-                        .child(Input::new(&self.skill_desc_input))
-                        .child(
-                            Button::new("skill-save")
-                                .small()
-                                .primary()
-                                .label("保存")
-                                .on_click(cx.listener(|this, _ev, _window, cx| {
-                                    let old = this.skill_edit_target.clone().unwrap_or_default();
-                                    let new_name =
-                                        this.skill_name_input.read(cx).value().to_string();
-                                    let desc = this.skill_desc_input.read(cx).value().to_string();
-                                    if !new_name.trim().is_empty() && new_name != old {
-                                        this.store.remove_skill(&old);
-                                        this.store.add_skill(new_name.trim(), desc.trim());
-                                    } else {
-                                        this.store.update_skill(&old, desc.trim());
-                                    }
-                                    this.skill_edit_target = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .into_any_element(),
-                );
-            } else {
-                let name_edit = name.clone();
-                let name_del = name.clone();
-                let desc_edit = desc.clone();
-                let mut target_buttons = Vec::new();
-                for (machine_idx, machine) in self.machines.iter().enumerate() {
-                    for (agent_idx, agent_info) in machine.agents.iter().enumerate() {
-                        for action in [
-                            SkillAction::Install,
-                            SkillAction::Update,
-                            SkillAction::Uninstall,
-                        ] {
-                            let skill = s.clone();
-                            let agent = agent_info.name.clone();
-                            let label = format!(
-                                "{} {}@{}",
-                                action.label(),
-                                agent_info.name,
-                                machine.config.name
-                            );
-                            target_buttons.push(
-                                Button::new(format!(
-                                    "skill-action-{machine_idx}-{agent_idx}-{}-{}",
-                                    action.label(),
-                                    name
-                                ))
-                                .small()
-                                .label(label)
-                                .on_click(cx.listener(
-                                    move |this, _ev, window, cx| {
-                                        this.manage_skill_on_agent(
-                                            window,
-                                            cx,
-                                            machine_idx,
-                                            agent.clone(),
-                                            skill.clone(),
-                                            action,
-                                        );
-                                    },
-                                )),
-                            );
-                        }
-                    }
+        let items = skills
+            .iter()
+            .map(|skill| {
+                let edit = skill.clone();
+                let delete = skill.name.clone();
+                let mut actions = Vec::new();
+                for action in [
+                    SkillAction::Install,
+                    SkillAction::Update,
+                    SkillAction::Uninstall,
+                ] {
+                    let skill = skill.clone();
+                    actions.push(
+                        Button::new(format!("skill-action-{}-{}", action.label(), skill.name))
+                            .small()
+                            .label(action.label())
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.open_skill_action_dialog(skill.clone(), action, cx);
+                            })),
+                    );
                 }
-                items.push(
-                    v_flex()
-                        .gap_2()
-                        .p_2()
-                        .bg(cx.theme().muted)
-                        .rounded_md()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            Label::new(&name)
-                                                .text_sm()
-                                                .font_weight(FontWeight::MEDIUM),
-                                        )
-                                        .child(
-                                            Label::new(&desc)
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .line_clamp(2),
-                                        ),
-                                )
-                                .child(
-                                    Button::new(format!("skill-edit-{name}"))
-                                        .small()
-                                        .label("编辑")
-                                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                                            this.skill_edit_target = Some(name_edit.clone());
-                                            let desc = desc_edit.clone();
-                                            this.skill_name_input.update(cx, |s, cx| {
-                                                s.set_value(name_edit.clone(), window, cx);
-                                            });
-                                            this.skill_desc_input.update(cx, |s, cx| {
-                                                s.set_value(desc, window, cx);
-                                            });
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Button::new(format!("skill-del-{name}"))
-                                        .small()
-                                        .label("删除")
-                                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                            this.store.remove_skill(&name_del);
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(h_flex().gap_1().flex_wrap().children(target_buttons))
-                        .into_any_element(),
-                );
-            }
-        }
+                v_flex()
+                    .gap_2()
+                    .p_2()
+                    .bg(cx.theme().muted)
+                    .rounded_md()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        Label::new(&skill.name)
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM),
+                                    )
+                                    .child(
+                                        Label::new(&skill.description)
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .line_clamp(2),
+                                    ),
+                            )
+                            .child(
+                                Button::new(format!("skill-edit-{}", skill.name))
+                                    .small()
+                                    .label("编辑")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        this.open_skill_form(window, cx, Some(edit.clone()));
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("skill-del-{}", skill.name))
+                                    .small()
+                                    .label("删除")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        this.confirm_remove_skill(window, cx, delete.clone());
+                                    })),
+                            ),
+                    )
+                    .child(h_flex().gap_1().flex_wrap().children(actions))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         v_flex()
             .gap_2()
-            .child(self.settings_header(
-                "技能管理",
-                "已安装 / 管理的 ACP skills 清单",
-                cx.theme().muted_foreground,
-            ))
-            .children(items)
-            .child(self.settings_header("＋ 新增技能", "", cx.theme().muted_foreground))
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(Input::new(&self.skill_name_input))
-                    .child(Input::new(&self.skill_desc_input))
+                h_flex()
+                    .items_center()
+                    .child(self.settings_header(
+                        "技能管理",
+                        "已安装 / 管理的 ACP skills 清单",
+                        cx.theme().muted_foreground,
+                    ))
+                    .child(div().flex_1())
                     .child(
-                        Button::new("skill-add")
+                        Button::new("skill-add-open")
                             .small()
                             .primary()
-                            .label("添加")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                let name = this.skill_name_input.read(cx).value().to_string();
-                                let desc = this.skill_desc_input.read(cx).value().to_string();
-                                if !name.trim().is_empty() {
-                                    this.store.add_skill(name.trim(), desc.trim());
-                                }
-                                cx.notify();
+                            .label("+")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.open_skill_form(window, cx, None);
                             })),
                     ),
             )
+            .children(items)
             .into_any()
     }
 
     fn render_templates_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let templates = self.store.list_templates();
-        let mut items: Vec<gpui::AnyElement> = Vec::new();
-        for t in &templates {
-            let name = t.name.clone();
-            let plan = t.plan.clone();
-            let existing = self.tpl_edit_target.as_deref() == Some(name.as_str());
-            if existing {
-                items.push(
-                    v_flex()
-                        .gap_1()
-                        .child(Input::new(&self.tpl_name_input))
-                        .child(Input::new(&self.tpl_desc_input))
-                        .child(
-                            Button::new("tpl-save")
-                                .small()
-                                .primary()
-                                .label("保存")
-                                .on_click(cx.listener(|this, _ev, _window, cx| {
-                                    let old = this.tpl_edit_target.clone().unwrap_or_default();
-                                    let new_name = this.tpl_name_input.read(cx).value().to_string();
-                                    let plan = this.tpl_desc_input.read(cx).value().to_string();
-                                    if !new_name.trim().is_empty() && new_name != old {
-                                        this.store.remove_template(&old);
-                                        this.store.add_template(new_name.trim(), plan.trim());
-                                    } else {
-                                        this.store.update_template(&old, plan.trim());
-                                    }
-                                    this.tpl_edit_target = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .into_any_element(),
-                );
-            } else {
-                let name_edit = name.clone();
-                let name_del = name.clone();
-                let plan_edit = plan.clone();
-                items.push(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .p_2()
-                        .bg(cx.theme().muted)
-                        .rounded_md()
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Label::new(&name).text_sm().font_weight(FontWeight::MEDIUM))
-                                .child(
-                                    Label::new(&plan)
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .line_clamp(2),
-                                ),
-                        )
-                        .child(
-                            Button::new(format!("tpl-edit-{name}"))
-                                .small()
-                                .label("编辑")
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    this.tpl_edit_target = Some(name_edit.clone());
-                                    let plan = plan_edit.clone();
-                                    this.tpl_name_input.update(cx, |s, cx| {
-                                        s.set_value(name_edit.clone(), window, cx);
-                                    });
-                                    this.tpl_desc_input.update(cx, |s, cx| {
-                                        s.set_value(plan, window, cx);
-                                    });
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("tpl-del-{name}"))
-                                .small()
-                                .label("删除")
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                    this.store.remove_template(&name_del);
-                                    cx.notify();
-                                })),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
+        let items = templates
+            .iter()
+            .map(|template| {
+                let edit = template.clone();
+                let delete = template.name.clone();
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .p_2()
+                    .bg(cx.theme().muted)
+                    .rounded_md()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Label::new(&template.name)
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(
+                                Label::new(&template.plan)
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .line_clamp(2),
+                            ),
+                    )
+                    .child(
+                        Button::new(format!("tpl-edit-{}", template.name))
+                            .small()
+                            .label("编辑")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.open_template_form(window, cx, Some(edit.clone()));
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("tpl-del-{}", template.name))
+                            .small()
+                            .label("删除")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.confirm_remove_template(window, cx, delete.clone());
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         v_flex()
             .gap_2()
-            .child(self.settings_header(
-                "工作流模板",
-                "模板的 plan 会作为工作流编排的系统指令注入",
-                cx.theme().muted_foreground,
-            ))
-            .children(items)
-            .child(self.settings_header("＋ 新增模板", "", cx.theme().muted_foreground))
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(Input::new(&self.tpl_name_input))
-                    .child(Input::new(&self.tpl_desc_input))
+                h_flex()
+                    .items_center()
+                    .child(self.settings_header(
+                        "工作流模板",
+                        "模板的 plan 会作为工作流编排的系统指令注入",
+                        cx.theme().muted_foreground,
+                    ))
+                    .child(div().flex_1())
                     .child(
-                        Button::new("tpl-add")
+                        Button::new("tpl-add-open")
                             .small()
                             .primary()
-                            .label("添加")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                let name = this.tpl_name_input.read(cx).value().to_string();
-                                let plan = this.tpl_desc_input.read(cx).value().to_string();
-                                if !name.trim().is_empty() {
-                                    this.store.add_template(name.trim(), plan.trim());
-                                }
-                                cx.notify();
+                            .label("+")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.open_template_form(window, cx, None);
                             })),
                     ),
             )
+            .children(items)
             .into_any()
     }
 
