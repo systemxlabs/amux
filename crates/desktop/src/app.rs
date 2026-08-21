@@ -2471,7 +2471,9 @@ impl AmuxApp {
     fn set_panel(&mut self, window: &mut Window, cx: &mut Context<Self>, panel: Option<Panel>) {
         let new_delta = panel.map(Self::panel_width_logical).unwrap_or(0.0) * window.scale_factor();
         let bounds = window.bounds();
-        let base = bounds.size.width - new_delta.into();
+        // 当前窗口宽度已经包含旧面板；先还原中间区域宽度，再应用新面板宽度。
+        // 直接用 new_delta 计算会让 resize 成为 no-op，导致面板覆盖中间区域的悬浮按钮。
+        let base = bounds.size.width - self.panel_delta_px.into();
         if panel == Some(Panel::Activities) && self.panel != Some(Panel::Activities) {
             self.activities_limit = 100;
             self.activities_scroll.scroll_to_bottom();
