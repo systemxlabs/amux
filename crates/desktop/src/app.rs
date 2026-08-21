@@ -1949,6 +1949,15 @@ impl AmuxApp {
         let Some(wf_id) = self.workflows.get(idx).map(|wf| wf.session.id.clone()) else {
             return;
         };
+        if self
+            .workflows
+            .get(idx)
+            .is_some_and(|workflow| workflow.session.state == SessionState::Busy)
+        {
+            self.workflow_error = Some("请先取消正在执行的工作流，再删除工作流会话。".into());
+            cx.notify();
+            return;
+        }
         let targets: Vec<(usize, WsClient, String)> = children
             .iter()
             .filter_map(|(machine, sid)| {

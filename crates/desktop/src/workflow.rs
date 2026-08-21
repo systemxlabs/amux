@@ -489,10 +489,19 @@ impl WorkflowEngine {
                         });
                     }
                     if let Err(error) = self.prompt_child(&session_id, &prompt).await {
+                        if let Some(child) = self
+                            .session
+                            .children
+                            .iter_mut()
+                            .find(|child| child.id == session_id)
+                        {
+                            child.state = SessionState::Idle;
+                        }
                         self.session.activities.push(Activity::Error {
                             timestamp: now(),
-                            detail: error,
+                            detail: error.clone(),
                         });
+                        return Err(error);
                     }
                     self.session.activities.push(Activity::ToolCall {
                         timestamp: now(),
@@ -506,10 +515,19 @@ impl WorkflowEngine {
                 }
                 OrcAction::Steer { session, prompt } | OrcAction::Retry { session, prompt } => {
                     if let Err(error) = self.prompt_child(&session, &prompt).await {
+                        if let Some(child) = self
+                            .session
+                            .children
+                            .iter_mut()
+                            .find(|child| child.id == session)
+                        {
+                            child.state = SessionState::Idle;
+                        }
                         self.session.activities.push(Activity::Error {
                             timestamp: now(),
-                            detail: error,
+                            detail: error.clone(),
                         });
+                        return Err(error);
                     }
                     self.session.activities.push(Activity::ToolCall {
                         timestamp: now(),

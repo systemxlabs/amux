@@ -164,6 +164,7 @@ impl SessionManager {
     pub async fn delete(&self, session_id: &str) -> Result<(), String> {
         let control = self.control(session_id);
         control.deleted.store(true, Ordering::SeqCst);
+        let log = SessionLog::open(&self.data_dir, session_id);
         let entry = self
             .registry
             .get(session_id)
@@ -171,7 +172,7 @@ impl SessionManager {
         let Some((meta, agent_session_id)) = entry else {
             // DELETE is idempotent so clients can safely retry after a partial
             // workflow cleanup.
-            return Ok(());
+            return log.remove().map_err(|e| format!("会话日志删除失败: {e}"));
         };
         if !agent_session_id.is_empty() {
             match self.agents.driver_for(&meta.agent) {
@@ -200,9 +201,7 @@ impl SessionManager {
         self.registry
             .delete(session_id)
             .map_err(|e| format!("注册表删除失败: {e}"))?;
-        SessionLog::open(&self.data_dir, session_id)
-            .remove()
-            .map_err(|e| format!("会话日志删除失败: {e}"))?;
+        log.remove().map_err(|e| format!("会话日志删除失败: {e}"))?;
         protocol::log::info("server.session", format!("删除会话 {session_id}"));
         Ok(())
     }
