@@ -5163,16 +5163,19 @@ impl AmuxApp {
         let tree = if diff_tree_collapsed {
             v_flex()
                 .w(px(28.0))
+                .h_full()
                 .child(Label::new("树"))
                 .into_any_element()
         } else {
             v_flex()
-                .w_full()
-                .max_h(px(220.0))
+                .w(px(220.0))
+                .h_full()
+                .min_h_0()
                 .gap_1()
                 .p_1()
                 .bg(cx.theme().muted)
                 .rounded_md()
+                .overflow_y_scrollbar()
                 .child(
                     Label::new("改动文件")
                         .text_sm()
@@ -5191,17 +5194,24 @@ impl AmuxApp {
             .border_color(cx.theme().border)
             .child(toolbar)
             .child(
-                v_flex().flex_1().min_h_0().gap_2().child(tree).child(
-                    div()
-                        .id("diff-panel")
-                        .v_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .gap_2()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.diff_scroll)
-                        .when(!diff_changes_collapsed, |d| d.children(content_children)),
-                ),
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .gap_2()
+                    .child(tree)
+                    .child(
+                        div()
+                            .id("diff-panel")
+                            .v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .gap_2()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.diff_scroll)
+                            .when(!diff_changes_collapsed, |d| d.children(content_children)),
+                    ),
             )
             .into_any()
     }
