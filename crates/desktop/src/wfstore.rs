@@ -135,15 +135,11 @@ fn state_str(s: protocol::SessionState) -> &'static str {
     }
 }
 
+/// sqlite 中的状态为协议 snake_case 表示；解析统一走 protocol，
+/// 未知值报错（坏数据显式失败，不静默回退）。
 fn state_from(s: &str) -> io::Result<protocol::SessionState> {
-    match s {
-        "idle" => Ok(protocol::SessionState::Idle),
-        "busy" => Ok(protocol::SessionState::Busy),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("未知工作流状态: {s}"),
-        )),
-    }
+    protocol::parse_session_state(s)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("未知工作流状态: {s}")))
 }
 
 /// 将工作流会话写入 sqlite + 两份 jsonl。

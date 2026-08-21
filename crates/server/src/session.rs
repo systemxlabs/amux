@@ -305,13 +305,13 @@ impl SessionManager {
 
     // ---- 会话数据 ----
 
-    /// 分页读对话历史（docs/DESIGN.md「session.history」）：`before` 为独占上界游标。
+    /// 分页读对话历史（docs/DESIGN.md「session.history」）：`before` 为独占上界游标（行号索引，转为 u64 便于协议层统一）。
     pub async fn history(
         &self,
         session_id: &str,
         limit: Option<usize>,
-        before: Option<usize>,
-    ) -> Result<(Vec<HistoryItem>, bool, usize), String> {
+        before: Option<u64>,
+    ) -> Result<(Vec<HistoryItem>, bool, Option<u64>), String> {
         self.registry
             .get(session_id)
             .map_err(|e| format!("注册表读取失败: {e}"))?
@@ -320,17 +320,19 @@ impl SessionManager {
             .read_history()
             .map_err(|e| format!("会话历史读取失败: {e}"))?;
         let limit = limit.unwrap_or(200);
-        let (start, end, has_more) = Self::window_items(items.len(), limit, before);
-        Ok((items[start..end].to_vec(), has_more, start))
+        let before_usize = before.map(|b| b as usize);
+        let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
+        let next_before = if has_more { Some(start as u64) } else { None };
+        Ok((items[start..end].to_vec(), has_more, next_before))
     }
 
-    /// 分页读活动历史（docs/DESIGN.md「session.activities」）：`before` 为独占上界游标。
+    /// 分页读活动历史（docs/DESIGN.md「session.activities」）：`before` 为独占上界游标（行号索引，转为 u64 便于协议层统一）。
     pub async fn activities(
         &self,
         session_id: &str,
         limit: Option<usize>,
-        before: Option<usize>,
-    ) -> Result<(Vec<Activity>, bool, usize), String> {
+        before: Option<u64>,
+    ) -> Result<(Vec<Activity>, bool, Option<u64>), String> {
         self.registry
             .get(session_id)
             .map_err(|e| format!("注册表读取失败: {e}"))?
@@ -339,8 +341,10 @@ impl SessionManager {
             .read_activities()
             .map_err(|e| format!("会话活动读取失败: {e}"))?;
         let limit = limit.unwrap_or(200);
-        let (start, end, has_more) = Self::window_items(items.len(), limit, before);
-        Ok((items[start..end].to_vec(), has_more, start))
+        let before_usize = before.map(|b| b as usize);
+        let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
+        let next_before = if has_more { Some(start as u64) } else { None };
+        Ok((items[start..end].to_vec(), has_more, next_before))
     }
 
     /// 查询正在进行中的活动（docs/DESIGN.md「session.ongoing_activity」；无则 None）。
@@ -857,7 +861,7 @@ mod tests {
         assert!(items.iter().any(|i| matches!(i, HistoryItem::AgentMessage { content, .. }
             if content.iter().any(|c| matches!(c, ContentBlock::Text { text } if text.contains("完成"))))));
         assert!(!has_more);
-        assert_eq!(next_before, 0);
+        assert_eq!(next_before, None);
 
         // 分页读活动：thinking + tool_call
         let (acts, _, _) = mgr.activities(&meta.id, None, None).await.unwrap();

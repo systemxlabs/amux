@@ -20,9 +20,12 @@ use rig::completion::Prompt;
 
 use serde::{Deserialize, Serialize};
 
-use protocol::{generate_title, Activity, ContentBlock, SessionState};
+use protocol::{
+    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult, SessionNewParams,
+    SessionPageParams, SessionPromptParams, SessionResult, SessionState,
+};
 
-use crate::config::OrchestratorConfig;
+use crate::config::{ApiFormat, OrchestratorConfig};
 use crate::logic::DialogMsg;
 use crate::ws::WsClient;
 
@@ -440,26 +443,14 @@ impl WorkflowEngine {
                                 .clients
                                 .get(m_idx)
                                 .ok_or_else(|| "机器连接已失效".to_string())?
-                                .request(
+                                .request::<_, SessionResult>(
                                     protocol::method::SESSION_NEW,
-                                    Some(serde_json::json!({
-                                        "agent": agent,
-                                        "cwd": cwd,
-                                    })),
+                                    Some(SessionNewParams { agent: agent.clone(), cwd: cwd.clone() }),
                                 )
                                 .await;
                             match res {
                                 Ok(v) => {
-                                    let sid = v
-                                        .get("session")
-                                        .and_then(|s| s.get("id"))
-                                        .and_then(|i| i.as_str())
-                                        .ok_or_else(|| {
-                                            format!(
-                                                "创建关联普通会话响应缺少 session.id（{machine}/{agent}）"
-                                            )
-                                        })?
-                                        .to_string();
+                                    let sid = v.session.id;
                                     if sid.is_empty() {
                                         return Err(format!(
                                             "创建关联普通会话响应的 session.id 为空（{machine}/{agent}）"
@@ -562,12 +553,13 @@ impl WorkflowEngine {
             c.state = SessionState::Busy;
         }
         let sid = session_id.to_string();
-        let input = serde_json::json!({
-            "sessionId": session_id,
-            "input": [{ "type": "text", "text": text }],
-        });
+        // 下发失败必须向上传播（工作流推进据此记录错误活动），不能只写日志
+        let input = SessionPromptParams {
+            session_id: session_id.to_string(),
+            input: vec![ContentBlock::Text { text: text.to_string() }],
+        };
         client
-            .request(protocol::method::SESSION_PROMPT, Some(input))
+            .request_ok(protocol::method::SESSION_PROMPT, Some(input))
             .await
             .map_err(|e| format!("下发指令失败 {sid}: {e}"))?;
         Ok(())
@@ -751,9 +743,9 @@ impl WorkflowEngine {
                 .cloned()
                 .ok_or_else(|| format!("机器连接已失效: {machine_idx}"))?;
             client
-                .request(
+                .request_ok(
                     protocol::method::SESSION_CANCEL,
-                    Some(serde_json::json!({ "sessionId": session_id })),
+                    Some(SessionIdParams { session_id: session_id.clone() }),
                 )
                 .await
                 .map_err(|e| format!("取消关联会话失败 {session_id}: {e}"))?;
@@ -905,21 +897,6 @@ where
         .map_err(|e| format!("编排 agent 调用失败: {e}"))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ApiFormat {
-    ChatCompletions,
-    Responses,
-    Messages,
-}
-
-fn api_format_kind(api_format: &str) -> ApiFormat {
-    match api_format {
-        "responses" => ApiFormat::Responses,
-        "messages" => ApiFormat::Messages,
-        _ => ApiFormat::ChatCompletions,
-    }
-}
-
 impl OrcBackend for RigBackend {
     fn decide<'a>(
         &'a self,
@@ -957,7 +934,7 @@ impl OrcBackend for RigBackend {
             let input = format!(
                 "用户消息与对话历史：\n{transcript_text}\n\n请用工具完成本轮调度，未指定的事项询问用户。"
             );
-            let text = match api_format_kind(&self.cfg.api_format) {
+            let text = match self.cfg.api_format {
                 ApiFormat::ChatCompletions => {
                     let client = rig::providers::openai::Client::builder()
                         .api_key(self.cfg.api_key.clone())
@@ -1216,21 +1193,16 @@ impl rig::tool::Tool for CreateSession {
             .client(&args.machine)
             .map_err(rig::tool::ToolExecutionError::other)?;
         let res = client
-            .request(
+            .request::<_, SessionResult>(
                 protocol::method::SESSION_NEW,
-                Some(serde_json::json!({
-                    "agent": args.agent,
-                    "cwd": args.cwd,
-                })),
+                Some(SessionNewParams {
+                    agent: args.agent.clone(),
+                    cwd: args.cwd.clone(),
+                }),
             )
             .await
             .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
-        let sid = res
-            .get("session")
-            .and_then(|s| s.get("id"))
-            .and_then(|i| i.as_str())
-            .unwrap_or("")
-            .to_string();
+        let sid = res.session.id;
         if sid.is_empty() {
             return Err(rig::tool::ToolExecutionError::other("创建会话未返回 id"));
         }
@@ -1300,16 +1272,14 @@ impl rig::tool::Tool for PromptSession {
             .get(child.machine_idx)
             .cloned()
             .ok_or_else(|| rig::tool::ToolExecutionError::other("机器连接已失效"))?;
-        client
-            .request(
-                protocol::method::SESSION_PROMPT,
-                Some(serde_json::json!({
-                    "sessionId": args.session,
-                    "input": [{ "type": "text", "text": args.prompt }],
-                })),
-            )
-            .await
-            .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        let input = SessionPromptParams {
+                session_id: args.session.clone(),
+                input: vec![ContentBlock::Text { text: args.prompt.clone() }],
+            };
+            client
+                .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&input).unwrap()))
+                .await
+                .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
         if let Some(c) = live
             .children
             .lock()
@@ -1366,10 +1336,7 @@ impl rig::tool::Tool for CancelSession {
             .cloned()
             .ok_or_else(|| rig::tool::ToolExecutionError::other("机器连接已失效"))?;
         client
-            .request(
-                protocol::method::SESSION_CANCEL,
-                Some(serde_json::json!({ "sessionId": args.session })),
-            )
+            .request_ok(protocol::method::SESSION_CANCEL, Some(serde_json::json!({ "sessionId": args.session })))
             .await
             .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
         live.record_tool(
@@ -1473,17 +1440,24 @@ async fn page_session(
         .get(child.machine_idx)
         .cloned()
         .ok_or_else(|| rig::tool::ToolExecutionError::other("机器连接已失效"))?;
-    let mut params = serde_json::json!({ "sessionId": args.session });
-    if let Some(limit) = args.limit {
-        params["limit"] = serde_json::json!(limit);
-    }
-    if let Some(before) = args.before {
-        params["before"] = serde_json::json!(before);
-    }
-    let res = client
-        .request(method, Some(params))
-        .await
-        .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+    let params = SessionPageParams {
+        session_id: args.session.clone(),
+        limit: args.limit.map(|l| l as usize),
+        before: args.before,
+    };
+    let res: serde_json::Value = if method == protocol::method::SESSION_HISTORY {
+        let r = client
+            .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
+            .await
+            .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        serde_json::to_value(r).unwrap()
+    } else {
+        let r = client
+            .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
+            .await
+            .map_err(|e| rig::tool::ToolExecutionError::other(e.to_string()))?;
+        serde_json::to_value(r).unwrap()
+    };
     let tool_name = if method == protocol::method::SESSION_HISTORY {
         "read_session_history"
     } else {
@@ -1748,7 +1722,7 @@ mod tests {
     #[test]
     fn rig_backend_builds_agent_with_tools() {
         let backend = RigBackend::new(OrchestratorConfig {
-            api_format: "chat_completions".into(),
+            api_format: ApiFormat::ChatCompletions,
             base_url: "http://127.0.0.1:9/v1".into(),
             api_key: "sk-test".into(),
             model: "gpt-4o-mini".into(),
@@ -1763,15 +1737,22 @@ mod tests {
     }
 
     #[test]
-    fn api_format_kind_dispatches_formats() {
+    fn api_format_serializes_snake_case() {
+        // ApiFormat 线上/存储表示为 snake_case（docs/DESIGN.md「编排智能体配置存储」）
         assert_eq!(
-            api_format_kind("chat_completions"),
-            ApiFormat::ChatCompletions
+            serde_json::to_string(&ApiFormat::ChatCompletions).unwrap(),
+            "\"chat_completions\""
         );
-        assert_eq!(api_format_kind("responses"), ApiFormat::Responses);
-        assert_eq!(api_format_kind("messages"), ApiFormat::Messages);
-        assert_eq!(api_format_kind("unknown"), ApiFormat::ChatCompletions);
-        assert_eq!(api_format_kind(""), ApiFormat::ChatCompletions);
+        assert_eq!(
+            serde_json::to_string(&ApiFormat::Responses).unwrap(),
+            "\"responses\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ApiFormat>("\"messages\"").unwrap(),
+            ApiFormat::Messages
+        );
+        // 非法值不再静默回退，由加载层归一化处理
+        assert!(serde_json::from_str::<ApiFormat>("\"graphql\"").is_err());
     }
 
     #[test]
@@ -1831,7 +1812,7 @@ mod tests {
     #[tokio::test]
     async fn unconfigured_rig_backend_records_clear_error() {
         let backend = Arc::new(RigBackend::new(OrchestratorConfig {
-            api_format: "chat_completions".into(),
+            api_format: ApiFormat::ChatCompletions,
             base_url: "https://api.openai.com/v1".into(),
             api_key: String::new(),
             model: "gpt-4o-mini".into(),

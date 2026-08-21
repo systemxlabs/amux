@@ -10,9 +10,13 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
+
+use protocol::OpResult;
 
 /// GPUI 环境无 Tokio runtime，这里维护一个独立的多线程 runtime 跑 WS 后台任务。
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -76,12 +80,23 @@ impl WsClient {
         WsClient { req_tx, notify_tx }
     }
 
-    pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
+    /// 发送 JSON-RPC 请求并按强类型反序列化响应结果。
+    /// 响应键名以协议类型为准（camelCase），禁止手工取键——分页游标曾因
+    /// GUI 读 snake_case 而整体失效，此处泛型化即为杜绝该类错配。
+    pub async fn request<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<P>,
+    ) -> Result<R, RpcError> {
+        let params_value = params.map(serde_json::to_value).transpose().map_err(|e| RpcError {
+            code: -1,
+            message: format!("参数序列化失败: {e}"),
+        })?;
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(ClientReq {
                 method: method.to_string(),
-                params,
+                params: params_value,
                 resp: tx,
             })
             .await
@@ -89,10 +104,27 @@ impl WsClient {
                 code: -1,
                 message: "连接已关闭".into(),
             })?;
-        rx.await.map_err(|_| RpcError {
+        let value = rx.await.map_err(|_| RpcError {
             code: -1,
             message: "连接中断".into(),
-        })?
+        })??;
+        serde_json::from_value(value).map_err(|e| RpcError {
+            code: -1,
+            message: format!("响应反序列化失败: {e}"),
+        })
+    }
+
+    /// 无业务载荷的方法（cancel/delete/configure/restart/restore/prompt 等）：
+    /// 响应恒为 `OpResult`，只关心成败。
+    pub async fn request_ok<P: Serialize>(&self, method: &str, params: Option<P>) -> Result<(), RpcError> {
+        let op: OpResult = self.request(method, params).await?;
+        if !op.ok {
+            return Err(RpcError {
+                code: -1,
+                message: op.message.unwrap_or_else(|| "操作失败".into()),
+            });
+        }
+        Ok(())
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notification> {

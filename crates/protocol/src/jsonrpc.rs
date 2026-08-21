@@ -2,7 +2,41 @@
 
 use serde::{Deserialize, Serialize};
 
-pub type JsonRpcId = serde_json::Value;
+/// JSON-RPC id：本协议只产生整数 id（GUI 自增计数器），但按规范兼容字符串；
+/// `Null` 仅用于无法确定 id 的错误响应（如 Parse error）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JsonRpcId {
+    Number(u64),
+    String(String),
+    Null,
+}
+
+impl From<u64> for JsonRpcId {
+    fn from(n: u64) -> Self {
+        JsonRpcId::Number(n)
+    }
+}
+
+impl std::fmt::Display for JsonRpcId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JsonRpcId::Number(n) => write!(f, "{n}"),
+            JsonRpcId::String(s) => write!(f, "{s}"),
+            JsonRpcId::Null => write!(f, "null"),
+        }
+    }
+}
+
+impl JsonRpcId {
+    /// 若为 Null 变体则返回 None，否则返回 Some(self)。用于检查请求是否缺 id。
+    pub fn else_null(self) -> Option<JsonRpcId> {
+        match self {
+            JsonRpcId::Null => None,
+            other => Some(other),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
@@ -55,8 +89,6 @@ pub mod server_error {
     pub const HARNESS_UNAVAILABLE: i32 = -32002;
     pub const SESSION_BUSY: i32 = -32003;
     pub const INVALID_INPUT: i32 = -32005;
-    /// steer 失败：agent 不支持进行中注入（docs/DESIGN.md §9）
-    pub const STEER_UNSUPPORTED: i32 = -32006;
 }
 
 #[cfg(test)]
@@ -67,21 +99,35 @@ mod tests {
     fn request_roundtrip() {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            id: serde_json::json!(1),
+            id: JsonRpcId::Number(1),
             method: "session.list".into(),
             params: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: JsonRpcRequest = serde_json::from_str(&s).unwrap();
         assert_eq!(back.method, "session.list");
-        assert_eq!(back.id, serde_json::json!(1));
+        assert_eq!(back.id, JsonRpcId::Number(1));
+        // 缺 id 的帧不是合法请求
+        assert!(serde_json::from_str::<JsonRpcRequest>(r#"{"jsonrpc":"2.0","method":"auth"}"#).is_err());
+    }
+
+    #[test]
+    fn id_accepts_string_and_null() {
+        assert_eq!(
+            serde_json::from_str::<JsonRpcId>(r#""abc""#).unwrap(),
+            JsonRpcId::String("abc".into())
+        );
+        assert_eq!(
+            serde_json::from_str::<JsonRpcId>("null").unwrap(),
+            JsonRpcId::Null
+        );
     }
 
     #[test]
     fn response_with_error_roundtrip() {
         let resp = JsonRpcResponse {
             jsonrpc: "2.0".into(),
-            id: serde_json::json!("x"),
+            id: JsonRpcId::String("x".into()),
             result: None,
             error: Some(JsonRpcError {
                 code: -32601,

@@ -35,19 +35,21 @@ use gpui_component::{
     WindowExt, *,
 };
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use protocol::{
-    Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
-    GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryItem, OpResult, SessionConfigureParams,
-    SessionIdParams, SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams,
-    SessionState, SkillEntry, WorkspaceDiffResult, WorkspaceEntry, WorkspaceListResult,
-    WorkspaceReadResult,
+    ActivitiesResult, Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult,
+    ContentBlock, GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryItem, HistoryResult, OpResult,
+    OngoingActivityResult, SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, SessionState,
+    SessionStateChange, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceEntry,
+    WorkspaceListResult, WorkspaceReadParams, WorkspaceReadResult, WorkspaceRestoreParams,
 };
 
 use crate::aggregate::SessionView;
 use crate::config::{
-    machine_ws_url, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand, WorkflowTemplate,
+    machine_ws_url, ApiFormat, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand,
+    SkillEntry, WorkflowTemplate,
 };
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
@@ -60,15 +62,6 @@ use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小（PRD §4.1.1：首次只取最近活跃一窗）。
 const PAGE_LIMIT: usize = 50;
-
-/// 字符串 → SessionState（server 通知负载用 snake_case）。
-fn state_from_str(s: &str) -> Option<SessionState> {
-    match s {
-        "busy" => Some(SessionState::Busy),
-        "idle" => Some(SessionState::Idle),
-        _ => None,
-    }
-}
 
 /// 右侧面板（默认折叠，悬浮按钮展开）。
 #[derive(Clone, Copy, PartialEq)]
@@ -329,7 +322,7 @@ pub struct AmuxApp {
     skill_desc_input: Entity<InputState>,
     tpl_name_input: Entity<InputState>,
     tpl_desc_input: Entity<InputState>,
-    orch_api_format: String,
+    orch_api_format: ApiFormat,
     orch_base_input: Entity<InputState>,
     orch_key_input: Entity<InputState>,
     orch_model_input: Entity<InputState>,
@@ -469,7 +462,7 @@ impl AmuxApp {
             orch_base_input,
             orch_key_input,
             orch_model_input,
-            orch_api_format: "chat_completions".into(),
+            orch_api_format: ApiFormat::ChatCompletions,
             orchestrator_form_error: None,
             orchestrator_form_status: None,
             settings_form_error: None,
@@ -527,17 +520,13 @@ impl AmuxApp {
             .update(cx, |s, cx| s.set_value(&cfg.model, window, cx));
     }
 
-    fn save_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let api_format = self.orch_api_format.clone();
+    fn save_orchestrator(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // api_format 为枚举单选，无需字符串校验
+        let api_format = self.orch_api_format;
         let base_url = self.orch_base_input.read(cx).value().trim().to_owned();
         let api_key = self.orch_key_input.read(cx).value().trim().to_owned();
         let model = self.orch_model_input.read(cx).value().trim().to_owned();
-        let error = if !matches!(
-            api_format.as_str(),
-            "chat_completions" | "responses" | "messages"
-        ) {
-            Some("API 格式必须是 chat_completions、responses 或 messages。")
-        } else if base_url.is_empty() {
+        let error = if base_url.is_empty() {
             Some("请输入 Base URL。")
         } else if api_key.is_empty() {
             Some("请输入 API Key。")
@@ -670,26 +659,16 @@ impl AmuxApp {
         idx: usize,
         n: &WsNotification,
     ) {
-        let Some(sid) = n
-            .params
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-        else {
+        // 通知负载按协议强类型解析（SessionStateChange，camelCase）
+        let Ok(change) = serde_json::from_value::<SessionStateChange>(n.params.clone()) else {
+            protocol::log::warn("gui.ws", "state_change 通知负载解析失败");
             return;
         };
-        let old_state = n
-            .params
-            .get("oldState")
-            .and_then(|v| v.as_str())
-            .and_then(state_from_str)
-            .unwrap_or(SessionState::Idle);
-        let new_state = n
-            .params
-            .get("newState")
-            .and_then(|v| v.as_str())
-            .and_then(state_from_str)
-            .unwrap_or(SessionState::Idle);
+        let SessionStateChange {
+            session_id: sid,
+            old_state,
+            new_state,
+        } = change;
         let idle = new_state == SessionState::Idle;
         // 更新普通会话元数据状态与聚合视图 busy（若已加载）
         if let Some(m) = this.machines.get_mut(idx) {
@@ -782,22 +761,12 @@ impl AmuxApp {
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({ "limit": PAGE_LIMIT });
             if let Ok(res) = client
-                .request(protocol::method::SESSION_LIST, Some(params))
+                .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
                 .await
             {
-                let sessions: Vec<SessionMeta> = res
-                    .get("sessions")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                let has_more = res
-                    .get("has_more")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let next_before = res
-                    .get("next_before")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
+                let sessions = res.sessions;
+                let has_more = res.has_more;
+                let next_before = res.next_before;
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
                         let (list, hm, nb) = if has_more {
@@ -829,12 +798,10 @@ impl AmuxApp {
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| match client
-            .request(protocol::method::AGENT_LIST, None)
+            .request::<_, AgentListResult>(protocol::method::AGENT_LIST, None::<serde_json::Value>)
             .await
         {
-            Ok(res) => {
-                let result: AgentListResult =
-                    serde_json::from_value(res).unwrap_or(AgentListResult { agents: Vec::new() });
+            Ok(result) => {
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
                         m.agents = result.agents;
@@ -879,25 +846,12 @@ impl AmuxApp {
                 before: None,
             };
             if let Ok(res) = client
-                .request(
-                    protocol::method::SESSION_HISTORY,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
                 .await
             {
-                let items: Vec<HistoryItem> = res
-                    .get("items")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                let has_more = res
-                    .get("has_more")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let next_before = res
-                    .get("next_before")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
+                let items = res.items;
+                let has_more = res.has_more;
+                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
@@ -930,25 +884,12 @@ impl AmuxApp {
                 before: None,
             };
             if let Ok(res) = client
-                .request(
-                    protocol::method::SESSION_ACTIVITIES,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
                 .await
             {
-                let acts: Vec<Activity> = res
-                    .get("activities")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                let has_more = res
-                    .get("has_more")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let next_before = res
-                    .get("next_before")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
+                let acts = res.activities;
+                let has_more = res.has_more;
+                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
@@ -977,28 +918,15 @@ impl AmuxApp {
             let params = SessionPageParams {
                 session_id: id.clone(),
                 limit: Some(PAGE_LIMIT),
-                before: Some(before),
+                before: Some(before as u64),
             };
             if let Ok(res) = client
-                .request(
-                    protocol::method::SESSION_ACTIVITIES,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
                 .await
             {
-                let acts: Vec<Activity> = res
-                    .get("activities")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                let has_more = res
-                    .get("has_more")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let next_before = res
-                    .get("next_before")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
+                let acts = res.activities;
+                let has_more = res.has_more;
+                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(view) = this
                         .machines
@@ -1029,28 +957,15 @@ impl AmuxApp {
             let params = SessionPageParams {
                 session_id: id.clone(),
                 limit: Some(PAGE_LIMIT),
-                before: Some(before),
+                before: Some(before as u64),
             };
             if let Ok(res) = client
-                .request(
-                    protocol::method::SESSION_HISTORY,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
                 .await
             {
-                let items: Vec<HistoryItem> = res
-                    .get("items")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                let has_more = res
-                    .get("has_more")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let next_before = res
-                    .get("next_before")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
+                let items = res.items;
+                let has_more = res.has_more;
+                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(view) = this
                         .machines
@@ -1083,16 +998,10 @@ impl AmuxApp {
                 session_id: session_id.clone(),
             };
             if let Ok(res) = client
-                .request(
-                    protocol::method::SESSION_ONGOING_ACTIVITY,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request::<_, OngoingActivityResult>(protocol::method::SESSION_ONGOING_ACTIVITY, Some(params))
                 .await
             {
-                let act = res
-                    .get("activity")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value::<Activity>(v).ok());
+                let act = res.activity;
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
@@ -1118,22 +1027,12 @@ impl AmuxApp {
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({ "limit": PAGE_LIMIT, "before": before });
             if let Ok(res) = client
-                .request(protocol::method::SESSION_LIST, Some(params))
+                .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
                 .await
             {
-                let sessions: Vec<SessionMeta> = res
-                    .get("sessions")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                let has_more = res
-                    .get("has_more")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let next_before = res
-                    .get("next_before")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
+                let sessions = res.sessions;
+                let has_more = res.has_more;
+                let next_before = res.next_before;
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(machine) {
                         let (list, hm, nb) =
@@ -1160,34 +1059,20 @@ impl AmuxApp {
             let machine_name = self.machines[i].config.name.clone();
             let epoch = self.machines[i].connection_epoch;
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
-                let snapshot = client
-                    .request(
-                        protocol::method::SESSION_LIST,
-                        Some(json!({ "limit": PAGE_LIMIT })),
-                    )
+                if let Ok(res) = client
+                    .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(json!({ "limit": PAGE_LIMIT })))
                     .await
-                    .ok();
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    if let Some(res) = &snapshot {
+                {
+                    let sessions = res.sessions;
+                    let has_more = res.has_more;
+                    let next_before = res.next_before;
+                    let _ = this.update_in(cx, |this, _w, cx| {
                         let Some(i) = this.machines.iter().position(|m| {
                             m.config.name == machine_name && m.connection_epoch == epoch
                         }) else {
                             return;
                         };
                         if let Some(m) = this.machines.get_mut(i) {
-                            let sessions: Vec<SessionMeta> = res
-                                .get("sessions")
-                                .cloned()
-                                .and_then(|v| serde_json::from_value(v).ok())
-                                .unwrap_or_default();
-                            let has_more = res
-                                .get("has_more")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            let next_before = res
-                                .get("next_before")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned);
                             let (list, hm, nb) = if has_more {
                                 merge_session_window(&m.sessions, sessions, has_more, next_before)
                             } else {
@@ -1198,9 +1083,9 @@ impl AmuxApp {
                             m.sessions_next_before = nb;
                             crate::logic::sort_sessions_recent(&mut m.sessions);
                         }
-                    }
-                    cx.notify();
-                });
+                        cx.notify();
+                    });
+                }
                 cx.background_executor()
                     .timer(Duration::from_secs(10))
                     .await;
@@ -1346,20 +1231,13 @@ impl AmuxApp {
         let client = self.machines[machine].client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
-                .request(
-                    protocol::method::SESSION_NEW,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request::<_, SessionResult>(protocol::method::SESSION_NEW, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match &res {
                     Ok(res) => {
-                        let new_id = res
-                            .get("session")
-                            .and_then(|s| s.get("id"))
-                            .and_then(|i| i.as_str())
-                            .map(str::to_string);
-                        if let Some(new_id) = new_id {
+                        let new_id = res.session.id.clone();
+                        if !new_id.is_empty() {
                             this.store
                                 .record_recent_workspace(&machine_name, &cwd, now_ts());
                             this.refresh_sessions(machine, w, cx);
@@ -1422,10 +1300,7 @@ impl AmuxApp {
                 }
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
-                        .request(
-                            protocol::method::SESSION_PROMPT,
-                            Some(serde_json::to_value(&params).unwrap()),
-                        )
+                        .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&params).unwrap()))
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
                         if let Err(error) = &result {
@@ -1508,10 +1383,7 @@ impl AmuxApp {
                 };
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
-                        .request(
-                            protocol::method::SESSION_PROMPT,
-                            Some(serde_json::to_value(&params).unwrap()),
-                        )
+                        .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&params).unwrap()))
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
                         if let Err(error) = &result {
@@ -1571,10 +1443,7 @@ impl AmuxApp {
                 session_id: sid.clone(),
             };
             let res = client
-                .request(
-                    protocol::method::SESSION_CANCEL,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::SESSION_CANCEL, Some(serde_json::to_value(&params).unwrap()))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 if let Err(error) = &res {
@@ -1607,10 +1476,7 @@ impl AmuxApp {
                 session_id: sid.clone(),
             };
             let res = client
-                .request(
-                    protocol::method::SESSION_DELETE,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::SESSION_DELETE, Some(serde_json::to_value(&params).unwrap()))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match res {
@@ -1692,18 +1558,20 @@ impl AmuxApp {
         };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
-                .request(
-                    protocol::method::SESSION_CONFIGURE,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::SESSION_CONFIGURE, Some(serde_json::to_value(&params).unwrap()))
                 .await;
-            let _ = this.update_in(cx, |this, _w, cx| {
-                if let Err(error) = res {
-                    if let Some(m) = this.machines.get_mut(machine) {
-                        m.status = format!("重命名失败（{error}）");
+            let _ = this.update_in(cx, |this, w, cx| {
+                match res {
+                    Err(error) => {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.notice = Some(format!("重命名失败（{error}）"));
+                        }
                     }
-                } else {
-                    this.renaming_session = None;
+                    Ok(()) => {
+                        this.renaming_session = None;
+                        // 主动刷新会话列表以体现新标题（修复 M1：重命名后不主动刷新）
+                        this.refresh_sessions(machine, w, cx);
+                    }
                 }
                 cx.notify();
             });
@@ -1982,83 +1850,28 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        let targets: Vec<(usize, WsClient, String)> = children
-            .iter()
-            .filter_map(|(machine, sid)| {
-                self.machine(*machine)
-                    .map(|m| (*machine, m.client.clone(), sid.clone()))
-            })
-            .collect();
-        let missing_machine = targets.len() != children.len();
-        let remote_targets = targets.clone();
-        let session_dir = self.session_dir.clone();
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let result = run_engine_on_tokio(async move {
-                if missing_machine {
-                    return Err("关联普通会话所属机器已移除，无法完成远端删除".to_string());
-                }
-                for (_, client, sid) in &remote_targets {
-                    let params = SessionIdParams {
-                        session_id: sid.clone(),
-                    };
-                    client
-                        .request(
-                            protocol::method::SESSION_DELETE,
-                            Some(serde_json::to_value(&params).unwrap()),
-                        )
-                        .await
-                        .map_err(|error| format!("删除关联普通会话 {sid} 失败：{error}"))?;
-                }
-                Ok(())
-            })
-            .await;
-            let _ = this.update_in(cx, |this, _window, cx| {
-                match result {
-                    Some(Ok(())) => {
-                        for (machine, _, sid) in &targets {
-                            if let Some(m) = this.machine_mut(*machine) {
-                                m.sessions.retain(|session| session.id != *sid);
-                                m.views.remove(sid);
-                            }
-                        }
-                        match WorkflowEngine::remove(&session_dir, &wf_id) {
-                            Ok(()) => {
-                                if let Some(current_idx) = this
-                                    .workflows
-                                    .iter()
-                                    .position(|workflow| workflow.session.id == wf_id)
-                                {
-                                    this.workflows.remove(current_idx);
-                                    this.selected = match this.selected.clone() {
-                                        Some(Selected::Workflow { engine })
-                                            if engine == current_idx =>
-                                        {
-                                            None
-                                        }
-                                        Some(Selected::Workflow { engine })
-                                            if engine > current_idx =>
-                                        {
-                                            Some(Selected::Workflow { engine: engine - 1 })
-                                        }
-                                        other => other,
-                                    };
-                                }
-                            }
-                            Err(error) => {
-                                this.workflow_error =
-                                    Some(format!("删除工作流持久化记录失败：{error}"));
-                            }
-                        }
-                    }
-                    Some(Err(error)) => {
-                        this.workflow_error = Some(format!("删除工作流失败：{error}"));
-                    }
-                    None => {
-                        this.workflow_error = Some("删除工作流任务未能执行".into());
-                    }
-                }
-                cx.notify();
-            });
+        if let Some(wf) = self.workflows.get(idx) {
+            let id = wf.session.id.clone();
+            WorkflowEngine::remove(&self.session_dir, &id);
+        }
+        if idx < self.workflows.len() {
+            self.workflows.remove(idx);
+        }
+        if let Some(Selected::Workflow { engine }) = self.selected.clone() {
+            if engine == idx {
+                self.selected = None;
+            }
+        }
+        cx.notify();
+        let _ = window;
+    }
+
+    fn delete_child(&self, client: WsClient, sid: String) {
+        let params = SessionIdParams { session_id: sid };
+        crate::ws::runtime().spawn(async move {
+            let _ = client
+                .request_ok(protocol::method::SESSION_DELETE, Some(serde_json::to_value(&params).unwrap()))
+                .await;
         });
         self._tasks.push(t);
     }
@@ -2148,9 +1961,12 @@ impl AmuxApp {
         }
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = json!({ "sessionId": session_id.clone() });
+            let params = WorkspaceDiffParams {
+                cwd: cwd.clone(),
+                path: None,
+            };
             let res = client
-                .request(protocol::method::WORKSPACE_DIFF, Some(params))
+                .request::<_, WorkspaceDiffResult>(protocol::method::WORKSPACE_DIFF, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 let is_current = matches!(
@@ -2168,18 +1984,11 @@ impl AmuxApp {
                 }
                 let mut error_message = None;
                 if let Some(m) = this.machines.get_mut(machine) {
-                    match res {
-                        Ok(value) => match serde_json::from_value::<WorkspaceDiffResult>(value) {
-                            Ok(result) => {
-                                m.diff_files = result.files;
-                                m.diff_not_repo = result.not_repo;
-                            }
-                            Err(error) => {
-                                m.diff_files.clear();
-                                m.diff_not_repo = false;
-                                error_message = Some(format!("改动列表解析失败：{error}"));
-                            }
-                        },
+                    match &res {
+                        Ok(r) => {
+                            m.diff_files = r.files.clone();
+                            m.diff_not_repo = r.not_repo;
+                        }
                         Err(error) => {
                             m.diff_files.clear();
                             m.diff_not_repo = false;
@@ -2240,7 +2049,7 @@ impl AmuxApp {
                 "limit": 200,
             });
             let res = client
-                .request(protocol::method::WORKSPACE_LIST, Some(params))
+                .request::<_, WorkspaceListResult>(protocol::method::WORKSPACE_LIST, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
                 let selected_session_matches = matches!(
@@ -2258,32 +2067,27 @@ impl AmuxApp {
                 }
                 m.workspace_loading.remove(&directory_path);
                 match res {
-                    Ok(value) => match serde_json::from_value::<WorkspaceListResult>(value) {
-                        Ok(result) => {
-                            if offset == 0 {
-                                m.workspace_directories.insert(
-                                    directory_path.clone(),
-                                    WorkspaceDirectory {
-                                        entries: result.entries,
-                                        has_more: result.has_more,
-                                        next_offset: result.next_offset,
-                                    },
-                                );
-                            } else {
-                                let directory = m
-                                    .workspace_directories
-                                    .entry(directory_path.clone())
-                                    .or_default();
-                                directory.entries.extend(result.entries);
-                                directory.has_more = result.has_more;
-                                directory.next_offset = result.next_offset;
-                            }
-                            m.workspace_error = None;
+                    Ok(result) => {
+                        if offset == 0 {
+                            m.workspace_directories.insert(
+                                directory_path.clone(),
+                                WorkspaceDirectory {
+                                    entries: result.entries,
+                                    has_more: result.has_more,
+                                    next_offset: result.next_offset,
+                                },
+                            );
+                        } else {
+                            let directory = m
+                                .workspace_directories
+                                .entry(directory_path.clone())
+                                .or_default();
+                            directory.entries.extend(result.entries);
+                            directory.has_more = result.has_more;
+                            directory.next_offset = result.next_offset;
                         }
-                        Err(error) => {
-                            m.workspace_error = Some(format!("工作目录列表失败：{error}"));
-                        }
-                    },
+                        m.workspace_error = None;
+                    }
                     Err(error) => {
                         m.workspace_error = Some(format!("工作目录列表失败：{error}"));
                     }
@@ -2333,14 +2137,14 @@ impl AmuxApp {
         }
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = json!({
-                "sessionId": session_id.clone(),
-                "path": path,
-                "offset": offset,
-                "limit": 400,
-            });
+            let params = WorkspaceReadParams {
+                session_id,
+                path,
+                offset,
+                limit: 400,
+            };
             let res = client
-                .request(protocol::method::WORKSPACE_READ, Some(params))
+                .request::<_, WorkspaceReadResult>(protocol::method::WORKSPACE_READ, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
                 let selected_session_matches = matches!(
@@ -2358,22 +2162,17 @@ impl AmuxApp {
                 }
                 m.workspace_read_loading = false;
                 match res {
-                    Ok(value) => match serde_json::from_value::<WorkspaceReadResult>(value) {
-                        Ok(result) => {
-                            if offset == 0 {
-                                m.workspace_content = result.content;
-                            } else {
-                                m.workspace_content.push_str(&result.content);
-                            }
-                            m.workspace_file = Some(result.path);
-                            m.workspace_error = None;
-                            m.workspace_read_has_more = result.has_more;
-                            m.workspace_read_next_offset = result.next_offset;
+                    Ok(result) => {
+                        if offset == 0 {
+                            m.workspace_content = result.content;
+                        } else {
+                            m.workspace_content.push_str(&result.content);
                         }
-                        Err(error) => {
-                            m.workspace_error = Some(format!("读取文件失败：{error}"));
-                        }
-                    },
+                        m.workspace_file = Some(result.path);
+                        m.workspace_error = None;
+                        m.workspace_read_has_more = result.has_more;
+                        m.workspace_read_next_offset = result.next_offset;
+                    }
                     Err(error) => {
                         m.workspace_error = Some(format!("读取文件失败：{error}"));
                     }
@@ -2403,9 +2202,13 @@ impl AmuxApp {
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = json!({ "sessionId": session_id.clone(), "path": path, "patch": patch });
+            let params = WorkspaceRestoreParams {
+                session_id: session_id.clone(),
+                path,
+                patch,
+            };
             let res = client
-                .request(protocol::method::WORKSPACE_RESTORE, Some(params))
+                .request::<_, OpResult>(protocol::method::WORKSPACE_RESTORE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match res {
@@ -2502,10 +2305,7 @@ impl AmuxApp {
                 input: vec![ContentBlock::Text { text: prompt }],
             };
             let _ = client
-                .request(
-                    protocol::method::SESSION_PROMPT,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&params).unwrap()))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 this.refresh_dialog(w, cx, machine, session_id);
@@ -2532,18 +2332,11 @@ impl AmuxApp {
         let a = agent.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = AgentParams { agent: a.clone() };
-            let mut skills = Vec::new();
-            if let Ok(res) = client
-                .request(
-                    protocol::method::AGENT_SKILLS,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+            let skills = client
+                .request::<_, AgentSkillsResult>(protocol::method::AGENT_SKILLS, Some(params))
                 .await
-            {
-                let r: AgentSkillsResult =
-                    serde_json::from_value(res).unwrap_or(AgentSkillsResult { skills: Vec::new() });
-                skills = r.skills;
-            }
+                .map(|r| r.skills)
+                .unwrap_or_default();
             let _ = this.update_in(cx, |this, _w, cx| {
                 if let Some(m) = this.machines.get_mut(machine) {
                     m.skills = skills;
@@ -2580,34 +2373,25 @@ impl AmuxApp {
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = async {
                 let session = client
-                    .request(
+                    .request::<_, SessionResult>(
                         protocol::method::SESSION_NEW,
-                        Some(
-                            serde_json::to_value(SessionNewParams { agent, cwd })
-                                .map_err(|e| e.to_string())?,
-                        ),
+                        Some(SessionNewParams {
+                            agent: agent.clone(),
+                            cwd: cwd.clone(),
+                        }),
                     )
                     .await
                     .map_err(|e| e.to_string())?;
-                let session_id = session
-                    .get("session")
-                    .and_then(|s| s.get("id"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "创建技能操作会话响应缺少 session.id".to_string())?
-                    .to_string();
+                let session_id = session.session.id;
+                if session_id.is_empty() {
+                    return Err("创建技能操作会话响应缺少 session.id".to_string());
+                }
+                let input = SessionPromptParams {
+                    session_id: session_id.clone(),
+                    input: vec![ContentBlock::Text { text: operation_prompt }],
+                };
                 client
-                    .request(
-                        protocol::method::SESSION_PROMPT,
-                        Some(
-                            serde_json::to_value(SessionPromptParams {
-                                session_id: session_id.clone(),
-                                input: vec![ContentBlock::Text {
-                                    text: operation_prompt,
-                                }],
-                            })
-                            .map_err(|e| e.to_string())?,
-                        ),
-                    )
+                    .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&input).unwrap()))
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok::<String, String>(session_id)
@@ -2644,10 +2428,7 @@ impl AmuxApp {
         let params = AgentParams { agent };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
-                .request(
-                    protocol::method::AGENT_RESTART,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::AGENT_RESTART, Some(serde_json::to_value(&params).unwrap()))
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let _ = res;
@@ -5403,9 +5184,8 @@ impl AmuxApp {
             let patch_for_restore = patch.clone();
             let mut file_children: Vec<gpui::AnyElement> = Vec::new();
             let (status_label, status_color) = match &f.status {
-                GitChangeStatus::Added | GitChangeStatus::Untracked => ("A", cx.theme().success),
+                GitChangeStatus::Added => ("A", cx.theme().success),
                 GitChangeStatus::Deleted => ("D", cx.theme().danger),
-                GitChangeStatus::Renamed => ("R", cx.theme().primary),
                 GitChangeStatus::Modified => ("M", cx.theme().warning),
             };
             file_children.push(
@@ -6634,23 +6414,21 @@ impl AmuxApp {
     }
 
     fn render_orchestrator_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let selected_api_format = match self.orch_api_format.as_str() {
-            "chat_completions" => Some(0),
-            "responses" => Some(1),
-            "messages" => Some(2),
-            _ => None,
+        let selected_api_format = match self.orch_api_format {
+            ApiFormat::ChatCompletions => Some(0),
+            ApiFormat::Responses => Some(1),
+            ApiFormat::Messages => Some(2),
         };
         let api_format_options = RadioGroup::horizontal("orch-api-format")
             .children(["chat_completions", "responses", "messages"])
             .selected_index(selected_api_format)
             .on_click(cx.listener(|this, selected: &usize, _window, cx| {
                 this.orch_api_format = match *selected {
-                    0 => "chat_completions",
-                    1 => "responses",
-                    2 => "messages",
+                    0 => ApiFormat::ChatCompletions,
+                    1 => ApiFormat::Responses,
+                    2 => ApiFormat::Messages,
                     _ => return,
-                }
-                .into();
+                };
                 this.orchestrator_form_error = None;
                 this.orchestrator_form_status = None;
                 cx.notify();

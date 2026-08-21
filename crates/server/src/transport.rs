@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
-use protocol::{method, notify, server_error, AuthParams, OpResult};
+use protocol::{method, notify, server_error, AuthParams, JsonRpcRequest, OpResult};
 
 use crate::rpc::{Handlers, RpcError};
 use crate::session::ServerNotification;
@@ -131,19 +131,22 @@ async fn handle_connection(
                     }
                 };
                 let Message::Text(text) = msg else { continue };
+                // 入站只解析一次：信封在此解析为 JsonRpcRequest，dispatch 只做语义分发。
+                let req: JsonRpcRequest = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let frame = serde_json::to_string(&parse_error_response()).unwrap_or_default();
+                        if sink.send(Message::Text(frame)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
                 // 认证请求在连接任务内串行完成；因此紧随其后的业务请求只有在
                 // auth 响应已处理后才会被派发，不会与认证发生竞态。
-                let is_auth = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("method")
-                            .and_then(|method| method.as_str())
-                            .map(|method| method == method::AUTH)
-                    })
-                    .unwrap_or(false);
+                let is_auth = req.method == method::AUTH;
                 if is_auth && !authenticated.load(Ordering::SeqCst) {
-                    if let Some(resp) = dispatch(&handlers, &text, &token, &authenticated).await {
+                    if let Some(resp) = dispatch(&handlers, req, &token, &authenticated).await {
                         let Ok(frame) = serde_json::to_string(&resp) else {
                             break;
                         };
@@ -158,7 +161,7 @@ async fn handle_connection(
                 let authenticated = authenticated.clone();
                 let token = token.clone();
                 tokio::spawn(async move {
-                    if let Some(resp) = dispatch(&handlers, &text, &token, &authenticated).await {
+                    if let Some(resp) = dispatch(&handlers, req, &token, &authenticated).await {
                         let frame = serde_json::to_string(&resp).unwrap_or_default();
                         let _ = resp_tx.send(frame).await;
                     }
@@ -169,36 +172,32 @@ async fn handle_connection(
     log(&opts, format!("断开: {peer}"));
 }
 
-/// 分发一帧 JSON-RPC 消息；请求返回响应，通知返回 None。
+/// Parse error 响应（id 未知，恒为 Null）。
+fn parse_error_response() -> protocol::JsonRpcResponse {
+    protocol::JsonRpcResponse {
+        jsonrpc: "2.0".into(),
+        id: protocol::JsonRpcId::Null,
+        result: None,
+        error: Some(protocol::JsonRpcError {
+            code: protocol::rpc_error::PARSE_ERROR,
+            message: "Parse error".into(),
+            data: None,
+        }),
+    }
+}
+
+/// 分发一帧已解析的 JSON-RPC 请求，返回响应。
 /// 未认证连接只接受 `auth` 方法，其余一律返回 AUTH_FAILED（docs/DESIGN.md「认证」）。
 async fn dispatch(
     handlers: &Handlers,
-    text: &str,
+    req: JsonRpcRequest,
     token: &str,
     authenticated: &Arc<AtomicBool>,
 ) -> Option<protocol::JsonRpcResponse> {
-    let value: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(_) => {
-            return Some(protocol::JsonRpcResponse {
-                jsonrpc: "2.0".into(),
-                id: protocol::JsonRpcId::Null,
-                result: None,
-                error: Some(protocol::JsonRpcError {
-                    code: protocol::rpc_error::PARSE_ERROR,
-                    message: "Parse error".into(),
-                    data: None,
-                }),
-            });
-        }
-    };
-    if value.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+    if req.jsonrpc != "2.0" {
         return Some(protocol::JsonRpcResponse {
             jsonrpc: "2.0".into(),
-            id: value
-                .get("id")
-                .cloned()
-                .unwrap_or(protocol::JsonRpcId::Null),
+            id: req.id,
             result: None,
             error: Some(protocol::JsonRpcError {
                 code: protocol::rpc_error::INVALID_REQUEST,
@@ -207,37 +206,27 @@ async fn dispatch(
             }),
         });
     }
-    let method = value.get("method").and_then(|m| m.as_str());
-    let Some(method) = method else {
+    // 无 id 的帧视为非法请求（文档样例 auth 带 id=1；auth 缺 id 返回 INVALID_REQUEST）
+    let Some(id) = req.id.else_null() else {
         return Some(protocol::JsonRpcResponse {
             jsonrpc: "2.0".into(),
-            id: value
-                .get("id")
-                .cloned()
-                .unwrap_or(protocol::JsonRpcId::Null),
+            id: protocol::JsonRpcId::Null,
             result: None,
             error: Some(protocol::JsonRpcError {
                 code: protocol::rpc_error::INVALID_REQUEST,
-                message: "Invalid Request".into(),
+                message: "请求缺少 id".into(),
                 data: None,
             }),
         });
     };
-    let id = value.get("id").cloned();
-    let params = value.get("params").cloned();
 
-    let Some(id) = id else {
-        // 客户端发起的通知：当前无 client→server 通知
-        return None;
-    };
-
-    if method == method::AUTH {
-        return Some(handle_auth(&params, token, authenticated, id));
+    if req.method == method::AUTH {
+        return Some(handle_auth(&req.params, token, authenticated, id));
     }
     if !authenticated.load(Ordering::SeqCst) {
         protocol::log::error(
             "server.transport",
-            format!("未认证连接请求 {method} → AUTH_FAILED"),
+            format!("未认证连接请求 {} → AUTH_FAILED", req.method),
         );
         return Some(protocol::JsonRpcResponse {
             jsonrpc: "2.0".into(),
@@ -252,19 +241,19 @@ async fn dispatch(
     }
 
     let summary = protocol::log::params_summary(
-        params.as_ref().unwrap_or(&protocol::JsonRpcId::Null),
+        req.params.as_ref().unwrap_or(&serde_json::Value::Null),
         &["sessionId", "agent", "cwd", "input"],
         60,
     );
-    protocol::log::debug("server.transport", format!("请求 {method} {summary}"));
+    protocol::log::debug("server.transport", format!("请求 {} {summary}", req.method));
     let started = std::time::Instant::now();
-    let result = handlers.handle(method, &params).await;
+    let result = handlers.handle(&req.method, &req.params).await;
     let (result, error) = match result {
         Ok(v) => (Some(v), None),
         Err(RpcError { code, message }) => {
             protocol::log::error(
                 "server.transport",
-                format!("请求 {method} 失败 [{code}]: {message}"),
+                format!("请求 {} 失败 [{code}]: {message}", req.method),
             );
             (
                 None,
@@ -278,7 +267,7 @@ async fn dispatch(
     };
     protocol::log::debug(
         "server.transport",
-        format!("响应 {method}（{}ms）", started.elapsed().as_millis()),
+        format!("响应 {}（{}ms）", req.method, started.elapsed().as_millis()),
     );
     Some(protocol::JsonRpcResponse {
         jsonrpc: "2.0".into(),
@@ -290,7 +279,7 @@ async fn dispatch(
 
 /// 处理 `auth` 消息：比较 token，匹配则标记认证通过并返回结果，否则 AUTH_FAILED。
 fn handle_auth(
-    params: &Option<protocol::JsonRpcId>,
+    params: &Option<serde_json::Value>,
     token: &str,
     authenticated: &Arc<AtomicBool>,
     id: protocol::JsonRpcId,

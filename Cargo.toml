@@ -25,3 +25,8 @@ uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 lto = "thin"
+
+# dev 构建只保留行号表：gpui 级别的依赖全量 debuginfo 会让二进制膨胀到数百 MB，
+# 在内存紧张的机器上链接抖动近停滞；行号表足以支撑 panic 回溯定位。
+[profile.dev]
+debug = "line-tables-only"

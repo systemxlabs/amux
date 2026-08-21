@@ -1,80 +1,8 @@
-//! 业务类型：agent/会话/对话内容/活动/workspace/应用侧配置形状。
-//! 语义依据 docs/DESIGN.md（「Client-Server 通信」协议、普通会话存储、应用各存储）。
+//! 业务类型：agent/会话/对话内容/活动/workspace。
+//! 语义依据 docs/DESIGN.md（「Client-Server 通信」协议、普通会话存储）。
+//! 应用本地配置形状（machines/skills/workflows 等 JSON 文件）不属于线上协议，由 desktop 自持。
 
 use serde::{Deserialize, Serialize};
-
-// ---- 应用侧本地配置形状（协议面单一来源）----
-
-/// 注册机器（docs/DESIGN.md「注册机器存储」）：name 唯一。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MachineConfig {
-    pub name: String,
-    /// ws://host:port
-    pub url: String,
-    pub token: String,
-}
-
-/// 技能条目（docs/DESIGN.md「技能存储」）：name 唯一，只存描述。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SkillEntry {
-    pub name: String,
-    pub description: String,
-}
-
-/// 工作流模板（docs/DESIGN.md「工作流模板存储」）：name 唯一。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkflowTemplate {
-    pub name: String,
-    pub plan: String,
-}
-
-/// 常用工作目录条目（docs/DESIGN.md「常用工作目录存储」）：(machine, workspace) 唯一。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RecentWorkspace {
-    pub machine: String,
-    pub workspace: String,
-    pub last_used: u64,
-}
-
-/// 快捷指令（docs/DESIGN.md「快捷指令存储」）：name 唯一。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct QuickCommand {
-    pub name: String,
-    pub prompt: String,
-}
-
-/// 内置编排 agent 的 API 配置（docs/DESIGN.md「编排智能体配置存储」）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct OrchestratorConfig {
-    /// API format：`chat_completions`（OpenAI Chat Completions）
-    /// | `responses`（OpenAI Responses）| `messages`（Anthropic Messages）
-    pub api_format: String,
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-}
-
-impl Default for OrchestratorConfig {
-    fn default() -> Self {
-        OrchestratorConfig {
-            api_format: "chat_completions".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            model: String::new(),
-        }
-    }
-}
-
-impl OrchestratorConfig {
-    /// 编排 agent 是否已配置可用：Base URL、API key、模型均非空。
-    pub fn is_configured(&self) -> bool {
-        !self.base_url.trim().is_empty()
-            && !self.api_key.trim().is_empty()
-            && !self.model.trim().is_empty()
-    }
-}
 
 // ---- 认证（docs/DESIGN.md「认证」）----
 
@@ -199,7 +127,7 @@ pub struct SessionPageParams {
     pub limit: Option<usize>,
     /// 独占上界游标：只返回该下标之前的条目（None = 从最新一窗开始）
     #[serde(default)]
-    pub before: Option<usize>,
+    pub before: Option<u64>,
 }
 
 /// `session.new` 结果。
@@ -209,7 +137,7 @@ pub struct SessionResult {
 }
 
 /// `session.list` 结果。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionListResult {
     pub sessions: Vec<SessionMeta>,
@@ -292,7 +220,8 @@ pub enum HistoryItem {
 pub struct HistoryResult {
     pub items: Vec<HistoryItem>,
     pub has_more: bool,
-    pub next_before: usize,
+    /// 更早一窗的独占上界游标；无更早时为 None。
+    pub next_before: Option<u64>,
 }
 
 // ---- 活动（docs/DESIGN.md「普通会话存储·活动历史」「session.activities」）----
@@ -329,7 +258,8 @@ pub enum Activity {
 pub struct ActivitiesResult {
     pub activities: Vec<Activity>,
     pub has_more: bool,
-    pub next_before: usize,
+    /// 更早一窗的独占上界游标；无更早时为 None。
+    pub next_before: Option<u64>,
 }
 
 /// `session.ongoing_activity` 结果（进行中的活动；无则 None）。
@@ -341,14 +271,14 @@ pub struct OngoingActivityResult {
 
 // ---- workspace（docs/DESIGN.md「workspace.diff」「workspace.restore」）----
 
+/// git 改动状态。server 侧 status 检测关闭了重命名跟踪，重命名呈现为删除+新增，
+/// 故无 Renamed/Untracked 变体（Untracked 与 Added 语义重叠）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitChangeStatus {
     Added,
     Modified,
     Deleted,
-    Renamed,
-    Untracked,
 }
 
 /// 单个 diff hunk（可独立反向应用撤销）。
@@ -382,8 +312,18 @@ pub struct WorkspaceDiffResult {
     pub not_repo: bool,
 }
 
+/// `workspace.diff` 参数（与 restore 不同：无 patch 字段）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDiffParams {
+    /// 普通会话 ID；Server 从注册表解析其绑定的工作目录。
+    pub session_id: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 /// `workspace.restore` 参数。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRestoreParams {
     /// 普通会话 ID；Server 从注册表解析其绑定的工作目录。
@@ -395,7 +335,7 @@ pub struct WorkspaceRestoreParams {
 }
 
 /// `workspace.list` 参数。path 始终是相对 cwd 的目录路径。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceListParams {
     /// 普通会话 ID；工作目录不可由调用方任意指定。
@@ -429,7 +369,7 @@ pub struct WorkspaceListResult {
 }
 
 /// `workspace.read` 参数。offset/limit 按 UTF-8 文本行分页。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceReadParams {
     /// 普通会话 ID；工作目录不可由调用方任意指定。
@@ -461,6 +401,16 @@ fn workspace_read_limit() -> usize {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// 会话状态的线上表示解析（snake_case）。GUI 与 server 之外的持久化层（工作流 sqlite）
+/// 也存该表示，解析统一收口在此，避免各处手写 match 漂移。
+pub fn parse_session_state(s: &str) -> Option<SessionState> {
+    match s {
+        "idle" => Some(SessionState::Idle),
+        "busy" => Some(SessionState::Busy),
+        _ => None,
+    }
 }
 
 /// 会话标题生成（协议面共享的纯逻辑）：取首行、压缩空白、截断到 max_chars。
@@ -576,55 +526,13 @@ mod tests {
         assert!(json.contains("\"nextOffset\":1"), "{json}");
     }
 
-    /// 配置形状往返：MachineConfig/SkillEntry/WorkflowTemplate/QuickCommand/RecentWorkspace/OrchestratorConfig。
+    /// 会话状态线上表示解析。
     #[test]
-    fn config_shapes_roundtrip() {
-        let m = MachineConfig {
-            name: "localpc".into(),
-            url: "ws://127.0.0.1:34567".into(),
-            token: "t".into(),
-        };
-        let back: MachineConfig =
-            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
-        assert_eq!(back.name, "localpc");
-
-        let w = RecentWorkspace {
-            machine: "localpc".into(),
-            workspace: "/home/x".into(),
-            last_used: 1,
-        };
-        let s = serde_json::to_string(&w).unwrap();
-        assert!(s.contains("\"lastUsed\":1"), "{s}");
-        let back: RecentWorkspace = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.workspace, "/home/x");
-
-        let t = WorkflowTemplate {
-            name: "审查".into(),
-            plan: "用 codex 实现，claude 审查".into(),
-        };
-        let back: WorkflowTemplate =
-            serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
-        assert_eq!(back.plan, "用 codex 实现，claude 审查");
-
-        let q = QuickCommand {
-            name: "Commit & Push".into(),
-            prompt: "提交并推送".into(),
-        };
-        let back: QuickCommand = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
-        assert_eq!(back.name, "Commit & Push");
-
-        let orch = OrchestratorConfig {
-            api_key: "k".into(),
-            base_url: "https://api.example.com/v1".into(),
-            model: "m".into(),
-            ..OrchestratorConfig::default()
-        };
-        assert!(orch.is_configured());
-        let blank = OrchestratorConfig {
-            model: "  ".into(),
-            ..orch.clone()
-        };
-        assert!(!blank.is_configured(), "空白模型不算已配置");
+    fn session_state_parses_snake_case() {
+        assert_eq!(parse_session_state("idle"), Some(SessionState::Idle));
+        assert_eq!(parse_session_state("busy"), Some(SessionState::Busy));
+        assert_eq!(parse_session_state("Idle"), None);
+        assert_eq!(parse_session_state(""), None);
     }
 
     /// Git diff 类型往返。

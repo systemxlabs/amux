@@ -3,7 +3,8 @@
 //! 常用工作目录（machine/workspace）插入、会话列表窗口合并、对话/活动数据变换、
 //! 输入 @ 引用与附件组装。与 GPUI 渲染分离，可单测直驱。
 
-use protocol::{Activity, ContentBlock, HistoryItem, RecentWorkspace, SessionMeta};
+use protocol::{Activity, ContentBlock, HistoryItem, SessionMeta};
+use crate::config::RecentWorkspace;
 
 // ---- 常用工作目录纯逻辑（docs/DESIGN.md「常用工作目录存储」）----
 

@@ -8,11 +8,90 @@
 
 use std::path::{Path, PathBuf};
 
-pub use protocol::{
-    MachineConfig, OrchestratorConfig, QuickCommand, RecentWorkspace, SkillEntry, WorkflowTemplate,
-};
+use serde::{Deserialize, Serialize};
 
 use crate::logic::{merge_recent_workspace, recent_workspaces_for_machine};
+
+// ---- 应用本地配置形状（docs/DESIGN.md「应用」各存储节）----
+// 这些是 ~/.amux/app/ 下 JSON 文件的格式，不属于线上协议，故定义在应用侧。
+
+/// 注册机器（docs/DESIGN.md「注册机器存储」）：name 唯一。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MachineConfig {
+    pub name: String,
+    /// ws://host:port
+    pub url: String,
+    pub token: String,
+}
+
+/// 技能条目（docs/DESIGN.md「技能存储」）：name 唯一，只存描述。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillEntry {
+    pub name: String,
+    pub description: String,
+}
+
+/// 工作流模板（docs/DESIGN.md「工作流模板存储」）：name 唯一。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowTemplate {
+    pub name: String,
+    pub plan: String,
+}
+
+/// 常用工作目录条目（docs/DESIGN.md「常用工作目录存储」）：(machine, workspace) 唯一。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentWorkspace {
+    pub machine: String,
+    pub workspace: String,
+    pub last_used: u64,
+}
+
+/// 快捷指令（docs/DESIGN.md「快捷指令存储」）：name 唯一。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuickCommand {
+    pub name: String,
+    pub prompt: String,
+}
+
+/// 编排 agent 的 API 格式（docs/DESIGN.md「编排智能体设置」单选项）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiFormat {
+    ChatCompletions,
+    Responses,
+    Messages,
+}
+
+/// 内置编排 agent 的 API 配置（docs/DESIGN.md「编排智能体配置存储」）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorConfig {
+    pub api_format: ApiFormat,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        OrchestratorConfig {
+            api_format: ApiFormat::ChatCompletions,
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+        }
+    }
+}
+
+impl OrchestratorConfig {
+    /// 编排 agent 是否已配置可用：Base URL、API key、模型均非空。
+    pub fn is_configured(&self) -> bool {
+        !self.base_url.trim().is_empty()
+            && !self.api_key.trim().is_empty()
+            && !self.model.trim().is_empty()
+    }
+}
 
 /// 每设备常用工作目录数量上限（实现决策；PRD 未明确，取一个合理值）。
 pub const MAX_RECENT_WORKSPACES: usize = 20;
@@ -104,7 +183,7 @@ pub fn normalize_quick_commands(raw: &serde_json::Value) -> Vec<QuickCommand> {
         .unwrap_or_default()
 }
 
-/// 编排配置归一化：坏配置回退默认（docs/DESIGN.md「编排智能体配置存储」）。
+/// 编排配置归一化：字段缺失或 api_format 非法 → 整体回退默认（docs/DESIGN.md「编排智能体配置存储」）。
 pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
     let has_req = ["apiFormat", "baseUrl", "apiKey", "model"]
         .iter()
@@ -112,8 +191,13 @@ pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
     if !has_req {
         return OrchestratorConfig::default();
     }
+    let Ok(api_format) =
+        serde_json::from_value::<ApiFormat>(raw["apiFormat"].clone())
+    else {
+        return OrchestratorConfig::default();
+    };
     OrchestratorConfig {
-        api_format: raw["apiFormat"].as_str().unwrap_or("").to_string(),
+        api_format,
         base_url: raw["baseUrl"].as_str().unwrap_or("").to_string(),
         api_key: raw["apiKey"].as_str().unwrap_or("").to_string(),
         model: raw["model"].as_str().unwrap_or("").to_string(),
@@ -366,8 +450,8 @@ impl ConfigStore {
     /// 记录一次常用工作目录使用（(machine, workspace) 唯一、最近优先、上限）。
     pub fn record_recent_workspace(&self, machine: &str, workspace: &str, now: u64) {
         let ws = self.recent_workspaces();
-        let merged = merge_recent_workspace(&ws, machine, workspace, now, MAX_RECENT_WORKSPACES);
         // 直接写合并结果（不再读回，防止并发覆盖）
+        let merged = merge_recent_workspace(&ws, machine, workspace, now, MAX_RECENT_WORKSPACES);
         write_file(
             &self.path("recent_workspaces.json"),
             &serde_json::to_value(&merged).unwrap(),
@@ -415,8 +499,6 @@ impl ConfigStore {
     }
 }
 
-/// 机器连接 URL：`ws://host:port?token=...`（ws 后台从查询串解析 token 用于 auth）。
-/// 统一补 `/` 保证 tungstenite 请求行合法（`GET /?...` 而非 `GET ?...`）。
 /// 机器 WS 连接 URL（不含 token；token 在建连后经 `auth` 发送，docs/DESIGN.md「认证」）。
 /// 统一补 `/` 保证 tungstenite 请求行合法（`GET /` 而非非法空路径）。
 pub fn machine_ws_url(m: &MachineConfig) -> String {
@@ -511,7 +593,14 @@ mod tests {
         let full = serde_json::json!({
             "apiFormat": "responses", "baseUrl": "http://x", "apiKey": "k", "model": "m"
         });
-        assert_eq!(normalize_orchestrator(&full).model, "m");
+        let cfg = normalize_orchestrator(&full);
+        assert_eq!(cfg.model, "m");
+        assert_eq!(cfg.api_format, ApiFormat::Responses);
+        // 非法 api_format 视为坏配置，整体回退默认
+        let bad = serde_json::json!({
+            "apiFormat": "graphql", "baseUrl": "http://x", "apiKey": "k", "model": "m"
+        });
+        assert_eq!(normalize_orchestrator(&bad), OrchestratorConfig::default());
     }
 
     #[test]
@@ -538,7 +627,7 @@ mod tests {
         s.add_template("审查", "用 codex 实现，claude 审查");
         s.add_quick_command("构建", "cargo build");
         s.save_orchestrator(&OrchestratorConfig {
-            api_format: "responses".into(),
+            api_format: ApiFormat::Responses,
             base_url: "http://localhost:8000/v1".into(),
             api_key: "sk".into(),
             model: "gpt-4.1".into(),

@@ -2,6 +2,10 @@
 //!
 //! 日志实现使用 logforth：默认 `info`，通过 `RUST_LOG` 调整级别，文件按天滚动并保留
 //! 最近 7 个日志文件。应用和 server 只负责在启动时提供各自的日志路径。
+//!
+//! 职责说明：日志是 desktop 与 server 共享的横切基础设施，而 protocol 是仓库中唯一的
+//! 公共 crate（AGENTS.md 仓库结构表仅三组件），故日志门面随协议面一同放在此处；
+//! 协议类型本身不依赖本模块。
 
 use std::num::NonZeroUsize;
 use std::path::Path;

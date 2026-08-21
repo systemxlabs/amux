@@ -10,7 +10,8 @@ use protocol::{
     method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams,
     AgentSkillsResult, HistoryResult, OngoingActivityResult, OpResult, SessionConfigureParams,
     SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, WorkspaceDiffResult,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
+    WorkspaceDiffParams, WorkspaceDiffResult,
     WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
@@ -252,7 +253,7 @@ impl Handlers {
             }
 
             method::WORKSPACE_DIFF => {
-                let p: WorkspaceRestoreParams = parse(params)?;
+                let p: WorkspaceDiffParams = parse(params)?;
                 let cwd = self
                     .manager
                     .workspace_cwd(&p.session_id)
