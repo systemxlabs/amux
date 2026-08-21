@@ -322,6 +322,7 @@ pub struct AmuxApp {
     orch_key_input: Entity<InputState>,
     orch_model_input: Entity<InputState>,
     orchestrator_form_error: Option<String>,
+    orchestrator_form_status: Option<String>,
     title_input: Entity<InputState>,
     qc_edit_target: Option<String>,
     skill_edit_target: Option<String>,
@@ -416,6 +417,7 @@ impl AmuxApp {
             orch_model_input,
             orch_api_format: "chat_completions".into(),
             orchestrator_form_error: None,
+            orchestrator_form_status: None,
             title_input,
             qc_edit_target: None,
             skill_edit_target: None,
@@ -485,14 +487,24 @@ impl AmuxApp {
         };
         if let Some(error) = error {
             self.orchestrator_form_error = Some(error.into());
+            self.orchestrator_form_status = None;
         } else {
-            self.store.save_orchestrator(&OrchestratorConfig {
+            let result = self.store.save_orchestrator(&OrchestratorConfig {
                 api_format,
                 base_url,
                 api_key,
                 model,
             });
-            self.orchestrator_form_error = None;
+            match result {
+                Ok(()) => {
+                    self.orchestrator_form_error = None;
+                    self.orchestrator_form_status = Some("已保存。".into());
+                }
+                Err(error) => {
+                    self.orchestrator_form_error = Some(format!("保存失败：{error}"));
+                    self.orchestrator_form_status = None;
+                }
+            }
         }
         cx.notify();
     }
@@ -5431,6 +5443,7 @@ impl AmuxApp {
                 }
                 .into();
                 this.orchestrator_form_error = None;
+                this.orchestrator_form_status = None;
                 cx.notify();
             }));
         let mut form = v_flex()
@@ -5467,6 +5480,13 @@ impl AmuxApp {
                 Label::new(error.clone())
                     .text_sm()
                     .text_color(cx.theme().danger),
+            );
+        }
+        if let Some(status) = &self.orchestrator_form_status {
+            form = form.child(
+                Label::new(status.clone())
+                    .text_sm()
+                    .text_color(cx.theme().success),
             );
         }
         form = form.child(

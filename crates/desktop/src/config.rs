@@ -362,11 +362,14 @@ impl ConfigStore {
             .unwrap_or_default()
     }
 
-    pub fn save_orchestrator(&self, cfg: &OrchestratorConfig) {
-        write_file(
-            &self.path("agent.json"),
-            &serde_json::to_value(cfg).unwrap(),
-        );
+    pub fn save_orchestrator(&self, cfg: &OrchestratorConfig) -> std::io::Result<()> {
+        let path = self.path("agent.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(cfg)
+            .map_err(std::io::Error::other)?;
+        std::fs::write(path, json)
     }
 
     /// 工作流会话持久化目录（~/.amux/app/sessions/）。
@@ -502,7 +505,8 @@ mod tests {
             base_url: "http://localhost:8000/v1".into(),
             api_key: "sk".into(),
             model: "gpt-4.1".into(),
-        });
+        })
+        .unwrap();
 
         // 重新加载（同一目录）：各分类独立往返
         let s2 = ConfigStore::new(dir.clone());
