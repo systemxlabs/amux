@@ -128,7 +128,7 @@ impl SessionRegistry {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at
-             FROM sessions ORDER BY last_active_at DESC",
+             FROM sessions ORDER BY last_active_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], row_to_entry)?;
         rows.collect()

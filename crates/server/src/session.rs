@@ -75,25 +75,21 @@ impl SessionManager {
     }
 
     /// 会话列表惰性分页（纯函数，可单测；docs/DESIGN.md「session.list」）：
-    /// `all` 已按最近活跃（`last_active_at` 降序）；`before` 为独占上界游标
-    /// （只取 `last_active_at < before` 的更早会话）。返回（窗口, 是否还有更早, 下次游标）。
+    /// `all` 已按最近活跃降序；`before` 是窗口之后剩余的更早条目数，而不是时间戳。
+    /// 使用稳定排序下的下标可覆盖相同毫秒时间戳的会话，不会因严格时间比较跳过条目。
     pub fn session_page(
         all: &[RegistryEntry],
         limit: usize,
         before: Option<u64>,
     ) -> (Vec<RegistryEntry>, bool, Option<u64>) {
-        let filtered: Vec<&RegistryEntry> = all
-            .iter()
-            .filter(|(m, _)| before.map(|b| m.last_active_at < b).unwrap_or(true))
-            .collect();
-        let window: Vec<RegistryEntry> =
-            filtered.iter().take(limit).map(|e| (*e).clone()).collect();
-        let has_more = filtered.len() > limit;
-        let next_before = if has_more {
-            window.last().map(|(m, _)| m.last_active_at)
-        } else {
-            None
-        };
+        let start = before
+            .and_then(|value| usize::try_from(value).ok())
+            .map(|remaining| all.len().saturating_sub(remaining))
+            .unwrap_or(0);
+        let end = start.saturating_add(limit).min(all.len());
+        let window = all[start..end].to_vec();
+        let has_more = end < all.len();
+        let next_before = has_more.then_some((all.len() - end) as u64);
         (window, has_more, next_before)
     }
 
@@ -171,9 +167,12 @@ impl SessionManager {
         let entry = self
             .registry
             .get(session_id)
-            .map_err(|e| format!("注册表读取失败: {e}"))?
-            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        let (meta, agent_session_id) = entry;
+            .map_err(|e| format!("注册表读取失败: {e}"))?;
+        let Some((meta, agent_session_id)) = entry else {
+            // DELETE is idempotent so clients can safely retry after a partial
+            // workflow cleanup.
+            return Ok(());
+        };
         if !agent_session_id.is_empty() {
             match self.agents.driver_for(&meta.agent) {
                 Ok(driver) => {
@@ -181,6 +180,12 @@ impl SessionManager {
                         protocol::log::error(
                             "server.session",
                             format!("关闭 ACP 会话失败（继续本地删除）{session_id}: {e}"),
+                        );
+                    }
+                    if let Err(e) = driver.delete(&agent_session_id) {
+                        protocol::log::debug(
+                            "server.session",
+                            format!("ACP 不支持删除会话（本地删除继续）{session_id}: {e}"),
                         );
                     }
                 }
@@ -230,6 +235,16 @@ impl SessionManager {
             }
         }
         Ok(metas)
+    }
+
+    /// 返回普通会话绑定的工作目录。workspace RPC 不接受调用方自带 cwd，
+    /// 避免借助已知 session id 浏览或修改另一目录。
+    pub fn workspace_cwd(&self, session_id: &str) -> Result<String, String> {
+        self.registry
+            .get(session_id)
+            .map_err(|e| format!("注册表读取失败: {e}"))?
+            .map(|(meta, _)| meta.cwd)
+            .ok_or_else(|| format!("会话不存在: {session_id}"))
     }
 
     /// 关闭长时间无活动的 agent 侧会话（>timeout_ms，docs/DESIGN.md「主动关闭长时间
@@ -495,7 +510,10 @@ impl SessionManager {
                     );
                 }
                 AgentEvent::Compaction(detail) => {
-                    merger.push_compaction(detail.clone(), now());
+                    merger.push_activity(Activity::Compaction {
+                        timestamp: now(),
+                        detail: detail.clone(),
+                    });
                     self.ongoing.lock().unwrap().insert(
                         session_id.to_string(),
                         Activity::Compaction {
@@ -702,17 +720,17 @@ mod tests {
         assert_eq!(w[0].0.id, "s9");
         assert_eq!(w[1].0.id, "s8");
         assert!(more);
-        assert_eq!(nb, Some(800));
+        assert_eq!(nb, Some(4));
 
-        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(800));
+        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(4));
         assert_eq!(
             w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
             ["s7", "s6"]
         );
         assert!(more);
-        assert_eq!(nb, Some(600));
+        assert_eq!(nb, Some(2));
 
-        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(600));
+        let (w, more, nb) = SessionManager::session_page(&all, 2, Some(2));
         assert_eq!(
             w.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
             ["s5", "s4"]
@@ -724,6 +742,35 @@ mod tests {
         assert!(w.is_empty());
         assert!(!more);
         assert_eq!(nb, None);
+    }
+
+    #[test]
+    fn session_page_keeps_same_timestamp_entries() {
+        let entry = |id: &str| {
+            (
+                SessionMeta {
+                    id: id.into(),
+                    agent: "codex".into(),
+                    cwd: "/tmp".into(),
+                    state: SessionState::Idle,
+                    title: String::new(),
+                    created_at: 1,
+                    last_active_at: 100,
+                },
+                String::new(),
+            )
+        };
+        let all = vec![entry("s3"), entry("s2"), entry("s1")];
+        let (first, more, cursor) = SessionManager::session_page(&all, 2, None);
+        assert_eq!(first.len(), 2);
+        assert!(more);
+        let (second, more, next) = SessionManager::session_page(&all, 2, cursor);
+        assert_eq!(
+            second.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
+            ["s1"]
+        );
+        assert!(!more);
+        assert_eq!(next, None);
     }
 
     /// 历史惰性加载切窗（纯函数）。
@@ -956,17 +1003,18 @@ mod tests {
         let (mgr, _rx) = stub_manager("codex");
         let meta = mgr.create("codex", "/tmp/noop").await.unwrap();
         mgr.delete(&meta.id).await.unwrap();
+        mgr.delete(&meta.id).await.expect("重复删除应保持幂等");
         assert!(mgr.registry.get(&meta.id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
     }
 
-    /// 会话不存在错误。
+    /// 会话不存在时，读取和 prompt 报错，删除保持幂等。
     #[tokio::test]
     async fn missing_session_errors() {
         let (mgr, _rx) = stub_manager("codex");
         assert!(mgr.prompt("nope", text("x")).await.is_err());
         assert!(mgr.history("nope", None, None).await.is_err());
-        assert!(mgr.delete("nope").await.is_err());
+        assert!(mgr.delete("nope").await.is_ok());
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
     }
 }

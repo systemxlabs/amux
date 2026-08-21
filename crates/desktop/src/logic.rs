@@ -155,6 +155,40 @@ pub fn path_attachment(path: &str) -> InputAttachment {
     }
 }
 
+/// 外部拖拽路径转换为附件；常见图片直接编码为 ACP resource，
+/// 其他文件保持路径上下文附件。
+pub fn external_path_attachment(path: &str) -> InputAttachment {
+    let p = std::path::Path::new(path);
+    let mime_type = match p
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        Some("bmp") => Some("image/bmp"),
+        _ => None,
+    };
+    if let Some(mime_type) = mime_type {
+        if let Ok(data) = std::fs::read(p) {
+            use base64::Engine;
+            return InputAttachment::Image {
+                name: p
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_string(),
+                mime_type: mime_type.to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+            };
+        }
+    }
+    path_attachment(path)
+}
+
 /// 解析输入文本中的 @ 引用（PRD §4.2：@ 引用文件或目录作为上下文）。
 /// 返回（清理后的文本，引用列表）。
 pub fn parse_at_references(text: &str) -> (String, Vec<String>) {
@@ -243,6 +277,26 @@ pub fn compose_prompt(text: &str, attachments: &[InputAttachment]) -> Vec<Conten
         blocks.push(attachment_to_content_block(a));
     }
     blocks
+}
+
+/// 工作流编排器当前使用文本上下文；将附件内容显式带入工作流 transcript，
+/// 避免工作流输入丢失 `@` 引用和拖拽附件。
+pub fn compose_workflow_text(text: &str, attachments: &[InputAttachment]) -> String {
+    let mut result = text.to_string();
+    for attachment in attachments {
+        let detail = match attachment {
+            InputAttachment::Path { path, .. } => read_path_context(path),
+            InputAttachment::Image {
+                name, mime_type, ..
+            } => format!("[图片 {name}，类型 {mime_type}]"),
+        };
+        if !result.trim().is_empty() {
+            result.push_str("\n\n");
+        }
+        result.push_str("[上下文附件]\n");
+        result.push_str(&detail);
+    }
+    result
 }
 
 #[cfg(test)]

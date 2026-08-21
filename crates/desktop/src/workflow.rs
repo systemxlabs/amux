@@ -310,6 +310,13 @@ impl WorkflowEngine {
         if !session.done {
             session.state = SessionState::Idle;
         }
+        // 子会话只持久化机器名和旧下标；应用重启或机器列表变化后按机器名重新绑定。
+        for child in &mut session.children {
+            child.machine_idx = machines
+                .iter()
+                .position(|machine| machine.name == child.machine_name)
+                .unwrap_or(usize::MAX);
+        }
         WorkflowEngine {
             session,
             backend,
@@ -354,6 +361,10 @@ impl WorkflowEngine {
     }
 
     async fn do_advance(&mut self) -> Result<(), String> {
+        self.session.activities.push(Activity::Thinking {
+            timestamp: now(),
+            content: "编排智能体正在分析工作流并规划本轮调度".into(),
+        });
         let ctx = self.build_context();
         let decision = match self.backend.decide(&ctx).await {
             Ok(d) => d,
@@ -477,7 +488,12 @@ impl WorkflowEngine {
                             last_active_at: now(),
                         });
                     }
-                    self.prompt_child(&session_id, &prompt).await?;
+                    if let Err(error) = self.prompt_child(&session_id, &prompt).await {
+                        self.session.activities.push(Activity::Error {
+                            timestamp: now(),
+                            detail: error,
+                        });
+                    }
                     self.session.activities.push(Activity::ToolCall {
                         timestamp: now(),
                         name: "create_session".into(),
@@ -489,7 +505,12 @@ impl WorkflowEngine {
                     });
                 }
                 OrcAction::Steer { session, prompt } | OrcAction::Retry { session, prompt } => {
-                    self.prompt_child(&session, &prompt).await?;
+                    if let Err(error) = self.prompt_child(&session, &prompt).await {
+                        self.session.activities.push(Activity::Error {
+                            timestamp: now(),
+                            detail: error,
+                        });
+                    }
                     self.session.activities.push(Activity::ToolCall {
                         timestamp: now(),
                         name: "prompt_session".into(),

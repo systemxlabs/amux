@@ -406,9 +406,18 @@ async fn workspace_diff_reflects_changes() {
     let mut c = Client::connect(port, "test-token").await;
     let dir = init_repo();
     std::fs::write(dir.join("a.txt"), "line1\nCHANGED\n").unwrap();
+    let session = c
+        .call(
+            "session.new",
+            json!({"agent": "mock_acp", "cwd": dir.to_str().unwrap()}),
+        )
+        .await["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let d = c
-        .call("workspace.diff", json!({"cwd": dir.to_str().unwrap()}))
+        .call("workspace.diff", json!({"sessionId": session}))
         .await;
     assert!(d.get("error").is_none(), "diff 失败: {d}");
     let files = d["result"]["files"].as_array().unwrap();
@@ -418,7 +427,7 @@ async fn workspace_diff_reflects_changes() {
     let r = c
         .call(
             "workspace.restore",
-            json!({"cwd": dir.to_str().unwrap(), "path": "a.txt"}),
+            json!({"sessionId": session, "path": "a.txt"}),
         )
         .await;
     assert_eq!(r["result"]["ok"], true, "restore 失败: {r}");
@@ -438,12 +447,18 @@ async fn workspace_list_and_read_browse_session_directory() {
     std::fs::create_dir(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(dir.join("README.md"), "one\ntwo\nthree\n").unwrap();
+    let session = c
+        .call(
+            "session.new",
+            json!({"agent": "mock_acp", "cwd": dir.to_str().unwrap()}),
+        )
+        .await["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let root = c
-        .call(
-            "workspace.list",
-            json!({"cwd": dir.to_str().unwrap(), "limit": 10}),
-        )
+        .call("workspace.list", json!({"sessionId": session, "limit": 10}))
         .await;
     assert!(root.get("error").is_none(), "list 失败: {root}");
     assert_eq!(root["result"]["path"], "");
@@ -456,7 +471,7 @@ async fn workspace_list_and_read_browse_session_directory() {
     let nested = c
         .call(
             "workspace.list",
-            json!({"cwd": dir.to_str().unwrap(), "path": "src"}),
+            json!({"sessionId": session, "path": "src"}),
         )
         .await;
     assert_eq!(nested["result"]["entries"][0]["path"], "src/main.rs");
@@ -464,7 +479,7 @@ async fn workspace_list_and_read_browse_session_directory() {
     let first = c
         .call(
             "workspace.read",
-            json!({"cwd": dir.to_str().unwrap(), "path": "README.md", "limit": 2}),
+            json!({"sessionId": session, "path": "README.md", "limit": 2}),
         )
         .await;
     assert_eq!(first["result"]["content"], "one\ntwo\n");
@@ -473,7 +488,7 @@ async fn workspace_list_and_read_browse_session_directory() {
         .call(
             "workspace.read",
             json!({
-                "cwd": dir.to_str().unwrap(),
+                "sessionId": session,
                 "path": "README.md",
                 "offset": first["result"]["nextOffset"],
                 "limit": 2
@@ -492,11 +507,20 @@ async fn workspace_read_rejects_invalid_and_binary_paths() {
     let mut c = Client::connect(port, "test-token").await;
     let dir = init_repo();
     std::fs::write(dir.join("binary.dat"), [0xff, 0xfe, 0xfd]).unwrap();
+    let session = c
+        .call(
+            "session.new",
+            json!({"agent": "mock_acp", "cwd": dir.to_str().unwrap()}),
+        )
+        .await["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let traversal = c
         .call(
             "workspace.read",
-            json!({"cwd": dir.to_str().unwrap(), "path": "../outside.txt"}),
+            json!({"sessionId": session, "path": "../outside.txt"}),
         )
         .await;
     assert!(
@@ -507,7 +531,7 @@ async fn workspace_read_rejects_invalid_and_binary_paths() {
     let binary = c
         .call(
             "workspace.read",
-            json!({"cwd": dir.to_str().unwrap(), "path": "binary.dat"}),
+            json!({"sessionId": session, "path": "binary.dat"}),
         )
         .await;
     assert!(
@@ -525,7 +549,7 @@ async fn workspace_read_rejects_invalid_and_binary_paths() {
         let symlink = c
             .call(
                 "workspace.read",
-                json!({"cwd": dir.to_str().unwrap(), "path": "link/secret.txt"}),
+                json!({"sessionId": session, "path": "link/secret.txt"}),
             )
             .await;
         assert!(

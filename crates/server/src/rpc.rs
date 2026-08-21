@@ -253,32 +253,48 @@ impl Handlers {
 
             method::WORKSPACE_DIFF => {
                 let p: WorkspaceRestoreParams = parse(params)?;
-                let r: WorkspaceDiffResult = self.git.diff(&p.cwd, p.path.as_deref());
+                let cwd = self
+                    .manager
+                    .workspace_cwd(&p.session_id)
+                    .map_err(map_session_err)?;
+                let r: WorkspaceDiffResult = self.git.diff(&cwd, p.path.as_deref());
                 serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
             }
 
             method::WORKSPACE_RESTORE => {
                 let p: WorkspaceRestoreParams = parse(params)?;
+                let cwd = self
+                    .manager
+                    .workspace_cwd(&p.session_id)
+                    .map_err(map_session_err)?;
                 let r = self
                     .git
-                    .restore(&p.cwd, p.path.as_deref(), p.patch.as_deref());
+                    .restore(&cwd, p.path.as_deref(), p.patch.as_deref());
                 serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
             }
 
             method::WORKSPACE_LIST => {
                 let p: WorkspaceListParams = parse(params)?;
+                let cwd = self
+                    .manager
+                    .workspace_cwd(&p.session_id)
+                    .map_err(map_session_err)?;
                 let r = self
                     .git
-                    .list_workspace(&p.cwd, p.path.as_deref(), p.limit, p.offset)
+                    .list_workspace(&cwd, p.path.as_deref(), p.limit, p.offset)
                     .map_err(RpcError::internal)?;
                 serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
             }
 
             method::WORKSPACE_READ => {
                 let p: WorkspaceReadParams = parse(params)?;
+                let cwd = self
+                    .manager
+                    .workspace_cwd(&p.session_id)
+                    .map_err(map_session_err)?;
                 let r = self
                     .git
-                    .read_workspace(&p.cwd, &p.path, p.offset, p.limit)
+                    .read_workspace(&cwd, &p.path, p.offset, p.limit)
                     .map_err(RpcError::internal)?;
                 serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
             }

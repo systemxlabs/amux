@@ -152,29 +152,17 @@ fn read_file_normalized<T: Clone>(
 }
 
 fn write_file(path: &Path, json: &serde_json::Value) {
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            protocol::log::error(
-                "gui.config",
-                format!("创建配置目录失败 {}: {e}", parent.display()),
-            );
-            return;
+    let result = (|| -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-    }
-    let content = match serde_json::to_string_pretty(json) {
-        Ok(content) => content,
-        Err(e) => {
-            protocol::log::error(
-                "gui.config",
-                format!("序列化配置失败 {}: {e}", path.display()),
-            );
-            return;
-        }
-    };
-    if let Err(e) = std::fs::write(path, content) {
+        let content = serde_json::to_string_pretty(json).map_err(std::io::Error::other)?;
+        std::fs::write(path, content)
+    })();
+    if let Err(error) = result {
         protocol::log::error(
             "gui.config",
-            format!("写入配置失败 {}: {e}", path.display()),
+            format!("写入配置文件失败 {}: {error}", path.display()),
         );
     }
 }

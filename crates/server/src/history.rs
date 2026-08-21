@@ -200,6 +200,7 @@ impl TurnMerger {
         content: Option<String>,
         timestamp: u64,
     ) {
+        self.finish_thinking();
         self.activities.push(Activity::ToolCall {
             timestamp,
             name,
@@ -210,6 +211,13 @@ impl TurnMerger {
 
     /// 追加执行错误。
     pub fn push_error(&mut self, activity: Activity) {
+        self.finish_thinking();
+        self.activities.push(activity);
+    }
+
+    /// 追加非流式活动（例如上下文压缩），并保持事件到达顺序。
+    pub fn push_activity(&mut self, activity: Activity) {
+        self.finish_thinking();
         self.activities.push(activity);
     }
 

@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
     BlobResourceContents, CancelNotification, CloseSessionRequest, ContentBlock as AcpContentBlock,
-    EmbeddedResource, EmbeddedResourceResource, InitializeRequest, NewSessionRequest,
-    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    DeleteSessionRequest, EmbeddedResource, EmbeddedResourceResource, InitializeRequest,
+    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
     TextContent, TextResourceContents, ToolKind,
@@ -86,6 +86,10 @@ pub trait AgentDriver: Send + Sync {
     /// 关闭会话（删除/长时间无活动时释放 agent 侧资源，docs/DESIGN.md「ACP 生命周期」：
     /// server 经 ACP `session/close` 关闭 agent 侧会话）
     fn close(&self, agent_session_id: &str) -> Result<(), String>;
+    /// 删除 agent 侧会话；不支持时返回错误，调用方可保留已关闭的远端会话。
+    fn delete(&self, _agent_session_id: &str) -> Result<(), String> {
+        Err("agent 不支持 session/delete".into())
+    }
     /// 该 agent 安装的 skills 列表；查询失败必须显式返回错误。
     fn list_skills(&self) -> Result<Vec<String>, String>;
     /// 关闭驱动自身（server 退出时释放 ACP 子进程资源，docs/DESIGN.md「ACP Server 生命周期」）
@@ -857,6 +861,11 @@ impl AgentDriver for AcpAgentDriver {
             .map(|_| ())
     }
 
+    fn delete(&self, agent_session_id: &str) -> Result<(), String> {
+        self.call("session/delete", json!({ "sessionId": agent_session_id }))
+            .map(|_| ())
+    }
+
     /// 经 ACP `skill/list` 查询该 agent 安装的 skills。
     fn list_skills(&self) -> Result<Vec<String>, String> {
         let res = self.call("skill/list", json!({}))?;
@@ -1177,6 +1186,13 @@ async fn dispatch_call_inner(
                 .map_err(|e| format!("session/close 失败: {e}"))?;
             Ok(Value::Null)
         }
+        "session/delete" => {
+            cx.send_request(DeleteSessionRequest::new(sid.to_string()))
+                .block_task()
+                .await
+                .map_err(|e| format!("session/delete 失败: {e}"))?;
+            Ok(Value::Null)
+        }
         "skill/list" => {
             let resp = cx
                 .send_request(SkillListRequest {})
@@ -1370,6 +1386,10 @@ impl AgentDriver for StubAgentDriver {
             .unwrap()
             .retain(|s| s != agent_session_id);
         Ok(())
+    }
+
+    fn delete(&self, agent_session_id: &str) -> Result<(), String> {
+        self.close(agent_session_id)
     }
 
     fn list_skills(&self) -> Result<Vec<String>, String> {

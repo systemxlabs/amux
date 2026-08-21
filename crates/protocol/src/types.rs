@@ -185,7 +185,7 @@ pub struct SessionConfigureParams {
 pub struct SessionListParams {
     #[serde(default)]
     pub limit: Option<usize>,
-    /// 独占上界游标：只返回 `last_active_at < before` 的更早一窗
+    /// 窗口游标：表示当前窗口之后剩余的更早条目数
     #[serde(default)]
     pub before: Option<u64>,
 }
@@ -386,7 +386,8 @@ pub struct WorkspaceDiffResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRestoreParams {
-    pub cwd: String,
+    /// 普通会话 ID；Server 从注册表解析其绑定的工作目录。
+    pub session_id: String,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
@@ -397,7 +398,8 @@ pub struct WorkspaceRestoreParams {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceListParams {
-    pub cwd: String,
+    /// 普通会话 ID；工作目录不可由调用方任意指定。
+    pub session_id: String,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default = "workspace_page_limit")]
@@ -430,7 +432,8 @@ pub struct WorkspaceListResult {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceReadParams {
-    pub cwd: String,
+    /// 普通会话 ID；工作目录不可由调用方任意指定。
+    pub session_id: String,
     pub path: String,
     #[serde(default)]
     pub offset: usize,
@@ -551,14 +554,14 @@ mod tests {
     #[test]
     fn workspace_params_and_results_use_documented_json_shape() {
         let list: WorkspaceListParams =
-            serde_json::from_str(r#"{"cwd":"/tmp/project","path":"src"}"#).unwrap();
-        assert_eq!(list.cwd, "/tmp/project");
+            serde_json::from_str(r#"{"sessionId":"s1","path":"src"}"#).unwrap();
+        assert_eq!(list.session_id, "s1");
         assert_eq!(list.path.as_deref(), Some("src"));
         assert_eq!(list.limit, 200);
         assert_eq!(list.offset, 0);
 
         let read: WorkspaceReadParams =
-            serde_json::from_str(r#"{"cwd":"/tmp/project","path":"README.md"}"#).unwrap();
+            serde_json::from_str(r#"{"sessionId":"s1","path":"README.md"}"#).unwrap();
         assert_eq!(read.limit, 400);
 
         let result = WorkspaceReadResult {

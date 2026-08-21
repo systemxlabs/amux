@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 
 use protocol::{
     Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
-    GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryItem, SessionConfigureParams,
+    GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryItem, OpResult, SessionConfigureParams,
     SessionIdParams, SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams,
     SessionState, SkillEntry, WorkspaceDiffResult, WorkspaceEntry, WorkspaceListResult,
     WorkspaceReadResult,
@@ -51,8 +51,8 @@ use crate::config::{
 };
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
-    compose_prompt, merge_session_window, parse_at_references, path_attachment, read_path_context,
-    DialogMsg, InputAttachment,
+    compose_prompt, compose_workflow_text, external_path_attachment, merge_session_window,
+    parse_at_references, path_attachment, read_path_context, DialogMsg, InputAttachment,
 };
 use crate::text::{block_text, one_line, truncate};
 use crate::workflow::{now_ts, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
@@ -1419,8 +1419,9 @@ impl AmuxApp {
             }
             Selected::Workflow { engine } => {
                 let session_dir = self.session_dir.clone();
+                let workflow_text = compose_workflow_text(&clean_text, &all);
                 let should_advance = if let Some(wf) = self.workflows.get_mut(engine) {
-                    let should_advance = wf.record_user(&clean_text);
+                    let should_advance = wf.record_user(&workflow_text);
                     if should_advance {
                         wf.begin_busy();
                     }
@@ -1545,13 +1546,18 @@ impl AmuxApp {
             let params = SessionIdParams {
                 session_id: sid.clone(),
             };
-            let _ = client
+            let res = client
                 .request(
                     protocol::method::SESSION_CANCEL,
                     Some(serde_json::to_value(&params).unwrap()),
                 )
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
+                if let Err(error) = &res {
+                    if let Some(m) = this.machines.get_mut(machine) {
+                        m.status = format!("取消失败（{error}）");
+                    }
+                }
                 this.refresh_dialog(w, cx, machine, sid);
                 cx.notify();
             });
@@ -1576,23 +1582,32 @@ impl AmuxApp {
             let params = SessionIdParams {
                 session_id: sid.clone(),
             };
-            let _ = client
+            let res = client
                 .request(
                     protocol::method::SESSION_DELETE,
                     Some(serde_json::to_value(&params).unwrap()),
                 )
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if let Some(m) = this.machines.get_mut(machine) {
-                    m.sessions.retain(|s| s.id != sid);
-                    m.views.remove(&sid);
-                }
-                if let Some(Selected::Session { id, .. }) = this.selected.clone() {
-                    if id == sid {
-                        this.selected = None;
+                match res {
+                    Ok(_) => {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.sessions.retain(|s| s.id != sid);
+                            m.views.remove(&sid);
+                        }
+                        if let Some(Selected::Session { id, .. }) = this.selected.clone() {
+                            if id == sid {
+                                this.selected = None;
+                            }
+                        }
+                        this.refresh_sessions(machine, w, cx);
+                    }
+                    Err(error) => {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.status = format!("删除会话失败（{error}）");
+                        }
                     }
                 }
-                this.refresh_sessions(machine, w, cx);
                 cx.notify();
             });
         })
@@ -1652,14 +1667,20 @@ impl AmuxApp {
             title: title_trim,
         };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let _ = client
+            let res = client
                 .request(
                     protocol::method::SESSION_CONFIGURE,
                     Some(serde_json::to_value(&params).unwrap()),
                 )
                 .await;
             let _ = this.update_in(cx, |this, _w, cx| {
-                this.renaming_session = None;
+                if let Err(error) = res {
+                    if let Some(m) = this.machines.get_mut(machine) {
+                        m.status = format!("重命名失败（{error}）");
+                    }
+                } else {
+                    this.renaming_session = None;
+                }
                 cx.notify();
             });
         })
@@ -1925,44 +1946,88 @@ impl AmuxApp {
                     .collect()
             })
             .unwrap_or_default();
-        for (machine, sid) in children {
-            if let Some(m) = self.machine(machine) {
-                let client = m.client.clone();
-                self.delete_child(client, sid.clone());
-            }
-            if let Some(m) = self.machine_mut(machine) {
-                m.sessions.retain(|session| session.id != sid);
-                m.views.remove(&sid);
-            }
-        }
-        if let Some(wf) = self.workflows.get(idx) {
-            let id = wf.session.id.clone();
-            if let Err(e) = WorkflowEngine::remove(&self.session_dir, &id) {
-                protocol::log::error("gui.workflow", format!("删除工作流失败 {id}：{e}"));
-            }
-        }
-        if idx < self.workflows.len() {
-            self.workflows.remove(idx);
-        }
-        if let Some(Selected::Workflow { engine }) = self.selected.clone() {
-            if engine == idx {
-                self.selected = None;
-            }
-        }
-        cx.notify();
-        let _ = window;
-    }
-
-    fn delete_child(&self, client: WsClient, sid: String) {
-        let params = SessionIdParams { session_id: sid };
-        crate::ws::runtime().spawn(async move {
-            let _ = client
-                .request(
-                    protocol::method::SESSION_DELETE,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
-                .await;
+        let Some(wf_id) = self.workflows.get(idx).map(|wf| wf.session.id.clone()) else {
+            return;
+        };
+        let targets: Vec<(usize, WsClient, String)> = children
+            .iter()
+            .filter_map(|(machine, sid)| {
+                self.machine(*machine)
+                    .map(|m| (*machine, m.client.clone(), sid.clone()))
+            })
+            .collect();
+        let missing_machine = targets.len() != children.len();
+        let remote_targets = targets.clone();
+        let session_dir = self.session_dir.clone();
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let result = run_engine_on_tokio(async move {
+                if missing_machine {
+                    return Err("关联普通会话所属机器已移除，无法完成远端删除".to_string());
+                }
+                for (_, client, sid) in &remote_targets {
+                    let params = SessionIdParams {
+                        session_id: sid.clone(),
+                    };
+                    client
+                        .request(
+                            protocol::method::SESSION_DELETE,
+                            Some(serde_json::to_value(&params).unwrap()),
+                        )
+                        .await
+                        .map_err(|error| format!("删除关联普通会话 {sid} 失败：{error}"))?;
+                }
+                Ok(())
+            })
+            .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                match result {
+                    Some(Ok(())) => {
+                        for (machine, _, sid) in &targets {
+                            if let Some(m) = this.machine_mut(*machine) {
+                                m.sessions.retain(|session| session.id != *sid);
+                                m.views.remove(sid);
+                            }
+                        }
+                        match WorkflowEngine::remove(&session_dir, &wf_id) {
+                            Ok(()) => {
+                                if let Some(current_idx) = this
+                                    .workflows
+                                    .iter()
+                                    .position(|workflow| workflow.session.id == wf_id)
+                                {
+                                    this.workflows.remove(current_idx);
+                                    this.selected = match this.selected.clone() {
+                                        Some(Selected::Workflow { engine })
+                                            if engine == current_idx =>
+                                        {
+                                            None
+                                        }
+                                        Some(Selected::Workflow { engine })
+                                            if engine > current_idx =>
+                                        {
+                                            Some(Selected::Workflow { engine: engine - 1 })
+                                        }
+                                        other => other,
+                                    };
+                                }
+                            }
+                            Err(error) => {
+                                this.workflow_error =
+                                    Some(format!("删除工作流持久化记录失败：{error}"));
+                            }
+                        }
+                    }
+                    Some(Err(error)) => {
+                        this.workflow_error = Some(format!("删除工作流失败：{error}"));
+                    }
+                    None => {
+                        this.workflow_error = Some("删除工作流任务未能执行".into());
+                    }
+                }
+                cx.notify();
+            });
         });
+        self._tasks.push(t);
     }
 
     fn orchestrator_backend(&self) -> Arc<dyn OrcBackend> {
@@ -2030,16 +2095,10 @@ impl AmuxApp {
             Some(Selected::Session {
                 id,
                 machine: selected_machine,
-            }) if *selected_machine == machine => id.clone(),
+            }) if *selected_machine == machine && m.sessions.iter().any(|s| s.id == *id) => {
+                id.clone()
+            }
             _ => return,
-        };
-        let cwd = m
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .map(|s| s.cwd.clone());
-        let Some(cwd) = cwd else {
-            return;
         };
         let client = m.client.clone();
         let request_id = self
@@ -2056,7 +2115,7 @@ impl AmuxApp {
         }
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = json!({ "cwd": cwd.clone() });
+            let params = json!({ "sessionId": session_id.clone() });
             let res = client
                 .request(protocol::method::WORKSPACE_DIFF, Some(params))
                 .await;
@@ -2120,17 +2179,6 @@ impl AmuxApp {
         let Some(m) = self.machine(machine) else {
             return;
         };
-        let cwd = match &self.selected {
-            Some(Selected::Session { id, .. }) => m
-                .sessions
-                .iter()
-                .find(|s| &s.id == id)
-                .map(|s| s.cwd.clone()),
-            _ => None,
-        };
-        let Some(cwd) = cwd else {
-            return;
-        };
         let client = m.client.clone();
         let session_id = match &self.selected {
             Some(Selected::Session {
@@ -2153,7 +2201,7 @@ impl AmuxApp {
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let directory_path = path.clone();
             let params = json!({
-                "cwd": cwd,
+                "sessionId": session_id.clone(),
                 "path": if path.is_empty() { None } else { Some(path.clone()) },
                 "offset": offset,
                 "limit": 200,
@@ -2224,17 +2272,6 @@ impl AmuxApp {
         let Some(m) = self.machine(machine) else {
             return;
         };
-        let cwd = match &self.selected {
-            Some(Selected::Session { id, .. }) => m
-                .sessions
-                .iter()
-                .find(|s| &s.id == id)
-                .map(|s| s.cwd.clone()),
-            _ => None,
-        };
-        let Some(cwd) = cwd else {
-            return;
-        };
         let client = m.client.clone();
         let session_id = match &self.selected {
             Some(Selected::Session {
@@ -2264,7 +2301,7 @@ impl AmuxApp {
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({
-                "cwd": cwd,
+                "sessionId": session_id.clone(),
                 "path": path,
                 "offset": offset,
                 "limit": 400,
@@ -2319,34 +2356,44 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
-        cwd: String,
         path: Option<String>,
         patch: Option<String>,
     ) {
         let Some(m) = self.machine(machine) else {
             return;
         };
+        let Some(session_id) = self.selected.as_ref().and_then(|selected| match selected {
+            Selected::Session { id, .. } => Some(id.clone()),
+            Selected::Workflow { .. } => None,
+        }) else {
+            return;
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = json!({ "cwd": cwd, "path": path, "patch": patch });
-            let result = client
+            let params = json!({ "sessionId": session_id.clone(), "path": path, "patch": patch });
+            let res = client
                 .request(protocol::method::WORKSPACE_RESTORE, Some(params))
                 .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(_) => {
-                        window.push_notification(
-                            UiNotification::success("已撤销所选改动").title("撤销成功"),
-                            cx,
-                        );
-                        this.load_diff(window, cx, machine);
-                    }
+            let _ = this.update_in(cx, |this, w, cx| {
+                match res {
+                    Ok(value) => match serde_json::from_value::<OpResult>(value) {
+                        Ok(result) if result.ok => this.load_diff(w, cx, machine),
+                        Ok(result) => {
+                            if let Some(m) = this.machines.get_mut(machine) {
+                                m.workspace_error =
+                                    Some(result.message.unwrap_or_else(|| "恢复改动失败".into()));
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(m) = this.machines.get_mut(machine) {
+                                m.workspace_error = Some(format!("恢复改动失败：{error}"));
+                            }
+                        }
+                    },
                     Err(error) => {
-                        window.push_notification(
-                            UiNotification::error(format!("撤销失败：{error}"))
-                                .title("无法撤销改动"),
-                            cx,
-                        );
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.workspace_error = Some(format!("恢复改动失败：{error}"));
+                        }
                     }
                 }
                 cx.notify();
@@ -2698,6 +2745,17 @@ impl AmuxApp {
         if idx >= self.machines.len() {
             return;
         }
+        if self.workflows.iter().any(|workflow| {
+            workflow
+                .session
+                .children
+                .iter()
+                .any(|child| child.machine_idx == idx)
+        }) {
+            self.machine_form_error = Some("请先删除关联工作流会话，再移除该机器。".into());
+            cx.notify();
+            return;
+        }
         let name = self.machines[idx].config.name.clone();
         self.store.remove_machine(&name);
         self.machines.remove(idx);
@@ -2711,7 +2769,11 @@ impl AmuxApp {
         };
         for wf in self.workflows.iter_mut() {
             for c in wf.session.children.iter_mut() {
-                if c.machine_idx > idx {
+                if c.machine_idx == idx {
+                    // 保留机器名和远端会话关联，但标记为未绑定，避免下标
+                    // 左移后误操作另一台机器。
+                    c.machine_idx = usize::MAX;
+                } else if c.machine_idx > idx {
                     c.machine_idx -= 1;
                 }
             }
@@ -4533,8 +4595,9 @@ impl AmuxApp {
                             .on_drop::<ExternalPaths>(cx.listener(
                                 |this, paths: &ExternalPaths, _window, cx| {
                                     for p in paths.paths() {
-                                        this.input_attachments
-                                            .push(path_attachment(&p.display().to_string()));
+                                        this.input_attachments.push(external_path_attachment(
+                                            &p.display().to_string(),
+                                        ));
                                     }
                                     cx.notify();
                                 },
@@ -5361,12 +5424,11 @@ impl AmuxApp {
                             .small()
                             .label("撤销该文件")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
-                                if let Some((machine, cwd)) = this.selected_workspace() {
+                                if let Some((machine, _)) = this.selected_workspace() {
                                     this.restore_workspace(
                                         window,
                                         cx,
                                         machine,
-                                        cwd,
                                         Some(path_for_restore.clone()),
                                         Some(patch_for_restore.clone()),
                                     );
@@ -5420,12 +5482,11 @@ impl AmuxApp {
                                 .on_click(cx.listener({
                                     let hunk_path = hunk_path.clone();
                                     move |this, _ev, window, cx| {
-                                        if let Some((machine, cwd)) = this.selected_workspace() {
+                                        if let Some((machine, _)) = this.selected_workspace() {
                                             this.restore_workspace(
                                                 window,
                                                 cx,
                                                 machine,
-                                                cwd,
                                                 Some(hunk_path.clone()),
                                                 Some(hunk_patch.clone()),
                                             );
