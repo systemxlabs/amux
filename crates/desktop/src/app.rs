@@ -388,21 +388,36 @@ impl AmuxApp {
                 .placeholder("Token")
                 .masked(true)
         });
-        let qc_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("指令名"));
+        let qc_name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("指令名")
+                .multi_line(true)
+                .auto_grow(2, 4)
+        });
         let qc_prompt_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("提示词（发给 agent 的一段话）")
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
-        let skill_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("名称"));
+        let skill_name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("名称")
+                .multi_line(true)
+                .auto_grow(2, 4)
+        });
         let skill_desc_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("描述（仓库/资源 URL 或安装方法）")
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
-        let tpl_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("模板名"));
+        let tpl_name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("模板名")
+                .multi_line(true)
+                .auto_grow(2, 4)
+        });
         let tpl_desc_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("执行计划（自然语言描述）")
