@@ -3515,6 +3515,7 @@ impl AmuxApp {
                     div().id(("row", i)).w_full().child(
                         div()
                             .ml_auto()
+                            .flex_none()
                             .max_w(px(720.))
                             .p_3()
                             .v_flex()
@@ -3547,6 +3548,7 @@ impl AmuxApp {
                 DialogMsg::AgentMessage { content, timestamp } => {
                     div().id(("row", i)).w_full().child(
                         div()
+                            .flex_none()
                             .max_w(px(720.))
                             .p_3()
                             .v_flex()
