@@ -4353,9 +4353,22 @@ impl AmuxApp {
             .border_l_1()
             .border_color(cx.theme().border)
             .child(
-                Label::new("会话活动历史")
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().foreground),
+                h_flex()
+                    .items_center()
+                    .child(
+                        Label::new("会话活动历史")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("close-panel-activities")
+                            .small()
+                            .label("✕")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.set_panel(window, cx, None);
+                            })),
+                    ),
             )
             .child(
                 div()
