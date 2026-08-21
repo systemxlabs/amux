@@ -60,7 +60,9 @@ impl SessionManager {
     ) -> (Self, broadcast::Receiver<ServerNotification>) {
         let (tx, rx) = broadcast::channel(256);
         // server 重启后，上次异常退出残留的 Busy 会话没有对应运行中 agent，统一重置为 Idle
-        let _ = registry.reset_busy_to_idle();
+        if let Err(e) = registry.reset_busy_to_idle() {
+            protocol::log::error("server.session", format!("重置残留忙会话失败：{e}"));
+        }
         let manager = SessionManager {
             agents,
             registry,
@@ -193,7 +195,9 @@ impl SessionManager {
         self.registry
             .delete(session_id)
             .map_err(|e| format!("注册表删除失败: {e}"))?;
-        SessionLog::open(&self.data_dir, session_id).remove();
+        SessionLog::open(&self.data_dir, session_id)
+            .remove()
+            .map_err(|e| format!("会话日志删除失败: {e}"))?;
         protocol::log::info("server.session", format!("删除会话 {session_id}"));
         Ok(())
     }
@@ -231,28 +235,46 @@ impl SessionManager {
     /// 关闭长时间无活动的 agent 侧会话（>timeout_ms，docs/DESIGN.md「主动关闭长时间
     /// 无活动会话」）：对注册表中超过阈值的候选会话经 ACP `session/close` 关闭并清空
     /// agent 侧会话 id（元数据与历史保留）。
-    pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> usize {
+    pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> Result<usize, String> {
         let candidates = self
             .registry
             .idle_candidates(now_ms, timeout_ms)
-            .unwrap_or_default();
+            .map_err(|e| format!("查询空闲会话失败: {e}"))?;
         let mut closed = 0;
+        let mut errors = Vec::new();
         for (sid, _) in candidates {
-            let Ok(Some((meta, aid))) = self.registry.get(&sid) else {
+            let Some((meta, aid)) = self
+                .registry
+                .get(&sid)
+                .map_err(|e| format!("读取会话失败 {sid}: {e}"))?
+            else {
                 continue;
             };
             if aid.is_empty() {
                 continue;
             }
-            if let Ok(driver) = self.agents.driver_for(&meta.agent) {
-                if driver.close(&aid).is_ok() {
-                    if let Ok(()) = self.registry.set_agent_session_id(&sid, "") {
-                        closed += 1;
-                    }
+            let driver = match self.agents.driver_for(&meta.agent) {
+                Ok(driver) => driver,
+                Err(e) => {
+                    errors.push(format!("解析 agent 驱动失败 {sid}: {e}"));
+                    continue;
                 }
+            };
+            if let Err(e) = driver.close(&aid) {
+                errors.push(format!("关闭 agent 会话失败 {sid}: {e}"));
+                continue;
+            }
+            if let Err(e) = self.registry.set_agent_session_id(&sid, "") {
+                errors.push(format!("清理 agent 会话状态失败 {sid}: {e}"));
+            } else {
+                closed += 1;
             }
         }
-        closed
+        if errors.is_empty() {
+            Ok(closed)
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     // ---- 会话数据 ----
@@ -268,7 +290,9 @@ impl SessionManager {
             .get(session_id)
             .map_err(|e| format!("注册表读取失败: {e}"))?
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        let items = SessionLog::open(&self.data_dir, session_id).read_history();
+        let items = SessionLog::open(&self.data_dir, session_id)
+            .read_history()
+            .map_err(|e| format!("会话历史读取失败: {e}"))?;
         let limit = limit.unwrap_or(200);
         let (start, end, has_more) = Self::window_items(items.len(), limit, before);
         Ok((items[start..end].to_vec(), has_more, start))
@@ -285,7 +309,9 @@ impl SessionManager {
             .get(session_id)
             .map_err(|e| format!("注册表读取失败: {e}"))?
             .ok_or_else(|| format!("会话不存在: {session_id}"))?;
-        let items = SessionLog::open(&self.data_dir, session_id).read_activities();
+        let items = SessionLog::open(&self.data_dir, session_id)
+            .read_activities()
+            .map_err(|e| format!("会话活动读取失败: {e}"))?;
         let limit = limit.unwrap_or(200);
         let (start, end, has_more) = Self::window_items(items.len(), limit, before);
         Ok((items[start..end].to_vec(), has_more, start))
@@ -380,9 +406,15 @@ impl SessionManager {
                 "server.session",
                 format!("用户消息落盘失败 {session_id}: {e}"),
             );
-            let _ = self
+            if let Err(e) = self
                 .registry
-                .update_state(session_id, SessionState::Idle, now());
+                .update_state(session_id, SessionState::Idle, now())
+            {
+                protocol::log::error(
+                    "server.session",
+                    format!("恢复失败后更新状态失败 {session_id}: {e}"),
+                );
+            }
             self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
             control.busy.store(false, Ordering::SeqCst);
             return Err(format!("用户消息落盘失败: {e}"));
@@ -395,11 +427,24 @@ impl SessionManager {
                 timestamp: now(),
                 detail: format!("恢复 agent 上下文失败: {e}"),
             };
-            let _ = SessionLog::open(&self.data_dir, session_id).append_activities(&[err]);
+            if let Err(log_error) =
+                SessionLog::open(&self.data_dir, session_id).append_activities(&[err])
+            {
+                protocol::log::error(
+                    "server.session",
+                    format!("resume 错误活动落盘失败 {session_id}: {log_error}"),
+                );
+            }
             self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
-            let _ = self
-                .registry
-                .update_state(session_id, SessionState::Idle, now());
+            if let Err(state_error) =
+                self.registry
+                    .update_state(session_id, SessionState::Idle, now())
+            {
+                protocol::log::error(
+                    "server.session",
+                    format!("resume 失败后更新状态失败 {session_id}: {state_error}"),
+                );
+            }
             self.ongoing.lock().unwrap().remove(session_id);
             control.busy.store(false, Ordering::SeqCst);
             return Err(format!("恢复 agent 上下文失败: {e}"));
@@ -450,6 +495,7 @@ impl SessionManager {
                     );
                 }
                 AgentEvent::Compaction(detail) => {
+                    merger.push_compaction(detail.clone(), now());
                     self.ongoing.lock().unwrap().insert(
                         session_id.to_string(),
                         Activity::Compaction {
@@ -485,14 +531,17 @@ impl SessionManager {
         let deleted = control.deleted.load(Ordering::SeqCst);
         // 落库历史 + 活动
         let (history, activities) = merger.finish();
+        let mut storage_error = None;
         if !deleted && !history.is_empty() {
             if let Err(e) = log.append_history(&history) {
                 protocol::log::error("server.session", format!("历史落盘失败 {session_id}: {e}"));
+                storage_error = Some(format!("历史落盘失败: {e}"));
             }
         }
         if !deleted && !activities.is_empty() {
             if let Err(e) = log.append_activities(&activities) {
                 protocol::log::error("server.session", format!("活动落盘失败 {session_id}: {e}"));
+                storage_error = Some(format!("活动落盘失败: {e}"));
             }
         }
 
@@ -500,9 +549,16 @@ impl SessionManager {
         self.ongoing.lock().unwrap().remove(session_id);
         control.busy.store(false, Ordering::SeqCst);
         if !deleted {
-            let _ = self
+            if let Err(e) = self
                 .registry
-                .update_state(session_id, SessionState::Idle, now());
+                .update_state(session_id, SessionState::Idle, now())
+            {
+                protocol::log::error(
+                    "server.session",
+                    format!("更新空闲状态失败 {session_id}: {e}"),
+                );
+                storage_error = Some(format!("更新空闲状态失败: {e}"));
+            }
             self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
         }
         protocol::log::info(
@@ -514,6 +570,8 @@ impl SessionManager {
         );
         if deleted {
             Err(format!("会话已删除: {session_id}"))
+        } else if let Some(error) = storage_error {
+            Err(error)
         } else {
             Ok(())
         }
@@ -811,7 +869,7 @@ mod tests {
         started.notified().await;
 
         let log = SessionLog::open(&dir, &meta.id);
-        let history = log.read_history();
+        let history = log.read_history().unwrap();
         assert!(matches!(
             history.as_slice(),
             [HistoryItem::UserMessage { content, .. }]

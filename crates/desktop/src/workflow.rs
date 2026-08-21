@@ -373,7 +373,13 @@ impl WorkflowEngine {
             self.session.done = true;
         }
         self.session.done = self.session.done || decision.done;
-        self.apply_actions(decision.actions).await?;
+        if let Err(e) = self.apply_actions(decision.actions).await {
+            self.session.activities.push(Activity::Error {
+                timestamp: now(),
+                detail: format!("执行编排动作失败：{e}"),
+            });
+            return Err(e);
+        }
         if let Some(kids) = self.backend.take_synced_children() {
             self.session.children = kids;
         }
@@ -412,21 +418,10 @@ impl WorkflowEngine {
                     prompt,
                     reuse,
                 } => {
-                    let m_idx = self.resolve_machine(&machine);
-                    let Ok(m_idx) = m_idx else {
-                        self.session.transcript.push(OrcMsg::User {
-                            text: format!("跳过步骤：{machine} 不可用（{m_idx:?}）"),
-                        });
-                        continue;
-                    };
+                    let m_idx = self.resolve_machine(&machine)?;
                     let session_id = match reuse {
                         Some(id) if self.session.children.iter().any(|c| c.id == id) => id,
-                        Some(id) => {
-                            self.session.transcript.push(OrcMsg::User {
-                                text: format!("跳过：复用的子会话不存在 {id}"),
-                            });
-                            continue;
-                        }
+                        Some(id) => return Err(format!("复用的子会话不存在: {id}")),
                         None => {
                             let res = self
                                 .clients
@@ -446,31 +441,27 @@ impl WorkflowEngine {
                                         .get("session")
                                         .and_then(|s| s.get("id"))
                                         .and_then(|i| i.as_str())
-                                        .unwrap_or("")
+                                        .ok_or_else(|| {
+                                            format!(
+                                                "创建关联普通会话响应缺少 session.id（{machine}/{agent}）"
+                                            )
+                                        })?
                                         .to_string();
                                     if sid.is_empty() {
-                                        self.session.transcript.push(OrcMsg::User {
-                                            text: format!(
-                                                "创建关联普通会话失败（{machine}/{agent}）"
-                                            ),
-                                        });
+                                        return Err(format!(
+                                            "创建关联普通会话响应的 session.id 为空（{machine}/{agent}）"
+                                        ));
                                     }
                                     sid
                                 }
                                 Err(e) => {
-                                    self.session.transcript.push(OrcMsg::User {
-                                        text: format!(
-                                            "创建关联普通会话失败（{machine}/{agent}）：{e}"
-                                        ),
-                                    });
-                                    continue;
+                                    return Err(format!(
+                                        "创建关联普通会话失败（{machine}/{agent}）：{e}"
+                                    ))
                                 }
                             }
                         }
                     };
-                    if session_id.is_empty() {
-                        continue;
-                    }
                     if !self.session.children.iter().any(|c| c.id == session_id) {
                         let step_desc = first_line(&prompt);
                         self.session.children.push(ChildSession {
@@ -483,7 +474,7 @@ impl WorkflowEngine {
                             last_output: String::new(),
                         });
                     }
-                    let _ = self.prompt_child(&session_id, &prompt).await;
+                    self.prompt_child(&session_id, &prompt).await?;
                     self.session.activities.push(Activity::ToolCall {
                         timestamp: now(),
                         name: "create_session".into(),
@@ -495,7 +486,7 @@ impl WorkflowEngine {
                     });
                 }
                 OrcAction::Steer { session, prompt } | OrcAction::Retry { session, prompt } => {
-                    let _ = self.prompt_child(&session, &prompt).await;
+                    self.prompt_child(&session, &prompt).await?;
                     self.session.activities.push(Activity::ToolCall {
                         timestamp: now(),
                         name: "prompt_session".into(),
@@ -533,14 +524,10 @@ impl WorkflowEngine {
             "sessionId": session_id,
             "input": [{ "type": "text", "text": text }],
         });
-        crate::ws::runtime().spawn(async move {
-            if let Err(e) = client
-                .request(protocol::method::SESSION_PROMPT, Some(input))
-                .await
-            {
-                protocol::log::error("gui.workflow", format!("下发指令失败 {sid}: {e}"));
-            }
-        });
+        client
+            .request(protocol::method::SESSION_PROMPT, Some(input))
+            .await
+            .map_err(|e| format!("下发指令失败 {sid}: {e}"))?;
         Ok(())
     }
 
@@ -548,10 +535,7 @@ impl WorkflowEngine {
         if let Some(i) = self.machines.iter().position(|m| m.name == name) {
             return Ok(i);
         }
-        if !self.machines.is_empty() {
-            return Ok(0);
-        }
-        Err("没有可用机器".into())
+        Err(format!("机器不可用: {name}"))
     }
 
     /// 关联普通会话状态变更（GUI 收到 `session.state_change` 通知时调用）。
@@ -562,7 +546,7 @@ impl WorkflowEngine {
         old_state: SessionState,
         new_state: SessionState,
         output_excerpt: Option<String>,
-    ) -> bool {
+    ) -> Result<bool, String> {
         let machine = {
             let Some(child) = self
                 .session
@@ -570,7 +554,7 @@ impl WorkflowEngine {
                 .iter_mut()
                 .find(|c| c.id == session_id)
             else {
-                return false;
+                return Ok(false);
             };
             if let Some(o) = output_excerpt {
                 child.last_output = o;
@@ -582,7 +566,7 @@ impl WorkflowEngine {
         if new_state == SessionState::Idle {
             // 用户取消工作流导致的子会话状态变更不注入（docs/DESIGN.md §工作流会话驱动）
             if self.session.cancelled || self.session.done {
-                return false;
+                return Ok(false);
             }
             self.session.transcript.push(OrcMsg::User {
                 text: format!(
@@ -591,10 +575,16 @@ impl WorkflowEngine {
                     new = state_label(new_state)
                 ),
             });
-            let _ = self.advance().await;
-            return true;
+            if let Err(e) = self.advance().await {
+                self.session.activities.push(Activity::Error {
+                    timestamp: now(),
+                    detail: format!("关联会话推进失败：{e}"),
+                });
+                return Err(e);
+            }
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     /// 同步记录关联普通会话状态变更（不推进；widget 状态即可视化）。
@@ -709,17 +699,22 @@ impl WorkflowEngine {
         });
     }
 
-    pub async fn send_cancel_to_children(&self) {
+    pub async fn send_cancel_to_children(&self) -> Result<(), String> {
         for (machine_idx, session_id) in cancel_requests(&self.session.children) {
-            if let Some(client) = self.clients.get(machine_idx).cloned() {
-                let _ = client
-                    .request(
-                        protocol::method::SESSION_CANCEL,
-                        Some(serde_json::json!({ "sessionId": session_id })),
-                    )
-                    .await;
-            }
+            let client = self
+                .clients
+                .get(machine_idx)
+                .cloned()
+                .ok_or_else(|| format!("机器连接已失效: {machine_idx}"))?;
+            client
+                .request(
+                    protocol::method::SESSION_CANCEL,
+                    Some(serde_json::json!({ "sessionId": session_id })),
+                )
+                .await
+                .map_err(|e| format!("取消关联会话失败 {session_id}: {e}"))?;
         }
+        Ok(())
     }
 
     // ---- 持久化（docs/DESIGN.md「工作流会话存储」：sqlite + 两份 jsonl）----
@@ -728,12 +723,12 @@ impl WorkflowEngine {
         crate::wfstore::save(data_dir, &self.session)
     }
 
-    pub fn load_all(data_dir: &Path) -> Vec<OrcSession> {
+    pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
         crate::wfstore::load_all(data_dir)
     }
 
-    pub fn remove(data_dir: &Path, id: &str) {
-        crate::wfstore::remove(data_dir, id);
+    pub fn remove(data_dir: &Path, id: &str) -> std::io::Result<()> {
+        crate::wfstore::remove(data_dir, id)
     }
 }
 
@@ -1635,7 +1630,8 @@ mod tests {
         });
         let advanced = engine
             .on_child_state("s_child", SessionState::Busy, SessionState::Idle, None)
-            .await;
+            .await
+            .unwrap();
         assert!(!advanced);
     }
 
@@ -1670,7 +1666,7 @@ mod tests {
         engine.record_user("立即保存");
         engine.persist(&dir).unwrap();
 
-        let sessions = WorkflowEngine::load_all(&dir);
+        let sessions = WorkflowEngine::load_all(&dir).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
         assert_eq!(sessions[0].title, "计划A");
@@ -1695,8 +1691,8 @@ mod tests {
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { text } if text == "恢复后推进")));
 
-        WorkflowEngine::remove(&dir, &id);
-        assert!(WorkflowEngine::load_all(&dir).is_empty());
+        WorkflowEngine::remove(&dir, &id).unwrap();
+        assert!(WorkflowEngine::load_all(&dir).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

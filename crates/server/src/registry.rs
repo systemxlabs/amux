@@ -6,10 +6,10 @@
 //! agent 侧存在但注册表未知的旧会话不出现（不列出、不打开、不回填）。
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use protocol::{SessionMeta, SessionState};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 
 /// SQLite 会话注册表（server 单写者：内部 Connection 用互斥锁串行化）。
 pub struct SessionRegistry {
@@ -26,10 +26,18 @@ fn state_str(s: SessionState) -> &'static str {
     }
 }
 
-fn state_from_str(s: &str) -> SessionState {
+fn state_from_str(s: &str) -> rusqlite::Result<SessionState> {
     match s {
-        "busy" => SessionState::Busy,
-        _ => SessionState::Idle,
+        "idle" => Ok(SessionState::Idle),
+        "busy" => Ok(SessionState::Busy),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid session state: {s}"),
+            )),
+        )),
     }
 }
 
@@ -38,7 +46,7 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
         id: row.get("id")?,
         agent: row.get("agent")?,
         cwd: row.get("cwd")?,
-        state: state_from_str(&row.get::<_, String>("state")?),
+        state: state_from_str(&row.get::<_, String>("state")?)?,
         title: row.get("title")?,
         created_at: row.get::<_, i64>("created_at")? as u64,
         last_active_at: row.get::<_, i64>("last_active_at")? as u64,
@@ -48,10 +56,19 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
 }
 
 impl SessionRegistry {
+    fn connection(&self) -> rusqlite::Result<MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|_| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                "session registry mutex poisoned",
+            )))
+        })
+    }
+
     /// 打开（或创建）注册表数据库；建表幂等。
     pub fn open(db_path: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         }
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
@@ -73,7 +90,7 @@ impl SessionRegistry {
 
     /// 插入或更新会话元数据（create / 标题 / 状态 / 时间戳更新均走这里）。
     pub fn upsert(&self, meta: &SessionMeta, agent_session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.connection()?;
         conn.execute(
             "INSERT INTO sessions
                 (id, agent, cwd, state, title, agent_session_id, created_at, last_active_at)
@@ -98,32 +115,28 @@ impl SessionRegistry {
 
     /// 按 server 会话 id 取条目（含 agent 侧会话 id）。
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<RegistryEntry>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at
-                 FROM sessions WHERE id = ?1",
-            )
-            .expect("prepare get");
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at
+             FROM sessions WHERE id = ?1",
+        )?;
         stmt.query_row(params![id], row_to_entry).optional()
     }
 
     /// 全部条目，按最近活跃（last_active_at）降序——惰性分页的上游数据。
     pub fn list(&self) -> rusqlite::Result<Vec<RegistryEntry>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at
-                 FROM sessions ORDER BY last_active_at DESC",
-            )
-            .expect("prepare list");
-        let rows = stmt.query_map([], row_to_entry).expect("query list");
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at
+             FROM sessions ORDER BY last_active_at DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_entry)?;
         rows.collect()
     }
 
     /// 删除条目；返回是否存在。
     pub fn delete(&self, id: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.connection()?;
         let n = conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         Ok(n > 0)
     }
@@ -135,7 +148,7 @@ impl SessionRegistry {
         state: SessionState,
         last_active_at: u64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.connection()?;
         conn.execute(
             "UPDATE sessions SET state = ?1, last_active_at = ?2 WHERE id = ?3",
             params![state_str(state), last_active_at as i64, id],
@@ -145,7 +158,7 @@ impl SessionRegistry {
 
     /// 更新标题与最近活跃时间。
     pub fn set_title(&self, id: &str, title: &str, last_active_at: u64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.connection()?;
         conn.execute(
             "UPDATE sessions SET title = ?1, last_active_at = ?2 WHERE id = ?3",
             params![title, last_active_at as i64, id],
@@ -156,7 +169,7 @@ impl SessionRegistry {
     /// 回填 agent 侧会话 id：创建会话时未与 ACP 交互（agent 侧会话延后到首次
     /// prompt 懒创建），首次 prompt 时经 `session/new` 拿到 id 后写入。
     pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.connection()?;
         conn.execute(
             "UPDATE sessions SET agent_session_id = ?1 WHERE id = ?2",
             params![agent_session_id, id],
@@ -166,7 +179,7 @@ impl SessionRegistry {
 
     /// server 启动时把异常退出残留的 Busy 会话重置为 Idle（无对应运行中 agent）。
     pub fn reset_busy_to_idle(&self) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.connection()?;
         let n = conn.execute(
             "UPDATE sessions SET state = 'idle' WHERE state = 'busy'",
             [],
@@ -180,21 +193,17 @@ impl SessionRegistry {
         now: u64,
         idle_timeout_ms: u64,
     ) -> rusqlite::Result<Vec<(String, u64)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id, last_active_at FROM sessions WHERE state = 'idle'")
-            .expect("prepare idle_candidates");
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>("id")?,
-                    row.get::<_, i64>("last_active_at")? as u64,
-                ))
-            })
-            .expect("query idle_candidates");
+        let conn = self.connection()?;
+        let mut stmt =
+            conn.prepare("SELECT id, last_active_at FROM sessions WHERE state = 'idle'")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>("id")?,
+                row.get::<_, i64>("last_active_at")? as u64,
+            ))
+        })?;
         Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap_or_default()
+            .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
             .filter(|(_, t)| now.saturating_sub(*t) > idle_timeout_ms)
             .collect())

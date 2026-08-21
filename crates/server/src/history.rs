@@ -39,15 +39,24 @@ fn append_lines<T: serde::Serialize>(path: &Path, entries: &[T]) -> std::io::Res
     Ok(())
 }
 
-fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|s| {
-            s.lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect()
+fn read<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    content
+        .lines()
+        .enumerate()
+        .map(|(line, value)| {
+            serde_json::from_str(value).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{}:{}: {error}", path.display(), line + 1),
+                )
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 impl SessionLog {
@@ -77,13 +86,13 @@ impl SessionLog {
         append_lines(&self.activities_path, items)
     }
 
-    /// 读取全部历史条目；日志缺失视为空。
-    pub fn read_history(&self) -> Vec<HistoryItem> {
+    /// 读取全部历史条目；日志缺失视为空，损坏内容返回错误。
+    pub fn read_history(&self) -> std::io::Result<Vec<HistoryItem>> {
         read(&self.history_path)
     }
 
-    /// 读取全部活动条目；日志缺失视为空。
-    pub fn read_activities(&self) -> Vec<Activity> {
+    /// 读取全部活动条目；日志缺失视为空，损坏内容返回错误。
+    pub fn read_activities(&self) -> std::io::Result<Vec<Activity>> {
         read(&self.activities_path)
     }
 
@@ -103,9 +112,15 @@ impl SessionLog {
     }
 
     /// 删除数据文件（会话删除联动）。
-    pub fn remove(&self) {
-        let _ = std::fs::remove_file(&self.history_path);
-        let _ = std::fs::remove_file(&self.activities_path);
+    pub fn remove(&self) -> std::io::Result<()> {
+        for path in [&self.history_path, &self.activities_path] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -198,6 +213,12 @@ impl TurnMerger {
         self.activities.push(activity);
     }
 
+    /// 追加上下文压缩活动。
+    pub fn push_compaction(&mut self, detail: String, timestamp: u64) {
+        self.activities
+            .push(Activity::Compaction { timestamp, detail });
+    }
+
     /// 完成一个 turn：收拢缓冲并返回（历史, 活动）。
     pub fn finish(&mut self) -> (Vec<HistoryItem>, Vec<Activity>) {
         self.finish_output();
@@ -228,6 +249,7 @@ mod tests {
         m.push_output("a".into(), 5);
         m.push_output("b".into(), 6);
         m.push_tool_call("t".into(), None, None, 7);
+        m.push_compaction("压缩".into(), 8);
         let (hist, acts) = m.finish();
         assert_eq!(hist.len(), 2, "用户 + 一条合并输出");
         match &hist[1] {
@@ -237,13 +259,16 @@ mod tests {
             }
             _ => panic!("第二条应为 AgentMessage"),
         }
-        assert_eq!(acts.len(), 2, "thinking 合并 + tool");
+        assert_eq!(acts.len(), 3, "thinking 合并 + tool + compaction");
         assert!(acts
             .iter()
             .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "xy")));
         assert!(acts
             .iter()
             .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "t")));
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Activity::Compaction { detail, .. } if detail == "压缩")));
     }
 
     /// 历史/活动分文件。
@@ -256,8 +281,8 @@ mod tests {
         ));
         let log = SessionLog::open(&dir, "s1");
         assert!(!log.exists_any());
-        assert!(log.read_history().is_empty());
-        assert!(log.read_activities().is_empty());
+        assert!(log.read_history().unwrap().is_empty());
+        assert!(log.read_activities().unwrap().is_empty());
 
         log.append_history(&[HistoryItem::UserMessage {
             content: vec![ContentBlock::Text { text: "hi".into() }],

@@ -41,15 +41,23 @@ fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> 
     Ok(())
 }
 
-fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|s| {
-            s.lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect()
+fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    text.lines()
+        .enumerate()
+        .map(|(line, content)| {
+            serde_json::from_str(content).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: {e}", path.display(), line + 1),
+                )
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn history_from_transcript(transcript: &[OrcMsg], ts: u64) -> Vec<HistoryItem> {
@@ -99,7 +107,8 @@ fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
 }
 
 fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
-    std::fs::create_dir_all(data_dir).ok();
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let conn = Connection::open(sqlite_path(data_dir))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS sessions (
@@ -126,10 +135,14 @@ fn state_str(s: protocol::SessionState) -> &'static str {
     }
 }
 
-fn state_from(s: &str) -> protocol::SessionState {
+fn state_from(s: &str) -> io::Result<protocol::SessionState> {
     match s {
-        "busy" => protocol::SessionState::Busy,
-        _ => protocol::SessionState::Idle,
+        "idle" => Ok(protocol::SessionState::Idle),
+        "busy" => Ok(protocol::SessionState::Busy),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("未知工作流状态: {s}"),
+        )),
     }
 }
 
@@ -172,80 +185,81 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
 }
 
 /// 加载全部工作流会话（按最近活跃降序）。
-pub fn load_all(data_dir: &Path) -> Vec<OrcSession> {
-    let Ok(conn) = open_db(data_dir) else {
-        return Vec::new();
-    };
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT id, title, state, last_active_at, children, description, preamble,
+pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
+    let conn = open_db(data_dir).map_err(io::Error::other)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, state, last_active_at, children, description, preamble,
                 cancelled, done, created_at, updated_at
          FROM sessions ORDER BY last_active_at DESC",
-    ) else {
-        return Vec::new();
-    };
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)? as u64,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, i64>(7)? != 0,
-            row.get::<_, i64>(8)? != 0,
-            row.get::<_, i64>(9)? as u64,
-            row.get::<_, i64>(10)? as u64,
-        ))
-    });
-    let Ok(rows) = rows else {
-        return Vec::new();
-    };
-    rows.flatten()
-        .map(
-            |(
-                id,
-                title,
-                state,
-                last_active_at,
-                children,
-                description,
-                preamble,
-                cancelled,
-                done,
-                created_at,
-                updated_at,
-            )| {
-                let children: Vec<ChildSession> =
-                    serde_json::from_str(&children).unwrap_or_default();
-                let transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, &id)));
-                let activities = read_jsonl(&activities_path(data_dir, &id));
-                OrcSession {
-                    id,
-                    title,
-                    description,
-                    preamble,
-                    state: state_from(&state),
-                    cancelled,
-                    done,
-                    transcript,
-                    children,
-                    activities,
-                    created_at,
-                    updated_at: last_active_at.max(updated_at),
-                }
-            },
         )
-        .collect()
+        .map_err(io::Error::other)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as u64,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)? != 0,
+                row.get::<_, i64>(8)? != 0,
+                row.get::<_, i64>(9)? as u64,
+                row.get::<_, i64>(10)? as u64,
+            ))
+        })
+        .map_err(io::Error::other)?;
+    rows.map(|row| -> io::Result<OrcSession> {
+        let (
+            id,
+            title,
+            state,
+            last_active_at,
+            children,
+            description,
+            preamble,
+            cancelled,
+            done,
+            created_at,
+            updated_at,
+        ) = row.map_err(io::Error::other)?;
+        let children: Vec<ChildSession> =
+            serde_json::from_str(&children).map_err(io::Error::other)?;
+        let transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, &id))?);
+        let activities = read_jsonl(&activities_path(data_dir, &id))?;
+        Ok(OrcSession {
+            id,
+            title,
+            description,
+            preamble,
+            state: state_from(&state)?,
+            cancelled,
+            done,
+            transcript,
+            children,
+            activities,
+            created_at,
+            updated_at: last_active_at.max(updated_at),
+        })
+    })
+    .collect()
 }
 
 /// 删除工作流会话元数据与 jsonl。
-pub fn remove(data_dir: &Path, id: &str) {
-    if let Ok(conn) = open_db(data_dir) {
-        let _ = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]);
+pub fn remove(data_dir: &Path, id: &str) -> io::Result<()> {
+    let conn = open_db(data_dir).map_err(io::Error::other)?;
+    conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
+        .map_err(io::Error::other)?;
+    for path in [history_path(data_dir, id), activities_path(data_dir, id)] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
     }
-    let _ = std::fs::remove_file(history_path(data_dir, id));
-    let _ = std::fs::remove_file(activities_path(data_dir, id));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -292,15 +306,15 @@ mod tests {
         assert!(dir.join("sessions/orc_1_history.jsonl").is_file());
         assert!(dir.join("sessions/orc_1_activities.jsonl").is_file());
 
-        let loaded = load_all(&dir);
+        let loaded = load_all(&dir).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].title, "计划A");
         assert_eq!(loaded[0].transcript.len(), 2);
         assert_eq!(loaded[0].activities.len(), 1);
         assert_eq!(loaded[0].preamble, "模板");
 
-        remove(&dir, "orc_1");
-        assert!(load_all(&dir).is_empty());
+        remove(&dir, "orc_1").unwrap();
+        assert!(load_all(&dir).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

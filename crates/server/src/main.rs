@@ -110,16 +110,22 @@ async fn main() {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             interval.tick().await;
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let closed = cleanup_manager.close_idle(now_ms, 3_600_000).await;
-            if closed > 0 {
-                protocol::log::info(
-                    "server.cleanup",
-                    format!("关闭 {closed} 个长时间无活动会话"),
-                );
+            let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                Ok(duration) => duration.as_millis() as u64,
+                Err(e) => {
+                    protocol::log::error("server.cleanup", format!("读取系统时间失败：{e}"));
+                    continue;
+                }
+            };
+            match cleanup_manager.close_idle(now_ms, 3_600_000).await {
+                Ok(closed) if closed > 0 => {
+                    protocol::log::info(
+                        "server.cleanup",
+                        format!("关闭 {closed} 个长时间无活动会话"),
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => protocol::log::error("server.cleanup", e),
             }
         }
     });

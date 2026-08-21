@@ -127,20 +127,56 @@ fn read_file_normalized<T: Clone>(
     path: &Path,
     parse: impl Fn(&serde_json::Value) -> Vec<T>,
 ) -> Vec<T> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            protocol::log::error(
+                "gui.config",
+                format!("读取配置失败 {}: {e}", path.display()),
+            );
+            return Vec::new();
+        }
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
+    let value = match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) => value,
+        Err(e) => {
+            protocol::log::error(
+                "gui.config",
+                format!("解析配置失败 {}: {e}", path.display()),
+            );
+            return Vec::new();
+        }
     };
     parse(&value)
 }
 
 fn write_file(path: &Path, json: &serde_json::Value) {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            protocol::log::error(
+                "gui.config",
+                format!("创建配置目录失败 {}: {e}", parent.display()),
+            );
+            return;
+        }
     }
-    let _ = std::fs::write(path, serde_json::to_string_pretty(json).unwrap_or_default());
+    let content = match serde_json::to_string_pretty(json) {
+        Ok(content) => content,
+        Err(e) => {
+            protocol::log::error(
+                "gui.config",
+                format!("序列化配置失败 {}: {e}", path.display()),
+            );
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(path, content) {
+        protocol::log::error(
+            "gui.config",
+            format!("写入配置失败 {}: {e}", path.display()),
+        );
+    }
 }
 
 /// 配置仓库：按文件读写拆分的本地数据（数据目录可注入）。
@@ -343,7 +379,6 @@ impl ConfigStore {
     pub fn record_recent_workspace(&self, machine: &str, workspace: &str, now: u64) {
         let ws = self.recent_workspaces();
         let merged = merge_recent_workspace(&ws, machine, workspace, now, MAX_RECENT_WORKSPACES);
-        let _ = merged;
         // 直接写合并结果（不再读回，防止并发覆盖）
         write_file(
             &self.path("recent_workspaces.json"),
@@ -354,12 +389,27 @@ impl ConfigStore {
     // ---- 编排 agent（agent.json）----
 
     pub fn orchestrator(&self) -> OrchestratorConfig {
-        let Ok(raw) = std::fs::read_to_string(self.path("agent.json")) else {
-            return OrchestratorConfig::default();
+        let path = self.path("agent.json");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return OrchestratorConfig::default();
+            }
+            Err(e) => {
+                protocol::log::error("gui.config", format!("读取编排配置失败: {e}"));
+                return OrchestratorConfig::default();
+            }
         };
-        serde_json::from_str::<serde_json::Value>(&raw)
-            .map(|v| normalize_orchestrator(&v))
-            .unwrap_or_default()
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => normalize_orchestrator(&value),
+            Err(e) => {
+                protocol::log::error(
+                    "gui.config",
+                    format!("解析编排配置失败 {}: {e}", path.display()),
+                );
+                OrchestratorConfig::default()
+            }
+        }
     }
 
     pub fn save_orchestrator(&self, cfg: &OrchestratorConfig) -> std::io::Result<()> {

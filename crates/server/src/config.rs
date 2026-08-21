@@ -24,9 +24,12 @@ pub fn parse_config(
 ) -> Result<ServerConfig, String> {
     let get = |k: &str| env.get(k).cloned();
     let mut host = get("AMUX_HOST").unwrap_or_else(|| "0.0.0.0".into());
-    let mut port: u16 = get("AMUX_PORT")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(34567);
+    let mut port: u16 = match get("AMUX_PORT") {
+        Some(value) => value
+            .parse()
+            .map_err(|_| format!("AMUX_PORT 不是有效端口: {value}"))?,
+        None => 34567,
+    };
     let mut data_dir = get("AMUX_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_data_dir(env).join(".amux").join("server"));
@@ -39,44 +42,51 @@ pub fn parse_config(
         match args[i].as_str() {
             "--token" => {
                 i += 1;
-                token = args.get(i).cloned();
+                token = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or_else(|| "--token 缺少参数".to_string())?,
+                );
             }
             "--host" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    host = v.clone();
-                }
+                host = args
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| "--host 缺少参数".to_string())?;
             }
             "--port" => {
                 i += 1;
-                if let Some(v) = args.get(i).and_then(|v| v.parse().ok()) {
-                    port = v;
-                }
+                let value = args.get(i).ok_or_else(|| "--port 缺少参数".to_string())?;
+                port = value
+                    .parse()
+                    .map_err(|_| format!("--port 不是有效端口: {value}"))?;
             }
             "--data-dir" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    data_dir = PathBuf::from(v);
-                }
+                data_dir = PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| "--data-dir 缺少参数".to_string())?,
+                );
             }
             "--agent" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    // 支持 `--agent "kimi acp"`（bin 与子命令参数空格分隔），
-                    // 也支持纯路径（`--agent /path/codex-acp`）
-                    let mut parts = v.split_whitespace();
-                    if let Some(bin) = parts.next() {
-                        agent_bin = Some(bin.to_string());
-                        agent_args = parts.map(str::to_string).collect();
-                    }
-                }
+                let value = args.get(i).ok_or_else(|| "--agent 缺少参数".to_string())?;
+                // 支持 `--agent "kimi acp"`（bin 与子命令参数空格分隔），
+                // 也支持纯路径（`--agent /path/codex-acp`）
+                let mut parts = value.split_whitespace();
+                let bin = parts
+                    .next()
+                    .ok_or_else(|| "--agent 参数不能为空".to_string())?;
+                agent_bin = Some(bin.to_string());
+                agent_args = parts.map(str::to_string).collect();
             }
-            _ => {}
+            other => return Err(format!("未知参数: {other}")),
         }
         i += 1;
     }
 
-    let token = token.filter(|t| !t.is_empty()).ok_or_else(|| {
+    let token = token.filter(|t| !t.trim().is_empty()).ok_or_else(|| {
         "未指定认证 token：请用 --token <值> 或环境变量 AMUX_TOKEN 指定后启动（token 不落盘，每次启动需重新指定）".to_string()
     })?;
     Ok(ServerConfig {
@@ -165,5 +175,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg2.port, 5000);
+    }
+
+    #[test]
+    fn invalid_arguments_are_rejected() {
+        let env = env_of(&[("AMUX_TOKEN", "t")]);
+        assert!(parse_config(&env, &["--port".into(), "not-a-port".into()])
+            .unwrap_err()
+            .contains("有效端口"));
+        assert!(parse_config(&env, &["--token".into()]).is_err());
+        assert!(parse_config(&env, &["--unknown".into()])
+            .unwrap_err()
+            .contains("未知参数"));
     }
 }
