@@ -337,6 +337,7 @@ pub struct AmuxApp {
     new_session_machine: Option<usize>,
     new_session_agent: Option<String>,
     new_session_error: Option<String>,
+    show_workspace_dropdown: bool,
     workflow_error: Option<String>,
     workflow_template: Option<WorkflowTemplate>,
     dialog_scroll: ScrollHandle,
@@ -438,6 +439,7 @@ impl AmuxApp {
             new_session_machine: None,
             new_session_agent: None,
             new_session_error: None,
+            show_workspace_dropdown: false,
             workflow_error: None,
             workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
@@ -3540,17 +3542,7 @@ impl AmuxApp {
                                         .child(self.render_harness_selector(cx)),
                                 ),
                         )
-                        .child(self.render_recent_workspaces(cx))
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    Label::new("工作目录（可手动输入或选择常用目录）")
-                                        .text_sm()
-                                        .text_color(muted_foreground),
-                                )
-                                .child(Input::new(&self.session_cwd_input)),
-                        )
+                        .child(self.render_workspace_picker(cx))
                         .when_some(self.new_session_error.clone(), |view, error| {
                             view.child(Label::new(error).text_sm().text_color(danger))
                         })
@@ -3655,41 +3647,80 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 常用工作目录快速选择：当前所选机器的最近使用目录，点击预填到工作目录输入框。
-    fn render_recent_workspaces(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 工作目录选择器：输入框支持手动编辑，也可从当前机器的最近目录中选择。
+    fn render_workspace_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machine = self.new_session_machine.unwrap_or(0);
         let Some(m) = self.machine(machine) else {
             return v_flex().into_any();
         };
         let dirs = self.store.recent_workspaces_for_machine(&m.config.name);
-        if dirs.is_empty() {
-            return v_flex().into_any();
-        }
-        let mut row = h_flex().gap_1().flex_wrap();
-        for dir in dirs {
-            let label = dir.clone();
-            row = row.child(
-                Button::new(format!("ns-recent-{}", label))
-                    .small()
-                    .label(short_cwd(&label))
-                    .tooltip(label.clone())
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.session_cwd_input
-                            .update(cx, |s, cx| s.set_value(&label, window, cx));
-                        this.new_session_error = None;
-                        cx.notify();
-                    })),
-            );
-        }
-        v_flex()
+        let mut picker = v_flex()
             .gap_1()
             .child(
-                Label::new("常用工作目录")
+                Label::new("工作目录")
                     .text_sm()
                     .text_color(cx.theme().muted_foreground),
             )
-            .child(row)
-            .into_any()
+            .child(
+                h_flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _ev, _window, cx| {
+                                    this.show_workspace_dropdown = true;
+                                    cx.notify();
+                                }),
+                            )
+                            .child(Input::new(&self.session_cwd_input)),
+                    )
+                    .child(
+                        Button::new("ns-workspace-toggle")
+                            .small()
+                            .label(if self.show_workspace_dropdown {
+                                "⌃"
+                            } else {
+                                "⌄"
+                            })
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.show_workspace_dropdown = !this.show_workspace_dropdown;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        if self.show_workspace_dropdown && !dirs.is_empty() {
+            let options = dirs
+                .into_iter()
+                .map(|dir| {
+                    let label = dir.clone();
+                    Button::new(format!("ns-workspace-option-{label}"))
+                        .small()
+                        .label(short_cwd(&label))
+                        .tooltip(label.clone())
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.session_cwd_input
+                                .update(cx, |s, cx| s.set_value(&label, window, cx));
+                            this.show_workspace_dropdown = false;
+                            this.new_session_error = None;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            picker = picker.child(
+                v_flex()
+                    .gap_1()
+                    .p_1()
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .children(options),
+            );
+        }
+        picker.into_any()
     }
 
     /// 机器选择（新会话视图）。
