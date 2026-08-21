@@ -9,7 +9,15 @@ use crate::logic::activity_kind_detail;
 
 /// 工作目录短名：取路径最后一段。
 pub fn short_cwd(cwd: &str) -> String {
-    cwd.rsplit('/').next().unwrap_or(cwd).to_string()
+    let trimmed = cwd.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return cwd.to_string();
+    }
+    trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 /// 活动 → （标签，详情）文案（样式逻辑委托给纯函数）。
@@ -24,9 +32,19 @@ pub fn machine_status_badge(
     danger: Hsla,
     warning: Hsla,
 ) -> impl IntoElement {
-    Label::new(status.to_string())
-        .text_xs()
-        .text_color(color_for_status(status, success, danger, warning))
+    let status_color = color_for_status(status, success, danger, warning);
+    div()
+        .max_w(px(180.))
+        .px_2()
+        .py(px(1.))
+        .rounded_full()
+        .bg(status_color.opacity(0.14))
+        .child(
+            Label::new(status.to_string())
+                .text_xs()
+                .truncate()
+                .text_color(status_color),
+        )
 }
 
 fn color_for_status(status: &str, success: Hsla, danger: Hsla, warning: Hsla) -> Hsla {
@@ -48,14 +66,32 @@ pub fn info_row(
 ) -> impl IntoElement {
     h_flex()
         .gap_2()
+        .items_start()
         .child(
             Label::new(format!("{}：", label))
                 .text_sm()
+                .flex_none()
                 .text_color(muted_foreground),
         )
         .child(
             Label::new(value.to_string())
                 .text_sm()
+                .flex_1()
+                .min_w_0()
+                .truncate()
                 .text_color(foreground),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_cwd;
+
+    #[test]
+    fn short_cwd_handles_platform_separators_and_root() {
+        assert_eq!(short_cwd("/home/user/project"), "project");
+        assert_eq!(short_cwd(r"C:\Users\me\project"), "project");
+        assert_eq!(short_cwd("/"), "/");
+        assert_eq!(short_cwd(""), "");
+    }
 }

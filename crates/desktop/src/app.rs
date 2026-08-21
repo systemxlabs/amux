@@ -190,11 +190,17 @@ struct MachineView {
     workspace_directories: HashMap<String, WorkspaceDirectory>,
     workspace_expanded: HashSet<String>,
     workspace_loading: HashSet<String>,
+    workspace_list_request_id: u64,
+    workspace_read_request_id: u64,
     workspace_file: Option<String>,
     workspace_content: String,
     workspace_error: Option<String>,
+    workspace_read_loading: bool,
     workspace_read_has_more: bool,
     workspace_read_next_offset: usize,
+    diff_request_id: u64,
+    diff_loading: bool,
+    diff_error: Option<String>,
     diff_tree_collapsed: bool,
     diff_changes_collapsed: bool,
     skills: Vec<String>,
@@ -222,11 +228,17 @@ impl MachineView {
             workspace_directories: HashMap::new(),
             workspace_expanded: HashSet::new(),
             workspace_loading: HashSet::new(),
+            workspace_list_request_id: 0,
+            workspace_read_request_id: 0,
             workspace_file: None,
             workspace_content: String::new(),
             workspace_error: None,
+            workspace_read_loading: false,
             workspace_read_has_more: false,
             workspace_read_next_offset: 0,
+            diff_request_id: 0,
+            diff_loading: false,
+            diff_error: None,
             diff_tree_collapsed: false,
             diff_changes_collapsed: false,
             skills: Vec::new(),
@@ -371,19 +383,39 @@ impl AmuxApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("名称，如 localpc"));
         let machine_url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("连接地址 ws://host:port"));
-        let machine_token_input = cx.new(|cx| InputState::new(window, cx).placeholder("Token"));
+        let machine_token_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Token")
+                .masked(true)
+        });
         let qc_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("指令名"));
-        let qc_prompt_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("提示词（发给 agent 的一段话）"));
+        let qc_prompt_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("提示词（发给 agent 的一段话）")
+                .multi_line(true)
+                .auto_grow(3, 8)
+        });
         let skill_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("名称"));
-        let skill_desc_input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("描述（仓库/资源 URL 或安装方法）"));
+        let skill_desc_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("描述（仓库/资源 URL 或安装方法）")
+                .multi_line(true)
+                .auto_grow(3, 8)
+        });
         let tpl_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("模板名"));
-        let tpl_desc_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("执行计划（自然语言描述）"));
+        let tpl_desc_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("执行计划（自然语言描述）")
+                .multi_line(true)
+                .auto_grow(3, 8)
+        });
         let orch_base_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Base URL（如 https://api…/v1）"));
-        let orch_key_input = cx.new(|cx| InputState::new(window, cx).placeholder("API Key"));
+        let orch_key_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("API Key")
+                .masked(true)
+        });
         let orch_model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("模型名（如 gpt-4.1）"));
         let title_input = cx.new(|cx| InputState::new(window, cx));
@@ -1222,6 +1254,23 @@ impl AmuxApp {
         self.set_panel(window, cx, None);
         if let Some(m) = self.machines.get_mut(machine) {
             m.views.entry(session_id.clone()).or_default();
+            m.diff_files.clear();
+            m.diff_not_repo = false;
+            m.diff_selection.clear();
+            m.diff_request_id = m.diff_request_id.saturating_add(1);
+            m.diff_loading = false;
+            m.diff_error = None;
+            m.workspace_directories.clear();
+            m.workspace_expanded.clear();
+            m.workspace_loading.clear();
+            m.workspace_list_request_id = m.workspace_list_request_id.saturating_add(1);
+            m.workspace_read_request_id = m.workspace_read_request_id.saturating_add(1);
+            m.workspace_file = None;
+            m.workspace_content.clear();
+            m.workspace_error = None;
+            m.workspace_read_loading = false;
+            m.workspace_read_has_more = false;
+            m.workspace_read_next_offset = 0;
         }
         self.refresh_dialog(window, cx, machine, session_id.clone());
         self.refresh_activities(window, cx, machine, session_id.clone());
@@ -1279,17 +1328,32 @@ impl AmuxApp {
                 )
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if let Ok(res) = &res {
-                    let new_id = res
-                        .get("session")
-                        .and_then(|s| s.get("id"))
-                        .and_then(|i| i.as_str())
-                        .map(str::to_string);
-                    if let Some(new_id) = new_id {
-                        this.store
-                            .record_recent_workspace(&machine_name, &cwd, now_ts());
-                        this.refresh_sessions(machine, w, cx);
-                        this.open_session(w, cx, machine, new_id);
+                match &res {
+                    Ok(res) => {
+                        let new_id = res
+                            .get("session")
+                            .and_then(|s| s.get("id"))
+                            .and_then(|i| i.as_str())
+                            .map(str::to_string);
+                        if let Some(new_id) = new_id {
+                            this.store
+                                .record_recent_workspace(&machine_name, &cwd, now_ts());
+                            this.refresh_sessions(machine, w, cx);
+                            this.open_session(w, cx, machine, new_id);
+                        } else {
+                            w.push_notification(
+                                UiNotification::error("服务器返回了无效的会话信息")
+                                    .title("创建会话失败"),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        w.push_notification(
+                            UiNotification::error(format!("无法创建会话：{error}"))
+                                .title("创建会话失败"),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -1333,13 +1397,20 @@ impl AmuxApp {
                     });
                 }
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                    let _ = client
+                    let result = client
                         .request(
                             protocol::method::SESSION_PROMPT,
                             Some(serde_json::to_value(&params).unwrap()),
                         )
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
+                        if let Err(error) = &result {
+                            w.push_notification(
+                                UiNotification::error(format!("发送失败：{error}"))
+                                    .title("消息未发送"),
+                                cx,
+                            );
+                        }
                         this.refresh_dialog(w, cx, machine, id);
                         cx.notify();
                     });
@@ -1411,13 +1482,20 @@ impl AmuxApp {
                     }],
                 };
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                    let _ = client
+                    let result = client
                         .request(
                             protocol::method::SESSION_PROMPT,
                             Some(serde_json::to_value(&params).unwrap()),
                         )
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
+                        if let Err(error) = &result {
+                            w.push_notification(
+                                UiNotification::error(format!("发送失败：{error}"))
+                                    .title("快捷指令未发送"),
+                                cx,
+                            );
+                        }
                         this.refresh_dialog(w, cx, machine, id);
                         cx.notify();
                     });
@@ -1944,43 +2022,86 @@ impl AmuxApp {
 
     // ---- workspace.diff（代码审查面板）----
 
-    fn load_diff(&self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
+    fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
         let Some(m) = self.machine(machine) else {
             return;
         };
-        let cwd = match &self.selected {
-            Some(Selected::Session { id, .. }) => m
-                .sessions
-                .iter()
-                .find(|s| &s.id == id)
-                .map(|s| s.cwd.clone()),
-            _ => None,
+        let session_id = match &self.selected {
+            Some(Selected::Session {
+                id,
+                machine: selected_machine,
+            }) if *selected_machine == machine => id.clone(),
+            _ => return,
         };
-        let Some(cwd) = cwd else { return };
+        let cwd = m
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| s.cwd.clone());
+        let Some(cwd) = cwd else {
+            return;
+        };
         let client = m.client.clone();
+        let request_id = self
+            .machines
+            .get_mut(machine)
+            .map(|m| {
+                m.diff_request_id = m.diff_request_id.saturating_add(1);
+                m.diff_request_id
+            })
+            .unwrap_or_default();
+        if let Some(m) = self.machines.get_mut(machine) {
+            m.diff_loading = true;
+            m.diff_error = None;
+        }
+        cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({ "cwd": cwd.clone() });
             let res = client
                 .request(protocol::method::WORKSPACE_DIFF, Some(params))
                 .await;
-            let _ = this.update_in(cx, |this, _w, cx| {
+            let _ = this.update_in(cx, |this, w, cx| {
+                let is_current = matches!(
+                    &this.selected,
+                    Some(Selected::Session {
+                        machine: selected_machine,
+                        id
+                    }) if *selected_machine == machine && id == &session_id
+                ) && this
+                    .machines
+                    .get(machine)
+                    .is_some_and(|m| m.diff_request_id == request_id);
+                if !is_current {
+                    return;
+                }
+                let mut error_message = None;
                 if let Some(m) = this.machines.get_mut(machine) {
-                    match &res {
-                        Ok(res) => {
-                            let r: WorkspaceDiffResult = serde_json::from_value(res.clone())
-                                .unwrap_or(WorkspaceDiffResult {
-                                    files: Vec::new(),
-                                    not_repo: false,
-                                });
-                            m.diff_files = r.files;
-                            m.diff_not_repo = r.not_repo;
-                        }
-                        Err(e) => {
-                            m.diff_files = Vec::new();
+                    match res {
+                        Ok(value) => match serde_json::from_value::<WorkspaceDiffResult>(value) {
+                            Ok(result) => {
+                                m.diff_files = result.files;
+                                m.diff_not_repo = result.not_repo;
+                            }
+                            Err(error) => {
+                                m.diff_files.clear();
+                                m.diff_not_repo = false;
+                                error_message = Some(format!("改动列表解析失败：{error}"));
+                            }
+                        },
+                        Err(error) => {
+                            m.diff_files.clear();
                             m.diff_not_repo = false;
-                            m.status = format!("diff 失败（{e}）");
+                            error_message = Some(format!("加载改动失败：{error}"));
                         }
                     }
+                    m.diff_loading = false;
+                    m.diff_error = error_message.clone();
+                }
+                if let Some(error) = error_message {
+                    w.push_notification(
+                        UiNotification::error(error.clone()).title("无法加载改动"),
+                        cx,
+                    );
                 }
                 cx.notify();
             });
@@ -2011,6 +2132,21 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let session_id = match &self.selected {
+            Some(Selected::Session {
+                id,
+                machine: selected_machine,
+            }) if *selected_machine == machine => id.clone(),
+            _ => return,
+        };
+        let request_id = self
+            .machines
+            .get_mut(machine)
+            .map(|m| {
+                m.workspace_list_request_id = m.workspace_list_request_id.saturating_add(1);
+                m.workspace_list_request_id
+            })
+            .unwrap_or_default();
         if let Some(m) = self.machines.get_mut(machine) {
             m.workspace_loading.insert(path.clone());
         }
@@ -2026,9 +2162,19 @@ impl AmuxApp {
                 .request(protocol::method::WORKSPACE_LIST, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
+                let selected_session_matches = matches!(
+                    &this.selected,
+                    Some(Selected::Session {
+                        machine: selected_machine,
+                        id
+                    }) if *selected_machine == machine && id == &session_id
+                );
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
+                if !selected_session_matches || m.workspace_list_request_id != request_id {
+                    return;
+                }
                 m.workspace_loading.remove(&directory_path);
                 match res {
                     Ok(value) => match serde_json::from_value::<WorkspaceListResult>(value) {
@@ -2068,7 +2214,7 @@ impl AmuxApp {
     }
 
     fn load_workspace_file(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
@@ -2090,6 +2236,32 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let session_id = match &self.selected {
+            Some(Selected::Session {
+                id,
+                machine: selected_machine,
+            }) if *selected_machine == machine => id.clone(),
+            _ => return,
+        };
+        let request_id = self
+            .machines
+            .get_mut(machine)
+            .map(|m| {
+                m.workspace_read_request_id = m.workspace_read_request_id.saturating_add(1);
+                m.workspace_read_request_id
+            })
+            .unwrap_or_default();
+        if let Some(m) = self.machines.get_mut(machine) {
+            m.workspace_read_loading = true;
+            m.workspace_error = None;
+            if offset == 0 {
+                m.workspace_file = Some(path.clone());
+                m.workspace_content.clear();
+                m.workspace_read_has_more = false;
+                m.workspace_read_next_offset = 0;
+            }
+        }
+        cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({
                 "cwd": cwd,
@@ -2101,9 +2273,20 @@ impl AmuxApp {
                 .request(protocol::method::WORKSPACE_READ, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
+                let selected_session_matches = matches!(
+                    &this.selected,
+                    Some(Selected::Session {
+                        machine: selected_machine,
+                        id
+                    }) if *selected_machine == machine && id == &session_id
+                );
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
+                if !selected_session_matches || m.workspace_read_request_id != request_id {
+                    return;
+                }
+                m.workspace_read_loading = false;
                 match res {
                     Ok(value) => match serde_json::from_value::<WorkspaceReadResult>(value) {
                         Ok(result) => {
@@ -2146,11 +2329,26 @@ impl AmuxApp {
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = json!({ "cwd": cwd, "path": path, "patch": patch });
-            let _ = client
+            let result = client
                 .request(protocol::method::WORKSPACE_RESTORE, Some(params))
                 .await;
-            let _ = this.update_in(cx, |this, w, cx| {
-                this.load_diff(w, cx, machine);
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(_) => {
+                        window.push_notification(
+                            UiNotification::success("已撤销所选改动").title("撤销成功"),
+                            cx,
+                        );
+                        this.load_diff(window, cx, machine);
+                    }
+                    Err(error) => {
+                        window.push_notification(
+                            UiNotification::error(format!("撤销失败：{error}"))
+                                .title("无法撤销改动"),
+                            cx,
+                        );
+                    }
+                }
                 cx.notify();
             });
         })
@@ -3068,6 +3266,7 @@ impl AmuxApp {
         for (wi, wf) in self.workflows.iter().enumerate() {
             let mut recency = wf.session.updated_at;
             for c in &wf.session.children {
+                recency = recency.max(c.last_active_at);
                 if let Some(mm) = self.machines.get(c.machine_idx) {
                     if let Some(s) = mm.sessions.iter().find(|s| s.id == c.id) {
                         recency = recency.max(s.last_active_at);
@@ -3114,7 +3313,6 @@ impl AmuxApp {
         s: &SessionMeta,
     ) -> gpui::AnyElement {
         let sid = s.id.clone();
-        let sid_open = sid.clone();
         let sel = self.selected
             == Some(Selected::Session {
                 machine,
@@ -3150,6 +3348,7 @@ impl AmuxApp {
         }
 
         let sid_ctx = sid.clone();
+        let sid_open = sid.clone();
         div()
             .id(format!("sess-row-{machine}-{sid}"))
             .relative()
@@ -3158,6 +3357,9 @@ impl AmuxApp {
             .bg(active.opacity(if sel { 1.0 } else { 0.0 }))
             .when(sel, |d| d.border_1().border_color(border))
             .hover(|d| d.bg(cx.theme().list_hover))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.open_session(window, cx, machine, sid_open.clone());
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
@@ -3188,9 +3390,6 @@ impl AmuxApp {
                             .min_w_0()
                             .gap_1()
                             .items_center()
-                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                this.open_session(window, cx, machine, sid_open.clone());
-                            }))
                             .child(Label::new(label).text_sm().flex_1().min_w_0().truncate()),
                     )
                     .child(if busy {
@@ -3244,20 +3443,18 @@ impl AmuxApp {
                             .min_w_0()
                             .truncate(),
                     )
-                    .when(wf.session.cancelled || wf.session.done, |h| {
-                        h.child(
-                            div()
-                                .px_1()
-                                .py(px(1.))
-                                .rounded_full()
-                                .bg(cx.theme().muted)
-                                .child(
-                                    Label::new(state)
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground),
-                                ),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .px_1()
+                            .py(px(1.))
+                            .rounded_full()
+                            .bg(cx.theme().muted)
+                            .child(
+                                Label::new(state)
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    ),
             )
             .child(
                 Button::new(format!("wf-toggle-{wi}"))
@@ -3280,8 +3477,24 @@ impl AmuxApp {
             });
 
         // 子会话默认折叠、可展开下钻
+        let mut children = wf.session.children.clone();
+        children.sort_by_key(|child| {
+            std::cmp::Reverse(
+                child.last_active_at.max(
+                    self.machine(child.machine_idx)
+                        .and_then(|machine| {
+                            machine
+                                .sessions
+                                .iter()
+                                .find(|session| session.id == child.id)
+                        })
+                        .map(|session| session.last_active_at)
+                        .unwrap_or(0),
+                ),
+            )
+        });
         let mut content = v_flex().gap_1();
-        for c in &wf.session.children {
+        for c in &children {
             let cid = c.id.clone();
             let cid_open = cid.clone();
             let step = c.step_desc.clone();
@@ -3508,7 +3721,8 @@ impl AmuxApp {
         let warning_foreground = cx.theme().warning_foreground;
         let danger = cx.theme().danger;
         let mut card = v_flex()
-            .w(px(640.))
+            .w_full()
+            .max_w(px(640.))
             .gap_3()
             .p_4()
             .bg(popover)
@@ -3582,6 +3796,7 @@ impl AmuxApp {
                     card = card
                         .child(
                             h_flex()
+                                .flex_wrap()
                                 .gap_6()
                                 .child(
                                     v_flex()
@@ -3791,7 +4006,7 @@ impl AmuxApp {
             .new_session_machine
             .filter(|i| *i < self.machines.len())
             .or_else(|| (!self.machines.is_empty()).then_some(0));
-        let mut row = h_flex().gap_1();
+        let mut row = h_flex().gap_1().flex_wrap();
         if self.machines.is_empty() {
             row = row.child(Label::new("（请先在设置中添加机器）"));
         }
@@ -3829,7 +4044,7 @@ impl AmuxApp {
             .new_session_machine
             .filter(|i| *i < self.machines.len())
             .or_else(|| (!self.machines.is_empty()).then_some(0));
-        let mut row = h_flex().gap_1();
+        let mut row = h_flex().gap_1().flex_wrap();
         let Some(mi) = machine else {
             return row.child(Label::new("（无机器）"));
         };
@@ -4340,15 +4555,17 @@ impl AmuxApp {
                             }),
                         ))
                     })
-                    .child(
-                        Button::new("clear-attachments")
-                            .small()
-                            .label("清空附件")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.input_attachments.clear();
-                                cx.notify();
-                            })),
-                    ),
+                    .when(!self.input_attachments.is_empty(), |row| {
+                        row.child(
+                            Button::new("clear-attachments")
+                                .small()
+                                .label("清空附件")
+                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    this.input_attachments.clear();
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
     }
 
@@ -4358,6 +4575,7 @@ impl AmuxApp {
         &self,
         machine_idx: usize,
         path: &str,
+        depth: usize,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let Some(machine) = self.machine(machine_idx) else {
@@ -4378,12 +4596,14 @@ impl AmuxApp {
         let next_offset = directory.next_offset;
         let loading = machine.workspace_loading.contains(path);
         let expanded_paths = machine.workspace_expanded.clone();
+        let selected_file = machine.workspace_file.as_deref();
         let mut children = Vec::new();
 
         for entry in entries {
             let entry_path = entry.path.clone();
             let is_dir = entry.is_dir;
             let expanded = is_dir && expanded_paths.contains(&entry_path);
+            let selected = !is_dir && selected_file == Some(entry_path.as_str());
             let label = format!(
                 "{} {}",
                 if is_dir {
@@ -4403,6 +4623,8 @@ impl AmuxApp {
                 .small()
                 .ghost()
                 .px_2()
+                .pl(px(8. + depth as f32 * 14.))
+                .when(selected, |b| b.bg(cx.theme().list_active))
                 .label(label)
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     let Some(machine) = this.active_machine() else {
@@ -4438,7 +4660,12 @@ impl AmuxApp {
                 }));
             let mut node = v_flex().child(h_flex().w_full().child(button));
             if expanded {
-                node = node.children(self.render_workspace_tree(machine_idx, &entry_path, cx));
+                node = node.children(self.render_workspace_tree(
+                    machine_idx,
+                    &entry_path,
+                    depth + 1,
+                    cx,
+                ));
             }
             children.push(node.into_any_element());
         }
@@ -4469,6 +4696,20 @@ impl AmuxApp {
                     .into_any_element(),
             );
         }
+        if children.is_empty() && !loading {
+            children.push(
+                Label::new(if depth == 0 {
+                    "（目录为空）"
+                } else {
+                    "（空目录）"
+                })
+                .px_2()
+                .pl(px(8. + depth as f32 * 14.))
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element(),
+            );
+        }
         children
     }
 
@@ -4492,6 +4733,7 @@ impl AmuxApp {
         let workspace_file = machine.workspace_file.clone();
         let workspace_content = machine.workspace_content.clone();
         let workspace_error = machine.workspace_error.clone();
+        let workspace_read_loading = machine.workspace_read_loading;
         let read_has_more = machine.workspace_read_has_more;
         let read_next_offset = machine.workspace_read_next_offset;
         let file = workspace_file.clone();
@@ -4502,7 +4744,7 @@ impl AmuxApp {
             .bg(cx.theme().muted.opacity(0.35))
             .rounded_md()
             .overflow_y_scrollbar()
-            .children(self.render_workspace_tree(machine_idx, "", cx));
+            .children(self.render_workspace_tree(machine_idx, "", 0, cx));
 
         let mut content = v_flex().flex_1().min_w_0().h_full().gap_2().child(
             Label::new(
@@ -4515,6 +4757,19 @@ impl AmuxApp {
         );
         if let Some(error) = workspace_error {
             content = content.child(Label::new(error).text_sm().text_color(cx.theme().danger));
+        } else if workspace_read_loading {
+            content = content.child(
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .p_4()
+                    .child(Spinner::new())
+                    .child(
+                        Label::new("正在读取文件…")
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            );
         } else if let Some(path) = file {
             content = content.child(
                 TextView::markdown(
@@ -4528,7 +4783,12 @@ impl AmuxApp {
                     Button::new("workspace-read-more")
                         .small()
                         .ghost()
-                        .label("加载更多内容")
+                        .label(if workspace_read_loading {
+                            "读取中…"
+                        } else {
+                            "加载更多内容"
+                        })
+                        .disabled(workspace_read_loading)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             if let Some(machine) = this.active_machine() {
                                 this.load_workspace_file(
@@ -4887,6 +5147,13 @@ impl AmuxApp {
             .and_then(|i| self.machine(i))
             .map(|m| m.diff_not_repo)
             .unwrap_or(false);
+        let diff_loading = machine
+            .and_then(|i| self.machine(i))
+            .map(|m| m.diff_loading)
+            .unwrap_or(false);
+        let diff_error = machine
+            .and_then(|i| self.machine(i))
+            .and_then(|m| m.diff_error.clone());
         let has_selection = machine
             .and_then(|i| self.machine(i))
             .is_some_and(|m| !m.diff_selection.is_empty());
@@ -4979,7 +5246,30 @@ impl AmuxApp {
                     })),
             )
             .into_any_element();
-        if not_repo {
+        if let Some(error) = diff_error {
+            content_children.push(
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .p_4()
+                    .child(Label::new(error).text_sm().text_color(cx.theme().danger))
+                    .into_any_element(),
+            );
+        } else if diff_loading {
+            content_children.push(
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .p_4()
+                    .child(Spinner::new())
+                    .child(
+                        Label::new("正在加载改动…")
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .into_any_element(),
+            );
+        } else if not_repo {
             content_children.push(
                 Label::new("当前工作目录不是 git 仓库")
                     .text_sm()
@@ -5447,11 +5737,15 @@ impl AmuxApp {
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
                         cx.stop_propagation();
                     })
-                    .w(px(880.))
-                    .h(px(620.))
+                    .w_full()
+                    .max_w(px(880.))
+                    .h_full()
+                    .max_h(px(620.))
                     .overflow_hidden()
                     .bg(cx.theme().popover)
                     .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
                     .shadow_lg()
                     .child(self.render_settings_nav(cx))
                     .child(self.render_settings_content(cx)),
@@ -5564,7 +5858,29 @@ impl AmuxApp {
             .gap_1()
             .p_2()
             .bg(cx.theme().sidebar)
-            .child(Label::new("设置"))
+            .child(
+                h_flex()
+                    .items_center()
+                    .px_1()
+                    .py_1()
+                    .child(
+                        Label::new("设置")
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("settings-close")
+                            .small()
+                            .ghost()
+                            .label("✕")
+                            .tooltip("关闭设置")
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.show_settings = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(self.settings_nav_item(
                 SettingsCategory::Machines,
                 "cat-machines",
@@ -5759,6 +6075,13 @@ impl AmuxApp {
                             })),
                     ),
             )
+            .when(self.machines.is_empty(), |view| {
+                view.child(
+                    Label::new("还没有注册机器。点击右上角 + 添加 amux server。")
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                )
+            })
             .children(machines)
             .into_any()
     }
@@ -6376,6 +6699,13 @@ impl AmuxApp {
                             })),
                     ),
             )
+            .when(commands.is_empty(), |view| {
+                view.child(
+                    Label::new("还没有快捷指令。添加后会显示在会话输入区上方。")
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                )
+            })
             .children(items)
             .into_any()
     }
@@ -6470,6 +6800,13 @@ impl AmuxApp {
                             })),
                     ),
             )
+            .when(skills.is_empty(), |view| {
+                view.child(
+                    Label::new("还没有技能。点击右上角 + 添加技能说明。")
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                )
+            })
             .children(items)
             .into_any()
     }
@@ -6543,6 +6880,13 @@ impl AmuxApp {
                             })),
                     ),
             )
+            .when(templates.is_empty(), |view| {
+                view.child(
+                    Label::new("还没有工作流模板。点击右上角 + 创建一个可复用计划。")
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                )
+            })
             .children(items)
             .into_any()
     }

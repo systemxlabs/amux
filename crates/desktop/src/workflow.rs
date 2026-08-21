@@ -47,6 +47,8 @@ pub struct ChildSession {
     pub step_desc: String,
     pub state: SessionState,
     pub last_output: String,
+    #[serde(default)]
+    pub last_active_at: u64,
 }
 
 /// 工作流会话（GUI 本地状态，docs/DESIGN.md「工作流会话存储」）。
@@ -472,6 +474,7 @@ impl WorkflowEngine {
                             step_desc,
                             state: SessionState::Busy,
                             last_output: String::new(),
+                            last_active_at: now(),
                         });
                     }
                     self.prompt_child(&session_id, &prompt).await?;
@@ -560,6 +563,7 @@ impl WorkflowEngine {
                 child.last_output = o;
             }
             child.state = new_state;
+            child.last_active_at = now();
             child.machine_name.clone()
         };
         self.sync_state_from_children();
@@ -596,6 +600,7 @@ impl WorkflowEngine {
             .find(|c| c.id == session_id)
         {
             child.state = state;
+            child.last_active_at = now();
         }
         self.sync_state_from_children();
     }
@@ -1202,6 +1207,7 @@ impl rig::tool::Tool for CreateSession {
                 step_desc: args.cwd,
                 state: SessionState::Idle,
                 last_output: String::new(),
+                last_active_at: now(),
             });
         live.record_tool(
             Self::NAME,
@@ -1523,6 +1529,7 @@ mod tests {
                 step_desc: "s".into(),
                 state: SessionState::Idle,
                 last_output: String::new(),
+                last_active_at: 0,
             },
             ChildSession {
                 id: "b".into(),
@@ -1532,6 +1539,7 @@ mod tests {
                 step_desc: "s".into(),
                 state: SessionState::Busy,
                 last_output: String::new(),
+                last_active_at: 0,
             },
         ];
         assert_eq!(
@@ -1594,6 +1602,7 @@ mod tests {
             step_desc: "第一步".into(),
             state: SessionState::Busy,
             last_output: String::new(),
+            last_active_at: 0,
         });
         engine.mark_cancelled();
         assert!(engine.session.cancelled);
@@ -1627,6 +1636,7 @@ mod tests {
             step_desc: "第一步".into(),
             state: SessionState::Busy,
             last_output: String::new(),
+            last_active_at: 0,
         });
         let advanced = engine
             .on_child_state("s_child", SessionState::Busy, SessionState::Idle, None)
@@ -1866,6 +1876,7 @@ mod tests {
             step_desc: "第一步".into(),
             state: SessionState::Idle,
             last_output: String::new(),
+            last_active_at: 0,
         });
         engine.on_child_state_local("s_child", SessionState::Busy);
         assert_eq!(engine.session.children[0].state, SessionState::Busy);

@@ -124,14 +124,16 @@ pub fn apply(cx: &mut App) {
         theme.scrollbar_thumb = color(0xd2d2cf);
         theme.scrollbar_thumb_hover = color(0xbfbfbc);
         theme.link = color(0x0a84ff);
-        theme.danger = color(0xe5484d);
-        theme.danger_hover = color(0xee5c61);
-        theme.danger_active = color(0xd93c42);
+        // Keep semantic text colors readable on the pale tinted surfaces used by
+        // status badges and inline validation feedback.
+        theme.danger = color(0xc53030);
+        theme.danger_hover = color(0xb4232b);
+        theme.danger_active = color(0xa61b1b);
         theme.danger_foreground = color(0xffffff);
-        theme.success = color(0x2f9e63);
+        theme.success = color(0x18794e);
         theme.success_foreground = color(0xffffff);
         theme.warning = color(0xa16207);
-        theme.warning_foreground = color(0xffffff);
+        theme.warning_foreground = color(0x6b4f00);
         theme.overlay = gpui::hsla(0.0, 0.0, 0.0, 0.25);
     }
     theme.font_family = ".AppleSystemUIFont".into();
