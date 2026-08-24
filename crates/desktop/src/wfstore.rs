@@ -29,16 +29,22 @@ fn sqlite_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("session.sqlite")
 }
 
+/// 原子写：先写同目录临时文件再 rename 覆盖。持久化中途崩溃不会留下截断文件
+/// （截断 jsonl 曾被读取端静默当空处理，等于无告警丢全部历史）。
 fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut f = std::fs::File::create(path)?;
-    for item in items {
-        let line = serde_json::to_string(item).map_err(io::Error::other)?;
-        writeln!(f, "{line}")?;
+    let tmp = path.with_extension("jsonl.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        for item in items {
+            let line = serde_json::to_string(item).map_err(io::Error::other)?;
+            writeln!(f, "{line}")?;
+        }
+        f.sync_all()?;
     }
-    Ok(())
+    std::fs::rename(&tmp, path)
 }
 
 fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {

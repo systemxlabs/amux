@@ -2863,6 +2863,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "jiff",
  "protocol",
  "reqwest 0.13.4",
  "rig",

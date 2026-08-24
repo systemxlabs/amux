@@ -39,7 +39,7 @@ use serde_json::json;
 
 use protocol::{
     ActivitiesResult, Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult,
-    ContentBlock, GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryResult, OpResult,
+    ContentBlock, GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryItem, HistoryResult, OpResult,
     OngoingActivityResult, SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta,
     SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, SessionState,
     SessionStateChange, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceEntry,
@@ -759,8 +759,10 @@ impl AmuxApp {
         if !idle {
             return;
         }
-        // 子会话变 idle：抽取其最新输出并异步推进该工作流
-        let output = this
+        // 子会话变 idle：抽取其最新输出并异步推进该工作流。
+        // 会话从未在 GUI 打开过时 views 无条目（后台创建的子会话），
+        // 先拉一次对话历史尾窗再抽取，避免向编排智能体注入空输出。
+        let opened_output = this
             .machines
             .get(idx)
             .and_then(|m| m.views.get(&sid))
@@ -769,17 +771,47 @@ impl AmuxApp {
                     DialogMsg::AgentMessage { content, .. } => Some(block_text(content)),
                     _ => None,
                 })
-            })
-            .unwrap_or_default();
+            });
+        let client_for_tail = this.machines.get(idx).map(|m| m.client.clone());
         let wf = match this.workflows.get(wi) {
             Some(wf) => wf.clone(),
             None => return,
         };
+        let sid_for_tail = sid.clone();
         wf.on_child_state_local(&sid, new_state);
         let session_dir = this.session_dir.clone();
         // 状态共享于引擎内部（Arc<RwLock>），任务结束无需整引擎回写
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             run_engine_on_tokio(async move {
+                let output = match opened_output {
+                    Some(o) => o,
+                    None => {
+                        let tail = match client_for_tail {
+                            Some(c) => c
+                                .request::<_, HistoryResult>(
+                                    protocol::method::SESSION_HISTORY,
+                                    Some(SessionPageParams {
+                                        session_id: sid_for_tail.clone(),
+                                        limit: Some(10),
+                                        before: None,
+                                    }),
+                                )
+                                .await
+                                .map(|r| r.items)
+                                .unwrap_or_default(),
+                            None => Vec::new(),
+                        };
+                        tail.iter()
+                            .rev()
+                            .find_map(|item| match item {
+                                HistoryItem::AgentMessage { content, .. } => {
+                                    Some(block_text(content))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_default()
+                    }
+                };
                 if let Err(e) = wf
                     .on_child_state(&sid, old_state, new_state, Some(output))
                     .await
@@ -917,6 +949,10 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
+        // docs/DESIGN.md「活动视图」：面板未打开时不主动刷新
+        if self.panel != Some(Panel::Activities) {
+            return;
+        }
         let Some(m) = self.machines.get(machine) else {
             return;
         };
@@ -5302,7 +5338,14 @@ impl AmuxApp {
                     )
                     .into_any_element(),
             );
-            for (hi, h) in f.hunks.iter().enumerate() {
+            // 折叠全部改动时仅保留文件头（路径 + 状态 + 统计），隐藏 diff 行
+            let hunks_iter: Box<dyn Iterator<Item = (usize, &protocol::GitDiffHunk)>> =
+                if diff_changes_collapsed {
+                    Box::new(std::iter::empty())
+                } else {
+                    Box::new(f.hunks.iter().enumerate())
+                };
+            for (hi, h) in hunks_iter {
                 let hunk_selected = self.is_diff_selected(machine_idx, &path, Some(hi));
                 let hunk_path = path.clone();
                 let hunk_patch = h.patch.clone();
@@ -5519,7 +5562,7 @@ impl AmuxApp {
                             .gap_2()
                             .overflow_y_scroll()
                             .track_scroll(&self.diff_scroll)
-                            .when(!diff_changes_collapsed, |d| d.children(content_children)),
+                            .children(content_children),
                     ),
             )
             .into_any()
@@ -6926,13 +6969,18 @@ async fn run_engine_on_tokio<T: Send + 'static>(
     rx.await.ok()
 }
 
+/// 消息/详情时间戳：本地时区；当日只显示时刻，跨天附日期（原实现为 UTC 当日
+/// 时分秒——跨天消息时间倒序且无法分辨日期）。
 fn format_timestamp(timestamp_ms: u64) -> String {
-    let seconds = timestamp_ms / 1_000;
-    let day_seconds = seconds % 86_400;
-    format!(
-        "{:02}:{:02}:{:02}",
-        day_seconds / 3_600,
-        (day_seconds % 3_600) / 60,
-        day_seconds % 60
-    )
+    let Ok(ts) = jiff::Timestamp::from_millisecond(timestamp_ms as i64) else {
+        return String::new();
+    };
+    let ts = ts.to_zoned(jiff::tz::TimeZone::system());
+    let now = jiff::Zoned::now();
+    let time = ts.strftime("%H:%M:%S").to_string();
+    if ts.date() == now.date() {
+        time
+    } else {
+        format!("{} {}", ts.strftime("%m-%d").to_string(), time)
+    }
 }

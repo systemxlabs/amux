@@ -23,5 +23,7 @@ gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 gpui_component = { package = "gpui-component", git = "https://github.com/longbridge/gpui-component" }
 gpui_component_assets = { package = "gpui-component-assets", git = "https://github.com/longbridge/gpui-component" }
+# 本地时区时间戳格式化（PRD「消息气泡包含时间」；跨天需日期）
+jiff = "0.2"
 rig = "0.41"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
