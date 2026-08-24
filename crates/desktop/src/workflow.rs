@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rig::client::CompletionClient;
@@ -181,6 +181,10 @@ pub trait OrcBackend: Send + Sync {
     fn take_synced_activities(&self) -> Option<Vec<Activity>> {
         None
     }
+    /// finish 工具的结论（None = 本轮未声明完成）。
+    fn take_synced_done(&self) -> Option<String> {
+        None
+    }
 }
 
 // ---- 工具规划动作记录 ----
@@ -240,15 +244,38 @@ pub fn cancel_requests(children: &[ChildSession]) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// 推进门闩：同一工作流的推进全局串行（修复引擎克隆并发分叉）。
+/// running 期间的新触发只置 requested；本轮结束后合并为至多一轮追加推进。
+#[derive(Default)]
+struct AdvanceGate {
+    running: bool,
+    requested: bool,
+}
+
+/// running 标志的 drop 兜底：turn 中途 panic/早退也不会把引擎永久卡在「推进中」。
+struct GateGuard {
+    gate: Arc<Mutex<AdvanceGate>>,
+}
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        self.gate
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .running = false;
+    }
+}
+
 #[derive(Clone)]
 pub struct WorkflowEngine {
-    pub session: OrcSession,
+    /// 共享会话快照：GUI 渲染读、引擎任务写（短临界区），克隆之间天然一致——
+    /// 后台推进不再「克隆-跑-整引擎回写」，并发分叉与后写覆盖随之消失。
+    pub session: Arc<RwLock<OrcSession>>,
     backend: Arc<dyn OrcBackend>,
     clients: Vec<WsClient>,
     machines: Vec<MachineSummary>,
-    advancing: bool,
-    pending_advance: bool,
-    /// 工作中收到的用户消息（steer 注入，克隆共享）。
+    gate: Arc<Mutex<AdvanceGate>>,
+    /// 工作中收到的用户消息（steer 注入；当前轮结束后合并）。
     steer_inbox: Arc<Mutex<Vec<String>>>,
 }
 
@@ -293,12 +320,11 @@ impl WorkflowEngine {
             updated_at: t,
         };
         WorkflowEngine {
-            session,
+            session: Arc::new(RwLock::new(session)),
             backend,
             clients,
             machines,
-            advancing: false,
-            pending_advance: false,
+            gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -321,96 +347,134 @@ impl WorkflowEngine {
                 .unwrap_or(usize::MAX);
         }
         WorkflowEngine {
-            session,
+            session: Arc::new(RwLock::new(session)),
             backend,
             clients,
             machines,
-            advancing: false,
-            pending_advance: false,
+            gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
+    /// 短临界区可变访问（长 await 一律发生在锁外）。
+    fn with_session<R>(&self, f: impl FnOnce(&mut OrcSession) -> R) -> R {
+        let mut s = self.session.write().expect("RwLock 中毒");
+        f(&mut s)
+    }
+
     #[cfg(test)]
-    pub async fn start(&mut self) -> Result<(), String> {
+    pub async fn start(&self) -> Result<(), String> {
         self.advance().await
     }
 
-    pub async fn advance(&mut self) -> Result<(), String> {
+    pub async fn advance(&self) -> Result<(), String> {
+        // 单飞 + 合并：running 期间的触发（子会话事件/用户消息/steer）只置 requested，
+        // 由持有者在本轮结束后补跑一轮，避免并发双 turn 分叉 transcript。
+        {
+            let mut g = self.gate.lock().expect("Mutex 中毒（临界区内不应 panic）");
+            if g.running {
+                g.requested = true;
+                return Ok(());
+            }
+            {
+                let s = self.session.read().expect("RwLock 中毒");
+                if s.cancelled || s.done {
+                    return Ok(());
+                }
+            }
+            g.running = true;
+        }
+        let _guard = GateGuard {
+            gate: self.gate.clone(),
+        };
         loop {
-            if self.advancing {
-                self.pending_advance = true;
-                return Ok(());
-            }
-            if self.session.cancelled || self.session.done {
-                return Ok(());
-            }
-            self.advancing = true;
-            self.session.state = SessionState::Busy;
-            self.session.updated_at = now();
+            self.with_session(|s| {
+                s.state = SessionState::Busy;
+                s.updated_at = now();
+            });
             let result = self.do_advance().await;
-            self.advancing = false;
             self.sync_state_from_children();
-            self.session.updated_at = now();
-            if self.absorb_steer() {
-                self.pending_advance = true;
-            }
-            if !self.pending_advance {
+            self.with_session(|s| s.updated_at = now());
+            let rerun = {
+                let mut g = self.gate.lock().expect("Mutex 中毒（临界区内不应 panic）");
+                let r = g.requested || self.absorb_steer();
+                g.requested = false;
+                r
+            };
+            if !rerun {
                 return result;
             }
-            self.pending_advance = false;
             result.as_ref()?;
         }
     }
 
-    async fn do_advance(&mut self) -> Result<(), String> {
-        self.session.activities.push(Activity::Thinking {
-            timestamp: now(),
-            content: "编排智能体正在分析工作流并规划本轮调度".into(),
+    async fn do_advance(&self) -> Result<(), String> {
+        self.with_session(|s| {
+            s.activities.push(Activity::Thinking {
+                timestamp: now(),
+                content: "编排智能体正在分析工作流并规划本轮调度".into(),
+            });
         });
         let ctx = self.build_context();
         let decision = match self.backend.decide(&ctx).await {
             Ok(d) => d,
             Err(e) => {
-                self.session.activities.push(Activity::Error {
-                    timestamp: now(),
-                    detail: format!("编排 agent 调用失败：{e}"),
+                self.with_session(|s| {
+                    s.activities.push(Activity::Error {
+                        timestamp: now(),
+                        detail: format!("编排 agent 调用失败：{e}"),
+                    });
                 });
                 return Err(e);
             }
         };
-        self.session.transcript.push(OrcMsg::Orc {
-            text: decision.summary.clone(),
-        });
-        if let Some(c) = &decision.conclusion {
-            self.session.transcript.push(OrcMsg::User {
-                text: format!("编排结束：{c}"),
+        self.with_session(|s| {
+            s.transcript.push(OrcMsg::Orc {
+                text: decision.summary.clone(),
             });
-            self.session.done = true;
-        }
-        self.session.done = self.session.done || decision.done;
+            if let Some(c) = &decision.conclusion {
+                s.transcript.push(OrcMsg::Orc {
+                    text: format!("编排结束：{c}"),
+                });
+                s.done = true;
+            }
+            s.done = s.done || decision.done;
+        });
         if let Err(e) = self.apply_actions(decision.actions).await {
-            self.session.activities.push(Activity::Error {
-                timestamp: now(),
-                detail: format!("执行编排动作失败：{e}"),
+            self.with_session(|s| {
+                s.activities.push(Activity::Error {
+                    timestamp: now(),
+                    detail: format!("执行编排动作失败：{e}"),
+                });
             });
             return Err(e);
         }
         if let Some(kids) = self.backend.take_synced_children() {
-            self.session.children = kids;
+            self.with_session(|s| s.children = kids);
         }
         if let Some(activities) = self.backend.take_synced_activities() {
-            self.session.activities.extend(activities);
+            self.with_session(|s| s.activities.extend(activities));
+        }
+        // finish 工具：编排智能体声明工作流完成（PRD「输出结论并回到空闲等待」；
+        // 无终止出口曾导致子会话每次 idle 都再触发一轮 LLM，无限推进）
+        if let Some(conclusion) = self.backend.take_synced_done() {
+            self.with_session(|s| {
+                s.transcript.push(OrcMsg::Orc {
+                    text: format!("工作流已完成：{conclusion}"),
+                });
+                s.done = true;
+                s.state = SessionState::Idle;
+            });
         }
         Ok(())
     }
 
     fn build_context(&self) -> OrcContext {
+        let s = self.session.read().expect("RwLock 中毒");
         OrcContext {
-            plan: self.session.description.clone(),
-            preamble: self.session.preamble.clone(),
-            transcript: self
-                .session
+            plan: s.description.clone(),
+            preamble: s.preamble.clone(),
+            transcript: s
                 .transcript
                 .iter()
                 .map(|m| match m {
@@ -418,13 +482,13 @@ impl WorkflowEngine {
                     OrcMsg::Orc { text } => format!("编排：{text}"),
                 })
                 .collect(),
-            child_sessions: self.session.children.clone(),
+            child_sessions: s.children.clone(),
             clients: self.clients.clone(),
             machines: self.machines.clone(),
         }
     }
 
-    async fn apply_actions(&mut self, actions: Vec<OrcAction>) -> Result<(), String> {
+    async fn apply_actions(&self, actions: Vec<OrcAction>) -> Result<(), String> {
         for action in actions {
             match action {
                 OrcAction::Run {
@@ -435,8 +499,16 @@ impl WorkflowEngine {
                     reuse,
                 } => {
                     let m_idx = self.resolve_machine(&machine)?;
+                    let exists = {
+                        self.session
+                            .read()
+                            .expect("RwLock 中毒")
+                            .children
+                            .iter()
+                            .any(|c| c.id == *reuse.as_ref().unwrap_or(&String::new()))
+                    };
                     let session_id = match reuse {
-                        Some(id) if self.session.children.iter().any(|c| c.id == id) => id,
+                        Some(id) if exists => id,
                         Some(id) => return Err(format!("复用的子会话不存在: {id}")),
                         None => {
                             let res = self
@@ -466,65 +538,76 @@ impl WorkflowEngine {
                             }
                         }
                     };
-                    if !self.session.children.iter().any(|c| c.id == session_id) {
+                    let known = {
+                        self.session
+                            .read()
+                            .expect("RwLock 中毒")
+                            .children
+                            .iter()
+                            .any(|c| c.id == session_id)
+                    };
+                    if !known {
                         let step_desc = first_line(&prompt);
-                        self.session.children.push(ChildSession {
-                            id: session_id.clone(),
-                            machine_idx: m_idx,
-                            machine_name: self.machines[m_idx].name.clone(),
-                            agent: agent.clone(),
-                            step_desc,
-                            state: SessionState::Busy,
-                            last_output: String::new(),
-                            last_active_at: now(),
+                        self.with_session(|s| {
+                            s.children.push(ChildSession {
+                                id: session_id.clone(),
+                                machine_idx: m_idx,
+                                machine_name: self.machines[m_idx].name.clone(),
+                                agent: agent.clone(),
+                                step_desc,
+                                state: SessionState::Busy,
+                                last_output: String::new(),
+                                last_active_at: now(),
+                            });
                         });
                     }
                     if let Err(error) = self.prompt_child(&session_id, &prompt).await {
-                        if let Some(child) = self
-                            .session
-                            .children
-                            .iter_mut()
-                            .find(|child| child.id == session_id)
-                        {
-                            child.state = SessionState::Idle;
-                        }
-                        self.session.activities.push(Activity::Error {
-                            timestamp: now(),
-                            detail: error.clone(),
+                        self.with_session(|s| {
+                            if let Some(child) =
+                                s.children.iter_mut().find(|c| c.id == session_id)
+                            {
+                                child.state = SessionState::Idle;
+                            }
+                            s.activities.push(Activity::Error {
+                                timestamp: now(),
+                                detail: error.clone(),
+                            });
                         });
                         return Err(error);
                     }
-                    self.session.activities.push(Activity::ToolCall {
-                        timestamp: now(),
-                        name: "create_session".into(),
-                        title: Some(format!(
-                            "在 {} 用 {} 创建关联普通会话 {session_id}",
-                            self.machines[m_idx].name, agent
-                        )),
-                        content: Some(prompt.clone()),
+                    self.with_session(|s| {
+                        s.activities.push(Activity::ToolCall {
+                            timestamp: now(),
+                            name: "create_session".into(),
+                            title: Some(format!(
+                                "在 {} 用 {} 创建关联普通会话 {session_id}",
+                                self.machines[m_idx].name, agent
+                            )),
+                            content: Some(prompt.clone()),
+                        });
                     });
                 }
                 OrcAction::Steer { session, prompt } | OrcAction::Retry { session, prompt } => {
                     if let Err(error) = self.prompt_child(&session, &prompt).await {
-                        if let Some(child) = self
-                            .session
-                            .children
-                            .iter_mut()
-                            .find(|child| child.id == session)
-                        {
-                            child.state = SessionState::Idle;
-                        }
-                        self.session.activities.push(Activity::Error {
-                            timestamp: now(),
-                            detail: error.clone(),
+                        self.with_session(|s| {
+                            if let Some(child) = s.children.iter_mut().find(|c| c.id == session)
+                            {
+                                child.state = SessionState::Idle;
+                            }
+                            s.activities.push(Activity::Error {
+                                timestamp: now(),
+                                detail: error.clone(),
+                            });
                         });
                         return Err(error);
                     }
-                    self.session.activities.push(Activity::ToolCall {
-                        timestamp: now(),
-                        name: "prompt_session".into(),
-                        title: Some(format!("介入关联普通会话 {session}")),
-                        content: Some(prompt.clone()),
+                    self.with_session(|s| {
+                        s.activities.push(Activity::ToolCall {
+                            timestamp: now(),
+                            name: "prompt_session".into(),
+                            title: Some(format!("介入关联普通会话 {session}")),
+                            content: Some(prompt.clone()),
+                        });
                     });
                 }
             }
@@ -532,26 +615,32 @@ impl WorkflowEngine {
         Ok(())
     }
 
-    async fn prompt_child(&mut self, session_id: &str, text: &str) -> Result<(), String> {
-        let Some(child) = self.session.children.iter().find(|c| c.id == session_id) else {
-            self.session.transcript.push(OrcMsg::User {
-                text: format!("关联普通会话不存在：{session_id}"),
+    async fn prompt_child(&self, session_id: &str, text: &str) -> Result<(), String> {
+        let (machine_idx, known) = {
+            let s = self.session.read().expect("RwLock 中毒");
+            match s.children.iter().find(|c| c.id == session_id) {
+                Some(c) => (c.machine_idx, true),
+                None => (usize::MAX, false),
+            }
+        };
+        if !known {
+            self.with_session(|s| {
+                s.transcript.push(OrcMsg::User {
+                    text: format!("关联普通会话不存在：{session_id}"),
+                });
             });
             return Err(format!("关联普通会话不存在: {session_id}"));
-        };
+        }
         let client = self
             .clients
-            .get(child.machine_idx)
+            .get(machine_idx)
             .cloned()
             .ok_or_else(|| "机器连接已失效".to_string())?;
-        if let Some(c) = self
-            .session
-            .children
-            .iter_mut()
-            .find(|c| c.id == session_id)
-        {
-            c.state = SessionState::Busy;
-        }
+        self.with_session(|s| {
+            if let Some(c) = s.children.iter_mut().find(|c| c.id == session_id) {
+                c.state = SessionState::Busy;
+            }
+        });
         let sid = session_id.to_string();
         // 下发失败必须向上传播（工作流推进据此记录错误活动），不能只写日志
         let input = SessionPromptParams {
@@ -575,19 +664,15 @@ impl WorkflowEngine {
     /// 关联普通会话状态变更（GUI 收到 `session.state_change` 通知时调用）。
     /// 关联普通会话变 idle → 按 docs/DESIGN.md 格式注入状态变更并推进。
     pub async fn on_child_state(
-        &mut self,
+        &self,
         session_id: &str,
         old_state: SessionState,
         new_state: SessionState,
         output_excerpt: Option<String>,
     ) -> Result<bool, String> {
         let machine = {
-            let Some(child) = self
-                .session
-                .children
-                .iter_mut()
-                .find(|c| c.id == session_id)
-            else {
+            let mut s = self.session.write().expect("RwLock 中毒");
+            let Some(child) = s.children.iter_mut().find(|c| c.id == session_id) else {
                 return Ok(false);
             };
             if let Some(o) = output_excerpt {
@@ -600,20 +685,27 @@ impl WorkflowEngine {
         self.sync_state_from_children();
         if new_state == SessionState::Idle {
             // 用户取消工作流导致的子会话状态变更不注入（docs/DESIGN.md §工作流会话驱动）
-            if self.session.cancelled || self.session.done {
-                return Ok(false);
+            {
+                let s = self.session.read().expect("RwLock 中毒");
+                if s.cancelled || s.done {
+                    return Ok(false);
+                }
             }
-            self.session.transcript.push(OrcMsg::User {
-                text: format!(
-                    "关联普通会话 {session_id}@{machine} 检测到状态变更：{old} -> {new}",
-                    old = state_label(old_state),
-                    new = state_label(new_state)
-                ),
+            self.with_session(|s| {
+                s.transcript.push(OrcMsg::User {
+                    text: format!(
+                        "关联普通会话 {session_id}@{machine} 检测到状态变更：{old} -> {new}",
+                        old = state_label(old_state),
+                        new = state_label(new_state)
+                    ),
+                });
             });
             if let Err(e) = self.advance().await {
-                self.session.activities.push(Activity::Error {
-                    timestamp: now(),
-                    detail: format!("关联会话推进失败：{e}"),
+                self.with_session(|s| {
+                    s.activities.push(Activity::Error {
+                        timestamp: now(),
+                        detail: format!("关联会话推进失败：{e}"),
+                    });
                 });
                 return Err(e);
             }
@@ -623,76 +715,66 @@ impl WorkflowEngine {
     }
 
     /// 同步记录关联普通会话状态变更（不推进；widget 状态即可视化）。
-    pub fn on_child_state_local(&mut self, session_id: &str, state: SessionState) {
-        if let Some(child) = self
-            .session
-            .children
-            .iter_mut()
-            .find(|c| c.id == session_id)
-        {
-            child.state = state;
-            child.last_active_at = now();
-        }
+    pub fn on_child_state_local(&self, session_id: &str, state: SessionState) {
+        self.with_session(|s| {
+            if let Some(child) = s.children.iter_mut().find(|c| c.id == session_id) {
+                child.state = state;
+                child.last_active_at = now();
+            }
+        });
         self.sync_state_from_children();
     }
 
-    fn sync_state_from_children(&mut self) {
-        if self.session.cancelled || self.session.done {
-            return;
-        }
-        self.session.state = if self.advancing
-            || self
-                .session
-                .children
-                .iter()
-                .any(|child| child.state == SessionState::Busy)
-        {
-            SessionState::Busy
-        } else {
-            SessionState::Idle
-        };
-    }
-
-    pub fn begin_busy(&mut self) {
-        self.advancing = true;
-        self.pending_advance = false;
-        self.session.state = SessionState::Busy;
-        self.session.updated_at = now();
-    }
-
-    pub fn start_advance(&mut self) {
-        self.advancing = false;
-        self.pending_advance = false;
-    }
-
-    pub fn abort_busy(&mut self) {
-        self.advancing = false;
-        self.pending_advance = false;
-        if self.session.state == SessionState::Busy {
-            self.session.state = SessionState::Idle;
-        }
-        self.session.updated_at = now();
-    }
-
-    pub fn record_user(&mut self, text: &str) -> bool {
-        if self.session.description.trim().is_empty() {
-            self.session.description = text.trim().to_string();
-        }
-        if self.session.title.trim().is_empty() {
-            self.session.title = generate_title(text);
-        }
-        self.session.transcript.push(OrcMsg::User {
-            text: text.to_string(),
+    fn sync_state_from_children(&self) {
+        self.with_session(|s| {
+            if s.cancelled || s.done {
+                return;
+            }
+            s.state = if s.children.iter().any(|c| c.state == SessionState::Busy) {
+                SessionState::Busy
+            } else {
+                SessionState::Idle
+            };
         });
-        self.session.updated_at = now();
-        if self.session.done {
+    }
+
+    pub fn begin_busy(&self) {
+        self.gate
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .requested = false;
+        self.with_session(|s| {
+            s.state = SessionState::Busy;
+            s.updated_at = now();
+        });
+    }
+
+    /// 返回是否应立即启动推进（false = 已在工作（steer 入队）/已取消/已完成）。
+    pub fn record_user(&self, text: &str) -> bool {
+        let busy = {
+            let s = self.session.read().expect("RwLock 中毒");
+            s.state == SessionState::Busy
+        };
+        self.with_session(|s| {
+            if s.description.trim().is_empty() {
+                s.description = text.trim().to_string();
+            }
+            if s.title.trim().is_empty() {
+                s.title = generate_title(text);
+            }
+            s.transcript.push(OrcMsg::User {
+                text: text.to_string(),
+            });
+            s.updated_at = now();
+            if s.cancelled {
+                s.cancelled = false;
+                s.state = SessionState::Idle;
+            }
+        });
+        if self.session.read().expect("RwLock 中毒").done {
             return false;
         }
-        if self.session.cancelled {
-            self.session.cancelled = false;
-            self.session.state = SessionState::Idle;
-        }
-        if self.advancing {
+        if busy {
             // 工作中以 steer 注入，当前 turn 结束后再跑一轮（docs/DESIGN.md 编排智能体 steer）
             self.steer_inbox
                 .lock()
@@ -704,7 +786,7 @@ impl WorkflowEngine {
     }
 
     /// 把 inbox 中尚未出现在 transcript 的 steer 消息合并进来。
-    pub fn absorb_steer(&mut self) -> bool {
+    pub fn absorb_steer(&self) -> bool {
         let msgs = std::mem::take(
             &mut *self
                 .steer_inbox
@@ -715,28 +797,33 @@ impl WorkflowEngine {
         for text in msgs {
             let exists = self
                 .session
+                .read()
+                .expect("RwLock 中毒")
                 .transcript
                 .iter()
                 .any(|m| matches!(m, OrcMsg::User { text: t } if t == &text));
             if !exists {
-                self.session.transcript.push(OrcMsg::User { text });
+                self.with_session(|s| s.transcript.push(OrcMsg::User { text }));
                 added = true;
             }
         }
         added
     }
 
-    pub fn mark_cancelled(&mut self) {
-        self.session.cancelled = true;
-        self.session.state = SessionState::Idle;
-        self.session.updated_at = now();
-        self.session.transcript.push(OrcMsg::User {
-            text: "已取消".into(),
+    pub fn mark_cancelled(&self) {
+        self.with_session(|s| {
+            s.cancelled = true;
+            s.state = SessionState::Idle;
+            s.updated_at = now();
+            s.transcript.push(OrcMsg::User {
+                text: "已取消".into(),
+            });
         });
     }
 
     pub async fn send_cancel_to_children(&self) -> Result<(), String> {
-        for (machine_idx, session_id) in cancel_requests(&self.session.children) {
+        let requests = cancel_requests(&self.session.read().expect("RwLock 中毒").children);
+        for (machine_idx, session_id) in requests {
             let client = self
                 .clients
                 .get(machine_idx)
@@ -756,7 +843,8 @@ impl WorkflowEngine {
     // ---- 持久化（docs/DESIGN.md「工作流会话存储」：sqlite + 两份 jsonl）----
 
     pub fn persist(&self, data_dir: &Path) -> std::io::Result<()> {
-        crate::wfstore::save(data_dir, &self.session)
+        let snapshot = self.session.read().expect("RwLock 中毒").clone();
+        crate::wfstore::save(data_dir, &snapshot)
     }
 
     pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
@@ -797,6 +885,8 @@ struct LiveRuntime {
     clients: Vec<WsClient>,
     children: Arc<Mutex<Vec<ChildSession>>>,
     activities: Arc<Mutex<Vec<Activity>>>,
+    /// finish 工具写入的结论（工作流终止出口）
+    done_conclusion: Arc<Mutex<Option<String>>>,
 }
 
 impl LiveRuntime {
@@ -825,6 +915,14 @@ impl LiveRuntime {
             .ok_or_else(|| format!("关联普通会话不存在: {session_id}"))
     }
 
+    /// finish 工具：编排智能体声明工作流完成并给出结论。
+    fn finish(&self, conclusion: String) {
+        *self
+            .done_conclusion
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）") = Some(conclusion);
+    }
+
     fn record_tool(&self, name: &str, title: impl Into<String>, content: impl Into<String>) {
         self.activities
             .lock()
@@ -844,6 +942,7 @@ pub struct RigBackend {
     cfg: OrchestratorConfig,
     synced_children: Mutex<Option<Vec<ChildSession>>>,
     synced_activities: Mutex<Option<Vec<Activity>>>,
+    synced_done: Mutex<Option<String>>,
 }
 
 impl RigBackend {
@@ -852,6 +951,7 @@ impl RigBackend {
             cfg,
             synced_children: Mutex::new(None),
             synced_activities: Mutex::new(None),
+            synced_done: Mutex::new(None),
         }
     }
 
@@ -869,6 +969,7 @@ impl RigBackend {
             .tool(CancelSession)
             .tool(ReadSessionHistory)
             .tool(ReadSessionActivities)
+            .tool(FinishWorkflow)
             .build()
     }
 
@@ -877,7 +978,9 @@ impl RigBackend {
          不进行任务拆解、任务执行和任务决策；可执行执行计划中明确写出的条件分支，但不创造计划之外的步骤、不自主变更目标。\n\
          未在工作流执行计划和用户指令中指定的事项交由用户决定。\n\
          使用工具：list_agents、list_sessions、create_session、prompt_session、cancel_session、\
-         read_session_history、read_session_activities。调度动作完成后用中文简述本轮动作并结束 turn。"
+         read_session_history、read_session_activities。调度动作完成后用中文简述本轮动作并结束 turn。\
+         工作流执行计划中的全部步骤已完成（或计划已无法继续）时，调用 finish 工具并给出中文结论，\
+         之后等待用户指令；需要人类判断（如通知人类审查）时不要调用 finish，直接输出结论并结束 turn 等待。"
             .to_string()
     }
 }
@@ -921,6 +1024,7 @@ impl OrcBackend for RigBackend {
                 clients: ctx.clients.clone(),
                 children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
                 activities: Arc::new(Mutex::new(Vec::new())),
+                done_conclusion: Arc::new(Mutex::new(None)),
             };
             let mut tool_ctx = rig::tool::ToolContext::new();
             tool_ctx.insert(live.clone());
@@ -982,6 +1086,11 @@ impl OrcBackend for RigBackend {
                 .synced_activities
                 .lock()
                 .expect("Mutex 中毒（临界区内不应 panic）") = Some(activities);
+            *self.synced_done.lock().expect("Mutex 中毒（临界区内不应 panic）") =
+                live.done_conclusion
+                    .lock()
+                    .expect("Mutex 中毒（临界区内不应 panic）")
+                    .clone();
             Ok(Decision {
                 summary: text,
                 actions: Vec::new(),
@@ -1000,6 +1109,13 @@ impl OrcBackend for RigBackend {
 
     fn take_synced_activities(&self) -> Option<Vec<Activity>> {
         self.synced_activities
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .take()
+    }
+
+    fn take_synced_done(&self) -> Option<String> {
+        self.synced_done
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .take()
@@ -1412,6 +1528,45 @@ impl rig::tool::Tool for ReadSessionActivities {
     }
 }
 
+/// finish：编排智能体声明工作流完成（终止出口；PRD「输出结论并回到空闲状态等待」）。
+struct FinishWorkflow;
+impl rig::tool::Tool for FinishWorkflow {
+    const NAME: &'static str = "finish";
+    type Args = FinishArgs;
+    type Output = String;
+    type Error = rig::tool::ToolExecutionError;
+
+    fn description(&self) -> String {
+        "声明工作流已完成（或已无法继续），给出中文结论后结束。需要人类判断时不要调用本工具".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "conclusion": { "type": "string", "description": "工作流的中文结论/结果摘要" }
+            },
+            "required": ["conclusion"]
+        })
+    }
+
+    async fn call(
+        &self,
+        context: &mut rig::tool::ToolContext,
+        args: FinishArgs,
+    ) -> Result<Self::Output, Self::Error> {
+        let live = live(context)?;
+        live.finish(args.conclusion.clone());
+        live.record_tool(Self::NAME, "工作流完成", args.conclusion);
+        Ok("已记录工作流完成".into())
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FinishArgs {
+    conclusion: String,
+}
+
 #[derive(serde::Deserialize)]
 struct SessionRefArgs {
     session: String,
@@ -1573,9 +1728,11 @@ mod tests {
             clients,
             vec![m],
         );
-        assert_eq!(engine.session.title, "实现登录功能");
+        assert_eq!(engine.session.read().unwrap().title, "实现登录功能");
         assert!(engine
             .session
+            .read()
+            .unwrap()
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::User { text } if text == "实现登录功能\n然后写测试")));
@@ -1593,8 +1750,8 @@ mod tests {
             clients,
             vec![m],
         );
-        assert!(engine.session.description.contains("[上下文]"));
-        assert!(engine.session.description.contains("src/main.rs"));
+        assert!(engine.session.read().unwrap().description.contains("[上下文]"));
+        assert!(engine.session.read().unwrap().description.contains("src/main.rs"));
     }
 
     #[tokio::test]
@@ -1607,7 +1764,7 @@ mod tests {
             conclusion: None,
         }]);
         let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
-        engine.session.children.push(ChildSession {
+        engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
@@ -1618,11 +1775,13 @@ mod tests {
             last_active_at: 0,
         });
         engine.mark_cancelled();
-        assert!(engine.session.cancelled);
-        assert_eq!(engine.session.state, SessionState::Idle);
+        assert!(engine.session.read().unwrap().cancelled);
+        assert_eq!(engine.session.read().unwrap().state, SessionState::Idle);
         engine.advance().await.unwrap();
         assert!(!engine
             .session
+            .read()
+            .unwrap()
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { .. })));
@@ -1640,8 +1799,8 @@ mod tests {
             conclusion: None,
         }]);
         let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
-        engine.session.done = true;
-        engine.session.children.push(ChildSession {
+        engine.session.write().unwrap().done = true;
+        engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
@@ -1669,12 +1828,15 @@ mod tests {
         }]);
         let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         engine.start().await.unwrap();
-        assert!(engine.session.done);
+        assert!(engine.session.read().unwrap().done);
         assert!(engine
             .session
+            .read()
+            .unwrap()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text.contains("编排结束"))));
+            .any(|m| matches!(m, OrcMsg::Orc { text } if text.contains("编排结束"))),
+        "编排结论应作为编排智能体输出（而非用户气泡）进入对话流");
     }
 
     /// 工作流会话持久化往返（acceptance）。
@@ -1685,7 +1847,7 @@ mod tests {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
         let mut engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m]);
-        let id = engine.session.id.clone();
+        let id = engine.session.read().unwrap().id.clone();
         engine.record_user("立即保存");
         engine.persist(&dir).unwrap();
 
@@ -1710,6 +1872,8 @@ mod tests {
         engine2.start().await.unwrap();
         assert!(engine2
             .session
+            .read()
+            .unwrap()
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { text } if text == "恢复后推进")));
@@ -1767,10 +1931,14 @@ mod tests {
             vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
         let mut engine = engine;
-        engine.session.transcript.push(OrcMsg::Orc {
+        engine.session
+            .write()
+            .unwrap()
+            .transcript
+            .push(OrcMsg::Orc {
             text: "决策".into(),
         });
-        let dialog = engine.session.to_dialog();
+        let dialog = engine.session.read().unwrap().to_dialog();
         assert_eq!(dialog.len(), 2);
         assert!(matches!(&dialog[0], DialogMsg::UserMessage { .. }));
         assert!(matches!(&dialog[1], DialogMsg::AgentMessage { .. }));
@@ -1787,9 +1955,9 @@ mod tests {
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
-        assert!(engine.session.transcript.is_empty());
-        assert_eq!(engine.session.preamble, "模板：先在测试机实现，再审查");
-        assert!(engine.session.title.is_empty());
+        assert!(engine.session.read().unwrap().transcript.is_empty());
+        assert_eq!(engine.session.read().unwrap().preamble, "模板：先在测试机实现，再审查");
+        assert!(engine.session.read().unwrap().title.is_empty());
     }
 
     #[test]
@@ -1804,8 +1972,8 @@ mod tests {
             vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
         let should_advance = engine.record_user("实现登录功能");
-        assert_eq!(engine.session.description, "实现登录功能");
-        assert_eq!(engine.session.title, "实现登录功能");
+        assert_eq!(engine.session.read().unwrap().description, "实现登录功能");
+        assert_eq!(engine.session.read().unwrap().title, "实现登录功能");
         assert!(should_advance);
     }
 
@@ -1828,10 +1996,10 @@ mod tests {
         );
         let res = engine.start().await;
         assert!(res.is_err());
-        assert!(engine.session.activities.iter().any(
+        assert!(engine.session.read().unwrap().activities.iter().any(
             |a| matches!(a, Activity::Error { detail, .. } if detail.contains("未配置编排 agent API"))
         ));
-        assert_eq!(engine.session.state, SessionState::Idle);
+        assert_eq!(engine.session.read().unwrap().state, SessionState::Idle);
     }
 
     #[tokio::test]
@@ -1860,6 +2028,7 @@ mod tests {
             clients: vec![client],
             children: Arc::new(Mutex::new(Vec::new())),
             activities: Arc::new(Mutex::new(Vec::new())),
+            done_conclusion: Arc::new(Mutex::new(None)),
         });
         let res = CreateSession
             .call(
@@ -1888,7 +2057,7 @@ mod tests {
             vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
         let mut engine = engine;
-        engine.session.children.push(ChildSession {
+        engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
@@ -1899,12 +2068,12 @@ mod tests {
             last_active_at: 0,
         });
         engine.on_child_state_local("s_child", SessionState::Busy);
-        assert_eq!(engine.session.children[0].state, SessionState::Busy);
+        assert_eq!(engine.session.read().unwrap().children[0].state, SessionState::Busy);
         engine.on_child_state_local("s_child", SessionState::Idle);
-        assert_eq!(engine.session.children[0].state, SessionState::Idle);
+        assert_eq!(engine.session.read().unwrap().children[0].state, SessionState::Idle);
         // 非挂载的会话 id：无副作用，不 panic，不新增条目
         engine.on_child_state_local("missing", SessionState::Busy);
-        assert_eq!(engine.session.children.len(), 1);
-        assert_eq!(engine.session.children[0].state, SessionState::Idle);
+        assert_eq!(engine.session.read().unwrap().children.len(), 1);
+        assert_eq!(engine.session.read().unwrap().children[0].state, SessionState::Idle);
     }
 }

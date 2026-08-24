@@ -736,7 +736,7 @@ impl AmuxApp {
         let Some(wi) = this
             .workflows
             .iter()
-            .position(|wf| wf.session.children.iter().any(|c| c.id == sid))
+            .position(|wf| wf.session.read().unwrap().children.iter().any(|c| c.id == sid))
         else {
             return;
         };
@@ -744,7 +744,7 @@ impl AmuxApp {
         if this
             .workflows
             .get(wi)
-            .map(|wf| wf.session.cancelled)
+            .map(|wf| wf.session.read().unwrap().cancelled)
             .unwrap_or(false)
         {
             if let Some(wf) = this.workflows.get_mut(wi) {
@@ -771,15 +771,15 @@ impl AmuxApp {
                 })
             })
             .unwrap_or_default();
-        let mut wf = match this.workflows.get(wi) {
+        let wf = match this.workflows.get(wi) {
             Some(wf) => wf.clone(),
             None => return,
         };
         wf.on_child_state_local(&sid, new_state);
         let session_dir = this.session_dir.clone();
-        let wf_id = wf.session.id.clone();
+        // 状态共享于引擎内部（Arc<RwLock>），任务结束无需整引擎回写
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let result = run_engine_on_tokio(async move {
+            run_engine_on_tokio(async move {
                 if let Err(e) = wf
                     .on_child_state(&sid, old_state, new_state, Some(output))
                     .await
@@ -789,15 +789,12 @@ impl AmuxApp {
                 if let Err(e) = wf.persist(&session_dir) {
                     protocol::log::error(
                         "gui.workflow",
-                        format!("工作流状态持久化失败 {}: {e}", wf.session.id),
+                        format!("工作流状态持久化失败 {}: {e}", wf.session.read().unwrap().id),
                     );
                 }
-                Some(wf)
             })
             .await;
-            let _ = this.update_in(cx, |this, _w, cx| {
-                this.finish_engine_task(cx, wi, &wf_id, result.unwrap_or(None));
-            });
+            let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
         });
         this._tasks.push(t);
     }
@@ -1374,7 +1371,7 @@ impl AmuxApp {
                     if let Err(e) = wf.persist(&session_dir) {
                         protocol::log::error(
                             "gui.workflow",
-                            format!("工作流用户消息持久化失败 {}: {e}", wf.session.id),
+                            format!("工作流用户消息持久化失败 {}: {e}", wf.session.read().unwrap().id),
                         );
                     }
                     should_advance
@@ -1382,29 +1379,24 @@ impl AmuxApp {
                     false
                 };
                 if should_advance {
-                    let mut wf = self.workflows[engine].clone();
-                    wf.start_advance();
-                    let wf_id = wf.session.id.clone();
+                    let wf = self.workflows[engine].clone();
                     let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                        let result = run_engine_on_tokio(async move {
+                        run_engine_on_tokio(async move {
                             if let Err(e) = wf.advance().await {
                                 protocol::log::error(
                                     "gui.workflow",
-                                    format!("推进工作流失败 {}: {e}", wf.session.id),
+                                    format!("推进工作流失败 {}: {e}", wf.session.read().unwrap().id),
                                 );
                             }
                             if let Err(e) = wf.persist(&session_dir) {
                                 protocol::log::error(
                                     "gui.workflow",
-                                    format!("工作流状态持久化失败 {}: {e}", wf.session.id),
+                                    format!("工作流状态持久化失败 {}: {e}", wf.session.read().unwrap().id),
                                 );
                             }
-                            wf
                         })
                         .await;
-                        let _ = this.update_in(cx, |this, _w, cx| {
-                            this.finish_engine_task(cx, engine, &wf_id, result);
-                        });
+                        let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
                     });
                     self._tasks.push(t);
                 }
@@ -1466,7 +1458,7 @@ impl AmuxApp {
             Some(Selected::Workflow { engine }) => self
                 .workflows
                 .get(*engine)
-                .is_some_and(|wf| wf.session.state == SessionState::Busy && !wf.session.done),
+                .is_some_and(|wf| wf.session.read().unwrap().state == SessionState::Busy && !wf.session.read().unwrap().done),
             None => false,
         }
     }
@@ -1628,7 +1620,7 @@ impl AmuxApp {
 
     fn rename_workflow(&mut self, cx: &mut Context<Self>, wi: usize, title: String) {
         if let Some(wf) = self.workflows.get_mut(wi) {
-            wf.session.title = title.trim().to_string();
+            wf.session.write().unwrap().title = title.trim().to_string();
             let _ = wf.persist(&self.session_dir);
         }
         self.renaming_workflow = None;
@@ -1732,80 +1724,31 @@ impl AmuxApp {
             if let Err(e) = wf.persist(&session_dir) {
                 protocol::log::error(
                     "gui.workflow",
-                    format!("工作流创建后持久化失败 {}: {e}", wf.session.id),
+                    format!("工作流创建后持久化失败 {}: {e}", wf.session.read().unwrap().id),
                 );
             }
         }
         if should_advance {
-            let mut wf = self.workflows[wi].clone();
-            wf.start_advance();
-            let wf_id = wf.session.id.clone();
+            let wf = self.workflows[wi].clone();
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                let result = run_engine_on_tokio(async move {
+                run_engine_on_tokio(async move {
                     if let Err(e) = wf.advance().await {
                         protocol::log::error(
                             "gui.workflow",
-                            format!("推进工作流失败 {}: {e}", wf.session.id),
+                            format!("推进工作流失败 {}: {e}", wf.session.read().unwrap().id),
                         );
                     }
                     if let Err(e) = wf.persist(&session_dir) {
                         protocol::log::error(
                             "gui.workflow",
-                            format!("工作流状态持久化失败 {}: {e}", wf.session.id),
+                            format!("工作流状态持久化失败 {}: {e}", wf.session.read().unwrap().id),
                         );
                     }
-                    wf
                 })
                 .await;
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    this.finish_engine_task(cx, wi, &wf_id, result);
-                });
+                let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
             });
             self._tasks.push(t);
-        }
-        cx.notify();
-    }
-
-    fn finish_engine_task(
-        &mut self,
-        cx: &mut Context<Self>,
-        wi: usize,
-        wf_id: &str,
-        result: Option<WorkflowEngine>,
-    ) {
-        match result {
-            Some(wf) => {
-                let same = self
-                    .workflows
-                    .get(wi)
-                    .map(|e| e.session.id == wf_id)
-                    .unwrap_or(false);
-                if same {
-                    let was_cancelled = self.workflows[wi].session.cancelled;
-                    self.workflows[wi] = wf;
-                    if was_cancelled {
-                        self.workflows[wi].session.cancelled = true;
-                        self.workflows[wi].session.state = SessionState::Idle;
-                    }
-                } else {
-                    if let Err(e) = WorkflowEngine::remove(&self.session_dir, wf_id) {
-                        protocol::log::error(
-                            "gui.workflow",
-                            format!("删除工作流失败 {wf_id}：{e}"),
-                        );
-                    }
-                }
-            }
-            None => {
-                if self
-                    .workflows
-                    .get(wi)
-                    .map(|e| e.session.id == wf_id)
-                    .unwrap_or(false)
-                {
-                    self.workflows[wi].abort_busy();
-                }
-            }
         }
         cx.notify();
     }
@@ -1818,24 +1761,20 @@ impl AmuxApp {
         let Some(wf) = self.workflows.get(idx).cloned() else {
             return;
         };
-        let wf_id = wf.session.id.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let result = run_engine_on_tokio(async move {
+            run_engine_on_tokio(async move {
                 if let Err(e) = wf.send_cancel_to_children().await {
                     protocol::log::error("gui.workflow", format!("取消关联会话失败：{e}"));
                 }
                 if let Err(e) = wf.persist(&session_dir) {
                     protocol::log::error(
                         "gui.workflow",
-                        format!("取消后工作流持久化失败 {}: {e}", wf.session.id),
+                        format!("取消后工作流持久化失败 {}: {e}", wf.session.read().unwrap().id),
                     );
                 }
-                wf
             })
             .await;
-            let _ = this.update_in(cx, |this, _w, cx| {
-                this.finish_engine_task(cx, idx, &wf_id, result);
-            });
+            let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
         });
         self._tasks.push(t);
         let _ = cx;
@@ -1845,7 +1784,7 @@ impl AmuxApp {
         let child_count = self
             .workflows
             .get(idx)
-            .map(|w| w.session.children.len())
+            .map(|w| w.session.read().unwrap().children.len())
             .unwrap_or(0);
         let this = cx.entity();
         window.open_alert_dialog(cx, move |alert, _window, _cx| {
@@ -1878,20 +1817,20 @@ impl AmuxApp {
             .workflows
             .get(idx)
             .map(|w| {
-                w.session
-                    .children
+                let sg = w.session.read().unwrap();
+                sg.children
                     .iter()
                     .map(|c| (c.machine_idx, c.id.clone()))
                     .collect()
             })
             .unwrap_or_default();
-        let Some(wf_id) = self.workflows.get(idx).map(|wf| wf.session.id.clone()) else {
+        let Some(wf_id) = self.workflows.get(idx).map(|wf| wf.session.read().unwrap().id.clone()) else {
             return;
         };
         if self
             .workflows
             .get(idx)
-            .is_some_and(|workflow| workflow.session.state == SessionState::Busy)
+            .is_some_and(|workflow| workflow.session.read().unwrap().state == SessionState::Busy)
         {
             self.workflow_error = Some("请先取消正在执行的工作流，再删除工作流会话。".into());
             cx.notify();
@@ -1941,7 +1880,7 @@ impl AmuxApp {
                                 if let Some(current_idx) = this
                                     .workflows
                                     .iter()
-                                    .position(|workflow| workflow.session.id == wf_id)
+                                    .position(|workflow| workflow.session.read().unwrap().id == wf_id)
                                 {
                                     this.workflows.remove(current_idx);
                                     this.selected = match this.selected.clone() {
@@ -2020,14 +1959,15 @@ impl AmuxApp {
                 .cloned(),
             Some(Selected::Workflow { engine }) => {
                 let wf = self.workflows.get(*engine)?;
+                let sg = wf.session.read().unwrap();
                 Some(SessionMeta {
-                    id: wf.session.id.clone(),
+                    id: sg.id.clone(),
                     agent: "编排".into(),
                     cwd: String::new(),
-                    state: wf.session.state,
-                    title: wf.session.title.clone(),
-                    created_at: wf.session.created_at,
-                    last_active_at: wf.session.updated_at,
+                    state: sg.state,
+                    title: sg.title.clone(),
+                    created_at: sg.created_at,
+                    last_active_at: sg.updated_at,
                 })
             }
             None => None,
@@ -2658,6 +2598,8 @@ impl AmuxApp {
         if self.workflows.iter().any(|workflow| {
             workflow
                 .session
+                .read()
+                .unwrap()
                 .children
                 .iter()
                 .any(|child| child.machine_idx == idx)
@@ -2678,7 +2620,8 @@ impl AmuxApp {
             other => other,
         };
         for wf in self.workflows.iter_mut() {
-            for c in wf.session.children.iter_mut() {
+            let mut children_guard = wf.session.write().unwrap();
+            for c in children_guard.children.iter_mut() {
                 if c.machine_idx == idx {
                     // 保留机器名和远端会话关联，但标记为未绑定，避免下标
                     // 左移后误操作另一台机器。
@@ -3215,10 +3158,18 @@ impl AmuxApp {
     /// 会话列表：普通会话 + 工作流会话统一按最近活跃排序；工作流挂载的关联普通会话折叠。
     fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         // 子会话只挂在工作流会话下，顶层列表跳过
-        let child_ids: std::collections::HashSet<&str> = self
+        let child_ids: std::collections::HashSet<String> = self
             .workflows
             .iter()
-            .flat_map(|wf| wf.session.children.iter().map(|c| c.id.as_str()))
+            .flat_map(|wf| {
+                wf.session
+                    .read()
+                    .unwrap()
+                    .children
+                    .iter()
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>()
+            })
             .collect();
         let mut items: Vec<(u64, SessionListItem)> = Vec::new();
         for (mi, m) in self.machines.iter().enumerate() {
@@ -3236,8 +3187,9 @@ impl AmuxApp {
             }
         }
         for (wi, wf) in self.workflows.iter().enumerate() {
-            let mut recency = wf.session.updated_at;
-            for c in &wf.session.children {
+            let s_guard = wf.session.read().unwrap();
+            let mut recency = s_guard.updated_at;
+            for c in &s_guard.children {
                 recency = recency.max(c.last_active_at);
                 if let Some(mm) = self.machines.get(c.machine_idx) {
                     if let Some(s) = mm.sessions.iter().find(|s| s.id == c.id) {
@@ -3380,16 +3332,16 @@ impl AmuxApp {
         let Some(wf) = self.workflows.get(wi) else {
             return div().into_any();
         };
-        let title = if wf.session.title.is_empty() {
+        let title = if wf.session.read().unwrap().title.is_empty() {
             "新工作流".to_string()
         } else {
-            wf.session.title.clone()
+            wf.session.read().unwrap().title.clone()
         };
-        let state = if wf.session.cancelled {
+        let state = if wf.session.read().unwrap().cancelled {
             "已取消"
-        } else if wf.session.done {
+        } else if wf.session.read().unwrap().done {
             "完成"
-        } else if wf.session.state == SessionState::Busy {
+        } else if wf.session.read().unwrap().state == SessionState::Busy {
             "编排中…"
         } else {
             "空闲"
@@ -3440,7 +3392,7 @@ impl AmuxApp {
                         cx.notify();
                     })),
             )
-            .child(if wf.session.state == SessionState::Busy {
+            .child(if wf.session.read().unwrap().state == SessionState::Busy {
                 Spinner::new()
                     .color(hsla(0.6, 0.8, 0.5, 1.0))
                     .into_any_element()
@@ -3449,7 +3401,7 @@ impl AmuxApp {
             });
 
         // 子会话默认折叠、可展开下钻
-        let mut children = wf.session.children.clone();
+        let mut children = wf.session.read().unwrap().children.clone();
         children.sort_by_key(|child| {
             std::cmp::Reverse(
                 child.last_active_at.max(
@@ -3645,7 +3597,7 @@ impl AmuxApp {
                 };
                 (
                     "编排智能体".to_string(),
-                    if workflow.session.state == SessionState::Busy {
+                    if workflow.session.read().unwrap().state == SessionState::Busy {
                         "工作中"
                     } else if self.store.orchestrator().is_configured() {
                         "可用"
@@ -4104,7 +4056,8 @@ impl AmuxApp {
                 .workflows
                 .get(*engine)
                 .map(|w| {
-                    let all = w.session.to_dialog();
+                    let sg = w.session.read().unwrap();
+                    let all = sg.to_dialog();
                     let start = all.len().saturating_sub(self.workflow_dialog_limit);
                     all[start..].to_vec()
                 })
@@ -4257,7 +4210,7 @@ impl AmuxApp {
                 let busy = self
                     .workflows
                     .get(*engine)
-                    .map(|wf| wf.session.state == SessionState::Busy)
+                    .map(|wf| wf.session.read().unwrap().state == SessionState::Busy)
                     .unwrap_or(false);
                 if busy {
                     Some(Activity::Thinking {
@@ -4917,7 +4870,7 @@ impl AmuxApp {
             let done = self
                 .workflows
                 .get(engine)
-                .map(|w| w.session.done)
+                .map(|w| w.session.read().unwrap().done)
                 .unwrap_or(false);
             body = body
                 .child(Label::new("— 工作流会话 —"))
@@ -4941,7 +4894,7 @@ impl AmuxApp {
             for c in self
                 .workflows
                 .get(engine)
-                .map(|w| w.session.children.clone())
+                .map(|w| w.session.read().unwrap().children.clone())
                 .unwrap_or_default()
             {
                 let step = c.step_desc.clone();
@@ -5018,8 +4971,8 @@ impl AmuxApp {
             }
             Some(Selected::Workflow { engine }) => {
                 if let Some(wf) = self.workflows.get(*engine) {
-                    rows = wf
-                        .session
+                    let sg = wf.session.read().unwrap();
+                    rows = sg
                         .activities
                         .iter()
                         .enumerate()
@@ -5028,9 +4981,9 @@ impl AmuxApp {
                             self.activity_row(&format!("wf-act-{i}"), &kind, &detail, cx)
                         })
                         .collect();
-                    if wf.session.state == SessionState::Busy {
+                    if wf.session.read().unwrap().state == SessionState::Busy {
                         live = Some(Activity::Thinking {
-                            timestamp: wf.session.updated_at,
+                            timestamp: wf.session.read().unwrap().updated_at,
                             content: "正在编排决策/推进…".into(),
                         });
                     }
@@ -5645,7 +5598,7 @@ impl AmuxApp {
                     let title0 = self
                         .workflows
                         .get(wi)
-                        .map(|w| w.session.title.clone())
+                        .map(|w| w.session.read().unwrap().title.clone())
                         .unwrap_or_default();
                     v_flex()
                         .gap_1()
