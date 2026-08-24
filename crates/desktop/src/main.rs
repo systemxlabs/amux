@@ -9,6 +9,7 @@ mod config;
 mod diff;
 mod display;
 mod logic;
+mod machine;
 mod text;
 mod theme;
 mod wfstore;

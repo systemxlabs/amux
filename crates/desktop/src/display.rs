@@ -27,7 +27,7 @@ pub fn activity_display(a: &Activity) -> (String, String) {
 
 /// 机器状态徽章：连接状态 + 可选的操作级提示（notice 存在时覆盖显示、警示色）。
 pub fn machine_status_badge<'a>(
-    state: (&'a crate::app::MachineStatus, Option<&'a str>),
+    state: (&'a crate::machine::MachineStatus, Option<&'a str>),
     success: Hsla,
     danger: Hsla,
     warning: Hsla,
@@ -51,17 +51,17 @@ pub fn machine_status_badge<'a>(
 }
 
 fn color_for_status(
-    status: &crate::app::MachineStatus,
+    status: &crate::machine::MachineStatus,
     success: Hsla,
     danger: Hsla,
     _warning: Hsla,
 ) -> Hsla {
     match status {
-        crate::app::MachineStatus::Online => success,
-        crate::app::MachineStatus::AuthFailed(_) | crate::app::MachineStatus::ConnectFailed(_) => {
+        crate::machine::MachineStatus::Online => success,
+        crate::machine::MachineStatus::AuthFailed(_) | crate::machine::MachineStatus::ConnectFailed(_) => {
             danger
         }
-        crate::app::MachineStatus::Connecting | crate::app::MachineStatus::Offline => _warning,
+        crate::machine::MachineStatus::Connecting | crate::machine::MachineStatus::Offline => _warning,
     }
 }
 

@@ -14,7 +14,7 @@
 //! 活动 `session.activities` 打开才刷 10s；实时 `session.ongoing_activity` 5s；`session.state_change`
 //! 通知用于工作流驱动。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,21 +38,21 @@ use gpui_component::{
 use serde_json::json;
 
 use protocol::{
-    ActivitiesResult, Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult,
-    ContentBlock, GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryItem, HistoryResult, OpResult,
-    OngoingActivityResult, SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, SessionState,
-    SessionStateChange, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceEntry,
-    WorkspaceListResult, WorkspaceReadParams, WorkspaceReadResult, WorkspaceRestoreParams,
+    ActivitiesResult, Activity, AgentListResult, AgentParams, AgentSkillsResult,
+    ContentBlock, GitChangeStatus, HistoryItem, HistoryResult, OpResult, OngoingActivityResult,
+    SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta, SessionNewParams,
+    SessionPageParams, SessionPromptParams, SessionResult, SessionState, SessionStateChange,
+    WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult, WorkspaceReadParams,
+    WorkspaceReadResult, WorkspaceRestoreParams,
 };
 
-use crate::aggregate::SessionView;
 use crate::config::{
-    machine_ws_url, ApiFormat, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand,
-    SkillEntry, WorkflowTemplate,
+    machine_ws_url, ApiFormat, ConfigStore, OrchestratorConfig, QuickCommand, SkillEntry,
+    WorkflowTemplate,
 };
-use crate::diff::{diff_lines, DiffLine, DiffLineKind};
+use crate::diff::{diff_lines, DiffLineKind};
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
+use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::logic::{
     compose_prompt, compose_workflow_text, external_path_attachment, merge_session_window,
     parse_at_references, path_attachment, read_path_context, DialogMsg, InputAttachment,
@@ -88,125 +88,6 @@ enum SettingsCategory {
 enum NewSessionMode {
     Direct,
     Workflow,
-}
-
-#[derive(Clone, Default)]
-struct WorkspaceDirectory {
-    entries: Vec<WorkspaceEntry>,
-    has_more: bool,
-    next_offset: usize,
-}
-
-/// 单机器视图：独立 WS 连接 + agent 列表 + 会话列表 + 各会话聚合视图 + diff/skills 状态。
-/// 机器连接状态（docs/DESIGN.md「机器连接」）：强类型状态机。曾用中文字符串
-/// 前缀匹配充当状态机——任何文案改动都会静默破坏在线判断。
-#[derive(Debug, Clone, PartialEq)]
-pub enum MachineStatus {
-    /// WS 建连/认证进行中（初始态）
-    Connecting,
-    /// 认证通过、可用
-    Online,
-    /// 认证被拒（token 错误；退避重连中）
-    AuthFailed(String),
-    /// 连接失败、不可达（退避重连中）
-    ConnectFailed(String),
-    /// 曾在线后断开（立即重连中）
-    Offline,
-}
-
-impl MachineStatus {
-    pub fn label(&self) -> String {
-        match self {
-            MachineStatus::Connecting => "连接中…".into(),
-            MachineStatus::Online => "已连接".into(),
-            MachineStatus::AuthFailed(e) => format!("认证失败（{e}）"),
-            MachineStatus::ConnectFailed(e) => format!("连接失败（{e}）"),
-            MachineStatus::Offline => "离线（重连中…）".into(),
-        }
-    }
-
-    pub fn online(&self) -> bool {
-        matches!(self, MachineStatus::Online)
-    }
-}
-
-struct MachineView {
-    config: MachineConfig,
-    client: WsClient,
-    connection_epoch: u64,
-    status: MachineStatus,
-    /// 操作级临时提示（diff 失败、技能安装失败等）；不参与连接状态机。
-    notice: Option<String>,
-    agents: Vec<AgentInfo>,
-    sessions: Vec<SessionMeta>,
-    sessions_has_more: bool,
-    sessions_next_before: Option<String>,
-    /// 各会话的聚合视图（对话 / 活动 / 实时）。
-    views: std::collections::HashMap<String, SessionView>,
-    diff_files: Vec<GitDiffFile>,
-    diff_not_repo: bool,
-    /// 代码审查面板中选中的文件/代码块：(path, None)=整文件；(path, Some(i))=第 i 个 hunk。
-    diff_selection: HashSet<(String, Option<usize>)>,
-    workspace_directories: HashMap<String, WorkspaceDirectory>,
-    workspace_expanded: HashSet<String>,
-    workspace_loading: HashSet<String>,
-    workspace_list_request_id: u64,
-    workspace_read_request_id: u64,
-    workspace_file: Option<String>,
-    workspace_content: String,
-    workspace_error: Option<String>,
-    workspace_read_loading: bool,
-    workspace_read_has_more: bool,
-    workspace_read_next_offset: usize,
-    diff_request_id: u64,
-    diff_loading: bool,
-    diff_error: Option<String>,
-    diff_tree_collapsed: bool,
-    diff_changes_collapsed: bool,
-    skills: Vec<String>,
-    skills_agent: Option<String>,
-    /// skills 弹窗的引用来源（机器下标 + agent 名）。
-    show_skills: Option<(usize, String)>,
-}
-
-impl MachineView {
-    fn new(config: MachineConfig) -> Self {
-        let url = machine_ws_url(&config);
-        MachineView {
-            client: WsClient::connect_with_token(url, config.token.clone()),
-            config,
-            connection_epoch: 1,
-            status: MachineStatus::Connecting,
-            notice: None,
-            agents: Vec::new(),
-            sessions: Vec::new(),
-            sessions_has_more: false,
-            sessions_next_before: None,
-            views: std::collections::HashMap::new(),
-            diff_files: Vec::new(),
-            diff_not_repo: false,
-            diff_selection: HashSet::new(),
-            workspace_directories: HashMap::new(),
-            workspace_expanded: HashSet::new(),
-            workspace_loading: HashSet::new(),
-            workspace_list_request_id: 0,
-            workspace_read_request_id: 0,
-            workspace_file: None,
-            workspace_content: String::new(),
-            workspace_error: None,
-            workspace_read_loading: false,
-            workspace_read_has_more: false,
-            workspace_read_next_offset: 0,
-            diff_request_id: 0,
-            diff_loading: false,
-            diff_error: None,
-            diff_tree_collapsed: false,
-            diff_changes_collapsed: false,
-            skills: Vec::new(),
-            skills_agent: None,
-            show_skills: None,
-        }
-    }
 }
 
 /// 当前选中的会话。
