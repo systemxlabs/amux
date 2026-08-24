@@ -66,17 +66,17 @@ fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>>
         .collect()
 }
 
-fn history_from_transcript(transcript: &[OrcMsg], ts: u64) -> Vec<HistoryItem> {
+fn history_from_transcript(transcript: &[OrcMsg]) -> Vec<HistoryItem> {
     transcript
         .iter()
         .map(|m| match m {
-            OrcMsg::User { text } => HistoryItem::UserMessage {
+            OrcMsg::User { text, timestamp } => HistoryItem::UserMessage {
                 content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: ts,
+                timestamp: *timestamp,
             },
-            OrcMsg::Orc { text } => HistoryItem::AgentMessage {
+            OrcMsg::Orc { text, timestamp } => HistoryItem::AgentMessage {
                 content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: ts,
+                timestamp: *timestamp,
             },
         })
         .collect()
@@ -86,7 +86,7 @@ fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
     items
         .iter()
         .map(|h| match h {
-            HistoryItem::UserMessage { content, .. } => {
+            HistoryItem::UserMessage { content, timestamp } => {
                 let text = content
                     .iter()
                     .filter_map(|b| match b {
@@ -95,9 +95,9 @@ fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                OrcMsg::User { text }
+                OrcMsg::User { text, timestamp: *timestamp }
             }
-            HistoryItem::AgentMessage { content, .. } => {
+            HistoryItem::AgentMessage { content, timestamp } => {
                 let text = content
                     .iter()
                     .filter_map(|b| match b {
@@ -106,7 +106,7 @@ fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                OrcMsg::Orc { text }
+                OrcMsg::Orc { text, timestamp: *timestamp }
             }
         })
         .collect()
@@ -180,7 +180,7 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     .map_err(io::Error::other)?;
     write_jsonl(
         &history_path(data_dir, &session.id),
-        &history_from_transcript(&session.transcript, session.updated_at),
+        &history_from_transcript(&session.transcript),
     )?;
     write_jsonl(&activities_path(data_dir, &session.id), &session.activities)?;
     Ok(())
@@ -290,9 +290,11 @@ mod tests {
             transcript: vec![
                 OrcMsg::User {
                     text: "开始".into(),
+                    timestamp: 1,
                 },
                 OrcMsg::Orc {
                     text: "已转发".into(),
+                    timestamp: 2,
                 },
             ],
             children: vec![],

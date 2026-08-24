@@ -21,6 +21,23 @@ use protocol::OpResult;
 /// GPUI 环境无 Tokio runtime，这里维护一个独立的多线程 runtime 跑 WS 后台任务。
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
+/// 全部活跃连接的关闭信号（应用退出时统一触发，docs/DESIGN.md「应用关闭时
+/// 会同时关闭所有 Server 连接」；进程退出兜底之外的确定性关闭）。
+static CLOSE_SIGNALS: OnceLock<std::sync::Mutex<Vec<tokio::sync::watch::Sender<bool>>>> =
+    OnceLock::new();
+
+fn close_signals() -> &'static std::sync::Mutex<Vec<tokio::sync::watch::Sender<bool>>> {
+    CLOSE_SIGNALS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 关闭全部 WS 连接（幂等；on_app_quit 钩子调用）。
+pub fn close_all() {
+    let mut signals = close_signals().lock().unwrap();
+    for tx in signals.drain(..) {
+        let _ = tx.send(true);
+    }
+}
+
 fn rt() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -75,8 +92,10 @@ impl WsClient {
         // 建连后**先发 `auth`**，之后再处理其它请求。
         let (req_tx, req_rx) = mpsc::channel::<ClientReq>(64);
         let (notify_tx, _) = broadcast::channel::<Notification>(256);
+        let (close_tx, close_rx) = tokio::sync::watch::channel(false);
+        close_signals().lock().unwrap().push(close_tx);
         let notify_for_task = notify_tx.clone();
-        rt().spawn(run_loop(url, token, req_rx, notify_for_task));
+        rt().spawn(run_loop(url, token, req_rx, close_rx, notify_for_task));
         WsClient { req_tx, notify_tx }
     }
 
@@ -151,10 +170,14 @@ async fn run_loop(
     url: String,
     token: String,
     mut req_rx: mpsc::Receiver<ClientReq>,
+    close_rx: tokio::sync::watch::Receiver<bool>,
     notify_tx: broadcast::Sender<Notification>,
 ) {
     let mut attempt: u32 = 0;
     loop {
+        if *close_rx.borrow() {
+            return;
+        }
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
                 attempt = 0;
@@ -163,7 +186,14 @@ async fn run_loop(
                     method: "connected".into(),
                     params: Value::Null,
                 });
-                let outcome = serve_connection(ws, token.clone(), &mut req_rx, &notify_tx).await;
+                let outcome = serve_connection(
+                    ws,
+                    token.clone(),
+                    &mut req_rx,
+                    &close_rx.clone(),
+                    &notify_tx,
+                )
+                .await;
                 match outcome {
                     ConnectionOutcome::ClientClosed => return,
                     ConnectionOutcome::Disconnected => {
@@ -199,15 +229,18 @@ async fn run_loop(
     }
 }
 
-/// 服务单条已建立的 WS 连接：auth 握手 → 请求/通知收发循环，直至断开或认证失败。
+/// 服务单条已建立的 WS 连接：auth 握手 → 请求/通知收发循环，直至断开、
+/// 认证失败或收到显式关闭信号。
 async fn serve_connection(
     ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     token: String,
     req_rx: &mut mpsc::Receiver<ClientReq>,
+    close_rx: &tokio::sync::watch::Receiver<bool>,
     notify_tx: &broadcast::Sender<Notification>,
 ) -> ConnectionOutcome {
+    let mut close_rx = close_rx.clone();
     let (mut sink, mut source) = ws.split();
     let mut pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> = HashMap::new();
     let mut next_id: u64 = 1;
@@ -227,6 +260,12 @@ async fn serve_connection(
 
     loop {
         tokio::select! {
+            _ = close_rx.changed() => {
+                if *close_rx.borrow() {
+                    protocol::log::info("gui.ws", "收到关闭信号");
+                    return ConnectionOutcome::ClientClosed;
+                }
+            }
             req = req_rx.recv() => {
                 let Some(req) = req else {
                     // client 全部销毁：连接任务退出（run_loop 一并结束）

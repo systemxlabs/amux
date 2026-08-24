@@ -35,8 +35,8 @@ use crate::ws::WsClient;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrcMsg {
-    User { text: String },
-    Orc { text: String },
+    User { text: String, timestamp: u64 },
+    Orc { text: String, timestamp: u64 },
 }
 
 /// 关联普通会话（工作流驱动的普通会话，由各机器 server 持久化）。
@@ -297,12 +297,16 @@ impl WorkflowEngine {
         if !description.trim().is_empty() {
             transcript.push(OrcMsg::User {
                 text: description.to_string(),
-            });
+
+                    timestamp: now(),
+});
         }
         if !context.trim().is_empty() {
             transcript.push(OrcMsg::User {
                 text: "已附加 @ 引用的上下文".into(),
-            });
+
+                    timestamp: now(),
+});
         }
         let t = now();
         let session = OrcSession {
@@ -431,11 +435,15 @@ impl WorkflowEngine {
         self.with_session(|s| {
             s.transcript.push(OrcMsg::Orc {
                 text: decision.summary.clone(),
-            });
+
+                    timestamp: now(),
+});
             if let Some(c) = &decision.conclusion {
                 s.transcript.push(OrcMsg::Orc {
                     text: format!("编排结束：{c}"),
-                });
+
+                        timestamp: now(),
+});
                 s.done = true;
             }
             s.done = s.done || decision.done;
@@ -461,7 +469,9 @@ impl WorkflowEngine {
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::Orc {
                     text: format!("工作流已完成：{conclusion}"),
-                });
+
+                        timestamp: now(),
+});
                 s.done = true;
                 s.state = SessionState::Idle;
             });
@@ -478,8 +488,8 @@ impl WorkflowEngine {
                 .transcript
                 .iter()
                 .map(|m| match m {
-                    OrcMsg::User { text } => format!("用户：{text}"),
-                    OrcMsg::Orc { text } => format!("编排：{text}"),
+                    OrcMsg::User { text, .. } => format!("用户：{text}"),
+                    OrcMsg::Orc { text, .. } => format!("编排：{text}"),
                 })
                 .collect(),
             child_sessions: s.children.clone(),
@@ -627,7 +637,9 @@ impl WorkflowEngine {
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::User {
                     text: format!("关联普通会话不存在：{session_id}"),
-                });
+
+                        timestamp: now(),
+});
             });
             return Err(format!("关联普通会话不存在: {session_id}"));
         }
@@ -698,7 +710,9 @@ impl WorkflowEngine {
                         old = state_label(old_state),
                         new = state_label(new_state)
                     ),
-                });
+
+                        timestamp: now(),
+});
             });
             if let Err(e) = self.advance().await {
                 self.with_session(|s| {
@@ -764,7 +778,9 @@ impl WorkflowEngine {
             }
             s.transcript.push(OrcMsg::User {
                 text: text.to_string(),
-            });
+
+                    timestamp: now(),
+});
             s.updated_at = now();
             if s.cancelled {
                 s.cancelled = false;
@@ -801,9 +817,14 @@ impl WorkflowEngine {
                 .expect("RwLock 中毒")
                 .transcript
                 .iter()
-                .any(|m| matches!(m, OrcMsg::User { text: t } if t == &text));
+                .any(|m| matches!(m, OrcMsg::User { text: t, .. } if t == &text));
             if !exists {
-                self.with_session(|s| s.transcript.push(OrcMsg::User { text }));
+                self.with_session(|s| {
+                    s.transcript.push(OrcMsg::User {
+                        text,
+                        timestamp: now(),
+                    });
+                });
                 added = true;
             }
         }
@@ -817,7 +838,9 @@ impl WorkflowEngine {
             s.updated_at = now();
             s.transcript.push(OrcMsg::User {
                 text: "已取消".into(),
-            });
+
+                    timestamp: now(),
+});
         });
     }
 
@@ -866,13 +889,13 @@ impl OrcSession {
         self.transcript
             .iter()
             .map(|m| match m {
-                OrcMsg::User { text } => DialogMsg::UserMessage {
+                OrcMsg::User { text, timestamp } => DialogMsg::UserMessage {
                     content: vec![ContentBlock::Text { text: text.clone() }],
-                    timestamp: self.updated_at,
+                    timestamp: *timestamp,
                 },
-                OrcMsg::Orc { text } => DialogMsg::AgentMessage {
+                OrcMsg::Orc { text, timestamp } => DialogMsg::AgentMessage {
                     content: vec![ContentBlock::Text { text: text.clone() }],
-                    timestamp: self.updated_at,
+                    timestamp: *timestamp,
                 },
             })
             .collect()
@@ -1736,7 +1759,7 @@ mod tests {
             .unwrap()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text == "实现登录功能\n然后写测试")));
+            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "实现登录功能\n然后写测试")));
     }
 
     #[test]
@@ -1836,7 +1859,7 @@ mod tests {
             .unwrap()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::Orc { text } if text.contains("编排结束"))),
+            .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text.contains("编排结束"))),
         "编排结论应作为编排智能体输出（而非用户气泡）进入对话流");
     }
 
@@ -1859,7 +1882,7 @@ mod tests {
         assert!(sessions[0]
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text } if text == "立即保存")));
+            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "立即保存")));
 
         let backend2 = FakeBackend::new(vec![Decision {
             summary: "恢复后推进".into(),
@@ -1877,7 +1900,7 @@ mod tests {
             .unwrap()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::Orc { text } if text == "恢复后推进")));
+            .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text == "恢复后推进")));
 
         WorkflowEngine::remove(&dir, &id).unwrap();
         assert!(WorkflowEngine::load_all(&dir).unwrap().is_empty());
@@ -1938,7 +1961,9 @@ mod tests {
             .transcript
             .push(OrcMsg::Orc {
             text: "决策".into(),
-        });
+
+                timestamp: now(),
+});
         let dialog = engine.session.read().unwrap().to_dialog();
         assert_eq!(dialog.len(), 2);
         assert!(matches!(&dialog[0], DialogMsg::UserMessage { .. }));
