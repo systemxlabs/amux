@@ -55,7 +55,7 @@ Server 主动推送通知
 - 序列化：`serde` / `serde_json`（JSON-RPC）
 - 会话元数据持久化：`rusqlite`
 - ACP：`agent-client-protocol` 官方 SDK
-- Git：`gitoxide`
+- Git：`gitoxide` / git CLI
 
 ### Server 启动
 
@@ -82,7 +82,7 @@ Server 在启动阶段会同时通过子进程方式启动已发现的 ACP Serve
 |---|---|
 | kimi | `kimi acp` |
 | claude | `npx -y @agentclientprotocol/claude-agent-acp` |
-| codex | `npx -y @agentclientprotocol/codex-acp` |
+| codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @agentclientprotocol/codex-acp` |
 
 ### ACP Server 生命周期
 
@@ -107,7 +107,7 @@ Server 作为 ACP client 与 ACP servers 通信
 普通会话数据包含三部分
 - 元数据：存储在 `~/.amux/server/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、所属 Agent、Agent 会话 ID，工作目录、最近活跃时间等
 - 对话历史：存储在 `~/.amux/server/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和 agent 输出（agent 流式输出合并后写入）
-- 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、compaction、执行错误等等（流式输出合并后写入）
+- 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
 
 ## 应用
 
@@ -161,7 +161,7 @@ Server 作为 ACP client 与 ACP servers 通信
 
 ### 工作流会话驱动
 
-当收到关联普通会话的状态变更事件时，系统往工作流会话以用户消息方式注入如下内容
+当收到关联普通会话的状态变更事件（工作中->空闲）时，系统往工作流会话以用户消息方式注入如下内容
 
 > 关联普通会话 `<session_id>@<机器名称>` 检测到状态变更：<旧状态> -> <新状态>
 
@@ -172,7 +172,7 @@ Server 作为 ACP client 与 ACP servers 通信
 工作流会话数据包含三部分
 - 元数据：存储在 `~/.amux/app/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、最近活跃时间、关联普通会话等
 - 对话历史：存储在 `~/.amux/app/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出（流式输出合并后写入）
-- 活动历史：存储在 `~/.amux/app/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、compaction、执行错误等等（流式输出合并后写入）
+- 活动历史：存储在 `~/.amux/app/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
 
 ### 工作流模板存储
 
