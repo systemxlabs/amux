@@ -133,14 +133,16 @@ pub fn activity_kind_detail(a: &Activity) -> (String, String) {
 
 // ---- 输入附件（PRD §4.2；去语音输入）----
 
-/// 输入附件：@ 引用文件/目录、拖拽文件、粘贴图片。
+/// 输入附件：@ 引用文件/目录、拖拽文件/图片。
+/// 图片以路径引用传递（不读二进制内容）——主流 agent CLI 自身具备按路径读取
+/// 图片的能力，GUI 侧 read_to_string 二进制只会得到空串（曾为坏路径）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputAttachment {
     Path {
         path: String,
         is_dir: bool,
     },
-    #[allow(dead_code)]
+    /// 图片附件：拖拽/引用图片时读字节并 base64 编码，作为 ACP resource 传给 agent
     Image {
         name: String,
         mime_type: String,
@@ -225,7 +227,19 @@ pub fn parse_at_references(text: &str) -> (String, Vec<String>) {
     (out, refs)
 }
 
-/// 读取 @ 引用路径为上下文文本。
+/// 常见图片扩展名（按路径引用传递、不读内容）。
+fn is_image_path(path: &str) -> bool {
+    matches!(
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg")
+    )
+}
+
+/// 读取 @ 引用路径为上下文文本。图片文件只传路径引用（二进制读成文本无意义）。
 pub fn read_path_context(path: &str) -> String {
     let p = std::path::Path::new(path);
     if p.is_dir() {
@@ -238,6 +252,8 @@ pub fn read_path_context(path: &str) -> String {
             .unwrap_or_default();
         entries.sort();
         format!("[目录 {path}] {}", entries.join(", "))
+    } else if is_image_path(path) {
+        format!("[图片 {path}]（请用工具按此路径读取图片）")
     } else if p.is_file() {
         let content = std::fs::read_to_string(p).unwrap_or_default();
         let excerpt: String = content.chars().take(4000).collect();

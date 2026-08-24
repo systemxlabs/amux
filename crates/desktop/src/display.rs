@@ -25,35 +25,43 @@ pub fn activity_display(a: &Activity) -> (String, String) {
     activity_kind_detail(a)
 }
 
-/// 机器状态徽章。
-pub fn machine_status_badge(
-    status: &str,
+/// 机器状态徽章：连接状态 + 可选的操作级提示（notice 存在时覆盖显示、警示色）。
+pub fn machine_status_badge<'a>(
+    state: (&'a crate::app::MachineStatus, Option<&'a str>),
     success: Hsla,
     danger: Hsla,
     warning: Hsla,
 ) -> impl IntoElement {
-    let status_color = color_for_status(status, success, danger, warning);
+    // 强类型状态 + 可选操作级提示（notice 覆盖显示、警示色）；胶囊样式沿用上游
+    let (status, notice) = state;
+    let (text, color) = match notice {
+        Some(n) => (n.to_string(), warning),
+        None => (
+            status.label(),
+            color_for_status(status, success, danger, warning),
+        ),
+    };
     div()
         .max_w(px(180.))
         .px_2()
         .py(px(1.))
         .rounded_full()
-        .bg(status_color.opacity(0.14))
-        .child(
-            Label::new(status.to_string())
-                .text_xs()
-                .truncate()
-                .text_color(status_color),
-        )
+        .bg(color.opacity(0.14))
+        .child(Label::new(text).text_xs().truncate().text_color(color))
 }
 
-fn color_for_status(status: &str, success: Hsla, danger: Hsla, warning: Hsla) -> Hsla {
-    if status.starts_with("已连接") || status.starts_with("认证成功") {
-        success
-    } else if status.starts_with("连接失败") || status.starts_with("认证失败") {
-        danger
-    } else {
-        warning
+fn color_for_status(
+    status: &crate::app::MachineStatus,
+    success: Hsla,
+    danger: Hsla,
+    _warning: Hsla,
+) -> Hsla {
+    match status {
+        crate::app::MachineStatus::Online => success,
+        crate::app::MachineStatus::AuthFailed(_) | crate::app::MachineStatus::ConnectFailed(_) => {
+            danger
+        }
+        crate::app::MachineStatus::Connecting | crate::app::MachineStatus::Offline => _warning,
     }
 }
 

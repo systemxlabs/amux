@@ -39,7 +39,7 @@ use serde_json::json;
 
 use protocol::{
     ActivitiesResult, Activity, AgentInfo, AgentListResult, AgentParams, AgentSkillsResult,
-    ContentBlock, GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryItem, HistoryResult, OpResult,
+    ContentBlock, GitChangeStatus, GitDiffFile, GitDiffHunk, HistoryResult, OpResult,
     OngoingActivityResult, SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta,
     SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, SessionState,
     SessionStateChange, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceEntry,
@@ -165,11 +165,45 @@ struct WorkspaceDirectory {
 }
 
 /// 单机器视图：独立 WS 连接 + agent 列表 + 会话列表 + 各会话聚合视图 + diff/skills 状态。
+/// 机器连接状态（docs/DESIGN.md「机器连接」）：强类型状态机。曾用中文字符串
+/// 前缀匹配充当状态机——任何文案改动都会静默破坏在线判断。
+#[derive(Debug, Clone, PartialEq)]
+pub enum MachineStatus {
+    /// WS 建连/认证进行中（初始态）
+    Connecting,
+    /// 认证通过、可用
+    Online,
+    /// 认证被拒（token 错误；退避重连中）
+    AuthFailed(String),
+    /// 连接失败、不可达（退避重连中）
+    ConnectFailed(String),
+    /// 曾在线后断开（立即重连中）
+    Offline,
+}
+
+impl MachineStatus {
+    pub fn label(&self) -> String {
+        match self {
+            MachineStatus::Connecting => "连接中…".into(),
+            MachineStatus::Online => "已连接".into(),
+            MachineStatus::AuthFailed(e) => format!("认证失败（{e}）"),
+            MachineStatus::ConnectFailed(e) => format!("连接失败（{e}）"),
+            MachineStatus::Offline => "离线（重连中…）".into(),
+        }
+    }
+
+    pub fn online(&self) -> bool {
+        matches!(self, MachineStatus::Online)
+    }
+}
+
 struct MachineView {
     config: MachineConfig,
     client: WsClient,
     connection_epoch: u64,
-    status: String,
+    status: MachineStatus,
+    /// 操作级临时提示（diff 失败、技能安装失败等）；不参与连接状态机。
+    notice: Option<String>,
     agents: Vec<AgentInfo>,
     sessions: Vec<SessionMeta>,
     sessions_has_more: bool,
@@ -209,7 +243,8 @@ impl MachineView {
             client: WsClient::connect_with_token(url, config.token.clone()),
             config,
             connection_epoch: 1,
-            status: "连接中…".into(),
+            status: MachineStatus::Connecting,
+            notice: None,
             agents: Vec::new(),
             sessions: Vec::new(),
             sessions_has_more: false,
@@ -520,7 +555,7 @@ impl AmuxApp {
             .update(cx, |s, cx| s.set_value(&cfg.model, window, cx));
     }
 
-    fn save_orchestrator(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn save_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // api_format 为枚举单选，无需字符串校验
         let api_format = self.orch_api_format;
         let base_url = self.orch_base_input.read(cx).value().trim().to_owned();
@@ -619,12 +654,17 @@ impl AmuxApp {
         n: &WsNotification,
     ) {
         match n.method.as_str() {
-            "connected" | "auth_ok" => {
+            "connected" => {
+                // WS 已建连但尚未认证：保持 Connecting，由 auth_ok 驱动后续
+            }
+            "auth_ok" => {
                 if let Some(m) = this.machines.get_mut(idx) {
-                    m.status = "已连接".into();
+                    m.status = MachineStatus::Online;
                 }
-                this.refresh_sessions(idx, window, cx);
+                // 认证通过后再拉取初始数据（此前启动即发请求会被未认证拒绝，
+                // 产生「连接失败」误报闪烁）
                 this.fetch_agents(idx, window, cx);
+                this.refresh_sessions(idx, window, cx);
             }
             "auth_failed" => {
                 if let Some(m) = this.machines.get_mut(idx) {
@@ -634,12 +674,23 @@ impl AmuxApp {
                         .and_then(|v| v.as_str())
                         .unwrap_or("认证失败")
                         .to_string();
-                    m.status = format!("认证失败（{msg}）");
+                    m.status = MachineStatus::AuthFailed(msg);
+                }
+            }
+            "connect_failed" => {
+                if let Some(m) = this.machines.get_mut(idx) {
+                    let err = n
+                        .params
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("无法连接")
+                        .to_string();
+                    m.status = MachineStatus::ConnectFailed(err);
                 }
             }
             "disconnected" => {
                 if let Some(m) = this.machines.get_mut(idx) {
-                    m.status = "离线（重连中…）".into();
+                    m.status = MachineStatus::Offline;
                 }
             }
             // 唯一主动推送 `session.state_change`：
@@ -803,12 +854,9 @@ impl AmuxApp {
         {
             Ok(result) => {
                 let _ = this.update_in(cx, |this, _w, cx| {
+                    // 连接状态由 ws 认证通知驱动；此处只更新 agent 列表
                     if let Some(m) = this.machines.get_mut(idx) {
                         m.agents = result.agents;
-                        if m.status.starts_with("已连接") || m.status.starts_with("认证成功")
-                        {
-                            m.status = "已连接".into();
-                        }
                     }
                     cx.notify();
                 });
@@ -816,9 +864,8 @@ impl AmuxApp {
             Err(e) => {
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
-                        if m.status.is_empty() || m.status == "连接中…" {
-                            m.status = format!("连接失败（{e}）");
-                        }
+                        // 连接状态机之外的操作级提示
+                        m.notice = Some(format!("agent 列表获取失败：{e}"));
                     }
                     cx.notify();
                 });
@@ -1217,7 +1264,7 @@ impl AmuxApp {
                 Some(a) => a,
                 None => {
                     if let Some(m) = self.machine_mut(machine) {
-                        m.status = "无可用 agent".into();
+                        m.notice = Some("无可用 agent".into());
                     }
                     cx.notify();
                     return;
@@ -1448,7 +1495,7 @@ impl AmuxApp {
             let _ = this.update_in(cx, |this, w, cx| {
                 if let Err(error) = &res {
                     if let Some(m) = this.machines.get_mut(machine) {
-                        m.status = format!("取消失败（{error}）");
+                        m.notice = Some(format!("取消失败（{error}）"));
                     }
                 }
                 this.refresh_dialog(w, cx, machine, sid);
@@ -1494,7 +1541,7 @@ impl AmuxApp {
                     }
                     Err(error) => {
                         if let Some(m) = this.machines.get_mut(machine) {
-                            m.status = format!("删除会话失败（{error}）");
+                            m.notice = Some(format!("删除会话失败（{error}）"));
                         }
                     }
                 }
@@ -1850,28 +1897,83 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        if let Some(wf) = self.workflows.get(idx) {
-            let id = wf.session.id.clone();
-            WorkflowEngine::remove(&self.session_dir, &id);
-        }
-        if idx < self.workflows.len() {
-            self.workflows.remove(idx);
-        }
-        if let Some(Selected::Workflow { engine }) = self.selected.clone() {
-            if engine == idx {
-                self.selected = None;
-            }
-        }
-        cx.notify();
-        let _ = window;
-    }
-
-    fn delete_child(&self, client: WsClient, sid: String) {
-        let params = SessionIdParams { session_id: sid };
-        crate::ws::runtime().spawn(async move {
-            let _ = client
-                .request_ok(protocol::method::SESSION_DELETE, Some(serde_json::to_value(&params).unwrap()))
-                .await;
+        let targets: Vec<(usize, WsClient, String)> = children
+            .iter()
+            .filter_map(|(machine, sid)| {
+                self.machine(*machine)
+                    .map(|m| (*machine, m.client.clone(), sid.clone()))
+            })
+            .collect();
+        let missing_machine = targets.len() != children.len();
+        let remote_targets = targets.clone();
+        let session_dir = self.session_dir.clone();
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let result = run_engine_on_tokio(async move {
+                if missing_machine {
+                    return Err("关联普通会话所属机器已移除，无法完成远端删除".to_string());
+                }
+                for (_, client, sid) in &remote_targets {
+                    let params = SessionIdParams {
+                        session_id: sid.clone(),
+                    };
+                    client
+                        .request_ok(
+                            protocol::method::SESSION_DELETE,
+                            Some(serde_json::to_value(&params).unwrap()),
+                        )
+                        .await
+                        .map_err(|error| format!("删除关联普通会话 {sid} 失败：{error}"))?;
+                }
+                Ok(())
+            })
+            .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                match result {
+                    Some(Ok(())) => {
+                        for (machine, _, sid) in &targets {
+                            if let Some(m) = this.machine_mut(*machine) {
+                                m.sessions.retain(|session| session.id != *sid);
+                                m.views.remove(sid);
+                            }
+                        }
+                        match WorkflowEngine::remove(&session_dir, &wf_id) {
+                            Ok(()) => {
+                                if let Some(current_idx) = this
+                                    .workflows
+                                    .iter()
+                                    .position(|workflow| workflow.session.id == wf_id)
+                                {
+                                    this.workflows.remove(current_idx);
+                                    this.selected = match this.selected.clone() {
+                                        Some(Selected::Workflow { engine })
+                                            if engine == current_idx =>
+                                        {
+                                            None
+                                        }
+                                        Some(Selected::Workflow { engine })
+                                            if engine > current_idx =>
+                                        {
+                                            Some(Selected::Workflow { engine: engine - 1 })
+                                        }
+                                        other => other,
+                                    };
+                                }
+                            }
+                            Err(error) => {
+                                this.workflow_error =
+                                    Some(format!("删除工作流持久化记录失败：{error}"));
+                            }
+                        }
+                    }
+                    Some(Err(error)) => {
+                        this.workflow_error = Some(format!("删除工作流失败：{error}"));
+                    }
+                    None => {
+                        this.workflow_error = Some("删除工作流任务未能执行".into());
+                    }
+                }
+                cx.notify();
+            });
         });
         self._tasks.push(t);
     }
@@ -1882,18 +1984,19 @@ impl AmuxApp {
     }
 
     fn machine_summaries(&self) -> Vec<MachineSummary> {
+        // 全量透传（含不可用 agent 的真实 available）：编排 LLM 需要看到
+        // 「某 agent 不可用」才能避让或上报，预先过滤会让该事实消失
         self.machines
             .iter()
             .map(|m| MachineSummary {
                 name: m.config.name.clone(),
-                online: m.status == "已连接",
+                online: m.status.online(),
                 agents: m
                     .agents
                     .iter()
-                    .filter(|a| a.available)
                     .map(|a| AgentSlot {
                         name: a.name.clone(),
-                        available: true,
+                        available: a.available,
                     })
                     .collect(),
             })
@@ -1962,7 +2065,7 @@ impl AmuxApp {
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = WorkspaceDiffParams {
-                cwd: cwd.clone(),
+                session_id: session_id.clone(),
                 path: None,
             };
             let res = client
@@ -2138,7 +2241,7 @@ impl AmuxApp {
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = WorkspaceReadParams {
-                session_id,
+                session_id: session_id.clone(),
                 path,
                 offset,
                 limit: 400,
@@ -2212,20 +2315,13 @@ impl AmuxApp {
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match res {
-                    Ok(value) => match serde_json::from_value::<OpResult>(value) {
-                        Ok(result) if result.ok => this.load_diff(w, cx, machine),
-                        Ok(result) => {
-                            if let Some(m) = this.machines.get_mut(machine) {
-                                m.workspace_error =
-                                    Some(result.message.unwrap_or_else(|| "恢复改动失败".into()));
-                            }
+                    Ok(result) if result.ok => this.load_diff(w, cx, machine),
+                    Ok(result) => {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.workspace_error =
+                                Some(result.message.unwrap_or_else(|| "恢复改动失败".into()));
                         }
-                        Err(error) => {
-                            if let Some(m) = this.machines.get_mut(machine) {
-                                m.workspace_error = Some(format!("恢复改动失败：{error}"));
-                            }
-                        }
-                    },
+                    }
                     Err(error) => {
                         if let Some(m) = this.machines.get_mut(machine) {
                             m.workspace_error = Some(format!("恢复改动失败：{error}"));
@@ -2405,7 +2501,7 @@ impl AmuxApp {
                 }
                 Err(error) => {
                     if let Some(m) = this.machines.get_mut(machine) {
-                        m.status = format!("技能{}失败：{error}", action.label());
+                        m.notice = Some(format!("技能{}失败：{error}", action.label()));
                     }
                     cx.notify();
                 }
@@ -2541,8 +2637,8 @@ impl AmuxApp {
         let machine = self
             .store
             .add_machine(name.trim(), url.trim(), token.trim());
-        let mut view = MachineView::new(machine);
-        view.status = "已连接".into();
+        let view = MachineView::new(machine);
+        // 初始 Connecting：状态由 ws 认证通知驱动，不伪造「已连接」
         let idx = self.machines.len();
         self.machines.push(view);
         let client = self.machines[idx].client.clone();
@@ -3533,7 +3629,7 @@ impl AmuxApp {
                 let Some(session) = machine_view.sessions.iter().find(|s| s.id == *id) else {
                     return h_flex().into_any();
                 };
-                let available = machine_view.status == "已连接"
+                let available = machine_view.status.online()
                     && machine_view
                         .agents
                         .iter()
@@ -3573,12 +3669,15 @@ impl AmuxApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground),
             )
-            .child(machine_status_badge(
-                status,
-                cx.theme().success,
-                cx.theme().danger,
-                cx.theme().warning,
-            ))
+            .child(
+                Label::new(status)
+                    .text_xs()
+                    .text_color(if status == "可用" {
+                        cx.theme().success
+                    } else {
+                        cx.theme().danger
+                    }),
+            )
             .into_any()
     }
 
@@ -4802,7 +4901,7 @@ impl AmuxApp {
                     ))
                     .child(info_row(
                         "机器状态",
-                        &machine_view.status,
+                        &machine_view.status.label(),
                         cx.theme().muted_foreground,
                         cx.theme().foreground,
                     ));
@@ -5850,7 +5949,7 @@ impl AmuxApp {
                                     .font_weight(FontWeight::MEDIUM),
                             )
                             .child(machine_status_badge(
-                                &m.status,
+                                (&m.status, m.notice.as_deref()),
                                 cx.theme().success,
                                 cx.theme().danger,
                                 cx.theme().warning,
@@ -6787,7 +6886,8 @@ impl AmuxApp {
         let client = WsClient::connect_with_token(machine_ws_url(&cfg), cfg.token.clone());
         self.machines[idx].client = client.clone();
         self.machines[idx].connection_epoch = self.machines[idx].connection_epoch.saturating_add(1);
-        self.machines[idx].status = "连接中…".into();
+        self.machines[idx].status = MachineStatus::Connecting;
+        self.machines[idx].notice = None;
         self.machines[idx].views.clear();
         let t = self.spawn_machine_tasks(window, cx, idx, client);
         self._tasks.push(t);

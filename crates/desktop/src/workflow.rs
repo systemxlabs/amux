@@ -21,8 +21,8 @@ use rig::completion::Prompt;
 use serde::{Deserialize, Serialize};
 
 use protocol::{
-    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult, SessionNewParams,
-    SessionPageParams, SessionPromptParams, SessionResult, SessionState,
+    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult, SessionIdParams,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, SessionState,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig};

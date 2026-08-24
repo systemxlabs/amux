@@ -132,6 +132,21 @@ impl WsClient {
     }
 }
 
+/// 单条连接的服务结果：决定重连节奏。
+enum ConnectionOutcome {
+    /// 已认证后连接断开（server 重启/网络抖动）：立即重连，恢复最快
+    Disconnected,
+    /// 认证被拒（token 错误等）：计入退避——TCP 可通但 token 错的机器
+    /// 若全速重连会打爆 server（曾为热循环缺陷）
+    AuthFailed,
+    /// 客户端全部销毁：整个连接任务退出
+    ClientClosed,
+}
+
+fn backoff_delay(attempt: u32) -> Duration {
+    Duration::from_millis(500u64 * 2u64.pow(attempt.min(6)))
+}
+
 async fn run_loop(
     url: String,
     token: String,
@@ -140,148 +155,165 @@ async fn run_loop(
 ) {
     let mut attempt: u32 = 0;
     loop {
-        let mut connected = false;
-        while !connected {
-            match tokio_tungstenite::connect_async(&url).await {
-                Ok((ws, _)) => {
-                    attempt = 0;
-                    connected = true;
-                    protocol::log::info("gui.ws", format!("已连接 {url}"));
-                    let _ = notify_tx.send(Notification {
-                        method: "connected".into(),
-                        params: Value::Null,
-                    });
-                    let (mut sink, mut source) = ws.split();
-                    let mut pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> =
-                        HashMap::new();
-                    let mut next_id: u64 = 1;
-                    // 认证成功后才放行普通请求（docs/DESIGN.md「认证」）。
-                    let mut authed = false;
-                    // 认证：建连后首个消息必须是 auth（docs/DESIGN.md「认证」）。
-                    // token 由连接配置显式传入；认证响应到达前其余请求一律返回认证失败。
-                    let auth_id = next_id;
-                    next_id += 1;
-                    let auth_frame = json!({
-                        "jsonrpc": "2.0", "id": auth_id,
-                        "method": protocol::method::AUTH,
-                        "params": { "token": token },
-                    });
-                    {
-                        // auth 只有成功才放行后续请求；失败则整个连接按失败重连。
-                        let _ = notify_tx.send(Notification {
-                            method: "auth_sent".into(),
-                            params: Value::Null,
-                        });
-                        if sink
-                            .send(Message::Text(auth_frame.to_string()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+        match tokio_tungstenite::connect_async(&url).await {
+            Ok((ws, _)) => {
+                attempt = 0;
+                protocol::log::info("gui.ws", format!("已连接 {url}"));
+                let _ = notify_tx.send(Notification {
+                    method: "connected".into(),
+                    params: Value::Null,
+                });
+                let outcome = serve_connection(ws, token.clone(), &mut req_rx, &notify_tx).await;
+                match outcome {
+                    ConnectionOutcome::ClientClosed => return,
+                    ConnectionOutcome::Disconnected => {
+                        // 立即重连：server 重启场景恢复最快；server 不在时由下方
+                        // connect_async 失败分支接管退避
                     }
-
-                    loop {
-                        tokio::select! {
-                            req = req_rx.recv() => {
-                                let Some(req) = req else { return };  // client 销毁
-                                // 认证成功后才放行普通请求，否则一律返回认证失败（docs/DESIGN.md「认证」）
-                                if !authed {
-                                    let _ = req.resp.send(Err(RpcError {
-                                        code: protocol::server_error::AUTH_FAILED,
-                                        message: "未认证：请先完成连接认证".into(),
-                                    }));
-                                    continue;
-                                }
-                                let id = next_id;
-                                next_id += 1;
-                                let frame = json!({
-                                    "jsonrpc": "2.0", "id": id,
-                                    "method": req.method,
-                                    "params": req.params.unwrap_or(Value::Null),
-                                });
-                                if sink.send(Message::Text(frame.to_string())).await.is_err() {
-                                    break;
-                                }
-                                pending.insert(id, req.resp);
-                            }
-                            msg = source.next() => {
-                                let Some(msg) = msg else { break };
-                                let msg = match msg {
-                                    Ok(m) => m,
-                                    Err(_) => break,
-                                };
-                                let Message::Text(t) = msg else { continue };
-                                let Ok(v) = serde_json::from_str::<Value>(&t) else { continue };
-                                if let Some(id) = v.get("id").and_then(|i| i.as_u64()) {
-                                    if id == auth_id {
-                                        // auth 响应：无论成败，认证阶段结束；失败则断开重连
-                                        if v.get("error").is_some() {
-                                            let code = v.get("error").and_then(|e| e.get("code"))
-                                                .and_then(|c| c.as_i64()).unwrap_or(-1) as i32;
-                                            let message = v.get("error").and_then(|e| e.get("message"))
-                                                .and_then(|m| m.as_str()).unwrap_or("").to_string();
-                                            protocol::log::warn("gui.ws", format!("认证失败 [{code}]: {message}"));
-                                            let _ = notify_tx.send(Notification {
-                                                method: "auth_failed".into(),
-                                                params: json!({ "code": code, "message": message }),
-                                            });
-                                            break;
-                                        }
-                                        protocol::log::info("gui.ws", "认证成功");
-                                        authed = true;
-                                        let _ = notify_tx.send(Notification {
-                                            method: "auth_ok".into(),
-                                            params: Value::Null,
-                                        });
-                                        continue;
-                                    }
-                                    if let Some(resp) = pending.remove(&id) {
-                                        if let Some(err) = v.get("error") {
-                                            let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) as i32;
-                                            let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-                                            protocol::log::warn("gui.ws", format!("请求 #{id} 失败 [{code}]: {message}"));
-                                            let _ = resp.send(Err(RpcError { code, message }));
-                                        } else {
-                                            let _ = resp.send(Ok(v.get("result").cloned().unwrap_or(Value::Null)));
-                                        }
-                                    }
-                                } else if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-                                    // server → GUI 通知（唯一主动推送 session.state_change）
-                                    protocol::log::debug("gui.ws", format!("通知 {method}"));
-                                    let _ = notify_tx.send(Notification {
-                                        method: method.to_string(),
-                                        params: v.get("params").cloned().unwrap_or(Value::Null),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    // 连接断开：通知 UI（真实离线状态），清 pending，退避后重连
-                    protocol::log::warn("gui.ws", format!("连接断开 {url}，准备重连"));
-                    let _ = notify_tx.send(Notification {
-                        method: "disconnected".into(),
-                        params: Value::Null,
-                    });
-                    for (_, resp) in pending.drain() {
-                        let _ = resp.send(Err(RpcError {
-                            code: -1,
-                            message: "连接断开".into(),
-                        }));
+                    ConnectionOutcome::AuthFailed => {
+                        attempt += 1;
+                        let delay = backoff_delay(attempt);
+                        protocol::log::warn(
+                            "gui.ws",
+                            format!("认证失败，{delay:?} 后重试（第 {attempt} 次）"),
+                        );
+                        tokio::time::sleep(delay).await;
                     }
                 }
-                Err(e) => {
-                    attempt += 1;
-                    let delay = Duration::from_millis(500u64 * 2u64.pow(attempt.min(6)));
-                    protocol::log::debug(
-                        "gui.ws",
-                        format!("连接失败（第 {attempt} 次），{delay:?} 后重试: {e}"),
-                    );
-                    tokio::time::sleep(delay).await;
+            }
+            Err(e) => {
+                attempt += 1;
+                let delay = backoff_delay(attempt);
+                protocol::log::debug(
+                    "gui.ws",
+                    format!("连接失败（第 {attempt} 次），{delay:?} 后重试: {e}"),
+                );
+                // UI 需区分「连不上」与「正在连」：连接失败也广播（修复机器永远显示连接中）
+                let _ = notify_tx.send(Notification {
+                    method: "connect_failed".into(),
+                    params: json!({ "error": e.to_string() }),
+                });
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+/// 服务单条已建立的 WS 连接：auth 握手 → 请求/通知收发循环，直至断开或认证失败。
+async fn serve_connection(
+    ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    token: String,
+    req_rx: &mut mpsc::Receiver<ClientReq>,
+    notify_tx: &broadcast::Sender<Notification>,
+) -> ConnectionOutcome {
+    let (mut sink, mut source) = ws.split();
+    let mut pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> = HashMap::new();
+    let mut next_id: u64 = 1;
+    // 认证成功后才放行普通请求（docs/DESIGN.md「认证」）。
+    let mut authed = false;
+    // 认证：建连后首个消息必须是 auth（docs/DESIGN.md「认证」）。
+    let auth_id = next_id;
+    next_id += 1;
+    let auth_frame = json!({
+        "jsonrpc": "2.0", "id": auth_id,
+        "method": protocol::method::AUTH,
+        "params": { "token": token },
+    });
+    if sink.send(Message::Text(auth_frame.to_string())).await.is_err() {
+        return ConnectionOutcome::Disconnected;
+    }
+
+    loop {
+        tokio::select! {
+            req = req_rx.recv() => {
+                let Some(req) = req else {
+                    // client 全部销毁：连接任务退出（run_loop 一并结束）
+                    return ConnectionOutcome::ClientClosed;
+                };
+                // 认证成功后才放行普通请求，否则一律返回认证失败（docs/DESIGN.md「认证」）
+                if !authed {
+                    let _ = req.resp.send(Err(RpcError {
+                        code: protocol::server_error::AUTH_FAILED,
+                        message: "未认证：请先完成连接认证".into(),
+                    }));
+                    continue;
+                }
+                let id = next_id;
+                next_id += 1;
+                let frame = json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "method": req.method,
+                    "params": req.params.unwrap_or(Value::Null),
+                });
+                if sink.send(Message::Text(frame.to_string())).await.is_err() {
+                    break;
+                }
+                pending.insert(id, req.resp);
+            }
+            msg = source.next() => {
+                let Some(msg) = msg else { break };
+                let Ok(msg) = msg else { break };
+                let Message::Text(t) = msg else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(&t) else { continue };
+                if let Some(id) = v.get("id").and_then(|i| i.as_u64()) {
+                    if id == auth_id {
+                        // auth 响应：无论成败，认证阶段结束；失败则按退避重连
+                        if let Some(err) = v.get("error") {
+                            let code = err.get("code").and_then(|c| c.as_i64())
+                                .unwrap_or(-1) as i32;
+                            let message = err.get("message").and_then(|m| m.as_str())
+                                .unwrap_or("").to_string();
+                            protocol::log::warn("gui.ws", format!("认证失败 [{code}]: {message}"));
+                            let _ = notify_tx.send(Notification {
+                                method: "auth_failed".into(),
+                                params: json!({ "code": code, "message": message }),
+                            });
+                            return ConnectionOutcome::AuthFailed;
+                        }
+                        protocol::log::info("gui.ws", "认证成功");
+                        authed = true;
+                        let _ = notify_tx.send(Notification {
+                            method: "auth_ok".into(),
+                            params: Value::Null,
+                        });
+                        continue;
+                    }
+                    if let Some(resp) = pending.remove(&id) {
+                        if let Some(err) = v.get("error") {
+                            let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) as i32;
+                            let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                            protocol::log::warn("gui.ws", format!("请求 #{id} 失败 [{code}]: {message}"));
+                            let _ = resp.send(Err(RpcError { code, message }));
+                        } else {
+                            let _ = resp.send(Ok(v.get("result").cloned().unwrap_or(Value::Null)));
+                        }
+                    }
+                } else if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
+                    // server → GUI 通知（唯一主动推送 session.state_change）
+                    protocol::log::debug("gui.ws", format!("通知 {method}"));
+                    let _ = notify_tx.send(Notification {
+                        method: method.to_string(),
+                        params: v.get("params").cloned().unwrap_or(Value::Null),
+                    });
                 }
             }
         }
     }
+    // 连接断开：通知 UI（真实离线状态），清空在途请求
+    protocol::log::warn("gui.ws", "连接断开，准备重连");
+    let _ = notify_tx.send(Notification {
+        method: "disconnected".into(),
+        params: Value::Null,
+    });
+    for (_, resp) in pending.drain() {
+        let _ = resp.send(Err(RpcError {
+            code: -1,
+            message: "连接断开".into(),
+        }));
+    }
+    ConnectionOutcome::Disconnected
 }
 
 #[cfg(test)]
