@@ -51,6 +51,7 @@ use crate::config::{
     machine_ws_url, ApiFormat, ConfigStore, MachineConfig, OrchestratorConfig, QuickCommand,
     SkillEntry, WorkflowTemplate,
 };
+use crate::diff::{diff_lines, DiffLine, DiffLineKind};
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
     compose_prompt, compose_workflow_text, external_path_attachment, merge_session_window,
@@ -70,74 +71,6 @@ enum Panel {
     Diff,
     Detail,
     Activities,
-}
-
-#[derive(Clone, Copy)]
-enum DiffLineKind {
-    Context,
-    Addition,
-    Deletion,
-}
-
-struct DiffLine {
-    old_number: Option<usize>,
-    new_number: Option<usize>,
-    kind: DiffLineKind,
-    content: String,
-}
-
-fn hunk_start(header: &str, prefix: char) -> usize {
-    header
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix(prefix))
-        .and_then(|range| range.split(',').next())
-        .and_then(|number| number.parse().ok())
-        .unwrap_or(1)
-}
-
-fn diff_lines(hunk: &GitDiffHunk) -> Vec<DiffLine> {
-    let mut in_body = false;
-    let mut old_number = hunk_start(&hunk.header, '-');
-    let mut new_number = hunk_start(&hunk.header, '+');
-    let mut lines = Vec::new();
-
-    for line in hunk.patch.lines() {
-        if !in_body {
-            in_body = line.starts_with("@@ ");
-            continue;
-        }
-        let Some(prefix) = line.chars().next() else {
-            continue;
-        };
-        let content = &line[prefix.len_utf8()..];
-        let (kind, old, new) = match prefix {
-            '+' => {
-                let number = new_number;
-                new_number += 1;
-                (DiffLineKind::Addition, None, Some(number))
-            }
-            '-' => {
-                let number = old_number;
-                old_number += 1;
-                (DiffLineKind::Deletion, Some(number), None)
-            }
-            ' ' => {
-                let old = old_number;
-                let new = new_number;
-                old_number += 1;
-                new_number += 1;
-                (DiffLineKind::Context, Some(old), Some(new))
-            }
-            _ => continue,
-        };
-        lines.push(DiffLine {
-            old_number: old,
-            new_number: new,
-            kind,
-            content: content.to_string(),
-        });
-    }
-    lines
 }
 
 /// 设置浮窗分类（PRD §4.3 五分类）。

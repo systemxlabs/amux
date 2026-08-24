@@ -6,6 +6,7 @@
 mod aggregate;
 mod app;
 mod config;
+mod diff;
 mod display;
 mod logic;
 mod text;
