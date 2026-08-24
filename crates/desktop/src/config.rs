@@ -122,36 +122,6 @@ pub fn normalize_machines(raw: &serde_json::Value) -> Vec<MachineConfig> {
         .unwrap_or_default()
 }
 
-/// 技能目录归一化：缺 name/description 的条目丢弃（docs/DESIGN.md「技能存储」）。
-pub fn normalize_skills(raw: &serde_json::Value) -> Vec<SkillEntry> {
-    raw.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|v| is_string_field(v, "name") && is_string_field(v, "description"))
-                .map(|v| SkillEntry {
-                    name: v["name"].as_str().unwrap_or("").to_string(),
-                    description: v["description"].as_str().unwrap_or("").to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// 工作流模板归一化：缺 name/plan 的条目丢弃（docs/DESIGN.md「工作流模板存储」）。
-pub fn normalize_workflows(raw: &serde_json::Value) -> Vec<WorkflowTemplate> {
-    raw.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|v| is_string_field(v, "name") && is_string_field(v, "plan"))
-                .map(|v| WorkflowTemplate {
-                    name: v["name"].as_str().unwrap_or("").to_string(),
-                    plan: v["plan"].as_str().unwrap_or("").to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// 常用工作目录归一化：缺 machine/workspace 的条目丢弃（docs/DESIGN.md「常用工作目录存储」）。
 pub fn normalize_recent_workspaces(raw: &serde_json::Value) -> Vec<RecentWorkspace> {
     raw.as_array()
@@ -162,21 +132,6 @@ pub fn normalize_recent_workspaces(raw: &serde_json::Value) -> Vec<RecentWorkspa
                     machine: v["machine"].as_str().unwrap_or("").to_string(),
                     workspace: v["workspace"].as_str().unwrap_or("").to_string(),
                     last_used: v.get("lastUsed").and_then(|x| x.as_u64()).unwrap_or(0),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// 快捷指令归一化：缺 name/prompt 的条目丢弃（docs/DESIGN.md「快捷指令存储」）。
-pub fn normalize_quick_commands(raw: &serde_json::Value) -> Vec<QuickCommand> {
-    raw.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|v| is_string_field(v, "name") && is_string_field(v, "prompt"))
-                .map(|v| QuickCommand {
-                    name: v["name"].as_str().unwrap_or("").to_string(),
-                    prompt: v["prompt"].as_str().unwrap_or("").to_string(),
                 })
                 .collect()
         })
@@ -205,6 +160,85 @@ pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
 }
 
 // ---- 存储工具 ----
+
+fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            protocol::log::warn("gui.config", format!("读取配置失败 {}: {e}", path.display()));
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            protocol::log::warn(
+                "gui.config",
+                format!("配置解析失败（按空处理）{}: {e}", path.display()),
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn write_typed<T: serde::Serialize>(path: &Path, value: &T) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    match serde_json::to_string_pretty(value) {
+        Ok(body) => {
+            if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
+                protocol::log::warn(
+                    "gui.config",
+                    format!("写入配置失败 {}: {e}", path.display()),
+                );
+            }
+        }
+        Err(e) => protocol::log::warn("gui.config", format!("序列化失败 {}: {e}", path.display())),
+    }
+}
+
+/// name 键控的 JSON 集合文件（quick_commands/skills/workflows 共用）：
+/// list/add(upsert)/update/remove 四组 CRUD 曾逐字重复三份，仅文件名与类型不同。
+struct JsonCollection<'a, T> {
+    path: std::borrow::Cow<'a, Path>,
+    /// 从存储值提取唯一键（name）
+    key: for<'x> fn(&'x T) -> &'x str,
+}
+
+impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollection<'a, T> {
+    fn list(&self) -> Vec<T> {
+        read_file_typed(self.path.as_ref())
+    }
+
+    fn upsert(&self, item: T) {
+        let key = (self.key)(&item);
+        let mut items = self.list();
+        items.retain(|x| (self.key)(x) != key);
+        items.push(item);
+        write_typed(self.path.as_ref(), &items);
+    }
+
+    fn update(&self, key: &str, mutate: impl FnOnce(&mut T)) {
+        let mut items = self.list();
+        if let Some(x) = items.iter_mut().find(|x| (self.key)(x) == key) {
+            mutate(x);
+        }
+        write_typed(self.path.as_ref(), &items);
+    }
+
+    fn remove(&self, key: &str) {
+        let items = self
+            .list()
+            .into_iter()
+            .filter(|x| (self.key)(x) != key)
+            .collect::<Vec<_>>();
+        write_typed(self.path.as_ref(), &items);
+    }
+}
+
 
 /// 从文件读取并归一化（不存在/损坏 → 空）。`normalize` 负责坏条目丢弃。
 fn read_file_normalized<T: Clone>(
@@ -302,134 +336,95 @@ impl ConfigStore {
 
     // ---- 快捷指令（quick_commands.json）----
 
+    fn quick_commands(&self) -> JsonCollection<'_, QuickCommand> {
+        JsonCollection {
+            path: std::borrow::Cow::Owned(self.path("quick_commands.json")),
+            key: |c| &c.name,
+        }
+    }
+
     pub fn list_quick_commands(&self) -> Vec<QuickCommand> {
-        read_file_normalized(&self.path("quick_commands.json"), normalize_quick_commands)
+        self.quick_commands().list()
     }
 
     pub fn add_quick_command(&self, name: &str, prompt: &str) -> QuickCommand {
-        let mut cmds = self.list_quick_commands();
-        cmds.retain(|c| c.name != name);
         let c = QuickCommand {
             name: name.to_string(),
             prompt: prompt.to_string(),
         };
-        cmds.push(c.clone());
-        write_file(
-            &self.path("quick_commands.json"),
-            &serde_json::to_value(cmds).unwrap(),
-        );
+        self.quick_commands().upsert(c.clone());
         c
     }
 
     pub fn update_quick_command(&self, name: &str, prompt: &str) {
-        let mut cmds = self.list_quick_commands();
-        if let Some(c) = cmds.iter_mut().find(|c| c.name == name) {
-            c.prompt = prompt.to_string();
-        }
-        write_file(
-            &self.path("quick_commands.json"),
-            &serde_json::to_value(cmds).unwrap(),
-        );
+        self.quick_commands()
+            .update(name, |c| c.prompt = prompt.to_string());
     }
 
     pub fn remove_quick_command(&self, name: &str) {
-        let cmds: Vec<QuickCommand> = self
-            .list_quick_commands()
-            .into_iter()
-            .filter(|c| c.name != name)
-            .collect();
-        write_file(
-            &self.path("quick_commands.json"),
-            &serde_json::to_value(cmds).unwrap(),
-        );
+        self.quick_commands().remove(name);
     }
 
     // ---- Skills（skills.json）----
 
+    fn skills(&self) -> JsonCollection<'_, SkillEntry> {
+        JsonCollection {
+            path: std::borrow::Cow::Owned(self.path("skills.json")),
+            key: |s| &s.name,
+        }
+    }
+
     pub fn list_skills(&self) -> Vec<SkillEntry> {
-        read_file_normalized(&self.path("skills.json"), normalize_skills)
+        self.skills().list()
     }
 
     pub fn add_skill(&self, name: &str, description: &str) -> SkillEntry {
-        let mut skills = self.list_skills();
-        skills.retain(|s| s.name != name);
-        let s = SkillEntry {
+        let entry = SkillEntry {
             name: name.to_string(),
             description: description.to_string(),
         };
-        skills.push(s.clone());
-        write_file(
-            &self.path("skills.json"),
-            &serde_json::to_value(skills).unwrap(),
-        );
-        s
+        self.skills().upsert(entry.clone());
+        entry
     }
 
     pub fn update_skill(&self, name: &str, description: &str) {
-        let mut skills = self.list_skills();
-        if let Some(s) = skills.iter_mut().find(|s| s.name == name) {
-            s.description = description.to_string();
-        }
-        write_file(
-            &self.path("skills.json"),
-            &serde_json::to_value(skills).unwrap(),
-        );
+        self.skills()
+            .update(name, |s| s.description = description.to_string());
     }
 
     pub fn remove_skill(&self, name: &str) {
-        let skills: Vec<SkillEntry> = self
-            .list_skills()
-            .into_iter()
-            .filter(|s| s.name != name)
-            .collect();
-        write_file(
-            &self.path("skills.json"),
-            &serde_json::to_value(skills).unwrap(),
-        );
+        self.skills().remove(name);
     }
 
     // ---- 工作流模板（workflows.json）----
 
+    fn templates(&self) -> JsonCollection<'_, WorkflowTemplate> {
+        JsonCollection {
+            path: std::borrow::Cow::Owned(self.path("workflows.json")),
+            key: |t| &t.name,
+        }
+    }
+
     pub fn list_templates(&self) -> Vec<WorkflowTemplate> {
-        read_file_normalized(&self.path("workflows.json"), normalize_workflows)
+        self.templates().list()
     }
 
     pub fn add_template(&self, name: &str, plan: &str) -> WorkflowTemplate {
-        let mut tpls = self.list_templates();
-        tpls.retain(|t| t.name != name);
-        let t = WorkflowTemplate {
+        let tpl = WorkflowTemplate {
             name: name.to_string(),
             plan: plan.to_string(),
         };
-        tpls.push(t.clone());
-        write_file(
-            &self.path("workflows.json"),
-            &serde_json::to_value(tpls).unwrap(),
-        );
-        t
+        self.templates().upsert(tpl.clone());
+        tpl
     }
 
     pub fn update_template(&self, name: &str, plan: &str) {
-        let mut tpls = self.list_templates();
-        if let Some(t) = tpls.iter_mut().find(|t| t.name == name) {
-            t.plan = plan.to_string();
-        }
-        write_file(
-            &self.path("workflows.json"),
-            &serde_json::to_value(tpls).unwrap(),
-        );
+        self.templates()
+            .update(name, |t| t.plan = plan.to_string());
     }
 
     pub fn remove_template(&self, name: &str) {
-        let tpls: Vec<WorkflowTemplate> = self
-            .list_templates()
-            .into_iter()
-            .filter(|t| t.name != name)
-            .collect();
-        write_file(
-            &self.path("workflows.json"),
-            &serde_json::to_value(tpls).unwrap(),
-        );
+        self.templates().remove(name);
     }
 
     // ---- 常用工作目录（recent_workspaces.json）----
@@ -541,28 +536,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_skills_drops_bad_entries() {
-        let raw = serde_json::json!([
-            { "name": "opencli", "description": "url" },
-            { "name": "缺 desc" }
-        ]);
-        let skills = normalize_skills(&raw);
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "opencli");
-    }
-
-    #[test]
-    fn normalize_workflows_drops_bad_entries() {
-        let raw = serde_json::json!([
-            { "name": "开发", "plan": "xxx" },
-            { "name": "缺 plan" }
-        ]);
-        let tpls = normalize_workflows(&raw);
-        assert_eq!(tpls.len(), 1);
-        assert_eq!(tpls[0].plan, "xxx");
-    }
-
-    #[test]
     fn normalize_recent_workspaces_drops_bad_entries() {
         let raw = serde_json::json!([
             { "machine": "m1", "workspace": "/a", "lastUsed": 10 },
@@ -573,17 +546,6 @@ mod tests {
         assert_eq!(ws[0].machine, "m1");
         assert_eq!(ws[0].workspace, "/a");
         assert_eq!(ws[0].last_used, 10);
-    }
-
-    #[test]
-    fn normalize_quick_commands_drops_bad_entries() {
-        let raw = serde_json::json!([
-            { "name": "Commit", "prompt": "提交" },
-            { "name": "缺 prompt" }
-        ]);
-        let cmds = normalize_quick_commands(&raw);
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].name, "Commit");
     }
 
     #[test]

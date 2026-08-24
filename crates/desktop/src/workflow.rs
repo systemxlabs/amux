@@ -1764,7 +1764,7 @@ mod tests {
             done: false,
             conclusion: None,
         }]);
-        let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
@@ -1799,7 +1799,7 @@ mod tests {
             done: false,
             conclusion: None,
         }]);
-        let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         engine.session.write().unwrap().done = true;
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
@@ -1827,7 +1827,7 @@ mod tests {
             done: true,
             conclusion: Some("全部步骤完成".into()),
         }]);
-        let mut engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         engine.start().await.unwrap();
         assert!(engine.session.read().unwrap().done);
         assert!(engine
@@ -1847,7 +1847,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let mut engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m]);
         let id = engine.session.read().unwrap().id.clone();
         engine.record_user("立即保存");
         engine.persist(&dir).unwrap();
@@ -1868,7 +1868,7 @@ mod tests {
             conclusion: None,
         }]);
         let (clients2, m2) = clients_with_machines();
-        let mut engine2 =
+        let engine2 =
             WorkflowEngine::restore(sessions[0].clone(), backend2, clients2, vec![m2]);
         engine2.start().await.unwrap();
         assert!(engine2
@@ -1931,7 +1931,7 @@ mod tests {
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
-        let mut engine = engine;
+        let engine = engine;
         engine.session
             .write()
             .unwrap()
@@ -1964,7 +1964,7 @@ mod tests {
     #[test]
     fn record_user_sets_description_when_empty() {
         let backend = FakeBackend::new_for_tests();
-        let mut engine = WorkflowEngine::new(
+        let engine = WorkflowEngine::new(
             "",
             "",
             "模板：先实现后审查",
@@ -1987,7 +1987,7 @@ mod tests {
             model: "gpt-4o-mini".into(),
         }));
         let client = WsClient::connect_with_token("ws://127.0.0.1:1".into(), "unused".into());
-        let mut engine = WorkflowEngine::new(
+        let engine = WorkflowEngine::new(
             "计划",
             "",
             "",
@@ -2057,7 +2057,7 @@ mod tests {
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],
         );
-        let mut engine = engine;
+        let engine = engine;
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
