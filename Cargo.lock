@@ -2865,7 +2865,6 @@ dependencies = [
  "gpui_platform",
  "jiff",
  "protocol",
- "reqwest 0.13.4",
  "rig",
  "rusqlite",
  "serde",

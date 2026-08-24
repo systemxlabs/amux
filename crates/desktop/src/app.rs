@@ -4198,6 +4198,26 @@ impl AmuxApp {
             _ => false,
         };
         let mut content = Vec::new();
+        if let Some(Selected::Workflow { engine }) = &self.selected {
+            let total = self
+                .workflows
+                .get(*engine)
+                .map(|w| w.session.read().unwrap().transcript.len())
+                .unwrap_or(0);
+            if total > self.workflow_dialog_limit {
+                content.push(
+                    Button::new("load-more-workflow-history")
+                        .small()
+                        .ghost()
+                        .label(format!("加载更早消息（共 {total} 条）"))
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.workflow_dialog_limit += 100;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
         if history_has_more {
             content.push(
                 Button::new("load-more-history")

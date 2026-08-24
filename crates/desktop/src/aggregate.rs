@@ -21,13 +21,29 @@ pub struct SessionView {
 }
 
 impl SessionView {
+    /// 增量合并最新一窗（docs/DESIGN.md「对话视图：增量渲染」）：
+    /// 新窗与已渲染内容的尾部按（类别，时间戳）序列对齐，只追加真正新增的条目——
+    /// 原实现整页替换，既破坏增量语义，还会在下次 10s 轮询时冲掉用户
+    /// 「加载更早」载入的旧消息。保留旧前缀时沿用旧分页游标。
     pub fn set_history_page(
         &mut self,
         items: &[HistoryItem],
         has_more: bool,
         next_before: Option<usize>,
     ) {
-        self.dialog = history_to_dialog(items);
+        let fresh = history_to_dialog(items);
+        if self.dialog.is_empty() || fresh.is_empty() {
+            self.dialog = fresh;
+            self.history_has_more = has_more;
+            self.history_next_before = next_before;
+            return;
+        }
+        if let Some(kept_older) = merge_tail(&mut self.dialog, fresh) {
+            if kept_older {
+                // 之前「加载更早」的窗口仍在展示：游标保持指向最旧已加载边界
+                return;
+            }
+        }
         self.history_has_more = has_more;
         self.history_next_before = next_before;
     }
@@ -71,13 +87,27 @@ impl SessionView {
         self.history_next_before = next_before;
     }
 
+    /// 增量合并最新一窗活动（同 set_history_page 的对齐策略）。
     pub fn set_activities_page(
         &mut self,
         activities: Vec<Activity>,
         has_more: bool,
         next_before: Option<usize>,
     ) {
-        self.activities = activities;
+        use std::mem;
+        if self.activities.is_empty() || activities.is_empty() {
+            self.activities = activities;
+            self.activities_has_more = has_more;
+            self.activities_next_before = next_before;
+            return;
+        }
+        let mut fresh = activities;
+        if let Some(kept_older) = merge_activities_tail(&mut self.activities, mem::take(&mut fresh))
+        {
+            if kept_older {
+                return;
+            }
+        }
         self.activities_has_more = has_more;
         self.activities_next_before = next_before;
     }
@@ -113,6 +143,91 @@ impl SessionView {
     pub fn set_busy(&mut self, busy: bool) {
         self.busy = busy;
     }
+}
+
+/// 对话条目的对齐键（类别 + 时间戳）。
+fn dialog_key(m: &DialogMsg) -> (&'static str, u64) {
+    match m {
+        DialogMsg::UserMessage { timestamp, .. } => ("user", *timestamp),
+        DialogMsg::AgentMessage { timestamp, .. } => ("agent", *timestamp),
+    }
+}
+
+fn activity_key(a: &Activity) -> (&'static str, u64) {
+    match a {
+        Activity::Thinking { timestamp, .. } => ("thinking", *timestamp),
+        Activity::ToolCall { timestamp, .. } => ("tool", *timestamp),
+        Activity::Compaction { timestamp, .. } => ("compaction", *timestamp),
+        Activity::Error { timestamp, .. } => ("error", *timestamp),
+    }
+}
+
+/// 把 `fresh` 作为尾部合并进 `current`：
+/// 在 fresh 中找到与 current 尾部键序列匹配的最长对齐点，
+/// 其后的条目追加到 current。返回 Some(true) 表示 current 保留了
+/// 更早的前缀（调用方应保留旧分页游标）；Some(false)/None 表示
+/// current 未含更早内容（调用方采用新窗游标）。
+fn merge_tail(current: &mut Vec<DialogMsg>, fresh: Vec<DialogMsg>) -> Option<bool> {
+    let cur_keys: Vec<_> = current.iter().map(dialog_key).collect();
+    let fresh_keys: Vec<_> = fresh.iter().map(dialog_key).collect();
+    let last = match cur_keys.last() {
+        Some(k) => *k,
+        None => return None,
+    };
+    // current 尾部键在 fresh 中最晚的出现位置（从后往前找第一处）
+    let mut anchor = None;
+    for (i, k) in fresh_keys.iter().enumerate().rev() {
+        if *k == last {
+            anchor = Some(i);
+            break;
+        }
+    }
+    let Some(anchor) = anchor else {
+        // 完全无交集（异常情况）：保守整页替换
+        *current = fresh;
+        return Some(false);
+    };
+    // 从 anchor 向前验证对齐长度
+    let mut matched = 0usize;
+    while matched < cur_keys.len()
+        && matched <= anchor
+        && cur_keys[cur_keys.len() - 1 - matched] == fresh_keys[anchor - matched]
+    {
+        matched += 1;
+    }
+    let kept_older = matched < cur_keys.len();
+    current.extend_from_slice(&fresh[anchor + 1..]);
+    Some(kept_older)
+}
+
+fn merge_activities_tail(current: &mut Vec<Activity>, fresh: Vec<Activity>) -> Option<bool> {
+    let cur_keys: Vec<_> = current.iter().map(activity_key).collect();
+    let fresh_keys: Vec<_> = fresh.iter().map(activity_key).collect();
+    let last = match cur_keys.last() {
+        Some(k) => *k,
+        None => return None,
+    };
+    let mut anchor = None;
+    for (i, k) in fresh_keys.iter().enumerate().rev() {
+        if *k == last {
+            anchor = Some(i);
+            break;
+        }
+    }
+    let Some(anchor) = anchor else {
+        *current = fresh;
+        return Some(false);
+    };
+    let mut matched = 0usize;
+    while matched < cur_keys.len()
+        && matched <= anchor
+        && cur_keys[cur_keys.len() - 1 - matched] == fresh_keys[anchor - matched]
+    {
+        matched += 1;
+    }
+    let kept_older = matched < cur_keys.len();
+    current.extend_from_slice(&fresh[anchor + 1..]);
+    Some(kept_older)
 }
 
 #[cfg(test)]
@@ -177,6 +292,32 @@ mod tests {
         }]);
         assert_eq!(view.activities.len(), 2);
         assert!(matches!(view.activities[0], Activity::Error { .. }));
+    }
+
+    #[test]
+    fn set_history_page_merges_incrementally() {
+        let mut view = SessionView::default();
+        view.set_history_page(&[user("问", 1), agent("答", 2)], false, None);
+        // 下一次轮询带回同一窗 + 一条新输出：不重复、不清空
+        view.set_history_page(&[user("问", 1), agent("答", 2), agent("补充", 3)], false, None);
+        assert_eq!(view.dialog.len(), 3, "增量追加而非整页替换");
+        assert!(matches!(&view.dialog[0], DialogMsg::UserMessage { .. }));
+    }
+
+    #[test]
+    fn set_history_page_preserves_older_window() {
+        let mut view = SessionView::default();
+        view.set_history_page(&[user("旧", 0)], true, Some(1));
+        view.prepend_history(&[user("更早", 0)]);
+        // 轮询最新一窗不含「更早」：不得把它冲掉，且保留旧游标
+        view.set_history_page(&[user("旧", 0), agent("新", 5)], true, Some(6));
+        let d = &view.dialog;
+        assert_eq!(d.len(), 3, "加载更早的内容应在轮询后保留");
+        assert_eq!(
+            (view.history_has_more, view.history_next_before),
+            (true, Some(1)),
+            "保留了更早前缀时应沿用旧游标"
+        );
     }
 
     #[test]

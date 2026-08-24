@@ -1257,6 +1257,7 @@ impl rig::tool::Tool for ListSessions {
                     "id": c.id,
                     "title": c.step_desc,
                     "state": state_label(c.state),
+                    "lastActiveAt": c.last_active_at,
                     "machine": c.machine_name,
                     "agent": c.agent,
                     "machineOnline": online,
