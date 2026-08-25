@@ -2836,7 +2836,7 @@ impl AmuxApp {
             self.panel_delta_px / window.scale_factor() - Self::PANEL_RESIZE_HANDLE_WIDTH;
         let handle = div()
             .id("panel-resize-handle")
-            .w(px(Self::PANEL_RESIZE_HANDLE_WIDTH))
+            .w(px(Self::PANEL_RESIZE_HANDLE_WIDTH)) // 拖拽手柄宽度：物理命中区域
             .h_full()
             .bg(cx.theme().border.opacity(0.35))
             .hover(|d| d.bg(cx.theme().primary))
@@ -2863,7 +2863,13 @@ impl AmuxApp {
             h_flex()
                 .h_full()
                 .child(handle)
-                .child(div().w(px(panel_width)).h_full().min_w_0().child(panel))
+                .child(
+                    div()
+                        .w(px(panel_width)) // 拖拽解析出的运行时宽度（随 pointer 事件更新）
+                        .h_full()
+                        .min_w_0()
+                        .child(panel),
+                )
                 .into_any(),
         )
     }
@@ -2897,7 +2903,7 @@ impl AmuxApp {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(div().size(px(8.)).rounded_full().bg(cx.theme().primary))
+                    .child(div().size_2().rounded_full().bg(cx.theme().primary))
                     .child(
                         Label::new("amux")
                             .text_xl()
@@ -2942,7 +2948,7 @@ impl AmuxApp {
             );
         let resize_handle = div()
             .id("sidebar-resize-handle")
-            .w(px(5.0))
+            .w(px(5.0)) // 拖拽手柄宽度：物理命中区域
             .h_full()
             .bg(sidebar_border.opacity(0.6))
             .hover(|d| d.bg(cx.theme().primary))
@@ -2965,7 +2971,7 @@ impl AmuxApp {
                 cx.notify();
             }));
         h_flex()
-            .w(px(sidebar_width))
+            .w(px(sidebar_width)) // 拖拽解析出的运行时宽度（随 pointer 事件更新）
             .h_full()
             .child(sidebar_content)
             .child(resize_handle)
@@ -3114,7 +3120,7 @@ impl AmuxApp {
             .child(
                 h_flex()
                     .w_full()
-                    .h(px(32.))
+                    .h_8()
                     .px_1()
                     .gap_1()
                     .items_center()
@@ -3129,10 +3135,10 @@ impl AmuxApp {
                     )
                     .child(if busy {
                         Spinner::new()
-                            .color(hsla(0.6, 0.8, 0.5, 1.0))
+                            .color(cx.theme().primary)
                             .into_any_element()
                     } else {
-                        div().w(px(14.)).h(px(14.)).into_any_element()
+                        div().size_3().into_any_element()
                     }),
             )
             .into_any_element()
@@ -3142,6 +3148,7 @@ impl AmuxApp {
         let Some(wf) = self.workflows.get(wi) else {
             return div().into_any();
         };
+        let wf_id = wf.session.read().unwrap().id.clone();
         let title = if wf.session.read().unwrap().title.is_empty() {
             "新工作流".to_string()
         } else {
@@ -3158,7 +3165,7 @@ impl AmuxApp {
             .items_center()
             .child(
                 h_flex()
-                    .id(format!("wf-title-{wi}"))
+                    .id(format!("wf-title-{wf_id}"))
                     .flex_1()
                     .min_w_0()
                     .gap_1()
@@ -3176,7 +3183,7 @@ impl AmuxApp {
                     .child(
                         div()
                             .px_1()
-                            .py(px(1.))
+                            .py_0p5()
                             .rounded_full()
                             .bg(cx.theme().muted)
                             .child(
@@ -3200,10 +3207,10 @@ impl AmuxApp {
             )
             .child(if wf.session.read().unwrap().state == SessionState::Busy {
                 Spinner::new()
-                    .color(hsla(0.6, 0.8, 0.5, 1.0))
+                    .color(cx.theme().primary)
                     .into_any_element()
             } else {
-                div().w(px(14.)).h(px(14.)).into_any_element()
+                div().size_3().into_any_element()
             });
 
         // 子会话默认折叠、可展开下钻。标题/忙闲联表本机会话缓存（权威在 server）
@@ -3244,7 +3251,7 @@ impl AmuxApp {
                     .child(Label::new("↳").text_color(cx.theme().muted_foreground))
                     .child(
                         h_flex()
-                            .id(format!("wf-child-title-{wi}-{cid}"))
+                            .id(format!("wf-child-title-{wf_id}-{cid}"))
                             .flex_1()
                             .min_w_0()
                             .gap_1()
@@ -3267,10 +3274,10 @@ impl AmuxApp {
                     )
                     .child(if busy {
                         Spinner::new()
-                            .color(hsla(0.6, 0.8, 0.5, 1.0))
+                            .color(cx.theme().primary)
                             .into_any_element()
                     } else {
-                        div().w(px(14.)).h(px(14.)).into_any_element()
+                        div().size_3().into_any_element()
                     }),
             );
         }
@@ -3305,7 +3312,7 @@ impl AmuxApp {
 
         let wf_sel = self.selected == Some(Selected::Workflow { engine: wi });
         div()
-            .id(format!("wf-row-{wi}"))
+            .id(format!("wf-row-{wf_id}"))
             .relative()
             .w_full()
             .rounded_md()
@@ -3883,10 +3890,9 @@ impl AmuxApp {
         let muted_foreground = cx.theme().muted_foreground;
         let rows = dialog
             .iter()
-            .enumerate()
-            .map(|(i, item)| match item {
+            .map(|item| match item {
                 DialogMsg::UserMessage { content, timestamp } => {
-                    div().id(("row", i)).w_full().child(
+                    div().id(("row", *timestamp)).w_full().child(
                         div()
                             .ml_auto()
                             .flex_none()
@@ -3909,14 +3915,14 @@ impl AmuxApp {
                                     .text_color(cx.theme().primary_foreground.opacity(0.78)),
                             )
                             .child(
-                                TextView::markdown(format!("umd-{i}"), block_text(content))
+                                TextView::markdown(format!("umd-{timestamp}"), block_text(content))
                                     .selectable(true)
                                     .text_color(primary_foreground),
                             ),
                     )
                 }
                 DialogMsg::AgentMessage { content, timestamp } => {
-                    div().id(("row", i)).w_full().child(
+                    div().id(("row", *timestamp)).w_full().child(
                         div()
                             .flex_none()
                             .max_w(px(720.))
@@ -3940,7 +3946,7 @@ impl AmuxApp {
                                     .text_color(muted_foreground),
                             )
                             .child(
-                                TextView::markdown(format!("amd-{i}"), block_text(content))
+                                TextView::markdown(format!("amd-{timestamp}"), block_text(content))
                                     .selectable(true),
                             ),
                     )
@@ -4236,7 +4242,7 @@ impl AmuxApp {
                     .children(attachments.iter().map(|a| {
                         div()
                             .px_2()
-                            .py(px(1.))
+                            .py_0p5()
                             .rounded_full()
                             .bg(cx.theme().muted)
                             .child(
@@ -5127,7 +5133,7 @@ impl AmuxApp {
                 hunk_children.push(
                     h_flex()
                         .w_full()
-                        .h(px(28.))
+                        .h_7()
                         .items_center()
                         .gap_2()
                         .px_2()
@@ -5191,6 +5197,7 @@ impl AmuxApp {
                         }
                     };
                     hunk_children.push(
+                        // 代码视图：行号/标记为对齐的等宽数据列，固定像素宽度以保持跨行对齐
                         h_flex()
                             .w_full()
                             .min_h(px(22.))
@@ -5351,7 +5358,7 @@ impl AmuxApp {
         let target = menu.target.clone();
         div()
             .absolute()
-            .left(px(menu.x))
+            .left(px(menu.x)) // 右键指针坐标：运行时几何
             .top(px(menu.y))
             .id("context-menu")
             .v_flex()
@@ -6669,10 +6676,10 @@ impl Render for AmuxApp {
         let panel = self.render_panel(window, cx);
         let title_bar = h_flex()
             .id("title-bar")
-            .h(px(36.))
+            .h(px(36.)) // 窗口标题栏高度：平台窗口 chrome
             .gap_2()
             .items_center()
-            .pl(px(76.))
+            .pl(px(76.)) // 为 macOS 红绿灯按钮区预留的窗口 inset
             .pr(px(12.))
             .bg(cx.theme().title_bar)
             .border_b_1()

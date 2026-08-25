@@ -41,9 +41,9 @@ pub fn machine_status_badge<'a>(
         ),
     };
     div()
-        .max_w(px(180.))
+        .max_w(px(180.)) // 徽章文本截断上限（小标签固定宽度）
         .px_2()
-        .py(px(1.))
+        .py_0p5()
         .rounded_full()
         .bg(color.opacity(0.14))
         .child(Label::new(text).text_xs().truncate().text_color(color))
