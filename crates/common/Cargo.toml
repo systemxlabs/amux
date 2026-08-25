@@ -9,4 +9,5 @@ publish = false
 [dependencies]
 log.workspace = true
 logforth.workspace = true
+serde.workspace = true
 serde_json.workspace = true

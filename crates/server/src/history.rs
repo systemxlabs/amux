@@ -3,14 +3,13 @@
 //!   （仅用户输入 `UserMessage` 与 agent 输出 `AgentMessage`，流式输出合并后写入）
 //! - 活动：`data_dir/sessions/<session_id>_activities.jsonl`，每行一个 `Activity`
 //!   （thinking / tool_call / compaction / error）
+//!
+//! 文件布局与 JSONL 读写复用 `amux-common::session_log`。
 
 use std::path::{Path, PathBuf};
 
+use amux_common::session_log::{activities_path, append_jsonl, history_path, read_jsonl};
 use protocol::{Activity, ContentBlock, HistoryItem};
-
-fn sessions_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("sessions")
-}
 
 /// 按会话的数据文件（历史 + 活动）。
 #[derive(Debug, Clone)]
@@ -19,52 +18,12 @@ pub struct SessionLog {
     activities_path: PathBuf,
 }
 
-fn append_lines<T: serde::Serialize>(path: &Path, entries: &[T]) -> std::io::Result<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    for e in entries {
-        let line = serde_json::to_string(e)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        std::io::Write::write_all(&mut f, line.as_bytes())?;
-        std::io::Write::write_all(&mut f, b"\n")?;
-    }
-    Ok(())
-}
-
-fn read<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-    content
-        .lines()
-        .enumerate()
-        .map(|(line, value)| {
-            serde_json::from_str(value).map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("{}:{}: {error}", path.display(), line + 1),
-                )
-            })
-        })
-        .collect()
-}
-
 impl SessionLog {
     pub fn history_path(data_dir: &Path, session_id: &str) -> PathBuf {
-        sessions_dir(data_dir).join(format!("{session_id}_history.jsonl"))
+        history_path(data_dir, session_id)
     }
     pub fn activities_path(data_dir: &Path, session_id: &str) -> PathBuf {
-        sessions_dir(data_dir).join(format!("{session_id}_activities.jsonl"))
+        activities_path(data_dir, session_id)
     }
 
     pub fn open(data_dir: &Path, session_id: &str) -> Self {
@@ -75,21 +34,21 @@ impl SessionLog {
     }
 
     pub fn append_history(&self, items: &[HistoryItem]) -> std::io::Result<()> {
-        append_lines(&self.history_path, items)
+        append_jsonl(&self.history_path, items)
     }
 
     pub fn append_activities(&self, items: &[Activity]) -> std::io::Result<()> {
-        append_lines(&self.activities_path, items)
+        append_jsonl(&self.activities_path, items)
     }
 
     /// 读取全部历史条目；日志缺失视为空，损坏内容返回错误。
     pub fn read_history(&self) -> std::io::Result<Vec<HistoryItem>> {
-        read(&self.history_path)
+        read_jsonl(&self.history_path)
     }
 
     /// 读取全部活动条目；日志缺失视为空，损坏内容返回错误。
     pub fn read_activities(&self) -> std::io::Result<Vec<Activity>> {
-        read(&self.activities_path)
+        read_jsonl(&self.activities_path)
     }
 
     pub fn history_exists(&self) -> bool {

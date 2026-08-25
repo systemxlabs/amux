@@ -130,11 +130,7 @@ pub fn params_summary(params: &serde_json::Value, keys: &[&str], max_text: usize
     for key in keys {
         if let Some(value) = obj.get(*key) {
             let value = match value {
-                Value::String(value) if value.chars().count() > max_text => {
-                    let prefix: String = value.chars().take(max_text).collect();
-                    format!("{prefix}…")
-                }
-                Value::String(value) => value.clone(),
+                Value::String(value) => crate::text::truncate(value, max_text),
                 value => value.to_string(),
             };
             parts.push(format!("{key}={value}"));

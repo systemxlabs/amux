@@ -49,6 +49,16 @@ pub enum SessionState {
     Busy,
 }
 
+impl SessionState {
+    /// 线上/持久化的 snake_case 表示（与 `parse_session_state` 互为逆）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionState::Idle => "idle",
+            SessionState::Busy => "busy",
+        }
+    }
+}
+
 /// 普通会话元数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

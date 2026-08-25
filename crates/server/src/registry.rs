@@ -19,26 +19,17 @@ pub struct SessionRegistry {
 /// 注册表条目：会话元数据 + agent 侧会话 id（驱动操作需要）。
 pub type RegistryEntry = (SessionMeta, String);
 
-fn state_str(s: SessionState) -> &'static str {
-    match s {
-        SessionState::Idle => "idle",
-        SessionState::Busy => "busy",
-    }
-}
-
 fn state_from_str(s: &str) -> rusqlite::Result<SessionState> {
-    match s {
-        "idle" => Ok(SessionState::Idle),
-        "busy" => Ok(SessionState::Busy),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+    protocol::parse_session_state(s).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
             0,
             Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("invalid session state: {s}"),
             )),
-        )),
-    }
+        )
+    })
 }
 
 fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
@@ -103,7 +94,7 @@ impl SessionRegistry {
                 meta.id,
                 meta.agent,
                 meta.cwd,
-                state_str(meta.state),
+                meta.state.as_str(),
                 meta.title,
                 agent_session_id,
                 meta.created_at as i64,
@@ -151,7 +142,7 @@ impl SessionRegistry {
         let conn = self.connection()?;
         conn.execute(
             "UPDATE sessions SET state = ?1, last_active_at = ?2 WHERE id = ?3",
-            params![state_str(state), last_active_at as i64, id],
+            params![state.as_str(), last_active_at as i64, id],
         )?;
         Ok(())
     }

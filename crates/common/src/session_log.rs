@@ -1,0 +1,115 @@
+//! 会话对话历史与活动记录的 JSONL 存储布局。
+//!
+//! server（权威日志）与 desktop（工作流会话本地缓存）共用同一套文件布局：
+//! `<data_dir>/sessions/<session_id>_history.jsonl` 与 `<id>_activities.jsonl`，
+//! 每行一条 JSON。读取与路径收口在此，避免两处硬编码布局漂移。
+
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+/// 会话数据目录：`<data_dir>/sessions/`。
+pub fn sessions_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("sessions")
+}
+
+/// 会话对话历史文件：`<data_dir>/sessions/<session_id>_history.jsonl`。
+pub fn history_path(data_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir(data_dir).join(format!("{session_id}_history.jsonl"))
+}
+
+/// 会话活动记录文件：`<data_dir>/sessions/<session_id>_activities.jsonl`。
+pub fn activities_path(data_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir(data_dir).join(format!("{session_id}_activities.jsonl"))
+}
+
+/// 追加 JSONL 行（append-only）。空输入直接返回；缺失父目录会创建。
+pub fn append_jsonl<T: serde::Serialize>(path: &Path, entries: &[T]) -> io::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    for entry in entries {
+        let line = serde_json::to_string(entry)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+/// 读取全部 JSONL 行；文件缺失视为空，损坏行带行号报错。
+pub fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    content
+        .lines()
+        .enumerate()
+        .map(|(line, value)| {
+            serde_json::from_str(value).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: {error}", path.display(), line + 1),
+                )
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_dir() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("amux-session-log-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn path_layout_matches_documented_layout() {
+        let dir = Path::new("/data");
+        assert_eq!(
+            history_path(dir, "s1"),
+            PathBuf::from("/data/sessions/s1_history.jsonl")
+        );
+        assert_eq!(
+            activities_path(dir, "s1"),
+            PathBuf::from("/data/sessions/s1_activities.jsonl")
+        );
+    }
+
+    #[test]
+    fn append_then_read_roundtrip_and_missing_is_empty() {
+        let dir = temp_dir();
+        let path = history_path(&dir, "s1");
+        assert!(read_jsonl::<u32>(&path).unwrap().is_empty());
+
+        append_jsonl(&path, &[1, 2, 3]).unwrap();
+        assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![1, 2, 3]);
+
+        append_jsonl(&path, &[4]).unwrap();
+        assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![1, 2, 3, 4]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupted_line_reports_line_number() {
+        let dir = temp_dir();
+        let path = activities_path(&dir, "s1");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"ok\":true}\nnot-json\n").unwrap();
+        let err = read_jsonl::<serde_json::Value>(&path).unwrap_err();
+        assert!(err.to_string().contains(":2:"), "应报告第 2 行：{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

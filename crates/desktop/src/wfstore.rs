@@ -2,6 +2,8 @@
 //! - 元数据：`~/.amux/app/session.sqlite`
 //! - 对话历史：`~/.amux/app/sessions/<session_id>_history.jsonl`
 //! - 活动历史：`~/.amux/app/sessions/<session_id>_activities.jsonl`
+//!
+//! 历史/活动文件布局与读取复用 `amux-common::session_log`；写采用整文件原子替换。
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -14,15 +16,11 @@ use rusqlite::{params, Connection};
 use crate::workflow::{ChildSession, OrcMsg, OrcSession};
 
 fn history_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
-    data_dir
-        .join("sessions")
-        .join(format!("{id}_history.jsonl"))
+    amux_common::session_log::history_path(data_dir, id)
 }
 
 fn activities_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
-    data_dir
-        .join("sessions")
-        .join(format!("{id}_activities.jsonl"))
+    amux_common::session_log::activities_path(data_dir, id)
 }
 
 fn sqlite_path(data_dir: &Path) -> std::path::PathBuf {
@@ -48,22 +46,7 @@ fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> 
 }
 
 fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    text.lines()
-        .enumerate()
-        .map(|(line, content)| {
-            serde_json::from_str(content).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{}:{}: {e}", path.display(), line + 1),
-                )
-            })
-        })
-        .collect()
+    amux_common::session_log::read_jsonl(path)
 }
 
 fn history_from_transcript(transcript: &[OrcMsg]) -> Vec<HistoryItem> {
@@ -138,13 +121,6 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn state_str(s: protocol::SessionState) -> &'static str {
-    match s {
-        protocol::SessionState::Idle => "idle",
-        protocol::SessionState::Busy => "busy",
-    }
-}
-
 /// sqlite 中的状态为协议 snake_case 表示；解析统一走 protocol，
 /// 未知值报错（坏数据显式失败，不静默回退）。
 fn state_from(s: &str) -> io::Result<protocol::SessionState> {
@@ -168,7 +144,7 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
         params![
             session.id,
             session.title,
-            state_str(session.state),
+            session.state.as_str(),
             session.updated_at as i64,
             children,
             session.description,

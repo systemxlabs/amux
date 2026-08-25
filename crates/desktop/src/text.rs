@@ -17,13 +17,7 @@ pub fn block_text(content: &[ContentBlock]) -> String {
 
 /// 截断长文本：超过 `max` 个字符时保留前 `max` 个字符并追加省略号 `…`。
 pub fn truncate(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count > max {
-        let t: String = s.chars().take(max).collect();
-        format!("{t}…")
-    } else {
-        s.to_string()
-    }
+    amux_common::text::truncate(s, max)
 }
 
 /// 折叠空白为单个空格后再截断（单行展示用）。
