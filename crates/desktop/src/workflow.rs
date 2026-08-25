@@ -52,9 +52,9 @@ pub struct ChildSession {
     pub machine_idx: usize,
     pub machine_name: String,
     pub agent: String,
+    /// 步骤描述：该子会话承担计划中的哪一步（取下发指令的首行）
     pub step_desc: String,
     pub state: SessionState,
-    pub last_output: String,
     pub last_active_at: u64,
 }
 
@@ -545,7 +545,6 @@ impl WorkflowEngine {
                                 agent: agent.clone(),
                                 step_desc,
                                 state: SessionState::Busy,
-                                last_output: String::new(),
                                 last_active_at: now(),
                             });
                         });
@@ -662,16 +661,12 @@ impl WorkflowEngine {
         old_state: SessionState,
         new_state: SessionState,
         reason: StateChangeReason,
-        output_excerpt: Option<String>,
     ) -> Result<bool, String> {
         let machine = {
             let mut s = self.session.write().expect("RwLock 中毒");
             let Some(child) = s.children.iter_mut().find(|c| c.id == session_id) else {
                 return Ok(false);
             };
-            if let Some(o) = output_excerpt {
-                child.last_output = o;
-            }
             child.state = new_state;
             child.last_active_at = now();
             child.machine_name.clone()
@@ -1449,9 +1444,9 @@ async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<S
             machine_idx: idx,
             machine_name,
             agent: args.agent,
-            step_desc: args.cwd,
+            // 步骤描述留待首次 prompt_session 下发指令时取首行
+            step_desc: String::new(),
             state: SessionState::Idle,
-            last_output: String::new(),
             last_active_at: now(),
         });
     live.record_tool(
@@ -1475,6 +1470,7 @@ async fn prompt_session(live: &LiveRuntime, args: PromptSessionArgs) -> Result<S
         .get(child.machine_idx)
         .cloned()
         .ok_or_else(|| "机器连接已失效".to_string())?;
+    let step_desc = first_line(&args.prompt);
     let input = SessionPromptParams {
         session_id: args.session.clone(),
         input: vec![ContentBlock::Text { text: args.prompt }],
@@ -1491,6 +1487,10 @@ async fn prompt_session(live: &LiveRuntime, args: PromptSessionArgs) -> Result<S
         .find(|c| c.id == args.session)
     {
         c.state = SessionState::Busy;
+        // 步骤描述跟随最近一次下发的指令首行
+        if !step_desc.is_empty() {
+            c.step_desc = step_desc;
+        }
     }
     live.record_tool(
         "prompt_session",
@@ -1688,7 +1688,6 @@ mod tests {
                 agent: "h".into(),
                 step_desc: "s".into(),
                 state: SessionState::Idle,
-                last_output: String::new(),
                 last_active_at: 0,
             },
             ChildSession {
@@ -1698,7 +1697,6 @@ mod tests {
                 agent: "h".into(),
                 step_desc: "s".into(),
                 state: SessionState::Busy,
-                last_output: String::new(),
                 last_active_at: 0,
             },
         ];
@@ -1771,7 +1769,6 @@ mod tests {
             agent: "mock_acp".into(),
             step_desc: "第一步".into(),
             state: SessionState::Busy,
-            last_output: String::new(),
             last_active_at: 0,
         });
         engine.mark_cancelled();
@@ -1805,7 +1802,6 @@ mod tests {
             agent: "mock_acp".into(),
             step_desc: "第一步".into(),
             state: SessionState::Busy,
-            last_output: String::new(),
             last_active_at: 0,
         });
         let advanced = engine
@@ -1814,7 +1810,6 @@ mod tests {
                 SessionState::Busy,
                 SessionState::Idle,
                 StateChangeReason::Completed,
-                None,
             )
             .await
             .unwrap();
@@ -1859,7 +1854,6 @@ mod tests {
             agent: "mock_acp".into(),
             step_desc: "第一步".into(),
             state: SessionState::Busy,
-            last_output: String::new(),
             last_active_at: 0,
         });
         let advanced = engine
@@ -1868,7 +1862,6 @@ mod tests {
                 SessionState::Busy,
                 SessionState::Idle,
                 StateChangeReason::Cancelled,
-                None,
             )
             .await
             .unwrap();
@@ -2095,7 +2088,6 @@ mod tests {
             agent: "mock_acp".into(),
             step_desc: "第一步".into(),
             state: SessionState::Idle,
-            last_output: String::new(),
             last_active_at: 0,
         });
         engine.on_child_state_local("s_child", SessionState::Busy);
@@ -2222,7 +2214,6 @@ mod tests {
                 agent: "mock_acp".into(),
                 step_desc: "第一步".into(),
                 state: SessionState::Busy,
-                last_output: String::new(),
                 last_active_at: 0,
             });
         }
@@ -2232,7 +2223,6 @@ mod tests {
                 SessionState::Busy,
                 SessionState::Idle,
                 StateChangeReason::Completed,
-                None,
             )
             .await
             .unwrap();

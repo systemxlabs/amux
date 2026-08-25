@@ -39,11 +39,11 @@ use serde_json::json;
 
 use protocol::{
     ActivitiesResult, Activity, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
-    GitChangeStatus, HistoryItem, HistoryResult, OngoingActivityResult, OpResult,
-    SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta, SessionNewParams,
-    SessionPageParams, SessionPromptParams, SessionResult, SessionState, SessionStateChange,
-    StateChangeReason, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult,
-    WorkspaceReadParams, WorkspaceReadResult, WorkspaceRestoreParams,
+    GitChangeStatus, HistoryResult, OngoingActivityResult, OpResult, SessionConfigureParams,
+    SessionIdParams, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
+    SessionPromptParams, SessionResult, SessionState, SessionStateChange, StateChangeReason,
+    WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult, WorkspaceReadParams,
+    WorkspaceReadResult, WorkspaceRestoreParams,
 };
 
 use crate::config::{
@@ -579,63 +579,18 @@ impl AmuxApp {
         if !idle {
             return;
         }
-        // 子会话变 idle：抽取其最新输出并异步推进该工作流。
-        // 会话从未在 GUI 打开过时 views 无条目（后台创建的子会话），
-        // 先拉一次对话历史尾窗再抽取，避免向编排智能体注入空输出。
-        let opened_output = this
-            .machines
-            .get(idx)
-            .and_then(|m| m.views.get(&sid))
-            .and_then(|v| {
-                v.dialog.iter().rev().find_map(|d| match d {
-                    DialogMsg::AgentMessage { content, .. } => Some(block_text(content)),
-                    _ => None,
-                })
-            });
-        let client_for_tail = this.machines.get(idx).map(|m| m.client.clone());
+        // 子会话变 idle：异步推进该工作流（编排者需要细节时自行调
+        // read_session_history 现查，不在通知路径预取）
         let wf = match this.workflows.get(wi) {
             Some(wf) => wf.clone(),
             None => return,
         };
-        let sid_for_tail = sid.clone();
         wf.on_child_state_local(&sid, new_state);
         let session_dir = this.session_dir.clone();
         // 状态共享于引擎内部（Arc<RwLock>），任务结束无需整引擎回写
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             run_engine_on_tokio(async move {
-                let output = match opened_output {
-                    Some(o) => o,
-                    None => {
-                        let tail = match client_for_tail {
-                            Some(c) => c
-                                .request::<_, HistoryResult>(
-                                    protocol::method::SESSION_HISTORY,
-                                    Some(SessionPageParams {
-                                        session_id: sid_for_tail.clone(),
-                                        limit: Some(10),
-                                        before: None,
-                                    }),
-                                )
-                                .await
-                                .map(|r| r.items)
-                                .unwrap_or_default(),
-                            None => Vec::new(),
-                        };
-                        tail.iter()
-                            .rev()
-                            .find_map(|item| match item {
-                                HistoryItem::AgentMessage { content, .. } => {
-                                    Some(block_text(content))
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or_default()
-                    }
-                };
-                if let Err(e) = wf
-                    .on_child_state(&sid, old_state, new_state, reason, Some(output))
-                    .await
-                {
+                if let Err(e) = wf.on_child_state(&sid, old_state, new_state, reason).await {
                     protocol::log::error("gui.workflow", format!("推进工作流失败：{e}"));
                 }
                 if let Err(e) = wf.persist(&session_dir) {
