@@ -55,7 +55,6 @@ pub struct ChildSession {
     pub step_desc: String,
     pub state: SessionState,
     pub last_output: String,
-    #[serde(default)]
     pub last_active_at: u64,
 }
 
@@ -68,14 +67,11 @@ pub struct OrcSession {
     /// 用户自然语言计划（含 @ 引用展开的上下文）
     pub description: String,
     /// 模板/系统指令（内置进编排 agent 的系统提示词，不进入会话历史；PRD §3.7）
-    #[serde(default)]
     pub preamble: String,
     pub state: SessionState,
-    #[serde(default)]
     pub cancelled: bool,
     pub transcript: Vec<OrcMsg>,
     pub children: Vec<ChildSession>,
-    #[serde(default)]
     pub activities: Vec<Activity>,
     pub created_at: u64,
     pub updated_at: u64,

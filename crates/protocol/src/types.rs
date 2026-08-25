@@ -187,7 +187,6 @@ pub struct SessionStateChange {
     pub session_id: String,
     pub old_state: SessionState,
     pub new_state: SessionState,
-    #[serde(default)]
     pub reason: StateChangeReason,
 }
 
@@ -525,11 +524,6 @@ mod tests {
         assert!(s.contains("\"sessionId\":\"s1\""), "{s}");
         assert!(s.contains("\"newState\":\"idle\""), "{s}");
         assert!(s.contains("\"reason\":\"cancelled\""), "{s}");
-        // 旧负载缺 reason 字段：向后兼容解析为默认值
-        let legacy: SessionStateChange =
-            serde_json::from_str(r#"{"sessionId":"s2","oldState":"busy","newState":"idle"}"#)
-                .unwrap();
-        assert_eq!(legacy.reason, StateChangeReason::Completed);
     }
 
     #[test]

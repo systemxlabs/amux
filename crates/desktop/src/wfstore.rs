@@ -136,16 +136,6 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
             updated_at INTEGER NOT NULL
         );",
     )?;
-    // 旧库含 done 列（工作流会话无终态，该字段已移除）：存在即删除
-    // （SQLite 3.35+ 支持 DROP COLUMN；rusqlite bundled 版本满足）
-    let has_done: Vec<String> = {
-        let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
-        let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        cols.collect::<rusqlite::Result<Vec<String>>>()?
-    };
-    if has_done.iter().any(|name| name == "done") {
-        conn.execute_batch("ALTER TABLE sessions DROP COLUMN done;")?;
-    }
     Ok(conn)
 }
 
