@@ -170,10 +170,7 @@ fn activity_key(a: &Activity) -> (&'static str, u64) {
 fn merge_tail(current: &mut Vec<DialogMsg>, fresh: Vec<DialogMsg>) -> Option<bool> {
     let cur_keys: Vec<_> = current.iter().map(dialog_key).collect();
     let fresh_keys: Vec<_> = fresh.iter().map(dialog_key).collect();
-    let last = match cur_keys.last() {
-        Some(k) => *k,
-        None => return None,
-    };
+    let last = *cur_keys.last()?;
     // current 尾部键在 fresh 中最晚的出现位置（从后往前找第一处）
     let mut anchor = None;
     for (i, k) in fresh_keys.iter().enumerate().rev() {
@@ -203,10 +200,7 @@ fn merge_tail(current: &mut Vec<DialogMsg>, fresh: Vec<DialogMsg>) -> Option<boo
 fn merge_activities_tail(current: &mut Vec<Activity>, fresh: Vec<Activity>) -> Option<bool> {
     let cur_keys: Vec<_> = current.iter().map(activity_key).collect();
     let fresh_keys: Vec<_> = fresh.iter().map(activity_key).collect();
-    let last = match cur_keys.last() {
-        Some(k) => *k,
-        None => return None,
-    };
+    let last = *cur_keys.last()?;
     let mut anchor = None;
     for (i, k) in fresh_keys.iter().enumerate().rev() {
         if *k == last {
@@ -299,7 +293,11 @@ mod tests {
         let mut view = SessionView::default();
         view.set_history_page(&[user("问", 1), agent("答", 2)], false, None);
         // 下一次轮询带回同一窗 + 一条新输出：不重复、不清空
-        view.set_history_page(&[user("问", 1), agent("答", 2), agent("补充", 3)], false, None);
+        view.set_history_page(
+            &[user("问", 1), agent("答", 2), agent("补充", 3)],
+            false,
+            None,
+        );
         assert_eq!(view.dialog.len(), 3, "增量追加而非整页替换");
         assert!(matches!(&view.dialog[0], DialogMsg::UserMessage { .. }));
     }

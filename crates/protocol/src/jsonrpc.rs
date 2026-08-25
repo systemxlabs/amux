@@ -108,7 +108,9 @@ mod tests {
         assert_eq!(back.method, "session.list");
         assert_eq!(back.id, JsonRpcId::Number(1));
         // 缺 id 的帧不是合法请求
-        assert!(serde_json::from_str::<JsonRpcRequest>(r#"{"jsonrpc":"2.0","method":"auth"}"#).is_err());
+        assert!(
+            serde_json::from_str::<JsonRpcRequest>(r#"{"jsonrpc":"2.0","method":"auth"}"#).is_err()
+        );
     }
 
     #[test]

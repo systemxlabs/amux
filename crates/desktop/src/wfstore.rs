@@ -95,7 +95,10 @@ fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                OrcMsg::User { text, timestamp: *timestamp }
+                OrcMsg::User {
+                    text,
+                    timestamp: *timestamp,
+                }
             }
             HistoryItem::AgentMessage { content, timestamp } => {
                 let text = content
@@ -106,7 +109,10 @@ fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                OrcMsg::Orc { text, timestamp: *timestamp }
+                OrcMsg::Orc {
+                    text,
+                    timestamp: *timestamp,
+                }
             }
         })
         .collect()

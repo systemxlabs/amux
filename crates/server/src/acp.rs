@@ -92,12 +92,23 @@ pub type SharedDriver = Arc<dyn AgentDriver>;
 /// 消除 params 里 cwd 缺省回落 "/" 的魔法值）。
 #[derive(Debug, Clone)]
 enum AcpCall {
-    NewSession { cwd: String },
-    Resume { sid: String, cwd: String },
-    Cancel { sid: String },
-    Close { sid: String },
+    NewSession {
+        cwd: String,
+    },
+    Resume {
+        sid: String,
+        cwd: String,
+    },
+    Cancel {
+        sid: String,
+    },
+    Close {
+        sid: String,
+    },
     /// 删除 agent 侧会话（agent 不支持时返回错误，调用方按「不支持」忽略）
-    Delete { sid: String },
+    Delete {
+        sid: String,
+    },
     ListSkills,
 }
 
@@ -194,7 +205,9 @@ impl AcpAgentDriver {
 
 impl AgentDriver for AcpAgentDriver {
     fn create_session(&self, cwd: &str) -> Result<String, String> {
-        let res = self.call(AcpCall::NewSession { cwd: cwd.to_string() })?;
+        let res = self.call(AcpCall::NewSession {
+            cwd: cwd.to_string(),
+        })?;
         let sid = res
             .get("sessionId")
             .and_then(|v| v.as_str())
@@ -765,8 +778,6 @@ mod tests {
         (routes, rx)
     }
 
-
-
     #[tokio::test]
     async fn route_update_user_message_chunk() {
         let (routes, mut rx) = route_with_channel();
@@ -796,8 +807,6 @@ mod tests {
         assert!(matches!(ev, AgentEvent::OutputChunk(s) if s == "输出"));
     }
 
-
-
     #[tokio::test]
     async fn route_update_thinking() {
         let (routes, mut rx) = route_with_channel();
@@ -811,8 +820,6 @@ mod tests {
         let ev = rx.try_recv().expect("应收到 thinking 事件");
         assert!(matches!(ev, AgentEvent::Thinking(s) if s == "思考中"));
     }
-
-
 
     #[tokio::test]
     async fn route_update_tool_call() {
@@ -838,8 +845,6 @@ mod tests {
         }
     }
 
-
-
     #[tokio::test]
     async fn route_update_session_info() {
         let (routes, mut rx) = route_with_channel();
@@ -852,8 +857,6 @@ mod tests {
         route_update(&routes, &notif).await;
         assert!(rx.try_recv().is_err());
     }
-
-
 
     #[test]
     fn pick_approve_option_prefers_allow() {
@@ -898,6 +901,4 @@ mod tests {
         // 空列表 → None
         assert!(pick_approve_option(&[]).is_none());
     }
-
-
 }

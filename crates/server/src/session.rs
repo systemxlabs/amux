@@ -469,9 +469,9 @@ impl SessionManager {
         }
 
         let started = std::time::Instant::now();
-        let storage_error =
-            self.run_turn(session_id, &driver, &agent_session_id, input, &control)
-                .await;
+        let storage_error = self
+            .run_turn(session_id, &driver, &agent_session_id, input, &control)
+            .await;
 
         self.finalize_turn(session_id, &control, false);
         protocol::log::info(
@@ -619,7 +619,10 @@ impl SessionManager {
         self.ongoing.lock().unwrap().remove(session_id);
         control.busy.store(false, Ordering::SeqCst);
         if !deleted {
-            if let Err(e) = self.registry.update_state(session_id, SessionState::Idle, now()) {
+            if let Err(e) = self
+                .registry
+                .update_state(session_id, SessionState::Idle, now())
+            {
                 protocol::log::error(
                     "server.session",
                     format!("更新空闲状态失败 {session_id}: {e}"),
@@ -655,7 +658,6 @@ impl SessionManager {
         };
         let _ = self.tx.send(ServerNotification::StateChange(payload));
     }
-
 }
 
 /// 取输入的首个文本块（标题生成用）。

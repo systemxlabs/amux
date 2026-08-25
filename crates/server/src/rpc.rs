@@ -10,9 +10,8 @@ use protocol::{
     method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams,
     AgentSkillsResult, HistoryResult, OngoingActivityResult, OpResult, SessionConfigureParams,
     SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
-    WorkspaceDiffParams, WorkspaceDiffResult,
-    WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, WorkspaceDiffParams,
+    WorkspaceDiffResult, WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
 use crate::error::SessionError;
@@ -125,7 +124,11 @@ impl Handlers {
 
             method::SESSION_NEW => {
                 let p: SessionNewParams = parse(params)?;
-                let session = self.manager.create(&p.agent, &p.cwd).await.map_err(map_session_err)?;
+                let session = self
+                    .manager
+                    .create(&p.agent, &p.cwd)
+                    .await
+                    .map_err(map_session_err)?;
                 serde_json::to_value(SessionResult { session })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }

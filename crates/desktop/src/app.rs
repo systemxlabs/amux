@@ -38,8 +38,8 @@ use gpui_component::{
 use serde_json::json;
 
 use protocol::{
-    ActivitiesResult, Activity, AgentListResult, AgentParams, AgentSkillsResult,
-    ContentBlock, GitChangeStatus, HistoryItem, HistoryResult, OpResult, OngoingActivityResult,
+    ActivitiesResult, Activity, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
+    GitChangeStatus, HistoryItem, HistoryResult, OngoingActivityResult, OpResult,
     SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta, SessionNewParams,
     SessionPageParams, SessionPromptParams, SessionResult, SessionState, SessionStateChange,
     WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult, WorkspaceReadParams,
@@ -52,11 +52,11 @@ use crate::config::{
 };
 use crate::diff::{diff_lines, DiffLineKind};
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
-use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::logic::{
     compose_prompt, compose_workflow_text, external_path_attachment, merge_session_window,
     parse_at_references, path_attachment, read_path_context, DialogMsg, InputAttachment,
 };
+use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::text::{block_text, one_line, truncate};
 use crate::workflow::{now_ts, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
@@ -547,11 +547,14 @@ impl AmuxApp {
         this.refresh_sessions(idx, window, cx);
 
         // 工作流驱动：查找挂载了该关联普通会话的工作流
-        let Some(wi) = this
-            .workflows
-            .iter()
-            .position(|wf| wf.session.read().unwrap().children.iter().any(|c| c.id == sid))
-        else {
+        let Some(wi) = this.workflows.iter().position(|wf| {
+            wf.session
+                .read()
+                .unwrap()
+                .children
+                .iter()
+                .any(|c| c.id == sid)
+        }) else {
             return;
         };
         // 用户取消工作流会话导致的子会话状态变更不注入（docs/DESIGN.md §工作流会话驱动）
@@ -635,7 +638,10 @@ impl AmuxApp {
                 if let Err(e) = wf.persist(&session_dir) {
                     protocol::log::error(
                         "gui.workflow",
-                        format!("工作流状态持久化失败 {}: {e}", wf.session.read().unwrap().id),
+                        format!(
+                            "工作流状态持久化失败 {}: {e}",
+                            wf.session.read().unwrap().id
+                        ),
                     );
                 }
             })
@@ -892,7 +898,10 @@ impl AmuxApp {
                 session_id: session_id.clone(),
             };
             if let Ok(res) = client
-                .request::<_, OngoingActivityResult>(protocol::method::SESSION_ONGOING_ACTIVITY, Some(params))
+                .request::<_, OngoingActivityResult>(
+                    protocol::method::SESSION_ONGOING_ACTIVITY,
+                    Some(params),
+                )
                 .await
             {
                 let act = res.activity;
@@ -954,7 +963,10 @@ impl AmuxApp {
             let epoch = self.machines[i].connection_epoch;
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
                 if let Ok(res) = client
-                    .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(json!({ "limit": PAGE_LIMIT })))
+                    .request::<_, SessionListResult>(
+                        protocol::method::SESSION_LIST,
+                        Some(json!({ "limit": PAGE_LIMIT })),
+                    )
                     .await
                 {
                     let sessions = res.sessions;
@@ -1194,7 +1206,10 @@ impl AmuxApp {
                 }
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
-                        .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&params).unwrap()))
+                        .request_ok(
+                            protocol::method::SESSION_PROMPT,
+                            Some(serde_json::to_value(&params).unwrap()),
+                        )
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
                         if let Err(error) = &result {
@@ -1221,7 +1236,10 @@ impl AmuxApp {
                     if let Err(e) = wf.persist(&session_dir) {
                         protocol::log::error(
                             "gui.workflow",
-                            format!("工作流用户消息持久化失败 {}: {e}", wf.session.read().unwrap().id),
+                            format!(
+                                "工作流用户消息持久化失败 {}: {e}",
+                                wf.session.read().unwrap().id
+                            ),
                         );
                     }
                     should_advance
@@ -1235,13 +1253,19 @@ impl AmuxApp {
                             if let Err(e) = wf.advance().await {
                                 protocol::log::error(
                                     "gui.workflow",
-                                    format!("推进工作流失败 {}: {e}", wf.session.read().unwrap().id),
+                                    format!(
+                                        "推进工作流失败 {}: {e}",
+                                        wf.session.read().unwrap().id
+                                    ),
                                 );
                             }
                             if let Err(e) = wf.persist(&session_dir) {
                                 protocol::log::error(
                                     "gui.workflow",
-                                    format!("工作流状态持久化失败 {}: {e}", wf.session.read().unwrap().id),
+                                    format!(
+                                        "工作流状态持久化失败 {}: {e}",
+                                        wf.session.read().unwrap().id
+                                    ),
                                 );
                             }
                         })
@@ -1272,7 +1296,10 @@ impl AmuxApp {
                 };
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
-                        .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&params).unwrap()))
+                        .request_ok(
+                            protocol::method::SESSION_PROMPT,
+                            Some(serde_json::to_value(&params).unwrap()),
+                        )
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
                         if let Err(error) = &result {
@@ -1305,10 +1332,10 @@ impl AmuxApp {
                 .machine(*machine)
                 .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
                 .is_some_and(|s| s.state == SessionState::Busy),
-            Some(Selected::Workflow { engine }) => self
-                .workflows
-                .get(*engine)
-                .is_some_and(|wf| wf.session.read().unwrap().state == SessionState::Busy && !wf.session.read().unwrap().done),
+            Some(Selected::Workflow { engine }) => self.workflows.get(*engine).is_some_and(|wf| {
+                wf.session.read().unwrap().state == SessionState::Busy
+                    && !wf.session.read().unwrap().done
+            }),
             None => false,
         }
     }
@@ -1332,7 +1359,10 @@ impl AmuxApp {
                 session_id: sid.clone(),
             };
             let res = client
-                .request_ok(protocol::method::SESSION_CANCEL, Some(serde_json::to_value(&params).unwrap()))
+                .request_ok(
+                    protocol::method::SESSION_CANCEL,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 if let Err(error) = &res {
@@ -1365,7 +1395,10 @@ impl AmuxApp {
                 session_id: sid.clone(),
             };
             let res = client
-                .request_ok(protocol::method::SESSION_DELETE, Some(serde_json::to_value(&params).unwrap()))
+                .request_ok(
+                    protocol::method::SESSION_DELETE,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match res {
@@ -1447,7 +1480,10 @@ impl AmuxApp {
         };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
-                .request_ok(protocol::method::SESSION_CONFIGURE, Some(serde_json::to_value(&params).unwrap()))
+                .request_ok(
+                    protocol::method::SESSION_CONFIGURE,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match res {
@@ -1574,7 +1610,10 @@ impl AmuxApp {
             if let Err(e) = wf.persist(&session_dir) {
                 protocol::log::error(
                     "gui.workflow",
-                    format!("工作流创建后持久化失败 {}: {e}", wf.session.read().unwrap().id),
+                    format!(
+                        "工作流创建后持久化失败 {}: {e}",
+                        wf.session.read().unwrap().id
+                    ),
                 );
             }
         }
@@ -1591,7 +1630,10 @@ impl AmuxApp {
                     if let Err(e) = wf.persist(&session_dir) {
                         protocol::log::error(
                             "gui.workflow",
-                            format!("工作流状态持久化失败 {}: {e}", wf.session.read().unwrap().id),
+                            format!(
+                                "工作流状态持久化失败 {}: {e}",
+                                wf.session.read().unwrap().id
+                            ),
                         );
                     }
                 })
@@ -1619,7 +1661,10 @@ impl AmuxApp {
                 if let Err(e) = wf.persist(&session_dir) {
                     protocol::log::error(
                         "gui.workflow",
-                        format!("取消后工作流持久化失败 {}: {e}", wf.session.read().unwrap().id),
+                        format!(
+                            "取消后工作流持久化失败 {}: {e}",
+                            wf.session.read().unwrap().id
+                        ),
                     );
                 }
             })
@@ -1674,7 +1719,11 @@ impl AmuxApp {
                     .collect()
             })
             .unwrap_or_default();
-        let Some(wf_id) = self.workflows.get(idx).map(|wf| wf.session.read().unwrap().id.clone()) else {
+        let Some(wf_id) = self
+            .workflows
+            .get(idx)
+            .map(|wf| wf.session.read().unwrap().id.clone())
+        else {
             return;
         };
         if self
@@ -1727,10 +1776,10 @@ impl AmuxApp {
                         }
                         match WorkflowEngine::remove(&session_dir, &wf_id) {
                             Ok(()) => {
-                                if let Some(current_idx) = this
-                                    .workflows
-                                    .iter()
-                                    .position(|workflow| workflow.session.read().unwrap().id == wf_id)
+                                if let Some(current_idx) =
+                                    this.workflows.iter().position(|workflow| {
+                                        workflow.session.read().unwrap().id == wf_id
+                                    })
                                 {
                                     this.workflows.remove(current_idx);
                                     this.selected = match this.selected.clone() {
@@ -2191,7 +2240,10 @@ impl AmuxApp {
                 input: vec![ContentBlock::Text { text: prompt }],
             };
             let _ = client
-                .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&params).unwrap()))
+                .request_ok(
+                    protocol::method::SESSION_PROMPT,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 this.refresh_dialog(w, cx, machine, session_id);
@@ -2274,10 +2326,15 @@ impl AmuxApp {
                 }
                 let input = SessionPromptParams {
                     session_id: session_id.clone(),
-                    input: vec![ContentBlock::Text { text: operation_prompt }],
+                    input: vec![ContentBlock::Text {
+                        text: operation_prompt,
+                    }],
                 };
                 client
-                    .request_ok(protocol::method::SESSION_PROMPT, Some(serde_json::to_value(&input).unwrap()))
+                    .request_ok(
+                        protocol::method::SESSION_PROMPT,
+                        Some(serde_json::to_value(&input).unwrap()),
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok::<String, String>(session_id)
@@ -2314,7 +2371,10 @@ impl AmuxApp {
         let params = AgentParams { agent };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
-                .request_ok(protocol::method::AGENT_RESTART, Some(serde_json::to_value(&params).unwrap()))
+                .request_ok(
+                    protocol::method::AGENT_RESTART,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let _ = res;
@@ -6815,6 +6875,6 @@ fn format_timestamp(timestamp_ms: u64) -> String {
     if ts.date() == now.date() {
         time
     } else {
-        format!("{} {}", ts.strftime("%m-%d").to_string(), time)
+        format!("{} {}", ts.strftime("%m-%d"), time)
     }
 }

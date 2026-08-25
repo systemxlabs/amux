@@ -61,10 +61,9 @@ fn main() {
         // 应用退出时确定性关闭全部 WS 连接（docs/DESIGN.md「机器连接」；
         // 进程退出兜底之外的显式关闭，避免 in-flight 请求被硬掐）
         // Subscription 需保活：drop 即注销，故显式绑定
-        let _quit_subscription =
-            cx.on_app_quit(|_cx| async {
-                crate::ws::close_all();
-            });
+        let _quit_subscription = cx.on_app_quit(|_cx| async {
+            crate::ws::close_all();
+        });
         theme::sync_appearance(None, cx);
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {

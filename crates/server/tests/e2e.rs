@@ -623,9 +623,7 @@ async fn agent_restart_keeps_agent_available() {
     let mut c = Client::connect(port, "test-token").await;
     let agent = mock_acp_name(&mut c).await;
 
-    let restarted = c
-        .call("agent.restart", json!({ "agent": agent }))
-        .await;
+    let restarted = c.call("agent.restart", json!({ "agent": agent })).await;
     assert_eq!(
         restarted["result"]["ok"], true,
         "agent.restart 应成功: {restarted}"
@@ -641,16 +639,25 @@ async fn agent_restart_keeps_agent_available() {
 
     // 重启后仍可正常建会话并下发指令（驱动缓存已换新）
     let created = c
-        .call("session.new", json!({ "agent": agent, "cwd": "/tmp/restart" }))
+        .call(
+            "session.new",
+            json!({ "agent": agent, "cwd": "/tmp/restart" }),
+        )
         .await;
-    let sid = created["result"]["session"]["id"].as_str().unwrap().to_string();
+    let sid = created["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let prompted = c
         .call(
             "session.prompt",
             json!({"sessionId": sid, "input": [{"type":"text","text":"重启后指令"}]}),
         )
         .await;
-    assert_eq!(prompted["result"]["ok"], true, "重启后 prompt 应成功: {prompted}");
+    assert_eq!(
+        prompted["result"]["ok"], true,
+        "重启后 prompt 应成功: {prompted}"
+    );
 }
 
 /// busy 中再次 prompt 返回 SESSION_BUSY(-32003)；cancel 后可回到 idle。
@@ -671,7 +678,10 @@ async fn busy_prompt_rejected_and_cancel_works() {
     let created = c
         .call("session.new", json!({ "agent": agent, "cwd": "/tmp/busy" }))
         .await;
-    let sid = created["result"]["session"]["id"].as_str().unwrap().to_string();
+    let sid = created["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     c.fire(
         "session.prompt",
@@ -696,15 +706,17 @@ async fn busy_prompt_rejected_and_cancel_works() {
         )
         .await;
     assert_eq!(
-        second["error"]["code"], json!(-32003),
+        second["error"]["code"],
+        json!(-32003),
         "忙时 prompt 应返回 -32003: {second}"
     );
 
     // cancel：请求成功，turn 结束后回 idle
-    let cancelled = c
-        .call("session.cancel", json!({"sessionId": sid}))
-        .await;
-    assert_eq!(cancelled["result"]["ok"], true, "cancel 应成功: {cancelled}");
+    let cancelled = c.call("session.cancel", json!({"sessionId": sid})).await;
+    assert_eq!(
+        cancelled["result"]["ok"], true,
+        "cancel 应成功: {cancelled}"
+    );
     let got_idle = c
         .wait_notification(
             "session.state_change",
@@ -722,7 +734,8 @@ async fn busy_prompt_rejected_and_cancel_works() {
         )
         .await;
     assert_ne!(
-        again["error"]["code"], json!(-32003),
+        again["error"]["code"],
+        json!(-32003),
         "空闲后不应再报 busy: {again}"
     );
     let _ = std::fs::remove_dir_all(&data_dir);

@@ -120,13 +120,10 @@ fn is_executable(_path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
 
-
     #[test]
     fn has_acp_subcommand_detects() {
         assert!(!has_acp_subcommand("/nonexistent/bin/definitely-not-here"));
     }
-
-
 
     #[test]
     fn discover_for_cli_prefers_native_acp() {
@@ -143,8 +140,6 @@ mod tests {
         assert_eq!(d.args, vec!["acp"]);
         assert!(d.env.is_empty());
     }
-
-
 
     #[test]
     fn discover_for_cli_claude_via_npx() {
@@ -163,10 +158,10 @@ mod tests {
             assert!(d.env.is_empty());
         }
         // kimi 无 acp 子命令时不发现（文档无 npx 回落路径）
-        assert!(discover_for_cli("kimi", None, Some("/usr/bin/kimi".into()), false, None).is_none());
+        assert!(
+            discover_for_cli("kimi", None, Some("/usr/bin/kimi".into()), false, None).is_none()
+        );
     }
-
-
 
     #[test]
     fn discover_for_cli_codex_via_npx_with_env() {
@@ -190,8 +185,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn discover_for_cli_missing_prereqs() {
         assert!(discover_for_cli(
@@ -211,6 +204,4 @@ mod tests {
         )
         .is_none());
     }
-
-
 }

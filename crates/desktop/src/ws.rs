@@ -107,10 +107,13 @@ impl WsClient {
         method: &str,
         params: Option<P>,
     ) -> Result<R, RpcError> {
-        let params_value = params.map(serde_json::to_value).transpose().map_err(|e| RpcError {
-            code: -1,
-            message: format!("参数序列化失败: {e}"),
-        })?;
+        let params_value = params
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| RpcError {
+                code: -1,
+                message: format!("参数序列化失败: {e}"),
+            })?;
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(ClientReq {
@@ -135,7 +138,11 @@ impl WsClient {
 
     /// 无业务载荷的方法（cancel/delete/configure/restart/restore/prompt 等）：
     /// 响应恒为 `OpResult`，只关心成败。
-    pub async fn request_ok<P: Serialize>(&self, method: &str, params: Option<P>) -> Result<(), RpcError> {
+    pub async fn request_ok<P: Serialize>(
+        &self,
+        method: &str,
+        params: Option<P>,
+    ) -> Result<(), RpcError> {
         let op: OpResult = self.request(method, params).await?;
         if !op.ok {
             return Err(RpcError {
@@ -254,7 +261,11 @@ async fn serve_connection(
         "method": protocol::method::AUTH,
         "params": { "token": token },
     });
-    if sink.send(Message::Text(auth_frame.to_string())).await.is_err() {
+    if sink
+        .send(Message::Text(auth_frame.to_string()))
+        .await
+        .is_err()
+    {
         return ConnectionOutcome::Disconnected;
     }
 

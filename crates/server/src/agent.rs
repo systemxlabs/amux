@@ -495,7 +495,6 @@ impl AgentRegistry {
     }
 }
 
-
 // ---- 内存 Stub（仅测试：演示/无需真实 agent 的单测）----
 #[cfg(test)]
 mod stub {

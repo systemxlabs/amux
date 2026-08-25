@@ -146,9 +146,7 @@ pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
     if !has_req {
         return OrchestratorConfig::default();
     }
-    let Ok(api_format) =
-        serde_json::from_value::<ApiFormat>(raw["apiFormat"].clone())
-    else {
+    let Ok(api_format) = serde_json::from_value::<ApiFormat>(raw["apiFormat"].clone()) else {
         return OrchestratorConfig::default();
     };
     OrchestratorConfig {
@@ -166,7 +164,10 @@ fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            protocol::log::warn("gui.config", format!("读取配置失败 {}: {e}", path.display()));
+            protocol::log::warn(
+                "gui.config",
+                format!("读取配置失败 {}: {e}", path.display()),
+            );
             return Vec::new();
         }
     };
@@ -238,7 +239,6 @@ impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollecti
         write_typed(self.path.as_ref(), &items);
     }
 }
-
 
 /// 从文件读取并归一化（不存在/损坏 → 空）。`normalize` 负责坏条目丢弃。
 fn read_file_normalized<T: Clone>(
@@ -419,8 +419,7 @@ impl ConfigStore {
     }
 
     pub fn update_template(&self, name: &str, plan: &str) {
-        self.templates()
-            .update(name, |t| t.plan = plan.to_string());
+        self.templates().update(name, |t| t.plan = plan.to_string());
     }
 
     pub fn remove_template(&self, name: &str) {

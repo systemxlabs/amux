@@ -92,9 +92,8 @@ async fn main() {
     // 退出信号（Ctrl+C 与 SIGTERM）：优雅关闭 ACP 子进程资源。
     // 看门狗：个别 agent 挂死时 join 可能不返回，5s 后强制退出兜底。
     tokio::spawn(async move {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("注册 SIGTERM 处理失败");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("注册 SIGTERM 处理失败");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
             _ = sigterm.recv() => {},
