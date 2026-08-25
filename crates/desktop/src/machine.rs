@@ -10,7 +10,7 @@ use crate::ws::WsClient;
 
 use protocol::GitDiffFile;
 
-/// 机器连接状态（docs/DESIGN.md「机器连接」）：强类型状态机。曾用中文字符串
+/// 机器连接状态：强类型状态机。曾用中文字符串
 /// 前缀匹配充当状态机——任何文案改动都会静默破坏在线判断。
 #[derive(Debug, Clone, PartialEq)]
 pub enum MachineStatus {

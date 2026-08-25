@@ -1,4 +1,4 @@
-//! 工作流会话存储（docs/DESIGN.md「工作流会话存储」）：
+//! 工作流会话存储：
 //! - 元数据：`~/.amux/app/session.sqlite`
 //! - 对话历史：`~/.amux/app/sessions/<session_id>_history.jsonl`
 //! - 活动历史：`~/.amux/app/sessions/<session_id>_activities.jsonl`
@@ -152,7 +152,6 @@ fn state_from(s: &str) -> io::Result<protocol::SessionState> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("未知工作流状态: {s}")))
 }
 
-/// 将工作流会话写入 sqlite + 两份 jsonl。
 pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     let children = serde_json::to_string(&session.children).map_err(io::Error::other)?;
     let conn = open_db(data_dir).map_err(io::Error::other)?;
@@ -187,7 +186,6 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     Ok(())
 }
 
-/// 加载全部工作流会话（按最近活跃降序）。
 pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let mut stmt = conn
@@ -244,7 +242,6 @@ pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     .collect()
 }
 
-/// 删除工作流会话元数据与 jsonl。
 pub fn remove(data_dir: &Path, id: &str) -> io::Result<()> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])

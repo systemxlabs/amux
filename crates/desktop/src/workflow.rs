@@ -1,4 +1,4 @@
-//! 工作流引擎（docs/DESIGN.md §10 / §「工作流会话驱动」「工作流会话存储」）：
+//! 工作流引擎：
 //! GUI 本地工作流会话 + 自研薄工具循环编排。
 //!
 //! - `OrcSession`：工作流会话状态，可序列化持久化到 SQLite 和两份 JSONL 日志
@@ -34,8 +34,6 @@ use crate::config::{ApiFormat, OrchestratorConfig};
 use crate::logic::DialogMsg;
 use crate::ws::WsClient;
 
-// ---- 工作流会话状态（可持久化）----
-
 /// 工作流会话中的一条消息（对话历史）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -55,7 +53,7 @@ pub struct ChildSession {
     pub machine_name: String,
 }
 
-/// 工作流会话（GUI 本地状态，docs/DESIGN.md「工作流会话存储」）。
+/// 工作流会话（GUI 本地状态）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrcSession {
@@ -63,7 +61,7 @@ pub struct OrcSession {
     pub title: String,
     /// 用户自然语言计划（含 @ 引用展开的上下文）
     pub description: String,
-    /// 模板/系统指令（内置进编排 agent 的系统提示词，不进入会话历史；PRD §3.7）
+    /// 模板/系统指令（内置进编排 agent 的系统提示词，不进入会话历史）。
     pub preamble: String,
     pub state: SessionState,
     pub transcript: Vec<OrcMsg>,
@@ -80,14 +78,10 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// 当前毫秒时间戳（GUI 附件命名等用）。
 pub fn now_ts() -> u64 {
     now()
 }
 
-// ---- 机器信息（供编排上下文与动作解析）----
-
-/// 某机器上的一个 agent（docs/DESIGN.md `list_agents`：可用性）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSlot {
@@ -122,8 +116,6 @@ impl MachineSummary {
     }
 }
 
-// ---- 编排决策 ----
-
 /// 编排上下文（每次 decide 的输入）。
 #[derive(Debug, Clone)]
 pub struct OrcContext {
@@ -134,12 +126,12 @@ pub struct OrcContext {
     pub clients: Vec<WsClient>,
     pub machines: Vec<MachineSummary>,
     /// 编排进行中用户插话的实时通道：RigBackend 工具循环在每轮请求边界 drain，
-    /// 注入为 user 消息（docs/DESIGN.md「编排智能体应支持 steer」）。
+    /// 注入为 user 消息。
     /// 与 `WorkflowEngine.steer_inbox` 是同一个 Arc；advance 收尾的 absorb_steer 只兜底剩余项。
     pub steer_inbox: Arc<Mutex<Vec<String>>>,
 }
 
-/// 编排动作（引擎统一执行；会话操作经真实 WsClient，docs/DESIGN.md §10）。
+/// 编排动作（引擎统一执行；会话操作经真实 WsClient）。
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrcAction {
@@ -160,14 +152,13 @@ pub enum OrcAction {
     },
 }
 
-/// 单 turn 决策结果。
 #[derive(Debug, Clone)]
 pub struct Decision {
     pub summary: String,
     pub actions: Vec<OrcAction>,
 }
 
-/// 单 turn 决策器（rig 单 turn 模式，docs/DESIGN.md §10）。
+/// 单 turn 决策器（rig 单 turn 模式）。
 pub trait OrcBackend: Send + Sync {
     fn decide<'a>(
         &'a self,
@@ -180,8 +171,6 @@ pub trait OrcBackend: Send + Sync {
         None
     }
 }
-
-// ---- 工具规划动作记录 ----
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,9 +217,7 @@ pub fn ops_to_actions(ops: Vec<ToolOp>, known_sessions: &[String]) -> Vec<OrcAct
     out
 }
 
-// ---- WorkflowEngine：状态机 ----
-
-/// 取消按钮注入的固定用户消息（docs/DESIGN.md「工作流会话取消」）：
+/// 取消按钮注入的固定用户消息：
 /// 取消走用户消息通道，由编排智能体自行调用 cancel_session 停止调度。
 pub const WORKFLOW_CANCEL_PROMPT: &str = "取消当前工作流会话关联的所有普通会话，停止工作流调度";
 
@@ -331,7 +318,7 @@ impl WorkflowEngine {
         clients: Vec<WsClient>,
         machines: Vec<MachineSummary>,
     ) -> Self {
-        // 应用重开后工作流会话回到空闲；重新启动需用户手动触发（PRD §工作流会话）
+        // 应用重开后工作流会话回到空闲，重新启动需用户手动触发。
         session.state = SessionState::Idle;
         // 子会话只持久化机器名和旧下标；应用重启或机器列表变化后按机器名重新绑定。
         for child in &mut session.children {
@@ -625,7 +612,7 @@ impl WorkflowEngine {
     }
 
     /// 关联普通会话状态变更（GUI 收到 `session.state_change` 通知时调用）。
-    /// 变 idle 且变更原因非取消 → 按 docs/DESIGN.md 格式注入并推进。
+    /// 变 idle 且变更原因非取消 → 注入变更信息并推进。
     /// 取消导致的不注入：编排者不应与用户的取消拉锯。
     pub async fn on_child_state(
         &self,
@@ -712,7 +699,7 @@ impl WorkflowEngine {
         }
     }
 
-    /// 工作流级忙闲：有忙碌子会话即工作中（PRD「编排调度中或关联会话工作中」）。
+    /// 工作流级忙闲：有忙碌子会话即工作中。
     fn sync_state(&self) {
         let busy = *self
             .busy_children
@@ -761,7 +748,7 @@ impl WorkflowEngine {
             s.updated_at = now();
         });
         if busy {
-            // 工作中以 steer 注入，当前 turn 结束后再跑一轮（docs/DESIGN.md 编排智能体 steer）
+            // 工作中以 steer 注入，当前 turn 结束后再跑一轮。
             self.steer_inbox
                 .lock()
                 .expect("Mutex 中毒（临界区内不应 panic）")
@@ -807,8 +794,6 @@ impl WorkflowEngine {
     pub fn cancel(&self) -> bool {
         self.record_user(WORKFLOW_CANCEL_PROMPT)
     }
-
-    // ---- 持久化（docs/DESIGN.md「工作流会话存储」：sqlite + 两份 jsonl）----
 
     pub fn persist(&self, data_dir: &Path) -> std::io::Result<()> {
         let snapshot = self.session.read().expect("RwLock 中毒").clone();
@@ -889,8 +874,6 @@ impl LiveRuntime {
             });
     }
 }
-
-// ---- 自研薄工具循环（docs/DESIGN.md「编排智能体」）----
 //
 // 不再用 rig `Agent::prompt` 的黑盒多 turn：它一旦发起无法中途插话，steer 只能
 // 退化为整轮结束后重跑。改为保留 rig provider 层（三种 ApiFormat 仍由 rig 处理），
@@ -899,7 +882,7 @@ impl LiveRuntime {
 /// 工具循环的模型调用上限（与原 rig default_max_turns(8) 对齐），防失控。
 const MAX_TOOL_TURNS: usize = 8;
 
-/// 编排工具清单（docs/DESIGN.md「编排智能体」工具表）。
+/// 编排工具清单。
 fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
     use rig_core::completion::ToolDefinition;
     vec![
@@ -978,7 +961,6 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
     ]
 }
 
-/// 从 assistant 响应中提取纯文本内容（多个 Text 块按序拼接）。
 fn assistant_text(choice: &OneOrMany<AssistantContent>) -> String {
     choice
         .iter()
@@ -1229,7 +1211,7 @@ fn state_label(s: SessionState) -> &'static str {
     }
 }
 
-/// 状态变更原因的中文标注（注入编排对话流的 docs/DESIGN.md 模板用）。
+/// 状态变更原因的中文标注，用于注入编排对话流。
 fn reason_label(r: StateChangeReason) -> &'static str {
     match r {
         StateChangeReason::Completed => "正常完成",
@@ -1241,7 +1223,6 @@ fn reason_label(r: StateChangeReason) -> &'static str {
     }
 }
 
-/// 脚本化测试后端（决策序列；用于驱动引擎的纯逻辑测试）。
 #[cfg(test)]
 #[doc(hidden)]
 pub struct FakeBackend {
@@ -1278,8 +1259,6 @@ impl OrcBackend for FakeBackend {
         })
     }
 }
-
-// ---- 编排调度工具（普通分派函数；docs/DESIGN.md「编排智能体」工具表）----
 //
 // 工具调用由循环自己解析 ToolCall 并调用（不再走 agent 运行时）：
 // 错误以 String 返回、由循环回传给模型纠正。
@@ -1574,7 +1553,6 @@ mod tests {
         (vec![c], m)
     }
 
-    /// 循环单测的 LiveRuntime（无真实机器连接；只走 list 类本地工具）。
     fn test_live() -> LiveRuntime {
         LiveRuntime {
             machines: vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -1587,7 +1565,6 @@ mod tests {
         }
     }
 
-    /// 提取请求中全部文本（system/user/assistant），供断言。
     fn request_texts(req: &rig_core::completion::CompletionRequest) -> Vec<String> {
         let mut out = Vec::new();
         for m in req.chat_history.iter() {
@@ -1732,7 +1709,6 @@ mod tests {
             .any(|msg| matches!(msg, OrcMsg::Orc { text, .. } if text == "已按指令取消")));
     }
 
-    /// 子会话 idle 事件任何时候都触发推进（工作流无终态，静默与否由编排判断）。
     #[tokio::test]
     async fn on_child_state_idle_always_triggers_advance() {
         let (clients, m) = clients_with_machines();
@@ -1766,7 +1742,6 @@ mod tests {
                 .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text == "本轮静默")),
             "静默决策也应作为编排输出进入对话流"
         );
-        // 注入文案按 docs/DESIGN.md 模板携带变更原因
         assert!(
             engine
                 .session
@@ -1780,7 +1755,6 @@ mod tests {
         );
     }
 
-    /// 变更原因为取消的 idle 事件不注入不推进（docs/DESIGN.md §工作流会话驱动）。
     #[tokio::test]
     async fn cancelled_reason_idle_event_does_not_advance() {
         let (clients, m) = clients_with_machines();
@@ -1813,7 +1787,6 @@ mod tests {
             .any(|m| matches!(m, OrcMsg::User { text, .. } if text.contains("状态变更"))));
     }
 
-    /// 工作流会话持久化往返（acceptance）。
     #[tokio::test]
     async fn persistence_roundtrip_and_restore() {
         let dir = std::env::temp_dir().join(format!("amux-wf-{}", std::process::id()));
@@ -1873,7 +1846,6 @@ mod tests {
 
     #[test]
     fn api_format_serializes_snake_case() {
-        // ApiFormat 线上/存储表示为 snake_case（docs/DESIGN.md「编排智能体配置存储」）
         assert_eq!(
             serde_json::to_string(&ApiFormat::ChatCompletions).unwrap(),
             "\"chat_completions\""
@@ -1886,7 +1858,6 @@ mod tests {
             serde_json::from_str::<ApiFormat>("\"messages\"").unwrap(),
             ApiFormat::Messages
         );
-        // 非法值不再静默回退，由加载层归一化处理
         assert!(serde_json::from_str::<ApiFormat>("\"graphql\"").is_err());
     }
 
@@ -2006,7 +1977,6 @@ mod tests {
         assert!(err.contains("机器不存在"));
     }
 
-    /// on_child_state_local 同步更新关联普通会话 busy/idle 状态（GUI 收到 state_change 通知时调用）。
     #[test]
     fn note_child_state_tracks_busy_count() {
         let backend = FakeBackend::new_for_tests();
@@ -2024,17 +1994,14 @@ mod tests {
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
-        // 忙碌计数驱动工作流级忙闲：子会话转忙 → 工作中；转闲 → 空闲
         engine.note_child_state("s_child", SessionState::Idle, SessionState::Busy);
         assert_eq!(engine.session.read().unwrap().state, SessionState::Busy);
         engine.note_child_state("s_child", SessionState::Busy, SessionState::Idle);
         assert_eq!(engine.session.read().unwrap().state, SessionState::Idle);
-        // 非挂载的会话 id：计数不变，不 panic
         engine.note_child_state("missing", SessionState::Idle, SessionState::Busy);
         assert_eq!(engine.session.read().unwrap().state, SessionState::Idle);
     }
 
-    /// 薄工具循环：工具调用 → 结果回填 → 纯文本收尾（两轮模型调用）。
     #[tokio::test]
     async fn tool_loop_runs_tools_then_returns_text() {
         let model = MockCompletionModel::from_turns([
@@ -2055,7 +2022,6 @@ mod tests {
         assert_eq!(out, "已查询可用 agent，本轮无调度动作");
         assert_eq!(model.request_count(), 2);
         let second = &model.requests()[1];
-        // 第二轮请求应携带第一轮的工具结果
         let has_tool_result = second.chat_history.iter().any(|m| {
             matches!(
                 m,
@@ -2065,14 +2031,12 @@ mod tests {
             )
         });
         assert!(has_tool_result, "第二轮请求应携带工具结果消息");
-        // preamble 以 system 消息置顶
         assert!(matches!(
             second.chat_history.first(),
             Message::System { .. }
         ));
     }
 
-    /// steer 实时注入：inbox 中的插话在下一轮请求前 drain 进对话历史。
     #[tokio::test]
     async fn tool_loop_drains_steers_into_next_request() {
         let model = MockCompletionModel::from_turns([
@@ -2101,7 +2065,6 @@ mod tests {
         assert!(inbox.lock().unwrap().is_empty(), "插话只注入一次");
     }
 
-    /// MAX_TOOL_TURNS 上限：连续工具调用不收敛时报错并停止请求。
     #[tokio::test]
     async fn tool_loop_caps_at_max_turns() {
         let turns: Vec<MockTurn> = (0..MAX_TOOL_TURNS)

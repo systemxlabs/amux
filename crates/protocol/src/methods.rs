@@ -1,8 +1,8 @@
-//! 方法名与通知名（协议面，单一来源）。依据 docs/DESIGN.md「Client-Server 通信」协议。
+//! 方法名与通知名的单一来源。
 
-/// JSON-RPC 请求方法名（docs/DESIGN.md 协议表）。
+/// JSON-RPC 请求方法名。
 pub mod method {
-    /// 认证（建连后首个消息，docs/DESIGN.md「认证」）
+    /// 认证（建连后首个消息）。
     pub const AUTH: &str = "auth";
     /// 查询当前机器的 agents（名称与可用性）
     pub const AGENT_LIST: &str = "agent.list";
@@ -40,7 +40,7 @@ pub mod method {
     pub const WORKSPACE_READ: &str = "workspace.read";
 }
 
-/// server → GUI 通知名（docs/DESIGN.md：唯一主动推送 `session.state_change`）。
+/// server → GUI 通知名。
 pub mod notify {
     /// 普通会话状态变更事件（工作流驱动等依赖它）
     pub const SESSION_STATE_CHANGE: &str = "session.state_change";

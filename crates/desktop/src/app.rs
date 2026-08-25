@@ -1,19 +1,3 @@
-//! amux 主视图（docs/DESIGN.md §7 / PRD §「桌面 GUI 设计」）。
-//! 三栏布局（左侧边栏 / 中间交互 / 右侧 Panel）+ 多机器 + 工作流编排 + 设置浮窗（五分类）。
-//!
-//! - 左侧：会话列表（普通会话 + 工作流会话统一按最近活跃排序；工作流挂载的关联普通会话
-//!   默认折叠、可展开下钻）+ 顶部「+」新建会话入口 + 底部设置入口
-//! - 中间：未选中会话显示新建会话视图（机器/Agent/工作目录/常用目录一屏并列、创建会话按钮）；
-//!   选中会话显示对话历史气泡 + 实时活动条 + 快捷按钮栏 + 输入区（含取消）+ 右侧竖向悬浮按钮
-//! - 右侧：代码审查 / 会话详情 / 会话活动，默认折叠，点悬浮按钮展开
-//! - 设置浮窗：半透明遮罩 + 分类导航侧边栏（机器管理 / 编排智能体 / 快捷指令 / 技能管理 /
-//!   工作流模板）+ 右侧内容；设置项为竖向堆叠卡片式，新增入口位于卡片区右上角，编辑/新增
-//!   使用弹窗，删除/机器操作需要确认；skills 操作弹窗选择目标机器和 agent）
-//!
-//! 数据为拉取式：会话列表 `session.list` 定时 10s + 主动；对话 `session.history` 打开才刷 10s；
-//! 活动 `session.activities` 打开才刷 10s；实时 `session.ongoing_activity` 5s；`session.state_change`
-//! 通知用于工作流驱动。
-
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,10 +45,9 @@ use crate::text::{block_text, one_line, truncate};
 use crate::workflow::{now_ts, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
 
-/// 会话列表惰性分页窗口大小（PRD §4.1.1：首次只取最近活跃一窗）。
+/// 会话列表惰性分页窗口大小。
 const PAGE_LIMIT: usize = 50;
 
-/// 右侧面板（默认折叠，悬浮按钮展开）。
 #[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Workspace,
@@ -73,7 +56,7 @@ enum Panel {
     Activities,
 }
 
-/// 设置浮窗分类（PRD §4.3 五分类）。
+/// 设置浮窗分类。
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsCategory {
     Machines,
@@ -90,21 +73,18 @@ enum NewSessionMode {
     Workflow,
 }
 
-/// 当前选中的会话。
 #[derive(Clone, PartialEq)]
 enum Selected {
     Session { machine: usize, id: String },
     Workflow { engine: usize },
 }
 
-/// 右键菜单目标。
 #[derive(Clone)]
 enum ContextMenuTarget {
     Session { machine: usize, session_id: String },
     Workflow { engine: usize },
 }
 
-/// 右键弹出菜单。
 struct SessionContextMenu {
     target: ContextMenuTarget,
     x: f32,
@@ -370,7 +350,6 @@ impl AmuxApp {
     }
 
     fn save_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // api_format 为枚举单选，无需字符串校验
         let api_format = self.orch_api_format;
         let base_url = self.orch_base_input.read(cx).value().trim().to_owned();
         let api_key = self.orch_key_input.read(cx).value().trim().to_owned();
@@ -458,8 +437,6 @@ impl AmuxApp {
         Some((*machine, cwd))
     }
 
-    // ---- 通知路由（connected/disconnected/auth + session.state_change 工作流驱动）----
-
     fn on_notify(
         this: &mut Self,
         window: &mut Window,
@@ -524,7 +501,6 @@ impl AmuxApp {
         idx: usize,
         n: &WsNotification,
     ) {
-        // 通知负载按协议强类型解析（SessionStateChange，camelCase）
         let Ok(change) = serde_json::from_value::<SessionStateChange>(n.params.clone()) else {
             protocol::log::warn("gui.ws", "state_change 通知负载解析失败");
             return;
@@ -536,7 +512,6 @@ impl AmuxApp {
             reason,
         } = change;
         let idle = new_state == SessionState::Idle;
-        // 更新普通会话元数据状态与聚合视图 busy（若已加载）
         if let Some(m) = this.machines.get_mut(idx) {
             if let Some(s) = m.sessions.iter_mut().find(|s| s.id == sid) {
                 s.state = new_state;
@@ -547,7 +522,6 @@ impl AmuxApp {
         }
         this.refresh_sessions(idx, window, cx);
 
-        // 工作流驱动：查找挂载了该关联普通会话的工作流
         let Some(wi) = this.workflows.iter().position(|wf| {
             wf.session
                 .read()
@@ -558,30 +532,25 @@ impl AmuxApp {
         }) else {
             return;
         };
-        // 取消导致的状态变更不注入（docs/DESIGN.md §工作流会话驱动）：
-        // 事件侧 reason=cancelled 时，编排者不应与用户的取消拉锯
+        // 取消导致的状态变更不注入，避免编排者与用户的取消拉锯。
         if reason == StateChangeReason::Cancelled {
-            // 不推进，但忙碌计数仍要记账（否则取消后计数永久偏高）
+            // 不推进，但忙碌计数仍要记账，否则取消后计数会永久偏高。
             if let Some(wf) = this.workflows.get_mut(wi) {
                 wf.note_child_state(&sid, old_state, new_state);
             }
             return;
         }
         if !idle {
-            // 忙碌化转换不推进，但计数要记账
             if let Some(wf) = this.workflows.get_mut(wi) {
                 wf.note_child_state(&sid, old_state, new_state);
             }
             return;
         }
-        // 子会话变 idle：异步推进该工作流（编排者需要细节时自行调
-        // read_session_history 现查，不在通知路径预取）
         let wf = match this.workflows.get(wi) {
             Some(wf) => wf.clone(),
             None => return,
         };
         let session_dir = this.session_dir.clone();
-        // 状态共享于引擎内部（Arc<RwLock>），任务结束无需整引擎回写
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             run_engine_on_tokio(async move {
                 if let Err(e) = wf.on_child_state(&sid, old_state, new_state, reason).await {
@@ -600,10 +569,9 @@ impl AmuxApp {
             .await;
             let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
         });
+        // 会话状态在引擎内部共享，后台任务无需把整个引擎写回 UI。
         this._tasks.push(t);
     }
-
-    // ---- 数据拉取：会话列表（session.list）主动刷新 ----
 
     fn refresh_sessions(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = self.machines.get(idx) else {
@@ -643,7 +611,6 @@ impl AmuxApp {
         .detach();
     }
 
-    /// agent.list：某机器 agents。
     fn fetch_agents(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = self.machines.get(idx) else {
             return;
@@ -655,7 +622,6 @@ impl AmuxApp {
         {
             Ok(result) => {
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    // 连接状态由 ws 认证通知驱动；此处只更新 agent 列表
                     if let Some(m) = this.machines.get_mut(idx) {
                         m.agents = result.agents;
                     }
@@ -675,7 +641,6 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 对话历史（session.history · 打开才刷）。
     fn refresh_dialog(
         &self,
         window: &mut Window,
@@ -713,7 +678,6 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 活动历史（session.activities · 打开才刷）。
     fn refresh_activities(
         &self,
         window: &mut Window,
@@ -721,7 +685,7 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        // docs/DESIGN.md「活动视图」：面板未打开时不主动刷新
+        // 面板未打开时不主动刷新活动。
         if self.panel != Some(Panel::Activities) {
             return;
         }
@@ -833,7 +797,6 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 实时活动（session.ongoing_activity · 5s）。
     fn refresh_ongoing(
         &self,
         window: &mut Window,
@@ -870,7 +833,6 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 加载更早一窗会话（滚动到底部）。
     fn load_more_sessions(&self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
         let Some(m) = self.machines.get(machine) else {
             return;
@@ -904,11 +866,8 @@ impl AmuxApp {
         .detach();
     }
 
-    // ---- 轮询：会话列表 10s（全机器）；打开会话的对话/活动 10s；实时 5s ----
-
     fn spawn_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.machines.len();
-        // 会话列表 10s（每机器）
         for i in 0..n {
             let client = self.machines[i].client.clone();
             let machine_name = self.machines[i].config.name.clone();
@@ -951,7 +910,6 @@ impl AmuxApp {
             self._tasks.push(t);
         }
 
-        // 打开会话的对话 + 活动 10s
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
             let target = this
                 .update_in(cx, |this, _w, _cx| this.open_session_target())
@@ -970,7 +928,6 @@ impl AmuxApp {
         });
         self._tasks.push(t);
 
-        // 打开会话的实时活动 5s
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
             let target = this
                 .update_in(cx, |this, _w, _cx| this.open_session_target())
@@ -987,7 +944,6 @@ impl AmuxApp {
         self._tasks.push(t);
     }
 
-    /// 单机器后台任务（通知订阅）。
     fn spawn_machine_tasks(
         &mut self,
         window: &mut Window,
@@ -1004,8 +960,6 @@ impl AmuxApp {
             }
         })
     }
-
-    // ---- 打开会话 / 工作流 ----
 
     fn open_session(
         &mut self,
@@ -1053,8 +1007,6 @@ impl AmuxApp {
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
     }
-
-    // ---- 动作：创建会话 / 发送 / 取消 / 删除 / 重命名 ----
 
     fn create_session_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let machine = self.new_session_machine.unwrap_or(0);
@@ -1148,7 +1100,6 @@ impl AmuxApp {
                     session_id: id.clone(),
                     input: blocks.clone(),
                 };
-                // 本地立即渲染用户消息
                 if let Some(m) = self.machine_mut(machine) {
                     let v = m.views.entry(id.clone()).or_default();
                     v.dialog.push(DialogMsg::UserMessage {
@@ -1268,7 +1219,7 @@ impl AmuxApp {
                 .detach();
             }
             Some(Selected::Workflow { .. }) => {
-                // 快捷指令作为用户输入进入工作流会话（PRD §快捷指令）
+                // 快捷指令作为用户输入进入工作流会话。
                 self.input_state
                     .update(cx, |s, cx| s.set_value(&cmd.prompt, window, cx));
                 self.send_prompt(window, cx);
@@ -1277,7 +1228,6 @@ impl AmuxApp {
         }
     }
 
-    /// 当前选中项是否正在工作中，可被取消。
     fn can_cancel(&self) -> bool {
         match &self.selected {
             Some(Selected::Session { machine, id }) => self
@@ -1464,8 +1414,6 @@ impl AmuxApp {
         self.renaming_workflow = None;
         cx.notify();
     }
-
-    // ---- 工作流 ----
 
     fn restore_workflows(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let sessions = match WorkflowEngine::load_all(&self.session_dir) {
@@ -1847,8 +1795,6 @@ impl AmuxApp {
         }
     }
 
-    // ---- workspace.diff（代码审查面板）----
-
     fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
         let Some(m) = self.machine(machine) else {
             return;
@@ -2147,7 +2093,6 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 切换 diff 面板中某个文件或 hunk 的选中状态。
     fn toggle_diff_selection(
         &mut self,
         machine: usize,
@@ -2175,7 +2120,6 @@ impl AmuxApp {
         }
     }
 
-    /// 把 diff 面板选中的 patch 作为用户消息发送到当前普通会话。
     fn send_selected_diff(&mut self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
         let Some(m) = self.machine(machine) else {
             return;
@@ -2227,8 +2171,6 @@ impl AmuxApp {
         .detach();
         cx.notify();
     }
-
-    // ---- agent 操作（skills / 重启）----
 
     fn fetch_agent_skills(
         &self,
@@ -2421,8 +2363,6 @@ impl AmuxApp {
                 .on_cancel(|_ev, _window, _cx| true)
         });
     }
-
-    // ---- 设置：机器管理 ----
 
     fn close_add_machine_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_add_machine_form = false;
@@ -2848,11 +2788,8 @@ impl AmuxApp {
         });
     }
 
-    // ---- 右侧面板 ----
-
     const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
 
-    /// 面板逻辑宽度（px）。
     fn panel_width_logical(panel: Panel) -> f32 {
         match panel {
             Panel::Workspace => 520.0,
@@ -2945,8 +2882,6 @@ impl AmuxApp {
 }
 
 impl AmuxApp {
-    // ---- 左侧边栏 ----
-
     fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
@@ -3039,7 +2974,6 @@ impl AmuxApp {
             .child(resize_handle)
     }
 
-    /// 会话列表：普通会话 + 工作流会话统一按最近活跃排序；工作流挂载的关联普通会话折叠。
     fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         // 子会话只挂在工作流会话下，顶层列表跳过
         let child_ids: std::collections::HashSet<String> = self
@@ -3094,7 +3028,6 @@ impl AmuxApp {
             })
             .collect();
 
-        // 惰性加载：还有更早会话时底部显示「加载更早会话」
         for (mi, m) in self.machines.iter().enumerate() {
             if m.sessions_has_more {
                 let name = m.config.name.clone();
@@ -3112,7 +3045,6 @@ impl AmuxApp {
         rows
     }
 
-    /// 普通会话行：标题 + 状态（工作中转圈右对齐）。
     fn render_session_row(
         &self,
         cx: &mut Context<Self>,
@@ -3135,7 +3067,6 @@ impl AmuxApp {
         let active = cx.theme().list_active;
         let border = cx.theme().list_active_border;
 
-        // 正在重命名该会话：行内输入框 + 保存
         if self.renaming_session.as_ref() == Some(&(machine, sid.clone())) {
             let sid2 = sid.clone();
             return v_flex()
@@ -3210,7 +3141,6 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    /// 工作流行：标题 · 折叠子会话 · 状态 + 转圈。
     fn render_workflow_row(&self, cx: &mut Context<Self>, wi: usize) -> gpui::AnyElement {
         let Some(wf) = self.workflows.get(wi) else {
             return div().into_any();
@@ -3407,8 +3337,6 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    // ---- 中间 ----
-
     fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.selected.is_none() {
             return v_flex()
@@ -3434,7 +3362,6 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 中间面板：未选中会话→新会话视图；否则对话流 + 悬浮按钮。
     fn render_center(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         if self.selected.is_none() {
             return self.render_new_session_view(window, cx);
@@ -3515,7 +3442,6 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 新会话视图：普通（机器与 Agent 并列一排 + 工作目录 + 创建按钮）/ 工作流模式。
     fn render_new_session_view(
         &self,
         _window: &mut Window,
@@ -3572,7 +3498,7 @@ impl AmuxApp {
         match mode {
             NewSessionMode::Direct => {
                 if self.machines.is_empty() {
-                    // PRD §桌面 GUI 设计：无机器时提示并引导到设置
+                    // 无机器时提示并引导到设置。
                     card = card.child(
                         v_flex()
                             .gap_2()
@@ -3733,7 +3659,6 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 工作目录选择器：输入框支持手动编辑，也可从当前机器的最近目录中选择。
     fn render_workspace_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machine = self.new_session_machine.unwrap_or(0);
         let Some(m) = self.machine(machine) else {
@@ -3809,7 +3734,6 @@ impl AmuxApp {
         picker.into_any()
     }
 
-    /// 机器选择（新会话视图）。
     fn render_machine_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_machine = self
             .new_session_machine
@@ -3847,7 +3771,6 @@ impl AmuxApp {
         row
     }
 
-    /// Agent 选择（新会话视图）：所选机器的可用 agent。
     fn render_harness_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let machine = self
             .new_session_machine
@@ -3886,7 +3809,6 @@ impl AmuxApp {
         row
     }
 
-    /// 工作流模板选择。
     fn render_template_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let templates = self.store.list_templates();
         let mut row = h_flex().gap_1().flex_wrap();
@@ -3907,7 +3829,6 @@ impl AmuxApp {
                     .when(sel, |b| b.primary())
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         let t = t.clone();
-                        // 点击已选模板则取消选择
                         if this
                             .workflow_template
                             .as_ref()
@@ -3924,8 +3845,6 @@ impl AmuxApp {
         }
         row
     }
-
-    // ---- 对话 / 活动 / 输入 ----
 
     fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let dialog: Vec<DialogMsg> = match &self.selected {
@@ -4101,7 +4020,6 @@ impl AmuxApp {
         }
     }
 
-    /// 进行中的活动（一条或无）。
     fn render_activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current: Option<Activity> = match &self.selected {
             Some(Selected::Session { machine, id }) => self
@@ -4203,7 +4121,6 @@ impl AmuxApp {
         }
     }
 
-    /// 对话流右侧竖排悬浮按钮：diff / 会话详情 / 会话活动历史。
     fn render_floating_buttons(
         &self,
         _window: &mut Window,
@@ -4287,7 +4204,6 @@ impl AmuxApp {
             )
     }
 
-    /// 快捷指令栏 + 取消当前工作。
     fn render_quick_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let commands = self.store.list_quick_commands();
         let mut row = h_flex().flex_wrap().gap_1();
@@ -4306,7 +4222,6 @@ impl AmuxApp {
         row
     }
 
-    /// 输入区：多行文本 + 附件 + 发送。
     fn render_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let attachments: Vec<String> = self
             .input_attachments
@@ -4399,8 +4314,6 @@ impl AmuxApp {
                     }),
             )
     }
-
-    // ---- 右侧面板内容 ----
 
     fn render_workspace_tree(
         &self,
@@ -4810,7 +4723,6 @@ impl AmuxApp {
         body.into_any()
     }
 
-    /// 单条活动历史：过长内容折叠。
     fn activity_row(
         &self,
         key: &str,
@@ -5208,7 +5120,6 @@ impl AmuxApp {
                     )
                     .into_any_element(),
             );
-            // 折叠全部改动时仅保留文件头（路径 + 状态 + 统计），隐藏 diff 行
             let hunks_iter: Box<dyn Iterator<Item = (usize, &protocol::GitDiffHunk)>> =
                 if diff_changes_collapsed {
                     Box::new(std::iter::empty())
@@ -5438,8 +5349,6 @@ impl AmuxApp {
             .into_any()
     }
 
-    // ---- 右键菜单 ----
-
     fn render_context_menu(
         &self,
         menu: &SessionContextMenu,
@@ -5545,8 +5454,6 @@ impl AmuxApp {
             })
     }
 
-    // ---- 设置浮窗 ----
-
     fn render_settings_overlay(
         &self,
         window: &mut Window,
@@ -5604,13 +5511,11 @@ impl AmuxApp {
             .when(self.skill_action_dialog.is_some(), |overlay| {
                 overlay.child(self.render_skill_action_dialog(window, cx))
             })
-            // skills 弹窗（盖在设置浮窗之上）
             .when(self.machines.iter().any(|m| m.show_skills.is_some()), |o| {
                 o.child(self.render_skills_dialog(window, cx))
             })
     }
 
-    /// skills 弹窗：可滚动显示某 agent 的 skills 列表。
     fn render_skills_dialog(
         &self,
         _window: &mut Window,
@@ -5793,7 +5698,6 @@ impl AmuxApp {
             })
     }
 
-    /// 机器管理：纵向堆叠卡片式（机器头 + URL + 每 agent 一行 + 底部「+」表单）。
     fn render_machines_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machines = self
             .machines
@@ -6728,7 +6632,6 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 设置项标题。
     fn settings_header(
         &self,
         title: &str,
@@ -6763,7 +6666,6 @@ impl AmuxApp {
     }
 }
 
-/// 会话列表项（统一最近活跃排序）。
 enum SessionListItem {
     Session { machine: usize, meta: SessionMeta },
     Workflow { idx: usize },
@@ -6828,7 +6730,7 @@ impl Render for AmuxApp {
 }
 
 /// 在 GUI 的 tokio runtime 上执行编排引擎任务（rig/reqwest 的 LLM 调用需要 tokio reactor；
-/// GPUI 主线程无 runtime，docs/DESIGN.md §7「异步模型」）。
+/// GPUI 主线程无 Tokio runtime。
 async fn run_engine_on_tokio<T: Send + 'static>(
     fut: impl std::future::Future<Output = T> + Send + 'static,
 ) -> Option<T> {

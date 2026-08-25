@@ -1,4 +1,4 @@
-//! Diff 渲染纯函数（PRD「文件改动审查」）：hunk patch → 行级数据。
+//! Diff 渲染纯函数：hunk patch → 行级数据。
 //! 与 GPUI 状态分离，便于单测。
 
 use protocol::GitDiffHunk;
@@ -95,12 +95,10 @@ mod tests {
         assert_eq!(lines[1].new_number, None);
         assert_eq!(lines[2].kind, DiffLineKind::Addition);
         assert_eq!(lines[2].old_number, None);
-        // context 之后 new 已推进到 3
         assert_eq!(lines[2].new_number, Some(3));
         assert_eq!(lines[3].new_number, Some(4));
     }
 
-    /// 单侧省略 `,1` 的 hunk 头同样可解析。
     #[test]
     fn hunk_start_handles_omitted_count() {
         assert_eq!(hunk_start("@@ -5 +5,2 @@", '-'), 5);

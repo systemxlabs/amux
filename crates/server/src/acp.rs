@@ -1,4 +1,4 @@
-//! ACP v1 驱动（docs/DESIGN.md §9）：官方 SDK `agent-client-protocol` 的 Client 角色，
+//! ACP v1 驱动：官方 SDK `agent-client-protocol` 的 Client 角色，
 //! 经 stdio 与 ACP server 子进程通信。
 //!
 //! `AcpAgentDriver` 使用**专用 exec 线程**承载全部异步 IO（SDK 连接、子进程 stdio、
@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 
 use protocol::ContentBlock;
 
-/// 拉起的统计（server 启动日志用；docs/DESIGN.md §4.1/§7.3）。
+/// 拉起的统计（server 启动日志用）。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LaunchSummary {
     /// 成功拉起的 ACP server 数
@@ -33,7 +33,7 @@ pub struct LaunchSummary {
     pub failed: usize,
 }
 
-/// turn 过程中的 agent 事件（docs/DESIGN.md §5.1：server 透传，GUI 应用聚合）。
+/// turn 过程中的 agent 事件，供 server 透传给 GUI 聚合。
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     /// agent 输出的增量片段
@@ -48,7 +48,7 @@ pub enum AgentEvent {
     },
     /// ACP 请求或传输失败
     Error(String),
-    /// turn 完成（携带结束原因；docs/DESIGN.md §工作流会话驱动「变更原因」）
+    /// turn 完成（携带结束原因）。
     TurnEnded(protocol::StateChangeReason),
 }
 
@@ -67,16 +67,15 @@ pub trait AgentDriver: Send + Sync {
     ) -> mpsc::Receiver<AgentEvent>;
     /// 取消进行中的工作
     fn cancel(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 关闭会话（删除/长时间无活动时释放 agent 侧资源，docs/DESIGN.md「ACP 生命周期」：
-    /// server 经 ACP `session/close` 关闭 agent 侧会话）
+    /// 关闭会话，释放 agent 侧资源。
     fn close(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 删除会话（docs/DESIGN.md「删除会话」：close 之后若 ACP Server 支持会话删除，
+    /// 删除会话：close 之后若 ACP Server 支持会话删除，
     /// 则发送 `session/delete` 删除 agent 侧会话；不支持删除的 agent 返回错误，
     /// 调用方按「不支持」忽略）
     fn delete_session(&self, agent_session_id: &str) -> Result<(), String>;
     /// 该 agent 安装的 skills 列表；查询失败必须显式返回错误。
     fn list_skills(&self) -> Result<Vec<String>, String>;
-    /// 关闭驱动自身（server 退出时释放 ACP 子进程资源，docs/DESIGN.md「ACP Server 生命周期」）
+    /// 关闭驱动自身，释放 ACP 子进程资源。
     fn shutdown(&self);
     /// 关闭并等待驱动后台线程退出（默认仅 shutdown、不等待；确定性退出路径使用，
     /// 避免 process::exit 抢在子进程清理之前）。
@@ -125,14 +124,14 @@ enum ExecReq {
     },
 }
 
-/// ACP v1 客户端（官方 SDK stdio 传输，docs/DESIGN.md §9）。
+/// ACP v1 客户端（官方 SDK stdio 传输）。
 pub struct AcpAgentDriver {
     /// 主线程 → exec 线程的请求发送端；shutdown 时置 None 以优雅结束 exec 线程
     exec_tx: Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>,
     /// 会话事件路由：agent sessionId -> prompt 的事件接收端
     routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
     /// 本进程内已 resume 过的会话（server 重启后从注册表恢复的会话首次交互前
-    /// 经 ACP `session/resume` 恢复 agent 上下文，docs/DESIGN.md §7.2）
+    /// 经 ACP `session/resume` 恢复 agent 上下文。
     resumed: Arc<Mutex<HashSet<String>>>,
     /// exec 线程句柄（Mutex 包装以便 `shutdown_and_join` 从 &self 取出并 join；
     /// 连接由 SDK 管理，线程结束即子进程清理）
@@ -219,7 +218,7 @@ impl AgentDriver for AcpAgentDriver {
     }
 
     /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史——
-    /// 历史以 server 本地日志为权威，docs/DESIGN.md §7.2/§5.2）。
+    /// 历史以 server 本地日志为权威。
     /// 同一进程内对同一会话幂等（已恢复过则直接成功）。
     fn resume_session(&self, agent_session_id: &str, cwd: &str) -> Result<(), String> {
         {
@@ -298,7 +297,7 @@ impl AgentDriver for AcpAgentDriver {
         .map(|_| ())
     }
 
-    /// 删除 agent 侧会话（docs/DESIGN.md「删除会话」：close 之后，agent 支持
+    /// 删除 agent 侧会话：close 之后，agent 支持
     /// 删除才调用；不支持删除的 agent 返回 METHOD_NOT_FOUND 类错误，调用方忽略）。
     fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
         self.call(AcpCall::Delete {
@@ -332,7 +331,7 @@ struct SkillInfo {
     name: String,
 }
 
-/// 自定义请求：ACP `skill/list`（PRD §3.3；SDK schema v1 未收录该方法）。
+/// 自定义请求：ACP `skill/list`（SDK schema v1 未收录该方法）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
 #[request(method = "skill/list", response = SkillListResponse)]
 struct SkillListRequest {}
@@ -386,7 +385,7 @@ async fn exec_main(
     // 由下方补发失败（swap 保证不重复发送）。
     let ready_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // SDK from_args 支持 `NAME=value` 前缀参数作为环境变量（docs/DESIGN.md §7.3）
+    // SDK from_args 支持 `NAME=value` 前缀参数作为环境变量。
     let mut cmd: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     cmd.push(bin.to_string());
     cmd.extend(args.iter().cloned());
@@ -399,7 +398,7 @@ async fn exec_main(
         }
     };
     protocol::log::info("acp", format!("已连接 ACP agent: {bin} {}", args.join(" ")));
-    // trace 级：ACP 线上原始帧（GUI ↔ server ↔ ACP client ↔ agent 全链路，docs/DESIGN.md §8）
+    // trace 级记录 ACP 原始帧，便于排查跨进程协议问题。
     let agent = if protocol::log::enabled_for(protocol::Level::Trace, "acp.wire") {
         agent.with_debug(|line, direction| {
             protocol::log::trace("acp.wire", format!("{direction:?} {line}"));
@@ -440,7 +439,7 @@ async fn connect_main(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
-                // yolo：自动批准（docs/DESIGN.md §7.2，无审批往返）。
+                // yolo：自动批准，避免额外的审批往返。
                 // 必须选 allow 类选项：claude-acp 等包装器的选项列表**第一项往往是
                 // 「Deny/reject」**，选第一个会被 agent 误判为用户拒绝
                 // （"User refused permission to run tool"）。
@@ -652,7 +651,7 @@ async fn dispatch_call_inner(
     }
 }
 
-/// ACP stopReason → 状态变更原因（docs/DESIGN.md §工作流会话驱动「变更原因」）。
+/// ACP stopReason → 状态变更原因。
 /// 未识别的新枚举值按正常结束处理（仅 cancelled 参与注入过滤）。
 fn stop_reason_reason(reason: StopReason) -> protocol::StateChangeReason {
     match reason {
@@ -664,13 +663,13 @@ fn stop_reason_reason(reason: StopReason) -> protocol::StateChangeReason {
     }
 }
 
-/// 把 ACP `session/update` 通知映射为 AgentEvent 并路由（docs/DESIGN.md §5 聚合）。
+/// 把 ACP `session/update` 通知映射为 AgentEvent 并路由。
 async fn route_update(
     routes: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
     notif: &SessionNotification,
 ) {
     let ev = match &notif.update {
-        // 用户消息回显不进活动流（server 直接落盘用户输入，docs/DESIGN.md §5.2）
+        // 用户消息由 server 直接落盘，不重复放入活动流。
         SessionUpdate::UserMessageChunk(_) => None,
         SessionUpdate::AgentMessageChunk(chunk) => {
             text_of(&chunk.content).map(AgentEvent::OutputChunk)
@@ -716,7 +715,7 @@ async fn route_update(
 }
 
 /// ContentBlock → 文本（仅 text 类型；其他类型记 debug 日志后忽略——
-/// PRD 对话历史为 IM 式文本流，非文本块暂无落盘表示）。
+/// 对话历史按 IM 式文本流处理，非文本块暂无落盘表示。
 fn text_of(block: &AcpContentBlock) -> Option<String> {
     match block {
         AcpContentBlock::Text(t) => Some(t.text.clone()),
@@ -809,11 +808,9 @@ mod tests {
             ))),
         );
         route_update(&routes, &notif).await;
-        // 用户消息回显不进活动流（server 直接落盘用户输入），无事件产生
         assert!(rx.try_recv().is_err());
     }
 
-    /// agent_message_chunk → OutputChunk。
     #[tokio::test]
     async fn route_update_agent_message_chunk() {
         let (routes, mut rx) = route_with_channel();
@@ -885,7 +882,6 @@ mod tests {
             PermissionOption::new(id.to_string(), id.to_string(), kind)
         }
 
-        // claude-acp 实际选项顺序：Deny 在前
         let opts = vec![
             opt("reject", PermissionOptionKind::RejectOnce),
             opt("allow", PermissionOptionKind::AllowOnce),
@@ -898,28 +894,24 @@ mod tests {
             "应优先选 AllowAlways（yolo 免重复询问）"
         );
 
-        // 无 AllowAlways：选 AllowOnce
         let opts = vec![
             opt("reject", PermissionOptionKind::RejectOnce),
             opt("allow", PermissionOptionKind::AllowOnce),
         ];
         assert_eq!(pick_approve_option(&opts).unwrap().to_string(), "allow");
 
-        // 仅一个 AllowOnce（mock 场景）
         let opts = vec![opt("allow-once", PermissionOptionKind::AllowOnce)];
         assert_eq!(
             pick_approve_option(&opts).unwrap().to_string(),
             "allow-once"
         );
 
-        // 全为拒绝 → None（按取消处理）
         let opts = vec![
             opt("reject", PermissionOptionKind::RejectOnce),
             opt("reject_all", PermissionOptionKind::RejectAlways),
         ];
         assert!(pick_approve_option(&opts).is_none());
 
-        // 空列表 → None
         assert!(pick_approve_option(&[]).is_none());
     }
 }

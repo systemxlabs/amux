@@ -9,7 +9,7 @@
 //! - `session/prompt` 先请求权限（期望 server yolo 自动批准），随后 sleep
 //!   `AMUX_MOCK_DELAY_MS`（默认 300ms）再发事件流与响应——保证忙时 prompt
 //!   （-32006）测试有确定性的 busy 窗口
-//! - `skill/list` 返回固定的 skills 列表（PRD §3.3）
+//! - `skill/list` 返回固定的 skills 列表。
 //! - 把收到的**方法名**追加到 `<state_file>.calls`（供测试断言 server 的 ACP 调用面，
 //!   包括 open_session 不触发 `session/load`、resume 幂等只调一次及 close/delete）。
 //! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
@@ -34,14 +34,12 @@ use serde_json::{json, Value};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// 每会话的历史（用户指令 + agent 输出 content block 列表）。
 fn history() -> &'static std::sync::Mutex<HashMap<String, Vec<Value>>> {
     use std::sync::OnceLock;
     static H: OnceLock<std::sync::Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
     H.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// 会话注册表：session_id → cwd（内存；session/list 用）。
 fn sessions() -> &'static std::sync::Mutex<HashMap<String, String>> {
     use std::sync::OnceLock;
     static S: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -64,7 +62,6 @@ fn delay_ms() -> u64 {
         .unwrap_or(300)
 }
 
-/// 把收到的 ACP 方法名追加到 `<state_file>.calls`（测试断言 server 调用面）。
 fn record_call(calls_file: &str, method: &str) {
     let _ = std::fs::OpenOptions::new()
         .create(true)
@@ -76,7 +73,6 @@ fn record_call(calls_file: &str, method: &str) {
         });
 }
 
-/// 把权限批准（outcome.selected）记录到状态文件（供测试断言 yolo 生效）。
 fn append_approved(state_file: &str) {
     let _ = std::fs::OpenOptions::new()
         .create(true)
@@ -88,7 +84,7 @@ fn append_approved(state_file: &str) {
         });
 }
 
-/// 自定义请求：ACP `skill/list`（PRD §3.3；SDK schema v1 未收录该方法）。
+/// 自定义请求：ACP `skill/list`（SDK schema v1 未收录该方法）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
 #[request(method = "skill/list", response = serde_json::Value)]
 struct SkillListRequest {}
@@ -143,9 +139,7 @@ async fn run(state_file: &str) -> Result<()> {
         )
         .on_receive_request(
             async move |request: LoadSessionRequest, responder, cx| {
-                // 全量重放：该会话记录的历史（用户指令 + agent 输出），重放完才响应。
-                // server 以本地历史为权威，不依赖 agent 的 load 结果；handler 仍用于协议完整性。
-                // 以便测试断言「open_session 不触发 session/load」。
+                // 重放 mock 保存的历史后再响应 load。
                 record_call(&calls_load, "session/load");
                 let sid = request.session_id.to_string();
                 let hist = history().lock().unwrap().get(&sid).cloned().unwrap_or_else(|| {
@@ -215,7 +209,6 @@ async fn run(state_file: &str) -> Result<()> {
                 let state_file = state_prompt.clone();
                 let cx_task = cx.clone();
                 cx.spawn(async move {
-                    // 1) 先请求权限（期望 client yolo 自动批准）→ 记录批准
                     let perm = ToolCallUpdate::new(
                         "tc1",
                         ToolCallUpdateFields::new()
@@ -240,7 +233,6 @@ async fn run(state_file: &str) -> Result<()> {
                         append_approved(&state_file);
                     }
 
-                    // 2) busy 窗口：让 server 有确定的时间观察 Busy 状态（-32006 测试）
                     let ms = delay_ms();
                     if ms > 0 {
                         tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -267,7 +259,6 @@ async fn run(state_file: &str) -> Result<()> {
                         )),
                     ))?;
 
-                    // 记录 agent 输出（先取 id 再锁，避免 json! 内再次锁同一 mutex 死锁）
                     let agent_mid = format!("a{}", history_len(&request.session_id.to_string()));
                     history()
                         .lock()

@@ -25,7 +25,6 @@ struct Client {
 }
 
 impl Client {
-    /// 连接不发送认证。
     async fn connect_raw(port: u16) -> Self {
         let url = format!("ws://127.0.0.1:{port}");
         let (ws, _) = tokio_tungstenite::connect_async(url)
@@ -40,7 +39,6 @@ impl Client {
         }
     }
 
-    /// 连接并完成 `auth` 认证。
     async fn connect(port: u16, token: &str) -> Self {
         let mut c = Self::connect_raw(port).await;
         let r = c.call("auth", json!({"token": token})).await;
@@ -48,7 +46,6 @@ impl Client {
         c
     }
 
-    /// 发送请求并等待匹配 id 的响应；期间到达的通知缓冲到 notifications。
     async fn call(&mut self, method: &str, params: Value) -> Value {
         let id = self.next_id;
         self.next_id += 1;
@@ -74,7 +71,6 @@ impl Client {
         }
     }
 
-    /// 只发送请求不等待响应（用于忙时/后台场景）。
     async fn fire(&mut self, method: &str, params: Value) {
         let id = self.next_id;
         self.next_id += 1;
@@ -86,7 +82,6 @@ impl Client {
             .unwrap();
     }
 
-    /// 在超时内等待某个通知（可带谓词）；返回是否等到。
     async fn wait_notification(
         &mut self,
         method: &str,
@@ -174,7 +169,6 @@ async fn start_server() -> (u16, ServerGuard) {
     (port, guard)
 }
 
-/// 第一个可用 agent 名（agent.list）。
 fn first_agent(list: &Value) -> String {
     list["result"]["agents"]
         .as_array()
@@ -190,29 +184,22 @@ fn mock_calls(data_dir: &std::path::Path) -> String {
     std::fs::read_to_string(data_dir.join("mock.state.calls")).unwrap_or_default()
 }
 
-// ---- 认证（docs/DESIGN.md「认证」）----
-
 #[tokio::test]
 async fn auth_required_and_enforced() {
     let (port, _guard) = start_server().await;
-    // 未认证连接请求其它方法 → AUTH_FAILED
     let mut c = Client::connect_raw(port).await;
     let r = c.call("session.list", json!({})).await;
     assert_eq!(r["error"]["code"], -32000, "未认证应 AUTH_FAILED: {r}");
 
-    // 错误 token → AUTH_FAILED
     let mut c2 = Client::connect_raw(port).await;
     let r = c2.call("auth", json!({"token": "wrong"})).await;
     assert_eq!(r["error"]["code"], -32000, "错误 token 应 AUTH_FAILED: {r}");
 
-    // 正确 token → 认证通过，可正常调用
     let r = c2.call("auth", json!({"token": "test-token"})).await;
     assert!(r.get("error").is_none(), "认证应成功: {r}");
     let list = c2.call("agent.list", json!({})).await;
     assert!(list.get("error").is_none(), "认证后可正常调用: {list}");
 }
-
-// ---- agent.list / agent.skills ----
 
 #[tokio::test]
 async fn agent_list_and_skills() {
@@ -243,14 +230,11 @@ async fn agent_list_and_skills() {
     );
 }
 
-// ---- 会话生命周期 + 惰性 + state_change + 删除触发 ACP close/delete ----
-
 #[tokio::test]
 async fn session_lifecycle_state_change_and_delete() {
     let (port, data_dir, _guard) = start_server_with_dir().await;
     let mut c = Client::connect(port, "test-token").await;
 
-    // session.new 惰性：只写注册表，不触发 ACP session/new
     let created = c
         .call(
             "session.new",
@@ -267,13 +251,11 @@ async fn session_lifecycle_state_change_and_delete() {
         "惰性：session.new 不应触发 ACP session/new"
     );
 
-    // session.list 惰性分页
     let list = c.call("session.list", json!({})).await;
     let sessions = list["result"]["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["id"], json!(sid));
 
-    // prompt：触发 ACP session/new（懒创建）+ state_change busy→idle 推送
     c.fire(
         "session.prompt",
         json!({"sessionId": sid, "input": [{"type": "text", "text": "实现登录功能"}]}),
@@ -292,7 +274,6 @@ async fn session_lifecycle_state_change_and_delete() {
         "首条 prompt 才懒创建 ACP session/new"
     );
 
-    // 标题按首条指令生成 + configure 可改标题
     let list = c.call("session.list", json!({})).await;
     let meta = list["result"]["sessions"].as_array().unwrap()[0].clone();
     assert!(
@@ -312,7 +293,6 @@ async fn session_lifecycle_state_change_and_delete() {
         "我的标题"
     );
 
-    // session.history：用户消息 + 一条合并输出
     let h = c.call("session.history", json!({"sessionId": sid})).await;
     let items = h["result"]["items"].as_array().unwrap();
     assert!(!items.is_empty());
@@ -322,7 +302,6 @@ async fn session_lifecycle_state_change_and_delete() {
     );
     assert!(items.iter().any(|i| i["kind"] == "agent_message"));
 
-    // session.activities：thinking + tool_call
     let a = c
         .call("session.activities", json!({"sessionId": sid}))
         .await;
@@ -330,7 +309,6 @@ async fn session_lifecycle_state_change_and_delete() {
     assert!(acts.iter().any(|x| x["kind"] == "thinking"), "{acts:?}");
     assert!(acts.iter().any(|x| x["kind"] == "tool_call"), "{acts:?}");
 
-    // ongoing_activity：空闲时为 null
     let oa = c
         .call("session.ongoing_activity", json!({"sessionId": sid}))
         .await;
@@ -339,7 +317,6 @@ async fn session_lifecycle_state_change_and_delete() {
         "空闲 ongoing_activity 为 null: {oa}"
     );
 
-    // 删除先触发 session/close，再尝试 session/delete
     let r = c.call("session.delete", json!({"sessionId": sid})).await;
     assert!(r.get("error").is_none(), "删除失败: {r}");
     assert!(
@@ -350,15 +327,12 @@ async fn session_lifecycle_state_change_and_delete() {
     assert!(list["result"]["sessions"].as_array().unwrap().is_empty());
 }
 
-// ---- session.list 分页 ----
-
 #[tokio::test]
 async fn session_list_pagination() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
     let agent = mock_acp_name(&mut c).await;
 
-    // 创建 3 个会话并分别 prompt（mock 延迟 → lastActiveAt 严格递增）
     let mut sids = Vec::new();
     for i in 0..3 {
         let created = c
@@ -379,7 +353,6 @@ async fn session_list_pagination() {
         sids.push(sid);
     }
 
-    // limit=2：最近活跃一窗，hasMore=true，nextBefore 是窗口末尾的复合游标
     let first = c.call("session.list", json!({"limit": 2})).await;
     let sessions = first["result"]["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 2, "limit=2 应返回一窗: {first}");
@@ -388,7 +361,6 @@ async fn session_list_pagination() {
     assert_eq!(sessions[0]["id"], json!(sids[2]), "最晚 prompt 排最前");
     assert_eq!(sessions[1]["id"], json!(sids[1]));
 
-    // before=next_before：更早一窗只剩最旧
     let second = c
         .call("session.list", json!({"limit": 2, "before": next_before}))
         .await;
@@ -397,8 +369,6 @@ async fn session_list_pagination() {
     assert_eq!(s2[0]["id"], json!(sids[0]));
     assert_eq!(second["result"]["hasMore"], false);
 }
-
-// ---- workspace.diff / workspace.restore ----
 
 #[tokio::test]
 async fn workspace_diff_reflects_changes() {
@@ -562,8 +532,6 @@ async fn workspace_read_rejects_invalid_and_binary_paths() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ---- helpers ----
-
 async fn mock_acp_name(c: &mut Client) -> String {
     let list = c.call("agent.list", json!({})).await;
     first_agent(&list)
@@ -580,7 +548,6 @@ async fn start_server_with_dir() -> (u16, std::path::PathBuf, ServerGuard) {
     (port, data_dir, guard)
 }
 
-// git helpers
 use std::path::Path;
 fn git(cwd: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
@@ -614,9 +581,6 @@ fn init_repo() -> std::path::PathBuf {
     dir
 }
 
-// ---- agent.restart / session.cancel / busy（-32003）----
-
-/// agent.restart：重启后 agent 仍可用（docs/DESIGN.md「ACP Server 生命周期」）。
 #[tokio::test]
 async fn agent_restart_keeps_agent_available() {
     let (port, _guard) = start_server().await;
@@ -637,7 +601,6 @@ async fn agent_restart_keeps_agent_available() {
         .expect("重启后 agent 仍在列表");
     assert_eq!(entry["available"], true, "重启后应可用: {list}");
 
-    // 重启后仍可正常建会话并下发指令（驱动缓存已换新）
     let created = c
         .call(
             "session.new",
@@ -660,10 +623,8 @@ async fn agent_restart_keeps_agent_available() {
     );
 }
 
-/// busy 中再次 prompt 返回 SESSION_BUSY(-32003)；cancel 后可回到 idle。
 #[tokio::test]
 async fn busy_prompt_rejected_and_cancel_works() {
-    // 大延迟窗口保证 prompt 进行中状态可观测
     let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
     let data_dir = std::env::temp_dir().join(format!(
         "amux-e2e-busy-{}-{}",
@@ -688,7 +649,6 @@ async fn busy_prompt_rejected_and_cancel_works() {
         json!({"sessionId": sid, "input": [{"type":"text","text":"长任务"}]}),
     )
     .await;
-    // 等 busy 推送确认 turn 已开始
     let got_busy = c
         .wait_notification(
             "session.state_change",
@@ -698,7 +658,6 @@ async fn busy_prompt_rejected_and_cancel_works() {
         .await;
     assert!(got_busy, "应推送 idle→busy");
 
-    // 忙时第二条 prompt：SESSION_BUSY(-32003)
     let second = c
         .call(
             "session.prompt",
@@ -711,7 +670,6 @@ async fn busy_prompt_rejected_and_cancel_works() {
         "忙时 prompt 应返回 -32003: {second}"
     );
 
-    // cancel：请求成功，turn 结束后回 idle
     let cancelled = c.call("session.cancel", json!({"sessionId": sid})).await;
     assert_eq!(
         cancelled["result"]["ok"], true,
@@ -726,7 +684,6 @@ async fn busy_prompt_rejected_and_cancel_works() {
         .await;
     assert!(got_idle, "cancel 后应回 idle");
 
-    // turn 结束后再次 prompt 可正常发起（busy 标志已释放）
     let again = c
         .call(
             "session.prompt",

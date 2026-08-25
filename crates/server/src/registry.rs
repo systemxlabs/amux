@@ -1,4 +1,4 @@
-//! 会话注册表（docs/DESIGN.md「普通会话存储」）：会话列表由 server 权威维护，
+//! 会话注册表：会话列表由 server 权威维护，
 //! 元数据持久化于 SQLite（`~/.amux/server/session.sqlite`）。server 单写者场景，
 //! 使用 rusqlite 同步 API（连接置于互斥锁内，短临界区）。
 //!
@@ -187,7 +187,7 @@ impl SessionRegistry {
         Ok(n)
     }
 
-    /// 全部会话的会话 id 与最近活跃时间（用于无活动回收时判断长时间空闲的会话，docs/DESIGN.md「ACP 生命周期」）。
+    /// 全部会话的会话 id 与最近活跃时间，用于无活动回收。
     pub fn idle_candidates(
         &self,
         now: u64,

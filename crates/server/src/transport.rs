@@ -1,4 +1,4 @@
-//! WebSocket 传输层（docs/DESIGN.md §4）：token 认证、连接管理、JSON-RPC 分发、
+//! WebSocket 传输层：token 认证、连接管理、JSON-RPC 分发、
 //! 通知广播（仅 `session.state_change`；多客户端同一份流、互不踢出）。
 
 use std::net::SocketAddr;
@@ -50,7 +50,6 @@ impl Transport {
     }
 
     pub async fn run(self) -> Result<(), String> {
-        // 解构后 notifications 独占消费，其余字段进入连接上下文
         let TransportOptions {
             host,
             port,
@@ -125,7 +124,7 @@ async fn handle_connection(
 
     let (mut sink, mut source) = ws.split();
     let handlers = opts.handlers.clone();
-    // 每连接「已认证」标志：建连后必须先发 `auth` 消息（docs/DESIGN.md「认证」）
+    // 每连接「已认证」标志：建连后必须先发 `auth` 消息。
     let authenticated = Arc::new(AtomicBool::new(false));
     let token = opts.token.clone();
     // 请求处理与通知发送解耦：dispatch 在独立任务，响应经通道回传
@@ -163,7 +162,6 @@ async fn handle_connection(
                     }
                 };
                 let Message::Text(text) = msg else { continue };
-                // 入站只解析一次：信封在此解析为 JsonRpcRequest，dispatch 只做语义分发。
                 let req: JsonRpcRequest = match serde_json::from_str(&text) {
                     Ok(v) => v,
                     Err(_) => {
@@ -219,7 +217,7 @@ fn parse_error_response() -> protocol::JsonRpcResponse {
 }
 
 /// 分发一帧已解析的 JSON-RPC 请求，返回响应。
-/// 未认证连接只接受 `auth` 方法，其余一律返回 AUTH_FAILED（docs/DESIGN.md「认证」）。
+/// 未认证连接只接受 `auth` 方法，其余一律返回 AUTH_FAILED。
 async fn dispatch(
     handlers: &Handlers,
     req: JsonRpcRequest,
@@ -367,7 +365,7 @@ fn handle_auth(
     }
 }
 
-/// 会话状态变更通知 → JSON-RPC notification 帧（docs/DESIGN.md 唯一主动推送）。
+/// 会话状态变更通知 → JSON-RPC notification 帧。
 fn notification_frame(n: &ServerNotification) -> Option<String> {
     let frame = match n {
         ServerNotification::StateChange(state_change) => protocol::JsonRpcNotification {
@@ -384,7 +382,7 @@ mod tests {
     use super::*;
     use protocol::{SessionState, SessionStateChange};
 
-    /// 状态变更通知帧：方法名与 camelCase 负载（docs/DESIGN.md 唯一主动推送）。
+    /// 状态变更通知帧：方法名与 camelCase 负载。
     #[test]
     fn state_change_frame() {
         let n = ServerNotification::StateChange(SessionStateChange {

@@ -1,4 +1,4 @@
-//! 会话管理（docs/DESIGN.md「普通会话存储」「session.*」）：会话列表与历史权威 = server。
+//! 会话管理：会话列表与历史权威在 server。
 //! - 会话元数据持久化于 SQLite（`session.sqlite`），列表由 server 维护
 //! - busy/idle 状态在 server 维护并存注册表；每次 Busy<->Idle 变更广播 `session.state_change`
 //! - 惰性会话：`session.new` 只写注册表，agent 侧会话延后到首条指令（`session.prompt`）
@@ -25,7 +25,7 @@ use crate::error::SessionError;
 use crate::history::{SessionLog, TurnMerger};
 use crate::registry::{RegistryEntry, SessionRegistry};
 
-/// server → GUI 通知（docs/DESIGN.md 唯一主动推送：`session.state_change`）。
+/// server → GUI 的会话状态通知。
 #[derive(Debug, Clone)]
 pub enum ServerNotification {
     StateChange(SessionStateChange),
@@ -72,7 +72,7 @@ impl SessionManager {
         data_dir: PathBuf,
     ) -> (Self, broadcast::Receiver<ServerNotification>) {
         let (tx, rx) = broadcast::channel(256);
-        // server 重启后，上次异常退出残留的 Busy 会话没有对应运行中 agent，统一重置为 Idle
+        // 异常退出后注册表中的 Busy 会话已没有对应的运行中 agent。
         if let Err(e) = registry.reset_busy_to_idle() {
             protocol::log::error("server.session", format!("重置残留忙会话失败：{e}"));
         }
@@ -89,7 +89,7 @@ impl SessionManager {
         (manager, rx)
     }
 
-    /// 会话列表惰性分页（纯函数，可单测；docs/DESIGN.md「session.list」）：
+    /// 会话列表惰性分页（纯函数，可单测）：
     /// `all` 已按最近活跃时间和会话 ID 降序排列；`before` 是上一页末尾生成的
     /// 不透明游标。复合游标避免会话列表变化或时间戳相同时重复、跳过条目。
     pub fn session_page(
@@ -125,16 +125,12 @@ impl SessionManager {
         (start, end, start > 0)
     }
 
-    // ---- agent ----
-
     pub fn agents(&self) -> &AgentRegistry {
         &self.agents
     }
 
-    // ---- 生命周期 ----
-
     /// 新建普通会话（**惰性**：只写注册表立即返回，不触发 ACP；agent 侧会话延后到
-    /// 首条指令时经 `session/new` 懒创建，docs/DESIGN.md「惰性创建新会话」）。
+    /// 首条指令时经 `session/new` 懒创建）。
     pub async fn create(&self, agent: &str, cwd: &str) -> Result<SessionMeta, SessionError> {
         let id = format!("s_{}", uuid::Uuid::new_v4());
         let ts = now();
@@ -169,14 +165,14 @@ impl SessionManager {
             .clone()
     }
 
-    /// 配置会话标题（用户可随时修改，PRD §3.1）。
+    /// 配置会话标题（用户可随时修改）。
     pub async fn configure(&self, session_id: &str, title: &str) -> Result<(), SessionError> {
         self.get_entry(session_id)?;
         self.registry.set_title(session_id, title.trim(), now())?;
         Ok(())
     }
 
-    /// 删除会话（docs/DESIGN.md「删除会话」）：若已有 agent 侧会话，先经 ACP
+    /// 删除会话：若已有 agent 侧会话，先经 ACP
     /// `session/close` 关闭；若 ACP Server 支持会话删除，再发 `session/delete`
     /// （不支持删除的 agent 报错，按「不支持」忽略）。ACP 失败不阻断本地删除。
     /// 联动清除注册表条目 + 历史日志 + 活动日志 + 进行中控制块。
@@ -200,7 +196,6 @@ impl SessionManager {
                             format!("关闭 ACP 会话失败（继续本地删除）{session_id}: {e}"),
                         );
                     }
-                    // 支持删除的 agent 同步删除 agent 侧会话；不支持删除的报错忽略
                     if let Err(e) = driver.delete_session(&agent_session_id) {
                         protocol::log::debug(
                             "server.session",
@@ -227,7 +222,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// 惰性分页会话列表（docs/DESIGN.md「session.list」）：按最近活跃降序切窗。
+    /// 惰性分页会话列表：按最近活跃降序切窗。
     pub async fn list(
         &self,
         limit: Option<usize>,
@@ -240,7 +235,7 @@ impl SessionManager {
         Ok((metas, has_more, next_before))
     }
 
-    /// 批量查询指定会话（docs/DESIGN.md「session.info」）。不存在的 id 静默跳过。
+    /// 批量查询指定会话。不存在的 id 静默跳过。
     pub async fn info(&self, session_ids: &[String]) -> Result<Vec<SessionMeta>, SessionError> {
         let mut metas = Vec::new();
         for id in session_ids {
@@ -264,7 +259,7 @@ impl SessionManager {
         Ok(self.get_entry(session_id)?.0.cwd)
     }
 
-    /// 关闭长时间无活动的 agent 侧会话（>timeout_ms，docs/DESIGN.md「主动关闭长时间
+    /// 关闭长时间无活动的 agent 侧会话（>timeout_ms，
     /// 无活动会话」）。候选选出后复核状态：已回到 Busy 的会话跳过本轮
     /// （避免关掉正在进行中的 turn 的 agent 侧会话）。
     pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> Result<usize, SessionError> {
@@ -291,9 +286,7 @@ impl SessionManager {
         Ok(closed)
     }
 
-    // ---- 会话数据 ----
-
-    /// 分页读对话历史（docs/DESIGN.md「session.history」）：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
+    /// 分页读对话历史：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
     pub async fn history(
         &self,
         session_id: &str,
@@ -309,7 +302,7 @@ impl SessionManager {
         Ok((items[start..end].to_vec(), has_more, next_before))
     }
 
-    /// 分页读活动历史（docs/DESIGN.md「session.activities」）：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
+    /// 分页读活动历史：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
     pub async fn activities(
         &self,
         session_id: &str,
@@ -382,7 +375,7 @@ impl SessionManager {
         self.activities_cache.lock().unwrap().remove(session_id);
     }
 
-    /// 查询正在进行中的活动（docs/DESIGN.md「session.ongoing_activity」；无则 None）。
+    /// 查询正在进行中的活动；无则 None。
     pub async fn ongoing_activity(
         &self,
         session_id: &str,
@@ -391,9 +384,7 @@ impl SessionManager {
         Ok(self.ongoing.lock().unwrap().get(session_id).cloned())
     }
 
-    // ---- 交互 ----
-
-    /// 发送指令（docs/DESIGN.md「session.prompt」）：busy 检查 → 首条生成标题 → 惰性创建
+    /// 发送指令：busy 检查 → 首条生成标题 → 惰性创建
     /// agent 会话（session/new）→ resume → 用户消息立即落盘 → 跑 turn（事件喂
     /// TurnMerger，记录 ongoing）→ 写 agent 历史/活动 → 置空闲；必要时广播
     /// `session.state_change`（Busy<->Idle）。落盘失败向上传播（GUI 可见）。
@@ -427,7 +418,6 @@ impl SessionManager {
             }
         };
 
-        // Busy 广播（reason 无意义，恒为默认值）
         if old_state != SessionState::Busy {
             self.broadcast_state_change(
                 session_id,
@@ -523,7 +513,6 @@ impl SessionManager {
             .agents
             .driver_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        // 惰性创建 agent 侧会话（session/new）并回填；已创建则沿用
         let agent_session_id = if agent_session_id.is_empty() {
             let sid2 = driver
                 .create_session(&meta.cwd)
@@ -553,7 +542,7 @@ impl SessionManager {
         let mut merger = TurnMerger::new();
         let mut rx = driver.prompt(agent_session_id, input);
         let mut turn_completed = false;
-        // 结束原因：事件流正常收尾时取 ACP stopReason；中断则保持 aborted
+        // 中断时没有 ACP stopReason，保持 aborted。
         let mut turn_reason = protocol::StateChangeReason::Aborted;
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -601,7 +590,7 @@ impl SessionManager {
                 }
             }
         }
-        // turn 未正常结束（连接中断或被异常终止）：记录错误活动
+        // 连接中断或异常终止的 turn 也要留下可见错误活动。
         if !turn_completed {
             let err = Activity::Error {
                 timestamp: now(),
@@ -656,7 +645,7 @@ impl SessionManager {
         }
     }
 
-    /// 取消指定普通会话正在进行的工作（docs/DESIGN.md「session.cancel」）。
+    /// 取消指定普通会话正在进行的工作。
     pub async fn cancel(&self, session_id: &str) -> Result<(), SessionError> {
         let (meta, agent_session_id) = self.get_entry(session_id)?;
         if agent_session_id.is_empty() {
@@ -691,7 +680,6 @@ impl SessionManager {
     }
 }
 
-/// 取输入的首个文本块（标题生成用）。
 fn first_text(input: &[ContentBlock]) -> String {
     input
         .iter()
@@ -718,7 +706,6 @@ mod tests {
         }]
     }
 
-    /// 测试直接构造 manager（独立临时数据目录）。
     fn stub_manager(agent: &str) -> (Arc<SessionManager>, broadcast::Receiver<ServerNotification>) {
         let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
             agent,
@@ -735,7 +722,6 @@ mod tests {
         (Arc::new(mgr), rx)
     }
 
-    /// 惰性会话：`session.new` 只写注册表，不触发 ACP；首条 prompt 懒创建 agent 侧会话。
     #[tokio::test]
     async fn create_is_lazy_until_first_prompt() {
         let agents = Arc::new(AgentRegistry::new_for_tests());
@@ -748,16 +734,13 @@ mod tests {
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
 
         let meta = mgr.create("codex", "/tmp/lazy").await.unwrap();
-        // 创建后：注册表 agent_session_id 为空（未与 ACP 交互）
         let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
         assert!(aid.is_empty(), "创建会话不应触发 ACP session/new");
 
-        // 惰性创建会话后即为 Idle
         assert_eq!(meta.state, SessionState::Idle);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 会话列表惰性分页纯函数（docs/DESIGN.md「session.list」）。
     #[test]
     fn session_page_lazy_windows() {
         fn entry(id: &str, last: u64) -> RegistryEntry {
@@ -877,7 +860,6 @@ mod tests {
         );
     }
 
-    /// 历史惰性加载切窗（纯函数）。
     #[test]
     fn window_items_lazy_loading_slices() {
         let (start, end, has_more) = SessionManager::window_items(1000, 200, None);
@@ -890,7 +872,6 @@ mod tests {
         assert_eq!((start, end, has_more), (0, 50, false));
     }
 
-    /// prompt 后写历史与活动（合并粒度），分页读取，标题生成。
     #[tokio::test]
     async fn prompt_writes_history_and_activities_with_title() {
         let (mgr, mut rx) = stub_manager("codex");
@@ -898,16 +879,13 @@ mod tests {
 
         mgr.prompt(&meta.id, text("实现登录功能")).await.unwrap();
 
-        // 标题按首条指令生成
         let (list, _, _) = mgr.list(None, None).await.unwrap();
         assert_eq!(list[0].title, "实现登录功能");
 
-        // 历史与活动已落盘
         let log = SessionLog::open(&mgr.data_dir, &meta.id);
         assert!(log.history_exists(), "prompt 后应写历史");
         assert!(log.activities_exists(), "prompt 后应写活动");
 
-        // 分页读历史：用户消息 + 一条合并输出
         let (items, has_more, next_before) = mgr.history(&meta.id, None, None).await.unwrap();
         assert!(matches!(&items[0], HistoryItem::UserMessage { content, .. }
             if content.contains(&ContentBlock::Text { text: "实现登录功能".into() })));
@@ -916,20 +894,16 @@ mod tests {
         assert!(!has_more);
         assert_eq!(next_before, None);
 
-        // 分页读活动：thinking + tool_call
         let (acts, _, _) = mgr.activities(&meta.id, None, None).await.unwrap();
         assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
         assert!(acts
             .iter()
             .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")));
 
-        // 列表状态回到空闲
         let (list, _, _) = mgr.list(None, None).await.unwrap();
         assert_eq!(list[0].state, SessionState::Idle);
-        // ongoing 清空
         assert!(mgr.ongoing_activity(&meta.id).await.unwrap().is_none());
 
-        // state_change：prompt 过程中应有 busy→idle
         let mut saw = false;
         while let Ok(n) = rx.recv().await {
             let ServerNotification::StateChange(c) = n;
@@ -944,8 +918,6 @@ mod tests {
         assert!(saw, "prompt 结束应广播 busy→idle");
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
     }
-
-    /// 用户消息应在 agent turn 结束前写入历史。
     #[tokio::test]
     async fn prompt_persists_user_message_before_turn_ends() {
         struct BlockingDriver {
@@ -1039,11 +1011,8 @@ mod tests {
         prompt_task.await.unwrap().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    /// 删除触发 ACP session/close（driver.close 被调用），并清除注册表与本地日志。
     #[tokio::test]
     async fn delete_triggers_driver_close() {
-        // 用计数关闭驱动验证 close 被调用
         struct Tracking {
             closed: Arc<std::sync::atomic::AtomicUsize>,
         }
@@ -1079,7 +1048,6 @@ mod tests {
                 Ok(())
             }
             fn delete_session(&self, _a: &str) -> Result<(), String> {
-                // 模拟不支持删除的 agent：返回错误，删除路径应忽略
                 Err("method not found".into())
             }
             fn list_skills(&self) -> Result<Vec<String>, String> {
@@ -1116,8 +1084,6 @@ mod tests {
         assert!(registry.get(&meta.id).unwrap().is_none(), "注册表应已删除");
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    /// 未 prompt 的会话可删除（无 agent 侧会话则无需 close）。
     #[tokio::test]
     async fn delete_unprompted_needs_no_close() {
         let (mgr, _rx) = stub_manager("codex");
@@ -1127,8 +1093,6 @@ mod tests {
         assert!(mgr.registry.get(&meta.id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
     }
-
-    /// 会话不存在时，读取和 prompt 报错，删除保持幂等。
     #[tokio::test]
     async fn missing_session_errors() {
         let (mgr, _rx) = stub_manager("codex");

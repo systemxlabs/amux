@@ -1,4 +1,4 @@
-//! GUI 本地配置（docs/DESIGN.md「应用」/ PRD §3.4/§3.6/§3.7/§4.3）：
+//! GUI 本地配置：
 //! 应用本地数据**拆到 `~/.amux/app/` 多个文件**：
 //! machines.json、skills.json、workflows.json、recent_workspaces.json、quick_commands.json、
 //! agent.json，以及工作流会话的 sessions/ 目录。
@@ -11,34 +11,29 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::logic::{merge_recent_workspace, recent_workspaces_for_machine};
-
-// ---- 应用本地配置形状（docs/DESIGN.md「应用」各存储节）----
-// 这些是 ~/.amux/app/ 下 JSON 文件的格式，不属于线上协议，故定义在应用侧。
-
-/// 注册机器（docs/DESIGN.md「注册机器存储」）：name 唯一。
+/// 注册机器：name 唯一。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MachineConfig {
     pub name: String,
-    /// ws://host:port
     pub url: String,
     pub token: String,
 }
 
-/// 技能条目（docs/DESIGN.md「技能存储」）：name 唯一，只存描述。
+/// 技能条目：name 唯一，只存描述。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillEntry {
     pub name: String,
     pub description: String,
 }
 
-/// 工作流模板（docs/DESIGN.md「工作流模板存储」）：name 唯一。
+/// 工作流模板：name 唯一。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowTemplate {
     pub name: String,
     pub plan: String,
 }
 
-/// 常用工作目录条目（docs/DESIGN.md「常用工作目录存储」）：(machine, workspace) 唯一。
+/// 常用工作目录条目：(machine, workspace) 唯一。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecentWorkspace {
@@ -47,14 +42,14 @@ pub struct RecentWorkspace {
     pub last_used: u64,
 }
 
-/// 快捷指令（docs/DESIGN.md「快捷指令存储」）：name 唯一。
+/// 快捷指令：name 唯一。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuickCommand {
     pub name: String,
     pub prompt: String,
 }
 
-/// 编排 agent 的 API 格式（docs/DESIGN.md「编排智能体设置」单选项）。
+/// 编排 agent 的 API 格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiFormat {
@@ -63,7 +58,7 @@ pub enum ApiFormat {
     Messages,
 }
 
-/// 内置编排 agent 的 API 配置（docs/DESIGN.md「编排智能体配置存储」）。
+/// 内置编排 agent 的 API 配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestratorConfig {
@@ -93,16 +88,14 @@ impl OrchestratorConfig {
     }
 }
 
-/// 每设备常用工作目录数量上限（实现决策；PRD 未明确，取一个合理值）。
+/// 每设备常用工作目录数量上限。
 pub const MAX_RECENT_WORKSPACES: usize = 20;
-
-// ---- 归一化（坏字段回退/丢弃，不抛错）----
 
 fn is_string_field(v: &serde_json::Value, key: &str) -> bool {
     v.get(key).and_then(|x| x.as_str()).is_some()
 }
 
-/// 机器目录归一化：缺 name/url/token 的条目丢弃（docs/DESIGN.md「注册机器存储」）。
+/// 机器目录归一化：缺 name/url/token 的条目丢弃。
 pub fn normalize_machines(raw: &serde_json::Value) -> Vec<MachineConfig> {
     raw.as_array()
         .map(|arr| {
@@ -122,7 +115,7 @@ pub fn normalize_machines(raw: &serde_json::Value) -> Vec<MachineConfig> {
         .unwrap_or_default()
 }
 
-/// 常用工作目录归一化：缺 machine/workspace 的条目丢弃（docs/DESIGN.md「常用工作目录存储」）。
+/// 常用工作目录归一化：缺 machine/workspace 的条目丢弃。
 pub fn normalize_recent_workspaces(raw: &serde_json::Value) -> Vec<RecentWorkspace> {
     raw.as_array()
         .map(|arr| {
@@ -138,7 +131,7 @@ pub fn normalize_recent_workspaces(raw: &serde_json::Value) -> Vec<RecentWorkspa
         .unwrap_or_default()
 }
 
-/// 编排配置归一化：字段缺失或 api_format 非法 → 整体回退默认（docs/DESIGN.md「编排智能体配置存储」）。
+/// 编排配置归一化：字段缺失或 api_format 非法 → 整体回退默认。
 pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
     let has_req = ["apiFormat", "baseUrl", "apiKey", "model"]
         .iter()
@@ -156,8 +149,6 @@ pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
         model: raw["model"].as_str().unwrap_or("").to_string(),
     }
 }
-
-// ---- 存储工具 ----
 
 fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
     let raw = match std::fs::read_to_string(path) {
@@ -300,8 +291,6 @@ impl ConfigStore {
         self.data_dir.join(name)
     }
 
-    // ---- 机器（machines.json）----
-
     pub fn list_machines(&self) -> Vec<MachineConfig> {
         read_file_normalized(&self.path("machines.json"), normalize_machines)
     }
@@ -334,8 +323,6 @@ impl ConfigStore {
         );
     }
 
-    // ---- 快捷指令（quick_commands.json）----
-
     fn quick_commands(&self) -> JsonCollection<'_, QuickCommand> {
         JsonCollection {
             path: std::borrow::Cow::Owned(self.path("quick_commands.json")),
@@ -364,8 +351,6 @@ impl ConfigStore {
     pub fn remove_quick_command(&self, name: &str) {
         self.quick_commands().remove(name);
     }
-
-    // ---- Skills（skills.json）----
 
     fn skills(&self) -> JsonCollection<'_, SkillEntry> {
         JsonCollection {
@@ -396,8 +381,6 @@ impl ConfigStore {
         self.skills().remove(name);
     }
 
-    // ---- 工作流模板（workflows.json）----
-
     fn templates(&self) -> JsonCollection<'_, WorkflowTemplate> {
         JsonCollection {
             path: std::borrow::Cow::Owned(self.path("workflows.json")),
@@ -426,8 +409,6 @@ impl ConfigStore {
         self.templates().remove(name);
     }
 
-    // ---- 常用工作目录（recent_workspaces.json）----
-
     pub fn recent_workspaces(&self) -> Vec<RecentWorkspace> {
         read_file_normalized(
             &self.path("recent_workspaces.json"),
@@ -435,7 +416,7 @@ impl ConfigStore {
         )
     }
 
-    /// 某设备的常用工作目录（最近使用优先）。
+    /// 某设备的常用工作目录，最近使用优先。
     pub fn recent_workspaces_for_machine(&self, machine: &str) -> Vec<String> {
         let ws = self.recent_workspaces();
         recent_workspaces_for_machine(&ws, machine)
@@ -451,8 +432,6 @@ impl ConfigStore {
             &serde_json::to_value(&merged).unwrap(),
         );
     }
-
-    // ---- 编排 agent（agent.json）----
 
     pub fn orchestrator(&self) -> OrchestratorConfig {
         let path = self.path("agent.json");
@@ -493,7 +472,7 @@ impl ConfigStore {
     }
 }
 
-/// 机器 WS 连接 URL（不含 token；token 在建连后经 `auth` 发送，docs/DESIGN.md「认证」）。
+/// 机器 WS 连接 URL；token 在建连后经 `auth` 发送，不放入 URL。
 /// 统一补 `/` 保证 tungstenite 请求行合法（`GET /` 而非非法空路径）。
 pub fn machine_ws_url(m: &MachineConfig) -> String {
     let base = m.url.trim_end_matches('/');
@@ -557,7 +536,6 @@ mod tests {
         let cfg = normalize_orchestrator(&full);
         assert_eq!(cfg.model, "m");
         assert_eq!(cfg.api_format, ApiFormat::Responses);
-        // 非法 api_format 视为坏配置，整体回退默认
         let bad = serde_json::json!({
             "apiFormat": "graphql", "baseUrl": "http://x", "apiKey": "k", "model": "m"
         });
@@ -569,7 +547,7 @@ mod tests {
         let s = store();
         assert!(s.list_machines().is_empty());
         s.add_machine("本机", "ws://127.0.0.1:34567", "t");
-        s.add_machine("本机", "ws://127.0.0.1:34567", "t2"); // name 唯一去重
+        s.add_machine("本机", "ws://127.0.0.1:34567", "t2");
         s.add_machine("远程", "ws://1.2.3.4:34567", "t3");
         let machines = s.list_machines();
         assert_eq!(machines.len(), 2, "name 唯一");
@@ -595,7 +573,6 @@ mod tests {
         })
         .unwrap();
 
-        // 重新加载（同一目录）：各分类独立往返
         let s2 = ConfigStore::new(dir.clone());
         assert_eq!(s2.list_machines().len(), 1);
         assert_eq!(s2.list_skills().len(), 1);
@@ -612,7 +589,7 @@ mod tests {
         assert!(s.recent_workspaces().is_empty());
         s.record_recent_workspace("m1", "/a", 1);
         s.record_recent_workspace("m1", "/b", 2);
-        s.record_recent_workspace("m1", "/a", 3); // (machine, workspace) 唯一，移到最前
+        s.record_recent_workspace("m1", "/a", 3);
         s.record_recent_workspace("m2", "/x", 4);
         let s2 = ConfigStore::new(dir.clone());
         assert_eq!(s2.recent_workspaces_for_machine("m1"), vec!["/a", "/b"]);

@@ -32,7 +32,6 @@ pub fn machine_status_badge<'a>(
     danger: Hsla,
     warning: Hsla,
 ) -> impl IntoElement {
-    // 强类型状态 + 可选操作级提示（notice 覆盖显示、警示色）；胶囊样式沿用上游
     let (status, notice) = state;
     let (text, color) = match notice {
         Some(n) => (n.to_string(), warning),

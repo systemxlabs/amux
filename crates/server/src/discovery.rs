@@ -1,5 +1,5 @@
-//! ACP agent 自动发现（docs/DESIGN.md「ACP Server 发现」）：PATH 探测已知 CLI，
-//! 决策表严格按文档——kimi 原生 `acp` 子命令；claude/codex 经 npx 官方包装器。
+//! ACP agent 自动发现：PATH 探测已知 CLI，kimi 使用原生 `acp` 子命令，
+//! claude/codex 使用 npx 官方包装器。
 //! 发现结果由 `AgentRegistry::launch_discovered` 在 server 启动时并行拉起。
 
 /// 自动发现的 ACP agent（含 ACP 子命令参数 / npx 包装器参数与附加环境变量）。
@@ -12,14 +12,13 @@ pub struct DiscoveredAgent {
     pub env: Vec<(String, String)>,
 }
 
-/// 自动发现 ACP agent（PRD §3.3：可执行路径自动发现、不手动指定）。
-/// 严格按 docs/DESIGN.md「ACP Server 发现」表：
+/// 自动发现已知的 ACP agent：
 /// - kimi：装有 `kimi` CLI 且 `kimi acp --help` 可用 → `kimi acp`
 /// - claude：装有 `claude` CLI 且 npx 可用 → `npx -y @agentclientprotocol/claude-agent-acp`
 /// - codex：装有 `codex` CLI 且 npx 可用 → `npx -y @agentclientprotocol/codex-acp`
 ///
 /// 不做任意 `*-acp` 扫描：只认已知 agent，避免无关可执行污染列表。
-/// 发现的 agent 由 `launch_discovered` 在 server 启动时拉起（docs/DESIGN.md §4.1/§7.3）。
+/// 发现的 agent 由 `launch_discovered` 在 server 启动时拉起。
 pub(crate) fn discover_acp_agents() -> Vec<DiscoveredAgent> {
     let mut found: Vec<DiscoveredAgent> = Vec::new();
     let npx = find_on_path("npx");
@@ -37,7 +36,7 @@ pub(crate) fn discover_acp_agents() -> Vec<DiscoveredAgent> {
     found
 }
 
-/// 单 CLI 的发现决策（纯逻辑，便于单测；docs/DESIGN.md「ACP Server 发现」表）。
+/// 单 CLI 的发现决策（纯逻辑，便于单测）。
 fn discover_for_cli(
     cli: &str,
     pkg: Option<&str>,
@@ -47,21 +46,18 @@ fn discover_for_cli(
 ) -> Option<DiscoveredAgent> {
     let cli_bin = cli_bin?;
     match (cli, pkg) {
-        // kimi 走原生 `acp` 子命令（文档唯一指定 `kimi acp --help` 可用为发现条件）
+        // 只有确认支持 `acp` 子命令时才使用原生模式。
         ("kimi", _) if acp_supported => Some(DiscoveredAgent {
             name: cli.to_string(),
             bin: cli_bin,
             args: vec!["acp".to_string()],
             env: Vec::new(),
         }),
-        // claude/codex 走 npx 官方 ACP 包装器（文档指定发现条件为「CLI 装有且 npx 可用」，
-        // 即使 CLI 自带 acp 子命令也按文档走包装器）
+        // claude/codex 始终走官方包装器，避免依赖 CLI 自带的 ACP 实现。
         ("claude" | "codex", Some(pkg)) => {
             let npx = npx_bin?;
             let mut env = Vec::new();
             if cli == "codex" {
-                // 全权限自主模式（与「权限自动审批」的 yolo 语义配套；文档启动表未列出，
-                // 属实现层补充，已列入文档修订建议）
                 env.push(("INITIAL_AGENT_MODE".into(), "agent-full-access".into()));
             }
             Some(DiscoveredAgent {

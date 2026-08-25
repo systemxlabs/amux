@@ -1,6 +1,6 @@
-//! GUI 的 WS 客户端（docs/DESIGN.md §4）：连 amux server，JSON-RPC 请求/响应/通知。
+//! GUI 的 WS 客户端：连接 amux server，处理 JSON-RPC 请求、响应和通知。
 //!
-//! 认证（docs/DESIGN.md「机器连接」）：应用连接后**先发 `auth`**（method=AUTH，params={token}），
+//! 认证：应用连接后**先发 `auth`**（method=AUTH，params={token}），
 //! 认证成功后才处理其它请求；认证完成前到达的请求一律返回认证失败（AUTH_FAILED）。
 //! 数据为**拉取式**（request/response 按 id 匹配），断线指数退避重连；
 //! 仅保留本地 connected/disconnected 通知供 UI 标记在线/离线状态。
@@ -21,8 +21,7 @@ use protocol::OpResult;
 /// GPUI 环境无 Tokio runtime，这里维护一个独立的多线程 runtime 跑 WS 后台任务。
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
-/// 全部活跃连接的关闭信号（应用退出时统一触发，docs/DESIGN.md「应用关闭时
-/// 会同时关闭所有 Server 连接」；进程退出兜底之外的确定性关闭）。
+/// 全部活跃连接的关闭信号，应用退出时统一触发，确保连接确定性关闭。
 static CLOSE_SIGNALS: OnceLock<std::sync::Mutex<Vec<tokio::sync::watch::Sender<bool>>>> =
     OnceLock::new();
 
@@ -89,7 +88,6 @@ impl WsClient {
     /// 连接 server（后台 task 持有连接并处理收发）。
     /// 认证 token 在首个 JSON-RPC `auth` 请求中发送，不放入 URL。
     pub fn connect_with_token(url: String, token: String) -> Self {
-        // 建连后**先发 `auth`**，之后再处理其它请求。
         let (req_tx, req_rx) = mpsc::channel::<ClientReq>(64);
         let (notify_tx, _) = broadcast::channel::<Notification>(256);
         let (close_tx, close_rx) = tokio::sync::watch::channel(false);
@@ -251,9 +249,7 @@ async fn serve_connection(
     let (mut sink, mut source) = ws.split();
     let mut pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> = HashMap::new();
     let mut next_id: u64 = 1;
-    // 认证成功后才放行普通请求（docs/DESIGN.md「认证」）。
     let mut authed = false;
-    // 认证：建连后首个消息必须是 auth（docs/DESIGN.md「认证」）。
     let auth_id = next_id;
     next_id += 1;
     let auth_frame = json!({
@@ -279,10 +275,8 @@ async fn serve_connection(
             }
             req = req_rx.recv() => {
                 let Some(req) = req else {
-                    // client 全部销毁：连接任务退出（run_loop 一并结束）
                     return ConnectionOutcome::ClientClosed;
                 };
-                // 认证成功后才放行普通请求，否则一律返回认证失败（docs/DESIGN.md「认证」）
                 if !authed {
                     let _ = req.resp.send(Err(RpcError {
                         code: protocol::server_error::AUTH_FAILED,

@@ -1,17 +1,10 @@
 //! 业务类型：agent/会话/对话内容/活动/workspace。
-//! 语义依据 docs/DESIGN.md（「Client-Server 通信」协议、普通会话存储）。
-//! 应用本地配置形状（machines/skills/workflows 等 JSON 文件）不属于线上协议，由 desktop 自持。
-
 use serde::{Deserialize, Serialize};
-
-// ---- 认证（docs/DESIGN.md「认证」）----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthParams {
     pub token: String,
 }
-
-// ---- agent（docs/DESIGN.md「agent.list」等）----
 
 /// 某机器上的一个 agent：名称与可用性。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,8 +41,6 @@ pub struct OpResult {
     pub message: Option<String>,
 }
 
-// ---- 会话（docs/DESIGN.md「普通会话存储」「session.*」）----
-
 /// 会话状态：空闲或工作中。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,7 +49,7 @@ pub enum SessionState {
     Busy,
 }
 
-/// 普通会话元数据（docs/DESIGN.md「普通会话存储·元数据」）。
+/// 普通会话元数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
@@ -159,8 +150,7 @@ pub struct SessionInfoResult {
     pub sessions: Vec<SessionMeta>,
 }
 
-/// 会话状态变更原因（源自 ACP `session/prompt` 响应的 stopReason；
-/// docs/DESIGN.md §工作流会话驱动「变更原因非取消才注入」）。
+/// 会话状态变更原因，源自 ACP `session/prompt` 响应的 stopReason。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StateChangeReason {
@@ -179,7 +169,7 @@ pub enum StateChangeReason {
     Aborted,
 }
 
-/// 会话状态变更通知负载（docs/DESIGN.md 唯一主动推送 `session.state_change`）。
+/// 会话状态变更通知负载。
 /// reason 仅在变更为 Idle（turn 结束）时有意义；Busy 侧恒为 completed。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -189,8 +179,6 @@ pub struct SessionStateChange {
     pub new_state: SessionState,
     pub reason: StateChangeReason,
 }
-
-// ---- 对话内容（docs/DESIGN.md prompt 输入；普通会话存储·对话历史）----
 
 /// prompt 输入内容块。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -222,7 +210,7 @@ pub enum ContentBlock {
     },
 }
 
-/// 对话历史条目（docs/DESIGN.md「普通会话存储·对话历史」：仅用户输入与 agent 输出，合并后写入）。
+/// 对话历史条目：仅包含用户输入与合并后的 agent 输出。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryItem {
@@ -245,8 +233,6 @@ pub struct HistoryResult {
     /// 更早一窗的独占上界游标；无更早时为 None。
     pub next_before: Option<u64>,
 }
-
-// ---- 活动（docs/DESIGN.md「普通会话存储·活动历史」「session.activities」）----
 
 /// 会话活动：turn 过程中的详细活动。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -290,8 +276,6 @@ pub struct OngoingActivityResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<Activity>,
 }
-
-// ---- workspace（docs/DESIGN.md「workspace.diff」「workspace.restore」）----
 
 /// git 改动状态。server 侧 status 检测关闭了重命名跟踪，重命名呈现为删除+新增，
 /// 故无 Renamed/Untracked 变体（Untracked 与 Added 语义重叠）。
@@ -441,7 +425,7 @@ pub fn generate_title(input: &str) -> String {
     generate_title_max(input, 40)
 }
 
-/// 带长度上限的标题生成（可单测）。
+/// 从首行生成标题，并在超过 `max_chars` 时追加省略号。
 pub fn generate_title_max(input: &str, max_chars: usize) -> String {
     let line = input.lines().next().unwrap_or("").trim();
     let collapsed: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -475,7 +459,6 @@ mod tests {
         assert!(!generate_title(&short).ends_with('…'));
     }
 
-    /// auth 参数与 session 各方法参数可解析。
     #[test]
     fn auth_and_session_params_deserialize() {
         let a: AuthParams = serde_json::from_str(r#"{"token":"t"}"#).unwrap();
@@ -497,7 +480,6 @@ mod tests {
         assert_eq!(page.before, None);
     }
 
-    /// 会话列表与分页结果序列化为 camelCase。
     #[test]
     fn session_list_result_serialize_camel_case() {
         let res = SessionListResult {
@@ -511,7 +493,6 @@ mod tests {
         assert!(s.contains("\"sessions\":[]"), "{s}");
     }
 
-    /// session.state_change 通知负载序列化。
     #[test]
     fn state_change_payload_serializes() {
         let n = SessionStateChange {
@@ -550,7 +531,6 @@ mod tests {
         assert!(json.contains("\"nextOffset\":1"), "{json}");
     }
 
-    /// 会话状态线上表示解析。
     #[test]
     fn session_state_parses_snake_case() {
         assert_eq!(parse_session_state("idle"), Some(SessionState::Idle));
@@ -559,7 +539,6 @@ mod tests {
         assert_eq!(parse_session_state(""), None);
     }
 
-    /// Git diff 类型往返。
     #[test]
     fn git_diff_types_roundtrip() {
         let hunk = GitDiffHunk {

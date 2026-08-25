@@ -1,12 +1,7 @@
-//! GUI 纯逻辑（PRD §4.2 输入 / §3.1 会话排序 / §4.1.1 会话列表惰性加载 /
-//! docs/DESIGN.md「常用工作目录存储」「会话列表」「对话视图」「活动视图」）：
-//! 常用工作目录（machine/workspace）插入、会话列表窗口合并、对话/活动数据变换、
-//! 输入 @ 引用与附件组装。与 GPUI 渲染分离，可单测直驱。
+//! Pure data transformations shared by the GUI and its tests.
 
 use crate::config::RecentWorkspace;
 use protocol::{Activity, ContentBlock, HistoryItem, SessionMeta};
-
-// ---- 常用工作目录纯逻辑（docs/DESIGN.md「常用工作目录存储」）----
 
 /// 合并一条新近使用记录：(machine, workspace) 唯一、去重后移到最前、整体按最近使用降序、
 /// 超出 `max` 时丢弃最旧。返回新的有序列表（最近使用在前）。
@@ -41,8 +36,6 @@ pub fn recent_workspaces_for_machine(entries: &[RecentWorkspace], machine: &str)
     mine.into_iter().map(|e| e.workspace.clone()).collect()
 }
 
-// ---- 会话列表窗口合并（docs/DESIGN.md「会话列表」惰性加载）----
-
 /// 把一窗会话并入已加载列表（首次取最近活跃一窗，滚动加载更早）。
 /// - 首次加载：`existing` 为空 → 窗口即为当前列表
 /// - 追加：更早一窗按序并入（保持最近活跃在前）
@@ -66,14 +59,11 @@ pub fn merge_session_window(
     (out, has_more, next_before)
 }
 
-/// 按最近活跃降序排序会话（列表合并后统一排序，docs/DESIGN.md「会话列表」）。
+/// 按最近活跃降序排序会话。
 pub fn sort_sessions_recent(meta: &mut [SessionMeta]) {
     meta.sort_by_key(|entry| std::cmp::Reverse(entry.last_active_at));
 }
 
-// ---- 对话数据变换（docs/DESIGN.md「对话视图」：session.history）----
-
-/// 对话气泡（对话历史渲染用）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum DialogMsg {
     UserMessage {
@@ -103,8 +93,6 @@ pub fn history_to_dialog(items: &[HistoryItem]) -> Vec<DialogMsg> {
         .collect()
 }
 
-// ---- 活动数据变换（docs/DESIGN.md「活动视图」：session.activities）----
-
 /// 活动 → （种类标签, 详情文案）纯逻辑（渲染层做样式）。
 pub fn activity_kind_detail(a: &Activity) -> (String, String) {
     match a {
@@ -131,8 +119,6 @@ pub fn activity_kind_detail(a: &Activity) -> (String, String) {
     }
 }
 
-// ---- 输入附件（PRD §4.2；去语音输入）----
-
 /// 输入附件：@ 引用文件/目录、拖拽文件/图片。
 /// 图片以路径引用传递（不读二进制内容）——主流 agent CLI 自身具备按路径读取
 /// 图片的能力，GUI 侧 read_to_string 二进制只会得到空串（曾为坏路径）。
@@ -150,7 +136,7 @@ pub enum InputAttachment {
     },
 }
 
-/// 路径 → 路径附件（PRD §4.2）。拖拽文件/目录与 `@` 引用共用。
+/// 路径 → 路径附件，供拖拽文件/目录与 `@` 引用共用。
 pub fn path_attachment(path: &str) -> InputAttachment {
     InputAttachment::Path {
         path: path.to_string(),
@@ -192,7 +178,7 @@ pub fn external_path_attachment(path: &str) -> InputAttachment {
     path_attachment(path)
 }
 
-/// 解析输入文本中的 @ 引用（PRD §4.2：@ 引用文件或目录作为上下文）。
+/// 解析输入文本中的 @ 引用，将文件或目录作为上下文。
 /// 返回（清理后的文本，引用列表）。
 pub fn parse_at_references(text: &str) -> (String, Vec<String>) {
     let mut refs = Vec::new();
@@ -263,7 +249,7 @@ pub fn read_path_context(path: &str) -> String {
     }
 }
 
-/// 附件 → prompt 内容块（PRD §4.2 上下文）。
+/// 附件 → prompt 内容块。
 pub fn attachment_to_content_block(a: &InputAttachment) -> ContentBlock {
     match a {
         InputAttachment::Path { path, .. } => ContentBlock::Text {
@@ -330,7 +316,6 @@ mod tests {
         }
     }
 
-    /// 常用工作目录：(machine, workspace) 去重/排序/上限（acceptance）。
     #[test]
     fn merge_recent_workspace_dedup_sort_cap() {
         let mut list = vec![
@@ -338,19 +323,16 @@ mod tests {
             rw("m1", "/b", 200),
             rw("m1", "/c", 300),
         ];
-        // 重复使用 /a：移到最前、其余保持相对顺序、总条数不变
         list = merge_recent_workspace(&list, "m1", "/a", 400, MAX_RECENT_WORKSPACES);
         let paths: Vec<&str> = list.iter().map(|e| e.workspace.as_str()).collect();
         assert_eq!(paths, ["/a", "/b", "/c"]);
         assert_eq!(list[0].last_used, 400);
         assert_eq!(list.len(), 3);
-        // (machine, workspace) 唯一
         let uniq: std::collections::HashSet<_> = list
             .iter()
             .map(|e| format!("{}:{}", e.machine, e.workspace))
             .collect();
         assert_eq!(uniq.len(), list.len());
-        // 上限：最旧丢弃
         let mut capped = Vec::new();
         for t in 0..25 {
             capped = merge_recent_workspace(&capped, "m1", &format!("/d{t}"), t, 20);
@@ -389,7 +371,6 @@ mod tests {
         }
     }
 
-    /// 会话列表窗口合并/去重/游标（acceptance）。
     #[test]
     fn merge_session_window_first_append_dedup() {
         let window1 = vec![smeta("s3", 300), smeta("s2", 200)];
@@ -409,7 +390,6 @@ mod tests {
         assert!(!has_more);
         assert_eq!(next, None);
 
-        // 重复 id 去重
         let window3 = vec![smeta("s2", 200), smeta("s0", 50)];
         let (list, _, _) = merge_session_window(&list, window3, false, None);
         assert_eq!(
@@ -418,7 +398,6 @@ mod tests {
         );
     }
 
-    /// 会话列表按最近活跃排序。
     #[test]
     fn sort_sessions_recent_desc() {
         let mut list = vec![smeta("a", 100), smeta("b", 300), smeta("c", 200)];
@@ -429,7 +408,6 @@ mod tests {
         );
     }
 
-    /// 对话数据变换（acceptance：session.history → 气泡）。
     #[test]
     fn history_to_dialog_maps_all_kinds() {
         let items = vec![
@@ -452,7 +430,6 @@ mod tests {
         assert!(matches!(&dialog[1], DialogMsg::AgentMessage { .. }));
     }
 
-    /// 活动数据变换（acceptance：session.activities → 文案）。
     #[test]
     fn activity_kind_detail_maps_variants() {
         let thinking = Activity::Thinking {

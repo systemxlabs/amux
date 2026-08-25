@@ -1,4 +1,4 @@
-//! server 配置与 token（docs/DESIGN.md §4）。
+//! server 配置与 token。
 //! 认证 token 不落盘：每次启动由用户指定（`--token` / `AMUX_TOKEN`），未指定则拒绝启动。
 
 use std::collections::HashMap;

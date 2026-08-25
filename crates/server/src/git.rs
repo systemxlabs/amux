@@ -1,4 +1,4 @@
-//! git 能力（docs/DESIGN.md「workspace.diff」「workspace.restore」）：
+//! git 能力：
 //! - diff 查询、untracked 判定：gitoxide（gix）结构化实现，不依赖 git 二进制、
 //!   无本地化输出解析
 //! - gitoxide 无等价能力处保留 git CLI：patch 应用（`git apply --reverse`）、
@@ -340,7 +340,7 @@ impl GitRunner {
         })
     }
 
-    /// 结构化 diff（docs/DESIGN.md「workspace.diff」）：gitoxide 实现。
+    /// 结构化 diff：gitoxide 实现。
     /// cwd 非 git 仓库时返回 `not_repo` 标记。
     pub fn diff(&self, cwd: &str, path: Option<&str>) -> WorkspaceDiffResult {
         let empty = || WorkspaceDiffResult {
@@ -423,7 +423,6 @@ impl GitRunner {
             }
         }
 
-        // 单路径过滤（相对 cwd 的路径映射到仓库根）
         if let Some(f) = path.map(|p| repo_relative_path(workdir, cwd, p)) {
             let f = BString::from(f);
             let prefix = format!("{f}/");
@@ -494,7 +493,7 @@ impl GitRunner {
         }
     }
 
-    /// 撤销工作区变更（docs/DESIGN.md「workspace.restore」）。
+    /// 撤销工作区变更。
     /// - `patch`：单 hunk/单文件 patch 反向应用——gitoxide 无 patch 应用引擎，保留 `git apply --reverse`
     ///   （diff patch 的 a/ b/ 头为仓库根相对路径，故从仓库根执行 apply，cwd 为子目录时同样正确）
     /// - `path`：单文件——tracked 用 `git restore`；untracked 直接删除（从未提交，revert = 移除）
@@ -559,7 +558,6 @@ impl GitRunner {
                 },
             };
         }
-        // 全部变更：restore tracked + clean untracked
         if let Err(e) = run(cwd, &["restore", "--staged", "--worktree", "--", "."]) {
             return OpResult {
                 ok: false,
@@ -836,7 +834,6 @@ mod tests {
     #[test]
     fn diff_returns_structured_files() {
         let dir = init_repo();
-        // 原 a.txt 两行 → 三行（删 line2，增 CHANGED 与 line3）
         std::fs::write(dir.join("a.txt"), "line1\nCHANGED\nline3\n").unwrap();
         std::fs::write(dir.join("new.txt"), "hello\nworld\n").unwrap();
         git(&dir, &["add", "new.txt"]);
@@ -849,7 +846,6 @@ mod tests {
         assert!(a.patch.contains("diff --git a/a.txt b/a.txt"));
         assert_eq!(a.hunks.len(), 1);
         assert!(a.hunks[0].header.starts_with("@@ "));
-        // hunk patch 含文件头，可独立反向应用（单 hunk revert）
         assert!(a.hunks[0].patch.contains("diff --git"));
         let n = d
             .files
@@ -869,14 +865,12 @@ mod tests {
         assert!(res.ok, "revert 失败: {:?}", res.message);
         let content = std::fs::read_to_string(dir.join("a.txt")).unwrap();
         assert_eq!(content, "line1\nline2\n", "工作区应恢复到 HEAD");
-        // 已无变更时 restore 是幂等成功（no-op）
         let res = r.restore(dir.to_str().unwrap(), Some("a.txt"), None);
         assert!(res.ok, "幂等 revert 应成功: {:?}", res.message);
     }
 
     #[test]
     fn revert_single_hunk_via_patch() {
-        // 独立仓库：20 行基线文件已提交；改第 3 行与第 18 行 → 两个独立 hunk
         let dir = unique_dir("amux-git-hunk");
         std::fs::create_dir_all(&dir).unwrap();
         git(&dir, &["init", "-b", "main", "-q"]);

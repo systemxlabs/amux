@@ -1,4 +1,4 @@
-//! 会话视图数据聚合（docs/DESIGN.md「对话视图」「活动视图」）：普通会话从
+//! 会话视图数据聚合：普通会话从
 //! `session.history` / `session.activities` / `session.ongoing_activity` 拉取的数据
 //! 聚合为对话气泡与活动列表。纯函数，与 GPUI/WS 分离，便于单测。
 
@@ -21,7 +21,7 @@ pub struct SessionView {
 }
 
 impl SessionView {
-    /// 增量合并最新一窗（docs/DESIGN.md「对话视图：增量渲染」）：
+    /// 增量合并最新一窗：
     /// 新窗与已渲染内容的尾部按（类别，时间戳）序列对齐，只追加真正新增的条目——
     /// 原实现整页替换，既破坏增量语义，还会在下次 10s 轮询时冲掉用户
     /// 「加载更早」载入的旧消息。保留旧前缀时沿用旧分页游标。
@@ -40,7 +40,6 @@ impl SessionView {
         }
         if let Some(kept_older) = merge_tail(&mut self.dialog, fresh) {
             if kept_older {
-                // 之前「加载更早」的窗口仍在展示：游标保持指向最旧已加载边界
                 return;
             }
         }
@@ -247,7 +246,7 @@ mod tests {
         let mut view = SessionView::default();
         view.set_history_page(&[user("你好", 1), agent("回复", 2)], false, None);
         assert_eq!(view.dialog.len(), 2);
-        // 刷新覆盖
+
         view.set_history_page(&[agent("新回复", 3)], false, None);
         assert_eq!(view.dialog.len(), 1);
         assert!(matches!(&view.dialog[0], DialogMsg::AgentMessage { .. }));
@@ -292,7 +291,7 @@ mod tests {
     fn set_history_page_merges_incrementally() {
         let mut view = SessionView::default();
         view.set_history_page(&[user("问", 1), agent("答", 2)], false, None);
-        // 下一次轮询带回同一窗 + 一条新输出：不重复、不清空
+
         view.set_history_page(
             &[user("问", 1), agent("答", 2), agent("补充", 3)],
             false,
@@ -307,7 +306,7 @@ mod tests {
         let mut view = SessionView::default();
         view.set_history_page(&[user("旧", 0)], true, Some(1));
         view.prepend_history(&[user("更早", 0)]);
-        // 轮询最新一窗不含「更早」：不得把它冲掉，且保留旧游标
+
         view.set_history_page(&[user("旧", 0), agent("新", 5)], true, Some(6));
         let d = &view.dialog;
         assert_eq!(d.len(), 3, "加载更早的内容应在轮询后保留");

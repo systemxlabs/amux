@@ -1,4 +1,4 @@
-//! amux server 常驻进程入口（docs/DESIGN.md §3）。
+//! amux server 常驻进程入口。
 //! 启动流程：配置 → token → 依赖组装 → 监听 WebSocket。
 
 // server crate 的模块全部在 lib.rs 声明（main.rs 复用它，避免重复编译）。
@@ -24,7 +24,6 @@ async fn main() {
         }
     };
 
-    // 初始化文件日志（按天切片、保留 7 天，docs/DESIGN.md §8）
     let log_path = cfg
         .data_dir
         .parent()
@@ -33,7 +32,7 @@ async fn main() {
     protocol::log::init_file_output(&log_path);
 
     // 依赖组装：ACP agent 驱动（--agent 显式指定 agent 可执行与子命令参数）；未指定时由
-    // AgentRegistry 自动发现本机 ACP agent（PRD §3.3）。单个显式 agent 拉起失败不阻止
+    // AgentRegistry 自动发现本机 ACP agent。单个显式 agent 拉起失败不阻止
     // Server 监听，其他已发现 agent 仍可用。
     let configured_name = cfg.agent_bin.as_ref().map(|bin| {
         std::path::Path::new(bin)
@@ -57,7 +56,6 @@ async fn main() {
         }
     });
 
-    // 数据目录
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
         protocol::log::error("server.startup", format!("创建数据目录失败: {e}"));
         std::process::exit(1);
@@ -71,9 +69,6 @@ async fn main() {
         }
     }
 
-    // 启动拉起移至监听之后（见 transport.run 前）：bind 失败路径不再遗留已拉起的子进程。
-
-    // 会话注册表（SQLite，docs/DESIGN.md「普通会话存储」：session.sqlite）。
     let registry = match SessionRegistry::open(&cfg.data_dir.join("session.sqlite")) {
         Ok(r) => Arc::new(r),
         Err(e) => {
@@ -82,7 +77,7 @@ async fn main() {
         }
     };
 
-    // 保留 agents 引用用于退出时关闭 ACP 子进程（docs/DESIGN.md「ACP Server 生命周期」）
+    // 保留 agents 引用用于退出时关闭 ACP 子进程。
     let shutdown_agents = agents.clone();
 
     let (manager, notifications) =
@@ -109,7 +104,7 @@ async fn main() {
         std::process::exit(0);
     });
 
-    // 定时清理长时间无活动会话（>1h，docs/DESIGN.md「主动关闭长时间无活动会话」）
+    // 定时清理长时间无活动会话（>1h）。
     let cleanup_manager = manager.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
@@ -151,7 +146,7 @@ async fn main() {
         })),
     });
 
-    // 启动拉起（docs/DESIGN.md「同时启动」）：并行拉起已发现 agent。放在监听之后
+    // 启动拉起：并行拉起已发现 agent。放在监听之后
     // 后台执行——bind 失败路径不再遗留子进程，agent 握手（最坏 30s/个）不阻塞
     // server 就绪；可用性经 agent.list 反映。
     let launch_agents = agents.clone();

@@ -1,5 +1,4 @@
-//! JSON-RPC 方法处理器（docs/DESIGN.md「Client-Server 通信」协议表）：
-//! 把协议方法面接到会话管理与 git。
+//! JSON-RPC 方法处理器，把协议方法面接到会话管理与 git。
 
 use std::sync::Arc;
 
@@ -56,7 +55,7 @@ fn parse<T: DeserializeOwned>(params: &Option<Value>) -> Result<T, RpcError> {
     serde_json::from_value(v).map_err(|e| RpcError::invalid_params(format!("参数非法: {e}")))
 }
 
-/// 把会话操作错误映射到协议错误码（docs/DESIGN.md 协议表错误语义）。
+/// 把会话操作错误映射到协议错误码。
 /// 强类型一次映射，替代按中文文案前缀反推。
 fn map_session_err(e: SessionError) -> RpcError {
     let message = e.to_string();
