@@ -189,7 +189,7 @@ pub trait OrcBackend: Send + Sync {
     fn take_synced_activities(&self) -> Option<Vec<Activity>> {
         None
     }
-    /// finish 工具的结论（None = 本轮未声明完成）。
+    /// 隐式终止的结论（None = 本轮未判定收敛）。
     fn take_synced_done(&self) -> Option<String> {
         None
     }
@@ -455,6 +455,11 @@ impl WorkflowEngine {
                 s.done = true;
             }
             s.done = s.done || decision.done;
+            // 收敛即回空闲（含仅置 done 无结论的情形）；否则 sync_state_from_children
+            // 会因 done 跳过同步，会话永远停在 Busy
+            if s.done {
+                s.state = SessionState::Idle;
+            }
         });
         if let Err(e) = self.apply_actions(decision.actions).await {
             self.with_session(|s| {
@@ -471,12 +476,13 @@ impl WorkflowEngine {
         if let Some(activities) = self.backend.take_synced_activities() {
             self.with_session(|s| s.activities.extend(activities));
         }
-        // finish 工具：编排智能体声明工作流完成（PRD「输出结论并回到空闲等待」；
-        // 无终止出口曾导致子会话每次 idle 都再触发一轮 LLM，无限推进）
+        // 隐式终止：编排本轮零调度动作且无子会话在跑 → 工作流收敛
+        // （PRD「输出结论并回到空闲等待」；无终止出口曾导致子会话每次 idle
+        // 都再触发一轮 LLM，无限推进）。用户新指令可复活继续推进。
         if let Some(conclusion) = self.backend.take_synced_done() {
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::Orc {
-                    text: format!("工作流已完成：{conclusion}"),
+                    text: format!("编排结束：{conclusion}"),
 
                     timestamp: now(),
                 });
@@ -775,7 +781,8 @@ impl WorkflowEngine {
         });
     }
 
-    /// 返回是否应立即启动推进（false = 已在工作（steer 入队）/已取消/已完成）。
+    /// 返回是否应立即启动推进（false = 已在工作（steer 入队））。
+    /// 已完成/等待人工输入的工作流，用户新指令可复活继续推进（PRD「输入指令继续推进」）。
     pub fn record_user(&self, text: &str) -> bool {
         let busy = {
             let s = self.session.read().expect("RwLock 中毒");
@@ -798,10 +805,9 @@ impl WorkflowEngine {
                 s.cancelled = false;
                 s.state = SessionState::Idle;
             }
+            // 隐式终止后的复活：done 不再是单向门，用户消息重新打开工作流
+            s.done = false;
         });
-        if self.session.read().expect("RwLock 中毒").done {
-            return false;
-        }
         if busy {
             // 工作中以 steer 注入，当前 turn 结束后再跑一轮（docs/DESIGN.md 编排智能体 steer）
             self.steer_inbox
@@ -922,7 +928,10 @@ struct LiveRuntime {
     clients: Vec<WsClient>,
     children: Arc<Mutex<Vec<ChildSession>>>,
     activities: Arc<Mutex<Vec<Activity>>>,
-    /// finish 工具写入的结论（工作流终止出口）
+    /// 本轮 decide 中调度类工具（create/prompt/cancel）的调用次数：
+    /// 隐式终止判定要求为 0（只读工具不计）。
+    scheduling_ops: Arc<Mutex<usize>>,
+    /// 隐式终止判定命中时写入的工作流结论
     done_conclusion: Arc<Mutex<Option<String>>>,
 }
 
@@ -952,12 +961,19 @@ impl LiveRuntime {
             .ok_or_else(|| format!("关联普通会话不存在: {session_id}"))
     }
 
-    /// finish 工具：编排智能体声明工作流完成并给出结论。
+    /// 隐式终止：循环判定工作流已收敛（无可自行推进之事）时写入结论。
     fn finish(&self, conclusion: String) {
         *self
             .done_conclusion
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）") = Some(conclusion);
+    }
+
+    fn scheduling_ops(&self) -> usize {
+        *self
+            .scheduling_ops
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
     }
 
     fn record_tool(&self, name: &str, title: impl Into<String>, content: impl Into<String>) {
@@ -1058,19 +1074,6 @@ fn tool_definitions() -> Vec<rig::completion::ToolDefinition> {
                 "required": ["session"]
             }),
         },
-        ToolDefinition {
-            name: "finish".into(),
-            description:
-                "声明工作流已完成（或已无法继续），给出中文结论后结束。需要人类判断时不要调用本工具"
-                    .into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "conclusion": { "type": "string", "description": "工作流的中文结论/结果摘要" }
-                },
-                "required": ["conclusion"]
-            }),
-        },
     ]
 }
 
@@ -1086,12 +1089,14 @@ fn assistant_text(choice: &OneOrMany<AssistantContent>) -> String {
         .join("\n")
 }
 
-/// 薄工具循环：驱动模型直至输出纯文本（turn 结束）或 finish 声明完成。
+/// 薄工具循环：驱动模型直至输出纯文本（turn 结束）。
 ///
 /// - 每轮请求前 drain `steer_inbox`，把用户插话注入为 user 消息（真实 steer）
 /// - assistant 响应整体保留（含 reasoning/image 与 message_id），provider 协议
 ///   要求后续请求原样回传（如 OpenAI Responses API 的 reasoning 配对）
 /// - 工具错误作为结果文本回传给模型自行纠正，不中断循环
+/// - 隐式终止：本轮零调度动作且所有子会话空闲时，本轮文本即工作流结论
+///   （PRD「输出结论并回到空闲等待」；无显式 finish 工具）
 async fn run_tool_loop<M>(
     model: M,
     preamble: &str,
@@ -1137,14 +1142,36 @@ where
             content: resp.choice,
         });
         if calls.is_empty() {
-            return Ok(if text.trim().is_empty() {
-                "（本轮调度动作见工具记录）".to_string()
+            let text = if text.trim().is_empty() {
+                "（编排智能体未输出文字）".to_string()
             } else {
                 text
-            });
+            };
+            // 隐式终止：整个 decide 未做任何调度、也没有子会话在跑，
+            // 编排已无可自行推进之事——文本即结论，等待用户新指令
+            let quiescent = live.scheduling_ops() == 0
+                && live
+                    .children
+                    .lock()
+                    .expect("Mutex 中毒（临界区内不应 panic）")
+                    .iter()
+                    .all(|c| c.state == SessionState::Idle);
+            if quiescent {
+                live.finish(text.clone());
+            }
+            return Ok(text);
         }
         let mut results = Vec::with_capacity(calls.len());
         for tc in calls {
+            if matches!(
+                tc.function.name.as_str(),
+                "create_session" | "prompt_session" | "cancel_session"
+            ) {
+                *live
+                    .scheduling_ops
+                    .lock()
+                    .expect("Mutex 中毒（临界区内不应 panic）") += 1;
+            }
             let outcome = match dispatch_tool(live, &tc.function.name, tc.function.arguments).await
             {
                 Ok(s) => s,
@@ -1154,19 +1181,6 @@ where
             results.push(match tc.call_id.clone() {
                 Some(cid) => UserContent::tool_result_with_call_id(tc.id, cid, content),
                 None => UserContent::tool_result(tc.id, content),
-            });
-        }
-        // finish 已声明完成：终止出口，不再发起下一轮请求
-        if live
-            .done_conclusion
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_some()
-        {
-            return Ok(if text.trim().is_empty() {
-                "（工作流已声明完成，结论见对话流）".to_string()
-            } else {
-                text
             });
         }
         history.push(Message::User {
@@ -1201,8 +1215,8 @@ impl RigBackend {
          未在工作流执行计划和用户指令中指定的事项交由用户决定。\n\
          使用工具：list_agents、list_sessions、create_session、prompt_session、cancel_session、\
          read_session_history、read_session_activities。调度动作完成后用中文简述本轮动作并结束 turn。\
-         工作流执行计划中的全部步骤已完成（或计划已无法继续）时，调用 finish 工具并给出中文结论，\
-         之后等待用户指令；需要人类判断（如通知人类审查）时不要调用 finish，直接输出结论并结束 turn 等待。"
+         当无需任何调度动作时（如全部步骤已完成、计划已无法继续、或需要人类判断），\
+         不要调用工具，直接用中文输出说明并结束 turn 等待用户。"
             .to_string()
     }
 }
@@ -1231,6 +1245,7 @@ impl OrcBackend for RigBackend {
                 clients: ctx.clients.clone(),
                 children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
                 activities: Arc::new(Mutex::new(Vec::new())),
+                scheduling_ops: Arc::new(Mutex::new(0)),
                 done_conclusion: Arc::new(Mutex::new(None)),
             };
             preamble.push_str("\n\n【工作流执行计划】\n");
@@ -1426,7 +1441,6 @@ async fn dispatch_tool(
             )
             .await
         }
-        "finish" => finish_workflow(live, parse_args(name, args)?),
         other => Err(format!("未知工具: {other}")),
     }
 }
@@ -1653,18 +1667,6 @@ async fn read_session_page(
     Ok(res.to_string())
 }
 
-/// finish：编排智能体声明工作流完成（终止出口；PRD「输出结论并回到空闲状态等待」）。
-fn finish_workflow(live: &LiveRuntime, args: FinishArgs) -> Result<String, String> {
-    live.finish(args.conclusion.clone());
-    live.record_tool("finish", "工作流完成", args.conclusion);
-    Ok("已记录工作流完成".into())
-}
-
-#[derive(serde::Deserialize)]
-struct FinishArgs {
-    conclusion: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1680,7 +1682,7 @@ mod tests {
         (vec![c], m)
     }
 
-    /// 循环单测的 LiveRuntime（无真实机器连接；只走 list/finish 类本地工具）。
+    /// 循环单测的 LiveRuntime（无真实机器连接；只走 list 类本地工具）。
     fn test_live() -> LiveRuntime {
         LiveRuntime {
             machines: vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -1690,6 +1692,7 @@ mod tests {
             )],
             children: Arc::new(Mutex::new(Vec::new())),
             activities: Arc::new(Mutex::new(Vec::new())),
+            scheduling_ops: Arc::new(Mutex::new(0)),
             done_conclusion: Arc::new(Mutex::new(None)),
         }
     }
@@ -1985,7 +1988,6 @@ mod tests {
                 "cancel_session",
                 "read_session_history",
                 "read_session_activities",
-                "finish",
             ]
         );
     }
@@ -2205,20 +2207,13 @@ mod tests {
         ));
     }
 
-    /// finish 工具即终止出口：声明完成后不再发起下一轮请求。
+    /// 隐式终止：零调度动作的文本收尾 + 无子会话在跑 → 文本即工作流结论。
     #[tokio::test]
-    async fn tool_loop_stops_after_finish() {
-        let model = MockCompletionModel::from_turns([
-            MockTurn::tool_call(
-                "call_1",
-                "finish",
-                serde_json::json!({ "conclusion": "全部完成" }),
-            ),
-            MockTurn::text("不应被消费"),
-        ]);
+    async fn tool_loop_concludes_on_quiescent_text_exit() {
+        let model = MockCompletionModel::text("全部步骤已完成");
         let live = test_live();
         let inbox = Mutex::new(Vec::new());
-        let _out = run_tool_loop(
+        let out = run_tool_loop(
             model.clone(),
             "preamble",
             vec![Message::user("计划")],
@@ -2226,11 +2221,45 @@ mod tests {
             &live,
         )
         .await
-        .expect("finish 后应正常返回");
-        assert_eq!(model.request_count(), 1, "finish 后不应再请求");
+        .expect("循环应正常结束");
+        assert_eq!(out, "全部步骤已完成");
+        assert_eq!(model.request_count(), 1);
         assert_eq!(
             live.done_conclusion.lock().unwrap().as_deref(),
-            Some("全部完成")
+            Some("全部步骤已完成"),
+            "静默收尾应写入工作流结论"
+        );
+    }
+
+    /// 有子会话仍在跑时，纯文本收尾不构成隐式终止（可能只是等待汇报）。
+    #[tokio::test]
+    async fn tool_loop_does_not_conclude_with_busy_children() {
+        let model = MockCompletionModel::text("等待子会话完成");
+        let live = test_live();
+        live.children.lock().unwrap().push(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+            agent: "mock_acp".into(),
+            step_desc: "第一步".into(),
+            state: SessionState::Busy,
+            last_output: String::new(),
+            last_active_at: 0,
+        });
+        let inbox = Mutex::new(Vec::new());
+        let out = run_tool_loop(
+            model,
+            "preamble",
+            vec![Message::user("计划")],
+            &inbox,
+            &live,
+        )
+        .await
+        .expect("循环应正常结束");
+        assert_eq!(out, "等待子会话完成");
+        assert!(
+            live.done_conclusion.lock().unwrap().is_none(),
+            "存在 busy 子会话时不应判定收敛"
         );
     }
 
@@ -2283,5 +2312,77 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("未结束 turn"));
         assert_eq!(model.request_count(), MAX_TOOL_TURNS);
+    }
+
+    /// 隐式终止后的复活：已完成的工作流，用户新指令重新打开并推进（PRD「输入指令继续推进」）。
+    #[tokio::test]
+    async fn user_message_resumes_done_workflow() {
+        let (clients, m) = clients_with_machines();
+        let backend = FakeBackend::new(vec![
+            Decision {
+                summary: "第一轮".into(),
+                actions: vec![],
+                done: true,
+                conclusion: Some("全部完成".into()),
+            },
+            Decision {
+                summary: "复活后推进".into(),
+                actions: vec![],
+                done: false,
+                conclusion: None,
+            },
+        ]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        engine.start().await.unwrap();
+        {
+            let s = engine.session.read().unwrap();
+            assert!(s.done, "done 决策应置完成");
+            assert!(s.transcript.iter().any(
+                |msg| matches!(msg, OrcMsg::Orc { text, .. } if text.contains("编排结束：全部完成"))
+            ));
+        }
+        // 用户新消息：不再被 done 挡住，而是复活工作流并立即推进
+        assert!(
+            engine.record_user("继续处理后续事项"),
+            "已完成的工作流应允许用户复活"
+        );
+        assert!(!engine.session.read().unwrap().done);
+        engine.advance().await.unwrap();
+        assert!(engine
+            .session
+            .read()
+            .unwrap()
+            .transcript
+            .iter()
+            .any(|msg| matches!(msg, OrcMsg::Orc { text, .. } if text == "复活后推进")));
+    }
+
+    /// 有子会话 busy 时静默收尾不终止；子会话 idle 事件仍可触发下一轮推进。
+    #[tokio::test]
+    async fn quiescent_conclusion_sets_idle_and_blocks_auto_advance() {
+        let (clients, m) = clients_with_machines();
+        let backend = FakeBackend::new_for_tests();
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        {
+            let mut s = engine.session.write().unwrap();
+            s.done = true;
+            s.children.push(ChildSession {
+                id: "s_child".into(),
+                machine_idx: 0,
+                machine_name: "测试机".into(),
+                agent: "mock_acp".into(),
+                step_desc: "第一步".into(),
+                state: SessionState::Busy,
+                last_output: String::new(),
+                last_active_at: 0,
+            });
+        }
+        // 自动事件不复活已收敛的工作流（只有用户消息可以）
+        let advanced = engine
+            .on_child_state("s_child", SessionState::Busy, SessionState::Idle, None)
+            .await
+            .unwrap();
+        assert!(!advanced);
+        assert!(engine.session.read().unwrap().done);
     }
 }
