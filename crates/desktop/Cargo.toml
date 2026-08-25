@@ -26,3 +26,7 @@ gpui_component_assets = { package = "gpui-component-assets", git = "https://gith
 # 本地时区时间戳格式化（PRD「消息气泡包含时间」；跨天需日期）
 jiff = "0.2"
 rig = "0.41"
+
+# 测试专用：rig MockCompletionModel/MockTurn（薄工具循环单测；不进 release 构建）
+[dev-dependencies]
+rig = { version = "0.41", features = ["test-utils"] }
