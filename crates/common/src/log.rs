@@ -3,6 +3,7 @@
 //! 日志实现使用 logforth：默认 `info`，通过 `RUST_LOG` 调整级别，文件按天滚动并保留
 //! 最近 7 个日志文件。应用和 server 只负责在启动时提供各自的日志路径。
 //!
+//! 日志实现属于 `amux-common`，协议 crate 不依赖日志基础设施。
 
 use std::num::NonZeroUsize;
 use std::path::Path;

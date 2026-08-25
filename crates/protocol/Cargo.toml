@@ -1,5 +1,5 @@
 [package]
-name = "protocol"
+name = "amux-protocol"
 description = "app↔server 协议面：方法名、参数/结果类型、通知类型（协议的唯一来源）"
 version.workspace = true
 edition.workspace = true
@@ -9,5 +9,3 @@ publish = false
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-log.workspace = true
-logforth.workspace = true

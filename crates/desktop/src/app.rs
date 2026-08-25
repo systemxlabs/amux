@@ -502,7 +502,7 @@ impl AmuxApp {
         n: &WsNotification,
     ) {
         let Ok(change) = serde_json::from_value::<SessionStateChange>(n.params.clone()) else {
-            protocol::log::warn("gui.ws", "state_change 通知负载解析失败");
+            amux_common::log::warn("gui.ws", "state_change 通知负载解析失败");
             return;
         };
         let SessionStateChange {
@@ -554,10 +554,10 @@ impl AmuxApp {
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             run_engine_on_tokio(async move {
                 if let Err(e) = wf.on_child_state(&sid, old_state, new_state, reason).await {
-                    protocol::log::error("gui.workflow", format!("推进工作流失败：{e}"));
+                    amux_common::log::error("gui.workflow", format!("推进工作流失败：{e}"));
                 }
                 if let Err(e) = wf.persist(&session_dir) {
-                    protocol::log::error(
+                    amux_common::log::error(
                         "gui.workflow",
                         format!(
                             "工作流状态持久化失败 {}: {e}",
@@ -1137,7 +1137,7 @@ impl AmuxApp {
                         wf.begin_busy();
                     }
                     if let Err(e) = wf.persist(&session_dir) {
-                        protocol::log::error(
+                        amux_common::log::error(
                             "gui.workflow",
                             format!(
                                 "工作流用户消息持久化失败 {}: {e}",
@@ -1154,7 +1154,7 @@ impl AmuxApp {
                     let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                         run_engine_on_tokio(async move {
                             if let Err(e) = wf.advance().await {
-                                protocol::log::error(
+                                amux_common::log::error(
                                     "gui.workflow",
                                     format!(
                                         "推进工作流失败 {}: {e}",
@@ -1163,7 +1163,7 @@ impl AmuxApp {
                                 );
                             }
                             if let Err(e) = wf.persist(&session_dir) {
-                                protocol::log::error(
+                                amux_common::log::error(
                                     "gui.workflow",
                                     format!(
                                         "工作流状态持久化失败 {}: {e}",
@@ -1419,7 +1419,7 @@ impl AmuxApp {
         let sessions = match WorkflowEngine::load_all(&self.session_dir) {
             Ok(sessions) => sessions,
             Err(e) => {
-                protocol::log::error("gui.workflow", format!("加载工作流失败：{e}"));
+                amux_common::log::error("gui.workflow", format!("加载工作流失败：{e}"));
                 return;
             }
         };
@@ -1510,7 +1510,7 @@ impl AmuxApp {
         }
         if let Some(wf) = self.workflows.get(wi) {
             if let Err(e) = wf.persist(&session_dir) {
-                protocol::log::error(
+                amux_common::log::error(
                     "gui.workflow",
                     format!(
                         "工作流创建后持久化失败 {}: {e}",
@@ -1524,13 +1524,13 @@ impl AmuxApp {
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                 run_engine_on_tokio(async move {
                     if let Err(e) = wf.advance().await {
-                        protocol::log::error(
+                        amux_common::log::error(
                             "gui.workflow",
                             format!("推进工作流失败 {}: {e}", wf.session.read().unwrap().id),
                         );
                     }
                     if let Err(e) = wf.persist(&session_dir) {
-                        protocol::log::error(
+                        amux_common::log::error(
                             "gui.workflow",
                             format!(
                                 "工作流状态持久化失败 {}: {e}",
@@ -1555,7 +1555,7 @@ impl AmuxApp {
                 wf.begin_busy();
             }
             if let Err(e) = wf.persist(&session_dir) {
-                protocol::log::error(
+                amux_common::log::error(
                     "gui.workflow",
                     format!(
                         "工作流取消消息持久化失败 {}: {e}",
@@ -1572,16 +1572,13 @@ impl AmuxApp {
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                 run_engine_on_tokio(async move {
                     if let Err(e) = wf.advance().await {
-                        protocol::log::error(
+                        amux_common::log::error(
                             "gui.workflow",
-                            format!(
-                                "取消推进工作流失败 {}: {e}",
-                                wf.session.read().unwrap().id
-                            ),
+                            format!("取消推进工作流失败 {}: {e}", wf.session.read().unwrap().id),
                         );
                     }
                     if let Err(e) = wf.persist(&session_dir) {
-                        protocol::log::error(
+                        amux_common::log::error(
                             "gui.workflow",
                             format!(
                                 "工作流状态持久化失败 {}: {e}",

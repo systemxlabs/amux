@@ -393,15 +393,15 @@ async fn exec_main(
         Ok(a) => a,
         Err(e) => {
             let _ = ready_tx.send(Err(format!("解析 agent 命令失败 ({bin}): {e}")));
-            protocol::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
+            amux_common::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
             return;
         }
     };
-    protocol::log::info("acp", format!("已连接 ACP agent: {bin} {}", args.join(" ")));
+    amux_common::log::info("acp", format!("已连接 ACP agent: {bin} {}", args.join(" ")));
     // trace 级记录 ACP 原始帧，便于排查跨进程协议问题。
-    let agent = if protocol::log::enabled_for(protocol::Level::Trace, "acp.wire") {
+    let agent = if amux_common::log::enabled_for(amux_common::Level::Trace, "acp.wire") {
         agent.with_debug(|line, direction| {
-            protocol::log::trace("acp.wire", format!("{direction:?} {line}"));
+            amux_common::log::trace("acp.wire", format!("{direction:?} {line}"));
         })
     } else {
         agent
@@ -413,7 +413,7 @@ async fn exec_main(
     // 进程立即退出 / npx 不可用 / 无网络），补报为 spawn 失败；若已报过就绪，
     // 之后的连接异常仅记录，不影响已缓存的驱动。
     if let core::result::Result::Err(e) = &result {
-        protocol::log::error("acp", format!("ACP 连接异常结束: {e}"));
+        amux_common::log::error("acp", format!("ACP 连接异常结束: {e}"));
         if !ready_sent.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let _ = ready_tx.send(Err(format!("ACP 连接失败: {e}")));
         }
@@ -469,7 +469,7 @@ async fn connect_main(
                     .await
                 {
                     core::result::Result::Ok(_) => {
-                        protocol::log::debug("acp", "initialize 完成");
+                        amux_common::log::debug("acp", "initialize 完成");
                         core::result::Result::Ok(())
                     }
                     core::result::Result::Err(e) => {
@@ -480,7 +480,7 @@ async fn connect_main(
                         .await
                         .is_err();
                         if alive {
-                            protocol::log::error("acp", format!("initialize 失败（继续）: {e}"));
+                            amux_common::log::error("acp", format!("initialize 失败（继续）: {e}"));
                             core::result::Result::Ok(())
                         } else {
                             core::result::Result::Err(format!(
@@ -546,7 +546,7 @@ async fn connect_main(
                                         core::result::Result::Ok(())
                                     });
                                 if let Err(e) = result {
-                                    protocol::log::error(
+                                    amux_common::log::error(
                                         "acp",
                                         format!("prompt 调用失败 {sid}: {e}"),
                                     );
@@ -590,11 +590,11 @@ async fn dispatch_call(
         AcpCall::Delete { .. } => "session/delete",
         AcpCall::ListSkills => "skill/list",
     };
-    protocol::log::debug("acp", format!("调用 {label}"));
+    amux_common::log::debug("acp", format!("调用 {label}"));
     let result = dispatch_call_inner(cx, call).await;
     match &result {
-        Ok(_) => protocol::log::debug("acp", format!("{label} 成功")),
-        Err(e) => protocol::log::error("acp", format!("{label} 失败: {e}")),
+        Ok(_) => amux_common::log::debug("acp", format!("{label} 成功")),
+        Err(e) => amux_common::log::error("acp", format!("{label} 失败: {e}")),
     }
     result
 }
@@ -708,7 +708,7 @@ async fn route_update(
             .cloned();
         if let Some(tx) = tx {
             if tx.send(ev).await.is_err() {
-                protocol::log::warn("acp", "agent 事件接收端已关闭");
+                amux_common::log::warn("acp", "agent 事件接收端已关闭");
             }
         }
     }
@@ -727,7 +727,7 @@ fn text_of(block: &AcpContentBlock) -> Option<String> {
                 AcpContentBlock::ResourceLink(_) => "resource_link",
                 _ => "unknown",
             };
-            protocol::log::debug("acp", format!("忽略非文本内容块（{kind}）"));
+            amux_common::log::debug("acp", format!("忽略非文本内容块（{kind}）"));
             None
         }
     }

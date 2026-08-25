@@ -1,5 +1,5 @@
 [package]
-name = "desktop"
+name = "amux-desktop"
 description = "GPUI 桌面应用（docs/DESIGN.md / PRD §桌面 GUI 设计）：三面板视图、对话流、会话活动页、diff 编辑器、侧边栏、设置页；会话历史本地缓存"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
-protocol = { path = "../protocol" }
+protocol = { package = "amux-protocol", path = "../protocol" }
+amux-common = { path = "../common" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

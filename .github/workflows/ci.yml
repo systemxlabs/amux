@@ -58,7 +58,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy -p protocol -p server --all-targets --locked -- -D warnings
+        run: cargo clippy -p amux-common -p amux-protocol -p amux-server --all-targets --locked -- -D warnings
 
       - name: Validate lockfile
         run: cargo metadata --locked --no-deps --format-version 1

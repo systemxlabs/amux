@@ -1,5 +1,5 @@
 [package]
-name = "server"
+name = "amux-server"
 description = "每台机器的常驻进程：WS 传输、JSON-RPC 分发、会话管理、会话数据聚合与 activities 缓存、git 能力；经 ACP 官方 SDK 与 agent 通信"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
-protocol = { path = "../protocol" }
+protocol = { package = "amux-protocol", path = "../protocol" }
+amux-common = { path = "../common" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

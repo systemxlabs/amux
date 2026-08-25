@@ -254,7 +254,7 @@ async fn dispatch(
         return Some(handle_auth(&req.params, token, authenticated, id));
     }
     if !authenticated.load(Ordering::SeqCst) {
-        protocol::log::error(
+        amux_common::log::error(
             "server.transport",
             format!("未认证连接请求 {} → AUTH_FAILED", req.method),
         );
@@ -270,18 +270,18 @@ async fn dispatch(
         });
     }
 
-    let summary = protocol::log::params_summary(
+    let summary = amux_common::log::params_summary(
         req.params.as_ref().unwrap_or(&serde_json::Value::Null),
         &["sessionId", "agent", "cwd", "input"],
         60,
     );
-    protocol::log::debug("server.transport", format!("请求 {} {summary}", req.method));
+    amux_common::log::debug("server.transport", format!("请求 {} {summary}", req.method));
     let started = std::time::Instant::now();
     let result = handlers.handle(&req.method, &req.params).await;
     let (result, error) = match result {
         Ok(v) => (Some(v), None),
         Err(RpcError { code, message }) => {
-            protocol::log::error(
+            amux_common::log::error(
                 "server.transport",
                 format!("请求 {} 失败 [{code}]: {message}", req.method),
             );
@@ -295,7 +295,7 @@ async fn dispatch(
             )
         }
     };
-    protocol::log::debug(
+    amux_common::log::debug(
         "server.transport",
         format!("响应 {}（{}ms）", req.method, started.elapsed().as_millis()),
     );
@@ -337,7 +337,7 @@ fn handle_auth(
     match auth {
         Ok(params) if constant_time_eq(&params.token, token) => {
             authenticated.store(true, Ordering::SeqCst);
-            protocol::log::debug("server.transport", "认证通过");
+            amux_common::log::debug("server.transport", "认证通过");
             protocol::JsonRpcResponse {
                 jsonrpc: "2.0".into(),
                 id,
@@ -350,7 +350,7 @@ fn handle_auth(
             }
         }
         _ => {
-            protocol::log::error("server.transport", "认证失败：token 不匹配");
+            amux_common::log::error("server.transport", "认证失败：token 不匹配");
             protocol::JsonRpcResponse {
                 jsonrpc: "2.0".into(),
                 id,

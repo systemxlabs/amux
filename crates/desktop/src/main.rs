@@ -49,7 +49,7 @@ fn main() {
         .parent()
         .map(|p| p.join("logs").join("desktop.log"))
         .unwrap_or_else(|| data_dir.join("desktop.log"));
-    protocol::log::init_file_output(&log_path);
+    amux_common::log::init_file_output(&log_path);
     let store = Arc::new(ConfigStore::new(data_dir));
 
     let app = gpui_platform::application().with_assets(Assets);

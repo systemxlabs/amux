@@ -155,7 +155,7 @@ fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            protocol::log::warn(
+            amux_common::log::warn(
                 "gui.config",
                 format!("读取配置失败 {}: {e}", path.display()),
             );
@@ -165,7 +165,7 @@ fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
     match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(e) => {
-            protocol::log::warn(
+            amux_common::log::warn(
                 "gui.config",
                 format!("配置解析失败（按空处理）{}: {e}", path.display()),
             );
@@ -182,13 +182,15 @@ fn write_typed<T: serde::Serialize>(path: &Path, value: &T) {
     match serde_json::to_string_pretty(value) {
         Ok(body) => {
             if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
-                protocol::log::warn(
+                amux_common::log::warn(
                     "gui.config",
                     format!("写入配置失败 {}: {e}", path.display()),
                 );
             }
         }
-        Err(e) => protocol::log::warn("gui.config", format!("序列化失败 {}: {e}", path.display())),
+        Err(e) => {
+            amux_common::log::warn("gui.config", format!("序列化失败 {}: {e}", path.display()))
+        }
     }
 }
 
@@ -240,7 +242,7 @@ fn read_file_normalized<T: Clone>(
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            protocol::log::error(
+            amux_common::log::error(
                 "gui.config",
                 format!("读取配置失败 {}: {e}", path.display()),
             );
@@ -250,7 +252,7 @@ fn read_file_normalized<T: Clone>(
     let value = match serde_json::from_str::<serde_json::Value>(&raw) {
         Ok(value) => value,
         Err(e) => {
-            protocol::log::error(
+            amux_common::log::error(
                 "gui.config",
                 format!("解析配置失败 {}: {e}", path.display()),
             );
@@ -269,7 +271,7 @@ fn write_file(path: &Path, json: &serde_json::Value) {
         std::fs::write(path, content)
     })();
     if let Err(error) = result {
-        protocol::log::error(
+        amux_common::log::error(
             "gui.config",
             format!("写入配置文件失败 {}: {error}", path.display()),
         );
@@ -441,14 +443,14 @@ impl ConfigStore {
                 return OrchestratorConfig::default();
             }
             Err(e) => {
-                protocol::log::error("gui.config", format!("读取编排配置失败: {e}"));
+                amux_common::log::error("gui.config", format!("读取编排配置失败: {e}"));
                 return OrchestratorConfig::default();
             }
         };
         match serde_json::from_str::<serde_json::Value>(&raw) {
             Ok(value) => normalize_orchestrator(&value),
             Err(e) => {
-                protocol::log::error(
+                amux_common::log::error(
                     "gui.config",
                     format!("解析编排配置失败 {}: {e}", path.display()),
                 );

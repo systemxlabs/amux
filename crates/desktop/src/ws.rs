@@ -186,7 +186,7 @@ async fn run_loop(
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
                 attempt = 0;
-                protocol::log::info("gui.ws", format!("已连接 {url}"));
+                amux_common::log::info("gui.ws", format!("已连接 {url}"));
                 let _ = notify_tx.send(Notification {
                     method: "connected".into(),
                     params: Value::Null,
@@ -208,7 +208,7 @@ async fn run_loop(
                     ConnectionOutcome::AuthFailed => {
                         attempt += 1;
                         let delay = backoff_delay(attempt);
-                        protocol::log::warn(
+                        amux_common::log::warn(
                             "gui.ws",
                             format!("认证失败，{delay:?} 后重试（第 {attempt} 次）"),
                         );
@@ -219,7 +219,7 @@ async fn run_loop(
             Err(e) => {
                 attempt += 1;
                 let delay = backoff_delay(attempt);
-                protocol::log::debug(
+                amux_common::log::debug(
                     "gui.ws",
                     format!("连接失败（第 {attempt} 次），{delay:?} 后重试: {e}"),
                 );
@@ -269,7 +269,7 @@ async fn serve_connection(
         tokio::select! {
             _ = close_rx.changed() => {
                 if *close_rx.borrow() {
-                    protocol::log::info("gui.ws", "收到关闭信号");
+                    amux_common::log::info("gui.ws", "收到关闭信号");
                     return ConnectionOutcome::ClientClosed;
                 }
             }
@@ -309,14 +309,14 @@ async fn serve_connection(
                                 .unwrap_or(-1) as i32;
                             let message = err.get("message").and_then(|m| m.as_str())
                                 .unwrap_or("").to_string();
-                            protocol::log::warn("gui.ws", format!("认证失败 [{code}]: {message}"));
+                            amux_common::log::warn("gui.ws", format!("认证失败 [{code}]: {message}"));
                             let _ = notify_tx.send(Notification {
                                 method: "auth_failed".into(),
                                 params: json!({ "code": code, "message": message }),
                             });
                             return ConnectionOutcome::AuthFailed;
                         }
-                        protocol::log::info("gui.ws", "认证成功");
+                        amux_common::log::info("gui.ws", "认证成功");
                         authed = true;
                         let _ = notify_tx.send(Notification {
                             method: "auth_ok".into(),
@@ -328,7 +328,7 @@ async fn serve_connection(
                         if let Some(err) = v.get("error") {
                             let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) as i32;
                             let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-                            protocol::log::warn("gui.ws", format!("请求 #{id} 失败 [{code}]: {message}"));
+                            amux_common::log::warn("gui.ws", format!("请求 #{id} 失败 [{code}]: {message}"));
                             let _ = resp.send(Err(RpcError { code, message }));
                         } else {
                             let _ = resp.send(Ok(v.get("result").cloned().unwrap_or(Value::Null)));
@@ -336,7 +336,7 @@ async fn serve_connection(
                     }
                 } else if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
                     // server → GUI 通知（唯一主动推送 session.state_change）
-                    protocol::log::debug("gui.ws", format!("通知 {method}"));
+                    amux_common::log::debug("gui.ws", format!("通知 {method}"));
                     let _ = notify_tx.send(Notification {
                         method: method.to_string(),
                         params: v.get("params").cloned().unwrap_or(Value::Null),
@@ -346,7 +346,7 @@ async fn serve_connection(
         }
     }
     // 连接断开：通知 UI（真实离线状态），清空在途请求
-    protocol::log::warn("gui.ws", "连接断开，准备重连");
+    amux_common::log::warn("gui.ws", "连接断开，准备重连");
     let _ = notify_tx.send(Notification {
         method: "disconnected".into(),
         params: Value::Null,

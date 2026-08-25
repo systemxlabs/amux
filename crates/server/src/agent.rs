@@ -311,7 +311,7 @@ impl AgentRegistry {
                 s.spawn(move || match self.spawn_and_cache(&d) {
                     Ok(_) => {
                         summary.lock().unwrap().started += 1;
-                        protocol::log::info(
+                        amux_common::log::info(
                             "server.launch",
                             format!("已拉起 ACP server: {}（agent={}）", d.bin, d.name),
                         );
@@ -322,7 +322,7 @@ impl AgentRegistry {
                             .lock()
                             .expect("Mutex 中毒（临界区内不应 panic）")
                             .insert(d.name.clone());
-                        protocol::log::error(
+                        amux_common::log::error(
                             "server.launch",
                             format!("ACP server 拉起失败（agent={}，已标记不可用）: {e}", d.name),
                         );
@@ -385,7 +385,7 @@ impl AgentRegistry {
                     .expect("Mutex 中毒（临界区内不应 panic）")
                     .insert(harness.to_string(), Arc::new(driver));
             }
-            protocol::log::info(
+            amux_common::log::info(
                 "server.launch",
                 format!("手动重启成功：{}（agent={}）", spec.bin, harness),
             );
@@ -408,7 +408,7 @@ impl AgentRegistry {
         };
         match self.spawn_and_cache(&d) {
             Ok(_) => {
-                protocol::log::info(
+                amux_common::log::info(
                     "server.launch",
                     format!("手动重启成功：{}（agent={}）", d.bin, d.name),
                 );
@@ -419,7 +419,7 @@ impl AgentRegistry {
                     .lock()
                     .expect("Mutex 中毒（临界区内不应 panic）")
                     .insert(harness.to_string());
-                protocol::log::error(
+                amux_common::log::error(
                     "server.launch",
                     format!("手动重启失败（agent={}）: {e}", d.name),
                 );
