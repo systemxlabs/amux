@@ -25,8 +25,11 @@ gpui_component = { package = "gpui-component", git = "https://github.com/longbri
 gpui_component_assets = { package = "gpui-component-assets", git = "https://github.com/longbridge/gpui-component" }
 # 本地时区时间戳格式化（PRD「消息气泡包含时间」；跨天需日期）
 jiff = "0.2"
-rig = "0.41"
+# rig-core：编排 agent 的 LLM provider 层（completion/providers/test-utils）。
+# 直接依赖 rig-core 而非 rig facade，避免拉入 rig-agent / rig-derive
+#（取消语义由引擎自研工具循环驱动，不使用 agent 运行时）
+rig-core = { version = "0.41", default-features = false, features = ["reqwest", "rustls"] }
 
-# 测试专用：rig MockCompletionModel/MockTurn（薄工具循环单测；不进 release 构建）
+# 测试专用：rig-core MockCompletionModel/MockTurn（薄工具循环单测；不进 release 构建）
 [dev-dependencies]
-rig = { version = "0.41", features = ["test-utils"] }
+rig-core = { version = "0.41", default-features = false, features = ["test-utils"] }

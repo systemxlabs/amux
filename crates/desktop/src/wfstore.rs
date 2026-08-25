@@ -131,7 +131,6 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
             children TEXT NOT NULL,
             description TEXT NOT NULL,
             preamble TEXT NOT NULL,
-            cancelled INTEGER NOT NULL,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );",
@@ -160,13 +159,12 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     conn.execute(
         "INSERT INTO sessions
             (id, title, state, last_active_at, children, description, preamble,
-             cancelled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
             title=excluded.title, state=excluded.state,
             last_active_at=excluded.last_active_at, children=excluded.children,
             description=excluded.description, preamble=excluded.preamble,
-            cancelled=excluded.cancelled,
             created_at=excluded.created_at, updated_at=excluded.updated_at",
         params![
             session.id,
@@ -176,7 +174,6 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
             children,
             session.description,
             session.preamble,
-            session.cancelled as i64,
             session.created_at as i64,
             session.updated_at as i64,
         ],
@@ -196,7 +193,7 @@ pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let mut stmt = conn
         .prepare(
             "SELECT id, title, state, last_active_at, children, description, preamble,
-                cancelled, created_at, updated_at
+                created_at, updated_at
          FROM sessions ORDER BY last_active_at DESC",
         )
         .map_err(io::Error::other)?;
@@ -210,9 +207,8 @@ pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
-                row.get::<_, i64>(7)? != 0,
+                row.get::<_, i64>(7)? as u64,
                 row.get::<_, i64>(8)? as u64,
-                row.get::<_, i64>(9)? as u64,
             ))
         })
         .map_err(io::Error::other)?;
@@ -225,7 +221,6 @@ pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
             children,
             description,
             preamble,
-            cancelled,
             created_at,
             updated_at,
         ) = row.map_err(io::Error::other)?;
@@ -239,7 +234,6 @@ pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
             description,
             preamble,
             state: state_from(&state)?,
-            cancelled,
             transcript,
             children,
             activities,
@@ -286,7 +280,6 @@ mod tests {
             description: "做完再审查".into(),
             preamble: "模板".into(),
             state: SessionState::Idle,
-            cancelled: false,
             transcript: vec![
                 OrcMsg::User {
                     text: "开始".into(),

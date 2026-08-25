@@ -17,10 +17,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rig::client::CompletionClient;
-use rig::completion::message::{ToolCall, ToolResultContent, UserContent};
-use rig::completion::{AssistantContent, CompletionModel, Message};
-use rig::OneOrMany;
+use rig_core::client::CompletionClient;
+use rig_core::completion::message::{ToolCall, ToolResultContent, UserContent};
+use rig_core::completion::{AssistantContent, CompletionModel, Message};
+use rig_core::OneOrMany;
 
 use serde::{Deserialize, Serialize};
 
@@ -66,7 +66,6 @@ pub struct OrcSession {
     /// 模板/系统指令（内置进编排 agent 的系统提示词，不进入会话历史；PRD §3.7）
     pub preamble: String,
     pub state: SessionState,
-    pub cancelled: bool,
     pub transcript: Vec<OrcMsg>,
     pub children: Vec<ChildSession>,
     pub activities: Vec<Activity>,
@@ -231,13 +230,9 @@ pub fn ops_to_actions(ops: Vec<ToolOp>, known_sessions: &[String]) -> Vec<OrcAct
 
 // ---- WorkflowEngine：状态机 ----
 
-/// 取消工作流时需下发的 CANCEL 请求列表：(机器下标, 子会话 id)（纯函数，可单测）。
-pub fn cancel_requests(children: &[ChildSession]) -> Vec<(usize, String)> {
-    children
-        .iter()
-        .map(|c| (c.machine_idx, c.id.clone()))
-        .collect()
-}
+/// 取消按钮注入的固定用户消息（docs/DESIGN.md「工作流会话取消」）：
+/// 取消走用户消息通道，由编排智能体自行调用 cancel_session 停止调度。
+pub const WORKFLOW_CANCEL_PROMPT: &str = "取消当前工作流会话关联的所有普通会话，停止工作流调度";
 
 /// 推进门闩：同一工作流的推进全局串行（修复引擎克隆并发分叉）。
 /// running 期间的新触发只置 requested；本轮结束后合并为至多一轮追加推进。
@@ -313,7 +308,6 @@ impl WorkflowEngine {
             description: full,
             preamble: preamble.to_string(),
             state: SessionState::Idle,
-            cancelled: false,
             transcript,
             children: Vec::new(),
             activities: Vec::new(),
@@ -376,12 +370,6 @@ impl WorkflowEngine {
             if g.running {
                 g.requested = true;
                 return Ok(());
-            }
-            {
-                let s = self.session.read().expect("RwLock 中毒");
-                if s.cancelled {
-                    return Ok(());
-                }
             }
             g.running = true;
         }
@@ -638,8 +626,7 @@ impl WorkflowEngine {
 
     /// 关联普通会话状态变更（GUI 收到 `session.state_change` 通知时调用）。
     /// 变 idle 且变更原因非取消 → 按 docs/DESIGN.md 格式注入并推进。
-    /// 取消导致的不注入：编排者不应与用户的取消拉锯；工作流自身已取消时同样跳过，
-    /// 兜住「取消瞬间自然完成的 idle 事件已在路上」的竞态。
+    /// 取消导致的不注入：编排者不应与用户的取消拉锯。
     pub async fn on_child_state(
         &self,
         session_id: &str,
@@ -657,11 +644,8 @@ impl WorkflowEngine {
         self.track_child_state(session_id, old_state, new_state);
         self.sync_state();
         if new_state == SessionState::Idle {
-            {
-                let s = self.session.read().expect("RwLock 中毒");
-                if reason == StateChangeReason::Cancelled || s.cancelled {
-                    return Ok(false);
-                }
+            if reason == StateChangeReason::Cancelled {
+                return Ok(false);
             }
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::User {
@@ -730,15 +714,12 @@ impl WorkflowEngine {
 
     /// 工作流级忙闲：有忙碌子会话即工作中（PRD「编排调度中或关联会话工作中」）。
     fn sync_state(&self) {
+        let busy = *self
+            .busy_children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            > 0;
         self.with_session(|s| {
-            if s.cancelled {
-                return;
-            }
-            let busy = *self
-                .busy_children
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                > 0;
             s.state = if busy {
                 SessionState::Busy
             } else {
@@ -759,7 +740,7 @@ impl WorkflowEngine {
     }
 
     /// 返回是否应立即启动推进（false = 已在工作（steer 入队））。
-    /// 工作流无终态：任何时刻的用户消息都推进（取消中的消息先解除取消）。
+    /// 工作流无终态：任何时刻的用户消息都推进。
     pub fn record_user(&self, text: &str) -> bool {
         let busy = {
             let s = self.session.read().expect("RwLock 中毒");
@@ -778,10 +759,6 @@ impl WorkflowEngine {
                 timestamp: now(),
             });
             s.updated_at = now();
-            if s.cancelled {
-                s.cancelled = false;
-                s.state = SessionState::Idle;
-            }
         });
         if busy {
             // 工作中以 steer 注入，当前 turn 结束后再跑一轮（docs/DESIGN.md 编排智能体 steer）
@@ -824,38 +801,11 @@ impl WorkflowEngine {
         added
     }
 
-    pub fn mark_cancelled(&self) {
-        self.with_session(|s| {
-            s.cancelled = true;
-            s.state = SessionState::Idle;
-            s.updated_at = now();
-            s.transcript.push(OrcMsg::User {
-                text: "已取消".into(),
-
-                timestamp: now(),
-            });
-        });
-    }
-
-    pub async fn send_cancel_to_children(&self) -> Result<(), String> {
-        let requests = cancel_requests(&self.session.read().expect("RwLock 中毒").children);
-        for (machine_idx, session_id) in requests {
-            let client = self
-                .clients
-                .get(machine_idx)
-                .cloned()
-                .ok_or_else(|| format!("机器连接已失效: {machine_idx}"))?;
-            client
-                .request_ok(
-                    protocol::method::SESSION_CANCEL,
-                    Some(SessionIdParams {
-                        session_id: session_id.clone(),
-                    }),
-                )
-                .await
-                .map_err(|e| format!("取消关联会话失败 {session_id}: {e}"))?;
-        }
-        Ok(())
+    /// 用户点击取消按钮：以用户消息方式注入固定取消指令
+    /// （docs/DESIGN.md「工作流会话取消」），由编排智能体自行调用
+    /// cancel_session 停止调度。返回是否应立即启动推进（false = 已在工作）。
+    pub fn cancel(&self) -> bool {
+        self.record_user(WORKFLOW_CANCEL_PROMPT)
     }
 
     // ---- 持久化（docs/DESIGN.md「工作流会话存储」：sqlite + 两份 jsonl）----
@@ -950,8 +900,8 @@ impl LiveRuntime {
 const MAX_TOOL_TURNS: usize = 8;
 
 /// 编排工具清单（docs/DESIGN.md「编排智能体」工具表）。
-fn tool_definitions() -> Vec<rig::completion::ToolDefinition> {
-    use rig::completion::ToolDefinition;
+fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
+    use rig_core::completion::ToolDefinition;
     vec![
         ToolDefinition {
             name: "list_agents".into(),
@@ -1187,7 +1137,7 @@ impl OrcBackend for RigBackend {
             let history = vec![Message::user(input)];
             let text = match self.cfg.api_format {
                 ApiFormat::ChatCompletions => {
-                    let client = rig::providers::openai::Client::builder()
+                    let client = rig_core::providers::openai::Client::builder()
                         .api_key(self.cfg.api_key.clone())
                         .base_url(self.cfg.base_url.clone())
                         .build()
@@ -1202,7 +1152,7 @@ impl OrcBackend for RigBackend {
                     .await?
                 }
                 ApiFormat::Responses => {
-                    let client = rig::providers::openai::Client::builder()
+                    let client = rig_core::providers::openai::Client::builder()
                         .api_key(self.cfg.api_key.clone())
                         .base_url(self.cfg.base_url.clone())
                         .build()
@@ -1217,7 +1167,7 @@ impl OrcBackend for RigBackend {
                     .await?
                 }
                 ApiFormat::Messages => {
-                    let client = rig::providers::anthropic::Client::builder()
+                    let client = rig_core::providers::anthropic::Client::builder()
                         .api_key(self.cfg.api_key.clone())
                         .base_url(self.cfg.base_url.clone())
                         .build()
@@ -1331,7 +1281,7 @@ impl OrcBackend for FakeBackend {
 
 // ---- 编排调度工具（普通分派函数；docs/DESIGN.md「编排智能体」工具表）----
 //
-// 从 `impl rig::tool::Tool` 改为普通函数：循环自己解析 ToolCall 并调用，
+// 工具调用由循环自己解析 ToolCall 并调用（不再走 agent 运行时）：
 // 错误以 String 返回、由循环回传给模型纠正。
 
 /// 工具调用统一入口：按名称分派，参数从模型给出的 JSON 反序列化。
@@ -1612,7 +1562,7 @@ async fn read_session_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::test_utils::{MockCompletionModel, MockTurn};
+    use rig_core::test_utils::{MockCompletionModel, MockTurn};
 
     fn machines() -> Vec<MachineSummary> {
         vec![MachineSummary::named("测试机", &["mock_acp"])]
@@ -1638,7 +1588,7 @@ mod tests {
     }
 
     /// 提取请求中全部文本（system/user/assistant），供断言。
-    fn request_texts(req: &rig::completion::CompletionRequest) -> Vec<String> {
+    fn request_texts(req: &rig_core::completion::CompletionRequest) -> Vec<String> {
         let mut out = Vec::new();
         for m in req.chat_history.iter() {
             match m {
@@ -1708,26 +1658,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_requests_lists_all_children() {
-        let children = vec![
-            ChildSession {
-                id: "a".into(),
-                machine_idx: 0,
-                machine_name: "m0".into(),
-            },
-            ChildSession {
-                id: "b".into(),
-                machine_idx: 1,
-                machine_name: "m1".into(),
-            },
-        ];
-        assert_eq!(
-            cancel_requests(&children),
-            vec![(0, "a".to_string()), (1, "b".to_string())]
-        );
-    }
-
-    #[test]
     fn title_generated_from_description() {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
@@ -1775,32 +1705,31 @@ mod tests {
             .contains("src/main.rs"));
     }
 
+    /// 取消按钮注入固定取消指令并推进（docs/DESIGN.md「工作流会话取消」）。
     #[tokio::test]
-    async fn cancel_marks_cancelled_and_stops_advance() {
+    async fn cancel_injects_cancel_prompt_and_advances() {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![Decision {
-            summary: "无动作".into(),
+            summary: "已按指令取消".into(),
             actions: vec![],
         }]);
         let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
-        engine.session.write().unwrap().children.push(ChildSession {
-            id: "s_child".into(),
-            machine_idx: 0,
-            machine_name: "测试机".into(),
-        });
-        engine.mark_cancelled();
-        assert!(engine.session.read().unwrap().cancelled);
-        assert_eq!(engine.session.read().unwrap().state, SessionState::Idle);
-        engine.advance().await.unwrap();
-        assert!(!engine
+        assert!(engine.cancel(), "空闲工作流取消应立即推进");
+        assert!(engine
             .session
             .read()
             .unwrap()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::Orc { .. })));
-        let should_advance = engine.record_user("先做 A");
-        assert!(should_advance, "取消后的新指令应恢复工作流");
+            .any(|msg| matches!(msg, OrcMsg::User { text, .. } if text == WORKFLOW_CANCEL_PROMPT)));
+        engine.advance().await.unwrap();
+        assert!(engine
+            .session
+            .read()
+            .unwrap()
+            .transcript
+            .iter()
+            .any(|msg| matches!(msg, OrcMsg::Orc { text, .. } if text == "已按指令取消")));
     }
 
     /// 子会话 idle 事件任何时候都触发推进（工作流无终态，静默与否由编排判断）。
@@ -2192,54 +2121,5 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("未结束 turn"));
         assert_eq!(model.request_count(), MAX_TOOL_TURNS);
-    }
-
-    /// 取消中的工作流，子会话 idle 事件不注入不推进（docs/DESIGN.md §工作流会话驱动）。
-    #[tokio::test]
-    async fn cancelled_workflow_ignores_child_idle_events() {
-        let (clients, m) = clients_with_machines();
-        let backend = FakeBackend::new_for_tests();
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
-        {
-            let mut s = engine.session.write().unwrap();
-            s.cancelled = true;
-            s.children.push(ChildSession {
-                id: "s_child".into(),
-                machine_idx: 0,
-                machine_name: "测试机".into(),
-            });
-        }
-        let advanced = engine
-            .on_child_state(
-                "s_child",
-                SessionState::Busy,
-                SessionState::Idle,
-                StateChangeReason::Completed,
-            )
-            .await
-            .unwrap();
-        assert!(!advanced);
-    }
-
-    /// 用户消息解除取消状态并推进（record_user 的取消恢复语义保持不变）。
-    #[tokio::test]
-    async fn record_user_unblocks_cancelled_workflow() {
-        let (clients, m) = clients_with_machines();
-        let backend = FakeBackend::new(vec![Decision {
-            summary: "取消后推进".into(),
-            actions: vec![],
-        }]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
-        engine.mark_cancelled();
-        assert!(engine.record_user("继续"), "取消后用户消息应推进");
-        assert!(!engine.session.read().unwrap().cancelled);
-        engine.advance().await.unwrap();
-        assert!(engine
-            .session
-            .read()
-            .unwrap()
-            .transcript
-            .iter()
-            .any(|msg| matches!(msg, OrcMsg::Orc { text, .. } if text == "取消后推进")));
     }
 }

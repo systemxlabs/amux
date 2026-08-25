@@ -559,14 +559,8 @@ impl AmuxApp {
             return;
         };
         // 取消导致的状态变更不注入（docs/DESIGN.md §工作流会话驱动）：
-        // 事件侧 reason=cancelled，或工作流自身已取消（竞态兜底：取消瞬间
-        // 自然完成的 idle 事件可能已在路上）
-        let wf_cancelled = this
-            .workflows
-            .get(wi)
-            .map(|wf| wf.session.read().unwrap().cancelled)
-            .unwrap_or(false);
-        if reason == StateChangeReason::Cancelled || wf_cancelled {
+        // 事件侧 reason=cancelled 时，编排者不应与用户的取消拉锯
+        if reason == StateChangeReason::Cancelled {
             // 不推进，但忙碌计数仍要记账（否则取消后计数永久偏高）
             if let Some(wf) = this.workflows.get_mut(wi) {
                 wf.note_child_state(&sid, old_state, new_state);
@@ -1606,33 +1600,53 @@ impl AmuxApp {
     }
 
     fn cancel_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
-        if let Some(wf) = self.workflows.get_mut(idx) {
-            wf.mark_cancelled();
-        }
         let session_dir = self.session_dir.clone();
-        let Some(wf) = self.workflows.get(idx).cloned() else {
-            return;
+        let should_advance = if let Some(wf) = self.workflows.get_mut(idx) {
+            let should_advance = wf.cancel();
+            if should_advance {
+                wf.begin_busy();
+            }
+            if let Err(e) = wf.persist(&session_dir) {
+                protocol::log::error(
+                    "gui.workflow",
+                    format!(
+                        "工作流取消消息持久化失败 {}: {e}",
+                        wf.session.read().unwrap().id
+                    ),
+                );
+            }
+            should_advance
+        } else {
+            false
         };
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            run_engine_on_tokio(async move {
-                if let Err(e) = wf.send_cancel_to_children().await {
-                    protocol::log::error("gui.workflow", format!("取消关联会话失败：{e}"));
-                }
-                if let Err(e) = wf.persist(&session_dir) {
-                    protocol::log::error(
-                        "gui.workflow",
-                        format!(
-                            "取消后工作流持久化失败 {}: {e}",
-                            wf.session.read().unwrap().id
-                        ),
-                    );
-                }
-            })
-            .await;
-            let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
-        });
-        self._tasks.push(t);
-        let _ = cx;
+        if should_advance {
+            let wf = self.workflows[idx].clone();
+            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                run_engine_on_tokio(async move {
+                    if let Err(e) = wf.advance().await {
+                        protocol::log::error(
+                            "gui.workflow",
+                            format!(
+                                "取消推进工作流失败 {}: {e}",
+                                wf.session.read().unwrap().id
+                            ),
+                        );
+                    }
+                    if let Err(e) = wf.persist(&session_dir) {
+                        protocol::log::error(
+                            "gui.workflow",
+                            format!(
+                                "工作流状态持久化失败 {}: {e}",
+                                wf.session.read().unwrap().id
+                            ),
+                        );
+                    }
+                })
+                .await;
+                let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
+            });
+            self._tasks.push(t);
+        }
     }
 
     fn confirm_delete_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
@@ -3206,9 +3220,7 @@ impl AmuxApp {
         } else {
             wf.session.read().unwrap().title.clone()
         };
-        let state = if wf.session.read().unwrap().cancelled {
-            "已取消"
-        } else if wf.session.read().unwrap().state == SessionState::Busy {
+        let state = if wf.session.read().unwrap().state == SessionState::Busy {
             "编排中…"
         } else {
             "空闲"
