@@ -1528,11 +1528,13 @@ impl AmuxApp {
         }
         let clients: Vec<WsClient> = self.machines.iter().map(|m| m.client.clone()).collect();
         let summaries = self.machine_summaries();
-        let backend = self.orchestrator_backend();
         for s in sessions {
+            // 每个工作流独立 backend：RigBackend 的 synced_children/synced_activities
+            // 是单轮 decide 的回传槽位，共享实例会在并发推进时互相覆盖
+            // （A 可能取到 B 的子会话快照）
             self.workflows.push(WorkflowEngine::restore(
                 s,
-                backend.clone(),
+                self.orchestrator_backend(),
                 clients.clone(),
                 summaries.clone(),
             ));
