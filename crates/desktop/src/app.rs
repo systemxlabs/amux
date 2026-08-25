@@ -3461,7 +3461,7 @@ impl AmuxApp {
         let danger = cx.theme().danger;
         let mut card = v_flex()
             .w_full()
-            .max_w(px(640.))
+            .max_w(px(640.)) // 新建会话卡片最大宽度（固定容器尺寸）
             .gap_3()
             .p_4()
             .bg(popover)
@@ -3896,7 +3896,7 @@ impl AmuxApp {
                         div()
                             .ml_auto()
                             .flex_none()
-                            .max_w(px(720.))
+                            .max_w(px(720.)) // 消息气泡最大宽度（内容可读性上限，固定容器尺寸）
                             .p_3()
                             .v_flex()
                             .gap_1()
@@ -3925,7 +3925,7 @@ impl AmuxApp {
                     div().id(("row", *timestamp)).w_full().child(
                         div()
                             .flex_none()
-                            .max_w(px(720.))
+                            .max_w(px(720.)) // 消息气泡最大宽度（内容可读性上限，固定容器尺寸）
                             .p_3()
                             .v_flex()
                             .gap_1()
@@ -4259,7 +4259,7 @@ impl AmuxApp {
                     .child(
                         div()
                             .flex_1()
-                            .min_h(px(96.))
+                            .min_h(px(96.)) // 输入区最小高度（宽松命中区域）
                             .id("input-drop-zone")
                             .child(Input::new(&self.input_state))
                             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -4366,7 +4366,7 @@ impl AmuxApp {
                 .small()
                 .ghost()
                 .px_2()
-                .pl(px(8. + depth as f32 * 14.))
+                .pl(px(8. + depth as f32 * 14.)) // 目录树缩进：随层级深度计算的运行时几何
                 .when(selected, |b| b.bg(cx.theme().list_active))
                 .label(label)
                 .on_click(cx.listener(move |this, _ev, window, cx| {
@@ -4447,7 +4447,7 @@ impl AmuxApp {
                     "（空目录）"
                 })
                 .px_2()
-                .pl(px(8. + depth as f32 * 14.))
+                .pl(px(8. + depth as f32 * 14.)) // 目录树缩进：随层级深度计算的运行时几何
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element(),
@@ -4482,7 +4482,7 @@ impl AmuxApp {
         let file = workspace_file.clone();
         let tree = v_flex()
             .gap_0()
-            .w(px(220.0))
+            .w(px(220.0)) // 文件树面板固定宽度
             .p_1()
             .bg(cx.theme().muted.opacity(0.35))
             .rounded_md()
@@ -5095,7 +5095,7 @@ impl AmuxApp {
                     )
                     .child(
                         Label::new(status_label)
-                            .w(px(20.))
+                            .w(px(20.)) // diff 状态列宽（对齐的数据列）
                             .text_center()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -5295,13 +5295,13 @@ impl AmuxApp {
         }
         let tree = if diff_tree_collapsed {
             v_flex()
-                .w(px(28.0))
+                .w_8()
                 .h_full()
                 .child(Label::new("树"))
                 .into_any_element()
         } else {
             v_flex()
-                .w(px(220.0))
+                .w(px(220.0)) // diff 文件树面板固定宽度
                 .h_full()
                 .min_h_0()
                 .gap_1()
@@ -5362,7 +5362,7 @@ impl AmuxApp {
             .top(px(menu.y))
             .id("context-menu")
             .v_flex()
-            .w(px(170.))
+            .w(px(170.)) // 右键菜单固定宽度（紧凑菜单）
             .p_1()
             .gap_1()
             .bg(cx.theme().popover)
@@ -5484,7 +5484,7 @@ impl AmuxApp {
                         cx.stop_propagation();
                     })
                     .w_full()
-                    .max_w(px(880.))
+                    .max_w(px(880.)) // 设置浮窗最大尺寸（固定容器）
                     .h_full()
                     .max_h(px(620.))
                     .overflow_hidden()
@@ -5565,7 +5565,7 @@ impl AmuxApp {
             .child(
                 v_flex()
                     .id("skills-card")
-                    .w(px(480.))
+                    .w(px(480.)) // skills 对话框固定尺寸
                     .h(px(420.))
                     .overflow_hidden()
                     .bg(cx.theme().popover)
@@ -5597,7 +5597,7 @@ impl AmuxApp {
     fn render_settings_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("settings-nav")
-            .w(px(190.))
+            .w(px(190.)) // 设置导航面板固定宽度
             .h_full()
             .gap_1()
             .p_2()
@@ -5837,7 +5837,7 @@ impl AmuxApp {
         let mut card = v_flex()
             .id("add-machine-card")
             .relative()
-            .w(px(460.))
+            .w(px(460.)) // 对话框固定宽度
             .gap_2()
             .p_4()
             .bg(cx.theme().popover)
@@ -5949,7 +5949,7 @@ impl AmuxApp {
         let mut card = v_flex()
             .id("quick-command-card")
             .relative()
-            .w(px(520.))
+            .w(px(520.)) // 对话框固定宽度
             .gap_2()
             .p_4()
             .bg(cx.theme().popover)
@@ -6032,7 +6032,7 @@ impl AmuxApp {
         let mut card = v_flex()
             .id("skill-form-card")
             .relative()
-            .w(px(520.))
+            .w(px(520.)) // 对话框固定宽度
             .gap_2()
             .p_4()
             .bg(cx.theme().popover)
@@ -6143,7 +6143,7 @@ impl AmuxApp {
         let mut card = v_flex()
             .id("skill-action-card")
             .relative()
-            .w(px(520.))
+            .w(px(520.)) // 对话框固定宽度
             .gap_2()
             .p_4()
             .bg(cx.theme().popover)
@@ -6212,7 +6212,7 @@ impl AmuxApp {
         let mut card = v_flex()
             .id("template-form-card")
             .relative()
-            .w(px(560.))
+            .w(px(560.)) // 对话框固定宽度
             .gap_2()
             .p_4()
             .bg(cx.theme().popover)
@@ -6680,7 +6680,7 @@ impl Render for AmuxApp {
             .gap_2()
             .items_center()
             .pl(px(76.)) // 为 macOS 红绿灯按钮区预留的窗口 inset
-            .pr(px(12.))
+            .pr(px(12.)) // 窗口 chrome 尾部内边距
             .bg(cx.theme().title_bar)
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
