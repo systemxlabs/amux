@@ -1332,10 +1332,10 @@ impl AmuxApp {
                 .machine(*machine)
                 .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
                 .is_some_and(|s| s.state == SessionState::Busy),
-            Some(Selected::Workflow { engine }) => self.workflows.get(*engine).is_some_and(|wf| {
-                wf.session.read().unwrap().state == SessionState::Busy
-                    && !wf.session.read().unwrap().done
-            }),
+            Some(Selected::Workflow { engine }) => self
+                .workflows
+                .get(*engine)
+                .is_some_and(|wf| wf.session.read().unwrap().state == SessionState::Busy),
             None => false,
         }
     }
@@ -3249,8 +3249,6 @@ impl AmuxApp {
         };
         let state = if wf.session.read().unwrap().cancelled {
             "已取消"
-        } else if wf.session.read().unwrap().done {
-            "完成"
         } else if wf.session.read().unwrap().state == SessionState::Busy {
             "编排中…"
         } else {
@@ -4797,18 +4795,18 @@ impl AmuxApp {
         };
         body = body.child(Label::new(format!("标题: {title}")));
         if let Some(Selected::Workflow { engine }) = self.selected.clone() {
-            let done = self
+            // 无运行中的推进时无需取消（工作流无终态，空闲即可直接下发新指令）
+            let busy = self
                 .workflows
                 .get(engine)
-                .map(|w| w.session.read().unwrap().done)
-                .unwrap_or(false);
+                .is_some_and(|w| w.session.read().unwrap().state == SessionState::Busy);
             body = body
                 .child(Label::new("— 工作流会话 —"))
                 .child(
                     Button::new("wf-cancel")
                         .small()
                         .label("取消")
-                        .when(done, |b| b.disabled(true))
+                        .when(!busy, |b| b.disabled(true))
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             this.cancel_workflow(window, cx, engine);
                         })),
