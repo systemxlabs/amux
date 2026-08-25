@@ -14,7 +14,7 @@ use agent_client_protocol::schema::v1::{
     NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    TextContent, TextResourceContents, ToolKind,
+    StopReason, TextContent, TextResourceContents, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{AcpAgent, ConnectionTo, JsonRpcRequest, JsonRpcResponse};
@@ -48,8 +48,8 @@ pub enum AgentEvent {
     },
     /// ACP 请求或传输失败
     Error(String),
-    /// turn 完成
-    TurnEnded,
+    /// turn 完成（携带结束原因；docs/DESIGN.md §工作流会话驱动「变更原因」）
+    TurnEnded(protocol::StateChangeReason),
 }
 
 /// 与单个 agent 的驱动接口（ACP v1 语义的投影）。
@@ -262,7 +262,7 @@ impl AgentDriver for AcpAgentDriver {
         if let Err(error) = send_result {
             self.routes.lock().unwrap().remove(agent_session_id);
             let _ = tx.try_send(AgentEvent::Error(error));
-            let _ = tx.try_send(AgentEvent::TurnEnded);
+            let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
         }
         rx
     }
@@ -524,12 +524,17 @@ async fn connect_main(
                                 let result = cx
                                     .send_request(PromptRequest::new(sid.clone(), blocks))
                                     .on_receiving_result(async move |result| {
-                                        // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）
+                                        // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）。
+                                        // 结束原因取自 ACP prompt 响应的 stopReason（权威归因）
                                         let route = callback_routes
                                             .lock()
                                             .expect("Mutex 中毒（临界区内不应 panic）")
                                             .remove(&callback_sid);
                                         if let Some(tx) = route {
+                                            let reason = match &result {
+                                                Ok(resp) => stop_reason_reason(resp.stop_reason),
+                                                Err(_) => protocol::StateChangeReason::Aborted,
+                                            };
                                             if let core::result::Result::Err(e) = &result {
                                                 let _ = tx
                                                     .send(AgentEvent::Error(format!(
@@ -537,7 +542,7 @@ async fn connect_main(
                                                     )))
                                                     .await;
                                             }
-                                            let _ = tx.send(AgentEvent::TurnEnded).await;
+                                            let _ = tx.send(AgentEvent::TurnEnded(reason)).await;
                                         }
                                         core::result::Result::Ok(())
                                     });
@@ -556,7 +561,11 @@ async fn connect_main(
                                                 "ACP prompt 调用失败: {e}"
                                             )))
                                             .await;
-                                        let _ = tx.send(AgentEvent::TurnEnded).await;
+                                        let _ = tx
+                                            .send(AgentEvent::TurnEnded(
+                                                protocol::StateChangeReason::Aborted,
+                                            ))
+                                            .await;
                                     }
                                 }
                             });
@@ -640,6 +649,18 @@ async fn dispatch_call_inner(
                 .map_err(|e| format!("skill/list 失败: {e}"))?;
             serde_json::to_value(resp).map_err(|e| format!("skill/list 序列化失败: {e}"))
         }
+    }
+}
+
+/// ACP stopReason → 状态变更原因（docs/DESIGN.md §工作流会话驱动「变更原因」）。
+/// 未识别的新枚举值按正常结束处理（仅 cancelled 参与注入过滤）。
+fn stop_reason_reason(reason: StopReason) -> protocol::StateChangeReason {
+    match reason {
+        StopReason::Cancelled => protocol::StateChangeReason::Cancelled,
+        StopReason::MaxTokens => protocol::StateChangeReason::MaxTokens,
+        StopReason::MaxTurnRequests => protocol::StateChangeReason::MaxTurnRequests,
+        StopReason::Refusal => protocol::StateChangeReason::Refusal,
+        _ => protocol::StateChangeReason::Completed,
     }
 }
 

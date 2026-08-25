@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use protocol::{
     generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult, SessionIdParams,
     SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, SessionState,
+    StateChangeReason,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig};
@@ -656,12 +657,15 @@ impl WorkflowEngine {
     }
 
     /// 关联普通会话状态变更（GUI 收到 `session.state_change` 通知时调用）。
-    /// 关联普通会话变 idle → 按 docs/DESIGN.md 格式注入状态变更并推进。
+    /// 变 idle 且变更原因非取消 → 按 docs/DESIGN.md 格式注入并推进。
+    /// 取消导致的不注入：编排者不应与用户的取消拉锯；工作流自身已取消时同样跳过，
+    /// 兜住「取消瞬间自然完成的 idle 事件已在路上」的竞态。
     pub async fn on_child_state(
         &self,
         session_id: &str,
         old_state: SessionState,
         new_state: SessionState,
+        reason: StateChangeReason,
         output_excerpt: Option<String>,
     ) -> Result<bool, String> {
         let machine = {
@@ -678,20 +682,20 @@ impl WorkflowEngine {
         };
         self.sync_state_from_children();
         if new_state == SessionState::Idle {
-            // 用户取消工作流导致的子会话状态变更不注入（docs/DESIGN.md §工作流会话驱动）
             {
                 let s = self.session.read().expect("RwLock 中毒");
-                // 用户取消工作流导致的子会话状态变更不注入（docs/DESIGN.md §工作流会话驱动）
-                if s.cancelled {
+                if reason == StateChangeReason::Cancelled || s.cancelled {
                     return Ok(false);
                 }
             }
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::User {
                     text: format!(
-                        "关联普通会话 {session_id}@{machine} 检测到状态变更：{old} -> {new}",
+                        "关联普通会话 {session_id}@{machine} 检测到状态变更：{old} -> {new}，\
+                         变更原因为{why}",
                         old = state_label(old_state),
-                        new = state_label(new_state)
+                        new = state_label(new_state),
+                        why = reason_label(reason),
                     ),
 
                     timestamp: now(),
@@ -1271,6 +1275,18 @@ fn state_label(s: SessionState) -> &'static str {
     }
 }
 
+/// 状态变更原因的中文标注（注入编排对话流的 docs/DESIGN.md 模板用）。
+fn reason_label(r: StateChangeReason) -> &'static str {
+    match r {
+        StateChangeReason::Completed => "正常完成",
+        StateChangeReason::Cancelled => "已取消",
+        StateChangeReason::MaxTokens => "达到 token 上限",
+        StateChangeReason::MaxTurnRequests => "达到请求次数上限",
+        StateChangeReason::Refusal => "agent 拒绝继续",
+        StateChangeReason::Aborted => "异常终止",
+    }
+}
+
 /// 脚本化测试后端（决策序列；用于驱动引擎的纯逻辑测试）。
 #[cfg(test)]
 #[doc(hidden)]
@@ -1797,7 +1813,13 @@ mod tests {
             last_active_at: 0,
         });
         let advanced = engine
-            .on_child_state("s_child", SessionState::Busy, SessionState::Idle, None)
+            .on_child_state(
+                "s_child",
+                SessionState::Busy,
+                SessionState::Idle,
+                StateChangeReason::Completed,
+                None,
+            )
             .await
             .unwrap();
         assert!(advanced);
@@ -1811,6 +1833,57 @@ mod tests {
                 .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text == "本轮静默")),
             "静默决策也应作为编排输出进入对话流"
         );
+        // 注入文案按 docs/DESIGN.md 模板携带变更原因
+        assert!(
+            engine
+                .session
+                .read()
+                .unwrap()
+                .transcript
+                .iter()
+                .any(|m| matches!(m, OrcMsg::User { text, .. }
+                    if text.contains("busy -> idle，变更原因为正常完成"))),
+            "注入文本应包含变更原因"
+        );
+    }
+
+    /// 变更原因为取消的 idle 事件不注入不推进（docs/DESIGN.md §工作流会话驱动）。
+    #[tokio::test]
+    async fn cancelled_reason_idle_event_does_not_advance() {
+        let (clients, m) = clients_with_machines();
+        let backend = FakeBackend::new(vec![Decision {
+            summary: "不应发生".into(),
+            actions: vec![],
+        }]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        engine.session.write().unwrap().children.push(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+            agent: "mock_acp".into(),
+            step_desc: "第一步".into(),
+            state: SessionState::Busy,
+            last_output: String::new(),
+            last_active_at: 0,
+        });
+        let advanced = engine
+            .on_child_state(
+                "s_child",
+                SessionState::Busy,
+                SessionState::Idle,
+                StateChangeReason::Cancelled,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!advanced);
+        assert!(!engine
+            .session
+            .read()
+            .unwrap()
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::User { text, .. } if text.contains("状态变更"))));
     }
 
     /// 工作流会话持久化往返（acceptance）。
@@ -2158,7 +2231,13 @@ mod tests {
             });
         }
         let advanced = engine
-            .on_child_state("s_child", SessionState::Busy, SessionState::Idle, None)
+            .on_child_state(
+                "s_child",
+                SessionState::Busy,
+                SessionState::Idle,
+                StateChangeReason::Completed,
+                None,
+            )
             .await
             .unwrap();
         assert!(!advanced);

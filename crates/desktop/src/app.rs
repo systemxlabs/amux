@@ -42,8 +42,8 @@ use protocol::{
     GitChangeStatus, HistoryItem, HistoryResult, OngoingActivityResult, OpResult,
     SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta, SessionNewParams,
     SessionPageParams, SessionPromptParams, SessionResult, SessionState, SessionStateChange,
-    WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult, WorkspaceReadParams,
-    WorkspaceReadResult, WorkspaceRestoreParams,
+    StateChangeReason, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult,
+    WorkspaceReadParams, WorkspaceReadResult, WorkspaceRestoreParams,
 };
 
 use crate::config::{
@@ -533,6 +533,7 @@ impl AmuxApp {
             session_id: sid,
             old_state,
             new_state,
+            reason,
         } = change;
         let idle = new_state == SessionState::Idle;
         // 更新普通会话元数据状态与聚合视图 busy（若已加载）
@@ -557,13 +558,15 @@ impl AmuxApp {
         }) else {
             return;
         };
-        // 用户取消工作流会话导致的子会话状态变更不注入（docs/DESIGN.md §工作流会话驱动）
-        if this
+        // 取消导致的状态变更不注入（docs/DESIGN.md §工作流会话驱动）：
+        // 事件侧 reason=cancelled，或工作流自身已取消（竞态兜底：取消瞬间
+        // 自然完成的 idle 事件可能已在路上）
+        let wf_cancelled = this
             .workflows
             .get(wi)
             .map(|wf| wf.session.read().unwrap().cancelled)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if reason == StateChangeReason::Cancelled || wf_cancelled {
             if let Some(wf) = this.workflows.get_mut(wi) {
                 wf.on_child_state_local(&sid, new_state);
             }
@@ -630,7 +633,7 @@ impl AmuxApp {
                     }
                 };
                 if let Err(e) = wf
-                    .on_child_state(&sid, old_state, new_state, Some(output))
+                    .on_child_state(&sid, old_state, new_state, reason, Some(output))
                     .await
                 {
                     protocol::log::error("gui.workflow", format!("推进工作流失败：{e}"));

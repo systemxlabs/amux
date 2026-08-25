@@ -39,7 +39,7 @@ async fn acp_driver_full_flow() {
     while let Ok(ev) = tokio::time::timeout_at(deadline, rx.recv()).await {
         let ev = ev.expect("事件流关闭");
         events.push(ev.clone());
-        if matches!(ev, AgentEvent::TurnEnded) {
+        if matches!(ev, AgentEvent::TurnEnded(_)) {
             break;
         }
     }

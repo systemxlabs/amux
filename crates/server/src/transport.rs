@@ -391,6 +391,7 @@ mod tests {
             session_id: "s1".into(),
             old_state: SessionState::Idle,
             new_state: SessionState::Busy,
+            reason: protocol::StateChangeReason::Completed,
         });
         let frame = notification_frame(&n).expect("应序列化");
         assert!(

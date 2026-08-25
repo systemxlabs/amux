@@ -557,7 +557,11 @@ mod stub {
                 tx.send(AgentEvent::OutputChunk(format!("{prefix}完成")))
                     .await
                     .ok();
-                tx.send(AgentEvent::TurnEnded).await.ok();
+                tx.send(AgentEvent::TurnEnded(
+                    protocol::StateChangeReason::Completed,
+                ))
+                .await
+                .ok();
             });
             rx
         }

@@ -427,9 +427,14 @@ impl SessionManager {
             }
         };
 
-        // Busy 广播
+        // Busy 广播（reason 无意义，恒为默认值）
         if old_state != SessionState::Busy {
-            self.broadcast_state_change(session_id, old_state, SessionState::Busy);
+            self.broadcast_state_change(
+                session_id,
+                old_state,
+                SessionState::Busy,
+                protocol::StateChangeReason::Completed,
+            );
         }
 
         let ts = now();
@@ -443,7 +448,12 @@ impl SessionManager {
                 "server.session",
                 format!("用户消息落盘失败 {session_id}: {e}"),
             );
-            self.finalize_turn(session_id, &control, false);
+            self.finalize_turn(
+                session_id,
+                &control,
+                false,
+                protocol::StateChangeReason::Aborted,
+            );
             return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
         }
         self.invalidate_log_caches(session_id);
@@ -462,18 +472,23 @@ impl SessionManager {
                 );
             }
             self.invalidate_log_caches(session_id);
-            self.finalize_turn(session_id, &control, false);
+            self.finalize_turn(
+                session_id,
+                &control,
+                false,
+                protocol::StateChangeReason::Aborted,
+            );
             return Err(SessionError::AgentUnavailable(format!(
                 "恢复 agent 上下文失败: {e}"
             )));
         }
 
         let started = std::time::Instant::now();
-        let storage_error = self
+        let (storage_error, turn_reason) = self
             .run_turn(session_id, &driver, &agent_session_id, input, &control)
             .await;
 
-        self.finalize_turn(session_id, &control, false);
+        self.finalize_turn(session_id, &control, false, turn_reason);
         protocol::log::info(
             "server.session",
             format!(
@@ -524,7 +539,7 @@ impl SessionManager {
     }
 
     /// 跑单个 turn：指令发给 agent，事件喂合并器，thinking/tool_call 记为 ongoing。
-    /// 返回落盘阶段的存储错误（如有）。删除与 prompt 并发时，
+    /// 返回（落盘阶段的存储错误、turn 结束原因）。删除与 prompt 并发时，
     /// 旧 turn 不得在删除后重新创建历史文件。
     async fn run_turn(
         &self,
@@ -533,15 +548,18 @@ impl SessionManager {
         agent_session_id: &str,
         input: Vec<ContentBlock>,
         control: &SessionControl,
-    ) -> Option<SessionError> {
+    ) -> (Option<SessionError>, protocol::StateChangeReason) {
         let log = SessionLog::open(&self.data_dir, session_id);
         let mut merger = TurnMerger::new();
         let mut rx = driver.prompt(agent_session_id, input);
         let mut turn_completed = false;
+        // 结束原因：事件流正常收尾时取 ACP stopReason；中断则保持 aborted
+        let mut turn_reason = protocol::StateChangeReason::Aborted;
         while let Some(ev) = rx.recv().await {
             match ev {
-                AgentEvent::TurnEnded => {
+                AgentEvent::TurnEnded(reason) => {
                     turn_completed = true;
+                    turn_reason = reason;
                     break;
                 }
                 AgentEvent::OutputChunk(text) => merger.push_output(text, now()),
@@ -610,12 +628,18 @@ impl SessionManager {
         if !deleted && (!history.is_empty() || !activities.is_empty()) {
             self.invalidate_log_caches(session_id);
         }
-        storage_error
+        (storage_error, turn_reason)
     }
 
-    /// turn 统一收尾：清 ongoing、释放 busy、置 Idle 并广播（deleted 时跳过状态回写，
-    /// 避免已删除会话在注册表中复活）。
-    fn finalize_turn(&self, session_id: &str, control: &SessionControl, deleted: bool) {
+    /// turn 统一收尾：清 ongoing、释放 busy、置 Idle 并广播结束原因
+    /// （deleted 时跳过状态回写，避免已删除会话在注册表中复活）。
+    fn finalize_turn(
+        &self,
+        session_id: &str,
+        control: &SessionControl,
+        deleted: bool,
+        reason: protocol::StateChangeReason,
+    ) {
         self.ongoing.lock().unwrap().remove(session_id);
         control.busy.store(false, Ordering::SeqCst);
         if !deleted {
@@ -628,7 +652,7 @@ impl SessionManager {
                     format!("更新空闲状态失败 {session_id}: {e}"),
                 );
             }
-            self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle);
+            self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle, reason);
         }
     }
 
@@ -650,11 +674,18 @@ impl SessionManager {
         Ok(())
     }
 
-    fn broadcast_state_change(&self, session_id: &str, old: SessionState, new: SessionState) {
+    fn broadcast_state_change(
+        &self,
+        session_id: &str,
+        old: SessionState,
+        new: SessionState,
+        reason: protocol::StateChangeReason,
+    ) {
         let payload = SessionStateChange {
             session_id: session_id.to_string(),
             old_state: old,
             new_state: new,
+            reason,
         };
         let _ = self.tx.send(ServerNotification::StateChange(payload));
     }
@@ -942,7 +973,11 @@ mod tests {
                 tokio::spawn(async move {
                     started.notify_one();
                     release.notified().await;
-                    let _ = tx.send(AgentEvent::TurnEnded).await;
+                    let _ = tx
+                        .send(AgentEvent::TurnEnded(
+                            protocol::StateChangeReason::Completed,
+                        ))
+                        .await;
                 });
                 rx
             }
@@ -1027,7 +1062,11 @@ mod tests {
                 let (tx, rx) = tokio::sync::mpsc::channel(8);
                 tokio::spawn(async move {
                     let _ = tx.send(AgentEvent::OutputChunk("输出".into())).await;
-                    let _ = tx.send(AgentEvent::TurnEnded).await;
+                    let _ = tx
+                        .send(AgentEvent::TurnEnded(
+                            protocol::StateChangeReason::Completed,
+                        ))
+                        .await;
                 });
                 rx
             }

@@ -159,13 +159,36 @@ pub struct SessionInfoResult {
     pub sessions: Vec<SessionMeta>,
 }
 
+/// 会话状态变更原因（源自 ACP `session/prompt` 响应的 stopReason；
+/// docs/DESIGN.md §工作流会话驱动「变更原因非取消才注入」）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateChangeReason {
+    /// 正常结束（ACP end_turn）
+    #[default]
+    Completed,
+    /// 客户端取消（ACP cancelled；规范要求 agent 收到 session/cancel 后必须返回）
+    Cancelled,
+    /// 达到 token 上限（ACP max_tokens）
+    MaxTokens,
+    /// turn 内请求次数上限（ACP max_turn_requests）
+    MaxTurnRequests,
+    /// agent 拒绝继续（ACP refusal）
+    Refusal,
+    /// 异常终止：连接中断 / ACP 调用失败，无 stopReason 可取
+    Aborted,
+}
+
 /// 会话状态变更通知负载（docs/DESIGN.md 唯一主动推送 `session.state_change`）。
+/// reason 仅在变更为 Idle（turn 结束）时有意义；Busy 侧恒为 completed。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStateChange {
     pub session_id: String,
     pub old_state: SessionState,
     pub new_state: SessionState,
+    #[serde(default)]
+    pub reason: StateChangeReason,
 }
 
 // ---- 对话内容（docs/DESIGN.md prompt 输入；普通会话存储·对话历史）----
@@ -496,10 +519,17 @@ mod tests {
             session_id: "s1".into(),
             old_state: SessionState::Busy,
             new_state: SessionState::Idle,
+            reason: StateChangeReason::Cancelled,
         };
         let s = serde_json::to_string(&n).unwrap();
         assert!(s.contains("\"sessionId\":\"s1\""), "{s}");
         assert!(s.contains("\"newState\":\"idle\""), "{s}");
+        assert!(s.contains("\"reason\":\"cancelled\""), "{s}");
+        // 旧负载缺 reason 字段：向后兼容解析为默认值
+        let legacy: SessionStateChange =
+            serde_json::from_str(r#"{"sessionId":"s2","oldState":"busy","newState":"idle"}"#)
+                .unwrap();
+        assert_eq!(legacy.reason, StateChangeReason::Completed);
     }
 
     #[test]
