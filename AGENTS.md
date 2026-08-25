@@ -34,7 +34,8 @@
 
 | 组件 | 职责 |
 |---|---|
-| `protocol` | 协议规范 |
-| `server` | Server 实现 |
-| `desktop` | 桌面应用 |
-| `web` | Web 应用（待定） |
+| `amux-common` | 共享代码 |
+| `amux-protocol` | 协议规范 |
+| `amux-server` | Server 实现 |
+| `amux-desktop` | 桌面应用 |
+| `amux-web` | Web 应用（待定） |
