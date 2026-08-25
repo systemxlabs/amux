@@ -15,7 +15,7 @@ use gpui_component::{
     radio::RadioGroup,
     scroll::ScrollableElement,
     spinner::Spinner,
-    text::{TextView, TextViewStyle},
+    text::TextView,
     WindowExt, *,
 };
 
@@ -3911,11 +3911,7 @@ impl AmuxApp {
                             .child(
                                 TextView::markdown(format!("umd-{i}"), block_text(content))
                                     .selectable(true)
-                                    .text_color(primary_foreground)
-                                    .style(TextViewStyle::default().inline_code(HighlightStyle {
-                                        background_color: Some(rgba(0x1e40af80).into()),
-                                        ..Default::default()
-                                    })),
+                                    .text_color(primary_foreground),
                             ),
                     )
                 }
