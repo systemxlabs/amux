@@ -567,16 +567,17 @@ impl AmuxApp {
             .map(|wf| wf.session.read().unwrap().cancelled)
             .unwrap_or(false);
         if reason == StateChangeReason::Cancelled || wf_cancelled {
+            // 不推进，但忙碌计数仍要记账（否则取消后计数永久偏高）
             if let Some(wf) = this.workflows.get_mut(wi) {
-                wf.on_child_state_local(&sid, new_state);
+                wf.note_child_state(&sid, old_state, new_state);
             }
             return;
         }
-        // 同步更新子会话本地状态（busy/idle 视觉）
-        if let Some(wf) = this.workflows.get_mut(wi) {
-            wf.on_child_state_local(&sid, new_state);
-        }
         if !idle {
+            // 忙碌化转换不推进，但计数要记账
+            if let Some(wf) = this.workflows.get_mut(wi) {
+                wf.note_child_state(&sid, old_state, new_state);
+            }
             return;
         }
         // 子会话变 idle：异步推进该工作流（编排者需要细节时自行调
@@ -585,7 +586,6 @@ impl AmuxApp {
             Some(wf) => wf.clone(),
             None => return,
         };
-        wf.on_child_state_local(&sid, new_state);
         let session_dir = this.session_dir.clone();
         // 状态共享于引擎内部（Arc<RwLock>），任务结束无需整引擎回写
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -3060,7 +3060,6 @@ impl AmuxApp {
             let s_guard = wf.session.read().unwrap();
             let mut recency = s_guard.updated_at;
             for c in &s_guard.children {
-                recency = recency.max(c.last_active_at);
                 if let Some(mm) = self.machines.get(c.machine_idx) {
                     if let Some(s) = mm.sessions.iter().find(|s| s.id == c.id) {
                         recency = recency.max(s.last_active_at);
@@ -3268,32 +3267,35 @@ impl AmuxApp {
                 div().w(px(14.)).h(px(14.)).into_any_element()
             });
 
-        // 子会话默认折叠、可展开下钻
+        // 子会话默认折叠、可展开下钻。标题/忙闲联表本机会话缓存（权威在 server）
         let mut children = wf.session.read().unwrap().children.clone();
         children.sort_by_key(|child| {
             std::cmp::Reverse(
-                child.last_active_at.max(
-                    self.machine(child.machine_idx)
-                        .and_then(|machine| {
-                            machine
-                                .sessions
-                                .iter()
-                                .find(|session| session.id == child.id)
-                        })
-                        .map(|session| session.last_active_at)
-                        .unwrap_or(0),
-                ),
+                self.machine(child.machine_idx)
+                    .and_then(|machine| {
+                        machine
+                            .sessions
+                            .iter()
+                            .find(|session| session.id == child.id)
+                    })
+                    .map(|session| session.last_active_at)
+                    .unwrap_or(0),
             )
         });
         let mut content = v_flex().gap_1();
         for c in &children {
             let cid = c.id.clone();
             let cid_open = cid.clone();
-            let step = c.step_desc.clone();
             let machine_name = c.machine_name.clone();
             let machine_click = machine_name.clone();
-            let agent = c.agent.clone();
-            let busy = c.state == SessionState::Busy;
+            let meta = self
+                .machine(c.machine_idx)
+                .and_then(|machine| machine.sessions.iter().find(|s| s.id == c.id));
+            let step = meta
+                .map(|m| m.title.clone())
+                .unwrap_or_else(|| "（会话不存在）".into());
+            let agent = meta.map(|m| m.agent.clone()).unwrap_or_default();
+            let busy = meta.is_some_and(|m| m.state == SessionState::Busy);
             content = content.child(
                 h_flex()
                     .w_full()
@@ -4785,7 +4787,11 @@ impl AmuxApp {
                 .map(|w| w.session.read().unwrap().children.clone())
                 .unwrap_or_default()
             {
-                let step = c.step_desc.clone();
+                let step = self
+                    .machine(c.machine_idx)
+                    .and_then(|m| m.sessions.iter().find(|s| s.id == c.id))
+                    .map(|s| s.title.clone())
+                    .unwrap_or_else(|| "（会话不存在）".into());
                 body = body.child(Label::new(format!("子会话 {} · {}", c.id, step)));
             }
         }

@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use protocol::{
     generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult, SessionIdParams,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, SessionState,
-    StateChangeReason,
+    SessionInfoParams, SessionInfoResult, SessionMeta, SessionNewParams, SessionPageParams,
+    SessionPromptParams, SessionResult, SessionState, StateChangeReason,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig};
@@ -44,18 +44,15 @@ pub enum OrcMsg {
     Orc { text: String, timestamp: u64 },
 }
 
-/// 关联普通会话（工作流驱动的普通会话，由各机器 server 持久化）。
+/// 关联普通会话的挂载关系（工作流 ↔ 普通会话）。只存路由信息：
+/// 标题、忙闲、agent 等一律以机器 server 的会话元数据为权威
+/// （编排者经 list_sessions 现查 session.info；GUI 渲染时与本机会话缓存联表）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildSession {
     pub id: String,
     pub machine_idx: usize,
     pub machine_name: String,
-    pub agent: String,
-    /// 步骤描述：该子会话承担计划中的哪一步（取下发指令的首行）
-    pub step_desc: String,
-    pub state: SessionState,
-    pub last_active_at: u64,
 }
 
 /// 工作流会话（GUI 本地状态，docs/DESIGN.md「工作流会话存储」）。
@@ -275,6 +272,9 @@ pub struct WorkflowEngine {
     gate: Arc<Mutex<AdvanceGate>>,
     /// 工作中收到的用户消息（steer 注入；当前轮结束后合并）。
     steer_inbox: Arc<Mutex<Vec<String>>>,
+    /// 忙碌子会话计数：子会话状态不落盘（权威在机器 server），仅按状态变更
+    /// 事件增减；驱动工作流级忙闲显示与 steer 路由。重启归零。
+    busy_children: Arc<Mutex<usize>>,
 }
 
 impl WorkflowEngine {
@@ -327,6 +327,7 @@ impl WorkflowEngine {
             machines,
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
+            busy_children: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -352,6 +353,7 @@ impl WorkflowEngine {
             machines,
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
+            busy_children: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -392,7 +394,7 @@ impl WorkflowEngine {
                 s.updated_at = now();
             });
             let result = self.do_advance().await;
-            self.sync_state_from_children();
+            self.sync_state();
             self.with_session(|s| s.updated_at = now());
             let rerun = {
                 let mut g = self.gate.lock().expect("Mutex 中毒（临界区内不应 panic）");
@@ -536,25 +538,16 @@ impl WorkflowEngine {
                             .any(|c| c.id == session_id)
                     };
                     if !known {
-                        let step_desc = first_line(&prompt);
                         self.with_session(|s| {
                             s.children.push(ChildSession {
                                 id: session_id.clone(),
                                 machine_idx: m_idx,
                                 machine_name: self.machines[m_idx].name.clone(),
-                                agent: agent.clone(),
-                                step_desc,
-                                state: SessionState::Busy,
-                                last_active_at: now(),
                             });
                         });
                     }
                     if let Err(error) = self.prompt_child(&session_id, &prompt).await {
                         self.with_session(|s| {
-                            if let Some(child) = s.children.iter_mut().find(|c| c.id == session_id)
-                            {
-                                child.state = SessionState::Idle;
-                            }
                             s.activities.push(Activity::Error {
                                 timestamp: now(),
                                 detail: error.clone(),
@@ -577,9 +570,6 @@ impl WorkflowEngine {
                 OrcAction::Steer { session, prompt } | OrcAction::Retry { session, prompt } => {
                     if let Err(error) = self.prompt_child(&session, &prompt).await {
                         self.with_session(|s| {
-                            if let Some(child) = s.children.iter_mut().find(|c| c.id == session) {
-                                child.state = SessionState::Idle;
-                            }
                             s.activities.push(Activity::Error {
                                 timestamp: now(),
                                 detail: error.clone(),
@@ -624,11 +614,6 @@ impl WorkflowEngine {
             .get(machine_idx)
             .cloned()
             .ok_or_else(|| "机器连接已失效".to_string())?;
-        self.with_session(|s| {
-            if let Some(c) = s.children.iter_mut().find(|c| c.id == session_id) {
-                c.state = SessionState::Busy;
-            }
-        });
         let sid = session_id.to_string();
         // 下发失败必须向上传播（工作流推进据此记录错误活动），不能只写日志
         let input = SessionPromptParams {
@@ -663,15 +648,14 @@ impl WorkflowEngine {
         reason: StateChangeReason,
     ) -> Result<bool, String> {
         let machine = {
-            let mut s = self.session.write().expect("RwLock 中毒");
-            let Some(child) = s.children.iter_mut().find(|c| c.id == session_id) else {
+            let s = self.session.read().expect("RwLock 中毒");
+            let Some(child) = s.children.iter().find(|c| c.id == session_id) else {
                 return Ok(false);
             };
-            child.state = new_state;
-            child.last_active_at = now();
             child.machine_name.clone()
         };
-        self.sync_state_from_children();
+        self.track_child_state(session_id, old_state, new_state);
+        self.sync_state();
         if new_state == SessionState::Idle {
             {
                 let s = self.session.read().expect("RwLock 中毒");
@@ -706,23 +690,56 @@ impl WorkflowEngine {
         Ok(false)
     }
 
-    /// 同步记录关联普通会话状态变更（不推进；widget 状态即可视化）。
-    pub fn on_child_state_local(&self, session_id: &str, state: SessionState) {
-        self.with_session(|s| {
-            if let Some(child) = s.children.iter_mut().find(|c| c.id == session_id) {
-                child.state = state;
-                child.last_active_at = now();
-            }
-        });
-        self.sync_state_from_children();
+    /// 仅更新忙碌计数（不推进）。被过滤不推进的变更事件也须经此记账，
+    /// 否则取消场景下计数永久偏高。与 [`Self::on_child_state`] 二选一调用，
+    /// 不可叠加（重复计数）。
+    pub fn note_child_state(
+        &self,
+        session_id: &str,
+        old_state: SessionState,
+        new_state: SessionState,
+    ) {
+        self.track_child_state(session_id, old_state, new_state);
+        self.sync_state();
     }
 
-    fn sync_state_from_children(&self) {
+    /// 按状态变更事件增减忙碌子会话计数。
+    fn track_child_state(
+        &self,
+        session_id: &str,
+        old_state: SessionState,
+        new_state: SessionState,
+    ) {
+        let mounted = {
+            let s = self.session.read().expect("RwLock 中毒");
+            s.children.iter().any(|c| c.id == session_id)
+        };
+        if !mounted || old_state == new_state {
+            return;
+        }
+        let mut busy = self
+            .busy_children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
+        match (old_state, new_state) {
+            (SessionState::Idle, SessionState::Busy) => *busy += 1,
+            (SessionState::Busy, SessionState::Idle) => *busy = busy.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    /// 工作流级忙闲：有忙碌子会话即工作中（PRD「编排调度中或关联会话工作中」）。
+    fn sync_state(&self) {
         self.with_session(|s| {
             if s.cancelled {
                 return;
             }
-            s.state = if s.children.iter().any(|c| c.state == SessionState::Busy) {
+            let busy = *self
+                .busy_children
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                > 0;
+            s.state = if busy {
                 SessionState::Busy
             } else {
                 SessionState::Idle
@@ -855,10 +872,6 @@ impl WorkflowEngine {
     pub fn remove(data_dir: &Path, id: &str) -> std::io::Result<()> {
         crate::wfstore::remove(data_dir, id)
     }
-}
-
-fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("").trim().to_string()
 }
 
 impl OrcSession {
@@ -1381,29 +1394,64 @@ async fn list_agents(live: &LiveRuntime) -> Result<String, String> {
 }
 
 async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
+    use std::collections::{BTreeMap, HashMap};
+    // 标题/忙闲/agent 以机器 server 为权威：按机器分组批量现查 session.info，
+    // 本地不缓存这些易漂移的字段
     let children = live
         .children
         .lock()
         .expect("Mutex 中毒（临界区内不应 panic）")
         .clone();
+    let mut ids_by_machine: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for c in &children {
+        ids_by_machine
+            .entry(c.machine_idx)
+            .or_default()
+            .push(c.id.clone());
+    }
+    let mut metas: HashMap<String, SessionMeta> = HashMap::new();
+    for (idx, ids) in ids_by_machine {
+        let Some(client) = live.clients.get(idx) else {
+            continue;
+        };
+        if let Ok(r) = client
+            .request::<_, SessionInfoResult>(
+                protocol::method::SESSION_INFO,
+                Some(SessionInfoParams { session_ids: ids }),
+            )
+            .await
+        {
+            for m in r.sessions {
+                metas.insert(m.id.clone(), m);
+            }
+        }
+    }
+    let online_of = |c: &ChildSession| {
+        live.machines
+            .iter()
+            .find(|m| m.name == c.machine_name)
+            .map(|m| m.online)
+            .unwrap_or(false)
+    };
     let v: Vec<serde_json::Value> = children
         .iter()
-        .map(|c| {
-            let online = live
-                .machines
-                .iter()
-                .find(|m| m.name == c.machine_name)
-                .map(|m| m.online)
-                .unwrap_or(false);
-            serde_json::json!({
+        .map(|c| match metas.get(&c.id) {
+            Some(m) => serde_json::json!({
                 "id": c.id,
-                "title": c.step_desc,
-                "state": state_label(c.state),
-                "lastActiveAt": c.last_active_at,
+                "title": m.title,
+                "state": state_label(m.state),
+                "lastActiveAt": m.last_active_at,
                 "machine": c.machine_name,
-                "agent": c.agent,
-                "machineOnline": online,
-            })
+                "agent": m.agent,
+                "machineOnline": online_of(c),
+            }),
+            // server 侧已不存在（被删除等）：显式告知编排者
+            None => serde_json::json!({
+                "id": c.id,
+                "machine": c.machine_name,
+                "machineOnline": online_of(c),
+                "missing": true,
+            }),
         })
         .collect();
     let output = serde_json::to_string(&v).map_err(|e| format!("序列化失败: {e}"))?;
@@ -1443,11 +1491,6 @@ async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<S
             id: sid.clone(),
             machine_idx: idx,
             machine_name,
-            agent: args.agent,
-            // 步骤描述留待首次 prompt_session 下发指令时取首行
-            step_desc: String::new(),
-            state: SessionState::Idle,
-            last_active_at: now(),
         });
     live.record_tool(
         "create_session",
@@ -1470,7 +1513,6 @@ async fn prompt_session(live: &LiveRuntime, args: PromptSessionArgs) -> Result<S
         .get(child.machine_idx)
         .cloned()
         .ok_or_else(|| "机器连接已失效".to_string())?;
-    let step_desc = first_line(&args.prompt);
     let input = SessionPromptParams {
         session_id: args.session.clone(),
         input: vec![ContentBlock::Text { text: args.prompt }],
@@ -1479,19 +1521,6 @@ async fn prompt_session(live: &LiveRuntime, args: PromptSessionArgs) -> Result<S
         .request_ok(protocol::method::SESSION_PROMPT, Some(input))
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(c) = live
-        .children
-        .lock()
-        .expect("Mutex 中毒（临界区内不应 panic）")
-        .iter_mut()
-        .find(|c| c.id == args.session)
-    {
-        c.state = SessionState::Busy;
-        // 步骤描述跟随最近一次下发的指令首行
-        if !step_desc.is_empty() {
-            c.step_desc = step_desc;
-        }
-    }
     live.record_tool(
         "prompt_session",
         "下发指令",
@@ -1685,19 +1714,11 @@ mod tests {
                 id: "a".into(),
                 machine_idx: 0,
                 machine_name: "m0".into(),
-                agent: "h".into(),
-                step_desc: "s".into(),
-                state: SessionState::Idle,
-                last_active_at: 0,
             },
             ChildSession {
                 id: "b".into(),
                 machine_idx: 1,
                 machine_name: "m1".into(),
-                agent: "h".into(),
-                step_desc: "s".into(),
-                state: SessionState::Busy,
-                last_active_at: 0,
             },
         ];
         assert_eq!(
@@ -1766,10 +1787,6 @@ mod tests {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
-            agent: "mock_acp".into(),
-            step_desc: "第一步".into(),
-            state: SessionState::Busy,
-            last_active_at: 0,
         });
         engine.mark_cancelled();
         assert!(engine.session.read().unwrap().cancelled);
@@ -1799,10 +1816,6 @@ mod tests {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
-            agent: "mock_acp".into(),
-            step_desc: "第一步".into(),
-            state: SessionState::Busy,
-            last_active_at: 0,
         });
         let advanced = engine
             .on_child_state(
@@ -1851,10 +1864,6 @@ mod tests {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
-            agent: "mock_acp".into(),
-            step_desc: "第一步".into(),
-            state: SessionState::Busy,
-            last_active_at: 0,
         });
         let advanced = engine
             .on_child_state(
@@ -2070,7 +2079,7 @@ mod tests {
 
     /// on_child_state_local 同步更新关联普通会话 busy/idle 状态（GUI 收到 state_change 通知时调用）。
     #[test]
-    fn on_child_state_local_updates_busy_and_idle() {
+    fn note_child_state_tracks_busy_count() {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "计划",
@@ -2085,28 +2094,15 @@ mod tests {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
-            agent: "mock_acp".into(),
-            step_desc: "第一步".into(),
-            state: SessionState::Idle,
-            last_active_at: 0,
         });
-        engine.on_child_state_local("s_child", SessionState::Busy);
-        assert_eq!(
-            engine.session.read().unwrap().children[0].state,
-            SessionState::Busy
-        );
-        engine.on_child_state_local("s_child", SessionState::Idle);
-        assert_eq!(
-            engine.session.read().unwrap().children[0].state,
-            SessionState::Idle
-        );
-        // 非挂载的会话 id：无副作用，不 panic，不新增条目
-        engine.on_child_state_local("missing", SessionState::Busy);
-        assert_eq!(engine.session.read().unwrap().children.len(), 1);
-        assert_eq!(
-            engine.session.read().unwrap().children[0].state,
-            SessionState::Idle
-        );
+        // 忙碌计数驱动工作流级忙闲：子会话转忙 → 工作中；转闲 → 空闲
+        engine.note_child_state("s_child", SessionState::Idle, SessionState::Busy);
+        assert_eq!(engine.session.read().unwrap().state, SessionState::Busy);
+        engine.note_child_state("s_child", SessionState::Busy, SessionState::Idle);
+        assert_eq!(engine.session.read().unwrap().state, SessionState::Idle);
+        // 非挂载的会话 id：计数不变，不 panic
+        engine.note_child_state("missing", SessionState::Idle, SessionState::Busy);
+        assert_eq!(engine.session.read().unwrap().state, SessionState::Idle);
     }
 
     /// 薄工具循环：工具调用 → 结果回填 → 纯文本收尾（两轮模型调用）。
@@ -2211,10 +2207,6 @@ mod tests {
                 id: "s_child".into(),
                 machine_idx: 0,
                 machine_name: "测试机".into(),
-                agent: "mock_acp".into(),
-                step_desc: "第一步".into(),
-                state: SessionState::Busy,
-                last_active_at: 0,
             });
         }
         let advanced = engine
