@@ -1001,6 +1001,12 @@ impl AmuxApp {
     }
 
     fn open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wi: usize) {
+        if let Some(wf) = self.workflows.get(wi) {
+            // 惰性加载：仅在打开会话渲染对话/活动视图时，从 JSONL 按需补齐 payload。
+            if let Err(e) = wf.backfill(&self.session_dir) {
+                amux_common::log::error("gui.workflow", format!("补齐工作流历史失败：{e}"));
+            }
+        }
         self.selected = Some(Selected::Workflow { engine: wi });
         self.set_panel(window, cx, None);
         self.workflow_dialog_limit = 50;
@@ -5430,6 +5436,14 @@ impl AmuxApp {
                                 .small()
                                 .label("重命名")
                                 .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    if let Some(wf) = this.workflows.get(wi) {
+                                        if let Err(e) = wf.backfill(&this.session_dir) {
+                                            amux_common::log::error(
+                                                "gui.workflow",
+                                                format!("补齐工作流历史失败：{e}"),
+                                            );
+                                        }
+                                    }
                                     this.selected = Some(Selected::Workflow { engine: wi });
                                     this.renaming_workflow = Some(wi);
                                     this.context_menu = None;

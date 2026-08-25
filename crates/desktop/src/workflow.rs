@@ -801,7 +801,18 @@ impl WorkflowEngine {
     }
 
     pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
-        crate::wfstore::load_all(data_dir)
+        // 惰性元数据加载：只读 sqlite，不读取 transcript/activities 两份 JSONL。
+        crate::wfstore::load_all_meta(data_dir)
+    }
+
+    /// 按需补齐：把会话的 transcript/activities 从 JSONL 读入（仅打开渲染视图时调用）。
+    pub fn backfill(&self, data_dir: &Path) -> std::io::Result<()> {
+        let mut s = self.session.write().expect("RwLock 中毒");
+        if !s.transcript.is_empty() || !s.activities.is_empty() {
+            // 已加载过（例如推进中正在写内存），避免用磁盘旧快照覆盖活跃状态。
+            return Ok(());
+        }
+        crate::wfstore::load_payload(data_dir, &mut s)
     }
 
     pub fn remove(data_dir: &Path, id: &str) -> std::io::Result<()> {
@@ -1802,7 +1813,14 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
         assert_eq!(sessions[0].title, "计划A");
-        assert!(sessions[0]
+        // 惰性元数据加载：启动路径不读取 transcript。
+        assert!(sessions[0].transcript.is_empty());
+        assert!(sessions[0].activities.is_empty());
+
+        // 打开会话时按需补齐，再 restore 推进。
+        let mut opened = sessions[0].clone();
+        crate::wfstore::load_payload(&dir, &mut opened).unwrap();
+        assert!(opened
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "立即保存")));
@@ -1812,7 +1830,7 @@ mod tests {
             actions: vec![],
         }]);
         let (clients2, m2) = clients_with_machines();
-        let engine2 = WorkflowEngine::restore(sessions[0].clone(), backend2, clients2, vec![m2]);
+        let engine2 = WorkflowEngine::restore(opened, backend2, clients2, vec![m2]);
         engine2.start().await.unwrap();
         assert!(engine2
             .session
@@ -1822,8 +1840,63 @@ mod tests {
             .iter()
             .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text == "恢复后推进")));
 
+        // 推进后仍能持久化；再次惰性加载 + 补齐应恢复出完整 transcript（含推进消息）。
+        engine2.persist(&dir).unwrap();
+        let reloaded = WorkflowEngine::load_all(&dir).unwrap();
+        assert!(reloaded[0].transcript.is_empty());
+        let mut opened2 = reloaded[0].clone();
+        crate::wfstore::load_payload(&dir, &mut opened2).unwrap();
+        assert!(opened2
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "立即保存")));
+        assert!(opened2
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text == "恢复后推进")));
+
         WorkflowEngine::remove(&dir, &id).unwrap();
         assert!(WorkflowEngine::load_all(&dir).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backfill_loads_payload_and_never_clobbers_live_session() {
+        let dir = std::env::temp_dir().join(format!("amux-wf-backfill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (clients, m) = clients_with_machines();
+        let backend = FakeBackend::new(vec![]);
+        let engine = WorkflowEngine::new("计划B", "", "", backend, clients, vec![m]);
+        let id = engine.session.read().unwrap().id.clone();
+        engine.record_user("准备保存");
+        engine.persist(&dir).unwrap();
+
+        // 从元数据惰性加载恢复出的 engine，backfill 补齐 transcript。
+        let sessions = WorkflowEngine::load_all(&dir).unwrap();
+        assert!(sessions[0].transcript.is_empty());
+        let (clients2, m2) = clients_with_machines();
+        let engine2 = WorkflowEngine::restore(sessions[0].clone(), FakeBackend::new(vec![]), clients2, vec![m2]);
+        engine2.backfill(&dir).unwrap();
+        assert!(engine2
+            .session
+            .read()
+            .unwrap()
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "准备保存")));
+
+        // 已在内存（推进中）的会话：backfill 不应被磁盘旧快照覆盖。
+        let live = engine2.session.read().unwrap().transcript.len();
+        engine2.record_user("推进中新增");
+        engine2.backfill(&dir).unwrap();
+        let after = engine2.session.read().unwrap();
+        assert_eq!(after.transcript.len(), live + 1);
+        assert!(after
+            .transcript
+            .iter()
+            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "推进中新增")));
+
+        WorkflowEngine::remove(&dir, &id).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

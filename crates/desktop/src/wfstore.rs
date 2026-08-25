@@ -162,7 +162,9 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     Ok(())
 }
 
-pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
+/// 惰性加载（元数据）：仅从 sqlite 读取会话骨架，不读取 transcript/activities
+/// 两份 JSONL 文件体。调用方仅在渲染对话/活动视图（`load_payload`）时才按需补齐。
+pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let mut stmt = conn
         .prepare(
@@ -200,22 +202,28 @@ pub fn load_all(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
         ) = row.map_err(io::Error::other)?;
         let children: Vec<ChildSession> =
             serde_json::from_str(&children).map_err(io::Error::other)?;
-        let transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, &id))?);
-        let activities = read_jsonl(&activities_path(data_dir, &id))?;
         Ok(OrcSession {
             id,
             title,
             description,
             preamble,
             state: state_from(&state)?,
-            transcript,
+            transcript: Vec::new(),
             children,
-            activities,
+            activities: Vec::new(),
             created_at,
             updated_at: last_active_at.max(updated_at),
         })
     })
     .collect()
+}
+
+/// 惰性加载（按需补齐）：把指定会话的 transcript/activities 从其对应 JSONL 读入，
+/// 其余字段保持不动。仅在打开会话渲染对话/活动视图时调用。
+pub fn load_payload(data_dir: &Path, session: &mut OrcSession) -> io::Result<()> {
+    session.transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, &session.id))?);
+    session.activities = read_jsonl(&activities_path(data_dir, &session.id))?;
+    Ok(())
 }
 
 pub fn remove(data_dir: &Path, id: &str) -> io::Result<()> {
@@ -244,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn save_load_remove_matches_design_layout() {
+    fn save_remove_matches_design_layout() {
         let dir = temp();
         let _ = std::fs::remove_dir_all(&dir);
         let session = OrcSession {
@@ -276,15 +284,72 @@ mod tests {
         assert!(dir.join("sessions/orc_1_history.jsonl").is_file());
         assert!(dir.join("sessions/orc_1_activities.jsonl").is_file());
 
-        let loaded = load_all(&dir).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].title, "计划A");
-        assert_eq!(loaded[0].transcript.len(), 2);
-        assert_eq!(loaded[0].activities.len(), 1);
-        assert_eq!(loaded[0].preamble, "模板");
-
         remove(&dir, "orc_1").unwrap();
-        assert!(load_all(&dir).unwrap().is_empty());
+        assert!(load_all_meta(&dir).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn meta_lazy_load_then_backfill_restores_payload() {
+        let dir = temp();
+        let _ = std::fs::remove_dir_all(&dir);
+        let session = OrcSession {
+            id: "orc_1".into(),
+            title: "计划A".into(),
+            description: "做完再审查".into(),
+            preamble: "模板".into(),
+            state: SessionState::Idle,
+            transcript: vec![
+                OrcMsg::User {
+                    text: "开始".into(),
+                    timestamp: 1,
+                },
+                OrcMsg::Orc {
+                    text: "已转发".into(),
+                    timestamp: 2,
+                },
+            ],
+            children: vec![],
+            activities: vec![Activity::Thinking {
+                timestamp: 1,
+                content: "想".into(),
+            }],
+            created_at: 10,
+            updated_at: 20,
+        };
+        save(&dir, &session).unwrap();
+
+        // 惰性元数据加载：只读 sqlite，不触碰 JSONL 文件体。
+        let mut meta = load_all_meta(&dir).unwrap();
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].id, "orc_1");
+        assert_eq!(meta[0].title, "计划A");
+        assert_eq!(meta[0].description, "做完再审查");
+        assert_eq!(meta[0].preamble, "模板");
+        assert_eq!(meta[0].state, SessionState::Idle);
+        assert!(meta[0].transcript.is_empty());
+        assert!(meta[0].activities.is_empty());
+
+        // 按需补齐：打开会话时才把 transcript/activities 从 JSONL 恢复出来。
+        load_payload(&dir, &mut meta[0]).unwrap();
+        assert_eq!(meta[0].transcript.len(), 2);
+        assert!(matches!(
+            &meta[0].transcript[0],
+            OrcMsg::User { text, timestamp } if text == "开始" && *timestamp == 1
+        ));
+        assert!(matches!(
+            &meta[0].transcript[1],
+            OrcMsg::Orc { text, timestamp } if text == "已转发" && *timestamp == 2
+        ));
+        assert_eq!(meta[0].activities.len(), 1);
+        assert_eq!(
+            meta[0].activities[0],
+            Activity::Thinking { timestamp: 1, content: "想".into() }
+        );
+        // 补齐只影响 payload，元数据字段保持不变。
+        assert_eq!(meta[0].title, "计划A");
+        assert_eq!(meta[0].preamble, "模板");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
