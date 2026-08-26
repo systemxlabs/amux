@@ -11,7 +11,7 @@ use gpui_component::{
     checkbox::Checkbox,
     collapsible::Collapsible,
     dialog::DialogButtonProps,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     label::Label,
     menu::{ContextMenuExt, PopupMenuItem},
     notification::Notification as UiNotification,
@@ -192,6 +192,8 @@ pub struct AmuxApp {
     /// 设置浮窗焦点锚：打开时把焦点移入浮窗，Escape 动作（绑定
     /// SettingsOverlay key_context）才能被派发到 on_action
     settings_focus: FocusHandle,
+    /// 持有订阅以避免其随 drop 自动取消
+    _subs: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -199,9 +201,9 @@ impl AmuxApp {
     pub fn new(store: Arc<ConfigStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("输入消息，Enter 发送；Ctrl+Enter 换行；@ 引用文件/目录作为上下文")
+                .placeholder("输入消息，Enter 发送；Shift+Enter 换行；@ 引用文件/目录作为上下文")
                 .auto_grow(3, 8)
-                .submit_on_enter(false)
+                .submit_on_enter(true)
         });
         let session_cwd_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("工作目录（如 ~/projects/api-server）")
@@ -329,6 +331,7 @@ impl AmuxApp {
             expanded_activities: std::collections::HashSet::new(),
             expanded_workflows: std::collections::HashSet::new(),
             settings_focus: cx.focus_handle(),
+            _subs: Vec::new(),
             _tasks: Vec::new(),
         };
         // Escape → 关闭设置浮窗：仅当焦点在浮窗（SettingsOverlay key_context 内）时命中
@@ -338,6 +341,19 @@ impl AmuxApp {
             Some("SettingsOverlay"),
         )]);
         app.session_dir = app.store.session_dir();
+        // Enter 提交发送：Input 组件在 submit_on_enter 时消费 Enter 键并发出
+        // PressEnter，父级无法再通过 on_key_down 捕获，因此在此订阅事件。
+        app._subs.push(cx.subscribe_in(
+            &app.input_state,
+            window,
+            |this, _input, event, window, cx| {
+                if let InputEvent::PressEnter { shift, .. } = event {
+                    if !shift {
+                        this.send_prompt(window, cx);
+                    }
+                }
+            },
+        ));
         for m in app.store.list_machines() {
             app.machines.push(MachineView::new(m));
         }
@@ -4395,17 +4411,6 @@ impl AmuxApp {
                             .min_h(px(96.)) // 输入区最小高度（宽松命中区域）
                             .id("input-drop-zone")
                             .child(Input::new(&self.input_state))
-                            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                                if ev.keystroke.key == "enter"
-                                    && !ev.keystroke.modifiers.control
-                                    && !ev.keystroke.modifiers.shift
-                                    && !ev.keystroke.modifiers.alt
-                                    && !ev.keystroke.modifiers.platform
-                                {
-                                    window.prevent_default();
-                                    this.send_prompt(window, cx);
-                                }
-                            }))
                             .can_drop(|dragged, _window, _cx| dragged.is::<ExternalPaths>())
                             .on_drop::<ExternalPaths>(cx.listener(
                                 |this, paths: &ExternalPaths, _window, cx| {
