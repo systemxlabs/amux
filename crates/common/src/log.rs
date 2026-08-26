@@ -3,37 +3,15 @@
 //! 日志实现使用 logforth：默认 `info`，通过 `RUST_LOG` 调整级别，文件按天滚动并保留
 //! 最近 7 个日志文件。应用和 server 只负责在启动时提供各自的日志路径。
 //!
-//! 日志实现属于 `amux-common`，协议 crate 不依赖日志基础设施。
+//! 业务代码直接使用 `log` crate 宏打印；日志布局（logforth `TextLayout`）自带
+//! `file:line`，无需手动传组件名。日志基础设施属于 `amux-common`。
 
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use logforth::Filter;
-
-/// 日志级别（数值越大越详细）。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Level {
-    Error = 0,
-    Warn = 1,
-    Info = 2,
-    Debug = 3,
-    Trace = 4,
-}
-
-impl Level {
-    fn as_logforth(self) -> logforth::record::Level {
-        match self {
-            Self::Error => logforth::record::Level::Error,
-            Self::Warn => logforth::record::Level::Warn,
-            Self::Info => logforth::record::Level::Info,
-            Self::Debug => logforth::record::Level::Debug,
-            Self::Trace => logforth::record::Level::Trace,
-        }
-    }
-}
-
-const DEFAULT_FILTER: &str = "warn,gui=info,server=info,acp=info";
+// 模块路径前缀匹配：amux 各 crate 日志默认 info，其余依赖（tokio/wgpu 等）为 warn。
+const DEFAULT_FILTER: &str = "warn,amux=info";
 static INITIALIZED: OnceLock<()> = OnceLock::new();
 
 fn current_filter() -> logforth::filter::EnvFilter {
@@ -85,39 +63,6 @@ fn apply(builder: logforth::starter_log::LogStarterBuilder) {
     }
 }
 
-/// 判断指定 target 的日志级别是否可能被当前 logger 输出。
-pub fn enabled_for(level: Level, target: &str) -> bool {
-    let filter = current_filter();
-    let criteria = logforth::record::FilterCriteria::builder()
-        .level(level.as_logforth())
-        .target(target)
-        .build();
-    matches!(
-        filter.enabled(&criteria, &[]),
-        logforth::filter::FilterResult::Accept | logforth::filter::FilterResult::Neutral
-    )
-}
-
-pub fn error(component: &str, msg: impl AsRef<str>) {
-    log::error!(target: component, "{}", msg.as_ref());
-}
-
-pub fn warn(component: &str, msg: impl AsRef<str>) {
-    log::warn!(target: component, "{}", msg.as_ref());
-}
-
-pub fn info(component: &str, msg: impl AsRef<str>) {
-    log::info!(target: component, "{}", msg.as_ref());
-}
-
-pub fn debug(component: &str, msg: impl AsRef<str>) {
-    log::debug!(target: component, "{}", msg.as_ref());
-}
-
-pub fn trace(component: &str, msg: impl AsRef<str>) {
-    log::trace!(target: component, "{}", msg.as_ref());
-}
-
 /// JSON 参数摘要：只保留关键字段，长文本截断（日志可读性）。
 /// `keys` 为需要保留的字段名；其余丢弃。
 pub fn params_summary(params: &serde_json::Value, keys: &[&str], max_text: usize) -> String {
@@ -142,6 +87,7 @@ pub fn params_summary(params: &serde_json::Value, keys: &[&str], max_text: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use logforth::Filter;
 
     #[test]
     fn params_summary_keeps_requested_fields_and_truncates_text() {
@@ -171,8 +117,12 @@ mod tests {
             )
         };
 
-        assert!(allows(logforth::record::Level::Info, "server.startup"));
-        assert!(allows(logforth::record::Level::Info, "gui.ws"));
+        assert!(allows(
+            logforth::record::Level::Info,
+            "amux_server::startup"
+        ));
+        assert!(allows(logforth::record::Level::Info, "amux_desktop::ws"));
+        assert!(allows(logforth::record::Level::Info, "amux_common::text"));
         assert!(!allows(logforth::record::Level::Info, "tokio"));
         assert!(allows(logforth::record::Level::Warn, "tokio"));
     }

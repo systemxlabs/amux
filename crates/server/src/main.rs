@@ -46,17 +46,14 @@ async fn main() {
         match AcpAgentDriver::spawn(&bin, &args_ref, &[]) {
             Ok(driver) => Some((name, Arc::new(driver) as SharedDriver)),
             Err(e) => {
-                amux_common::log::warn(
-                    "server.startup",
-                    format!("启动 ACP agent ({bin}) 失败，Server 将继续监听: {e}"),
-                );
+                log::warn!("启动 ACP agent ({bin}) 失败，Server 将继续监听: {e}");
                 None
             }
         }
     });
 
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
-        amux_common::log::error("server.startup", format!("创建数据目录失败: {e}"));
+        log::error!("创建数据目录失败: {e}");
         std::process::exit(1);
     }
     let configured_failed = cfg.agent_bin.is_some() && configured.is_none();
@@ -71,7 +68,7 @@ async fn main() {
     let registry = match SessionRegistry::open(&cfg.data_dir.join("session.sqlite")) {
         Ok(r) => Arc::new(r),
         Err(e) => {
-            amux_common::log::error("server.startup", format!("打开会话注册表失败: {e}"));
+            log::error!("打开会话注册表失败: {e}");
             std::process::exit(1);
         }
     };
@@ -92,14 +89,14 @@ async fn main() {
             _ = tokio::signal::ctrl_c() => {},
             _ = sigterm.recv() => {},
         }
-        amux_common::log::info("server.shutdown", "收到退出信号，正在关闭 ACP 子进程…");
+        log::info!("收到退出信号，正在关闭 ACP 子进程…");
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(5));
-            amux_common::log::error("server.shutdown", "关闭超时，强制退出");
+            log::error!("关闭超时，强制退出");
             std::process::exit(0);
         });
         shutdown_agents.shutdown_all();
-        amux_common::log::info("server.shutdown", "ACP 子进程已全部关闭");
+        log::info!("ACP 子进程已全部关闭");
         std::process::exit(0);
     });
 
@@ -112,19 +109,16 @@ async fn main() {
             let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                 Ok(duration) => duration.as_millis() as u64,
                 Err(e) => {
-                    amux_common::log::error("server.cleanup", format!("读取系统时间失败：{e}"));
+                    log::error!("读取系统时间失败：{e}");
                     continue;
                 }
             };
             match cleanup_manager.close_idle(now_ms, 3_600_000).await {
                 Ok(closed) if closed > 0 => {
-                    amux_common::log::info(
-                        "server.cleanup",
-                        format!("关闭 {closed} 个长时间无活动会话"),
-                    );
+                    log::info!("关闭 {closed} 个长时间无活动会话");
                 }
                 Ok(_) => {}
-                Err(e) => amux_common::log::error("server.cleanup", e.to_string()),
+                Err(e) => log::error!("{}", e),
             }
         }
     });
@@ -140,9 +134,7 @@ async fn main() {
         token: cfg.token.clone(),
         handlers: handlers.clone(),
         notifications,
-        logger: Some(Arc::new(|line| {
-            amux_common::log::info("server.transport", line)
-        })),
+        logger: Some(Arc::new(|line| log::info!("{}", line))),
     });
 
     // 启动拉起：并行拉起已发现 agent。放在监听之后
@@ -151,17 +143,15 @@ async fn main() {
     let launch_agents = agents.clone();
     std::thread::spawn(move || {
         let launch = launch_agents.launch_discovered();
-        amux_common::log::info(
-            "server.startup",
-            format!(
-                "ACP server 启动完成：{} 个已拉起，{} 个失败（标记不可用）",
-                launch.started, launch.failed
-            ),
+        log::info!(
+            "ACP server 启动完成：{} 个已拉起，{} 个失败（标记不可用）",
+            launch.started,
+            launch.failed
         );
     });
 
     if let Err(e) = transport.run().await {
-        amux_common::log::error("server", format!("server 出错: {e}"));
+        log::error!("server 出错: {e}");
         std::process::exit(1);
     }
 }

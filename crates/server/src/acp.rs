@@ -393,15 +393,15 @@ async fn exec_main(
         Ok(a) => a,
         Err(e) => {
             let _ = ready_tx.send(Err(format!("解析 agent 命令失败 ({bin}): {e}")));
-            amux_common::log::error("acp", format!("解析 agent 命令失败 ({bin}): {e}"));
+            log::error!("解析 agent 命令失败 ({bin}): {e}");
             return;
         }
     };
-    amux_common::log::info("acp", format!("已连接 ACP agent: {bin} {}", args.join(" ")));
+    log::info!("已连接 ACP agent: {bin} {}", args.join(" "));
     // trace 级记录 ACP 原始帧，便于排查跨进程协议问题。
-    let agent = if amux_common::log::enabled_for(amux_common::Level::Trace, "acp.wire") {
+    let agent = if log::log_enabled!(log::Level::Trace) {
         agent.with_debug(|line, direction| {
-            amux_common::log::trace("acp.wire", format!("{direction:?} {line}"));
+            log::trace!("{direction:?} {line}");
         })
     } else {
         agent
@@ -413,7 +413,7 @@ async fn exec_main(
     // 进程立即退出 / npx 不可用 / 无网络），补报为 spawn 失败；若已报过就绪，
     // 之后的连接异常仅记录，不影响已缓存的驱动。
     if let core::result::Result::Err(e) = &result {
-        amux_common::log::error("acp", format!("ACP 连接异常结束: {e}"));
+        log::error!("ACP 连接异常结束: {e}");
         if !ready_sent.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let _ = ready_tx.send(Err(format!("ACP 连接失败: {e}")));
         }
@@ -469,7 +469,7 @@ async fn connect_main(
                     .await
                 {
                     core::result::Result::Ok(_) => {
-                        amux_common::log::debug("acp", "initialize 完成");
+                        log::debug!("initialize 完成");
                         core::result::Result::Ok(())
                     }
                     core::result::Result::Err(e) => {
@@ -480,7 +480,7 @@ async fn connect_main(
                         .await
                         .is_err();
                         if alive {
-                            amux_common::log::error("acp", format!("initialize 失败（继续）: {e}"));
+                            log::error!("initialize 失败（继续）: {e}");
                             core::result::Result::Ok(())
                         } else {
                             core::result::Result::Err(format!(
@@ -546,10 +546,7 @@ async fn connect_main(
                                         core::result::Result::Ok(())
                                     });
                                 if let Err(e) = result {
-                                    amux_common::log::error(
-                                        "acp",
-                                        format!("prompt 调用失败 {sid}: {e}"),
-                                    );
+                                    log::error!("prompt 调用失败 {sid}: {e}");
                                     let route = routes
                                         .lock()
                                         .expect("Mutex 中毒（临界区内不应 panic）")
@@ -590,11 +587,11 @@ async fn dispatch_call(
         AcpCall::Delete { .. } => "session/delete",
         AcpCall::ListSkills => "skill/list",
     };
-    amux_common::log::debug("acp", format!("调用 {label}"));
+    log::debug!("调用 {label}");
     let result = dispatch_call_inner(cx, call).await;
     match &result {
-        Ok(_) => amux_common::log::debug("acp", format!("{label} 成功")),
-        Err(e) => amux_common::log::error("acp", format!("{label} 失败: {e}")),
+        Ok(_) => log::debug!("{label} 成功"),
+        Err(e) => log::error!("{label} 失败: {e}"),
     }
     result
 }
@@ -708,7 +705,7 @@ async fn route_update(
             .cloned();
         if let Some(tx) = tx {
             if tx.send(ev).await.is_err() {
-                amux_common::log::warn("acp", "agent 事件接收端已关闭");
+                log::warn!("agent 事件接收端已关闭");
             }
         }
     }
@@ -727,7 +724,7 @@ fn text_of(block: &AcpContentBlock) -> Option<String> {
                 AcpContentBlock::ResourceLink(_) => "resource_link",
                 _ => "unknown",
             };
-            amux_common::log::debug("acp", format!("忽略非文本内容块（{kind}）"));
+            log::debug!("忽略非文本内容块（{kind}）");
             None
         }
     }

@@ -74,7 +74,7 @@ impl SessionManager {
         let (tx, rx) = broadcast::channel(256);
         // 异常退出后注册表中的 Busy 会话已没有对应的运行中 agent。
         if let Err(e) = registry.reset_busy_to_idle() {
-            amux_common::log::error("server.session", format!("重置残留忙会话失败：{e}"));
+            log::error!("重置残留忙会话失败：{e}");
         }
         let manager = SessionManager {
             agents,
@@ -134,10 +134,7 @@ impl SessionManager {
     pub async fn create(&self, agent: &str, cwd: &str) -> Result<SessionMeta, SessionError> {
         let id = format!("s_{}", uuid::Uuid::new_v4());
         let ts = now();
-        amux_common::log::info(
-            "server.session",
-            format!("新建会话 {id}（agent={agent} cwd={cwd}，agent 侧会话延后创建）"),
-        );
+        log::info!("新建会话 {id}（agent={agent} cwd={cwd}，agent 侧会话延后创建）");
         let meta = SessionMeta {
             id,
             agent: agent.to_string(),
@@ -191,23 +188,14 @@ impl SessionManager {
             match self.agents.driver_for(&meta.agent) {
                 Ok(driver) => {
                     if let Err(e) = driver.close(&agent_session_id) {
-                        amux_common::log::error(
-                            "server.session",
-                            format!("关闭 ACP 会话失败（继续本地删除）{session_id}: {e}"),
-                        );
+                        log::error!("关闭 ACP 会话失败（继续本地删除）{session_id}: {e}");
                     }
                     if let Err(e) = driver.delete_session(&agent_session_id) {
-                        amux_common::log::debug(
-                            "server.session",
-                            format!("agent 不支持或删除 ACP 会话失败（忽略）{session_id}: {e}"),
-                        );
+                        log::debug!("agent 不支持或删除 ACP 会话失败（忽略）{session_id}: {e}");
                     }
                 }
                 Err(e) => {
-                    amux_common::log::error(
-                        "server.session",
-                        format!("解析 agent 驱动失败（继续本地删除）{session_id}: {e}"),
-                    );
+                    log::error!("解析 agent 驱动失败（继续本地删除）{session_id}: {e}");
                 }
             }
         }
@@ -218,7 +206,7 @@ impl SessionManager {
         // 控制块出 map：进行中的 prompt 持有 Arc 克隆仍能看到 deleted 标志；
         // 新请求将得到全新（未删除）的控制块——但会话已不在注册表，NotFound 兜底。
         self.controls.lock().unwrap().remove(session_id);
-        amux_common::log::info("server.session", format!("删除会话 {session_id}"));
+        log::info!("删除会话 {session_id}");
         Ok(())
     }
 
@@ -434,10 +422,7 @@ impl SessionManager {
             timestamp: ts,
         };
         if let Err(e) = log.append_history(std::slice::from_ref(&user_message)) {
-            amux_common::log::error(
-                "server.session",
-                format!("用户消息落盘失败 {session_id}: {e}"),
-            );
+            log::error!("用户消息落盘失败 {session_id}: {e}");
             self.finalize_turn(
                 session_id,
                 &control,
@@ -450,16 +435,13 @@ impl SessionManager {
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
         if let Err(e) = driver.resume_session(&agent_session_id, &cwd) {
-            amux_common::log::error("server.session", format!("resume 失败 {session_id}: {e}"));
+            log::error!("resume 失败 {session_id}: {e}");
             let err = Activity::Error {
                 timestamp: now(),
                 detail: format!("恢复 agent 上下文失败: {e}"),
             };
             if let Err(log_error) = log.append_activities(&[err]) {
-                amux_common::log::error(
-                    "server.session",
-                    format!("resume 错误活动落盘失败 {session_id}: {log_error}"),
-                );
+                log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
             }
             self.invalidate_log_caches(session_id);
             self.finalize_turn(
@@ -479,12 +461,9 @@ impl SessionManager {
             .await;
 
         self.finalize_turn(session_id, &control, false, turn_reason);
-        amux_common::log::info(
-            "server.session",
-            format!(
-                "prompt 完成 {session_id}（{}ms）",
-                started.elapsed().as_millis()
-            ),
+        log::info!(
+            "prompt 完成 {session_id}（{}ms）",
+            started.elapsed().as_millis()
         );
         match (control.deleted.load(Ordering::SeqCst), storage_error) {
             (true, _) => Err(SessionError::NotFound(format!("{session_id}（已删除）"))),
@@ -583,10 +562,7 @@ impl SessionManager {
                         timestamp: now(),
                         detail: detail.clone(),
                     });
-                    amux_common::log::error(
-                        "server.session",
-                        format!("agent turn 失败 {session_id}: {detail}"),
-                    );
+                    log::error!("agent turn 失败 {session_id}: {detail}");
                 }
             }
         }
@@ -604,19 +580,13 @@ impl SessionManager {
         let mut storage_error: Option<SessionError> = None;
         if !deleted && !history.is_empty() {
             if let Err(e) = log.append_history(&history) {
-                amux_common::log::error(
-                    "server.session",
-                    format!("历史落盘失败 {session_id}: {e}"),
-                );
+                log::error!("历史落盘失败 {session_id}: {e}");
                 storage_error = Some(SessionError::Storage(format!("历史落盘失败: {e}")));
             }
         }
         if !deleted && !activities.is_empty() {
             if let Err(e) = log.append_activities(&activities) {
-                amux_common::log::error(
-                    "server.session",
-                    format!("活动落盘失败 {session_id}: {e}"),
-                );
+                log::error!("活动落盘失败 {session_id}: {e}");
                 storage_error = Some(SessionError::Storage(format!("活动落盘失败: {e}")));
             }
         }
@@ -642,10 +612,7 @@ impl SessionManager {
                 .registry
                 .update_state(session_id, SessionState::Idle, now())
             {
-                amux_common::log::error(
-                    "server.session",
-                    format!("更新空闲状态失败 {session_id}: {e}"),
-                );
+                log::error!("更新空闲状态失败 {session_id}: {e}");
             }
             self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle, reason);
         }
