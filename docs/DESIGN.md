@@ -145,7 +145,7 @@ Server 作为 ACP client 与 ACP servers 通信
 
 系统提示词应包括
 - 角色，工作方式，行为约束
-- 工作流执行计划
+- 工作流计划
 
 | 工具 | 用途 |
 |---|---|
@@ -180,7 +180,7 @@ Server 作为 ACP client 与 ACP servers 通信
 - 对话历史：存储在 `~/.amux/app/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出（流式输出合并后写入）
 - 活动历史：存储在 `~/.amux/app/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
 
-### 工作流模板存储
+### 工作流计划存储
 
 存储在 `~/.amux/app/workflows.json` 路径，格式为
 ```json
