@@ -311,8 +311,9 @@ async fn serve_connection(
             }
         }
     }
-    // 连接断开：通知 UI（真实离线状态），清空在途请求
-    log::warn!("连接断开，准备重连");
+    // 连接断开：通知 UI（真实离线状态），清空在途请求。
+    // 不做自动重连（见 run_loop 文档）：机器转 Offline，等用户手动重连
+    log::warn!("连接断开（server 重启或网络中断），等待手动重连");
     let _ = notify_tx.send(Notification {
         method: "disconnected".into(),
         params: Value::Null,

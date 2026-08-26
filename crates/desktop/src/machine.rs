@@ -18,9 +18,9 @@ pub enum MachineStatus {
     Connecting,
     /// 认证通过、可用
     Online,
-    /// 认证被拒（token 错误；退避重连中）
+    /// 认证被拒（token 错误；等待手动重连）
     AuthFailed(String),
-    /// 曾在线后断开（立即重连中），或连不上（退避重连中）
+    /// 曾在线后断开或连不上。WS 层不做自动重连，等待用户在设置里手动重连
     Offline,
 }
 
@@ -30,7 +30,7 @@ impl MachineStatus {
             MachineStatus::Connecting => "连接中…".into(),
             MachineStatus::Online => "已连接".into(),
             MachineStatus::AuthFailed(e) => format!("认证失败（{e}）"),
-            MachineStatus::Offline => "离线（重连中…）".into(),
+            MachineStatus::Offline => "离线".into(),
         }
     }
 
