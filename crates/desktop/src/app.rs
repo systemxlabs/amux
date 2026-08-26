@@ -2862,8 +2862,8 @@ impl AmuxApp {
             .flex_1()
             .min_w_0()
             .h_full()
-            .gap(crate::theme::SPACE_SM)
-            .p(crate::theme::SPACE_MD)
+            .gap_2()
+            .p_3()
             .bg(sidebar)
             .border_r_1()
             .border_color(sidebar_border)
@@ -3383,7 +3383,7 @@ impl AmuxApp {
             return v_flex()
                 .flex_1()
                 .min_w_0()
-                .p(crate::theme::SPACE_MD)
+                .p_3()
                 .child(self.render_center(window, cx))
                 .into_any();
         }
@@ -3391,7 +3391,7 @@ impl AmuxApp {
             .flex_1()
             .min_w_0()
             .gap_2()
-            .p(crate::theme::SPACE_MD)
+            .p_3()
             .bg(cx.theme().popover)
             .rounded_lg()
             .border_1()
