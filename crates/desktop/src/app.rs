@@ -998,7 +998,7 @@ impl AmuxApp {
                     cx.notify();
                 });
             }
-            cx.background_executor().timer(Duration::from_secs(5)).await;
+            cx.background_executor().timer(Duration::from_secs(2)).await;
         });
         self._tasks.push(t);
     }
