@@ -252,7 +252,7 @@ async fn serve_connection(
         "params": { "token": token },
     });
     if sink
-        .send(Message::Text(auth_frame.to_string()))
+        .send(Message::Text(auth_frame.to_string().into()))
         .await
         .is_err()
     {
@@ -285,7 +285,7 @@ async fn serve_connection(
                     "method": req.method,
                     "params": req.params.unwrap_or(Value::Null),
                 });
-                if sink.send(Message::Text(frame.to_string())).await.is_err() {
+                if sink.send(Message::Text(frame.to_string().into())).await.is_err() {
                     break;
                 }
                 pending.insert(id, req.resp);

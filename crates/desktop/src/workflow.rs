@@ -20,7 +20,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rig_core::client::CompletionClient;
 use rig_core::completion::message::{ToolCall, ToolResultContent, UserContent};
 use rig_core::completion::{AssistantContent, CompletionModel, Message};
-use rig_core::OneOrMany;
 
 use serde::{Deserialize, Serialize};
 
@@ -972,7 +971,7 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
     ]
 }
 
-fn assistant_text(choice: &OneOrMany<AssistantContent>) -> String {
+fn assistant_text(choice: &[AssistantContent]) -> String {
     choice
         .iter()
         .filter_map(|c| match c {
@@ -998,7 +997,7 @@ async fn run_tool_loop<M>(
     live: &LiveRuntime,
 ) -> Result<String, String>
 where
-    M: CompletionModel + 'static,
+    M: CompletionModel + Clone + 'static,
 {
     let tool_defs = tool_definitions();
     for _ in 0..MAX_TOOL_TURNS {
@@ -1045,20 +1044,31 @@ where
         }
         let mut results = Vec::with_capacity(calls.len());
         for tc in calls {
-            let outcome = match dispatch_tool(live, &tc.function.name, tc.function.arguments).await
-            {
+            // 0.42 起 provider 下发的 id 收敛到 tc.provider（call_id 必有，
+            // 双标识 wire 另带 item_id）；无则回退 rig 关联句柄 tc.id
+            let name = tc.function.name.clone();
+            let outcome = match dispatch_tool(live, &name, tc.function.arguments).await {
                 Ok(s) => s,
                 Err(e) => format!("工具执行失败：{e}"),
             };
-            let content = OneOrMany::one(ToolResultContent::text(outcome));
-            results.push(match tc.call_id.clone() {
-                Some(cid) => UserContent::tool_result_with_call_id(tc.id, cid, content),
-                None => UserContent::tool_result(tc.id, content),
-            });
+            let content = vec![ToolResultContent::text(outcome)];
+            match tc.provider.clone() {
+                Some(provider) => {
+                    let item_id = provider
+                        .item_id
+                        .clone()
+                        .unwrap_or_else(|| tc.id.to_string());
+                    results.push(UserContent::tool_result_with_call_id(
+                        item_id,
+                        provider.call_id,
+                        &name,
+                        content,
+                    ));
+                }
+                None => results.push(UserContent::tool_result(tc.id, &name, content)),
+            }
         }
-        history.push(Message::User {
-            content: OneOrMany::many(results).expect("工具调用非空，结果必然非空"),
-        });
+        history.push(Message::User { content: results });
     }
     Err(format!(
         "编排 agent 连续 {MAX_TOOL_TURNS} 轮未结束 turn（可能陷入循环），已中止本轮推进"
@@ -2111,7 +2121,7 @@ mod tests {
         assert!(has_tool_result, "第二轮请求应携带工具结果消息");
         assert!(matches!(
             second.chat_history.first(),
-            Message::System { .. }
+            Some(Message::System { .. })
         ));
     }
 

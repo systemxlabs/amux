@@ -14,8 +14,8 @@ use std::sync::OnceLock;
 const DEFAULT_FILTER: &str = "warn,amux=info";
 static INITIALIZED: OnceLock<()> = OnceLock::new();
 
-fn current_filter() -> logforth::filter::EnvFilter {
-    logforth::filter::env_filter::EnvFilterBuilder::from_default_env_or(DEFAULT_FILTER).build()
+fn current_filter() -> logforth::filter::RustLogFilter {
+    logforth::filter::rustlog::RustLogFilterBuilder::from_default_env_or(DEFAULT_FILTER).build()
 }
 
 /// 初始化 stderr 与文件日志。重复调用不会替换已经安装的全局 logger。
@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn default_filter_prioritizes_app_logs_over_dependencies() {
         let filter =
-            logforth::filter::env_filter::EnvFilterBuilder::from_spec(DEFAULT_FILTER).build();
+            logforth::filter::rustlog::RustLogFilterBuilder::from_spec(DEFAULT_FILTER).build();
         let allows = |level, target| {
             let criteria = logforth::record::FilterCriteria::builder()
                 .level(level)

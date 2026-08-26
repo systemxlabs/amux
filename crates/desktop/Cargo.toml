@@ -16,8 +16,8 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 uuid.workspace = true
 futures-util = "0.3"
-base64 = "0.22"
-rusqlite = { version = "0.32", features = ["bundled"] }
+base64 = "0.23"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # GPUI（Zed 主线 git）+ gpui-component（longbridge）
 # 注意：跟踪 Zed 主线，API 可能随上游变化（docs/DESIGN.md §7）
@@ -30,8 +30,8 @@ jiff = "0.2"
 # rig-core：编排 agent 的 LLM provider 层（completion/providers/test-utils）。
 # 直接依赖 rig-core 而非 rig facade，避免拉入 rig-agent / rig-derive
 #（取消语义由引擎自研工具循环驱动，不使用 agent 运行时）
-rig-core = { version = "0.41", default-features = false, features = ["reqwest", "rustls"] }
+rig-core = { version = "0.42", default-features = false, features = ["reqwest", "rustls"] }
 
 # 测试专用：rig-core MockCompletionModel/MockTurn（薄工具循环单测；不进 release 构建）
 [dev-dependencies]
-rig-core = { version = "0.41", default-features = false, features = ["test-utils"] }
+rig-core = { version = "0.42", default-features = false, features = ["test-utils"] }

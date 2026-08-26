@@ -135,7 +135,7 @@ async fn handle_connection(
             n = notify_rx.recv() => {
                 match n {
                     Ok(frame) => {
-                        if sink.send(Message::Text(frame)).await.is_err() {
+                        if sink.send(Message::Text(frame.into())).await.is_err() {
                             break;
                         }
                     }
@@ -148,7 +148,7 @@ async fn handle_connection(
             }
             resp = resp_rx.recv() => {
                 let Some(frame) = resp else { break };
-                if sink.send(Message::Text(frame)).await.is_err() {
+                if sink.send(Message::Text(frame.into())).await.is_err() {
                     break;
                 }
             }
@@ -166,7 +166,7 @@ async fn handle_connection(
                     Ok(v) => v,
                     Err(_) => {
                         let frame = serde_json::to_string(&parse_error_response()).unwrap_or_default();
-                        if sink.send(Message::Text(frame)).await.is_err() {
+                        if sink.send(Message::Text(frame.into())).await.is_err() {
                             break;
                         }
                         continue;
@@ -180,7 +180,7 @@ async fn handle_connection(
                         let Ok(frame) = serde_json::to_string(&resp) else {
                             break;
                         };
-                        if sink.send(Message::Text(frame)).await.is_err() {
+                        if sink.send(Message::Text(frame.into())).await.is_err() {
                             break;
                         }
                     }
