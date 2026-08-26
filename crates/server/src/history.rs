@@ -154,13 +154,16 @@ impl TurnMerger {
         self.activities.push(activity);
     }
 
+    /// 取走已定稿待写盘的活动（thinking 累积到 tool_call/error/turn 结束才定稿）。
+    /// 供调用方在事件循环中实时逐条落盘，而非攒到 turn 结束统一写。
+    pub fn take_ready(&mut self) -> Vec<Activity> {
+        std::mem::take(&mut self.activities)
+    }
+
     pub fn finish(&mut self) -> (Vec<HistoryItem>, Vec<Activity>) {
         self.finish_output();
         self.finish_thinking();
-        (
-            std::mem::take(&mut self.history),
-            std::mem::take(&mut self.activities),
-        )
+        (std::mem::take(&mut self.history), self.take_ready())
     }
 }
 

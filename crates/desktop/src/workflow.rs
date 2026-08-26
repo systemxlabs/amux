@@ -12,7 +12,7 @@
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -185,6 +185,9 @@ pub struct WorkflowEngine {
     /// 忙碌子会话计数：子会话状态不落盘（权威在机器 server），仅按状态变更
     /// 事件增减；驱动工作流级忙闲显示与 steer 路由。重启归零。
     busy_children: Arc<Mutex<usize>>,
+    /// 活动实时落盘目录：活动产生即追加写 `<data_dir>/sessions/<id>_activities.jsonl`，
+    /// 不等 `persist` 整文件快照。
+    data_dir: PathBuf,
 }
 
 impl WorkflowEngine {
@@ -195,6 +198,7 @@ impl WorkflowEngine {
         backend: Arc<dyn OrcBackend>,
         clients: Vec<WsClient>,
         machines: Vec<MachineSummary>,
+        data_dir: &Path,
     ) -> Self {
         let full = if context.trim().is_empty() {
             description.to_string()
@@ -237,6 +241,7 @@ impl WorkflowEngine {
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
             busy_children: Arc::new(Mutex::new(0)),
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
@@ -245,6 +250,7 @@ impl WorkflowEngine {
         backend: Arc<dyn OrcBackend>,
         clients: Vec<WsClient>,
         machines: Vec<MachineSummary>,
+        data_dir: &Path,
     ) -> Self {
         // 应用重开后工作流会话回到空闲，重新启动需用户手动触发。
         session.state = SessionState::Idle;
@@ -263,6 +269,7 @@ impl WorkflowEngine {
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
             busy_children: Arc::new(Mutex::new(0)),
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
@@ -270,6 +277,30 @@ impl WorkflowEngine {
     fn with_session<R>(&self, f: impl FnOnce(&mut OrcSession) -> R) -> R {
         let mut s = self.session.write().expect("RwLock 中毒");
         f(&mut s)
+    }
+
+    /// 记录一条活动并实时追加落盘（不依赖 `persist` 的整文件快照）。
+    pub fn record_activity(&self, act: Activity) {
+        self.with_session(|s| s.activities.push(act.clone()));
+        self.append_activities(&[act]);
+    }
+
+    /// 记录一批活动并实时追加落盘。
+    pub fn record_activities(&self, acts: Vec<Activity>) {
+        if acts.is_empty() {
+            return;
+        }
+        self.with_session(|s| s.activities.extend(acts.iter().cloned()));
+        self.append_activities(&acts);
+    }
+
+    /// 追加写活动 JSONL；失败仅记日志，不阻断推进（活动落盘尽力而为）。
+    fn append_activities(&self, acts: &[Activity]) {
+        let id = self.session.read().expect("RwLock 中毒").id.clone();
+        let path = amux_common::session_log::activities_path(&self.data_dir, &id);
+        if let Err(e) = amux_common::session_log::append_jsonl(&path, acts) {
+            log::error!("工作流活动落盘失败 {id}: {e}");
+        }
     }
 
     #[cfg(test)]
@@ -313,21 +344,17 @@ impl WorkflowEngine {
     }
 
     async fn do_advance(&self) -> Result<(), String> {
-        self.with_session(|s| {
-            s.activities.push(Activity::Thinking {
-                timestamp: now(),
-                content: "编排智能体正在分析工作流并规划本轮调度".into(),
-            });
+        self.record_activity(Activity::Thinking {
+            timestamp: now(),
+            content: "编排智能体正在分析工作流并规划本轮调度".into(),
         });
         let ctx = self.build_context();
         let decision = match self.backend.decide(&ctx).await {
             Ok(d) => d,
             Err(e) => {
-                self.with_session(|s| {
-                    s.activities.push(Activity::Error {
-                        timestamp: now(),
-                        detail: format!("编排 agent 调用失败：{e}"),
-                    });
+                self.record_activity(Activity::Error {
+                    timestamp: now(),
+                    detail: format!("编排 agent 调用失败：{e}"),
                 });
                 return Err(e);
             }
@@ -345,7 +372,7 @@ impl WorkflowEngine {
             self.with_session(|s| s.children = kids);
         }
         if let Some(activities) = self.backend.take_synced_activities() {
-            self.with_session(|s| s.activities.extend(activities));
+            self.record_activities(activities);
         }
         Ok(())
     }
@@ -407,11 +434,9 @@ impl WorkflowEngine {
                 });
             });
             if let Err(e) = self.advance().await {
-                self.with_session(|s| {
-                    s.activities.push(Activity::Error {
-                        timestamp: now(),
-                        detail: format!("关联会话推进失败：{e}"),
-                    });
+                self.record_activity(Activity::Error {
+                    timestamp: now(),
+                    detail: format!("关联会话推进失败：{e}"),
                 });
                 return Err(e);
             }
@@ -1331,6 +1356,17 @@ mod tests {
         (vec![c], m)
     }
 
+    /// 每个测试独立的临时数据目录（活动实时落盘与持久化测试共用）。
+    fn temp_data_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "amux-wf-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     fn test_live() -> LiveRuntime {
         LiveRuntime {
             machines: vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -1378,6 +1414,7 @@ mod tests {
             backend,
             clients,
             vec![m],
+            &temp_data_dir(),
         );
         assert_eq!(engine.session.read().unwrap().title, "实现登录功能");
         assert!(engine
@@ -1400,6 +1437,7 @@ mod tests {
             backend,
             clients,
             vec![m],
+            &temp_data_dir(),
         );
         assert!(engine
             .session
@@ -1422,7 +1460,7 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "已按指令取消".into(),
         }]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
         assert!(engine.cancel(), "空闲工作流取消应立即推进");
         assert!(engine
             .session
@@ -1447,7 +1485,7 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "本轮静默".into(),
         }]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
@@ -1492,7 +1530,7 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "不应发生".into(),
         }]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
@@ -1523,7 +1561,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m], &dir);
         let id = engine.session.read().unwrap().id.clone();
         engine.record_user("立即保存");
         engine.persist(&dir).unwrap();
@@ -1548,7 +1586,7 @@ mod tests {
             summary: "恢复后推进".into(),
         }]);
         let (clients2, m2) = clients_with_machines();
-        let engine2 = WorkflowEngine::restore(opened, backend2, clients2, vec![m2]);
+        let engine2 = WorkflowEngine::restore(opened, backend2, clients2, vec![m2], &dir);
         engine2.start().await.unwrap();
         assert!(engine2
             .session
@@ -1584,7 +1622,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("计划B", "", "", backend, clients, vec![m]);
+        let engine = WorkflowEngine::new("计划B", "", "", backend, clients, vec![m], &dir);
         let id = engine.session.read().unwrap().id.clone();
         engine.record_user("准备保存");
         engine.persist(&dir).unwrap();
@@ -1598,6 +1636,7 @@ mod tests {
             FakeBackend::new(vec![]),
             clients2,
             vec![m2],
+            &dir,
         );
         engine2.backfill(&dir).unwrap();
         assert!(engine2
@@ -1620,6 +1659,27 @@ mod tests {
             .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "推进中新增")));
 
         WorkflowEngine::remove(&dir, &id).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn activities_recorded_are_immediately_on_disk() {
+        let dir = temp_data_dir();
+        let (clients, m) = clients_with_machines();
+        let backend = FakeBackend::new(vec![]);
+        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &dir);
+        let id = engine.session.read().unwrap().id.clone();
+
+        engine.record_activity(Activity::Thinking {
+            timestamp: 1,
+            content: "想".into(),
+        });
+
+        // 活动实时追加写盘：无需 persist，磁盘即可读到。
+        let path = amux_common::session_log::activities_path(&dir, &id);
+        let acts = amux_common::session_log::read_jsonl::<Activity>(&path).unwrap();
+        assert_eq!(acts.len(), 1, "活动应实时落盘");
+        assert!(matches!(&acts[0], Activity::Thinking { content, .. } if content == "想"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1667,6 +1727,7 @@ mod tests {
             backend,
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],
+            &temp_data_dir(),
         );
         let engine = engine;
         engine
@@ -1695,6 +1756,7 @@ mod tests {
             backend,
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],
+            &temp_data_dir(),
         );
         assert!(engine.session.read().unwrap().transcript.is_empty());
         assert_eq!(
@@ -1714,6 +1776,7 @@ mod tests {
             backend,
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],
+            &temp_data_dir(),
         );
         let should_advance = engine.record_user("实现登录功能");
         assert_eq!(engine.session.read().unwrap().description, "实现登录功能");
@@ -1737,6 +1800,7 @@ mod tests {
             backend,
             vec![client],
             vec![MachineSummary::named("测试机", &["kimi"])],
+            &temp_data_dir(),
         );
         let res = engine.start().await;
         assert!(res.is_err());
@@ -1783,6 +1847,7 @@ mod tests {
             backend,
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],
+            &temp_data_dir(),
         );
         let engine = engine;
         engine.session.write().unwrap().children.push(ChildSession {

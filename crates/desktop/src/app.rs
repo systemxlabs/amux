@@ -1550,6 +1550,7 @@ impl AmuxApp {
                 self.orchestrator_backend(),
                 clients.clone(),
                 summaries.clone(),
+                &self.session_dir,
             ));
         }
         cx.notify();
@@ -1609,6 +1610,7 @@ impl AmuxApp {
             backend,
             clients.clone(),
             summaries,
+            &self.session_dir,
         );
         let wi = self.workflows.len();
         let session_dir = self.session_dir.clone();

@@ -520,6 +520,7 @@ impl SessionManager {
         let mut turn_completed = false;
         // 中断时没有 ACP stopReason，保持 aborted。
         let mut turn_reason = protocol::StateChangeReason::Aborted;
+        let mut storage_error: Option<SessionError> = None;
         while let Some(ev) = rx.recv().await {
             match ev {
                 AgentEvent::TurnEnded(reason) => {
@@ -562,6 +563,14 @@ impl SessionManager {
                     log::error!("agent turn 失败 {session_id}: {detail}");
                 }
             }
+            // 活动实时逐条落盘：thinking 累积到 tool_call/error 才定稿，
+            // 定稿即写，不等 turn 结束。删除与 prompt 并发时旧 turn 不得
+            // 重新创建活动文件，故 deleted 时不写。
+            if !control.deleted.load(Ordering::SeqCst) {
+                if let Err(e) = self.flush_ready_activities(session_id, &log, &mut merger) {
+                    storage_error = Some(e);
+                }
+            }
         }
         // 连接中断或异常终止的 turn 也要留下可见错误活动。
         if !turn_completed {
@@ -574,7 +583,6 @@ impl SessionManager {
 
         let deleted = control.deleted.load(Ordering::SeqCst);
         let (history, activities) = merger.finish();
-        let mut storage_error: Option<SessionError> = None;
         if !deleted && !history.is_empty() {
             if let Err(e) = log.append_history(&history) {
                 log::error!("历史落盘失败 {session_id}: {e}");
@@ -591,6 +599,26 @@ impl SessionManager {
             self.invalidate_log_caches(session_id);
         }
         (storage_error, turn_reason)
+    }
+
+    /// 把已定稿的活动实时追加写盘并失效活动缓存。返回落盘错误（写盘后仍
+    /// 会继续跑 turn，仅收集错误供调用方上报）。
+    fn flush_ready_activities(
+        &self,
+        session_id: &str,
+        log: &SessionLog,
+        merger: &mut TurnMerger,
+    ) -> Result<(), SessionError> {
+        let ready = merger.take_ready();
+        if ready.is_empty() {
+            return Ok(());
+        }
+        if let Err(e) = log.append_activities(&ready) {
+            log::error!("活动落盘失败 {session_id}: {e}");
+            return Err(SessionError::Storage(format!("活动落盘失败: {e}")));
+        }
+        self.activities_cache.lock().unwrap().remove(session_id);
+        Ok(())
     }
 
     /// turn 统一收尾：清 ongoing、释放 busy、置 Idle 并广播结束原因
@@ -979,6 +1007,121 @@ mod tests {
             [HistoryItem::UserMessage { content, .. }]
                 if content == &text("立即保存")
         ));
+
+        release.notify_one();
+        prompt_task.await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[tokio::test]
+    async fn activities_flush_during_turn_not_only_at_end() {
+        struct StreamingDriver {
+            started: Arc<Notify>,
+            flushed: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        impl AgentDriver for StreamingDriver {
+            fn create_session(&self, _cwd: &str) -> Result<String, String> {
+                Ok("agent_stream".into())
+            }
+
+            fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn prompt(
+                &self,
+                _agent_session_id: &str,
+                _input: Vec<ContentBlock>,
+            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+                let (tx, rx) = tokio::sync::mpsc::channel(8);
+                let started = self.started.clone();
+                let flushed = self.flushed.clone();
+                let release = self.release.clone();
+                tokio::spawn(async move {
+                    started.notify_one();
+                    let _ = tx.send(AgentEvent::Thinking("思考中".into())).await;
+                    let _ = tx
+                        .send(AgentEvent::ToolCall {
+                            name: "read_file".into(),
+                            title: None,
+                            content: None,
+                        })
+                        .await;
+                    // 事件已发完但 turn 未结束（release 未放行）。
+                    flushed.notify_one();
+                    release.notified().await;
+                    let _ = tx
+                        .send(AgentEvent::TurnEnded(
+                            protocol::StateChangeReason::Completed,
+                        ))
+                        .await;
+                });
+                rx
+            }
+
+            fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn close(&self, _agent_session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn list_skills(&self) -> Result<Vec<String>, String> {
+                Ok(Vec::new())
+            }
+
+            fn shutdown(&self) {}
+        }
+
+        let started = Arc::new(Notify::new());
+        let flushed = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "stream",
+            Arc::new(StreamingDriver {
+                started: started.clone(),
+                flushed: flushed.clone(),
+                release: release.clone(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-real-time-activity-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (manager, _rx) = SessionManager::new(agents, registry, dir.clone());
+        let manager = Arc::new(manager);
+        let meta = manager.create("stream", "/tmp/work").await.unwrap();
+        let session_id = meta.id.clone();
+
+        let prompt_manager = manager.clone();
+        let prompt_task =
+            tokio::spawn(async move { prompt_manager.prompt(&session_id, text("立即保存")).await });
+        started.notified().await;
+
+        // thinking + tool_call 事件已处理，但 turn 尚未结束（release 未放行）：
+        // 已定稿的活动应实时落盘，而非攒到 turn 结束统一写。
+        flushed.notified().await;
+        let log = SessionLog::open(&dir, &meta.id);
+        let acts = log.read_activities().unwrap();
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "思考中")),
+            "thinking 应在 turn 结束前实时落盘"
+        );
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")),
+            "tool_call 应在 turn 结束前实时落盘"
+        );
 
         release.notify_one();
         prompt_task.await.unwrap().unwrap();

@@ -158,7 +158,8 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
         &history_path(data_dir, &session.id),
         &history_from_transcript(&session.transcript),
     )?;
-    write_jsonl(&activities_path(data_dir, &session.id), &session.activities)?;
+    // 活动由 WorkflowEngine 实时逐条追加写盘，save 不再整文件覆盖，
+    // 避免与实时追加竞争同一活动文件。
     Ok(())
 }
 
@@ -283,7 +284,8 @@ mod tests {
         save(&dir, &session).unwrap();
         assert!(dir.join("session.sqlite").is_file());
         assert!(dir.join("sessions/orc_1_history.jsonl").is_file());
-        assert!(dir.join("sessions/orc_1_activities.jsonl").is_file());
+        // 活动由引擎实时追加写盘，save 不再生成活动文件。
+        assert!(!dir.join("sessions/orc_1_activities.jsonl").exists());
 
         remove(&dir, "orc_1").unwrap();
         assert!(load_all_meta(&dir).unwrap().is_empty());
@@ -319,6 +321,16 @@ mod tests {
             updated_at: 20,
         };
         save(&dir, &session).unwrap();
+        // 活动由引擎实时追加写盘；这里模拟已实时追加的活动，供 backfill 恢复。
+        let act_path = amux_common::session_log::activities_path(&dir, "orc_1");
+        amux_common::session_log::append_jsonl(
+            &act_path,
+            &[Activity::Thinking {
+                timestamp: 1,
+                content: "想".into(),
+            }],
+        )
+        .unwrap();
 
         // 惰性元数据加载：只读 sqlite，不触碰 JSONL 文件体。
         let mut meta = load_all_meta(&dir).unwrap();
