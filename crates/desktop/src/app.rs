@@ -4430,24 +4430,21 @@ impl AmuxApp {
             let expanded = is_dir && expanded_paths.contains(&entry_path);
             let selected = !is_dir && selected_file == Some(entry_path.as_str());
             let click_path = entry_path.clone();
-            // 图标占位固定槽位：目录用折叠箭头、文件用文件图标，两类行标签对齐
-            let button = Button::new(format!("workspace-entry-{entry_path}"))
+            // 手搓行而非 Button：库 Button 内容层硬编码 justify_center，全宽行的
+            // 「图标+名称」会被整体居中（第一层级缩进小、错位最明显），无法左对齐
+            let row = div()
+                .id(format!("workspace-entry-{entry_path}"))
                 .w_full()
-                .small()
-                .ghost()
+                .h_6()
+                .flex()
+                .items_center()
+                .gap_1p5()
                 .px_2()
                 .pl(px(8. + depth as f32 * 14.)) // 目录树缩进：随层级深度计算的运行时几何
-                .when(selected, |b| b.bg(cx.theme().list_active))
-                .icon(if is_dir {
-                    if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    }
-                } else {
-                    IconName::File
-                })
-                .label(entry.name.clone())
+                .rounded_sm()
+                .cursor_pointer()
+                .when(selected, |d| d.bg(cx.theme().list_active))
+                .hover(|d| d.bg(cx.theme().list_hover))
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     let Some(machine) = this.active_machine() else {
                         return;
@@ -4479,8 +4476,33 @@ impl AmuxApp {
                         this.load_workspace_file(window, cx, machine, click_path.clone(), 0);
                     }
                     cx.notify();
-                }));
-            let mut node = v_flex().child(h_flex().w_full().child(button));
+                }))
+                .child(
+                    Icon::new(if is_dir {
+                        if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        }
+                    } else {
+                        IconName::File
+                    })
+                    .xsmall()
+                    .flex_none()
+                    .text_color(if selected {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().muted_foreground
+                    }),
+                )
+                .child(
+                    Label::new(entry.name.clone())
+                        .text_sm()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
+                );
+            let mut node = v_flex().child(row);
             if expanded {
                 node = node.children(self.render_workspace_tree(
                     machine_idx,
