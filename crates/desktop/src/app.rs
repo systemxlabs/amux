@@ -3944,11 +3944,21 @@ impl AmuxApp {
             .iter()
             .map(|item| match item {
                 DialogMsg::UserMessage { content, timestamp } => {
+                    let text = block_text(content);
+                    // 气泡贴内容：按最长行估算宽度，短消息收拢；长消息触顶换行。
+                    // 下限需容纳「我 + 时间戳」头部行
+                    let bubble_w = crate::text::estimate_bubble_width(
+                        &text,
+                        crate::theme::FONT_BODY.as_f32(),
+                        132.,
+                        720., // 消息气泡最大宽度（内容可读性上限）
+                    );
                     div().id(("row", *timestamp)).w_full().child(
                         div()
                             .ml_auto()
                             .flex_none()
-                            .max_w(px(720.)) // 消息气泡最大宽度（内容可读性上限，固定容器尺寸）
+                            .w(bubble_w)
+                            .overflow_hidden()
                             .p_3()
                             .v_flex()
                             .gap_1()
@@ -3967,17 +3977,25 @@ impl AmuxApp {
                                     .text_color(cx.theme().primary_foreground.opacity(0.78)),
                             )
                             .child(
-                                TextView::markdown(format!("umd-{timestamp}"), block_text(content))
+                                TextView::markdown(format!("umd-{timestamp}"), text)
                                     .selectable(true)
                                     .text_color(primary_foreground),
                             ),
                     )
                 }
                 DialogMsg::AgentMessage { content, timestamp } => {
+                    let text = block_text(content);
+                    let bubble_w = crate::text::estimate_bubble_width(
+                        &text,
+                        crate::theme::FONT_BODY.as_f32(),
+                        132.,
+                        720., // 消息气泡最大宽度（内容可读性上限）
+                    );
                     div().id(("row", *timestamp)).w_full().child(
                         div()
                             .flex_none()
-                            .max_w(px(720.)) // 消息气泡最大宽度（内容可读性上限，固定容器尺寸）
+                            .w(bubble_w)
+                            .overflow_hidden()
                             .p_3()
                             .v_flex()
                             .gap_1()
