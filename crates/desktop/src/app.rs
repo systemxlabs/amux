@@ -3830,25 +3830,12 @@ impl AmuxApp {
                     .label(m.config.name.clone())
                     .selected(selected_machine == Some(i))
             }))
-            .on_click(cx.listener(move |this, clicks: &Vec<usize>, window, cx| {
+            .on_click(cx.listener(move |this, clicks: &Vec<usize>, _window, cx| {
                 let Some(&ix) = clicks.first() else {
                     return;
                 };
                 this.new_session_machine = Some(ix);
                 this.new_session_agent = None;
-                let cwd = this
-                    .machines
-                    .get(ix)
-                    .map(|m| m.config.name.clone())
-                    .and_then(|name| {
-                        this.store
-                            .recent_workspaces_for_machine(&name)
-                            .into_iter()
-                            .next()
-                    })
-                    .unwrap_or_default();
-                this.session_cwd_input
-                    .update(cx, |s, cx| s.set_value(&cwd, window, cx));
                 this.new_session_error = None;
                 cx.notify();
             }))
