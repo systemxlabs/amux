@@ -4863,43 +4863,53 @@ impl AmuxApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded_activities.contains(key);
-        let long = detail.chars().count() > 200;
-        let shown = if long && !expanded {
-            one_line(detail, 200)
-        } else {
-            detail.to_string()
-        };
+        // 整卡可点击切换展开：折叠恒为一行（截断省略），展开显示全文（可换行）。
+        // 不再用字符数阈值裁剪——截断交给样式层，展开态即原始 detail。
         let key_owned = key.to_string();
-        // 类型行（xs 弱化）+ 内容行分层，替代单行 "[kind] detail" 拼接
-        let mut row = div()
-            .id(key_owned.clone())
+        let key_toggle = key_owned.clone();
+        div()
+            .id(key_owned)
             .w_full()
             .p_2()
             .bg(cx.theme().muted.opacity(0.55))
             .rounded_md()
-            .v_flex()
-            .gap_0p5()
+            .cursor_pointer()
+            .hover(|d| d.bg(cx.theme().muted))
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                if !this.expanded_activities.remove(&key_toggle) {
+                    this.expanded_activities.insert(key_toggle.clone());
+                }
+                cx.notify();
+            }))
             .child(
-                Label::new(kind.to_string())
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground),
+                h_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .flex_none()
+                        .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Label::new(kind.to_string())
+                            .text_xs()
+                            .flex_none()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Label::new(detail.to_string())
+                            .text_sm()
+                            .flex_1()
+                            .min_w_0()
+                            .when(!expanded, |l| l.truncate()),
+                    ),
             )
-            .child(Label::new(shown).text_sm());
-        if long {
-            row = row.child(
-                Button::new(format!("act-toggle-{key}"))
-                    .xsmall()
-                    .link()
-                    .label(if expanded { "收起" } else { "展开" })
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        if !this.expanded_activities.remove(&key_owned) {
-                            this.expanded_activities.insert(key_owned.clone());
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        row.into_any_element()
+            .into_any_element()
     }
 
     fn render_activities_panel(
@@ -5026,9 +5036,11 @@ impl AmuxApp {
                     ),
             )
             .child(
+                // v_flex 让卡片间 gap 生效（原为普通 div，gap 无效导致卡片贴叠）
                 div()
                     .id("activities-panel")
                     .flex_1()
+                    .v_flex()
                     .gap_2()
                     .overflow_y_scroll()
                     .track_scroll(&self.activities_scroll)
