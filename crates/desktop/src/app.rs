@@ -4253,6 +4253,13 @@ impl AmuxApp {
                         this.load_diff(window, cx, machine);
                     }
                 }
+                // 打开即拉取：refresh_activities 有「面板已打开」守卫，周期轮询
+                // 不会补上首次打开前的数据；set_panel 已置位，此处守卫可通过
+                if next == Some(Panel::Activities) {
+                    if let Some((machine, id)) = this.open_session_target() {
+                        this.refresh_activities(window, cx, machine, id);
+                    }
+                }
             }))
             .child(Icon::new(icon).text_color(icon_color))
             .child(Label::new(label).text_xs().text_color(label_color))
