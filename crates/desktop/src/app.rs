@@ -678,11 +678,11 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 对话滚动区当前是否贴底。偏移为负（向上为负），贴底时 offset.y 达到最大负偏移。
+    /// 对话滚动区当前是否贴底。偏移为负（向上为负），贴底时 offset.y 达到最大负偏移 -max_offset.y。
     fn dialog_at_bottom(&self) -> bool {
         let off = self.dialog_scroll.offset();
         let max = self.dialog_scroll.max_offset();
-        off.y >= max.y
+        off.y >= -max.y
     }
 
     fn refresh_dialog(
