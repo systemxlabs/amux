@@ -667,6 +667,13 @@ impl AmuxApp {
         .detach();
     }
 
+    /// 对话滚动区当前是否贴底。偏移为负（向上为负），贴底时 offset.y 达到最大负偏移。
+    fn dialog_at_bottom(&self) -> bool {
+        let off = self.dialog_scroll.offset();
+        let max = self.dialog_scroll.max_offset();
+        off.y >= max.y
+    }
+
     fn refresh_dialog(
         &self,
         window: &mut Window,
@@ -692,10 +699,15 @@ impl AmuxApp {
                 let has_more = res.has_more;
                 let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
+                    // 新消息到达前若已在底部，追加内容后保持贴底，避免新消息被遮挡。
+                    let was_at_bottom = this.dialog_at_bottom();
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
                             v.set_history_page(&items, has_more, next_before);
                         }
+                    }
+                    if was_at_bottom {
+                        this.dialog_scroll.scroll_to_bottom();
                     }
                     cx.notify();
                 });
@@ -1149,6 +1161,7 @@ impl AmuxApp {
                         timestamp: now(),
                     });
                 }
+                self.dialog_scroll.scroll_to_bottom();
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
                         .request_ok(
