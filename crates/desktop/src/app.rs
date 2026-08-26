@@ -895,27 +895,37 @@ impl AmuxApp {
     fn spawn_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.machines.len();
         for i in 0..n {
-            let client = self.machines[i].client.clone();
             let machine_name = self.machines[i].config.name.clone();
-            let epoch = self.machines[i].connection_epoch;
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
-                if let Ok(res) = client
-                    .request::<_, SessionListResult>(
-                        protocol::method::SESSION_LIST,
-                        Some(json!({ "limit": PAGE_LIMIT })),
-                    )
-                    .await
-                {
-                    let sessions = res.sessions;
-                    let has_more = res.has_more;
-                    let next_before = res.next_before;
-                    let _ = this.update_in(cx, |this, _w, cx| {
-                        let Some(i) = this.machines.iter().position(|m| {
-                            m.config.name == machine_name && m.connection_epoch == epoch
-                        }) else {
-                            return;
-                        };
-                        if let Some(m) = this.machines.get_mut(i) {
+                // 每轮按机器名解析当前 client：重连会替换 client 实例，
+                // 循环若持有启动时的旧克隆，重连后将永远请求失败（静默丢同步）
+                let resolved = this
+                    .update_in(cx, |this, _w, _cx| {
+                        this.machines
+                            .iter()
+                            .find(|m| m.config.name == machine_name)
+                            .map(|m| (m.client.clone(), m.connection_epoch))
+                    })
+                    .ok()
+                    .flatten();
+                if let Some((client, epoch)) = resolved {
+                    if let Ok(res) = client
+                        .request::<_, SessionListResult>(
+                            protocol::method::SESSION_LIST,
+                            Some(json!({ "limit": PAGE_LIMIT })),
+                        )
+                        .await
+                    {
+                        let sessions = res.sessions;
+                        let has_more = res.has_more;
+                        let next_before = res.next_before;
+                        let _ = this.update_in(cx, |this, _w, cx| {
+                            // epoch 不匹配说明响应跨越了一次重连：丢弃，等下一轮新连接的数据
+                            let Some(m) = this.machines.iter_mut().find(|m| {
+                                m.config.name == machine_name && m.connection_epoch == epoch
+                            }) else {
+                                return;
+                            };
                             let (list, hm, nb) = if has_more {
                                 merge_session_window(&m.sessions, sessions, has_more, next_before)
                             } else {
@@ -925,9 +935,9 @@ impl AmuxApp {
                             m.sessions_has_more = hm;
                             m.sessions_next_before = nb;
                             crate::logic::sort_sessions_recent(&mut m.sessions);
-                        }
-                        cx.notify();
-                    });
+                            cx.notify();
+                        });
+                    }
                 }
                 cx.background_executor()
                     .timer(Duration::from_secs(10))
@@ -6836,8 +6846,9 @@ impl AmuxApp {
         self.machines[idx].views.clear();
         let t = self.spawn_machine_tasks(window, cx, idx, client);
         self._tasks.push(t);
-        self.fetch_agents(idx, window, cx);
-        self.refresh_sessions(idx, window, cx);
+        // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
+        // 提前发的 agent.list 必然失败并把 notice 染成「agent 列表获取失败」。
+        // 初始数据由 on_notify 的 auth_ok 分支统一拉取（同启动流程）。
         cx.notify();
     }
 }
