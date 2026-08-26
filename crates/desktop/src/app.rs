@@ -3612,11 +3612,6 @@ impl AmuxApp {
                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                     this.create_session_only(window, cx);
                                 })),
-                        )
-                        .child(
-                            Label::new("创建后进入会话页，在下方输入区发送首条指令")
-                                .text_xs()
-                                .text_color(muted_foreground),
                         );
                 }
             }
