@@ -51,6 +51,10 @@ use crate::ws::{Notification as WsNotification, WsClient};
 /// 会话列表惰性分页窗口大小。
 const PAGE_LIMIT: usize = 50;
 
+// 关闭设置浮窗（Escape）。浮窗为手搓 overlay，焦点落在其内部时该动作才可达；
+// 处理顺序 = 叠层从顶到底：内嵌表单对话框 > skills 弹窗 > 整个设置浮窗。
+actions!(amux, [CloseSettingsOverlay]);
+
 #[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Workspace,
@@ -181,6 +185,9 @@ pub struct AmuxApp {
     expanded_activities: std::collections::HashSet<String>,
     /// 以工作流会话 ID 为身份（同 Selected）
     expanded_workflows: std::collections::HashSet<String>,
+    /// 设置浮窗焦点锚：打开时把焦点移入浮窗，Escape 动作（绑定
+    /// SettingsOverlay key_context）才能被派发到 on_action
+    settings_focus: FocusHandle,
     _tasks: Vec<Task<()>>,
 }
 
@@ -317,8 +324,15 @@ impl AmuxApp {
             activities_limit: 100,
             expanded_activities: std::collections::HashSet::new(),
             expanded_workflows: std::collections::HashSet::new(),
+            settings_focus: cx.focus_handle(),
             _tasks: Vec::new(),
         };
+        // Escape → 关闭设置浮窗：仅当焦点在浮窗（SettingsOverlay key_context 内）时命中
+        cx.bind_keys([KeyBinding::new(
+            "escape",
+            CloseSettingsOverlay,
+            Some("SettingsOverlay"),
+        )]);
         app.session_dir = app.store.session_dir();
         for m in app.store.list_machines() {
             app.machines.push(MachineView::new(m));
@@ -2754,6 +2768,22 @@ impl AmuxApp {
         cx.notify();
     }
 
+    /// 打开设置浮窗并把焦点移入：Escape（绑定 SettingsOverlay key_context）
+    /// 只有焦点落在浮窗内部时才会派发到 on_action。
+    fn open_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        category: Option<SettingsCategory>,
+    ) {
+        self.show_settings = true;
+        if let Some(category) = category {
+            self.settings_category = category;
+        }
+        window.focus(&self.settings_focus, cx);
+        cx.notify();
+    }
+
     fn render_panel(
         &self,
         window: &mut Window,
@@ -2871,12 +2901,11 @@ impl AmuxApp {
                         .small()
                         .ghost()
                         .label("设置")
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.show_settings = true;
+                        .on_click(cx.listener(|this, _ev, window, cx| {
+                            this.open_settings(window, cx, None);
                             if let Some(i) = this.active_machine() {
-                                this.refresh_sessions(i, _window, cx);
+                                this.refresh_sessions(i, window, cx);
                             }
-                            cx.notify();
                         })),
                 ),
             );
@@ -3493,10 +3522,12 @@ impl AmuxApp {
                                     .small()
                                     .primary()
                                     .label("去注册机器")
-                                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                                        this.show_settings = true;
-                                        this.settings_category = SettingsCategory::Machines;
-                                        cx.notify();
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.open_settings(
+                                            window,
+                                            cx,
+                                            Some(SettingsCategory::Machines),
+                                        );
                                     })),
                             ),
                     );
@@ -3569,10 +3600,12 @@ impl AmuxApp {
                                     .small()
                                     .primary()
                                     .label("去配置编排 agent")
-                                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                                        this.show_settings = true;
-                                        this.settings_category = SettingsCategory::Orchestrator;
-                                        cx.notify();
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.open_settings(
+                                            window,
+                                            cx,
+                                            Some(SettingsCategory::Orchestrator),
+                                        );
                                     })),
                             ),
                     );
@@ -4320,20 +4353,8 @@ impl AmuxApp {
             let is_dir = entry.is_dir;
             let expanded = is_dir && expanded_paths.contains(&entry_path);
             let selected = !is_dir && selected_file == Some(entry_path.as_str());
-            let label = format!(
-                "{} {}",
-                if is_dir {
-                    if expanded {
-                        "▾"
-                    } else {
-                        "▸"
-                    }
-                } else {
-                    "·"
-                },
-                entry.name
-            );
             let click_path = entry_path.clone();
+            // 图标占位固定槽位：目录用折叠箭头、文件用文件图标，两类行标签对齐
             let button = Button::new(format!("workspace-entry-{entry_path}"))
                 .w_full()
                 .small()
@@ -4341,7 +4362,16 @@ impl AmuxApp {
                 .px_2()
                 .pl(px(8. + depth as f32 * 14.)) // 目录树缩进：随层级深度计算的运行时几何
                 .when(selected, |b| b.bg(cx.theme().list_active))
-                .label(label)
+                .icon(if is_dir {
+                    if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    }
+                } else {
+                    IconName::File
+                })
+                .label(entry.name.clone())
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     let Some(machine) = this.active_machine() else {
                         return;
@@ -5382,6 +5412,31 @@ impl AmuxApp {
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
                         cx.stop_propagation();
                     })
+                    // Escape 关闭：焦点锚在卡片上，动作按叠层从顶到底关闭
+                    .track_focus(&self.settings_focus)
+                    .key_context("SettingsOverlay")
+                    .on_action(cx.listener(|this, _: &CloseSettingsOverlay, window, cx| {
+                        if this.show_add_machine_form {
+                            this.close_add_machine_form(window, cx);
+                        } else if this.show_quick_command_form {
+                            this.close_quick_command_form(window, cx);
+                        } else if this.show_skill_form {
+                            this.close_skill_form(window, cx);
+                        } else if this.show_template_form {
+                            this.close_template_form(window, cx);
+                        } else if this.skill_action_dialog.take().is_some() {
+                            // 已取走即完成关闭
+                        } else if this
+                            .machines
+                            .iter_mut()
+                            .any(|m| m.show_skills.take().is_some())
+                        {
+                            // skills 弹窗已随 take 关闭
+                        } else {
+                            this.show_settings = false;
+                        }
+                        cx.notify();
+                    }))
                     .w_full()
                     .max_w(px(880.)) // 设置浮窗最大尺寸（固定容器）
                     .h_full()
