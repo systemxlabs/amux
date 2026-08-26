@@ -8,8 +8,6 @@ use gpui_component::{ActiveTheme as _, Theme, ThemeMode};
 
 pub const SIDEBAR_WIDTH: f32 = 240.0;
 pub const FONT_BODY: gpui::Pixels = px(14.0);
-pub const SPACE_SM: gpui::Pixels = px(8.0);
-pub const SPACE_MD: gpui::Pixels = px(12.0);
 
 fn color(hex: u32) -> Hsla {
     Rgba {
