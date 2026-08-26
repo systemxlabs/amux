@@ -70,15 +70,11 @@ pub struct OrcSession {
     pub updated_at: u64,
 }
 
-fn now() -> u64 {
+pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-pub fn now_ts() -> u64 {
-    now()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,34 +126,12 @@ pub struct OrcContext {
     pub steer_inbox: Arc<Mutex<Vec<String>>>,
 }
 
-/// 编排动作（引擎统一执行；会话操作经真实 WsClient）。
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OrcAction {
-    Run {
-        machine: String,
-        agent: String,
-        cwd: String,
-        prompt: String,
-        reuse: Option<String>,
-    },
-    Steer {
-        session: String,
-        prompt: String,
-    },
-    Retry {
-        session: String,
-        prompt: String,
-    },
-}
-
+/// 单 turn 决策器（rig 单 turn 模式）。
 #[derive(Debug, Clone)]
 pub struct Decision {
     pub summary: String,
-    pub actions: Vec<OrcAction>,
 }
 
-/// 单 turn 决策器（rig 单 turn 模式）。
 pub trait OrcBackend: Send + Sync {
     fn decide<'a>(
         &'a self,
@@ -169,51 +143,6 @@ pub trait OrcBackend: Send + Sync {
     fn take_synced_activities(&self) -> Option<Vec<Activity>> {
         None
     }
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolOp {
-    Create {
-        machine: String,
-        agent: String,
-        cwd: String,
-        prompt: String,
-    },
-    Prompt {
-        session: String,
-        prompt: String,
-    },
-}
-
-/// 规划动作 → 引擎动作（纯逻辑，可单测）。
-#[allow(dead_code)]
-pub fn ops_to_actions(ops: Vec<ToolOp>, known_sessions: &[String]) -> Vec<OrcAction> {
-    let mut out = Vec::new();
-    for op in ops {
-        match op {
-            ToolOp::Create {
-                machine,
-                agent,
-                cwd,
-                prompt,
-            } => out.push(OrcAction::Run {
-                machine,
-                agent,
-                cwd,
-                prompt,
-                reuse: None,
-            }),
-            ToolOp::Prompt { session, prompt } => {
-                if known_sessions.contains(&session) {
-                    out.push(OrcAction::Retry { session, prompt });
-                } else {
-                    out.push(OrcAction::Steer { session, prompt });
-                }
-            }
-        }
-    }
-    out
 }
 
 /// 取消按钮注入的固定用户消息：
@@ -412,15 +341,6 @@ impl WorkflowEngine {
                 timestamp: now(),
             });
         });
-        if let Err(e) = self.apply_actions(decision.actions).await {
-            self.with_session(|s| {
-                s.activities.push(Activity::Error {
-                    timestamp: now(),
-                    detail: format!("执行编排动作失败：{e}"),
-                });
-            });
-            return Err(e);
-        }
         if let Some(kids) = self.backend.take_synced_children() {
             self.with_session(|s| s.children = kids);
         }
@@ -448,166 +368,6 @@ impl WorkflowEngine {
             machines: self.machines.clone(),
             steer_inbox: Arc::clone(&self.steer_inbox),
         }
-    }
-
-    async fn apply_actions(&self, actions: Vec<OrcAction>) -> Result<(), String> {
-        for action in actions {
-            match action {
-                OrcAction::Run {
-                    machine,
-                    agent,
-                    cwd,
-                    prompt,
-                    reuse,
-                } => {
-                    let m_idx = self.resolve_machine(&machine)?;
-                    let exists = {
-                        self.session
-                            .read()
-                            .expect("RwLock 中毒")
-                            .children
-                            .iter()
-                            .any(|c| c.id == *reuse.as_ref().unwrap_or(&String::new()))
-                    };
-                    let session_id = match reuse {
-                        Some(id) if exists => id,
-                        Some(id) => return Err(format!("复用的子会话不存在: {id}")),
-                        None => {
-                            let res = self
-                                .clients
-                                .get(m_idx)
-                                .ok_or_else(|| "机器连接已失效".to_string())?
-                                .request::<_, SessionResult>(
-                                    protocol::method::SESSION_NEW,
-                                    Some(SessionNewParams {
-                                        agent: agent.clone(),
-                                        cwd: cwd.clone(),
-                                    }),
-                                )
-                                .await;
-                            match res {
-                                Ok(v) => {
-                                    let sid = v.session.id;
-                                    if sid.is_empty() {
-                                        return Err(format!(
-                                            "创建关联普通会话响应的 session.id 为空（{machine}/{agent}）"
-                                        ));
-                                    }
-                                    sid
-                                }
-                                Err(e) => {
-                                    return Err(format!(
-                                        "创建关联普通会话失败（{machine}/{agent}）：{e}"
-                                    ))
-                                }
-                            }
-                        }
-                    };
-                    let known = {
-                        self.session
-                            .read()
-                            .expect("RwLock 中毒")
-                            .children
-                            .iter()
-                            .any(|c| c.id == session_id)
-                    };
-                    if !known {
-                        self.with_session(|s| {
-                            s.children.push(ChildSession {
-                                id: session_id.clone(),
-                                machine_idx: m_idx,
-                                machine_name: self.machines[m_idx].name.clone(),
-                            });
-                        });
-                    }
-                    if let Err(error) = self.prompt_child(&session_id, &prompt).await {
-                        self.with_session(|s| {
-                            s.activities.push(Activity::Error {
-                                timestamp: now(),
-                                detail: error.clone(),
-                            });
-                        });
-                        return Err(error);
-                    }
-                    self.with_session(|s| {
-                        s.activities.push(Activity::ToolCall {
-                            timestamp: now(),
-                            name: "create_session".into(),
-                            title: Some(format!(
-                                "在 {} 用 {} 创建关联普通会话 {session_id}",
-                                self.machines[m_idx].name, agent
-                            )),
-                            content: Some(prompt.clone()),
-                        });
-                    });
-                }
-                OrcAction::Steer { session, prompt } | OrcAction::Retry { session, prompt } => {
-                    if let Err(error) = self.prompt_child(&session, &prompt).await {
-                        self.with_session(|s| {
-                            s.activities.push(Activity::Error {
-                                timestamp: now(),
-                                detail: error.clone(),
-                            });
-                        });
-                        return Err(error);
-                    }
-                    self.with_session(|s| {
-                        s.activities.push(Activity::ToolCall {
-                            timestamp: now(),
-                            name: "prompt_session".into(),
-                            title: Some(format!("介入关联普通会话 {session}")),
-                            content: Some(prompt.clone()),
-                        });
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn prompt_child(&self, session_id: &str, text: &str) -> Result<(), String> {
-        let (machine_idx, known) = {
-            let s = self.session.read().expect("RwLock 中毒");
-            match s.children.iter().find(|c| c.id == session_id) {
-                Some(c) => (c.machine_idx, true),
-                None => (usize::MAX, false),
-            }
-        };
-        if !known {
-            self.with_session(|s| {
-                s.transcript.push(OrcMsg::User {
-                    text: format!("关联普通会话不存在：{session_id}"),
-
-                    timestamp: now(),
-                });
-            });
-            return Err(format!("关联普通会话不存在: {session_id}"));
-        }
-        let client = self
-            .clients
-            .get(machine_idx)
-            .cloned()
-            .ok_or_else(|| "机器连接已失效".to_string())?;
-        let sid = session_id.to_string();
-        // 下发失败必须向上传播（工作流推进据此记录错误活动），不能只写日志
-        let input = SessionPromptParams {
-            session_id: session_id.to_string(),
-            input: vec![ContentBlock::Text {
-                text: text.to_string(),
-            }],
-        };
-        client
-            .request_ok(protocol::method::SESSION_PROMPT, Some(input))
-            .await
-            .map_err(|e| format!("下发指令失败 {sid}: {e}"))?;
-        Ok(())
-    }
-
-    fn resolve_machine(&self, name: &str) -> Result<usize, String> {
-        if let Some(i) = self.machines.iter().position(|m| m.name == name) {
-            return Ok(i);
-        }
-        Err(format!("机器不可用: {name}"))
     }
 
     /// 关联普通会话状态变更（GUI 收到 `session.state_change` 通知时调用）。
@@ -1203,10 +963,7 @@ impl OrcBackend for RigBackend {
                 .synced_activities
                 .lock()
                 .expect("Mutex 中毒（临界区内不应 panic）") = Some(activities);
-            Ok(Decision {
-                summary: text,
-                actions: Vec::new(),
-            })
+            Ok(Decision { summary: text })
         })
     }
 
@@ -1611,51 +1368,6 @@ mod tests {
     }
 
     #[test]
-    fn ops_to_actions_maps_create_and_prompt() {
-        let ops = vec![
-            ToolOp::Create {
-                machine: "本机".into(),
-                agent: "codex".into(),
-                cwd: "/p".into(),
-                prompt: "实现功能".into(),
-            },
-            ToolOp::Prompt {
-                session: "s_known".into(),
-                prompt: "重试".into(),
-            },
-            ToolOp::Prompt {
-                session: "s_unknown".into(),
-                prompt: "介入".into(),
-            },
-        ];
-        let actions = ops_to_actions(ops, &["s_known".to_string()]);
-        assert_eq!(actions.len(), 3);
-        match &actions[0] {
-            OrcAction::Run {
-                machine,
-                agent,
-                prompt,
-                reuse,
-                ..
-            } => {
-                assert_eq!(machine, "本机");
-                assert_eq!(agent, "codex");
-                assert_eq!(prompt, "实现功能");
-                assert!(reuse.is_none());
-            }
-            _ => panic!("Create 应映射为 Run"),
-        }
-        match &actions[1] {
-            OrcAction::Retry { session, .. } => assert_eq!(session, "s_known"),
-            _ => panic!("已知会话应映射为 Retry"),
-        }
-        match &actions[2] {
-            OrcAction::Steer { session, .. } => assert_eq!(session, "s_unknown"),
-            _ => panic!("未知会话应映射为 Steer"),
-        }
-    }
-
-    #[test]
     fn title_generated_from_description() {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
@@ -1709,7 +1421,6 @@ mod tests {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![Decision {
             summary: "已按指令取消".into(),
-            actions: vec![],
         }]);
         let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         assert!(engine.cancel(), "空闲工作流取消应立即推进");
@@ -1735,7 +1446,6 @@ mod tests {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![Decision {
             summary: "本轮静默".into(),
-            actions: vec![],
         }]);
         let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         engine.session.write().unwrap().children.push(ChildSession {
@@ -1781,7 +1491,6 @@ mod tests {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![Decision {
             summary: "不应发生".into(),
-            actions: vec![],
         }]);
         let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m]);
         engine.session.write().unwrap().children.push(ChildSession {
@@ -1837,7 +1546,6 @@ mod tests {
 
         let backend2 = FakeBackend::new(vec![Decision {
             summary: "恢复后推进".into(),
-            actions: vec![],
         }]);
         let (clients2, m2) = clients_with_machines();
         let engine2 = WorkflowEngine::restore(opened, backend2, clients2, vec![m2]);

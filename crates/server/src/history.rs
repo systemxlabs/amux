@@ -92,13 +92,6 @@ impl TurnMerger {
         Self::default()
     }
 
-    pub fn push_user(&mut self, content: Vec<ContentBlock>, timestamp: u64) {
-        self.finish_output();
-        self.finish_thinking();
-        self.history
-            .push(HistoryItem::UserMessage { content, timestamp });
-    }
-
     pub fn push_output(&mut self, text: String, timestamp: u64) {
         if let Some((t, first)) = &mut self.output {
             if *first == 0 {
@@ -161,16 +154,6 @@ impl TurnMerger {
         self.activities.push(activity);
     }
 
-    pub fn push_activity(&mut self, activity: Activity) {
-        self.finish_thinking();
-        self.activities.push(activity);
-    }
-
-    pub fn push_compaction(&mut self, detail: String, timestamp: u64) {
-        self.activities
-            .push(Activity::Compaction { timestamp, detail });
-    }
-
     pub fn finish(&mut self) -> (Vec<HistoryItem>, Vec<Activity>) {
         self.finish_output();
         self.finish_thinking();
@@ -188,28 +171,25 @@ mod tests {
     #[test]
     fn merger_merges_output_and_thinking() {
         let mut m = TurnMerger::new();
-        m.push_user(
-            vec![ContentBlock::Text {
-                text: "你好".into(),
-            }],
-            1,
-        );
         m.push_thinking("x".into(), 3);
         m.push_thinking("y".into(), 4);
         m.push_output("a".into(), 5);
         m.push_output("b".into(), 6);
         m.push_tool_call("t".into(), None, None, 7);
-        m.push_compaction("压缩".into(), 8);
+        m.push_error(Activity::Error {
+            timestamp: 8,
+            detail: "出错".into(),
+        });
         let (hist, acts) = m.finish();
-        assert_eq!(hist.len(), 2, "用户 + 一条合并输出");
-        match &hist[1] {
+        assert_eq!(hist.len(), 1, "仅输出合并为一条");
+        match &hist[0] {
             HistoryItem::AgentMessage { content, timestamp } => {
                 assert_eq!(content[0], ContentBlock::Text { text: "ab".into() });
                 assert_eq!(*timestamp, 5);
             }
-            _ => panic!("第二条应为 AgentMessage"),
+            _ => panic!("应为 AgentMessage"),
         }
-        assert_eq!(acts.len(), 3, "thinking 合并 + tool + compaction");
+        assert_eq!(acts.len(), 3, "thinking 合并 + tool + error");
         assert!(acts
             .iter()
             .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "xy")));
@@ -218,7 +198,7 @@ mod tests {
             .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "t")));
         assert!(acts
             .iter()
-            .any(|a| matches!(a, Activity::Compaction { detail, .. } if detail == "压缩")));
+            .any(|a| matches!(a, Activity::Error { detail, .. } if detail == "出错")));
     }
 
     #[test]

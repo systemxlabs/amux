@@ -45,7 +45,7 @@ use crate::logic::{
 };
 use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::text::{block_text, one_line};
-use crate::workflow::{now_ts, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
+use crate::workflow::{now, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小。
@@ -332,11 +332,11 @@ impl AmuxApp {
         }
         app.restore_workflows(window, cx);
         app.spawn_polling(window, cx);
-        app._setup_orch_inputs(window, cx);
+        app.setup_orch_inputs(window, cx);
         app
     }
 
-    fn _setup_orch_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn setup_orch_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cfg = self.store.orchestrator();
         self.orch_api_format = cfg.api_format;
         self.orch_base_input
@@ -1063,7 +1063,7 @@ impl AmuxApp {
                         let new_id = res.session.id.clone();
                         if !new_id.is_empty() {
                             this.store
-                                .record_recent_workspace(&machine_name, &cwd, now_ts());
+                                .record_recent_workspace(&machine_name, &cwd, now());
                             this.refresh_sessions(machine, w, cx);
                             this.open_session(w, cx, machine, new_id);
                         } else {
@@ -1118,7 +1118,7 @@ impl AmuxApp {
                     let v = m.views.entry(id.clone()).or_default();
                     v.dialog.push(DialogMsg::UserMessage {
                         content: blocks.clone(),
-                        timestamp: now_ts(),
+                        timestamp: now(),
                     });
                 }
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -1336,6 +1336,47 @@ impl AmuxApp {
         .detach();
     }
 
+    /// 通用危险/确认弹窗：统一 alert_dialog 结构（按钮文案、危险变体、
+    /// 取消按钮），on_ok 动作经闭包注入。各 `confirm_*` 入口共用，避免重复。
+    fn confirm_dialog<F>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        ok_text: &'static str,
+        danger: bool,
+        title: &'static str,
+        description: String,
+        on_ok: F,
+    ) where
+        F: Fn(&mut Self, &mut Window, &mut Context<Self>) + Clone + 'static,
+    {
+        let this = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            let this = this.clone();
+            let on_ok = on_ok.clone();
+            alert
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(ok_text)
+                        .ok_variant(if danger {
+                            ButtonVariant::Danger
+                        } else {
+                            ButtonVariant::Primary
+                        })
+                        .cancel_text("取消")
+                        .show_cancel(true),
+                )
+                .title(title)
+                .description(description.clone())
+                .on_ok(move |_ev, window, cx| {
+                    let this = this.clone();
+                    this.update(cx, |this, cx| on_ok(this, window, cx));
+                    true
+                })
+                .on_cancel(|_ev, _window, _cx| true)
+        });
+    }
+
     fn confirm_delete_session(
         &mut self,
         window: &mut Window,
@@ -1343,32 +1384,18 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let this = this.clone();
-            let sid = session_id.clone();
-            alert
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("确认删除")
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .title("删除会话")
-                .description(format!(
-                    "确定删除会话 {session_id} 吗？删除后历史一并移除，不可恢复。"
-                ))
-                .on_ok(move |_ev, window, cx| {
-                    let this = this.clone();
-                    let sid = sid.clone();
-                    this.update(cx, |this, cx| {
-                        this.delete_session(window, cx, machine, sid);
-                    });
-                    true
-                })
-                .on_cancel(|_ev, _window, _cx| true)
-        });
+        self.confirm_dialog(
+            window,
+            cx,
+            "确认删除",
+            true,
+            "删除会话",
+            format!("确定删除会话 {session_id} 吗？删除后历史一并移除，不可恢复。"),
+            move |this, window, cx| {
+                let sid = session_id.clone();
+                this.delete_session(window, cx, machine, sid);
+            },
+        );
     }
 
     fn rename_session(
@@ -1602,34 +1629,20 @@ impl AmuxApp {
             .and_then(|idx| self.workflows.get(idx))
             .map(|w| w.session.read().unwrap().children.len())
             .unwrap_or(0);
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let this = this.clone();
-            alert
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("确认删除")
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .title("删除工作流会话")
-                .description(format!(
-                    "确定删除该工作流会话吗？将同时删除其 {child_count} 个关联普通会话，不可恢复。"
-                ))
-                .on_ok({
-                    // 外层构建闭包为 Fn：先克隆出本轮局部，再交由 on_ok 持有
-                    let wf_id = wf_id.clone();
-                    move |_ev, window, cx| {
-                        let this = this.clone();
-                        this.update(cx, |this, cx| {
-                            this.delete_workflow(window, cx, wf_id.clone());
-                        });
-                        true
-                    }
-                })
-                .on_cancel(|_ev, _window, _cx| true)
-        });
+        self.confirm_dialog(
+            window,
+            cx,
+            "确认删除",
+            true,
+            "删除工作流会话",
+            format!(
+                "确定删除该工作流会话吗？将同时删除其 {child_count} 个关联普通会话，不可恢复。"
+            ),
+            move |this, window, cx| {
+                let wf_id = wf_id.clone();
+                this.delete_workflow(window, cx, wf_id);
+            },
+        );
     }
 
     fn delete_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wf_id: String) {
@@ -2294,30 +2307,18 @@ impl AmuxApp {
         machine: usize,
         agent: String,
     ) {
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let this = this.clone();
-            let agent2 = agent.clone();
-            let agent_ok = agent.clone();
-            alert
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("重启")
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .title("重启 agent")
-                .description(format!("确定重启 agent「{agent2}」吗？"))
-                .on_ok(move |_ev, window, cx| {
-                    let this = this.clone();
-                    let agent = agent_ok.clone();
-                    this.update(cx, |this, cx| {
-                        this.restart_agent(window, cx, machine, agent);
-                    });
-                    true
-                })
-                .on_cancel(|_ev, _window, _cx| true)
-        });
+        self.confirm_dialog(
+            window,
+            cx,
+            "重启",
+            false,
+            "重启 agent",
+            format!("确定重启 agent「{agent}」吗？"),
+            move |this, window, cx| {
+                let agent = agent.clone();
+                this.restart_agent(window, cx, machine, agent);
+            },
+        );
     }
 
     fn confirm_reconnect_machine(
@@ -2327,27 +2328,17 @@ impl AmuxApp {
         idx: usize,
         name: String,
     ) {
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let this = this.clone();
-            alert
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("重连")
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .title("重连机器")
-                .description(format!("确定重连机器「{name}」吗？"))
-                .on_ok(move |_ev, window, cx| {
-                    let this = this.clone();
-                    this.update(cx, |this, cx| {
-                        this.reconnect_machine(window, cx, idx);
-                    });
-                    true
-                })
-                .on_cancel(|_ev, _window, _cx| true)
-        });
+        self.confirm_dialog(
+            window,
+            cx,
+            "重连",
+            false,
+            "重连机器",
+            format!("确定重连机器「{name}」吗？"),
+            move |this, window, cx| {
+                this.reconnect_machine(window, cx, idx);
+            },
+        );
     }
 
     fn close_add_machine_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2451,30 +2442,17 @@ impl AmuxApp {
         idx: usize,
         name: String,
     ) {
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let this = this.clone();
-            alert
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("确认移除")
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .title("移除机器")
-                .description(format!(
-                    "确定移除机器「{name}」吗？其本地注册信息将被删除。"
-                ))
-                .on_ok(move |_ev, window, cx| {
-                    let this = this.clone();
-                    this.update(cx, |this, cx| {
-                        this.remove_machine(window, cx, idx);
-                    });
-                    true
-                })
-                .on_cancel(|_ev, _window, _cx| true)
-        });
+        self.confirm_dialog(
+            window,
+            cx,
+            "确认移除",
+            true,
+            "移除机器",
+            format!("确定移除机器「{name}」吗？其本地注册信息将被删除。"),
+            move |this, window, cx| {
+                this.remove_machine(window, cx, idx);
+            },
+        );
     }
 
     fn open_quick_command_form(
@@ -2547,30 +2525,19 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         name: String,
     ) {
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let this = this.clone();
-            let name_ok = name.clone();
-            alert
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("确认删除")
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .title("删除快捷指令")
-                .description(format!("确定删除快捷指令「{name}」吗？"))
-                .on_ok(move |_ev, _window, cx| {
-                    let name = name_ok.clone();
-                    this.update(cx, |this, cx| {
-                        this.store.remove_quick_command(&name);
-                        cx.notify();
-                    });
-                    true
-                })
-                .on_cancel(|_ev, _window, _cx| true)
-        });
+        self.confirm_dialog(
+            window,
+            cx,
+            "确认删除",
+            true,
+            "删除快捷指令",
+            format!("确定删除快捷指令「{name}」吗？"),
+            move |this, _window, cx| {
+                let name = name.clone();
+                this.store.remove_quick_command(&name);
+                cx.notify();
+            },
+        );
     }
 
     fn open_skill_form(
@@ -2639,30 +2606,19 @@ impl AmuxApp {
     }
 
     fn confirm_remove_skill(&mut self, window: &mut Window, cx: &mut Context<Self>, name: String) {
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let this = this.clone();
-            let name_ok = name.clone();
-            alert
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("确认删除")
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .title("删除技能")
-                .description(format!("确定删除技能「{name}」吗？"))
-                .on_ok(move |_ev, _window, cx| {
-                    let name = name_ok.clone();
-                    this.update(cx, |this, cx| {
-                        this.store.remove_skill(&name);
-                        cx.notify();
-                    });
-                    true
-                })
-                .on_cancel(|_ev, _window, _cx| true)
-        });
+        self.confirm_dialog(
+            window,
+            cx,
+            "确认删除",
+            true,
+            "删除技能",
+            format!("确定删除技能「{name}」吗？"),
+            move |this, _window, cx| {
+                let name = name.clone();
+                this.store.remove_skill(&name);
+                cx.notify();
+            },
+        );
     }
 
     fn open_skill_action_dialog(
@@ -2748,30 +2704,19 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         name: String,
     ) {
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let this = this.clone();
-            let name_ok = name.clone();
-            alert
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("确认删除")
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .title("删除工作流模板")
-                .description(format!("确定删除工作流模板「{name}」吗？"))
-                .on_ok(move |_ev, _window, cx| {
-                    let name = name_ok.clone();
-                    this.update(cx, |this, cx| {
-                        this.store.remove_template(&name);
-                        cx.notify();
-                    });
-                    true
-                })
-                .on_cancel(|_ev, _window, _cx| true)
-        });
+        self.confirm_dialog(
+            window,
+            cx,
+            "确认删除",
+            true,
+            "删除工作流模板",
+            format!("确定删除工作流模板「{name}」吗？"),
+            move |this, _window, cx| {
+                let name = name.clone();
+                this.store.remove_template(&name);
+                cx.notify();
+            },
+        );
     }
 
     const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
