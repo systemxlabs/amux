@@ -1,7 +1,7 @@
 //! 共享展示助手（不依赖 `AmuxApp` 状态；仅依赖 GPUI/协议类型）。
 
 use gpui::*;
-use gpui_component::{label::Label, *};
+use gpui_component::{label::Label, tag::Tag, *};
 
 use protocol::Activity;
 
@@ -40,13 +40,12 @@ pub fn machine_status_badge<'a>(
             color_for_status(status, success, danger, warning),
         ),
     };
-    div()
-        .max_w(px(180.)) // 徽章文本截断上限（小标签固定宽度）
-        .px_2()
-        .py_0p5()
+    // 药丸徽章：底色为状态色低透明度、前景/描边用状态色本身（浅底上可读）
+    Tag::custom(color.opacity(0.14), color, color.opacity(0.35))
+        .small()
         .rounded_full()
-        .bg(color.opacity(0.14))
-        .child(Label::new(text).text_xs().truncate().text_color(color))
+        .max_w(px(180.)) // 徽章文本截断上限（小标签固定宽度）
+        .child(Label::new(text).truncate())
 }
 
 fn color_for_status(

@@ -6,6 +6,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
+    alert::Alert,
     button::*,
     checkbox::Checkbox,
     collapsible::Collapsible,
@@ -17,8 +18,11 @@ use gpui_component::{
     popover::Popover,
     radio::RadioGroup,
     scroll::ScrollableElement,
+    separator::Separator,
     spinner::Spinner,
+    tag::Tag,
     text::TextView,
+    tooltip::Tooltip,
     WindowExt, *,
 };
 
@@ -3102,8 +3106,17 @@ impl AmuxApp {
                     .w_full()
                     .h_8()
                     .px_1()
-                    .gap_1()
+                    .gap_1p5()
                     .items_center()
+                    .child(
+                        Icon::new(IconName::SquareTerminal)
+                            .small()
+                            .text_color(if sel {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().muted_foreground
+                            }),
+                    )
                     .child(
                         h_flex()
                             .id(format!("sess-title-{machine}-{sid}"))
@@ -3113,10 +3126,21 @@ impl AmuxApp {
                             .items_center()
                             .child(Label::new(label).text_sm().flex_1().min_w_0().truncate()),
                     )
+                    .when(s.last_active_at > 0, |row| {
+                        row.child(
+                            Label::new(format_compact_time(s.last_active_at))
+                                .text_xs()
+                                .flex_none()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    })
                     .child(if busy {
-                        Spinner::new().color(cx.theme().primary).into_any_element()
+                        Spinner::new()
+                            .xsmall()
+                            .color(cx.theme().primary)
+                            .into_any_element()
                     } else {
-                        div().size_3().into_any_element()
+                        div().size_2().into_any_element()
                     }),
             )
             .into_any_element()
@@ -3126,16 +3150,19 @@ impl AmuxApp {
         let Some(wf) = self.workflows.get(wi) else {
             return div().into_any();
         };
+        let wf_sel = self.selected
+            == Some(Selected::Workflow {
+                id: wf.session.read().unwrap().id.clone(),
+            });
         let wf_id = wf.session.read().unwrap().id.clone();
-        let title = if wf.session.read().unwrap().title.is_empty() {
-            "新工作流".to_string()
-        } else {
-            wf.session.read().unwrap().title.clone()
-        };
-        let state = if wf.session.read().unwrap().state == SessionState::Busy {
-            "编排中…"
-        } else {
-            "空闲"
+        let (title, busy) = {
+            let sg = wf.session.read().unwrap();
+            let title = if sg.title.is_empty() {
+                "新工作流".to_string()
+            } else {
+                sg.title.clone()
+            };
+            (title, sg.state == SessionState::Busy)
         };
         let expanded = self.expanded_workflows.contains(&wf_id);
         // 各回调闭包（Fn）逐个持有独立克隆，避免互抢所有权
@@ -3149,10 +3176,15 @@ impl AmuxApp {
                     .id(format!("wf-title-{wf_id}"))
                     .flex_1()
                     .min_w_0()
-                    .gap_1()
+                    .gap_1p5()
                     .items_center()
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.open_workflow(window, cx, wf_id_title.clone());
+                    }))
+                    .child(Icon::new(IconName::Network).small().text_color(if wf_sel {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().muted_foreground
                     }))
                     .child(
                         Label::new(title.as_str())
@@ -3161,18 +3193,20 @@ impl AmuxApp {
                             .min_w_0()
                             .truncate(),
                     )
-                    .child(
-                        div()
-                            .px_1()
-                            .py_0p5()
+                    .child(if busy {
+                        Tag::warning()
+                            .small()
                             .rounded_full()
-                            .bg(cx.theme().muted)
-                            .child(
-                                Label::new(state)
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground),
-                            ),
-                    ),
+                            .child(Label::new("编排中…").text_xs())
+                            .into_any_element()
+                    } else {
+                        Tag::secondary()
+                            .outline()
+                            .small()
+                            .rounded_full()
+                            .child(Label::new("空闲").text_xs())
+                            .into_any_element()
+                    }),
             )
             .child(
                 Button::new(format!("wf-toggle-{wf_id}"))
@@ -3190,10 +3224,13 @@ impl AmuxApp {
                         cx.notify();
                     })),
             )
-            .child(if wf.session.read().unwrap().state == SessionState::Busy {
-                Spinner::new().color(cx.theme().primary).into_any_element()
+            .child(if busy {
+                Spinner::new()
+                    .xsmall()
+                    .color(cx.theme().primary)
+                    .into_any_element()
             } else {
-                div().size_3().into_any_element()
+                div().size_2().into_any_element()
             });
 
         // 子会话默认折叠、可展开下钻。标题/忙闲联表本机会话缓存（权威在 server）
@@ -3237,7 +3274,7 @@ impl AmuxApp {
                             .id(format!("wf-child-title-{wf_id}-{cid}"))
                             .flex_1()
                             .min_w_0()
-                            .gap_1()
+                            .gap_1p5()
                             .items_center()
                             .on_click(cx.listener(move |this, _ev, window, cx| {
                                 let mi = this
@@ -3247,18 +3284,21 @@ impl AmuxApp {
                                     .unwrap_or(0);
                                 this.open_session(window, cx, mi, cid_open.clone());
                             }))
+                            .child(Label::new(step).text_sm().flex_1().min_w_0().truncate())
                             .child(
-                                Label::new(format!("{step} [{agent}@{machine_name}]"))
-                                    .text_sm()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate(),
+                                Label::new(format!("{agent}@{machine_name}"))
+                                    .text_xs()
+                                    .flex_none()
+                                    .text_color(cx.theme().muted_foreground),
                             ),
                     )
                     .child(if busy {
-                        Spinner::new().color(cx.theme().primary).into_any_element()
+                        Spinner::new()
+                            .xsmall()
+                            .color(cx.theme().primary)
+                            .into_any_element()
                     } else {
-                        div().size_3().into_any_element()
+                        div().size_2().into_any_element()
                     }),
             );
         }
@@ -3292,7 +3332,6 @@ impl AmuxApp {
                 .content(content),
         );
 
-        let wf_sel = self.selected == Some(Selected::Workflow { id: wf_id.clone() });
         // 右键菜单交给 ContextMenu 组件（同普通会话行）；逐层持有独立克隆
         let app = cx.entity();
         let wf_id_menu = wf_id.clone();
@@ -3432,15 +3471,19 @@ impl AmuxApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground),
             )
-            .child(
-                Label::new(status)
-                    .text_xs()
-                    .text_color(if status == "可用" {
-                        cx.theme().success
-                    } else {
-                        cx.theme().danger
-                    }),
-            )
+            .child(if status == "可用" {
+                Tag::success()
+                    .small()
+                    .rounded_full()
+                    .child(Label::new(status).text_xs())
+                    .into_any_element()
+            } else {
+                Tag::danger()
+                    .small()
+                    .rounded_full()
+                    .child(Label::new(status).text_xs())
+                    .into_any_element()
+            })
             .into_any()
     }
 
@@ -3454,9 +3497,6 @@ impl AmuxApp {
         let border = cx.theme().border;
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
-        let warning = cx.theme().warning;
-        let warning_foreground = cx.theme().warning_foreground;
-        let danger = cx.theme().danger;
         let mut card = v_flex()
             .w_full()
             .max_w(px(640.)) // 新建会话卡片最大宽度（固定容器尺寸）
@@ -3474,28 +3514,27 @@ impl AmuxApp {
                     .text_color(foreground),
             )
             .child(
-                h_flex()
-                    .gap_1()
+                // 分段单选：模式切换用库 ButtonGroup（选中态/圆角拼接由其负责）
+                ButtonGroup::new("ns-mode")
+                    .small()
                     .child(
                         Button::new("ns-mode-direct")
-                            .small()
                             .label("普通")
-                            .when(mode == NewSessionMode::Direct, |b| b.primary())
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.new_session_mode = NewSessionMode::Direct;
-                                cx.notify();
-                            })),
+                            .selected(mode == NewSessionMode::Direct),
                     )
                     .child(
                         Button::new("ns-mode-tpl")
-                            .small()
                             .label("工作流")
-                            .when(mode == NewSessionMode::Workflow, |b| b.primary())
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.new_session_mode = NewSessionMode::Workflow;
-                                cx.notify();
-                            })),
-                    ),
+                            .selected(mode == NewSessionMode::Workflow),
+                    )
+                    .on_click(cx.listener(|this, clicks: &Vec<usize>, _window, cx| {
+                        if clicks.contains(&0) {
+                            this.new_session_mode = NewSessionMode::Direct;
+                        } else if clicks.contains(&1) {
+                            this.new_session_mode = NewSessionMode::Workflow;
+                        }
+                        cx.notify();
+                    })),
             );
         match mode {
             NewSessionMode::Direct => {
@@ -3504,18 +3543,12 @@ impl AmuxApp {
                     card = card.child(
                         v_flex()
                             .gap_2()
-                            .p_3()
-                            .bg(warning.opacity(0.18))
-                            .rounded_md()
                             .child(
-                                Label::new("尚未注册机器")
-                                    .text_color(warning_foreground)
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            )
-                            .child(
-                                Label::new("请先在设置 → 机器管理中注册一台 amux server。")
-                                    .text_sm()
-                                    .text_color(warning_foreground),
+                                Alert::warning(
+                                    "ns-no-machines-alert",
+                                    "请先在设置 → 机器管理中注册一台 amux server。",
+                                )
+                                .title("尚未注册机器"),
                             )
                             .child(
                                 Button::new("ns-goto-machine-settings")
@@ -3560,7 +3593,7 @@ impl AmuxApp {
                         )
                         .child(self.render_workspace_picker(cx))
                         .when_some(self.new_session_error.clone(), |view, error| {
-                            view.child(Label::new(error).text_sm().text_color(danger))
+                            view.child(Alert::error("ns-create-error", error))
                         })
                         .child(
                             Button::new("ns-create")
@@ -3582,18 +3615,12 @@ impl AmuxApp {
                     card = card.child(
                         v_flex()
                             .gap_2()
-                            .p_2()
-                            .bg(warning.opacity(0.18))
-                            .rounded_md()
                             .child(
-                                Label::new("编排智能体尚未配置")
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(warning_foreground),
-                            )
-                            .child(
-                                Label::new("请先配置 API 格式、Base URL、API Key 和模型名称。")
-                                    .text_sm()
-                                    .text_color(warning_foreground),
+                                Alert::warning(
+                                    "ns-no-orch-alert",
+                                    "请先配置 API 格式、Base URL、API Key 和模型名称。",
+                                )
+                                .title("编排智能体尚未配置"),
                             )
                             .child(
                                 Button::new("ns-goto-orch-settings")
@@ -3636,14 +3663,7 @@ impl AmuxApp {
                                 .child(Input::new(&self.workflow_input)),
                         );
                     if let Some(err) = &self.workflow_error {
-                        card = card.child(
-                            v_flex()
-                                .gap_1()
-                                .p_2()
-                                .bg(danger.opacity(0.12))
-                                .rounded_md()
-                                .child(Label::new(err).text_color(danger)),
-                        );
+                        card = card.child(Alert::error("ns-wf-error", err.clone()));
                     }
                     card = card.child(
                         Button::new("ns-create-workflow")
@@ -3748,41 +3768,46 @@ impl AmuxApp {
             .into_any()
     }
 
-    fn render_machine_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_machine_selector(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let selected_machine = self
             .new_session_machine
             .filter(|i| *i < self.machines.len())
             .or_else(|| (!self.machines.is_empty()).then_some(0));
-        let mut row = h_flex().gap_1().flex_wrap();
         if self.machines.is_empty() {
-            row = row.child(Label::new("（请先在设置中添加机器）"));
+            return Label::new("（请先在设置中添加机器）").into_any_element();
         }
-        for (i, m) in self.machines.iter().enumerate() {
-            let name = m.config.name.clone();
-            let machine_name = name.clone();
-            let selected = selected_machine == Some(i);
-            row = row.child(
+        // ButtonGroup 单选组：子按钮 on_click 由组统一接管（按下索引回传）
+        ButtonGroup::new("ns-machine-group")
+            .small()
+            .flex_wrap()
+            .children(self.machines.iter().enumerate().map(|(i, m)| {
                 Button::new(format!("ns-machine-{i}"))
-                    .small()
-                    .label(name)
-                    .when(selected, |b| b.primary())
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.new_session_machine = Some(i);
-                        this.new_session_agent = None;
-                        let cwd = this
-                            .store
-                            .recent_workspaces_for_machine(&machine_name)
+                    .label(m.config.name.clone())
+                    .selected(selected_machine == Some(i))
+            }))
+            .on_click(cx.listener(move |this, clicks: &Vec<usize>, window, cx| {
+                let Some(&ix) = clicks.first() else {
+                    return;
+                };
+                this.new_session_machine = Some(ix);
+                this.new_session_agent = None;
+                let cwd = this
+                    .machines
+                    .get(ix)
+                    .map(|m| m.config.name.clone())
+                    .and_then(|name| {
+                        this.store
+                            .recent_workspaces_for_machine(&name)
                             .into_iter()
                             .next()
-                            .unwrap_or_default();
-                        this.session_cwd_input
-                            .update(cx, |s, cx| s.set_value(&cwd, window, cx));
-                        this.new_session_error = None;
-                        cx.notify();
-                    })),
-            );
-        }
-        row
+                    })
+                    .unwrap_or_default();
+                this.session_cwd_input
+                    .update(cx, |s, cx| s.set_value(&cwd, window, cx));
+                this.new_session_error = None;
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     fn render_harness_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3823,41 +3848,42 @@ impl AmuxApp {
         row
     }
 
-    fn render_template_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_template_selector(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let templates = self.store.list_templates();
-        let mut row = h_flex().gap_1().flex_wrap();
         if templates.is_empty() {
-            return row.child(Label::new("（无模板，可在设置中添加）"));
+            return Label::new("（无模板，可在设置中添加）").into_any_element();
         }
-        for t in templates {
-            let name = t.name.clone();
-            let sel = self
-                .workflow_template
-                .as_ref()
-                .map(|x| x.name == name)
-                .unwrap_or(false);
-            row = row.child(
-                Button::new(format!("ns-tpl-{name}"))
-                    .small()
-                    .label(name)
-                    .when(sel, |b| b.primary())
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        let t = t.clone();
-                        if this
-                            .workflow_template
-                            .as_ref()
-                            .map(|x| x.name == t.name)
-                            .unwrap_or(false)
-                        {
-                            this.workflow_template = None;
-                        } else {
-                            this.workflow_template = Some(t);
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        row
+        ButtonGroup::new("ns-tpl-group")
+            .small()
+            .flex_wrap()
+            .children(templates.iter().map(|t| {
+                let sel = self
+                    .workflow_template
+                    .as_ref()
+                    .is_some_and(|x| x.name == t.name);
+                Button::new(format!("ns-tpl-{}", t.name))
+                    .label(t.name.clone())
+                    .selected(sel)
+            }))
+            // 单选组回传按下索引；再次点击已选模板取消选择
+            .on_click(cx.listener(move |this, clicks: &Vec<usize>, _window, cx| {
+                let Some(&ix) = clicks.first() else {
+                    return;
+                };
+                if let Some(t) = this.store.list_templates().get(ix) {
+                    if this
+                        .workflow_template
+                        .as_ref()
+                        .is_some_and(|x| x.name == t.name)
+                    {
+                        this.workflow_template = None;
+                    } else {
+                        this.workflow_template = Some(t.clone());
+                    }
+                }
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -4004,13 +4030,23 @@ impl AmuxApp {
         }
         content.extend(rows.into_iter().map(|r| r.into_any_element()));
         if content.is_empty() {
+            // 空态：图标 + 引导文案居中，弱化存在感
             div()
                 .id("dialog-empty")
                 .flex_1()
+                .v_flex()
                 .items_center()
                 .justify_center()
+                .gap_2()
                 .child(
-                    Label::new("选择左侧会话查看对话，或输入消息开始").text_color(muted_foreground),
+                    Icon::new(IconName::Inbox)
+                        .large()
+                        .text_color(muted_foreground.opacity(0.55)),
+                )
+                .child(
+                    Label::new("选择左侧会话查看对话，或输入消息开始")
+                        .text_sm()
+                        .text_color(muted_foreground),
                 )
                 .into_any()
         } else {
@@ -4126,91 +4162,96 @@ impl AmuxApp {
         }
     }
 
+    /// 右缘悬浮面板切换栏：图标 + 微标签的纵向导航条（活动栏样式）。
     fn render_floating_buttons(
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let panel = self.panel;
         v_flex()
-            .gap_1()
+            .gap_0p5()
             .p_1()
             .justify_center()
             .bg(cx.theme().popover)
-            .rounded_md()
+            .rounded_lg()
             .border_1()
             .border_color(cx.theme().border)
             .shadow_sm()
-            .child(
-                Button::new("float-workspace")
-                    .small()
-                    .label("目录")
-                    .when(panel == Some(Panel::Workspace), |b| b.primary())
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        let next = if this.panel == Some(Panel::Workspace) {
-                            None
-                        } else {
-                            Some(Panel::Workspace)
-                        };
-                        this.set_panel(window, cx, next);
-                        if next == Some(Panel::Workspace) {
-                            if let Some(machine) = this.active_machine() {
-                                this.load_workspace_list(window, cx, machine, String::new(), 0);
-                            }
-                        }
-                    })),
-            )
-            .child(
-                Button::new("float-diff")
-                    .small()
-                    .label("改动")
-                    .when(panel == Some(Panel::Diff), |b| b.primary())
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        let next = if this.panel == Some(Panel::Diff) {
-                            None
-                        } else {
-                            Some(Panel::Diff)
-                        };
-                        this.set_panel(window, cx, next);
-                        if next == Some(Panel::Diff) {
-                            if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
-                                this.load_diff(window, cx, machine);
-                            }
-                        }
-                    })),
-            )
-            .child(
-                Button::new("float-detail")
-                    .small()
-                    .label("详情")
-                    .when(panel == Some(Panel::Detail), |b| b.primary())
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        let next = if this.panel == Some(Panel::Detail) {
-                            None
-                        } else {
-                            Some(Panel::Detail)
-                        };
-                        this.set_panel(window, cx, next);
-                    })),
-            )
-            .child(
-                Button::new("float-activities")
-                    .small()
-                    .label("活动")
-                    .when(panel == Some(Panel::Activities), |b| b.primary())
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        let next = if this.panel == Some(Panel::Activities) {
-                            None
-                        } else {
-                            Some(Panel::Activities)
-                        };
-                        this.set_panel(window, cx, next);
-                    })),
-            )
+            .child(self.render_rail_button(
+                Panel::Workspace,
+                "float-workspace",
+                "目录",
+                IconName::FolderOpen,
+                cx,
+            ))
+            .child(self.render_rail_button(Panel::Diff, "float-diff", "改动", IconName::File, cx))
+            .child(self.render_rail_button(
+                Panel::Detail,
+                "float-detail",
+                "详情",
+                IconName::Info,
+                cx,
+            ))
+            .child(self.render_rail_button(
+                Panel::Activities,
+                "float-activities",
+                "活动",
+                IconName::Inbox,
+                cx,
+            ))
+    }
+
+    /// 单个面板切换入口：再次点击同一面板即关闭；打开工作目录/改动面板时顺带加载。
+    fn render_rail_button(
+        &self,
+        panel: Panel,
+        id: &str,
+        label: &'static str,
+        icon: IconName,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let active = self.panel == Some(panel);
+        let (icon_color, label_color) = if active {
+            (cx.theme().primary, cx.theme().foreground)
+        } else {
+            (cx.theme().muted_foreground, cx.theme().muted_foreground)
+        };
+        div()
+            .id(id.to_string())
+            .v_flex()
+            .items_center()
+            .gap_0p5()
+            .px_2()
+            .py_1p5()
+            .rounded_md()
+            .when(active, |d| d.bg(cx.theme().list_active))
+            .hover(|d| d.bg(cx.theme().list_hover))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                let next = if this.panel == Some(panel) {
+                    None
+                } else {
+                    Some(panel)
+                };
+                this.set_panel(window, cx, next);
+                if next == Some(Panel::Workspace) {
+                    if let Some(machine) = this.active_machine() {
+                        this.load_workspace_list(window, cx, machine, String::new(), 0);
+                    }
+                }
+                if next == Some(Panel::Diff) {
+                    if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
+                        this.load_diff(window, cx, machine);
+                    }
+                }
+            }))
+            .child(Icon::new(icon).text_color(icon_color))
+            .child(Label::new(label).text_xs().text_color(label_color))
+            .into_any_element()
     }
 
     fn render_quick_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let commands = self.store.list_quick_commands();
+        // ghost：输入区上方的快捷入口应视觉后退，不与发送按钮争夺注意力
         let mut row = h_flex().flex_wrap().gap_1();
         for c in commands {
             let name = c.name.clone();
@@ -4218,6 +4259,7 @@ impl AmuxApp {
             row = row.child(
                 Button::new(format!("qc-{}", c.name))
                     .small()
+                    .ghost()
                     .label(name)
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.quick_command(window, cx, &cmd);
@@ -4228,36 +4270,57 @@ impl AmuxApp {
     }
 
     fn render_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let attachments: Vec<String> = self
-            .input_attachments
-            .iter()
-            .map(|a| match a {
-                InputAttachment::Path { path, .. } => format!("📎 {path}"),
-                InputAttachment::Image { name, .. } => format!("🖼 {name}"),
-            })
-            .collect();
+        let muted_foreground = cx.theme().muted_foreground;
         v_flex()
             .gap_2()
             .pt_2()
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(attachments.iter().map(|a| {
+            // 附件 chips：点击单个 chip 即移除该附件（原仅支持一键清空）
+            .when(!self.input_attachments.is_empty(), |view| {
+                view.child(h_flex().flex_wrap().gap_1().children(
+                    self.input_attachments.iter().enumerate().map(|(i, a)| {
+                        let label: SharedString = match a {
+                            InputAttachment::Path { path, .. } => path.clone().into(),
+                            InputAttachment::Image { name, .. } => name.clone().into(),
+                        };
+                        let tooltip_label = label.clone();
                         div()
+                            .id(format!("attachment-chip-{i}"))
+                            .max_w(px(280.))
                             .px_2()
                             .py_0p5()
                             .rounded_full()
                             .bg(cx.theme().muted)
+                            .hover(|d| d.bg(cx.theme().secondary_hover))
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip_label.clone()).build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.input_attachments.remove(i);
+                                cx.notify();
+                            }))
                             .child(
-                                Label::new(a.clone())
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground),
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_1()
+                                    .overflow_hidden()
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .xsmall()
+                                            .text_color(muted_foreground),
+                                    )
+                                    .child(
+                                        Label::new(label.clone())
+                                            .text_xs()
+                                            .text_color(muted_foreground)
+                                            .truncate(),
+                                    ),
                             )
-                    })),
-            )
+                    }),
+                ))
+            })
             .child(
                 h_flex()
                     .gap_2()
@@ -4300,16 +4363,29 @@ impl AmuxApp {
                             })),
                     )
                     .when(self.can_cancel(), |this| {
-                        this.child(Button::new("cancel-work").small().label("✕ 取消").on_click(
-                            cx.listener(|this, _ev, window, cx| {
-                                this.cancel_work(window, cx);
-                            }),
-                        ))
+                        // 危险操作的轻量表达：透明底 + 危险色前景，悬停泛起浅红
+                        this.child(
+                            Button::new("cancel-work")
+                                .small()
+                                .custom(
+                                    ButtonCustomVariant::new(cx)
+                                        .color(gpui::transparent_black())
+                                        .foreground(cx.theme().danger)
+                                        .hover(cx.theme().danger.opacity(0.12))
+                                        .active(cx.theme().danger.opacity(0.2)),
+                                )
+                                .icon(IconName::Close)
+                                .label("取消")
+                                .on_click(cx.listener(|this, _ev, window, cx| {
+                                    this.cancel_work(window, cx);
+                                })),
+                        )
                     })
-                    .when(!self.input_attachments.is_empty(), |row| {
+                    .when(self.input_attachments.len() > 1, |row| {
                         row.child(
                             Button::new("clear-attachments")
                                 .small()
+                                .ghost()
                                 .label("清空附件")
                                 .on_click(cx.listener(|this, _ev, _window, cx| {
                                     this.input_attachments.clear();
@@ -4688,7 +4764,12 @@ impl AmuxApp {
         } else {
             meta.title.clone()
         };
-        body = body.child(Label::new(format!("标题: {title}")));
+        body = body.child(info_row(
+            "标题",
+            &title,
+            cx.theme().muted_foreground,
+            cx.theme().foreground,
+        ));
         if let Some(Selected::Workflow { id }) = self.selected.clone() {
             // 无运行中的推进时无需取消（工作流无终态，空闲即可直接下发新指令）
             let busy = self
@@ -4697,35 +4778,67 @@ impl AmuxApp {
             let id_cancel = id.clone();
             let id_delete = id.clone();
             body = body
-                .child(Label::new("— 工作流会话 —"))
+                .child(Separator::horizontal().label("工作流会话"))
                 .child(
-                    Button::new("wf-cancel")
-                        .small()
-                        .label("取消")
-                        .when(!busy, |b| b.disabled(true))
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.cancel_workflow(window, cx, id_cancel.clone());
-                        })),
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("wf-cancel")
+                                .small()
+                                .when(!busy, |b| b.disabled(true))
+                                .label("取消")
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    this.cancel_workflow(window, cx, id_cancel.clone());
+                                })),
+                        )
+                        .child(
+                            Button::new("wf-delete")
+                                .small()
+                                .danger()
+                                .label("删除工作流")
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    this.confirm_delete_workflow(window, cx, id_delete.clone());
+                                })),
+                        ),
                 )
                 .child(
-                    Button::new("wf-delete")
-                        .small()
-                        .label("删除工作流会话")
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.confirm_delete_workflow(window, cx, id_delete.clone());
-                        })),
+                    Label::new(format!(
+                        "子会话 {}",
+                        self.workflow(&id)
+                            .map(|w| w.session.read().unwrap().children.len())
+                            .unwrap_or(0)
+                    ))
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground),
                 );
             for c in self
                 .workflow(&id)
                 .map(|w| w.session.read().unwrap().children.clone())
                 .unwrap_or_default()
             {
-                let step = self
+                let step: SharedString = self
                     .machine(c.machine_idx)
                     .and_then(|m| m.sessions.iter().find(|s| s.id == c.id))
                     .map(|s| s.title.clone())
-                    .unwrap_or_else(|| "（会话不存在）".into());
-                body = body.child(Label::new(format!("子会话 {} · {}", c.id, step)));
+                    .unwrap_or_else(|| "（会话不存在）".into())
+                    .into();
+                body = body.child(
+                    h_flex()
+                        .w_full()
+                        .gap_1p5()
+                        .items_center()
+                        .child(
+                            Icon::new(IconName::SquareTerminal)
+                                .small()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(Label::new(step).text_sm().flex_1().min_w_0().truncate())
+                        .child(
+                            Label::new(c.id)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground),
+                        ),
+                );
             }
         }
         body.into_any()
@@ -4757,20 +4870,26 @@ impl AmuxApp {
             detail.to_string()
         };
         let key_owned = key.to_string();
+        // 类型行（xs 弱化）+ 内容行分层，替代单行 "[kind] detail" 拼接
         let mut row = div()
             .id(key_owned.clone())
             .w_full()
-            .p_1()
-            .bg(cx.theme().muted)
+            .p_2()
+            .bg(cx.theme().muted.opacity(0.55))
             .rounded_md()
             .v_flex()
-            .gap_1()
-            .child(Label::new(format!("[{kind}] {shown}")).text_sm());
+            .gap_0p5()
+            .child(
+                Label::new(kind.to_string())
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Label::new(shown).text_sm());
         if long {
             row = row.child(
                 Button::new(format!("act-toggle-{key}"))
-                    .small()
-                    .ghost()
+                    .xsmall()
+                    .link()
                     .label(if expanded { "收起" } else { "展开" })
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         if !this.expanded_activities.remove(&key_owned) {
@@ -4853,18 +4972,28 @@ impl AmuxApp {
         }
         children.extend(rows.into_iter().skip(start));
         if let Some(a) = &live {
+            // 与会话区活动条同构的警示横幅：spinner + 单行截断
             let (kind, detail) = activity_display(a);
             children.push(
-                div()
+                h_flex()
                     .id("act-live")
                     .w_full()
-                    .p_1()
+                    .gap_2()
+                    .p_2()
+                    .items_center()
                     .bg(cx.theme().warning.opacity(0.16))
                     .border_1()
                     .border_color(cx.theme().warning.opacity(0.45))
                     .rounded_md()
-                    .child(Spinner::new())
-                    .child(format!("[{kind}] {detail}"))
+                    .child(Spinner::new().xsmall())
+                    .child(
+                        Label::new(format!("[{kind}] {detail}"))
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(cx.theme().warning_foreground),
+                    )
                     .into_any_element(),
             );
         }
@@ -5079,11 +5208,6 @@ impl AmuxApp {
             let path_for_restore = path.clone();
             let patch_for_restore = patch.clone();
             let mut file_children: Vec<gpui::AnyElement> = Vec::new();
-            let (status_label, status_color) = match &f.status {
-                GitChangeStatus::Added => ("A", cx.theme().success),
-                GitChangeStatus::Deleted => ("D", cx.theme().danger),
-                GitChangeStatus::Modified => ("M", cx.theme().warning),
-            };
             file_children.push(
                 h_flex()
                     .w_full()
@@ -5111,10 +5235,14 @@ impl AmuxApp {
                             }),
                     )
                     .child(
+                        // 路径用等宽字体：与 diff 正文一致的技术文本质感
                         Label::new(path.clone())
                             .flex_1()
+                            .min_w_0()
                             .text_sm()
-                            .font_weight(FontWeight::MEDIUM),
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate(),
                     )
                     .child(
                         Label::new(format!("+{additions}"))
@@ -5127,16 +5255,27 @@ impl AmuxApp {
                             .text_color(cx.theme().danger),
                     )
                     .child(
-                        Label::new(status_label)
-                            .w(px(20.)) // diff 状态列宽（对齐的数据列）
-                            .text_center()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(status_color),
+                        match &f.status {
+                            GitChangeStatus::Added => Tag::success(),
+                            GitChangeStatus::Deleted => Tag::danger(),
+                            GitChangeStatus::Modified => Tag::warning(),
+                        }
+                        .small()
+                        .rounded_full()
+                        .child(
+                            Label::new(match &f.status {
+                                GitChangeStatus::Added => "A",
+                                GitChangeStatus::Deleted => "D",
+                                GitChangeStatus::Modified => "M",
+                            })
+                            .text_xs(),
+                        ),
                     )
                     .child(
                         Button::new(format!("restore-{path}"))
                             .small()
+                            .ghost()
+                            .icon(IconName::Undo)
                             .label("撤销该文件")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
                                 if let Some((machine, _)) = this.selected_workspace() {
@@ -5200,6 +5339,8 @@ impl AmuxApp {
                         .child(
                             Button::new(format!("restore-hunk-{fi}-{hi}"))
                                 .small()
+                                .ghost()
+                                .icon(IconName::Undo)
                                 .label("撤销此块")
                                 .on_click(cx.listener({
                                     let hunk_path = hunk_path.clone();
@@ -5532,6 +5673,7 @@ impl AmuxApp {
                             .items_center()
                             .child(
                                 Label::new(format!("Skills · {agent}"))
+                                    .text_lg()
                                     .font_weight(FontWeight::SEMIBOLD),
                             )
                             .child(div().flex_1())
@@ -5588,22 +5730,37 @@ impl AmuxApp {
                 SettingsCategory::Machines,
                 "cat-machines",
                 "机器管理",
+                IconName::HardDrive,
                 cx,
             ))
             .child(self.settings_nav_item(
                 SettingsCategory::Orchestrator,
                 "cat-orch",
                 "编排智能体",
+                IconName::Bot,
                 cx,
             ))
             .child(self.settings_nav_item(
                 SettingsCategory::QuickCommands,
                 "cat-qc",
                 "快捷指令",
+                IconName::Play,
                 cx,
             ))
-            .child(self.settings_nav_item(SettingsCategory::Skills, "cat-skills", "技能管理", cx))
-            .child(self.settings_nav_item(SettingsCategory::Templates, "cat-tpl", "工作流模板", cx))
+            .child(self.settings_nav_item(
+                SettingsCategory::Skills,
+                "cat-skills",
+                "技能管理",
+                IconName::BookOpen,
+                cx,
+            ))
+            .child(self.settings_nav_item(
+                SettingsCategory::Templates,
+                "cat-tpl",
+                "工作流模板",
+                IconName::File,
+                cx,
+            ))
             .child(div().flex_1())
             .child(
                 Button::new("settings-back")
@@ -5621,22 +5778,22 @@ impl AmuxApp {
         target: SettingsCategory,
         id: &str,
         label: &str,
+        icon: IconName,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let id_owned = id.to_string();
         let label_owned = label.to_string();
-        let btn = Button::new(id_owned)
+        // ghost + selected：选中态由组件以 secondary_active 底色呈现，弱于 primary 实心
+        Button::new(id_owned)
             .small()
+            .ghost()
+            .icon(icon)
             .label(label_owned)
+            .selected(self.settings_category == target)
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.settings_category = target;
                 cx.notify();
-            }));
-        if self.settings_category == target {
-            btn.primary()
-        } else {
-            btn
-        }
+            }))
     }
 
     fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5769,7 +5926,8 @@ impl AmuxApp {
                         Button::new("settings-add-open")
                             .small()
                             .primary()
-                            .label("+")
+                            .icon(IconName::Plus)
+                            .tooltip("添加机器")
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.show_add_machine_form = true;
                                 this.machine_form_error = None;
@@ -5805,7 +5963,11 @@ impl AmuxApp {
             .child(
                 h_flex()
                     .items_center()
-                    .child(Label::new("添加机器").font_weight(FontWeight::SEMIBOLD))
+                    .child(
+                        Label::new("添加机器")
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
                     .child(div().flex_1())
                     .child(
                         Button::new("add-machine-close")
@@ -5916,7 +6078,11 @@ impl AmuxApp {
             .bg(cx.theme().popover)
             .rounded_lg()
             .shadow_lg()
-            .child(Label::new(title).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                Label::new(title)
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
             .child(
                 Label::new("指令名称")
                     .text_sm()
@@ -5999,7 +6165,11 @@ impl AmuxApp {
             .bg(cx.theme().popover)
             .rounded_lg()
             .shadow_lg()
-            .child(Label::new(title).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                Label::new(title)
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
             .child(
                 Label::new("技能名称")
                     .text_sm()
@@ -6110,7 +6280,11 @@ impl AmuxApp {
             .bg(cx.theme().popover)
             .rounded_lg()
             .shadow_lg()
-            .child(Label::new(format!("{}技能", action.label())).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                Label::new(format!("{}技能", action.label()))
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
             .child(
                 Label::new(format!("选择执行技能「{}」的机器和 agent", skill.name))
                     .text_sm()
@@ -6179,7 +6353,11 @@ impl AmuxApp {
             .bg(cx.theme().popover)
             .rounded_lg()
             .shadow_lg()
-            .child(Label::new(title).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                Label::new(title)
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
             .child(
                 Label::new("模板名称")
                     .text_sm()
@@ -6395,7 +6573,8 @@ impl AmuxApp {
                         Button::new("qc-add-open")
                             .small()
                             .primary()
-                            .label("+")
+                            .icon(IconName::Plus)
+                            .tooltip("添加快捷指令")
                             .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.open_quick_command_form(window, cx, None);
                             })),
@@ -6496,7 +6675,8 @@ impl AmuxApp {
                         Button::new("skill-add-open")
                             .small()
                             .primary()
-                            .label("+")
+                            .icon(IconName::Plus)
+                            .tooltip("添加技能")
                             .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.open_skill_form(window, cx, None);
                             })),
@@ -6576,7 +6756,8 @@ impl AmuxApp {
                         Button::new("tpl-add-open")
                             .small()
                             .primary()
-                            .label("+")
+                            .icon(IconName::Plus)
+                            .tooltip("添加模板")
                             .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.open_template_form(window, cx, None);
                             })),
@@ -6635,26 +6816,13 @@ enum SessionListItem {
 impl Render for AmuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = self.render_panel(window, cx);
-        let title_bar = h_flex()
-            .id("title-bar")
-            .h(px(36.)) // 窗口标题栏高度：平台窗口 chrome
-            .gap_2()
-            .items_center()
-            .pl(px(76.)) // 为 macOS 红绿灯按钮区预留的窗口 inset
-            .pr(px(12.)) // 窗口 chrome 尾部内边距
-            .bg(cx.theme().title_bar)
-            .border_b_1()
-            .border_color(cx.theme().title_bar_border)
-            .on_mouse_down(MouseButton::Left, |_e, window, _cx| {
-                window.start_window_move();
-            })
-            .child(
-                Label::new("amux")
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().foreground),
-            )
-            .child(div().flex_1());
+        // 库 TitleBar：拖拽/双击最大化、Linux/Windows 窗口控制按钮由组件负责
+        let title_bar = TitleBar::new().child(
+            Label::new("amux")
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(cx.theme().foreground),
+        );
 
         let mut main_row = h_flex()
             .flex_1()
@@ -6712,5 +6880,19 @@ fn format_timestamp(timestamp_ms: u64) -> String {
         time
     } else {
         format!("{} {}", ts.strftime("%m-%d"), time)
+    }
+}
+
+/// 会话列表行的紧凑时间：当日只显示时刻、跨天只显示日期（列宽有限）。
+fn format_compact_time(timestamp_ms: u64) -> String {
+    let Ok(ts) = jiff::Timestamp::from_millisecond(timestamp_ms as i64) else {
+        return String::new();
+    };
+    let ts = ts.to_zoned(jiff::tz::TimeZone::system());
+    let now = jiff::Zoned::now();
+    if ts.date() == now.date() {
+        ts.strftime("%H:%M").to_string()
+    } else {
+        ts.strftime("%m-%d").to_string()
     }
 }

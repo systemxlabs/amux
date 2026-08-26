@@ -64,13 +64,10 @@ fn main() {
         theme::sync_appearance(None, cx);
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
+                // 组件默认选项（透明标题栏 + macOS 红绿灯定位）之上保留 WM 标题
                 titlebar: Some(TitlebarOptions {
                     title: Some("amux".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(Point {
-                        x: px(12.0),
-                        y: px(10.0),
-                    }),
+                    ..TitleBar::title_bar_options()
                 }),
                 ..Default::default()
             };
