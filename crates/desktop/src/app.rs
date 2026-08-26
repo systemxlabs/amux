@@ -3701,10 +3701,12 @@ impl AmuxApp {
             return v_flex().into_any();
         };
         let dirs = self.store.recent_workspaces_for_machine(&m.config.name);
-        // 最近目录选择走 Popover 组件：锚定触发按钮、外点/Esc 关闭、
-        // 开启态在触发按钮上持续可见（selected），不再依赖手搓面板的开关状态
+        // 有最近目录时输入框本身即 Popover 触发器（Input 实现 Selectable，
+        // 开启态由组件在触发器上呈现选中样式），点击即弹出最近目录；
+        // 外点/Esc 关闭、选项回填后经 on_open_change 回写关闭
         let app = cx.entity();
         let open = self.show_workspace_dropdown;
+        let store = self.store.clone();
         let machine_name = m.config.name.clone();
         v_flex()
             .gap_1()
@@ -3713,68 +3715,78 @@ impl AmuxApp {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground),
             )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().flex_1().child(Input::new(&self.session_cwd_input)))
-                    .when(!dirs.is_empty(), |row| {
-                        let store = self.store.clone();
-                        row.child(
-                            Popover::new("workspace-picker")
-                                .open(open)
-                                .on_open_change({
-                                    let app = app.clone();
-                                    move |is_open, _window, cx| {
-                                        app.update(cx, |this, cx| {
-                                            this.show_workspace_dropdown = *is_open;
-                                            cx.notify();
-                                        });
-                                    }
-                                })
-                                .trigger(
-                                    Button::new("ns-workspace-toggle")
-                                        .small()
-                                        .ghost()
-                                        .icon(IconName::ChevronDown)
-                                        .tooltip("从最近工作目录中选择"),
-                                )
-                                .content(move |_, _window, _cx| {
-                                    // 受控开启：选项点击后经 AmuxApp 关闭（on_open_change 回写）
-                                    let dirs = store.recent_workspaces_for_machine(&machine_name);
-                                    v_flex()
-                                        .id("workspace-picker-list")
-                                        .w(rems(22.))
-                                        .max_h(rems(16.))
-                                        .overflow_y_scroll()
-                                        .gap_0p5()
-                                        .children(dirs.into_iter().map(|dir| {
-                                            Button::new(format!("ns-workspace-option-{dir}"))
-                                                .xsmall()
-                                                .ghost()
-                                                .label(short_cwd(&dir))
-                                                .tooltip(dir.clone())
-                                                .on_click({
-                                                    let app = app.clone();
-                                                    move |_, window, cx| {
-                                                        app.update(cx, |this, cx| {
-                                                            this.session_cwd_input.update(
-                                                                cx,
-                                                                |s, cx| {
-                                                                    s.set_value(&dir, window, cx)
-                                                                },
-                                                            );
-                                                            this.show_workspace_dropdown = false;
-                                                            this.new_session_error = None;
-                                                            cx.notify();
-                                                        });
-                                                    }
-                                                })
-                                        }))
-                                }),
+            .when(dirs.is_empty(), |view| {
+                view.child(Input::new(&self.session_cwd_input))
+            })
+            .when(!dirs.is_empty(), |view| {
+                view.child(
+                    Popover::new("workspace-picker")
+                        .anchor(Anchor::BottomLeft)
+                        .open(open)
+                        .on_open_change({
+                            let app = app.clone();
+                            move |is_open, _window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.show_workspace_dropdown = *is_open;
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .trigger(
+                            Input::new(&self.session_cwd_input).suffix(
+                                Icon::new(IconName::ChevronDown)
+                                    .small()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
                         )
-                    }),
-            )
+                        .content(move |_, _window, cx| {
+                            // 受控开启：选项点击后经 AmuxApp 关闭（on_open_change 回写）。
+                            // 选项为手搓行而非 Button——库 Button 内容层硬编码居中，
+                            // 全宽下拉项无法左对齐（同目录树行）
+                            let dirs = store.recent_workspaces_for_machine(&machine_name);
+                            let hover_bg = cx.theme().accent;
+                            v_flex()
+                                .id("workspace-picker-list")
+                                .w(rems(26.))
+                                .max_h(rems(16.))
+                                .overflow_y_scroll()
+                                .gap_0p5()
+                                .children(dirs.into_iter().map(|dir| {
+                                    let app = app.clone();
+                                    let dir_val = dir.clone();
+                                    div()
+                                        .id(format!("ns-workspace-option-{dir}"))
+                                        .w_full()
+                                        .h_6()
+                                        .flex()
+                                        .items_center()
+                                        .px_2()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(move |d| d.bg(hover_bg))
+                                        .on_click(move |_, window, cx| {
+                                            app.update(cx, |this, cx| {
+                                                this.session_cwd_input.update(cx, |s, cx| {
+                                                    s.set_value(&dir_val, window, cx)
+                                                });
+                                                this.show_workspace_dropdown = false;
+                                                this.new_session_error = None;
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(
+                                            // 展示完整路径；溢出时头部截断——路径尾部
+                                            // （最具体的目录段）始终可见
+                                            Label::new(dir.clone())
+                                                .text_sm()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis_start(),
+                                        )
+                                }))
+                        }),
+                )
+            })
             .into_any()
     }
 
