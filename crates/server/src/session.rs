@@ -618,7 +618,10 @@ impl SessionManager {
     /// 取消指定普通会话正在进行的工作。
     pub async fn cancel(&self, session_id: &str) -> Result<(), SessionError> {
         let (meta, agent_session_id) = self.get_entry(session_id)?;
-        if agent_session_id.is_empty() {
+        // 空闲会话（或尚无 agent 侧会话）无可取消：ACP agent 对未知 turn
+        // 会报错，这里幂等返回成功、不透传——GUI 的取消按钮是常驻的，
+        // 调用方无需自行区分忙闲。
+        if meta.state != SessionState::Busy || agent_session_id.is_empty() {
             return Ok(());
         }
         let driver = self
@@ -1070,5 +1073,81 @@ mod tests {
         assert!(mgr.history("nope", None, None).await.is_err());
         assert!(mgr.delete("nope").await.is_ok());
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
+    }
+
+    #[tokio::test]
+    async fn cancel_on_idle_session_skips_acp() {
+        struct Counting {
+            cancels: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl AgentDriver for Counting {
+            fn create_session(&self, cwd: &str) -> Result<String, String> {
+                Ok(format!("agent_{}", cwd.replace('/', "_")))
+            }
+            fn resume_session(&self, _a: &str, _c: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn prompt(
+                &self,
+                _a: &str,
+                _i: Vec<ContentBlock>,
+            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+                let (tx, rx) = tokio::sync::mpsc::channel(8);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(AgentEvent::TurnEnded(
+                            protocol::StateChangeReason::Completed,
+                        ))
+                        .await;
+                });
+                rx
+            }
+            fn cancel(&self, _a: &str) -> Result<(), String> {
+                self.cancels
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn close(&self, _a: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn delete_session(&self, _a: &str) -> Result<(), String> {
+                Err("method not found".into())
+            }
+            fn list_skills(&self) -> Result<Vec<String>, String> {
+                Ok(Vec::new())
+            }
+            fn shutdown(&self) {}
+        }
+
+        let cancels = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "track",
+            Arc::new(Counting {
+                cancels: cancels.clone(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-cancel-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+
+        // 从未 prompt 的会话处于 Idle：cancel 应幂等成功且不触达 ACP
+        let meta = mgr.create("track", "/tmp/idle").await.unwrap();
+        mgr.cancel(&meta.id).await.unwrap();
+        assert_eq!(
+            cancels.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "空闲会话的取消不应透传 ACP agent"
+        );
+        // 状态不被取消操作扰动
+        assert_eq!(
+            registry.get(&meta.id).unwrap().unwrap().0.state,
+            protocol::SessionState::Idle
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
