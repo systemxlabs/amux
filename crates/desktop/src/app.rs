@@ -685,6 +685,13 @@ impl AmuxApp {
         off.y >= -max.y
     }
 
+    /// 活动历史滚动区当前是否贴底，语义同 dialog_at_bottom。
+    fn activities_at_bottom(&self) -> bool {
+        let off = self.activities_scroll.offset();
+        let max = self.activities_scroll.max_offset();
+        off.y >= -max.y
+    }
+
     fn refresh_dialog(
         &self,
         window: &mut Window,
@@ -756,10 +763,15 @@ impl AmuxApp {
                 let has_more = res.has_more;
                 let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
+                    // 新活动到达前若已在底部，追加内容后保持贴底。
+                    let was_at_bottom = this.activities_at_bottom();
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
                             v.set_activities_page(acts, has_more, next_before);
                         }
+                    }
+                    if was_at_bottom {
+                        this.activities_scroll.scroll_to_bottom();
                     }
                     cx.notify();
                 });
