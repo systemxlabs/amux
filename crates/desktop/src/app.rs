@@ -1299,20 +1299,6 @@ impl AmuxApp {
         }
     }
 
-    fn can_cancel(&self) -> bool {
-        match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
-                .is_some_and(|s| s.state == SessionState::Busy),
-            Some(Selected::Workflow { id }) => self
-                .workflow_idx(id)
-                .and_then(|engine| self.workflows.get(engine))
-                .is_some_and(|wf| wf.session.read().unwrap().state == SessionState::Busy),
-            None => false,
-        }
-    }
-
     fn cancel_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Selected::Workflow { id }) = self.selected.clone() {
             self.cancel_workflow(window, cx, id);
@@ -1325,6 +1311,13 @@ impl AmuxApp {
         let Some(m) = self.machine(machine) else {
             return;
         };
+        // 空闲会话本就无可取消：ACP 侧报错属预期，静默忽略以免污染状态徽章；
+        // 忙碌中取消失败才值得提示
+        let was_busy = m
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .is_some_and(|s| s.state == SessionState::Busy);
         let client = m.client.clone();
         let sid = id.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -1339,8 +1332,10 @@ impl AmuxApp {
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 if let Err(error) = &res {
-                    if let Some(m) = this.machines.get_mut(machine) {
-                        m.notice = Some(format!("取消失败（{error}）"));
+                    if was_busy {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.notice = Some(format!("取消失败（{error}）"));
+                        }
                     }
                 }
                 this.refresh_dialog(w, cx, machine, sid);
@@ -4431,25 +4426,25 @@ impl AmuxApp {
                                 this.send_prompt(window, cx);
                             })),
                     )
-                    .when(self.can_cancel(), |this| {
-                        // 危险操作的轻量表达：透明底 + 危险色前景，悬停泛起浅红
-                        this.child(
-                            Button::new("cancel-work")
-                                .small()
-                                .custom(
-                                    ButtonCustomVariant::new(cx)
-                                        .color(gpui::transparent_black())
-                                        .foreground(cx.theme().danger)
-                                        .hover(cx.theme().danger.opacity(0.12))
-                                        .active(cx.theme().danger.opacity(0.2)),
-                                )
-                                .icon(IconName::Close)
-                                .label("取消")
-                                .on_click(cx.listener(|this, _ev, window, cx| {
-                                    this.cancel_work(window, cx);
-                                })),
-                        )
-                    })
+                    // 常驻取消：不随忙闲出现/消失（此前条件渲染让「想取消时
+                    // 找不到按钮」）；空闲时点击为无害操作——会话侧静默吞掉
+                    // ACP 的无可取消错误，工作流侧走既有注入取消指令机制
+                    .child(
+                        Button::new("cancel-work")
+                            .small()
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(gpui::transparent_black())
+                                    .foreground(cx.theme().danger)
+                                    .hover(cx.theme().danger.opacity(0.12))
+                                    .active(cx.theme().danger.opacity(0.2)),
+                            )
+                            .icon(IconName::Close)
+                            .label("取消")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.cancel_work(window, cx);
+                            })),
+                    )
                     .when(self.input_attachments.len() > 1, |row| {
                         row.child(
                             Button::new("clear-attachments")
