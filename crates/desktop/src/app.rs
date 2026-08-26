@@ -1391,6 +1391,7 @@ impl AmuxApp {
 
     /// 通用危险/确认弹窗：统一 alert_dialog 结构（按钮文案、危险变体、
     /// 取消按钮），on_ok 动作经闭包注入。各 `confirm_*` 入口共用，避免重复。
+    #[allow(clippy::too_many_arguments)]
     fn confirm_dialog<F>(
         &mut self,
         window: &mut Window,

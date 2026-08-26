@@ -186,14 +186,8 @@ async fn run_loop(
                 params: Value::Null,
             });
             // 认证/断开通知由 serve_connection 发出；返回后不再重连
-            let _outcome = serve_connection(
-                ws,
-                token,
-                &mut req_rx,
-                &close_rx.clone(),
-                &notify_tx,
-            )
-            .await;
+            let _outcome =
+                serve_connection(ws, token, &mut req_rx, &close_rx.clone(), &notify_tx).await;
         }
         Err(e) => {
             log::debug!("连接失败: {e}");
