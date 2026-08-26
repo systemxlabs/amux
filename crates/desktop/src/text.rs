@@ -15,15 +15,10 @@ pub fn block_text(content: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-/// 截断长文本：超过 `max` 个字符时保留前 `max` 个字符并追加省略号 `…`。
-pub fn truncate(s: &str, max: usize) -> String {
-    amux_common::text::truncate(s, max)
-}
-
 /// 折叠空白为单个空格后再截断（单行展示用）。
 pub fn one_line(s: &str, max: usize) -> String {
     let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate(&collapsed, max)
+    amux_common::text::truncate(&collapsed, max)
 }
 
 #[cfg(test)]
@@ -48,15 +43,6 @@ mod tests {
             },
         ];
         assert_eq!(block_text(&mixed), "x");
-    }
-
-    #[test]
-    fn truncate_exact_and_overflow() {
-        assert_eq!(truncate("abcd", 4), "abcd", "恰好等于上限不加省略号");
-        assert_eq!(truncate("abcd", 2), "ab…", "超限加省略号");
-        assert_eq!(truncate("", 2), "");
-        // 按字符（而非字节）截断
-        assert_eq!(truncate("你好世界", 2), "你好…");
     }
 
     #[test]

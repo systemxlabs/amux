@@ -52,6 +52,14 @@ fn run(cwd: &str, args: &[&str]) -> Result<String, GitError> {
     }
 }
 
+/// 构造失败的 `OpResult`（restore 的 CLI/文件操作错误路径共用）。
+fn op_err(message: impl Into<String>) -> OpResult {
+    OpResult {
+        ok: false,
+        message: Some(message.into()),
+    }
+}
+
 /// 把相对 cwd 的路径换算为仓库根相对路径（cwd 通常即仓库根，映射为恒等）。
 fn repo_relative_path(workdir: &Path, cwd: &str, p: &str) -> String {
     match Path::new(cwd).strip_prefix(workdir) {
@@ -505,10 +513,7 @@ impl GitRunner {
             std::fs::create_dir_all(&dir).ok();
             let patch_file = dir.join("revert.patch");
             if std::fs::write(&patch_file, p).is_err() {
-                return OpResult {
-                    ok: false,
-                    message: Some("写入 patch 失败".into()),
-                };
+                return op_err("写入 patch 失败");
             }
             // patch 路径以仓库根为基准：从仓库根应用（cwd 为其子目录时也正确）
             let apply_dir = gix::discover(cwd)
@@ -523,10 +528,7 @@ impl GitRunner {
                     ok: true,
                     message: None,
                 },
-                Err(e) => OpResult {
-                    ok: false,
-                    message: Some(e.stderr.trim().to_string()),
-                },
+                Err(e) => op_err(e.stderr.trim()),
             };
         }
         if let Some(target) = path {
@@ -541,10 +543,7 @@ impl GitRunner {
                         ok: true,
                         message: None,
                     },
-                    Err(e) => OpResult {
-                        ok: false,
-                        message: Some(format!("删除 untracked 文件失败: {e}")),
-                    },
+                    Err(e) => op_err(format!("删除 untracked 文件失败: {e}")),
                 };
             }
             return match run(cwd, &["restore", "--staged", "--worktree", "--", &target]) {
@@ -552,17 +551,11 @@ impl GitRunner {
                     ok: true,
                     message: None,
                 },
-                Err(e) => OpResult {
-                    ok: false,
-                    message: Some(e.stderr.trim().to_string()),
-                },
+                Err(e) => op_err(e.stderr.trim()),
             };
         }
         if let Err(e) = run(cwd, &["restore", "--staged", "--worktree", "--", "."]) {
-            return OpResult {
-                ok: false,
-                message: Some(e.stderr.trim().to_string()),
-            };
+            return op_err(e.stderr.trim());
         }
         match run(cwd, &["clean", "-fd"]) {
             Ok(_) => OpResult {
@@ -610,12 +603,7 @@ impl GitRunner {
 fn validate_restore_path(cwd: &str, target: &str) -> Result<String, OpResult> {
     let root = match canonical_workspace_root(cwd) {
         Ok(root) => root,
-        Err(message) => {
-            return Err(OpResult {
-                ok: false,
-                message: Some(message),
-            })
-        }
+        Err(message) => return Err(op_err(message)),
     };
     let relative = Path::new(target);
     if target.is_empty()
@@ -624,27 +612,16 @@ fn validate_restore_path(cwd: &str, target: &str) -> Result<String, OpResult> {
             .components()
             .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(OpResult {
-            ok: false,
-            message: Some("工作目录路径非法".into()),
-        });
+        return Err(op_err("工作目录路径非法"));
     }
     let candidate = root.join(relative);
     if candidate.exists() {
         let canonical = match candidate.canonicalize() {
             Ok(path) => path,
-            Err(error) => {
-                return Err(OpResult {
-                    ok: false,
-                    message: Some(format!("工作目录路径不可访问: {error}")),
-                })
-            }
+            Err(error) => return Err(op_err(format!("工作目录路径不可访问: {error}"))),
         };
         if !canonical.starts_with(&root) {
-            return Err(OpResult {
-                ok: false,
-                message: Some("工作目录路径超出工作目录范围".into()),
-            });
+            return Err(op_err("工作目录路径超出工作目录范围"));
         }
     }
     Ok(relative.to_string_lossy().replace('\\', "/"))

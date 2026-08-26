@@ -247,9 +247,8 @@ impl SessionManager {
         Ok(self.get_entry(session_id)?.0.cwd)
     }
 
-    /// 关闭长时间无活动的 agent 侧会话（>timeout_ms，
-    /// 无活动会话」）。候选选出后复核状态：已回到 Busy 的会话跳过本轮
-    /// （避免关掉正在进行中的 turn 的 agent 侧会话）。
+    /// 关闭长时间无活动的 agent 侧会话（>timeout_ms）。候选选出后复核状态：
+    /// 已回到 Busy 的会话跳过本轮（避免关掉正在进行中的 turn 的 agent 侧会话）。
     pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> Result<usize, SessionError> {
         let candidates = self
             .registry
@@ -282,12 +281,14 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<(Vec<HistoryItem>, bool, Option<u64>), SessionError> {
         self.get_entry(session_id)?;
-        let items = self.cached_history(session_id)?;
-        let limit = limit.unwrap_or(200);
-        let before_usize = before.map(|b| b as usize);
-        let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
-        let next_before = if has_more { Some(start as u64) } else { None };
-        Ok((items[start..end].to_vec(), has_more, next_before))
+        let items = self.cached_log(
+            session_id,
+            &self.history_cache,
+            SessionLog::history_path(&self.data_dir, session_id),
+            |log| log.read_history(),
+            "会话历史读取失败",
+        )?;
+        Ok(Self::page(&items, limit, before))
     }
 
     /// 分页读活动历史：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
@@ -298,54 +299,50 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<(Vec<Activity>, bool, Option<u64>), SessionError> {
         self.get_entry(session_id)?;
-        let items = self.cached_activities(session_id)?;
+        let items = self.cached_log(
+            session_id,
+            &self.activities_cache,
+            SessionLog::activities_path(&self.data_dir, session_id),
+            |log| log.read_activities(),
+            "会话活动读取失败",
+        )?;
+        Ok(Self::page(&items, limit, before))
+    }
+
+    /// 惰性分页切窗并计算下一游标（纯函数，`history`/`activities` 共用）。
+    fn page<T: Clone>(
+        items: &[T],
+        limit: Option<usize>,
+        before: Option<u64>,
+    ) -> (Vec<T>, bool, Option<u64>) {
         let limit = limit.unwrap_or(200);
         let before_usize = before.map(|b| b as usize);
         let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
         let next_before = if has_more { Some(start as u64) } else { None };
-        Ok((items[start..end].to_vec(), has_more, next_before))
+        (items[start..end].to_vec(), has_more, next_before)
     }
 
-    /// 带缓存的对话历史读取：文件长度未变时复用上次解析结果
-    /// （GUI 每 10s 轮询打开的会话；日志 append-only，长度不变即内容不变）。
-    fn cached_history(&self, session_id: &str) -> Result<Arc<Vec<HistoryItem>>, SessionError> {
-        let path = SessionLog::history_path(&self.data_dir, session_id);
+    /// 带缓存的日志读取：文件长度未变时复用上次解析结果
+    /// （GUI 每 10s 轮询打开的会话；日志 append-only，长度不变即内容不变），
+    /// 追加后由写入方失效缓存。`history`/`activities` 共用同一逻辑。
+    fn cached_log<T>(
+        &self,
+        session_id: &str,
+        cache: &Mutex<HashMap<String, LogCache<T>>>,
+        path: PathBuf,
+        read: impl FnOnce(&SessionLog) -> std::io::Result<Vec<T>>,
+        err_ctx: &str,
+    ) -> Result<Arc<Vec<T>>, SessionError> {
         let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let mut cache = self.history_cache.lock().unwrap();
+        let mut cache = cache.lock().unwrap();
         if let Some(c) = cache.get(session_id) {
             if c.source_len == file_len {
                 return Ok(c.items.clone());
             }
         }
         let items = Arc::new(
-            SessionLog::open(&self.data_dir, session_id)
-                .read_history()
-                .map_err(|e| SessionError::Storage(format!("会话历史读取失败: {e}")))?,
-        );
-        cache.insert(
-            session_id.to_string(),
-            LogCache {
-                items: items.clone(),
-                source_len: file_len,
-            },
-        );
-        Ok(items)
-    }
-
-    /// 带缓存的活动读取：文件长度未变时复用上次解析结果。
-    fn cached_activities(&self, session_id: &str) -> Result<Arc<Vec<Activity>>, SessionError> {
-        let path = SessionLog::activities_path(&self.data_dir, session_id);
-        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let mut cache = self.activities_cache.lock().unwrap();
-        if let Some(c) = cache.get(session_id) {
-            if c.source_len == file_len {
-                return Ok(c.items.clone());
-            }
-        }
-        let items = Arc::new(
-            SessionLog::open(&self.data_dir, session_id)
-                .read_activities()
-                .map_err(|e| SessionError::Storage(format!("会话活动读取失败: {e}")))?,
+            read(&SessionLog::open(&self.data_dir, session_id))
+                .map_err(|e| SessionError::Storage(format!("{err_ctx}: {e}")))?,
         );
         cache.insert(
             session_id.to_string(),
