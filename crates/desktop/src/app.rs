@@ -4936,20 +4936,15 @@ impl AmuxApp {
         }
     }
 
-    fn activity_row(
-        &self,
-        key: &str,
-        kind: &str,
-        detail: &str,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let expanded = self.expanded_activities.contains(key);
+    fn activity_row(&self, prefix: &str, a: &Activity, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let key_toggle = Self::activity_row_key(prefix, a);
+        let expanded = self.expanded_activities.contains(&key_toggle);
         // 整卡可点击切换展开：折叠恒为一行（截断省略），展开显示全文（可换行）。
         // 不再用字符数阈值裁剪——截断交给样式层，展开态即原始 detail。
-        let key_owned = key.to_string();
-        let key_toggle = key_owned.clone();
+        let (_, ts) = crate::aggregate::activity_key(a);
+        let (kind, detail) = activity_display(a);
         div()
-            .id(key_owned)
+            .id(key_toggle.clone())
             .w_full()
             .p_2()
             .bg(cx.theme().muted.opacity(0.55))
@@ -4988,6 +4983,12 @@ impl AmuxApp {
                             .flex_1()
                             .min_w_0()
                             .when(!expanded, |l| l.truncate()),
+                    )
+                    .child(
+                        Label::new(format_timestamp(ts))
+                            .text_xs()
+                            .flex_none()
+                            .text_color(cx.theme().muted_foreground),
                     ),
             )
             .into_any_element()
@@ -5007,10 +5008,7 @@ impl AmuxApp {
                 activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
                 rows = activities
                     .iter()
-                    .map(|a| {
-                        let (kind, detail) = activity_display(a);
-                        self.activity_row(&Self::activity_row_key("act", a), &kind, &detail, cx)
-                    })
+                    .map(|a| self.activity_row("act", a, cx))
                     .collect();
             }
             Some(Selected::Workflow { id }) => {
@@ -5019,15 +5017,7 @@ impl AmuxApp {
                     rows = sg
                         .activities
                         .iter()
-                        .map(|a| {
-                            let (kind, detail) = activity_display(a);
-                            self.activity_row(
-                                &Self::activity_row_key("wf-act", a),
-                                &kind,
-                                &detail,
-                                cx,
-                            )
-                        })
+                        .map(|a| self.activity_row("wf-act", a, cx))
                         .collect();
                 }
             }
