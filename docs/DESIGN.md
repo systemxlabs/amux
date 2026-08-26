@@ -105,9 +105,13 @@ Server 作为 ACP client 与 ACP servers 通信
 ### 普通会话存储
 
 普通会话数据包含三部分
-- 元数据：存储在 `~/.amux/server/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、所属 Agent、Agent 会话 ID，工作目录、最近活跃时间等
+- 元数据：存储在 `~/.amux/server/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、所属 Agent、Agent 会话 ID、工作目录、worktree 目录，最近活跃时间等
 - 对话历史：存储在 `~/.amux/server/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和 agent 输出（agent 流式输出合并后写入）
 - 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
+
+### 工作树存储
+
+Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 内。在普通会话首次接收指令时惰性创建 worktree，普通会话被删除时，其关联的 worktree 也应一并删除。
 
 ## 应用
 
