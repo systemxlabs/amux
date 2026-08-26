@@ -514,14 +514,9 @@ impl AmuxApp {
                 }
             }
             "connect_failed" => {
+                // 连接失败（server 不可达）即离线；不自动重连，由用户手动触发
                 if let Some(m) = this.machines.get_mut(idx) {
-                    let err = n
-                        .params
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("无法连接")
-                        .to_string();
-                    m.status = MachineStatus::ConnectFailed(err);
+                    m.status = MachineStatus::Offline;
                 }
             }
             "disconnected" => {

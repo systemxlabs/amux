@@ -2,12 +2,12 @@
 //!
 //! 认证：应用连接后**先发 `auth`**（method=AUTH，params={token}），
 //! 认证成功后才处理其它请求；认证完成前到达的请求一律返回认证失败（AUTH_FAILED）。
-//! 数据为**拉取式**（request/response 按 id 匹配），断线指数退避重连；
-//! 仅保留本地 connected/disconnected 通知供 UI 标记在线/离线状态。
+//! 数据为**拉取式**（request/response 按 id 匹配）；
+//! 连接失败 / 认证失败 / 断开后**不自动重连**，保持离线或认证失败状态，
+//! 由 UI 手动触发重连。仅保留本地 connected/disconnected 通知供 UI 标记在线/离线状态。
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
@@ -156,21 +156,18 @@ impl WsClient {
     }
 }
 
-/// 单条连接的服务结果：决定重连节奏。
+/// 单条连接的退出原因。
 enum ConnectionOutcome {
-    /// 已认证后连接断开（server 重启/网络抖动）：立即重连，恢复最快
+    /// 已认证后连接断开（server 重启/网络抖动）
     Disconnected,
-    /// 认证被拒（token 错误等）：计入退避——TCP 可通但 token 错的机器
-    /// 若全速重连会打爆 server（曾为热循环缺陷）
+    /// 认证被拒（token 错误等）
     AuthFailed,
     /// 客户端全部销毁：整个连接任务退出
     ClientClosed,
 }
 
-fn backoff_delay(attempt: u32) -> Duration {
-    Duration::from_millis(500u64 * 2u64.pow(attempt.min(6)))
-}
-
+/// 单次连接尝试。失败（连不上 / 认证失败 / 已连接后断开）即终止，
+/// 不做自动重连：机器保持离线或认证失败状态，由用户手动触发重连。
 async fn run_loop(
     url: String,
     token: String,
@@ -178,52 +175,33 @@ async fn run_loop(
     close_rx: tokio::sync::watch::Receiver<bool>,
     notify_tx: broadcast::Sender<Notification>,
 ) {
-    let mut attempt: u32 = 0;
-    loop {
-        if *close_rx.borrow() {
-            return;
+    if *close_rx.borrow() {
+        return;
+    }
+    match tokio_tungstenite::connect_async(&url).await {
+        Ok((ws, _)) => {
+            log::info!("已连接 {url}");
+            let _ = notify_tx.send(Notification {
+                method: "connected".into(),
+                params: Value::Null,
+            });
+            // 认证/断开通知由 serve_connection 发出；返回后不再重连
+            let _outcome = serve_connection(
+                ws,
+                token,
+                &mut req_rx,
+                &close_rx.clone(),
+                &notify_tx,
+            )
+            .await;
         }
-        match tokio_tungstenite::connect_async(&url).await {
-            Ok((ws, _)) => {
-                attempt = 0;
-                log::info!("已连接 {url}");
-                let _ = notify_tx.send(Notification {
-                    method: "connected".into(),
-                    params: Value::Null,
-                });
-                let outcome = serve_connection(
-                    ws,
-                    token.clone(),
-                    &mut req_rx,
-                    &close_rx.clone(),
-                    &notify_tx,
-                )
-                .await;
-                match outcome {
-                    ConnectionOutcome::ClientClosed => return,
-                    ConnectionOutcome::Disconnected => {
-                        // 立即重连：server 重启场景恢复最快；server 不在时由下方
-                        // connect_async 失败分支接管退避
-                    }
-                    ConnectionOutcome::AuthFailed => {
-                        attempt += 1;
-                        let delay = backoff_delay(attempt);
-                        log::warn!("认证失败，{delay:?} 后重试（第 {attempt} 次）");
-                        tokio::time::sleep(delay).await;
-                    }
-                }
-            }
-            Err(e) => {
-                attempt += 1;
-                let delay = backoff_delay(attempt);
-                log::debug!("连接失败（第 {attempt} 次），{delay:?} 后重试: {e}");
-                // UI 需区分「连不上」与「正在连」：连接失败也广播（修复机器永远显示连接中）
-                let _ = notify_tx.send(Notification {
-                    method: "connect_failed".into(),
-                    params: json!({ "error": e.to_string() }),
-                });
-                tokio::time::sleep(delay).await;
-            }
+        Err(e) => {
+            log::debug!("连接失败: {e}");
+            // UI 需区分「连不上」与「正在连」：连接失败也广播（修复机器永远显示连接中）
+            let _ = notify_tx.send(Notification {
+                method: "connect_failed".into(),
+                params: json!({ "error": e.to_string() }),
+            });
         }
     }
 }

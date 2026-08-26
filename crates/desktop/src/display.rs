@@ -56,8 +56,7 @@ fn color_for_status(
 ) -> Hsla {
     match status {
         crate::machine::MachineStatus::Online => success,
-        crate::machine::MachineStatus::AuthFailed(_)
-        | crate::machine::MachineStatus::ConnectFailed(_) => danger,
+        crate::machine::MachineStatus::AuthFailed(_) => danger,
         crate::machine::MachineStatus::Connecting | crate::machine::MachineStatus::Offline => {
             _warning
         }

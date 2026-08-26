@@ -20,9 +20,7 @@ pub enum MachineStatus {
     Online,
     /// 认证被拒（token 错误；退避重连中）
     AuthFailed(String),
-    /// 连接失败、不可达（退避重连中）
-    ConnectFailed(String),
-    /// 曾在线后断开（立即重连中）
+    /// 曾在线后断开（立即重连中），或连不上（退避重连中）
     Offline,
 }
 
@@ -32,7 +30,6 @@ impl MachineStatus {
             MachineStatus::Connecting => "连接中…".into(),
             MachineStatus::Online => "已连接".into(),
             MachineStatus::AuthFailed(e) => format!("认证失败（{e}）"),
-            MachineStatus::ConnectFailed(e) => format!("连接失败（{e}）"),
             MachineStatus::Offline => "离线（重连中…）".into(),
         }
     }
