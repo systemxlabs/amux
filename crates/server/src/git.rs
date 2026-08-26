@@ -598,6 +598,47 @@ impl GitRunner {
             .unwrap_or(false);
         !in_index
     }
+
+    /// 在 `repo_cwd` 仓库内创建指向 `target` 路径的 git worktree（docs/DESIGN.md
+    /// 「工作树存储」）。分支名由 git 取目标目录 basename 自动生成。要求仓库已有
+    /// 提交（unborn HEAD 无法建 worktree）。
+    pub fn create_worktree(&self, repo_cwd: &str, target: &Path) -> Result<(), String> {
+        run(
+            repo_cwd,
+            &["worktree", "add", target.to_string_lossy().as_ref()],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{}: {}", e.message, e.stderr.trim()))
+    }
+
+    /// 移除 worktree（强制：会话删除级联清理不因未提交改动而失败），并 prune
+    /// 主仓库的残留管理信息。repo 已不存在时退化为直接删目录。
+    pub fn remove_worktree(&self, repo_cwd: &str, target: &Path) {
+        let target_str = target.to_string_lossy().into_owned();
+        if gix::discover(repo_cwd).is_ok() {
+            if let Err(e) = run(
+                repo_cwd,
+                &["worktree", "remove", "--force", target_str.as_str()],
+            ) {
+                log::warn!("git worktree remove 失败（回退直接删目录）: {e}");
+            } else {
+                let _ = run(repo_cwd, &["worktree", "prune"]);
+                return;
+            }
+        }
+        if let Err(e) = std::fs::remove_dir_all(target) {
+            log::error!("删除 worktree 目录失败 {}: {e}", target.display());
+        }
+        let _ = run(repo_cwd, &["worktree", "prune"]);
+    }
+
+    /// 判定 cwd 是否为 git 仓库（worktree 开关的前置校验与惰性创建前的复验）。
+    pub fn is_repo(&self, cwd: &str) -> bool {
+        gix::discover(cwd)
+            .ok()
+            .and_then(|r| r.workdir().map(|_| ()))
+            .is_some()
+    }
 }
 
 fn validate_restore_path(cwd: &str, target: &str) -> Result<String, OpResult> {

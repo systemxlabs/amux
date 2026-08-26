@@ -41,6 +41,7 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
         title: row.get("title")?,
         created_at: row.get::<_, i64>("created_at")? as u64,
         last_active_at: row.get::<_, i64>("last_active_at")? as u64,
+        worktree_dir: row.get("worktree_dir")?,
     };
     let agent_session_id: String = row.get("agent_session_id")?;
     Ok((meta, agent_session_id))
@@ -71,7 +72,8 @@ impl SessionRegistry {
                 title TEXT NOT NULL DEFAULT '',
                 agent_session_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
-                last_active_at INTEGER NOT NULL
+                last_active_at INTEGER NOT NULL,
+                worktree_dir TEXT NOT NULL DEFAULT ''
             );",
         )?;
         Ok(SessionRegistry {
@@ -84,12 +86,13 @@ impl SessionRegistry {
         let conn = self.connection()?;
         conn.execute(
             "INSERT INTO sessions
-                (id, agent, cwd, state, title, agent_session_id, created_at, last_active_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 agent=excluded.agent, cwd=excluded.cwd, state=excluded.state,
                 title=excluded.title, agent_session_id=excluded.agent_session_id,
-                created_at=excluded.created_at, last_active_at=excluded.last_active_at",
+                created_at=excluded.created_at, last_active_at=excluded.last_active_at,
+                worktree_dir=excluded.worktree_dir",
             params![
                 meta.id,
                 meta.agent,
@@ -98,7 +101,8 @@ impl SessionRegistry {
                 meta.title,
                 agent_session_id,
                 meta.created_at as i64,
-                meta.last_active_at as i64
+                meta.last_active_at as i64,
+                meta.worktree_dir
             ],
         )?;
         Ok(())
@@ -108,7 +112,7 @@ impl SessionRegistry {
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<RegistryEntry>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at
+            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir
              FROM sessions WHERE id = ?1",
         )?;
         stmt.query_row(params![id], row_to_entry).optional()
@@ -118,7 +122,7 @@ impl SessionRegistry {
     pub fn list(&self) -> rusqlite::Result<Vec<RegistryEntry>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at
+            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir
              FROM sessions ORDER BY last_active_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], row_to_entry)?;
@@ -224,6 +228,7 @@ mod tests {
                 title: String::new(),
                 created_at: 1,
                 last_active_at,
+                worktree_dir: String::new(),
             },
             format!("agent_{id}"),
         )

@@ -368,6 +368,7 @@ mod tests {
             title: String::new(),
             created_at: 1,
             last_active_at: last,
+            worktree_dir: String::new(),
         }
     }
 

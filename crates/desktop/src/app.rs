@@ -177,6 +177,8 @@ pub struct AmuxApp {
     renaming_workflow: Option<String>,
     new_session_machine: Option<usize>,
     new_session_agent: Option<String>,
+    /// 新会话是否以 git worktree 方式工作（docs/PRD.md 新建会话「worktree 开关」）
+    new_session_worktree: bool,
     new_session_error: Option<String>,
     show_workspace_dropdown: bool,
     workflow_error: Option<String>,
@@ -319,6 +321,7 @@ impl AmuxApp {
             renaming_workflow: None,
             new_session_machine: None,
             new_session_agent: None,
+            new_session_worktree: false,
             new_session_error: None,
             show_workspace_dropdown: false,
             workflow_error: None,
@@ -468,17 +471,22 @@ impl AmuxApp {
         }
     }
 
+    /// 当前选中会话的生效工作目录：启用 worktree 的会话 agent 实际工作在
+    /// 工作树内，目录浏览/改动审查/还原都应对准工作树而非用户指定的主仓库。
     fn selected_workspace(&self) -> Option<(usize, String)> {
         let Selected::Session { machine, id } = self.selected.as_ref()? else {
             return None;
         };
-        let cwd = self
+        let session = self
             .machine(*machine)?
             .sessions
             .iter()
-            .find(|session| session.id == *id)?
-            .cwd
-            .clone();
+            .find(|session| session.id == *id)?;
+        let cwd = if session.worktree_dir.is_empty() {
+            session.cwd.clone()
+        } else {
+            session.worktree_dir.clone()
+        };
         Some((*machine, cwd))
     }
 
@@ -1114,6 +1122,7 @@ impl AmuxApp {
         let params = SessionNewParams {
             agent: agent.clone(),
             cwd: cwd.clone(),
+            use_worktree: self.new_session_worktree,
         };
         let client = self.machines[machine].client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -1853,6 +1862,7 @@ impl AmuxApp {
                     title: sg.title.clone(),
                     created_at: sg.created_at,
                     last_active_at: sg.updated_at,
+                    worktree_dir: String::new(),
                 })
             }
             None => None,
@@ -2296,6 +2306,8 @@ impl AmuxApp {
                         Some(SessionNewParams {
                             agent: agent.clone(),
                             cwd: cwd.clone(),
+                            // 技能操作是临时会话：直接在用户指定目录执行
+                            use_worktree: false,
                         }),
                     )
                     .await
@@ -3642,6 +3654,17 @@ impl AmuxApp {
                                 ),
                         )
                         .child(self.render_workspace_picker(cx))
+                        // worktree 开关（docs/PRD.md）：勾选后 agent 在独立工作树中
+                        // 工作，主仓库工作区不受影响；路径由 server 统一分配
+                        .child(
+                            Checkbox::new("ns-worktree-toggle")
+                                .label("使用 git worktree（agent 在隔离工作树中修改代码）")
+                                .checked(self.new_session_worktree)
+                                .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                                    this.new_session_worktree = *checked;
+                                    cx.notify();
+                                })),
+                        )
                         .when_some(self.new_session_error.clone(), |view, error| {
                             view.child(Alert::error("ns-create-error", error))
                         })
@@ -4806,6 +4829,15 @@ impl AmuxApp {
                 cx.theme().muted_foreground,
                 cx.theme().foreground,
             ))
+            .when(!meta.worktree_dir.is_empty(), |view| {
+                // worktree 会话：agent 实际工作在工作树内，展示以便定位
+                view.child(info_row(
+                    "worktree",
+                    &meta.worktree_dir,
+                    cx.theme().muted_foreground,
+                    cx.theme().foreground,
+                ))
+            })
             .child(info_row(
                 "状态",
                 if meta.state == SessionState::Busy {

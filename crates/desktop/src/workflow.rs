@@ -699,7 +699,8 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
                 "properties": {
                     "machine": { "type": "string", "description": "机器名" },
                     "agent": { "type": "string", "description": "agent 名" },
-                    "cwd": { "type": "string", "description": "工作目录" }
+                    "cwd": { "type": "string", "description": "工作目录" },
+                    "worktree": { "type": "boolean", "description": "是否以 git worktree 方式工作（工作计划要求隔离修改主仓库时使用）；缺省 false" }
                 },
                 "required": ["machine", "agent", "cwd"]
             }),
@@ -1196,6 +1197,9 @@ struct CreateSessionArgs {
     machine: String,
     agent: String,
     cwd: String,
+    /// 工作计划要求以 worktree 方式工作时由编排智能体传入；缺省 false
+    #[serde(default)]
+    worktree: bool,
 }
 
 async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<String, String> {
@@ -1207,6 +1211,7 @@ async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<S
             Some(SessionNewParams {
                 agent: args.agent.clone(),
                 cwd: args.cwd.clone(),
+                use_worktree: args.worktree,
             }),
         )
         .await
@@ -1460,7 +1465,8 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "已按指令取消".into(),
         }]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
+        let engine =
+            WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
         assert!(engine.cancel(), "空闲工作流取消应立即推进");
         assert!(engine
             .session
@@ -1485,7 +1491,8 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "本轮静默".into(),
         }]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
+        let engine =
+            WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
@@ -1530,7 +1537,8 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "不应发生".into(),
         }]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
+        let engine =
+            WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,

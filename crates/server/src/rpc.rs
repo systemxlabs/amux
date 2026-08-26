@@ -125,7 +125,7 @@ impl Handlers {
                 let p: SessionNewParams = parse(params)?;
                 let session = self
                     .manager
-                    .create(&p.agent, &p.cwd)
+                    .create(&p.agent, &p.cwd, p.use_worktree)
                     .await
                     .map_err(map_session_err)?;
                 serde_json::to_value(SessionResult { session })

@@ -22,6 +22,7 @@ use protocol::{
 
 use crate::agent::{AgentEvent, AgentRegistry};
 use crate::error::SessionError;
+use crate::git::GitRunner;
 use crate::history::{SessionLog, TurnMerger};
 use crate::registry::{RegistryEntry, SessionRegistry};
 
@@ -130,11 +131,35 @@ impl SessionManager {
     }
 
     /// 新建普通会话（**惰性**：只写注册表立即返回，不触发 ACP；agent 侧会话延后到
-    /// 首条指令时经 `session/new` 懒创建）。
-    pub async fn create(&self, agent: &str, cwd: &str) -> Result<SessionMeta, SessionError> {
+    /// 首条指令时经 `session/new` 懒创建）。`use_worktree` 时按 docs/DESIGN.md
+    /// 「工作树存储」确定 worktree 路径（统一位于 `~/.amux/worktrees/`，即
+    /// data_dir 同级的 worktrees/），磁盘工作树同样惰性——首次接收指令才落盘。
+    pub async fn create(
+        &self,
+        agent: &str,
+        cwd: &str,
+        use_worktree: bool,
+    ) -> Result<SessionMeta, SessionError> {
         let id = format!("s_{}", uuid::Uuid::new_v4());
         let ts = now();
         log::info!("新建会话 {id}（agent={agent} cwd={cwd}，agent 侧会话延后创建）");
+        let worktree_dir = if use_worktree {
+            let repo_name = std::path::Path::new(cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "repo".into());
+            // 随机串取 UUID 前 8 位：同仓库多会话并存、路径可读且免碰撞
+            let rand: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+            self.data_dir
+                .parent()
+                .unwrap_or(std::path::Path::new("/tmp"))
+                .join("worktrees")
+                .join(format!("{repo_name}-{rand}"))
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        };
         let meta = SessionMeta {
             id,
             agent: agent.to_string(),
@@ -143,6 +168,7 @@ impl SessionManager {
             title: String::new(),
             created_at: ts,
             last_active_at: ts,
+            worktree_dir,
         };
         self.registry.upsert(&meta, "")?;
         self.control(&meta.id);
@@ -203,6 +229,13 @@ impl SessionManager {
         log.remove()
             .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")))?;
         self.invalidate_log_caches(session_id);
+        // worktree 级联清理（docs/DESIGN.md「工作树存储」）：尽力而为不阻断删除
+        if !meta.worktree_dir.is_empty() {
+            let wt = std::path::PathBuf::from(&meta.worktree_dir);
+            if wt.exists() {
+                GitRunner::new().remove_worktree(&meta.cwd, &wt);
+            }
+        }
         // 控制块出 map：进行中的 prompt 持有 Arc 克隆仍能看到 deleted 标志；
         // 新请求将得到全新（未删除）的控制块——但会话已不在注册表，NotFound 兜底。
         self.controls.lock().unwrap().remove(session_id);
@@ -485,13 +518,28 @@ impl SessionManager {
         }
         meta.state = SessionState::Busy;
         meta.last_active_at = now();
+        // worktree 惰性创建（docs/DESIGN.md「工作树存储」）：路径在 session.new 已
+        // 确定，首次接收指令才落盘。放在 ACP 交互之前——失败即拒绝本次 prompt，
+        // 注册表尚未写 Busy，无需状态回滚。
+        if !meta.worktree_dir.is_empty() && !std::path::Path::new(&meta.worktree_dir).exists() {
+            GitRunner::new()
+                .create_worktree(&meta.cwd, std::path::Path::new(&meta.worktree_dir))
+                .map_err(SessionError::Storage)?;
+        }
+        // agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
+        // create/resume 共用此值，GUI 的 workspace/diff RPC 也按它下发。
+        let cwd = if meta.worktree_dir.is_empty() {
+            meta.cwd.clone()
+        } else {
+            meta.worktree_dir.clone()
+        };
         let driver = self
             .agents
             .driver_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
         let agent_session_id = if agent_session_id.is_empty() {
             let sid2 = driver
-                .create_session(&meta.cwd)
+                .create_session(&cwd)
                 .map_err(SessionError::AgentUnavailable)?;
             self.registry.set_agent_session_id(session_id, &sid2)?;
             sid2
@@ -499,7 +547,6 @@ impl SessionManager {
             agent_session_id
         };
         self.registry.upsert(&meta, &agent_session_id)?;
-        let cwd = meta.cwd.clone();
         Ok((driver, agent_session_id, cwd, old_state))
     }
 
@@ -723,6 +770,78 @@ mod tests {
         (Arc::new(mgr), rx)
     }
 
+    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} 失败: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[tokio::test]
+    async fn worktree_lazy_create_and_delete_cascade() {
+        // data_dir 嵌套一层：worktree 根落在用例沙箱内（data_dir 同级 worktrees/）
+        let case = std::env::temp_dir().join(format!(
+            "amux-wt-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(case.join("server").join("sessions")).unwrap();
+
+        // 主仓库：需要已有提交（unborn HEAD 无法建 worktree）
+        let repo = case.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a.txt"), "v1\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init", "-q"]);
+
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "codex",
+            Arc::new(crate::agent::StubAgentDriver::new()),
+        ));
+        let registry =
+            Arc::new(SessionRegistry::open(&case.join("server").join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry, case.join("server"));
+
+        let meta = mgr
+            .create("codex", repo.to_str().unwrap(), true)
+            .await
+            .unwrap();
+        assert!(meta
+            .worktree_dir
+            .starts_with(case.join("worktrees").to_str().unwrap()));
+        assert!(
+            !std::path::Path::new(&meta.worktree_dir).exists(),
+            "工作树应惰性创建：session.new 不落盘"
+        );
+
+        // 首次指令：工作树落盘并挂入主仓库
+        mgr.prompt(&meta.id, text("hi")).await.unwrap();
+        let wt = std::path::PathBuf::from(&meta.worktree_dir);
+        assert!(wt.is_dir(), "首次 prompt 应创建工作树");
+        assert!(wt.join(".git").is_file(), ".git 为文件是 worktree 的特征");
+        let list = git(&repo, &["worktree", "list", "--porcelain"]);
+        assert!(list.contains(meta.worktree_dir.trim()));
+
+        // 删除会话：工作树级联移除
+        mgr.delete(&meta.id).await.unwrap();
+        assert!(!wt.exists(), "删除会话应级联删除工作树");
+        let list = git(&repo, &["worktree", "list", "--porcelain"]);
+        assert!(!list.contains(meta.worktree_dir.trim()));
+        let _ = std::fs::remove_dir_all(&case);
+    }
+
     #[tokio::test]
     async fn create_is_lazy_until_first_prompt() {
         let agents = Arc::new(AgentRegistry::new_for_tests());
@@ -734,7 +853,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
 
-        let meta = mgr.create("codex", "/tmp/lazy").await.unwrap();
+        let meta = mgr.create("codex", "/tmp/lazy", false).await.unwrap();
         let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
         assert!(aid.is_empty(), "创建会话不应触发 ACP session/new");
 
@@ -754,6 +873,7 @@ mod tests {
                     title: String::new(),
                     created_at: 1,
                     last_active_at: last,
+                    worktree_dir: String::new(),
                 },
                 format!("agent_{id}"),
             )
@@ -808,6 +928,7 @@ mod tests {
                     title: String::new(),
                     created_at: 1,
                     last_active_at: 100,
+                    worktree_dir: String::new(),
                 },
                 String::new(),
             )
@@ -837,6 +958,7 @@ mod tests {
                     title: String::new(),
                     created_at: 1,
                     last_active_at,
+                    worktree_dir: String::new(),
                 },
                 String::new(),
             )
@@ -876,7 +998,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_writes_history_and_activities_with_title() {
         let (mgr, mut rx) = stub_manager("codex");
-        let meta = mgr.create("codex", "/tmp/work").await.unwrap();
+        let meta = mgr.create("codex", "/tmp/work", false).await.unwrap();
 
         mgr.prompt(&meta.id, text("实现登录功能")).await.unwrap();
 
@@ -992,7 +1114,10 @@ mod tests {
         let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         let (manager, _rx) = SessionManager::new(agents, registry, dir.clone());
         let manager = Arc::new(manager);
-        let meta = manager.create("blocking", "/tmp/work").await.unwrap();
+        let meta = manager
+            .create("blocking", "/tmp/work", false)
+            .await
+            .unwrap();
         let session_id = meta.id.clone();
 
         let prompt_manager = manager.clone();
@@ -1099,7 +1224,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         let (manager, _rx) = SessionManager::new(agents, registry, dir.clone());
         let manager = Arc::new(manager);
-        let meta = manager.create("stream", "/tmp/work").await.unwrap();
+        let meta = manager.create("stream", "/tmp/work", false).await.unwrap();
         let session_id = meta.id.clone();
 
         let prompt_manager = manager.clone();
@@ -1187,7 +1312,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
-        let meta = mgr.create("track", "/tmp/work").await.unwrap();
+        let meta = mgr.create("track", "/tmp/work", false).await.unwrap();
         mgr.prompt(&meta.id, text("hi")).await.unwrap();
         assert_eq!(closed.load(std::sync::atomic::Ordering::SeqCst), 0);
 
@@ -1203,7 +1328,7 @@ mod tests {
     #[tokio::test]
     async fn delete_unprompted_needs_no_close() {
         let (mgr, _rx) = stub_manager("codex");
-        let meta = mgr.create("codex", "/tmp/noop").await.unwrap();
+        let meta = mgr.create("codex", "/tmp/noop", false).await.unwrap();
         mgr.delete(&meta.id).await.unwrap();
         mgr.delete(&meta.id).await.expect("重复删除应保持幂等");
         assert!(mgr.registry.get(&meta.id).unwrap().is_none());
@@ -1279,7 +1404,7 @@ mod tests {
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
 
         // 从未 prompt 的会话处于 Idle：cancel 应幂等成功且不触达 ACP
-        let meta = mgr.create("track", "/tmp/idle").await.unwrap();
+        let meta = mgr.create("track", "/tmp/idle", false).await.unwrap();
         mgr.cancel(&meta.id).await.unwrap();
         assert_eq!(
             cancels.load(std::sync::atomic::Ordering::SeqCst),
