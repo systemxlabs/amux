@@ -3527,13 +3527,16 @@ impl AmuxApp {
                 // 分段单选：模式切换用库 ButtonGroup（选中态/圆角拼接由其负责）
                 ButtonGroup::new("ns-mode")
                     .small()
+                    .w_full()
                     .child(
                         Button::new("ns-mode-direct")
+                            .flex_1()
                             .label("普通")
                             .selected(mode == NewSessionMode::Direct),
                     )
                     .child(
                         Button::new("ns-mode-tpl")
+                            .flex_1()
                             .label("工作流")
                             .selected(mode == NewSessionMode::Workflow),
                     )
