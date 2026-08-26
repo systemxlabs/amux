@@ -4999,7 +4999,6 @@ impl AmuxApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        let mut live: Option<Activity> = None;
         let mut activities_has_more = false;
         match &self.selected {
             Some(Selected::Session { machine, id }) => {
@@ -5013,7 +5012,6 @@ impl AmuxApp {
                         self.activity_row(&Self::activity_row_key("act", a), &kind, &detail, cx)
                     })
                     .collect();
-                live = view.and_then(|v| v.live.clone());
             }
             Some(Selected::Workflow { id }) => {
                 if let Some(wf) = self.workflow(id) {
@@ -5031,12 +5029,6 @@ impl AmuxApp {
                             )
                         })
                         .collect();
-                    if wf.session.read().unwrap().state == SessionState::Busy {
-                        live = Some(Activity::Thinking {
-                            timestamp: wf.session.read().unwrap().updated_at,
-                            content: "正在编排决策/推进…".into(),
-                        });
-                    }
                 }
             }
             _ => {}
@@ -5062,32 +5054,6 @@ impl AmuxApp {
             );
         }
         children.extend(rows.into_iter().skip(start));
-        if let Some(a) = &live {
-            // 与会话区活动条同构的警示横幅：spinner + 单行截断
-            let (kind, detail) = activity_display(a);
-            children.push(
-                h_flex()
-                    .id("act-live")
-                    .w_full()
-                    .gap_2()
-                    .p_2()
-                    .items_center()
-                    .bg(cx.theme().warning.opacity(0.16))
-                    .border_1()
-                    .border_color(cx.theme().warning.opacity(0.45))
-                    .rounded_md()
-                    .child(Spinner::new().xsmall())
-                    .child(
-                        Label::new(format!("[{kind}] {detail}"))
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(cx.theme().warning_foreground),
-                    )
-                    .into_any_element(),
-            );
-        }
         v_flex()
             .w_full()
             .h_full()
