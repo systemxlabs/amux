@@ -1155,6 +1155,11 @@ impl AmuxApp {
                     input: blocks.clone(),
                 };
                 if let Some(m) = self.machine_mut(machine) {
+                    // 乐观置忙：不等服务端 state_change 回推，取消按钮立即可见；
+                    // 请求失败时由下方主动 refresh_sessions 快速纠正
+                    if let Some(s) = m.sessions.iter_mut().find(|s| s.id == id) {
+                        s.state = SessionState::Busy;
+                    }
                     let v = m.views.entry(id.clone()).or_default();
                     v.dialog.push(DialogMsg::UserMessage {
                         content: blocks.clone(),
@@ -1176,6 +1181,7 @@ impl AmuxApp {
                                     .title("消息未发送"),
                                 cx,
                             );
+                            this.refresh_sessions(machine, w, cx);
                         }
                         this.refresh_dialog(w, cx, machine, id);
                         cx.notify();
