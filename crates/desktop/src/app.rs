@@ -3140,9 +3140,7 @@ impl AmuxApp {
                             .child(Label::new(label).text_sm().flex_1().min_w_0().truncate()),
                     )
                     .child(if busy {
-                        Spinner::new()
-                            .color(cx.theme().primary)
-                            .into_any_element()
+                        Spinner::new().color(cx.theme().primary).into_any_element()
                     } else {
                         div().size_3().into_any_element()
                     }),
@@ -3212,9 +3210,7 @@ impl AmuxApp {
                     })),
             )
             .child(if wf.session.read().unwrap().state == SessionState::Busy {
-                Spinner::new()
-                    .color(cx.theme().primary)
-                    .into_any_element()
+                Spinner::new().color(cx.theme().primary).into_any_element()
             } else {
                 div().size_3().into_any_element()
             });
@@ -3279,9 +3275,7 @@ impl AmuxApp {
                             ),
                     )
                     .child(if busy {
-                        Spinner::new()
-                            .color(cx.theme().primary)
-                            .into_any_element()
+                        Spinner::new().color(cx.theme().primary).into_any_element()
                     } else {
                         div().size_3().into_any_element()
                     }),

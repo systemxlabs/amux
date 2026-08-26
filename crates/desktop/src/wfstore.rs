@@ -221,7 +221,8 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
 /// 惰性加载（按需补齐）：把指定会话的 transcript/activities 从其对应 JSONL 读入，
 /// 其余字段保持不动。仅在打开会话渲染对话/活动视图时调用。
 pub fn load_payload(data_dir: &Path, session: &mut OrcSession) -> io::Result<()> {
-    session.transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, &session.id))?);
+    session.transcript =
+        transcript_from_history(&read_jsonl(&history_path(data_dir, &session.id))?);
     session.activities = read_jsonl(&activities_path(data_dir, &session.id))?;
     Ok(())
 }
@@ -344,7 +345,10 @@ mod tests {
         assert_eq!(meta[0].activities.len(), 1);
         assert_eq!(
             meta[0].activities[0],
-            Activity::Thinking { timestamp: 1, content: "想".into() }
+            Activity::Thinking {
+                timestamp: 1,
+                content: "想".into()
+            }
         );
         // 补齐只影响 payload，元数据字段保持不变。
         assert_eq!(meta[0].title, "计划A");

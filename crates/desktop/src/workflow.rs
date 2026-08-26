@@ -1875,7 +1875,12 @@ mod tests {
         let sessions = WorkflowEngine::load_all(&dir).unwrap();
         assert!(sessions[0].transcript.is_empty());
         let (clients2, m2) = clients_with_machines();
-        let engine2 = WorkflowEngine::restore(sessions[0].clone(), FakeBackend::new(vec![]), clients2, vec![m2]);
+        let engine2 = WorkflowEngine::restore(
+            sessions[0].clone(),
+            FakeBackend::new(vec![]),
+            clients2,
+            vec![m2],
+        );
         engine2.backfill(&dir).unwrap();
         assert!(engine2
             .session
