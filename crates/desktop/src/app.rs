@@ -4962,6 +4962,12 @@ impl AmuxApp {
                     .w_full()
                     .gap_1p5()
                     .child(
+                        Label::new(format_timestamp(ts))
+                            .text_xs()
+                            .flex_none()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
                         Icon::new(if expanded {
                             IconName::ChevronDown
                         } else {
@@ -4983,12 +4989,6 @@ impl AmuxApp {
                             .flex_1()
                             .min_w_0()
                             .when(!expanded, |l| l.truncate()),
-                    )
-                    .child(
-                        Label::new(format_timestamp(ts))
-                            .text_xs()
-                            .flex_none()
-                            .text_color(cx.theme().muted_foreground),
                     ),
             )
             .into_any_element()
@@ -6866,13 +6866,24 @@ enum SessionListItem {
 impl Render for AmuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = self.render_panel(window, cx);
-        // 库 TitleBar：拖拽/双击最大化、Linux/Windows 窗口控制按钮由组件负责
-        let title_bar = TitleBar::new().child(
-            Label::new("amux")
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(cx.theme().foreground),
-        );
+        // 库 TitleBar：拖拽/双击最大化、Linux/Windows 窗口控制按钮由组件负责。
+        // 外层按下时压制窗口级文本选择（同 Button/Input 机制）：标题栏拖动走
+        // WM 交互移动，Wayland/X11 下松开事件被合成器吞掉，选择控制器收不到
+        // MouseUp 会滞留拖选态——不启动选区则丢失的 MouseUp 无害
+        let title_bar = div()
+            .id("title-bar-wrap")
+            .w_full()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                GlobalState::suppress_text_selection(cx);
+            })
+            .child(
+                TitleBar::new().child(
+                    Label::new("amux")
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground),
+                ),
+            );
 
         let mut main_row = h_flex()
             .flex_1()
