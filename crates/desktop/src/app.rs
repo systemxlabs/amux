@@ -1199,6 +1199,15 @@ impl AmuxApp {
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
                         if let Err(error) = &result {
+                            // 同步回滚乐观置忙：服务端拒绝即未写 Busy（setup 阶段
+                            // 失败早于状态广播），本地回 Idle 语义确定。不能只依赖
+                            // refresh_sessions——若失败源于断连，列表刷新同样会
+                            // 静默失败，乐观的 Busy 将永久滞留（会话一直转圈）
+                            if let Some(m) = this.machines.get_mut(machine) {
+                                if let Some(s) = m.sessions.iter_mut().find(|s| s.id == id) {
+                                    s.state = SessionState::Idle;
+                                }
+                            }
                             w.push_notification(
                                 UiNotification::error(format!("发送失败：{error}"))
                                     .title("消息未发送"),
