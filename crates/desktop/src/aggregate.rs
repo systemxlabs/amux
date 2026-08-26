@@ -152,7 +152,7 @@ fn dialog_key(m: &DialogMsg) -> (&'static str, u64) {
     }
 }
 
-fn activity_key(a: &Activity) -> (&'static str, u64) {
+pub(crate) fn activity_key(a: &Activity) -> (&'static str, u64) {
     match a {
         Activity::Thinking { timestamp, .. } => ("thinking", *timestamp),
         Activity::ToolCall { timestamp, .. } => ("tool", *timestamp),

@@ -7,11 +7,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     button::*,
+    checkbox::Checkbox,
     collapsible::Collapsible,
     dialog::DialogButtonProps,
     input::{Input, InputState},
     label::Label,
+    menu::{ContextMenuExt, PopupMenuItem},
     notification::Notification as UiNotification,
+    popover::Popover,
     radio::RadioGroup,
     scroll::ScrollableElement,
     spinner::Spinner,
@@ -41,7 +44,7 @@ use crate::logic::{
     parse_at_references, path_attachment, read_path_context, DialogMsg, InputAttachment,
 };
 use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
-use crate::text::{block_text, one_line, truncate};
+use crate::text::{block_text, one_line};
 use crate::workflow::{now_ts, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
 
@@ -75,20 +78,15 @@ enum NewSessionMode {
 
 #[derive(Clone, PartialEq)]
 enum Selected {
-    Session { machine: usize, id: String },
-    Workflow { engine: usize },
-}
-
-#[derive(Clone)]
-enum ContextMenuTarget {
-    Session { machine: usize, session_id: String },
-    Workflow { engine: usize },
-}
-
-struct SessionContextMenu {
-    target: ContextMenuTarget,
-    x: f32,
-    y: f32,
+    Session {
+        machine: usize,
+        id: String,
+    },
+    /// 以工作流会话 ID（而非 Vec 下标）为身份：列表按活跃度重排、删除会移位下标，
+    /// 用下标会让选中态静默漂移到另一个工作流。
+    Workflow {
+        id: String,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -166,9 +164,9 @@ pub struct AmuxApp {
     show_skill_form: bool,
     show_template_form: bool,
     skill_action_dialog: Option<(SkillEntry, SkillAction)>,
-    context_menu: Option<SessionContextMenu>,
     renaming_session: Option<(usize, String)>,
-    renaming_workflow: Option<usize>,
+    /// 同 Selected：以工作流会话 ID 为身份
+    renaming_workflow: Option<String>,
     new_session_machine: Option<usize>,
     new_session_agent: Option<String>,
     new_session_error: Option<String>,
@@ -181,7 +179,8 @@ pub struct AmuxApp {
     workflow_dialog_limit: usize,
     activities_limit: usize,
     expanded_activities: std::collections::HashSet<String>,
-    expanded_workflows: std::collections::HashSet<usize>,
+    /// 以工作流会话 ID 为身份（同 Selected）
+    expanded_workflows: std::collections::HashSet<String>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -303,7 +302,6 @@ impl AmuxApp {
             show_skill_form: false,
             show_template_form: false,
             skill_action_dialog: None,
-            context_menu: None,
             renaming_session: None,
             renaming_workflow: None,
             new_session_machine: None,
@@ -413,6 +411,19 @@ impl AmuxApp {
             Some(Selected::Session { machine, id }) => Some((*machine, id.clone())),
             _ => None,
         }
+    }
+
+    /// 工作流会话 ID → 引擎下标（UI 身份用 ID，引擎存放在 Vec，仅作解析）。
+    fn workflow_idx(&self, wf_id: &str) -> Option<usize> {
+        self.workflows
+            .iter()
+            .position(|wf| wf.session.read().unwrap().id == wf_id)
+    }
+
+    /// 工作流会话 ID → 引擎引用。
+    fn workflow(&self, wf_id: &str) -> Option<&WorkflowEngine> {
+        self.workflow_idx(wf_id)
+            .and_then(|wi| self.workflows.get(wi))
     }
 
     /// 默认机器下标：有选中会话则用它，否则第一台。
@@ -1000,14 +1011,14 @@ impl AmuxApp {
         cx.notify();
     }
 
-    fn open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wi: usize) {
-        if let Some(wf) = self.workflows.get(wi) {
+    fn open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wf_id: String) {
+        if let Some(wf) = self.workflow(&wf_id) {
             // 惰性加载：仅在打开会话渲染对话/活动视图时，从 JSONL 按需补齐 payload。
             if let Err(e) = wf.backfill(&self.session_dir) {
                 amux_common::log::error("gui.workflow", format!("补齐工作流历史失败：{e}"));
             }
         }
-        self.selected = Some(Selected::Workflow { engine: wi });
+        self.selected = Some(Selected::Workflow { id: wf_id });
         self.set_panel(window, cx, None);
         self.workflow_dialog_limit = 50;
         self.dialog_scroll.scroll_to_bottom();
@@ -1134,9 +1145,12 @@ impl AmuxApp {
                 })
                 .detach();
             }
-            Selected::Workflow { engine } => {
+            Selected::Workflow { id } => {
                 let session_dir = self.session_dir.clone();
                 let workflow_text = compose_workflow_text(&clean_text, &all);
+                let Some(engine) = self.workflow_idx(&id) else {
+                    return;
+                };
                 let should_advance = if let Some(wf) = self.workflows.get_mut(engine) {
                     let should_advance = wf.record_user(&workflow_text);
                     if should_advance {
@@ -1240,17 +1254,17 @@ impl AmuxApp {
                 .machine(*machine)
                 .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
                 .is_some_and(|s| s.state == SessionState::Busy),
-            Some(Selected::Workflow { engine }) => self
-                .workflows
-                .get(*engine)
+            Some(Selected::Workflow { id }) => self
+                .workflow_idx(id)
+                .and_then(|engine| self.workflows.get(engine))
                 .is_some_and(|wf| wf.session.read().unwrap().state == SessionState::Busy),
             None => false,
         }
     }
 
     fn cancel_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Selected::Workflow { engine }) = self.selected.clone() {
-            self.cancel_workflow(window, cx, engine);
+        if let Some(Selected::Workflow { id }) = self.selected.clone() {
+            self.cancel_workflow(window, cx, id);
             cx.notify();
             return;
         }
@@ -1412,8 +1426,11 @@ impl AmuxApp {
         .detach();
     }
 
-    fn rename_workflow(&mut self, cx: &mut Context<Self>, wi: usize, title: String) {
-        if let Some(wf) = self.workflows.get_mut(wi) {
+    fn rename_workflow(&mut self, cx: &mut Context<Self>, wf_id: &str, title: String) {
+        if let Some(wf) = self
+            .workflow_idx(wf_id)
+            .and_then(|wi| self.workflows.get_mut(wi))
+        {
             wf.session.write().unwrap().title = title.trim().to_string();
             let _ = wf.persist(&self.session_dir);
         }
@@ -1506,7 +1523,8 @@ impl AmuxApp {
         let wi = self.workflows.len();
         let session_dir = self.session_dir.clone();
         self.workflows.push(engine);
-        self.selected = Some(Selected::Workflow { engine: wi });
+        let wf_id = self.workflows[wi].session.read().unwrap().id.clone();
+        self.selected = Some(Selected::Workflow { id: wf_id });
         let should_advance =
             !clean.trim().is_empty() || preamble.as_deref().is_some_and(|p| !p.trim().is_empty());
         if should_advance {
@@ -1553,9 +1571,12 @@ impl AmuxApp {
         cx.notify();
     }
 
-    fn cancel_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+    fn cancel_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wf_id: String) {
         let session_dir = self.session_dir.clone();
-        let should_advance = if let Some(wf) = self.workflows.get_mut(idx) {
+        let Some(engine) = self.workflow_idx(&wf_id) else {
+            return;
+        };
+        let should_advance = if let Some(wf) = self.workflows.get_mut(engine) {
             let should_advance = wf.cancel();
             if should_advance {
                 wf.begin_busy();
@@ -1574,7 +1595,7 @@ impl AmuxApp {
             false
         };
         if should_advance {
-            let wf = self.workflows[idx].clone();
+            let wf = self.workflows[engine].clone();
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                 run_engine_on_tokio(async move {
                     if let Err(e) = wf.advance().await {
@@ -1600,10 +1621,15 @@ impl AmuxApp {
         }
     }
 
-    fn confirm_delete_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+    fn confirm_delete_workflow(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        wf_id: String,
+    ) {
         let child_count = self
-            .workflows
-            .get(idx)
+            .workflow_idx(&wf_id)
+            .and_then(|idx| self.workflows.get(idx))
             .map(|w| w.session.read().unwrap().children.len())
             .unwrap_or(0);
         let this = cx.entity();
@@ -1621,18 +1647,25 @@ impl AmuxApp {
                 .description(format!(
                     "确定删除该工作流会话吗？将同时删除其 {child_count} 个关联普通会话，不可恢复。"
                 ))
-                .on_ok(move |_ev, window, cx| {
-                    let this = this.clone();
-                    this.update(cx, |this, cx| {
-                        this.delete_workflow(window, cx, idx);
-                    });
-                    true
+                .on_ok({
+                    // 外层构建闭包为 Fn：先克隆出本轮局部，再交由 on_ok 持有
+                    let wf_id = wf_id.clone();
+                    move |_ev, window, cx| {
+                        let this = this.clone();
+                        this.update(cx, |this, cx| {
+                            this.delete_workflow(window, cx, wf_id.clone());
+                        });
+                        true
+                    }
                 })
                 .on_cancel(|_ev, _window, _cx| true)
         });
     }
 
-    fn delete_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+    fn delete_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wf_id: String) {
+        let Some(idx) = self.workflow_idx(&wf_id) else {
+            return;
+        };
         let children: Vec<(usize, String)> = self
             .workflows
             .get(idx)
@@ -1644,13 +1677,6 @@ impl AmuxApp {
                     .collect()
             })
             .unwrap_or_default();
-        let Some(wf_id) = self
-            .workflows
-            .get(idx)
-            .map(|wf| wf.session.read().unwrap().id.clone())
-        else {
-            return;
-        };
         if self
             .workflows
             .get(idx)
@@ -1701,25 +1727,12 @@ impl AmuxApp {
                         }
                         match WorkflowEngine::remove(&session_dir, &wf_id) {
                             Ok(()) => {
-                                if let Some(current_idx) =
-                                    this.workflows.iter().position(|workflow| {
-                                        workflow.session.read().unwrap().id == wf_id
-                                    })
-                                {
-                                    this.workflows.remove(current_idx);
-                                    this.selected = match this.selected.clone() {
-                                        Some(Selected::Workflow { engine })
-                                            if engine == current_idx =>
-                                        {
-                                            None
-                                        }
-                                        Some(Selected::Workflow { engine })
-                                            if engine > current_idx =>
-                                        {
-                                            Some(Selected::Workflow { engine: engine - 1 })
-                                        }
-                                        other => other,
-                                    };
+                                // 选中态以工作流会话 ID 为身份：删除后无需平移其他引用
+                                this.workflows.retain(|workflow| {
+                                    workflow.session.read().unwrap().id != wf_id
+                                });
+                                if this.selected == Some(Selected::Workflow { id: wf_id.clone() }) {
+                                    this.selected = None;
                                 }
                             }
                             Err(error) => {
@@ -1781,8 +1794,8 @@ impl AmuxApp {
                 .machine(*machine)
                 .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
                 .cloned(),
-            Some(Selected::Workflow { engine }) => {
-                let wf = self.workflows.get(*engine)?;
+            Some(Selected::Workflow { id }) => {
+                let wf = self.workflows.get(self.workflow_idx(id)?)?;
                 let sg = wf.session.read().unwrap();
                 Some(SessionMeta {
                     id: sg.id.clone(),
@@ -2920,7 +2933,7 @@ impl AmuxApp {
                     .child(
                         Button::new("goto-new-session")
                             .small()
-                            .label("＋")
+                            .icon(IconName::Plus)
                             .tooltip("新会话 / 工作流")
                             .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.selected = None;
@@ -3071,6 +3084,8 @@ impl AmuxApp {
         } else {
             s.title.clone()
         };
+        // 重命名预填用原始标题（title 是含「（未命名）/目录」回退的展示文案）
+        let raw_title = s.title.clone();
         let busy = s.state == SessionState::Busy;
         let label: SharedString = title.clone().into();
         let active = cx.theme().list_active;
@@ -3094,8 +3109,11 @@ impl AmuxApp {
                 .into_any_element();
         }
 
-        let sid_ctx = sid.clone();
         let sid_open = sid.clone();
+        // 右键菜单交给 ContextMenu 组件：外点/Esc 关闭、键盘导航、焦点恢复由其负责。
+        // 菜单构建闭包与各条目回调均为 Fn，逐层持有独立克隆
+        let app = cx.entity();
+        let sid_menu = sid.clone();
         div()
             .id(format!("sess-row-{machine}-{sid}"))
             .relative()
@@ -3107,22 +3125,34 @@ impl AmuxApp {
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 this.open_session(window, cx, machine, sid_open.clone());
             }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                    this.context_menu = Some(SessionContextMenu {
-                        target: ContextMenuTarget::Session {
-                            machine,
-                            session_id: sid_ctx.clone(),
-                        },
-                        x: ev.position.x.as_f32(),
-                        y: ev.position.y.as_f32(),
-                    });
-                    this.renaming_session = None;
-                    this.renaming_workflow = None;
-                    cx.notify();
-                }),
-            )
+            .context_menu(move |menu, _window, _cx| {
+                menu.item(PopupMenuItem::new("重命名").on_click({
+                    let app = app.clone();
+                    let sid = sid_menu.clone();
+                    let raw_title = raw_title.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.selected = Some(Selected::Session {
+                                machine,
+                                id: sid.clone(),
+                            });
+                            this.renaming_session = Some((machine, sid.clone()));
+                            this.title_input
+                                .update(cx, |s, cx| s.set_value(&raw_title, window, cx));
+                            cx.notify();
+                        });
+                    }
+                }))
+                .item(PopupMenuItem::new("删除会话").on_click({
+                    let app = app.clone();
+                    let sid = sid_menu.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.confirm_delete_session(window, cx, machine, sid.clone());
+                        });
+                    }
+                }))
+            })
             .child(
                 h_flex()
                     .w_full()
@@ -3163,7 +3193,10 @@ impl AmuxApp {
         } else {
             "空闲"
         };
-        let expanded = self.expanded_workflows.contains(&wi);
+        let expanded = self.expanded_workflows.contains(&wf_id);
+        // 各回调闭包（Fn）逐个持有独立克隆，避免互抢所有权
+        let wf_id_title = wf_id.clone();
+        let wf_id_toggle = wf_id.clone();
         let header = h_flex()
             .gap_1()
             .items_center()
@@ -3175,7 +3208,7 @@ impl AmuxApp {
                     .gap_1()
                     .items_center()
                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.open_workflow(window, cx, wi);
+                        this.open_workflow(window, cx, wf_id_title.clone());
                     }))
                     .child(
                         Label::new(title.as_str())
@@ -3198,13 +3231,17 @@ impl AmuxApp {
                     ),
             )
             .child(
-                Button::new(format!("wf-toggle-{wi}"))
+                Button::new(format!("wf-toggle-{wf_id}"))
                     .small()
                     .ghost()
-                    .label(if expanded { "▾" } else { "▸" })
+                    .icon(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        if !this.expanded_workflows.insert(wi) {
-                            this.expanded_workflows.remove(&wi);
+                        if !this.expanded_workflows.insert(wf_id_toggle.clone()) {
+                            this.expanded_workflows.remove(&wf_id_toggle);
                         }
                         cx.notify();
                     })),
@@ -3282,7 +3319,8 @@ impl AmuxApp {
             );
         }
 
-        if self.renaming_workflow == Some(wi) {
+        if self.renaming_workflow.as_deref() == Some(wf_id.as_str()) {
+            let wf_id2 = wf_id.clone();
             return v_flex()
                 .gap_1()
                 .p_2()
@@ -3292,13 +3330,13 @@ impl AmuxApp {
                 .border_color(cx.theme().border)
                 .child(Input::new(&self.title_input))
                 .child(
-                    Button::new(format!("wf-rename-save-{wi}"))
+                    Button::new(format!("wf-rename-save-{wf_id}"))
                         .small()
                         .primary()
                         .label("保存")
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
                             let title = this.title_input.read(cx).value().to_string();
-                            this.rename_workflow(cx, wi, title);
+                            this.rename_workflow(cx, &wf_id2.clone(), title);
                         })),
                 )
                 .into_any_element();
@@ -3306,11 +3344,15 @@ impl AmuxApp {
 
         let row = v_flex().gap_1().p_1().rounded_md().child(header).child(
             Collapsible::new()
-                .open(self.expanded_workflows.contains(&wi))
+                .open(self.expanded_workflows.contains(&wf_id))
                 .content(content),
         );
 
-        let wf_sel = self.selected == Some(Selected::Workflow { engine: wi });
+        let wf_sel = self.selected == Some(Selected::Workflow { id: wf_id.clone() });
+        // 右键菜单交给 ContextMenu 组件（同普通会话行）；逐层持有独立克隆
+        let app = cx.entity();
+        let wf_id_menu = wf_id.clone();
+        let title_menu = title.clone();
         div()
             .id(format!("wf-row-{wf_id}"))
             .relative()
@@ -3324,19 +3366,31 @@ impl AmuxApp {
                 d.border_1().border_color(cx.theme().list_active_border)
             })
             .hover(|d| d.bg(cx.theme().list_hover))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                    this.context_menu = Some(SessionContextMenu {
-                        target: ContextMenuTarget::Workflow { engine: wi },
-                        x: ev.position.x.as_f32(),
-                        y: ev.position.y.as_f32(),
-                    });
-                    this.renaming_workflow = None;
-                    this.renaming_session = None;
-                    cx.notify();
-                }),
-            )
+            .context_menu(move |menu, _window, _cx| {
+                menu.item(PopupMenuItem::new("重命名").on_click({
+                    let app = app.clone();
+                    let wf_id = wf_id_menu.clone();
+                    let title = title_menu.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.selected = Some(Selected::Workflow { id: wf_id.clone() });
+                            this.renaming_workflow = Some(wf_id.clone());
+                            this.title_input
+                                .update(cx, |s, cx| s.set_value(&title, window, cx));
+                            cx.notify();
+                        });
+                    }
+                }))
+                .item(PopupMenuItem::new("删除工作流").on_click({
+                    let app = app.clone();
+                    let wf_id = wf_id_menu.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.confirm_delete_workflow(window, cx, wf_id.clone());
+                        });
+                    }
+                }))
+            })
             .child(row)
             .into_any_element()
     }
@@ -3404,8 +3458,8 @@ impl AmuxApp {
                     if available { "可用" } else { "不可用" },
                 )
             }
-            Some(Selected::Workflow { engine }) => {
-                let Some(workflow) = self.workflows.get(*engine) else {
+            Some(Selected::Workflow { id }) => {
+                let Some(workflow) = self.workflow(id) else {
                     return h_flex().into_any();
                 };
                 (
@@ -3669,7 +3723,12 @@ impl AmuxApp {
             return v_flex().into_any();
         };
         let dirs = self.store.recent_workspaces_for_machine(&m.config.name);
-        let mut picker = v_flex()
+        // 最近目录选择走 Popover 组件：锚定触发按钮、外点/Esc 关闭、
+        // 开启态在触发按钮上持续可见（selected），不再依赖手搓面板的开关状态
+        let app = cx.entity();
+        let open = self.show_workspace_dropdown;
+        let machine_name = m.config.name.clone();
+        v_flex()
             .gap_1()
             .child(
                 Label::new("工作目录")
@@ -3679,63 +3738,66 @@ impl AmuxApp {
             .child(
                 h_flex()
                     .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _ev, _window, cx| {
-                                    this.show_workspace_dropdown = true;
-                                    cx.notify();
-                                }),
-                            )
-                            .child(Input::new(&self.session_cwd_input)),
-                    )
-                    .child(
-                        Button::new("ns-workspace-toggle")
-                            .small()
-                            .label(if self.show_workspace_dropdown {
-                                "⌃"
-                            } else {
-                                "⌄"
-                            })
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.show_workspace_dropdown = !this.show_workspace_dropdown;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        if self.show_workspace_dropdown && !dirs.is_empty() {
-            let options = dirs
-                .into_iter()
-                .map(|dir| {
-                    let label = dir.clone();
-                    Button::new(format!("ns-workspace-option-{label}"))
-                        .small()
-                        .label(short_cwd(&label))
-                        .tooltip(label.clone())
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.session_cwd_input
-                                .update(cx, |s, cx| s.set_value(&label, window, cx));
-                            this.show_workspace_dropdown = false;
-                            this.new_session_error = None;
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>();
-            picker = picker.child(
-                v_flex()
                     .gap_1()
-                    .p_1()
-                    .bg(cx.theme().popover)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded_md()
-                    .children(options),
-            );
-        }
-        picker.into_any()
+                    .child(div().flex_1().child(Input::new(&self.session_cwd_input)))
+                    .when(!dirs.is_empty(), |row| {
+                        let store = self.store.clone();
+                        row.child(
+                            Popover::new("workspace-picker")
+                                .open(open)
+                                .on_open_change({
+                                    let app = app.clone();
+                                    move |is_open, _window, cx| {
+                                        app.update(cx, |this, cx| {
+                                            this.show_workspace_dropdown = *is_open;
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .trigger(
+                                    Button::new("ns-workspace-toggle")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::ChevronDown)
+                                        .tooltip("从最近工作目录中选择"),
+                                )
+                                .content(move |_, _window, _cx| {
+                                    // 受控开启：选项点击后经 AmuxApp 关闭（on_open_change 回写）
+                                    let dirs = store.recent_workspaces_for_machine(&machine_name);
+                                    v_flex()
+                                        .id("workspace-picker-list")
+                                        .w(rems(22.))
+                                        .max_h(rems(16.))
+                                        .overflow_y_scroll()
+                                        .gap_0p5()
+                                        .children(dirs.into_iter().map(|dir| {
+                                            Button::new(format!("ns-workspace-option-{dir}"))
+                                                .xsmall()
+                                                .ghost()
+                                                .label(short_cwd(&dir))
+                                                .tooltip(dir.clone())
+                                                .on_click({
+                                                    let app = app.clone();
+                                                    move |_, window, cx| {
+                                                        app.update(cx, |this, cx| {
+                                                            this.session_cwd_input.update(
+                                                                cx,
+                                                                |s, cx| {
+                                                                    s.set_value(&dir, window, cx)
+                                                                },
+                                                            );
+                                                            this.show_workspace_dropdown = false;
+                                                            this.new_session_error = None;
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                })
+                                        }))
+                                }),
+                        )
+                    }),
+            )
+            .into_any()
     }
 
     fn render_machine_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3857,9 +3919,8 @@ impl AmuxApp {
                 .and_then(|m| m.views.get(id))
                 .map(|v| v.dialog.clone())
                 .unwrap_or_default(),
-            Some(Selected::Workflow { engine }) => self
-                .workflows
-                .get(*engine)
+            Some(Selected::Workflow { id }) => self
+                .workflow(id)
                 .map(|w| {
                     let sg = w.session.read().unwrap();
                     let all = sg.to_dialog();
@@ -3962,10 +4023,9 @@ impl AmuxApp {
             _ => false,
         };
         let mut content = Vec::new();
-        if let Some(Selected::Workflow { engine }) = &self.selected {
+        if let Some(Selected::Workflow { id }) = &self.selected {
             let total = self
-                .workflows
-                .get(*engine)
+                .workflow(id)
                 .map(|w| w.session.read().unwrap().transcript.len())
                 .unwrap_or(0);
             if total > self.workflow_dialog_limit {
@@ -4025,12 +4085,10 @@ impl AmuxApp {
                 .machine(*machine)
                 .and_then(|m| m.views.get(id))
                 .and_then(|v| v.live.clone()),
-            Some(Selected::Workflow { engine }) => {
+            Some(Selected::Workflow { id }) => {
                 let busy = self
-                    .workflows
-                    .get(*engine)
-                    .map(|wf| wf.session.read().unwrap().state == SessionState::Busy)
-                    .unwrap_or(false);
+                    .workflow(id)
+                    .is_some_and(|wf| wf.session.read().unwrap().state == SessionState::Busy);
                 if busy {
                     Some(Activity::Thinking {
                         timestamp: 0,
@@ -4574,7 +4632,9 @@ impl AmuxApp {
                     .child(
                         Button::new("close-panel-workspace")
                             .small()
-                            .label("✕")
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("关闭面板")
                             .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.set_panel(window, cx, None);
                             })),
@@ -4599,64 +4659,68 @@ impl AmuxApp {
         let Some(meta) = self.selected_meta() else {
             return div().w_full().child(Label::new("未选择会话")).into_any();
         };
-        let mut body =
-            v_flex()
-                .w_full()
-                .h_full()
-                .gap_2()
-                .p_3()
-                .bg(cx.theme().popover)
-                .border_l_1()
-                .border_color(cx.theme().border)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .child(
-                            Label::new("会话详情")
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(cx.theme().foreground),
-                        )
-                        .child(div().flex_1())
-                        .child(Button::new("close-panel2").small().label("✕").on_click(
-                            cx.listener(|this, _ev, window, cx| {
+        let mut body = v_flex()
+            .w_full()
+            .h_full()
+            .gap_2()
+            .p_3()
+            .bg(cx.theme().popover)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .child(
+                        Label::new("会话详情")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("close-panel2")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("关闭面板")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.set_panel(window, cx, None);
-                            }),
-                        )),
-                )
-                .child(info_row(
-                    "ID",
-                    &meta.id,
-                    cx.theme().muted_foreground,
-                    cx.theme().foreground,
-                ))
-                .child(info_row(
-                    "Agent",
-                    &meta.agent,
-                    cx.theme().muted_foreground,
-                    cx.theme().foreground,
-                ))
-                .child(info_row(
-                    "工作目录",
-                    &meta.cwd,
-                    cx.theme().muted_foreground,
-                    cx.theme().foreground,
-                ))
-                .child(info_row(
-                    "状态",
-                    if meta.state == SessionState::Busy {
-                        "工作中"
-                    } else {
-                        "空闲"
-                    },
-                    cx.theme().muted_foreground,
-                    cx.theme().foreground,
-                ))
-                .child(info_row(
-                    "创建时间",
-                    &format_timestamp(meta.created_at),
-                    cx.theme().muted_foreground,
-                    cx.theme().foreground,
-                ));
+                            })),
+                    ),
+            )
+            .child(info_row(
+                "ID",
+                &meta.id,
+                cx.theme().muted_foreground,
+                cx.theme().foreground,
+            ))
+            .child(info_row(
+                "Agent",
+                &meta.agent,
+                cx.theme().muted_foreground,
+                cx.theme().foreground,
+            ))
+            .child(info_row(
+                "工作目录",
+                &meta.cwd,
+                cx.theme().muted_foreground,
+                cx.theme().foreground,
+            ))
+            .child(info_row(
+                "状态",
+                if meta.state == SessionState::Busy {
+                    "工作中"
+                } else {
+                    "空闲"
+                },
+                cx.theme().muted_foreground,
+                cx.theme().foreground,
+            ))
+            .child(info_row(
+                "创建时间",
+                &format_timestamp(meta.created_at),
+                cx.theme().muted_foreground,
+                cx.theme().foreground,
+            ));
         if let Some(Selected::Session { machine, .. }) = &self.selected {
             if let Some(machine_view) = self.machine(*machine) {
                 body = body
@@ -4680,12 +4744,13 @@ impl AmuxApp {
             meta.title.clone()
         };
         body = body.child(Label::new(format!("标题: {title}")));
-        if let Some(Selected::Workflow { engine }) = self.selected.clone() {
+        if let Some(Selected::Workflow { id }) = self.selected.clone() {
             // 无运行中的推进时无需取消（工作流无终态，空闲即可直接下发新指令）
             let busy = self
-                .workflows
-                .get(engine)
+                .workflow(&id)
                 .is_some_and(|w| w.session.read().unwrap().state == SessionState::Busy);
+            let id_cancel = id.clone();
+            let id_delete = id.clone();
             body = body
                 .child(Label::new("— 工作流会话 —"))
                 .child(
@@ -4694,7 +4759,7 @@ impl AmuxApp {
                         .label("取消")
                         .when(!busy, |b| b.disabled(true))
                         .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.cancel_workflow(window, cx, engine);
+                            this.cancel_workflow(window, cx, id_cancel.clone());
                         })),
                 )
                 .child(
@@ -4702,12 +4767,11 @@ impl AmuxApp {
                         .small()
                         .label("删除工作流会话")
                         .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.confirm_delete_workflow(window, cx, engine);
+                            this.confirm_delete_workflow(window, cx, id_delete.clone());
                         })),
                 );
             for c in self
-                .workflows
-                .get(engine)
+                .workflow(&id)
                 .map(|w| w.session.read().unwrap().children.clone())
                 .unwrap_or_default()
             {
@@ -4720,6 +4784,17 @@ impl AmuxApp {
             }
         }
         body.into_any()
+    }
+
+    /// 活动行身份：语义键（aggregate::activity_key）+ 前缀，而非下标——加载更早
+    /// 活动会前移插入，下标键会让展开态漂移到其他条目。工具调用附名称以区分
+    /// 同毫秒的多个调用。
+    fn activity_row_key(prefix: &str, a: &Activity) -> String {
+        let (kind, ts) = crate::aggregate::activity_key(a);
+        match a {
+            Activity::ToolCall { name, .. } => format!("{prefix}-{kind}-{ts}-{name}"),
+            _ => format!("{prefix}-{kind}-{ts}"),
+        }
     }
 
     fn activity_row(
@@ -4778,24 +4853,27 @@ impl AmuxApp {
                 activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
                 rows = activities
                     .iter()
-                    .enumerate()
-                    .map(|(i, a)| {
+                    .map(|a| {
                         let (kind, detail) = activity_display(a);
-                        self.activity_row(&format!("act-{i}"), &kind, &detail, cx)
+                        self.activity_row(&Self::activity_row_key("act", a), &kind, &detail, cx)
                     })
                     .collect();
                 live = view.and_then(|v| v.live.clone());
             }
-            Some(Selected::Workflow { engine }) => {
-                if let Some(wf) = self.workflows.get(*engine) {
+            Some(Selected::Workflow { id }) => {
+                if let Some(wf) = self.workflow(id) {
                     let sg = wf.session.read().unwrap();
                     rows = sg
                         .activities
                         .iter()
-                        .enumerate()
-                        .map(|(i, a)| {
+                        .map(|a| {
                             let (kind, detail) = activity_display(a);
-                            self.activity_row(&format!("wf-act-{i}"), &kind, &detail, cx)
+                            self.activity_row(
+                                &Self::activity_row_key("wf-act", a),
+                                &kind,
+                                &detail,
+                                cx,
+                            )
                         })
                         .collect();
                     if wf.session.read().unwrap().state == SessionState::Busy {
@@ -4865,7 +4943,9 @@ impl AmuxApp {
                     .child(
                         Button::new("close-panel-activities")
                             .small()
-                            .label("✕")
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("关闭面板")
                             .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.set_panel(window, cx, None);
                             })),
@@ -4986,7 +5066,9 @@ impl AmuxApp {
             .child(
                 Button::new("close-panel-diff")
                     .small()
-                    .label("✕")
+                    .ghost()
+                    .icon(IconName::Close)
+                    .tooltip("关闭面板")
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         this.set_panel(window, cx, None);
                     })),
@@ -5065,17 +5147,23 @@ impl AmuxApp {
                     .items_center()
                     .bg(cx.theme().muted.opacity(0.35))
                     .child(
-                        Button::new(format!("diff-sel-file-{fi}"))
-                            .small()
-                            .ghost()
-                            .label(if file_selected { "☑" } else { "☐" })
-                            .on_click(cx.listener({
+                        Checkbox::new(format!("diff-sel-file-{}", path))
+                            .checked(file_selected)
+                            .on_click({
+                                let app = cx.entity();
                                 let path = path.clone();
-                                move |this, _ev, _window, cx| {
-                                    this.toggle_diff_selection(machine_idx, path.clone(), None, cx);
-                                    cx.notify();
+                                move |_, _window, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.toggle_diff_selection(
+                                            machine_idx,
+                                            path.clone(),
+                                            None,
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    });
                                 }
-                            })),
+                            }),
                     )
                     .child(
                         Label::new(path.clone())
@@ -5139,22 +5227,23 @@ impl AmuxApp {
                         .px_2()
                         .bg(cx.theme().primary.opacity(0.12))
                         .child(
-                            Button::new(format!("diff-sel-hunk-{fi}-{hi}"))
-                                .small()
-                                .ghost()
-                                .label(if hunk_selected { "☑" } else { "☐" })
-                                .on_click(cx.listener({
+                            Checkbox::new(format!("diff-sel-hunk-{}-{hi}", hunk_path))
+                                .checked(hunk_selected)
+                                .on_click({
+                                    let app = cx.entity();
                                     let hunk_path = hunk_path.clone();
-                                    move |this, _ev, _window, cx| {
-                                        this.toggle_diff_selection(
-                                            machine_idx,
-                                            hunk_path.clone(),
-                                            Some(hi),
-                                            cx,
-                                        );
-                                        cx.notify();
+                                    move |_, _window, cx| {
+                                        app.update(cx, |this, cx| {
+                                            this.toggle_diff_selection(
+                                                machine_idx,
+                                                hunk_path.clone(),
+                                                Some(hi),
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        });
                                     }
-                                })),
+                                }),
                         )
                         .child(
                             Label::new(h.header.clone())
@@ -5349,119 +5438,6 @@ impl AmuxApp {
             .into_any()
     }
 
-    fn render_context_menu(
-        &self,
-        menu: &SessionContextMenu,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let target = menu.target.clone();
-        div()
-            .absolute()
-            .left(px(menu.x)) // 右键指针坐标：运行时几何
-            .top(px(menu.y))
-            .id("context-menu")
-            .v_flex()
-            .w(px(170.)) // 右键菜单固定宽度（紧凑菜单）
-            .p_1()
-            .gap_1()
-            .bg(cx.theme().popover)
-            .rounded_md()
-            .shadow_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .child(match &target {
-                ContextMenuTarget::Session {
-                    machine,
-                    session_id,
-                } => match self
-                    .machine(*machine)
-                    .and_then(|m| m.sessions.iter().find(|s| &s.id == session_id))
-                {
-                    Some(s) => {
-                        let sid = s.id.clone();
-                        let sid_rename = sid.clone();
-                        let sid_delete = sid.clone();
-                        let title0 = s.title.clone();
-                        let machine = *machine;
-                        v_flex()
-                            .gap_1()
-                            .child(Label::new(truncate(&title0, 30)).text_sm())
-                            .child(Button::new("ctx-rename").small().label("重命名").on_click(
-                                cx.listener(move |this, _ev, window, cx| {
-                                    this.selected = Some(Selected::Session {
-                                        machine,
-                                        id: sid_rename.clone(),
-                                    });
-                                    this.renaming_session = Some((machine, sid_rename.clone()));
-                                    this.context_menu = None;
-                                    this.title_input.update(cx, |s, cx| {
-                                        s.set_value(&title0, window, cx);
-                                    });
-                                    cx.notify();
-                                }),
-                            ))
-                            .child(
-                                Button::new("ctx-delete")
-                                    .small()
-                                    .label("删除会话")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let sid = sid_delete.clone();
-                                        this.context_menu = None;
-                                        this.confirm_delete_session(window, cx, machine, sid);
-                                    })),
-                            )
-                            .into_any_element()
-                    }
-                    None => div().into_any_element(),
-                },
-                ContextMenuTarget::Workflow { engine } => {
-                    let wi = *engine;
-                    let title0 = self
-                        .workflows
-                        .get(wi)
-                        .map(|w| w.session.read().unwrap().title.clone())
-                        .unwrap_or_default();
-                    v_flex()
-                        .gap_1()
-                        .child(Label::new(truncate(&title0, 30)).text_sm())
-                        .child(
-                            Button::new("ctx-wf-rename")
-                                .small()
-                                .label("重命名")
-                                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                    if let Some(wf) = this.workflows.get(wi) {
-                                        if let Err(e) = wf.backfill(&this.session_dir) {
-                                            amux_common::log::error(
-                                                "gui.workflow",
-                                                format!("补齐工作流历史失败：{e}"),
-                                            );
-                                        }
-                                    }
-                                    this.selected = Some(Selected::Workflow { engine: wi });
-                                    this.renaming_workflow = Some(wi);
-                                    this.context_menu = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("ctx-wf-delete")
-                                .small()
-                                .label("删除工作流")
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    this.context_menu = None;
-                                    this.confirm_delete_workflow(window, cx, wi);
-                                })),
-                        )
-                        .into_any_element()
-                }
-            })
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
-                // 阻止冒泡：避免触发底层面板处理
-                cx.stop_propagation();
-            })
-    }
-
     fn render_settings_overlay(
         &self,
         window: &mut Window,
@@ -5589,14 +5565,19 @@ impl AmuxApp {
                                     .font_weight(FontWeight::SEMIBOLD),
                             )
                             .child(div().flex_1())
-                            .child(Button::new("skills-close").small().label("✕").on_click(
-                                cx.listener(|this, _ev, _window, cx| {
-                                    for m in this.machines.iter_mut() {
-                                        m.show_skills = None;
-                                    }
-                                    cx.notify();
-                                }),
-                            )),
+                            .child(
+                                Button::new("skills-close")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .tooltip("关闭")
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        for m in this.machines.iter_mut() {
+                                            m.show_skills = None;
+                                        }
+                                        cx.notify();
+                                    })),
+                            ),
                     )
                     .child(list),
             )
@@ -5625,7 +5606,7 @@ impl AmuxApp {
                         Button::new("settings-close")
                             .small()
                             .ghost()
-                            .label("✕")
+                            .icon(IconName::Close)
                             .tooltip("关闭设置")
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.show_settings = false;
@@ -5859,7 +5840,9 @@ impl AmuxApp {
                     .child(
                         Button::new("add-machine-close")
                             .small()
-                            .label("✕")
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("取消")
                             .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.close_add_machine_form(window, cx);
                             })),
@@ -6718,9 +6701,6 @@ impl Render for AmuxApp {
             .bg(cx.theme().background)
             .child(title_bar)
             .child(main_row);
-        if let Some(menu) = &self.context_menu {
-            root = root.child(self.render_context_menu(menu, window, cx));
-        }
         if self.show_settings {
             root = root.child(self.render_settings_overlay(window, cx));
         }
