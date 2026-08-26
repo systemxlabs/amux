@@ -2290,13 +2290,8 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
-        let cwd = self
-            .store
-            .recent_workspaces_for_machine(&machine_name)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| ".".into());
+        // PRD：技能操作的临时会话固定在工作目录为系统临时目录的普通会话中执行
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let operation_prompt = action.prompt(&skill);
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = async {
@@ -2306,7 +2301,7 @@ impl AmuxApp {
                         Some(SessionNewParams {
                             agent: agent.clone(),
                             cwd: cwd.clone(),
-                            // 技能操作是临时会话：直接在用户指定目录执行
+                            // 技能操作是临时会话：在系统临时目录执行
                             use_worktree: false,
                         }),
                     )
