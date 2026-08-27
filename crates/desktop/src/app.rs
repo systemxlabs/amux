@@ -5936,10 +5936,13 @@ impl AmuxApp {
                     .gap_2()
                     .child(tree)
                     .child(
+                        // 注意：h_flex() 默认 items_center，子项高度会退化为内容高度，
+                        // 必须显式 h_full 约束为行高，否则 overflow_y_scroll 不生效
                         div()
                             .id("diff-panel")
                             .v_flex()
                             .flex_1()
+                            .h_full()
                             .min_w_0()
                             .min_h_0()
                             .gap_2()
