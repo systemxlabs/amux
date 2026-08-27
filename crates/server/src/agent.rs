@@ -467,17 +467,24 @@ mod stub {
     }
 
     impl AgentDriver for StubAgentDriver {
-        fn create_session(&self, cwd: &str) -> Result<String, String> {
+        fn create_session(
+            &self,
+            cwd: &str,
+        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
             let id = format!("agent_{}", cwd.replace('/', "_"));
             self.sessions
                 .lock()
                 .expect("Mutex 中毒（临界区内不应 panic）")
                 .push(id.clone());
-            Ok(id)
+            Ok((id, Vec::new()))
         }
 
-        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
-            Ok(())
+        fn resume_session(
+            &self,
+            _agent_session_id: &str,
+            _cwd: &str,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(Vec::new())
         }
 
         fn prompt(
@@ -525,6 +532,15 @@ mod stub {
 
         fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
             self.close(agent_session_id)
+        }
+
+        fn set_config_option(
+            &self,
+            _agent_session_id: &str,
+            _config_id: &str,
+            _value: protocol::SessionConfigOptionValue,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(Vec::new())
         }
 
         fn list_skills(&self) -> Result<Vec<String>, String> {

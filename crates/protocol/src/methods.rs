@@ -20,6 +20,8 @@ pub mod method {
     pub const SESSION_DELETE: &str = "session.delete";
     /// 配置指定普通会话（会话标题）
     pub const SESSION_CONFIGURE: &str = "session.configure";
+    /// 设置指定普通会话的配置选项（ACP session/set_config_option；选项由 ACP 会话提供）
+    pub const SESSION_SET_CONFIG_OPTION: &str = "session.set_config_option";
     /// 分页查询指定普通会话的对话历史
     pub const SESSION_HISTORY: &str = "session.history";
     /// 分页查询指定普通会话的活动历史

@@ -24,9 +24,11 @@ use agent_client_protocol::schema::v1::{
     InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, MessageId, NewSessionRequest, NewSessionResponse, PermissionOption,
     PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionInfo,
-    SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse,
+    SessionConfigOption, SessionConfigOptionValue, SessionInfo, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    UsageUpdate,
 };
 use agent_client_protocol::{Agent, JsonRpcRequest, Result, Stdio};
 use serde::{Deserialize, Serialize};
@@ -44,6 +46,38 @@ fn sessions() -> &'static std::sync::Mutex<HashMap<String, String>> {
     use std::sync::OnceLock;
     static S: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
     S.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// 每个会话当前选中的 model 选项值（mock 的 config_options 状态）。
+fn session_models() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    use std::sync::OnceLock;
+    static M: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// mock 的会话配置选项：model select（gpt-4o / gpt-5）。
+fn config_options_for(sid: &str) -> Vec<SessionConfigOption> {
+    let current = session_models()
+        .lock()
+        .unwrap()
+        .get(sid)
+        .cloned()
+        .unwrap_or_else(|| "gpt-4o".into());
+    vec![SessionConfigOption::select(
+        "model",
+        "模型",
+        current,
+        vec![
+            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                "gpt-4o",
+                "GPT-4o",
+            ),
+            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                "gpt-5",
+                "GPT-5",
+            ),
+        ],
+    )]
 }
 
 fn history_len(sid: &str) -> usize {
@@ -113,6 +147,7 @@ async fn run(state_file: &str) -> Result<()> {
     let calls_close = calls_file.clone();
     let calls_list = calls_file.clone();
     let calls_skill = calls_file.clone();
+    let calls_cfg = calls_file.clone();
     let state_prompt = state_file.clone();
     Agent
         .builder()
@@ -133,7 +168,31 @@ async fn run(state_file: &str) -> Result<()> {
                 let sid = format!("mock_s_{n}");
                 let cwd = request.cwd.to_string_lossy().into_owned();
                 sessions().lock().unwrap().insert(sid.clone(), cwd);
-                responder.respond(NewSessionResponse::new(sid))
+                session_models().lock().unwrap().insert(sid.clone(), "gpt-4o".into());
+                let opts = config_options_for(&sid);
+                responder.respond(
+                    NewSessionResponse::new(sid).config_options(opts),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                record_call(&calls_cfg, "session/set_config_option");
+                let sid = request.session_id.to_string();
+                let value = match &request.value {
+                    SessionConfigOptionValue::ValueId { value } => value.0.to_string(),
+                    SessionConfigOptionValue::Boolean { value } => value.to_string(),
+                    // SDK 1.4.0 仅含上述两变体；non_exhaustive 要求通配
+                    _ => String::new(),
+                };
+                session_models()
+                    .lock()
+                    .unwrap()
+                    .insert(sid.clone(), value);
+                responder.respond(SetSessionConfigOptionResponse::new(
+                    config_options_for(&sid),
+                ))
             },
             agent_client_protocol::on_receive_request!(),
         )

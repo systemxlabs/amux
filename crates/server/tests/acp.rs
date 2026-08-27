@@ -21,11 +21,40 @@ async fn acp_driver_full_flow() {
     let driver =
         AcpAgentDriver::spawn(mock, &[state_file_s.as_str()], &[]).expect("spawn mock acp");
 
-    let sid = driver.create_session("/tmp/work").expect("create");
+    let (sid, options) = driver.create_session("/tmp/work").expect("create");
     assert_eq!(sid, "mock_s_1");
+    // mock 声明了 configOptions 能力：new 响应带回初始选项
+    assert_eq!(options.len(), 1, "初始选项应含 model: {options:?}");
+    assert_eq!(options[0].id, "model");
+    let model_current = match &options[0].kind {
+        protocol::SessionConfigKind::Select { current_value, .. } => current_value.clone(),
+        other => panic!("应为 Select 选项: {other:?}"),
+    };
+    assert_eq!(model_current, "gpt-4o");
     driver
         .resume_session("mock_s_restored", "/tmp/work")
         .expect("restore");
+
+    // 设置会话选项：返回更新后的完整选项集合
+    let updated = driver
+        .set_config_option(
+            &sid,
+            "model",
+            protocol::SessionConfigOptionValue::ValueId {
+                value: "gpt-5".into(),
+            },
+        )
+        .expect("set_config_option");
+    let model = updated
+        .iter()
+        .find(|o| o.id == "model")
+        .expect("model 选项仍在");
+    match &model.kind {
+        protocol::SessionConfigKind::Select { current_value, .. } => {
+            assert_eq!(current_value, "gpt-5")
+        }
+        other => panic!("应为 Select 选项: {other:?}"),
+    }
 
     let mut rx = driver.prompt(
         &sid,

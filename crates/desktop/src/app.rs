@@ -31,11 +31,11 @@ use serde_json::json;
 
 use protocol::{
     ActivitiesResult, Activity, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
-    GitChangeStatus, HistoryResult, OngoingActivityResult, OpResult, SessionConfigureParams,
-    SessionIdParams, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
-    SessionPromptParams, SessionResult, SessionState, SessionStateChange, StateChangeReason,
-    WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult, WorkspaceReadParams,
-    WorkspaceReadResult, WorkspaceRestoreParams,
+    GitChangeStatus, HistoryResult, OngoingActivityResult, OpResult, SessionConfigKind,
+    SessionConfigOptionValue, SessionConfigureParams, SessionIdParams, SessionListResult,
+    SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
+    SessionState, SessionStateChange, StateChangeReason, WorkspaceDiffParams, WorkspaceDiffResult,
+    WorkspaceListResult, WorkspaceReadParams, WorkspaceReadResult, WorkspaceRestoreParams,
 };
 
 use crate::config::{
@@ -193,6 +193,8 @@ pub struct AmuxApp {
     expanded_activities: std::collections::HashSet<String>,
     /// 以工作流会话 ID 为身份（同 Selected）
     expanded_workflows: std::collections::HashSet<String>,
+    /// 会话详情页展开的 select 配置选项（key = `{machine}:{session_id}:{config_id}`）
+    expanded_config_options: std::collections::HashSet<String>,
     /// 设置浮窗焦点锚：打开时把焦点移入浮窗，Escape 动作（绑定
     /// SettingsOverlay key_context）才能被派发到 on_action
     settings_focus: FocusHandle,
@@ -335,6 +337,7 @@ impl AmuxApp {
             activities_limit: 100,
             expanded_activities: std::collections::HashSet::new(),
             expanded_workflows: std::collections::HashSet::new(),
+            expanded_config_options: std::collections::HashSet::new(),
             settings_focus: cx.focus_handle(),
             _subs: Vec::new(),
             _tasks: Vec::new(),
@@ -1867,6 +1870,7 @@ impl AmuxApp {
                     worktree_dir: String::new(),
                     context_size: 0,
                     context_window_size: 0,
+                    config_options: Vec::new(),
                 })
             }
             None => None,
@@ -4994,7 +4998,170 @@ impl AmuxApp {
                 );
             }
         }
+        // 会话选项（docs/DESIGN.md「ACP 通信」：选项由 ACP 会话提供，用户可基于
+        // 当前会话可选项设置）。select 点击展开候选，boolean 直接开关。
+        if let Some(Selected::Session { machine, id }) = self.selected.clone() {
+            if !meta.config_options.is_empty() {
+                body = body.child(Separator::horizontal().label("会话选项"));
+                for opt in &meta.config_options {
+                    let cfg_key = format!("{machine}:{id}:{}", opt.id);
+                    let cfg_name = opt.name.clone();
+                    match &opt.kind {
+                        SessionConfigKind::Select {
+                            current_value,
+                            options,
+                        } => {
+                            let current_label = options
+                                .iter()
+                                .find(|o| o.value == *current_value)
+                                .map(|o| o.name.clone())
+                                .unwrap_or_else(|| current_value.clone());
+                            let expanded =
+                                self.expanded_config_options.contains(&cfg_key);
+                            let key_toggle = cfg_key.clone();
+                            let cid = cfg_key.clone();
+                            body = body.child(
+                                h_flex()
+                                    .id(format!("cfg-row-{cfg_key}"))
+                                    .w_full()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(cx.theme().muted))
+                                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                        if !this.expanded_config_options.remove(&key_toggle) {
+                                            this.expanded_config_options.insert(key_toggle.clone());
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(Label::new(cfg_name).text_sm().flex_none())
+                                    .child(
+                                        Label::new(current_label)
+                                            .text_sm()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        Icon::new(if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .xsmall()
+                                        .flex_none()
+                                        .text_color(cx.theme().muted_foreground),
+                                    ),
+                            );
+                            if expanded {
+                                for o in options {
+                                    let sid = id.clone();
+                                    let oid = opt.id.clone();
+                                    let oval = o.value.clone();
+                                    let oname = o.name.clone();
+                                    let btn_id = format!("cfg-opt-{cid}-{}", o.value);
+                                    body = body.child(
+                                        h_flex()
+                                            .w_full()
+                                            .pl_4()
+                                            .child(
+                                                Button::new(btn_id)
+                                                    .small()
+                                                    .ghost()
+                                                    .when(o.value == *current_value, |b| {
+                                                        b.primary()
+                                                    })
+                                                    .label(oname)
+                                                    .on_click(cx.listener(
+                                                        move |this, _ev, window, cx| {
+                                                            this.set_session_config_option(
+                                                                window,
+                                                                cx,
+                                                                machine,
+                                                                sid.clone(),
+                                                                oid.clone(),
+                                                                SessionConfigOptionValue::ValueId {
+                                                                    value: oval.clone(),
+                                                                },
+                                                            );
+                                                        },
+                                                    )),
+                                            ),
+                                    );
+                                }
+                            }
+                        }
+                        SessionConfigKind::Boolean { current_value } => {
+                            let sid = id.clone();
+                            let oid = opt.id.clone();
+                            let checked = *current_value;
+                            body = body.child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(Label::new(cfg_name).text_sm().flex_1())
+                                    .child(
+                                        Checkbox::new(format!("cfg-bool-{cfg_key}"))
+                                            .checked(checked)
+                                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                                this.set_session_config_option(
+                                                    window,
+                                                    cx,
+                                                    machine,
+                                                    sid.clone(),
+                                                    oid.clone(),
+                                                    SessionConfigOptionValue::Boolean {
+                                                        value: !checked,
+                                                    },
+                                                );
+                                            })),
+                                    ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         body.into_any()
+    }
+
+    /// 设置会话配置选项（docs/DESIGN.md：Server 向 ACP Server 发送
+    /// `session/set_config_option`）。成功后刷新会话列表带回最新选项。
+    fn set_session_config_option(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+        config_id: String,
+        value: SessionConfigOptionValue,
+    ) {
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        let params = json!({
+            "sessionId": session_id,
+            "configId": config_id,
+            "value": value,
+        });
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            if client
+                .request::<_, SessionResult>(
+                    protocol::method::SESSION_SET_CONFIG_OPTION,
+                    Some(params),
+                )
+                .await
+                .is_ok()
+            {
+                let _ = this.update_in(cx, |this, w, cx| {
+                    this.refresh_sessions(machine, w, cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /// 活动行身份：语义键（aggregate::activity_key）+ 前缀，而非下标——加载更早

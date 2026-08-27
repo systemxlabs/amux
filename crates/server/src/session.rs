@@ -188,6 +188,7 @@ impl SessionManager {
             worktree_dir,
             context_size: 0,
             context_window_size: 0,
+            config_options: Vec::new(),
         };
         self.registry.upsert(&meta, "")?;
         self.control(&meta.id);
@@ -518,25 +519,35 @@ impl SessionManager {
         self.invalidate_log_caches(session_id);
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
-        if let Err(e) = driver.resume_session(&agent_session_id, &cwd) {
-            log::error!("resume 失败 {session_id}: {e}");
-            let err = Activity::Error {
-                timestamp: now(),
-                detail: format!("恢复 agent 上下文失败: {e}"),
-            };
-            if let Err(log_error) = log.append_activities(&[err]) {
-                log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
+        // 恢复响应携带的最新配置选项（幂等 resume 返回空）同步到元数据。
+        match driver.resume_session(&agent_session_id, &cwd) {
+            Ok(options) => {
+                if !options.is_empty() {
+                    if let Err(e) = self.registry.set_config_options(session_id, &options) {
+                        log::error!("记录会话配置选项失败 {session_id}: {e}");
+                    }
+                }
             }
-            self.invalidate_log_caches(session_id);
-            self.finalize_turn(
-                session_id,
-                &control,
-                control.deleted.load(Ordering::SeqCst),
-                protocol::StateChangeReason::Aborted,
-            );
-            return Err(SessionError::AgentUnavailable(format!(
-                "恢复 agent 上下文失败: {e}"
-            )));
+            Err(e) => {
+                log::error!("resume 失败 {session_id}: {e}");
+                let err = Activity::Error {
+                    timestamp: now(),
+                    detail: format!("恢复 agent 上下文失败: {e}"),
+                };
+                if let Err(log_error) = log.append_activities(&[err]) {
+                    log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
+                }
+                self.invalidate_log_caches(session_id);
+                self.finalize_turn(
+                    session_id,
+                    &control,
+                    control.deleted.load(Ordering::SeqCst),
+                    protocol::StateChangeReason::Aborted,
+                );
+                return Err(SessionError::AgentUnavailable(format!(
+                    "恢复 agent 上下文失败: {e}"
+                )));
+            }
         }
 
         let started = std::time::Instant::now();
@@ -590,10 +601,13 @@ impl SessionManager {
             .driver_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
         let agent_session_id = if agent_session_id.is_empty() {
-            let sid2 = driver
+            let (sid2, options) = driver
                 .create_session(&cwd)
                 .map_err(SessionError::AgentUnavailable)?;
             self.registry.set_agent_session_id(session_id, &sid2)?;
+            if !options.is_empty() {
+                self.registry.set_config_options(session_id, &options)?;
+            }
             sid2
         } else {
             agent_session_id
@@ -688,6 +702,14 @@ impl SessionManager {
                     if !control.deleted.load(Ordering::SeqCst) {
                         if let Err(e) = self.registry.set_context_size(session_id, used, size) {
                             log::error!("记录会话上下文大小失败 {session_id}: {e}");
+                        }
+                    }
+                }
+                AgentEvent::ConfigOptions(options) => {
+                    // 会话配置选项变更（ACP config_options_update）。
+                    if !control.deleted.load(Ordering::SeqCst) {
+                        if let Err(e) = self.registry.set_config_options(session_id, &options) {
+                            log::error!("记录会话配置选项失败 {session_id}: {e}");
                         }
                     }
                 }
@@ -794,6 +816,49 @@ impl SessionManager {
         Ok(())
     }
 
+    /// 设置会话配置选项（docs/DESIGN.md「ACP 通信」：Server 向 ACP Server
+    /// 发送 `session/set_config_option`）。返回更新后的会话元数据。
+    pub async fn set_config_option(
+        &self,
+        session_id: &str,
+        config_id: &str,
+        value: protocol::SessionConfigOptionValue,
+    ) -> Result<SessionMeta, SessionError> {
+        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        // 尚无 agent 侧会话（未发过指令）时先惰性创建，保证选项落到真实会话上
+        let agent_session_id = if agent_session_id.is_empty() {
+            let cwd = if meta.worktree_dir.is_empty() {
+                meta.cwd.clone()
+            } else {
+                meta.worktree_dir.clone()
+            };
+            let driver = self
+                .agents
+                .driver_for(&meta.agent)
+                .map_err(SessionError::AgentUnavailable)?;
+            let (sid, options) = driver
+                .create_session(&cwd)
+                .map_err(SessionError::AgentUnavailable)?;
+            self.registry.set_agent_session_id(session_id, &sid)?;
+            if !options.is_empty() {
+                self.registry.set_config_options(session_id, &options)?;
+            }
+            sid
+        } else {
+            agent_session_id
+        };
+        let driver = self
+            .agents
+            .driver_for(&meta.agent)
+            .map_err(SessionError::AgentUnavailable)?;
+        let options = driver
+            .set_config_option(&agent_session_id, config_id, value)
+            .map_err(SessionError::AgentUnavailable)?;
+        self.registry.set_config_options(session_id, &options)?;
+        let (updated, _) = self.get_entry(session_id)?;
+        Ok(updated)
+    }
+
     fn broadcast_state_change(
         &self,
         session_id: &str,
@@ -861,12 +926,12 @@ mod tests {
     }
 
     impl AgentDriver for BlockingDriver {
-        fn create_session(&self, _cwd: &str) -> Result<String, String> {
-            Ok("agent_blocking".into())
+        fn create_session(&self, _cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+            Ok(("agent_blocking".into(), Vec::new()))
         }
 
-        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
-            Ok(())
+        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(Vec::new())
         }
 
         fn prompt(
@@ -901,6 +966,15 @@ mod tests {
             Ok(())
         }
 
+        fn set_config_option(
+            &self,
+            _agent_session_id: &str,
+            _config_id: &str,
+            _value: protocol::SessionConfigOptionValue,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(Vec::new())
+        }
+
         fn list_skills(&self) -> Result<Vec<String>, String> {
             Ok(Vec::new())
         }
@@ -916,12 +990,12 @@ mod tests {
     }
 
     impl AgentDriver for UsageDriver {
-        fn create_session(&self, _cwd: &str) -> Result<String, String> {
-            Ok("agent_usage".into())
+        fn create_session(&self, _cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+            Ok(("agent_usage".into(), Vec::new()))
         }
 
-        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
-            Ok(())
+        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(Vec::new())
         }
 
         fn prompt(
@@ -957,6 +1031,15 @@ mod tests {
             Ok(())
         }
 
+        fn set_config_option(
+            &self,
+            _agent_session_id: &str,
+            _config_id: &str,
+            _value: protocol::SessionConfigOptionValue,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(Vec::new())
+        }
+
         fn list_skills(&self) -> Result<Vec<String>, String> {
             Ok(Vec::new())
         }
@@ -973,12 +1056,12 @@ mod tests {
     }
 
     impl AgentDriver for ThinkingChunksDriver {
-        fn create_session(&self, _cwd: &str) -> Result<String, String> {
-            Ok("agent_thinking".into())
+        fn create_session(&self, _cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+            Ok(("agent_thinking".into(), Vec::new()))
         }
 
-        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
-            Ok(())
+        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(Vec::new())
         }
 
         fn prompt(
@@ -1013,6 +1096,15 @@ mod tests {
 
         fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
             Ok(())
+        }
+
+        fn set_config_option(
+            &self,
+            _agent_session_id: &str,
+            _config_id: &str,
+            _value: protocol::SessionConfigOptionValue,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(Vec::new())
         }
 
         fn list_skills(&self) -> Result<Vec<String>, String> {
@@ -1240,6 +1332,161 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 测试驱动：持有会话配置选项，`set_config_option` 按 config_id 更新并返回完整集合
+    /// （验证 session.set_config_option → registry 记录的链路）。
+    struct ConfigDriver {
+        options: std::sync::Mutex<Vec<protocol::SessionConfigOption>>,
+    }
+
+    impl AgentDriver for ConfigDriver {
+        fn create_session(
+            &self,
+            _cwd: &str,
+        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+            Ok((
+                "agent_cfg".into(),
+                self.options.lock().unwrap().clone(),
+            ))
+        }
+
+        fn resume_session(
+            &self,
+            _agent_session_id: &str,
+            _cwd: &str,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            Ok(self.options.lock().unwrap().clone())
+        }
+
+        fn prompt(
+            &self,
+            _agent_session_id: &str,
+            _input: Vec<ContentBlock>,
+        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(AgentEvent::TurnEnded(
+                        protocol::StateChangeReason::Completed,
+                    ))
+                    .await;
+            });
+            rx
+        }
+
+        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn set_config_option(
+            &self,
+            _agent_session_id: &str,
+            config_id: &str,
+            value: protocol::SessionConfigOptionValue,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            let mut options = self.options.lock().unwrap();
+            for opt in options.iter_mut() {
+                if opt.id != config_id {
+                    continue;
+                }
+                match (&mut opt.kind, &value) {
+                    (
+                        protocol::SessionConfigKind::Select { current_value, .. },
+                        protocol::SessionConfigOptionValue::ValueId { value: v },
+                    ) => *current_value = v.clone(),
+                    (
+                        protocol::SessionConfigKind::Boolean { current_value },
+                        protocol::SessionConfigOptionValue::Boolean { value: v },
+                    ) => *current_value = *v,
+                    _ => return Err(format!("选项 {config_id} 与值类型不匹配")),
+                }
+            }
+            Ok(options.clone())
+        }
+
+        fn list_skills(&self) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+
+        fn shutdown(&self) {}
+    }
+
+    #[tokio::test]
+    async fn set_config_option_updates_registry() {
+        let opts = vec![protocol::SessionConfigOption {
+            id: "model".into(),
+            name: "模型".into(),
+            description: None,
+            category: Some("model".into()),
+            kind: protocol::SessionConfigKind::Select {
+                current_value: "gpt-4o".into(),
+                options: vec![
+                    protocol::SessionConfigSelectEntry {
+                        value: "gpt-4o".into(),
+                        name: "GPT-4o".into(),
+                    },
+                    protocol::SessionConfigSelectEntry {
+                        value: "gpt-5".into(),
+                        name: "GPT-5".into(),
+                    },
+                ],
+            },
+        }];
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "codex",
+            Arc::new(ConfigDriver {
+                options: std::sync::Mutex::new(opts.clone()),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-cfg-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+
+        let meta = mgr.create("codex", "/tmp/cfg", false).await.unwrap();
+        // 尚无 agent 侧会话：首次 prompt 惰性创建时带回初始选项
+        mgr.prompt(&meta.id, text("hi")).await.unwrap();
+        let (stored, _) = registry.get(&meta.id).unwrap().unwrap();
+        assert_eq!(stored.config_options, opts, "惰性创建后应记录初始选项");
+
+        // 设置选项：更新后返回完整集合并落库
+        let updated = mgr
+            .set_config_option(
+                &meta.id,
+                "model",
+                protocol::SessionConfigOptionValue::ValueId {
+                    value: "gpt-5".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let model = updated
+            .config_options
+            .iter()
+            .find(|o| o.id == "model")
+            .expect("选项仍在");
+        match &model.kind {
+            protocol::SessionConfigKind::Select { current_value, .. } => {
+                assert_eq!(current_value, "gpt-5")
+            }
+            other => panic!("应为 Select，得到 {other:?}"),
+        }
+        let (stored, _) = registry.get(&meta.id).unwrap().unwrap();
+        assert_eq!(stored.config_options, updated.config_options, "设置后应落库");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn ongoing_thinking_accumulates_across_chunks() {
         // GUI 通过 session.ongoing_activity 看到「思考中」应当是整个 turn 的累积内容，
@@ -1330,6 +1577,7 @@ mod tests {
                     worktree_dir: String::new(),
                     context_size: 0,
                     context_window_size: 0,
+                    config_options: Vec::new(),
                 },
                 format!("agent_{id}"),
             )
@@ -1387,6 +1635,7 @@ mod tests {
                     worktree_dir: String::new(),
                     context_size: 0,
                     context_window_size: 0,
+                    config_options: Vec::new(),
                 },
                 String::new(),
             )
@@ -1419,6 +1668,7 @@ mod tests {
                     worktree_dir: String::new(),
                     context_size: 0,
                     context_window_size: 0,
+                    config_options: Vec::new(),
                 },
                 String::new(),
             )
@@ -1616,12 +1866,12 @@ mod tests {
         }
 
         impl AgentDriver for StreamingDriver {
-            fn create_session(&self, _cwd: &str) -> Result<String, String> {
-                Ok("agent_stream".into())
+            fn create_session(&self, _cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+                Ok(("agent_stream".into(), Vec::new()))
             }
 
-            fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
-                Ok(())
+            fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+                Ok(Vec::new())
             }
 
             fn prompt(
@@ -1668,6 +1918,15 @@ mod tests {
 
             fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
                 Ok(())
+            }
+
+            fn set_config_option(
+                &self,
+                _agent_session_id: &str,
+                _config_id: &str,
+                _value: protocol::SessionConfigOptionValue,
+            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+                Ok(Vec::new())
             }
 
             fn list_skills(&self) -> Result<Vec<String>, String> {
@@ -1731,11 +1990,11 @@ mod tests {
             closed: Arc<std::sync::atomic::AtomicUsize>,
         }
         impl AgentDriver for Tracking {
-            fn create_session(&self, cwd: &str) -> Result<String, String> {
-                Ok(format!("agent_{}", cwd.replace('/', "_")))
+            fn create_session(&self, cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+                Ok((format!("agent_{}", cwd.replace('/', "_")), Vec::new()))
             }
-            fn resume_session(&self, _a: &str, _c: &str) -> Result<(), String> {
-                Ok(())
+            fn resume_session(&self, _a: &str, _c: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+                Ok(Vec::new())
             }
             fn prompt(
                 &self,
@@ -1763,6 +2022,14 @@ mod tests {
             }
             fn delete_session(&self, _a: &str) -> Result<(), String> {
                 Err("method not found".into())
+            }
+            fn set_config_option(
+                &self,
+                _a: &str,
+                _config_id: &str,
+                _value: protocol::SessionConfigOptionValue,
+            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+                Ok(Vec::new())
             }
             fn list_skills(&self) -> Result<Vec<String>, String> {
                 Ok(Vec::new())
@@ -1822,11 +2089,11 @@ mod tests {
             cancels: Arc<std::sync::atomic::AtomicUsize>,
         }
         impl AgentDriver for Counting {
-            fn create_session(&self, cwd: &str) -> Result<String, String> {
-                Ok(format!("agent_{}", cwd.replace('/', "_")))
+            fn create_session(&self, cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+                Ok((format!("agent_{}", cwd.replace('/', "_")), Vec::new()))
             }
-            fn resume_session(&self, _a: &str, _c: &str) -> Result<(), String> {
-                Ok(())
+            fn resume_session(&self, _a: &str, _c: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+                Ok(Vec::new())
             }
             fn prompt(
                 &self,
@@ -1853,6 +2120,14 @@ mod tests {
             }
             fn delete_session(&self, _a: &str) -> Result<(), String> {
                 Err("method not found".into())
+            }
+            fn set_config_option(
+                &self,
+                _a: &str,
+                _config_id: &str,
+                _value: protocol::SessionConfigOptionValue,
+            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+                Ok(Vec::new())
             }
             fn list_skills(&self) -> Result<Vec<String>, String> {
                 Ok(Vec::new())

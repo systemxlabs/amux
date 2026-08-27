@@ -86,6 +86,70 @@ pub struct SessionMeta {
     /// 上下文窗口总大小（token，ACP `usage_update` 的 size）；0 = 尚未收到通知。
     #[serde(default)]
     pub context_window_size: u64,
+    /// 会话支持的配置选项（源自 ACP session 的 config_options，如模型、推理级别）。
+    /// 空 = 会话尚未打开 agent 侧会话或 agent 不支持。
+    #[serde(default)]
+    pub config_options: Vec<SessionConfigOption>,
+}
+
+/// 会话配置选项（ACP `configOptions` 的投影；类型与协议对齐）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionConfigOption {
+    /// 选项唯一标识（ACP `session/set_config_option` 的 configId）
+    pub id: String,
+    /// 展示名（如「模型」「推理级别」）
+    pub name: String,
+    /// 可选描述
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 语义分类（ACP category，如 model / thought_level；仅供 UX，可为空）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// 选项类型与当前值
+    #[serde(flatten)]
+    pub kind: SessionConfigKind,
+}
+
+/// 会话选项的类型化负载（ACP `type` 判别）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionConfigKind {
+    /// 单值选择器（下拉）：当前选中值 + 可选值（分组已展平）
+    Select {
+        current_value: String,
+        options: Vec<SessionConfigSelectEntry>,
+    },
+    /// 布尔开关
+    Boolean { current_value: bool },
+}
+
+/// select 选项的一个可选值（ACP 分组展平为扁平的 value + name）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionConfigSelectEntry {
+    pub value: String,
+    pub name: String,
+}
+
+/// `session.set_config_option` 要设置的值（ACP `SessionConfigOptionValue`）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionConfigOptionValue {
+    /// select 类选项：选项值 id
+    ValueId { value: String },
+    /// boolean 类选项：开关值
+    Boolean { value: bool },
+}
+
+/// `session.set_config_option` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetConfigOptionParams {
+    pub session_id: String,
+    pub config_id: String,
+    #[serde(flatten)]
+    pub value: SessionConfigOptionValue,
 }
 
 /// `session.new` 参数。

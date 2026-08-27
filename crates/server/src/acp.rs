@@ -9,11 +9,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
-    BlobResourceContents, CancelNotification, CloseSessionRequest, ContentBlock as AcpContentBlock,
-    DeleteSessionRequest, EmbeddedResource, EmbeddedResourceResource, InitializeRequest,
-    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    BlobResourceContents, BooleanConfigOptionCapabilities, CancelNotification,
+    ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
+    ContentBlock as AcpContentBlock, DeleteSessionRequest, EmbeddedResource,
+    EmbeddedResourceResource, InitializeRequest, NewSessionRequest, PermissionOption,
+    PermissionOptionId, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigOption as AcpSessionConfigOption,
+    SessionConfigOptionValue as AcpSessionConfigOptionValue, SessionConfigOptionsCapabilities,
+    SessionConfigSelectOptions, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     StopReason, TextContent, TextResourceContents, ToolKind,
 };
 use agent_client_protocol::schema::ProtocolVersion;
@@ -56,17 +60,23 @@ pub enum AgentEvent {
         /// 上下文窗口总大小（token）
         size: u64,
     },
+    /// 会话配置选项更新（ACP `config_options_update`：完整的选项集合与当前值）。
+    ConfigOptions(Vec<protocol::SessionConfigOption>),
     /// turn 完成（携带结束原因）。
     TurnEnded(protocol::StateChangeReason),
 }
 
 /// 与单个 agent 的驱动接口（ACP v1 语义的投影）。
 pub trait AgentDriver: Send + Sync {
-    /// 新建会话，返回 agent 侧会话 id
-    fn create_session(&self, cwd: &str) -> Result<String, String>;
+    /// 新建会话，返回 agent 侧会话 id 与初始配置选项
+    fn create_session(&self, cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String>;
     /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史；
-    /// 同一进程内对同一会话幂等——已恢复过则直接成功）
-    fn resume_session(&self, agent_session_id: &str, cwd: &str) -> Result<(), String>;
+    /// 同一进程内对同一会话幂等——已恢复过则直接成功），返回会话配置选项
+    fn resume_session(
+        &self,
+        agent_session_id: &str,
+        cwd: &str,
+    ) -> Result<Vec<protocol::SessionConfigOption>, String>;
     /// 发送 prompt，返回事件流（阻塞直到 turn 结束）
     fn prompt(
         &self,
@@ -81,6 +91,13 @@ pub trait AgentDriver: Send + Sync {
     /// 则发送 `session/delete` 删除 agent 侧会话；不支持删除的 agent 返回错误，
     /// 调用方按「不支持」忽略）
     fn delete_session(&self, agent_session_id: &str) -> Result<(), String>;
+    /// 设置会话配置选项（ACP `session/set_config_option`），返回更新后的完整选项集合。
+    fn set_config_option(
+        &self,
+        agent_session_id: &str,
+        config_id: &str,
+        value: protocol::SessionConfigOptionValue,
+    ) -> Result<Vec<protocol::SessionConfigOption>, String>;
     /// 该 agent 安装的 skills 列表；查询失败必须显式返回错误。
     fn list_skills(&self) -> Result<Vec<String>, String>;
     /// 关闭驱动自身，释放 ACP 子进程资源。
@@ -115,6 +132,12 @@ enum AcpCall {
     /// 删除 agent 侧会话（agent 不支持时返回错误，调用方按「不支持」忽略）
     Delete {
         sid: String,
+    },
+    /// 设置会话配置选项（ACP `session/set_config_option`）
+    SetConfigOption {
+        sid: String,
+        config_id: String,
+        value: protocol::SessionConfigOptionValue,
     },
     ListSkills,
 }
@@ -211,7 +234,7 @@ impl AcpAgentDriver {
 }
 
 impl AgentDriver for AcpAgentDriver {
-    fn create_session(&self, cwd: &str) -> Result<String, String> {
+    fn create_session(&self, cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
         let res = self.call(AcpCall::NewSession {
             cwd: cwd.to_string(),
         })?;
@@ -222,17 +245,22 @@ impl AgentDriver for AcpAgentDriver {
             .to_string();
         // 新会话 agent 已在内存中持有，无需 resume
         self.resumed.lock().unwrap().insert(sid.clone());
-        Ok(sid)
+        let options = config_options_from_value(res.get("configOptions"));
+        Ok((sid, options))
     }
 
     /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史——
     /// 历史以 server 本地日志为权威。
-    /// 同一进程内对同一会话幂等（已恢复过则直接成功）。
-    fn resume_session(&self, agent_session_id: &str, cwd: &str) -> Result<(), String> {
+    /// 同一进程内对同一会话幂等（已恢复过则直接成功），返回会话配置选项。
+    fn resume_session(
+        &self,
+        agent_session_id: &str,
+        cwd: &str,
+    ) -> Result<Vec<protocol::SessionConfigOption>, String> {
         {
             let resumed = self.resumed.lock().unwrap();
             if resumed.contains(agent_session_id) {
-                return Ok(());
+                return Ok(Vec::new());
             }
         }
         let result = self.call(AcpCall::Resume {
@@ -245,7 +273,7 @@ impl AgentDriver for AcpAgentDriver {
                 .unwrap()
                 .insert(agent_session_id.to_string());
         }
-        result.map(|_| ())
+        result.map(|res| config_options_from_value(res.get("configOptions")))
     }
 
     fn prompt(
@@ -312,6 +340,21 @@ impl AgentDriver for AcpAgentDriver {
             sid: agent_session_id.to_string(),
         })
         .map(|_| ())
+    }
+
+    /// 设置会话配置选项（ACP `session/set_config_option`），返回更新后的完整选项集合。
+    fn set_config_option(
+        &self,
+        agent_session_id: &str,
+        config_id: &str,
+        value: protocol::SessionConfigOptionValue,
+    ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+        self.call(AcpCall::SetConfigOption {
+            sid: agent_session_id.to_string(),
+            config_id: config_id.to_string(),
+            value,
+        })
+        .map(|res| config_options_from_value(res.get("configOptions")))
     }
 
     /// 经 ACP `skill/list` 查询该 agent 安装的 skills。
@@ -471,8 +514,19 @@ async fn connect_main(
                 // - **传输层失败**（进程已退出 / 连接已死，如 npx 不可用、无网络）：拉起失败。
                 // 二者用短窗口探测连接活性区分：incoming_closed 在传输层关闭后很快完成，
                 // 超时则连接仍存活。
+                // 声明客户端能力：会话配置选项（docs/DESIGN.md「ACP 通信」——
+                // 会话选项由 ACP 会话提供，需客户端声明 configOptions 能力
+                // agent 才会在 new/resume 响应中下发选项并接受 set_config_option）。
+                let init_request = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+                    ClientCapabilities::new().session(
+                        ClientSessionCapabilities::new().config_options(
+                            SessionConfigOptionsCapabilities::new()
+                                .boolean(BooleanConfigOptionCapabilities::new()),
+                        ),
+                    ),
+                );
                 let init_result = match cx
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .send_request(init_request)
                     .block_task()
                     .await
                 {
@@ -593,6 +647,7 @@ async fn dispatch_call(
         AcpCall::Cancel { .. } => "session/cancel",
         AcpCall::Close { .. } => "session/close",
         AcpCall::Delete { .. } => "session/delete",
+        AcpCall::SetConfigOption { .. } => "session/set_config_option",
         AcpCall::ListSkills => "skill/list",
     };
     log::debug!("调用 {label}");
@@ -615,14 +670,18 @@ async fn dispatch_call_inner(
                 .block_task()
                 .await
                 .map_err(|e| format!("session/new 失败: {e}"))?;
-            Ok(json!({ "sessionId": resp.session_id }))
+            Ok(json!({
+                "sessionId": resp.session_id,
+                "configOptions": acp_config_options(resp.config_options),
+            }))
         }
         AcpCall::Resume { sid, cwd } => {
-            cx.send_request(ResumeSessionRequest::new(sid.clone(), cwd))
+            let resp = cx
+                .send_request(ResumeSessionRequest::new(sid.clone(), cwd))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/resume 失败: {e}"))?;
-            Ok(Value::Null)
+            Ok(json!({ "configOptions": acp_config_options(resp.config_options) }))
         }
         AcpCall::Cancel { sid } => {
             cx.send_notification(CancelNotification::new(sid.clone()))
@@ -644,6 +703,35 @@ async fn dispatch_call_inner(
                 .await
                 .map_err(|e| format!("session/delete 失败（agent 可能不支持删除）: {e}"))?;
             Ok(Value::Null)
+        }
+        AcpCall::SetConfigOption {
+            sid,
+            config_id,
+            value,
+        } => {
+            // 客户端已声明 configOptions 能力；不支持时 agent 返回错误并向上传播。
+            let acp_value = match value {
+                protocol::SessionConfigOptionValue::ValueId { value } => {
+                    AcpSessionConfigOptionValue::value_id(
+                        agent_client_protocol::schema::v1::SessionConfigValueId::new(
+                            value.as_str(),
+                        ),
+                    )
+                }
+                protocol::SessionConfigOptionValue::Boolean { value } => {
+                    AcpSessionConfigOptionValue::boolean(*value)
+                }
+            };
+            let resp = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    sid.clone(),
+                    config_id.clone(),
+                    acp_value,
+                ))
+                .block_task()
+                .await
+                .map_err(|e| format!("session/set_config_option 失败: {e}"))?;
+            Ok(json!({ "configOptions": acp_config_options(Some(resp.config_options)) }))
         }
         AcpCall::ListSkills => {
             let resp = cx
@@ -706,8 +794,14 @@ async fn route_update(
             used: update.used,
             size: update.size,
         }),
+        // ACP `config_options_update`：会话配置选项变更（完整集合）。
+        SessionUpdate::ConfigOptionUpdate(update) => {
+            Some(AgentEvent::ConfigOptions(acp_config_options(Some(
+                update.config_options.clone(),
+            ))))
+        }
         // SessionInfoUpdate（ACP v1 未携带状态字段）/ AvailableCommandsUpdate /
-        // CurrentModeUpdate / ConfigOptionUpdate / Plan 等不产生 AgentEvent
+        // CurrentModeUpdate / Plan 等不产生 AgentEvent
         _ => None,
     };
     if let Some(ev) = ev {
@@ -749,6 +843,76 @@ fn tool_kind_str(kind: &ToolKind) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "tool_call".to_string())
+}
+
+/// ACP `SessionConfigOption` 列表 → amux 协议投影。
+/// select 选项的分组展平为扁平 (value, name) 列表（group 名并入 name 前缀）。
+fn acp_config_options(
+    options: Option<Vec<AcpSessionConfigOption>>,
+) -> Vec<protocol::SessionConfigOption> {
+    options
+        .unwrap_or_default()
+        .into_iter()
+        .map(|opt| {
+            let kind = match opt.kind {
+                agent_client_protocol::schema::v1::SessionConfigKind::Select(sel) => {
+                    let entries: Vec<protocol::SessionConfigSelectEntry> = match sel.options {
+                        SessionConfigSelectOptions::Ungrouped(list) => list
+                            .into_iter()
+                            .map(|o| protocol::SessionConfigSelectEntry {
+                                value: o.value.0.to_string(),
+                                name: o.name,
+                            })
+                            .collect(),
+                        SessionConfigSelectOptions::Grouped(groups) => groups
+                            .into_iter()
+                            .flat_map(|g| {
+                                let prefix = format!("{} · ", g.group.0);
+                                g.options.into_iter().map(move |o| {
+                                    protocol::SessionConfigSelectEntry {
+                                        value: o.value.0.to_string(),
+                                        name: format!("{prefix}{}", o.name),
+                                    }
+                                })
+                            })
+                            .collect(),
+                        // SDK 1.4.0 仅含 Ungrouped/Grouped；non_exhaustive 要求通配
+                        _ => Vec::new(),
+                    };
+                    protocol::SessionConfigKind::Select {
+                        current_value: sel.current_value.0.to_string(),
+                        options: entries,
+                    }
+                }
+                agent_client_protocol::schema::v1::SessionConfigKind::Boolean(b) => {
+                    protocol::SessionConfigKind::Boolean {
+                        current_value: b.current_value,
+                    }
+                }
+                // SDK 1.4.0 仅含 Select/Boolean；non_exhaustive 要求通配
+                _ => protocol::SessionConfigKind::Select {
+                    current_value: String::new(),
+                    options: Vec::new(),
+                },
+            };
+            protocol::SessionConfigOption {
+                id: opt.id.0.to_string(),
+                name: opt.name,
+                description: opt.description,
+                category: opt
+                    .category
+                    .as_ref()
+                    .map(|c| serde_json::to_string(c).unwrap_or_default()),
+                kind,
+            }
+        })
+        .collect()
+}
+
+/// 从 ACP 方法响应 json 中解析 configOptions 字段（缺省为空）。
+fn config_options_from_value(v: Option<&Value>) -> Vec<protocol::SessionConfigOption> {
+    v.and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
 }
 
 /// protocol::ContentBlock → SDK ContentBlock。
@@ -794,8 +958,9 @@ fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        ContentBlock as AcpContentBlock, ContentChunk, SessionId, TextContent, ToolCall,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        ConfigOptionUpdate, ContentBlock as AcpContentBlock, ContentChunk, SessionConfigOption,
+        SessionConfigSelectOption, SessionId, TextContent, ToolCall, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use tokio::sync::mpsc;
 
@@ -967,6 +1132,42 @@ mod tests {
                 assert_eq!(size, 200_000);
             }
             other => panic!("应为 UsageUpdate，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn route_update_config_option_update() {
+        let (routes, mut rx) = route_with_channel();
+        let opt = SessionConfigOption::select(
+            "model",
+            "模型",
+            "gpt-5",
+            vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
+        );
+        let notif = SessionNotification::new(
+            SessionId::new("s1"),
+            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![opt])),
+        );
+        route_update(&routes, &notif).await;
+        let ev = rx.try_recv().expect("应收到 config_options 事件");
+        match ev {
+            AgentEvent::ConfigOptions(opts) => {
+                assert_eq!(opts.len(), 1);
+                assert_eq!(opts[0].id, "model");
+                assert_eq!(opts[0].name, "模型");
+                match &opts[0].kind {
+                    protocol::SessionConfigKind::Select {
+                        current_value,
+                        options,
+                    } => {
+                        assert_eq!(current_value, "gpt-5");
+                        assert_eq!(options.len(), 1);
+                        assert_eq!(options[0].value, "gpt-5");
+                    }
+                    other => panic!("应为 Select 选项，得到 {other:?}"),
+                }
+            }
+            other => panic!("应为 ConfigOptions，得到 {other:?}"),
         }
     }
 
