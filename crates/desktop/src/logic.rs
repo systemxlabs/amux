@@ -79,6 +79,15 @@ pub fn context_usage_text(used: u64, window: u64) -> Option<String> {
     Some(format!("{used_s} / {window_s} token（{percent:.1}%）"))
 }
 
+/// 会话上下文占用百分比（0.0–100.0）；窗口未知（0）时返回 None。
+/// 供列表行迷你进度条使用。
+pub fn context_percent(used: u64, window: u64) -> Option<f32> {
+    if window == 0 {
+        return None;
+    }
+    Some(((used as f64 / window as f64) * 100.0) as f32)
+}
+
 /// 千分位分组（仅用于展示，非契约）。
 fn format_thousands(n: u64) -> String {
     let s = n.to_string();
@@ -401,6 +410,16 @@ mod tests {
         );
         // 窗口未知：只展示已用量
         assert_eq!(context_usage_text(1_234, 0), Some("1,234 token".into()));
+    }
+
+    #[test]
+    fn context_percent_ratio_or_none() {
+        assert_eq!(context_percent(0, 0), None);
+        assert_eq!(context_percent(1_234, 0), None);
+        let p = context_percent(50_000, 200_000).unwrap();
+        assert!((p - 25.0).abs() < 0.01, "50k/200k 应为 25%: {p}");
+        let p = context_percent(200_000, 200_000).unwrap();
+        assert!((p - 100.0).abs() < 0.01);
     }
 
     fn smeta(id: &str, last: u64) -> SessionMeta {

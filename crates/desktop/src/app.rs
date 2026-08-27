@@ -16,6 +16,7 @@ use gpui_component::{
     menu::{ContextMenuExt, PopupMenuItem},
     notification::Notification as UiNotification,
     popover::Popover,
+    progress::Progress,
     radio::RadioGroup,
     scroll::ScrollableElement,
     separator::Separator,
@@ -44,9 +45,9 @@ use crate::config::{
 use crate::diff::{diff_lines, DiffLineKind};
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
-    compose_prompt, compose_workflow_text, context_usage_text, external_path_attachment,
-    merge_session_window, parse_at_references, path_attachment, read_path_context, DialogMsg,
-    InputAttachment,
+    compose_prompt, compose_workflow_text, context_percent, context_usage_text,
+    external_path_attachment, merge_session_window, parse_at_references, path_attachment,
+    read_path_context, DialogMsg, InputAttachment,
 };
 use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::text::{block_text, one_line};
@@ -3183,6 +3184,33 @@ impl AmuxApp {
                             .items_center()
                             .child(Label::new(label).text_sm().flex_1().min_w_0().truncate()),
                     )
+                    // 会话上下文占用（docs/DESIGN.md：usage_update 记录的已用/窗口）
+                    .when(context_percent(s.context_size, s.context_window_size).is_some(), |row| {
+                        let percent = context_percent(s.context_size, s.context_window_size)
+                            .expect("上方已判非 None");
+                        let percent_text: SharedString =
+                            format!("{percent:.0}%").into();
+                        row.child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(px(40.))
+                                        .child(
+                                            Progress::new(format!("sess-ctx-{machine}-{sid}"))
+                                                .value(percent)
+                                                .xsmall()
+                                                .color(cx.theme().primary),
+                                        ),
+                                )
+                                .child(
+                                    Label::new(percent_text)
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                    })
                     .when(s.last_active_at > 0, |row| {
                         row.child(
                             Label::new(format_compact_time(s.last_active_at))
