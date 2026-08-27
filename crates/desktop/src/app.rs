@@ -3649,34 +3649,29 @@ impl AmuxApp {
                                 ),
                         )
                         .child(self.render_workspace_picker(cx))
-                        // worktree 开关 + 创建按钮同行并排：开关在左、按钮靠右，
-                        // 避免垂直堆叠时被按钮边角压到 checkbox。
+                        // worktree 开关（docs/PRD.md）：勾选后 agent 在独立工作树中
+                        // 工作，主仓库工作区不受影响；路径由 server 统一分配
                         .child(
-                            h_flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    Checkbox::new("ns-worktree-toggle")
-                                        .label("使用 worktree")
-                                        .checked(self.new_session_worktree)
-                                        .on_click(cx.listener(|this, checked: &bool, _window, cx| {
-                                            this.new_session_worktree = *checked;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Button::new("ns-create")
-                                        .primary()
-                                        .ml_auto()
-                                        .label("创建会话")
-                                        .on_click(cx.listener(|this, _ev, window, cx| {
-                                            this.create_session_only(window, cx);
-                                        })),
-                                ),
+                            Checkbox::new("ns-worktree-toggle")
+                                .label("使用 worktree")
+                                .checked(self.new_session_worktree)
+                                .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                                    this.new_session_worktree = *checked;
+                                    cx.notify();
+                                })),
                         )
                         .when_some(self.new_session_error.clone(), |view, error| {
                             view.child(Alert::error("ns-create-error", error))
-                        });
+                        })
+                        .child(
+                            Button::new("ns-create")
+                                .primary()
+                                .mt_2()
+                                .label("创建会话")
+                                .on_click(cx.listener(|this, _ev, window, cx| {
+                                    this.create_session_only(window, cx);
+                                })),
+                        );
                 }
             }
             NewSessionMode::Workflow => {
