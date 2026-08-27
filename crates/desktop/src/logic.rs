@@ -1,5 +1,7 @@
 //! Pure data transformations shared by the GUI and its tests.
 
+use std::collections::BTreeMap;
+
 use crate::config::RecentWorkspace;
 use protocol::{Activity, ContentBlock, HistoryItem, SessionMeta};
 
@@ -340,11 +342,96 @@ pub fn compose_workflow_text(text: &str, attachments: &[InputAttachment]) -> Str
     result
 }
 
+/// 改动审查视图左侧文件树节点：仅由改动文件的路径聚合而成。
+/// 目录节点始终全展开渲染，无需折叠状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffFileTreeNode {
+    Dir(BTreeMap<String, DiffFileTreeNode>),
+    /// 叶子：对应 diff_files 的下标（供点击滚动定位）。
+    File {
+        path_index: usize,
+    },
+}
+
+/// 把改动文件路径列表聚合成目录树。目录按名称排序，叶子保留原下标。
+pub fn build_changed_file_tree(paths: &[impl AsRef<str>]) -> BTreeMap<String, DiffFileTreeNode> {
+    let mut root = BTreeMap::new();
+    for (path_index, path) in paths.iter().enumerate() {
+        let parts: Vec<&str> = path.as_ref().split('/').collect();
+        let mut cursor: &mut BTreeMap<String, DiffFileTreeNode> = &mut root;
+        for (i, part) in parts.iter().enumerate() {
+            if i + 1 == parts.len() {
+                cursor.insert((*part).to_string(), DiffFileTreeNode::File { path_index });
+            } else {
+                let entry = cursor
+                    .entry((*part).to_string())
+                    .or_insert_with(|| DiffFileTreeNode::Dir(BTreeMap::new()));
+                cursor = entry.dir_mut();
+            }
+        }
+    }
+    root
+}
+
+impl DiffFileTreeNode {
+    fn dir_mut(&mut self) -> &mut BTreeMap<String, DiffFileTreeNode> {
+        match self {
+            DiffFileTreeNode::Dir(children) => children,
+            DiffFileTreeNode::File { .. } => unreachable!("路径组件不应重名：文件与目录同名"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::MAX_RECENT_WORKSPACES;
     use protocol::SessionState;
+
+    #[test]
+    fn changed_file_tree_groups_and_sorts() {
+        let paths = [
+            "src/main.rs",
+            "src/ui/panel.rs",
+            "docs/DESIGN.md",
+            "README.md",
+        ];
+        let tree = build_changed_file_tree(&paths);
+        // 顶层键按字典序排序：README.md（大写 R）< docs < src
+        let top: Vec<&String> = tree.keys().collect();
+        assert_eq!(top, ["README.md", "docs", "src"]);
+        assert_eq!(
+            tree["docs"],
+            DiffFileTreeNode::Dir(
+                [(
+                    "DESIGN.md".to_string(),
+                    DiffFileTreeNode::File { path_index: 2 }
+                )]
+                .into()
+            )
+            .clone()
+        );
+        assert_eq!(tree["README.md"], DiffFileTreeNode::File { path_index: 3 });
+        // src 下既有文件又有目录，两级结构
+        match &tree["src"] {
+            DiffFileTreeNode::Dir(children) => {
+                assert!(matches!(
+                    children["main.rs"],
+                    DiffFileTreeNode::File { path_index: 0 }
+                ));
+                assert!(matches!(children["ui"], DiffFileTreeNode::Dir(_)));
+            }
+            other => panic!("应为目录节点: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn changed_file_tree_keeps_file_at_each_level() {
+        // 同名前缀：a.txt 是文件、another 是另一文件，互不影响
+        let tree = build_changed_file_tree(&["a/b/c.rs", "d.rs"]);
+        assert!(matches!(&tree["a"], DiffFileTreeNode::Dir(_)));
+        assert_eq!(tree["d.rs"], DiffFileTreeNode::File { path_index: 1 });
+    }
 
     fn rw(machine: &str, workspace: &str, last_used: u64) -> RecentWorkspace {
         RecentWorkspace {

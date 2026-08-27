@@ -45,9 +45,9 @@ use crate::config::{
 use crate::diff::{diff_lines, DiffLineKind};
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
-    compose_prompt, compose_workflow_text, context_percent, context_usage_text,
-    external_path_attachment, merge_session_window, parse_at_references, path_attachment,
-    read_path_context, DialogMsg, InputAttachment,
+    build_changed_file_tree, compose_prompt, compose_workflow_text, context_percent,
+    context_usage_text, external_path_attachment, merge_session_window, parse_at_references,
+    path_attachment, read_path_context, DialogMsg, DiffFileTreeNode, InputAttachment,
 };
 use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::text::{block_text, one_line};
@@ -5404,6 +5404,75 @@ impl AmuxApp {
             .into_any()
     }
 
+    /// 递归渲染改动文件树的节点（目录 + 文件叶子）。
+    /// 目录行全展开；文件行点击后滚动到右侧对应 diff 块。层级经缩进左对齐。
+    fn push_diff_file_tree_nodes(
+        &self,
+        nodes: &std::collections::BTreeMap<String, DiffFileTreeNode>,
+        out: &mut Vec<gpui::AnyElement>,
+        depth: usize,
+        machine_idx: usize,
+        cx: &mut Context<Self>,
+    ) {
+        for (name, node) in nodes {
+            match node {
+                DiffFileTreeNode::Dir(children) => {
+                    out.push(
+                        h_flex()
+                            .items_center()
+                            .pl(px((depth * 12 + 4) as f32))
+                            .py_0p5()
+                            .child(
+                                Label::new(name.clone())
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .into_any_element(),
+                    );
+                    self.push_diff_file_tree_nodes(children, out, depth + 1, machine_idx, cx);
+                }
+                DiffFileTreeNode::File { path_index } => {
+                    let fi = *path_index;
+                    let (additions, deletions) = {
+                        let files = &self.machines[machine_idx].diff_files;
+                        let f = &files[fi];
+                        (f.additions, f.deletions)
+                    };
+                    let diff_scroll = self.diff_scroll.clone();
+                    out.push(
+                        h_flex()
+                            .items_center()
+                            .pl(px((depth * 12 + 4) as f32))
+                            .min_w_0()
+                            .child(
+                                Button::new(format!("diff-tree-{fi}"))
+                                    .xsmall()
+                                    .ghost()
+                                    .label(name.clone())
+                                    .on_click(cx.listener(move |_this, _ev, _window, _cx| {
+                                        diff_scroll.scroll_to_top_of_item(fi);
+                                    })),
+                            )
+                            .child(
+                                Label::new(format!("+{additions}"))
+                                    .text_xs()
+                                    .ml_1()
+                                    .text_color(cx.theme().success),
+                            )
+                            .child(
+                                Label::new(format!("-{deletions}"))
+                                    .text_xs()
+                                    .text_color(cx.theme().danger),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+    }
+
     fn render_diff_panel(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let machine = self.active_machine();
         let files = machine
@@ -5433,7 +5502,6 @@ impl AmuxApp {
             .and_then(|i| self.machine(i))
             .map(|m| m.diff_changes_collapsed)
             .unwrap_or(false);
-        let diff_scroll = self.diff_scroll.clone();
         let mut content_children: Vec<gpui::AnyElement> = Vec::new();
         let toolbar = h_flex()
             .items_center()
@@ -5565,6 +5633,9 @@ impl AmuxApp {
                 .child(toolbar)
                 .into_any();
         };
+        // 左侧文件树：按路径聚合的目录树，默认全展开、左对齐，仅含改动文件
+        let changed_tree =
+            build_changed_file_tree(&files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>());
         let mut tree_items: Vec<gpui::AnyElement> = Vec::new();
         for (fi, f) in files.iter().enumerate() {
             let path = f.path.clone();
@@ -5810,18 +5881,6 @@ impl AmuxApp {
                         .into_any_element(),
                 );
             }
-            let tree_path = path.clone();
-            let diff_scroll = diff_scroll.clone();
-            tree_items.push(
-                Button::new(format!("diff-tree-{fi}"))
-                    .small()
-                    .ghost()
-                    .label(format!("{}  (+{additions}/-{deletions})", tree_path))
-                    .on_click(cx.listener(move |_this, _ev, _window, _cx| {
-                        diff_scroll.scroll_to_top_of_item(fi);
-                    }))
-                    .into_any_element(),
-            );
             content_children.push(
                 v_flex()
                     .id(format!("diff-file-{fi}"))
@@ -5835,6 +5894,7 @@ impl AmuxApp {
                     .into_any_element(),
             );
         }
+        self.push_diff_file_tree_nodes(&changed_tree, &mut tree_items, 0, machine_idx, cx);
         let tree = if diff_tree_collapsed {
             v_flex()
                 .w_8()
