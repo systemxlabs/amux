@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,6 +67,46 @@ enum Panel {
     Diff,
     Detail,
     Activities,
+}
+
+/// 未发送输入草稿的会话身份：普通会话以机器名（store 内的持久身份，
+/// 下标会随删机重排）+ 会话 ID 定位；工作流以工作流会话 ID 定位。
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum DraftKey {
+    Session { machine: String, id: String },
+    Workflow { id: String },
+}
+
+/// 切走会话时暂存的未发送输入内容与附件。
+struct Draft {
+    text: String,
+    attachments: Vec<InputAttachment>,
+}
+
+/// 草稿交换的纯逻辑：把当前输入按旧会话身份存入草稿表（空内容则移除旧键），
+/// 返回应换入的新会话草稿（无则返回空草稿）。返回的草稿同时从表中取出，
+/// 与 `set_selected` 的存入/换出配对，保证每个会话只看到自己的输入。
+fn swap_draft(
+    drafts: &mut HashMap<DraftKey, Draft>,
+    old_key: Option<DraftKey>,
+    current: Draft,
+    new_key: Option<DraftKey>,
+) -> Draft {
+    let empty = current.text.trim().is_empty() && current.attachments.is_empty();
+    if let Some(key) = old_key {
+        if empty {
+            drafts.remove(&key);
+        } else {
+            drafts.insert(key, current);
+        }
+    }
+    // 未选中会话时输入区不可达，此处内容无主，直接丢弃
+    new_key
+        .and_then(|key| drafts.remove(&key))
+        .unwrap_or(Draft {
+            text: String::new(),
+            attachments: Vec::new(),
+        })
 }
 
 /// 设置浮窗分类。
@@ -148,6 +188,8 @@ pub struct AmuxApp {
     new_session_mode: NewSessionMode,
     input_state: Entity<InputState>,
     input_attachments: Vec<InputAttachment>,
+    /// 各会话未发送的输入草稿（输入框为全局单例，切换会话时按 DraftKey 换入换出）
+    drafts: HashMap<DraftKey, Draft>,
     session_cwd_input: Entity<InputState>,
     workflow_input: Entity<InputState>,
     machine_name_input: Entity<InputState>,
@@ -295,6 +337,7 @@ impl AmuxApp {
             new_session_mode: NewSessionMode::Direct,
             input_state,
             input_attachments: Vec::new(),
+            drafts: HashMap::new(),
             session_cwd_input,
             workflow_input,
             machine_name_input,
@@ -1052,6 +1095,40 @@ impl AmuxApp {
         })
     }
 
+    fn selected_draft_key(&self) -> Option<DraftKey> {
+        match self.selected.as_ref()? {
+            Selected::Session { machine, id } => Some(DraftKey::Session {
+                machine: self.machines.get(*machine)?.config.name.clone(),
+                id: id.clone(),
+            }),
+            Selected::Workflow { id } => Some(DraftKey::Workflow { id: id.clone() }),
+        }
+    }
+
+    /// 切换选中会话。输入框是全局单例，直接换会话会把 A 的未发送内容串到 B，
+    /// 因此先把当前内容按会话身份存入草稿表，再取出新会话的草稿换入。
+    fn set_selected(
+        &mut self,
+        next: Option<Selected>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.input_state.read(cx).value().to_string();
+        let attachments = std::mem::take(&mut self.input_attachments);
+        let old_key = self.selected_draft_key();
+        self.selected = next;
+        let new_key = self.selected_draft_key();
+        let draft = swap_draft(
+            &mut self.drafts,
+            old_key,
+            Draft { text, attachments },
+            new_key,
+        );
+        self.input_attachments = draft.attachments;
+        self.input_state
+            .update(cx, |s, cx| s.set_value(&draft.text, window, cx));
+    }
+
     fn open_session(
         &mut self,
         window: &mut Window,
@@ -1059,10 +1136,14 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        self.selected = Some(Selected::Session {
-            machine,
-            id: session_id.clone(),
-        });
+        self.set_selected(
+            Some(Selected::Session {
+                machine,
+                id: session_id.clone(),
+            }),
+            window,
+            cx,
+        );
         self.set_panel(window, cx, None);
         if let Some(m) = self.machines.get_mut(machine) {
             m.views.entry(session_id.clone()).or_default();
@@ -1098,7 +1179,7 @@ impl AmuxApp {
                 log::error!("补齐工作流历史失败：{e}");
             }
         }
-        self.selected = Some(Selected::Workflow { id: wf_id });
+        self.set_selected(Some(Selected::Workflow { id: wf_id }), window, cx);
         self.set_panel(window, cx, None);
         self.workflow_dialog_limit = 50;
         self.dialog_scroll.scroll_to_bottom();
@@ -1400,11 +1481,21 @@ impl AmuxApp {
                             m.sessions.retain(|s| s.id != sid);
                             m.views.remove(&sid);
                         }
+                        let machine_name = this
+                            .machine(machine)
+                            .map(|m| m.config.name.clone())
+                            .unwrap_or_default();
                         if let Some(Selected::Session { id, .. }) = this.selected.clone() {
                             if id == sid {
-                                this.selected = None;
+                                this.set_selected(None, w, cx);
                             }
                         }
+                        this.drafts.retain(|key, _| match key {
+                            DraftKey::Session { id, machine } => {
+                                *id != sid || *machine != machine_name
+                            }
+                            DraftKey::Workflow { .. } => true,
+                        });
                         this.refresh_sessions(machine, w, cx);
                     }
                     Err(error) => {
@@ -1625,7 +1716,7 @@ impl AmuxApp {
         let session_dir = self.session_dir.clone();
         self.workflows.push(engine);
         let wf_id = self.workflows[wi].session.read().unwrap().id.clone();
-        self.selected = Some(Selected::Workflow { id: wf_id });
+        self.set_selected(Some(Selected::Workflow { id: wf_id }), window, cx);
         let should_advance =
             !clean.trim().is_empty() || preamble.as_deref().is_some_and(|p| !p.trim().is_empty());
         if should_advance {
@@ -1785,7 +1876,7 @@ impl AmuxApp {
                 Ok(())
             })
             .await;
-            let _ = this.update_in(cx, |this, _window, cx| {
+            let _ = this.update_in(cx, |this, w, cx| {
                 match result {
                     Some(Ok(())) => {
                         for (machine, _, sid) in &targets {
@@ -1801,8 +1892,15 @@ impl AmuxApp {
                                     workflow.session.read().unwrap().id != wf_id
                                 });
                                 if this.selected == Some(Selected::Workflow { id: wf_id.clone() }) {
-                                    this.selected = None;
+                                    this.set_selected(None, w, cx);
                                 }
+                                this.drafts.retain(|key, _| match key {
+                                    DraftKey::Workflow { id } => id != &wf_id,
+                                    // 关联的普通会话已一并删除，草稿随之清理
+                                    DraftKey::Session { id, .. } => {
+                                        !children.iter().any(|(_, sid)| sid == id)
+                                    }
+                                });
                             }
                             Err(error) => {
                                 this.workflow_error =
@@ -2449,7 +2547,7 @@ impl AmuxApp {
         true
     }
 
-    fn remove_machine(&mut self, _window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+    fn remove_machine(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
         if idx >= self.machines.len() {
             return;
         }
@@ -2467,9 +2565,8 @@ impl AmuxApp {
             return;
         }
         let name = self.machines[idx].config.name.clone();
-        self.store.remove_machine(&name);
-        self.machines.remove(idx);
-        self.selected = match self.selected.clone() {
+        // 草稿键以机器名定位，须在下标重排/机器移除前完成旧草稿保存与新草稿换入
+        let next = match self.selected.clone() {
             Some(Selected::Session { machine, .. }) if machine == idx => None,
             Some(Selected::Session { machine, id }) if machine > idx => Some(Selected::Session {
                 machine: machine - 1,
@@ -2477,6 +2574,13 @@ impl AmuxApp {
             }),
             other => other,
         };
+        self.set_selected(next, window, cx);
+        self.store.remove_machine(&name);
+        self.drafts.retain(|key, _| match key {
+            DraftKey::Session { machine, .. } => machine != &name,
+            DraftKey::Workflow { .. } => true,
+        });
+        self.machines.remove(idx);
         for wf in self.workflows.iter_mut() {
             let mut children_guard = wf.session.write().unwrap();
             for c in children_guard.children.iter_mut() {
@@ -7058,5 +7162,90 @@ fn format_compact_time(timestamp_ms: u64) -> String {
         ts.strftime("%H:%M").to_string()
     } else {
         ts.strftime("%m-%d").to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_key(machine: &str, id: &str) -> DraftKey {
+        DraftKey::Session {
+            machine: machine.into(),
+            id: id.into(),
+        }
+    }
+
+    fn draft(text: &str) -> Draft {
+        Draft {
+            text: text.into(),
+            attachments: vec![],
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn draft_isolated_per_session() {
+        let mut drafts = HashMap::new();
+
+        // 在 A 输入后切到 B：A 的草稿留存，B 拿到空草稿
+        swap_draft(
+            &mut drafts,
+            Some(session_key("m1", "s-a")),
+            draft("a"),
+            Some(session_key("m1", "s-b")),
+        );
+        assert_eq!(drafts[&session_key("m1", "s-a")].text, "a");
+
+        // 在 B 输入后切回 A：两边各自看到自己的内容
+        let for_a = swap_draft(
+            &mut drafts,
+            Some(session_key("m1", "s-b")),
+            draft("b"),
+            Some(session_key("m1", "s-a")),
+        );
+        assert_eq!(drafts[&session_key("m1", "s-b")].text, "b");
+        assert_eq!(for_a.text, "a");
+        assert!(!drafts.contains_key(&session_key("m1", "s-a")));
+    }
+
+    #[::core::prelude::v1::test]
+    fn empty_input_on_leaving_clears_draft() {
+        // 曾在 A 留过草稿，之后清空输入再离开，不应残留旧草稿
+        let mut drafts = HashMap::new();
+        swap_draft(&mut drafts, None, draft(""), Some(session_key("m1", "s-a")));
+        swap_draft(&mut drafts, None, draft(""), Some(session_key("m1", "s-b")));
+
+        // 回到 A 带出旧草稿
+        let for_a = swap_draft(
+            &mut drafts,
+            Some(session_key("m1", "s-b")),
+            draft(""),
+            Some(session_key("m1", "s-a")),
+        );
+        assert_eq!(for_a.text, "");
+
+        // 带着空输入再次离开 A
+        let for_b = swap_draft(
+            &mut drafts,
+            Some(session_key("m1", "s-a")),
+            draft(""),
+            Some(session_key("m1", "s-b")),
+        );
+        assert_eq!(for_b.text, "");
+        assert!(drafts.is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn unowned_input_is_dropped_without_selection() {
+        // 未选中会话时输入区无主，切换不应把内容挂到新会话头上
+        let mut drafts = HashMap::new();
+        let for_a = swap_draft(
+            &mut drafts,
+            None,
+            draft("x"),
+            Some(session_key("m1", "s-a")),
+        );
+        assert_eq!(for_a.text, "");
+        assert!(drafts.is_empty());
     }
 }
