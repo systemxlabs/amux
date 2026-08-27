@@ -402,8 +402,7 @@ impl ConfigStore {
 
     /// 某设备的常用工作目录，最近使用优先。
     pub fn recent_workspaces_for_machine(&self, machine: &str) -> Vec<String> {
-        let ws = self.recent_workspaces();
-        recent_workspaces_for_machine(&ws, machine)
+        recent_workspaces_for_machine(&self.recent_workspaces(), machine)
     }
 
     /// 记录一次常用工作目录使用（(machine, workspace) 唯一、最近优先、上限）。

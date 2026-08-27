@@ -51,6 +51,44 @@ pub fn estimate_bubble_width(text: &str, font_px: f32, min: f32, max: f32) -> Pi
     gpui::px((widest_em * font_px + PAD).clamp(min, max))
 }
 
+/// 精度档：秒级（带秒数）/ 分级（紧凑）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimePrecision {
+    /// `HH:MM:SS`（含秒）；跨天附 `MM-DD`。
+    Seconds,
+    /// `HH:MM`（紧凑，会话列表列宽有限）；跨天只显示日期。
+    Compact,
+}
+
+/// 本地时区时间戳格式化为展示字符串。
+/// `Seconds` 走秒级精度（消息/活动详情），`Compact` 走分级（会话列表行）。
+/// 跨天：秒级附 `MM-DD`；紧凑只显示日期。
+pub fn format_local_time(timestamp_ms: u64, precision: TimePrecision) -> String {
+    let Ok(ts) = jiff::Timestamp::from_millisecond(timestamp_ms as i64) else {
+        return String::new();
+    };
+    let ts = ts.to_zoned(jiff::tz::TimeZone::system());
+    let now = jiff::Zoned::now();
+    let same_day = ts.date() == now.date();
+    match precision {
+        TimePrecision::Seconds => {
+            let time = ts.strftime("%H:%M:%S").to_string();
+            if same_day {
+                time
+            } else {
+                format!("{} {}", ts.strftime("%m-%d"), time)
+            }
+        }
+        TimePrecision::Compact => {
+            if same_day {
+                ts.strftime("%H:%M").to_string()
+            } else {
+                ts.strftime("%m-%d").to_string()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,9 +133,28 @@ mod tests {
             estimate_bubble_width("你好\n世界", 14.0, min, max),
             gpui::px(min)
         );
-        // ASCII 0.6em：20 字符 ≈ 168 + 28 = 196（f32 累加有微差，容差比较）
+        // ASCII 0.6em：20 字符随宽度增长线性变宽，且在 [min, max] 内（不触界）。
+        // 用区间断言而非字面像素值，避免与 0.6em 估算常量强耦合。
         let ascii = "a".repeat(20);
         let width = estimate_bubble_width(&ascii, 14.0, min, max);
-        assert!((width.as_f32() - 196.0).abs() < 0.01);
+        let px = width.as_f32();
+        assert!(px > min && px < max, "ASCII 中等长度应落在区间内: {px}");
+        // 更长文本应更宽（单调递增）
+        let longer = "a".repeat(40);
+        let w2 = estimate_bubble_width(&longer, 14.0, min, max).as_f32();
+        assert!(w2 > px, "更长文本应更宽: {w2} <= {px}");
+    }
+
+    #[test]
+    fn format_local_time_invalid_timestamp_returns_empty() {
+        // 超出 jiff 可表示范围的时间戳不应 panic，返回空串。
+        assert_eq!(
+            format_local_time(i64::MAX as u64, TimePrecision::Seconds),
+            String::new()
+        );
+        assert_eq!(
+            format_local_time(i64::MAX as u64, TimePrecision::Compact),
+            String::new()
+        );
     }
 }

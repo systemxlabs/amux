@@ -3,10 +3,6 @@
 use gpui::*;
 use gpui_component::{label::Label, tag::Tag, *};
 
-use protocol::Activity;
-
-use crate::logic::activity_kind_detail;
-
 /// 工作目录短名：取路径最后一段。
 pub fn short_cwd(cwd: &str) -> String {
     let trimmed = cwd.trim_end_matches(['/', '\\']);
@@ -18,11 +14,6 @@ pub fn short_cwd(cwd: &str) -> String {
         .next()
         .unwrap_or(trimmed)
         .to_string()
-}
-
-/// 活动 → （标签，详情）文案（样式逻辑委托给纯函数）。
-pub fn activity_display(a: &Activity) -> (String, String) {
-    activity_kind_detail(a)
 }
 
 /// 机器状态徽章：连接状态 + 可选的操作级提示（notice 存在时覆盖显示、警示色）。

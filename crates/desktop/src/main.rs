@@ -5,6 +5,7 @@
 
 mod aggregate;
 mod app;
+mod app_render;
 mod config;
 mod diff;
 mod display;

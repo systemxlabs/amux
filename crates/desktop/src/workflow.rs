@@ -279,6 +279,41 @@ impl WorkflowEngine {
         f(&mut s)
     }
 
+    /// 会话 id（短临界区读取）。
+    pub fn id(&self) -> String {
+        self.session.read().expect("RwLock 中毒").id.clone()
+    }
+
+    /// 会话状态（短临界区读取）。
+    pub fn state(&self) -> SessionState {
+        self.session.read().expect("RwLock 中毒").state
+    }
+
+    /// 会话标题（短临界区读取）。
+    pub fn title(&self) -> String {
+        self.session.read().expect("RwLock 中毒").title.clone()
+    }
+
+    /// 会话标题是否为空。
+    pub fn title_is_empty(&self) -> bool {
+        self.session.read().expect("RwLock 中毒").title.is_empty()
+    }
+
+    /// 关联普通会话列表的克隆（短临界区读取）。
+    pub fn children(&self) -> Vec<ChildSession> {
+        self.session.read().expect("RwLock 中毒").children.clone()
+    }
+
+    /// 关联普通会话数量。
+    pub fn child_count(&self) -> usize {
+        self.session.read().expect("RwLock 中毒").children.len()
+    }
+
+    /// 会话快照（仅读字段的克隆；调用方需持有 RwLock 语义）。
+    pub fn snapshot(&self) -> OrcSession {
+        self.session.read().expect("RwLock 中毒").clone()
+    }
+
     /// 记录一条活动并实时追加落盘（不依赖 `persist` 的整文件快照）。
     pub fn record_activity(&self, act: Activity) {
         self.with_session(|s| s.activities.push(act.clone()));
