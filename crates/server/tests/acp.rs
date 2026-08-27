@@ -51,6 +51,27 @@ async fn acp_driver_full_flow() {
         .expect("prompt 事件流应收到 usage_update");
     assert_eq!(usage, (53_000, 200_000));
 
+    // tool_call 与同 id 的 tool_call_update 都应路由（合并发生在 TurnMerger）。
+    let tools = events
+        .iter()
+        .filter_map(|ev| match ev {
+            AgentEvent::ToolCall {
+                id,
+                name,
+                title,
+                ..
+            } => Some((id.as_str(), name.as_deref(), title.as_deref())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tools.len(), 2, "ToolCall 与 ToolCallUpdate 各产生一条事件: {tools:?}");
+    assert_eq!(tools[0], ("tc1", Some("execute"), Some("运行 cargo test")));
+    assert_eq!(
+        tools[1],
+        ("tc1", None, Some("运行 cargo test 完成")),
+        "update 的 kind 缺失时 name 为 None（合并器沿用同 id 名称）"
+    );
+
     tokio::time::sleep(Duration::from_millis(200)).await;
     let approved = std::fs::read_to_string(&state_file).unwrap_or_default();
     assert!(

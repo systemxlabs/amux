@@ -78,13 +78,24 @@ impl SessionLog {
 /// 单 turn 聚合：把 turn 期间的驱动事件转换为历史 + 活动：
 /// - 用户输入 → `HistoryItem::UserMessage`
 /// - agent 输出合并为一条 `HistoryItem::AgentMessage`
-/// - thinking 累积为一条 `Activity::Thinking`，工具调用为 `Activity::ToolCall`
+/// - thinking 累积为一条 `Activity::Thinking`
+/// - 同一 `tool_call_id` 的 tool_call / tool_call_update 合并为一条 `Activity::ToolCall`
 #[derive(Default)]
 pub struct TurnMerger {
     output: Option<(String, u64)>,
     thinking: Option<(String, u64)>,
+    /// 当前进行中的工具调用（按 ACP `tool_call_id` 合并；遇到新 id 或非工具事件时定稿）。
+    current_tool: Option<CurrentTool>,
     history: Vec<HistoryItem>,
     activities: Vec<Activity>,
+}
+
+struct CurrentTool {
+    id: String,
+    name: String,
+    title: Option<String>,
+    content: Option<String>,
+    timestamp: u64,
 }
 
 impl TurnMerger {
@@ -93,6 +104,7 @@ impl TurnMerger {
     }
 
     pub fn push_output(&mut self, text: String, timestamp: u64) {
+        self.finish_current_tool();
         if let Some((t, first)) = &mut self.output {
             if *first == 0 {
                 *first = timestamp;
@@ -112,7 +124,19 @@ impl TurnMerger {
         }
     }
 
+    fn finish_current_tool(&mut self) {
+        if let Some(tool) = self.current_tool.take() {
+            self.activities.push(Activity::ToolCall {
+                timestamp: tool.timestamp,
+                name: tool.name,
+                title: tool.title,
+                content: tool.content,
+            });
+        }
+    }
+
     pub fn push_thinking(&mut self, content: String, timestamp: u64) {
+        self.finish_current_tool();
         if let Some((c, first)) = &mut self.thinking {
             if *first == 0 {
                 *first = timestamp;
@@ -132,24 +156,42 @@ impl TurnMerger {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn push_tool_call(
         &mut self,
-        name: String,
+        id: String,
+        name: Option<String>,
         title: Option<String>,
         content: Option<String>,
         timestamp: u64,
     ) {
         self.finish_thinking();
-        self.activities.push(Activity::ToolCall {
-            timestamp,
+        if let Some(tool) = &mut self.current_tool {
+            if tool.id == id {
+                if let Some(name) = name {
+                    tool.name = name;
+                }
+                if title.is_some() {
+                    tool.title = title;
+                }
+                if content.is_some() {
+                    tool.content = content;
+                }
+                return;
+            }
+        }
+        self.finish_current_tool();
+        let name = name.unwrap_or_else(|| "tool_call".into());
+        self.current_tool = Some(CurrentTool {
+            id,
             name,
             title,
             content,
+            timestamp,
         });
     }
 
     pub fn push_error(&mut self, activity: Activity) {
+        self.finish_current_tool();
         self.finish_thinking();
         self.activities.push(activity);
     }
@@ -162,6 +204,7 @@ impl TurnMerger {
 
     pub fn finish(&mut self) -> (Vec<HistoryItem>, Vec<Activity>) {
         self.finish_output();
+        self.finish_current_tool();
         self.finish_thinking();
         (std::mem::take(&mut self.history), self.take_ready())
     }
@@ -178,7 +221,7 @@ mod tests {
         m.push_thinking("y".into(), 4);
         m.push_output("a".into(), 5);
         m.push_output("b".into(), 6);
-        m.push_tool_call("t".into(), None, None, 7);
+        m.push_tool_call("tc1".into(), Some("t".into()), None, None, 7);
         m.push_error(Activity::Error {
             timestamp: 8,
             detail: "出错".into(),
@@ -202,6 +245,62 @@ mod tests {
         assert!(acts
             .iter()
             .any(|a| matches!(a, Activity::Error { detail, .. } if detail == "出错")));
+    }
+
+    #[test]
+    fn merger_merges_tool_call_updates_by_id() {
+        let mut m = TurnMerger::new();
+        m.push_tool_call(
+            "tc1".into(),
+            Some("read".into()),
+            Some("读文件".into()),
+            Some(r#"{"path":"a"}"#.into()),
+            1,
+        );
+        m.push_tool_call("tc1".into(), None, Some("读文件 v2".into()), None, 2);
+        m.push_tool_call("tc1".into(), None, None, Some(r#"{"path":"b"}"#.into()), 3);
+        m.push_tool_call(
+            "tc2".into(),
+            Some("execute".into()),
+            Some("运行测试".into()),
+            None,
+            4,
+        );
+        m.push_tool_call(
+            "tc2".into(),
+            None,
+            Some("运行测试完成".into()),
+            Some(r#"{"cmd":"cargo test"}"#.into()),
+            5,
+        );
+        let (_, acts) = m.finish();
+        assert_eq!(acts.len(), 2, "同 id 的多条 update 应合并为一条 ToolCall");
+        match &acts[0] {
+            Activity::ToolCall {
+                name,
+                title,
+                content,
+                ..
+            } => {
+                assert_eq!(name, "read");
+                assert_eq!(title.as_deref(), Some("读文件 v2"));
+                assert_eq!(content.as_deref(), Some(r#"{"path":"b"}"#));
+            }
+            _ => panic!("应为 ToolCall"),
+        }
+        match &acts[1] {
+            Activity::ToolCall {
+                name,
+                title,
+                content,
+                ..
+            } => {
+                assert_eq!(name, "execute");
+                assert_eq!(title.as_deref(), Some("运行测试完成"));
+                assert_eq!(content.as_deref(), Some(r#"{"cmd":"cargo test"}"#));
+            }
+            _ => panic!("应为 ToolCall"),
+        }
     }
 
     #[test]

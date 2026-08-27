@@ -40,9 +40,10 @@ pub enum AgentEvent {
     OutputChunk(String),
     /// 思考片段
     Thinking(String),
-    /// 工具调用
+    /// 工具调用（ACP `tool_call` / `tool_call_update`，按 `tool_call_id` 合并）
     ToolCall {
-        name: String,
+        id: String,
+        name: Option<String>,
         title: Option<String>,
         content: Option<String>,
     },
@@ -682,23 +683,25 @@ async fn route_update(
             text_of(&chunk.content).map(AgentEvent::Thinking)
         }
         SessionUpdate::ToolCall(tc) => Some(AgentEvent::ToolCall {
-            name: tool_kind_str(&tc.kind),
+            id: tc.tool_call_id.0.to_string(),
+            name: Some(tool_kind_str(&tc.kind)),
             title: Some(tc.title.clone()),
             content: tc.raw_input.as_ref().map(|v| v.to_string()),
         }),
-        // ACP tool_call_update 的 kind 字段可选，常缺失；缺失时用标题作为展示名。
-        // kind 与 title 都没有的更新没有可展示标识，直接跳过（避免「工具调用 工具」空条目）。
-        SessionUpdate::ToolCallUpdate(tcu) => tcu
-            .fields
-            .kind
-            .as_ref()
-            .map(tool_kind_str)
-            .or_else(|| tcu.fields.title.clone())
-            .map(|name| AgentEvent::ToolCall {
+        // ACP `tool_call_update`：按 `tool_call_id` 合并到同一条活动。
+        // `kind`/`title` 可选；缺失时沿用已在合并器中的同 id 工具调用名称。
+        // 仅当更新携带可合并字段时才发出事件，避免空更新产生无意义条目。
+        SessionUpdate::ToolCallUpdate(tcu) => {
+            let name = tcu.fields.kind.as_ref().map(tool_kind_str);
+            let title = tcu.fields.title.clone();
+            let content = tcu.fields.raw_input.as_ref().map(|v| v.to_string());
+            (name.is_some() || title.is_some() || content.is_some()).then(|| AgentEvent::ToolCall {
+                id: tcu.tool_call_id.0.to_string(),
                 name,
-                title: tcu.fields.title.clone(),
-                content: tcu.fields.raw_input.as_ref().map(|v| v.to_string()),
-            }),
+                title,
+                content,
+            })
+        }
         SessionUpdate::UsageUpdate(update) => Some(AgentEvent::UsageUpdate {
             used: update.used,
             size: update.size,
@@ -792,7 +795,7 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, ContentChunk, SessionId, TextContent, ToolCall,
-        ToolCallStatus, ToolKind,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use tokio::sync::mpsc;
 
@@ -858,16 +861,80 @@ mod tests {
         let ev = rx.try_recv().expect("应收到 tool_call 事件");
         match ev {
             AgentEvent::ToolCall {
+                id,
                 name,
                 title,
                 content,
             } => {
-                assert_eq!(name, "execute");
+                assert_eq!(id, "tc1");
+                assert_eq!(name.as_deref(), Some("execute"));
                 assert_eq!(title.as_deref(), Some("运行 cargo test"));
                 assert!(content.unwrap_or_default().contains("cargo test"));
             }
             other => panic!("应为 ToolCall，得到 {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn route_update_tool_call_update_with_fields() {
+        let (routes, mut rx) = route_with_channel();
+        let tcu = ToolCallUpdate::new(
+            "tc1",
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Execute)
+                .title("运行测试")
+                .raw_input(serde_json::json!({"cmd": "cargo test"})),
+        );
+        let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
+        route_update(&routes, &notif).await;
+        let ev = rx.try_recv().expect("应收到 tool_call_update 事件");
+        match ev {
+            AgentEvent::ToolCall {
+                id,
+                name,
+                title,
+                content,
+            } => {
+                assert_eq!(id, "tc1");
+                assert_eq!(name.as_deref(), Some("execute"));
+                assert_eq!(title.as_deref(), Some("运行测试"));
+                assert!(content.unwrap_or_default().contains("cargo test"));
+            }
+            other => panic!("应为 ToolCall，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn route_update_tool_call_update_kind_missing_keeps_others() {
+        let (routes, mut rx) = route_with_channel();
+        // ACP tool_call_update 的 kind 可选，常缺失；只更新 title。
+        let tcu = ToolCallUpdate::new(
+            "tc1",
+            ToolCallUpdateFields::new().title("更新后的标题"),
+        );
+        let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
+        route_update(&routes, &notif).await;
+        let ev = rx.try_recv().expect("应收到 tool_call_update 事件");
+        match ev {
+            AgentEvent::ToolCall { name, title, .. } => {
+                assert_eq!(name, None, "kind 缺失时 name 应为 None（沿用合并器中的同 id 名称）");
+                assert_eq!(title.as_deref(), Some("更新后的标题"));
+            }
+            other => panic!("应为 ToolCall，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn route_update_tool_call_update_empty_skipped() {
+        let (routes, mut rx) = route_with_channel();
+        // 仅 status 变化（无可合并字段）不产生事件，避免空条目。
+        let tcu = ToolCallUpdate::new(
+            "tc1",
+            ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+        );
+        let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
+        route_update(&routes, &notif).await;
+        assert!(rx.try_recv().is_err(), "仅 status 的 update 不应产生事件");
     }
 
     #[tokio::test]
