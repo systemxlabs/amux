@@ -734,18 +734,22 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 对话滚动区当前是否贴底。偏移为负（向上为负），贴底时 offset.y 达到最大负偏移 -max_offset.y。
+    /// 滚动容器是否贴底：gpui 的 offset.y 范围为 [-max_offset.y, 0]
+    /// （顶部 0、底部 -max），贴底即接近区间下端，留 1px 浮点容差。
+    fn scroll_handle_at_bottom(handle: &gpui::ScrollHandle) -> bool {
+        let off = handle.offset().y;
+        let max = handle.max_offset().y;
+        off <= -max + px(1.0)
+    }
+
+    /// 对话历史滚动区当前是否贴底。
     fn dialog_at_bottom(&self) -> bool {
-        let off = self.dialog_scroll.offset();
-        let max = self.dialog_scroll.max_offset();
-        off.y >= -max.y
+        Self::scroll_handle_at_bottom(&self.dialog_scroll)
     }
 
     /// 活动历史滚动区当前是否贴底，语义同 dialog_at_bottom。
     fn activities_at_bottom(&self) -> bool {
-        let off = self.activities_scroll.offset();
-        let max = self.activities_scroll.max_offset();
-        off.y >= -max.y
+        Self::scroll_handle_at_bottom(&self.activities_scroll)
     }
 
     fn refresh_dialog(
