@@ -76,7 +76,8 @@ pub struct SessionMeta {
     /// 最近活跃时间（会话列表按它排序）
     pub last_active_at: u64,
     /// git worktree 目录（docs/DESIGN.md「工作树存储」）：非空时 agent 实际工作在
-    /// 该目录，磁盘上的工作树在首次接收指令时惰性创建；空串 = 未启用 worktree。
+    /// 该目录，磁盘上的工作树由 `session.new` 立即创建（`use_worktree=true`）；
+    /// 空串 = 未启用 worktree。
     #[serde(default)]
     pub worktree_dir: String,
 }
@@ -87,7 +88,8 @@ pub struct SessionMeta {
 pub struct SessionNewParams {
     pub agent: String,
     pub cwd: String,
-    /// 是否以 git worktree 方式工作：路径在创建会话时确定，工作树惰性创建
+    /// 是否以 git worktree 方式工作：`session.new` 即在工作树根目录下创建独立
+    /// worktree 并写入元数据；agent 侧会话仍延后到首条指令时懒创建
     #[serde(default)]
     pub use_worktree: bool,
 }

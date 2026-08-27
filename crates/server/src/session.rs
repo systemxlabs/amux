@@ -130,10 +130,11 @@ impl SessionManager {
         &self.agents
     }
 
-    /// 新建普通会话（**惰性**：只写注册表立即返回，不触发 ACP；agent 侧会话延后到
-    /// 首条指令时经 `session/new` 懒创建）。`use_worktree` 时按 docs/DESIGN.md
-    /// 「工作树存储」确定 worktree 路径（统一位于 `~/.amux/worktrees/`，即
-    /// data_dir 同级的 worktrees/），磁盘工作树同样惰性——首次接收指令才落盘。
+    /// 新建普通会话（**agent 侧会话惰性**，**worktree 立即创建**）：只写注册表
+    /// 立即返回，不触发 ACP；agent 侧会话延后到首条指令时经 `session/new`
+    /// 懒创建。`use_worktree` 时按 docs/DESIGN.md「工作树存储」在
+    /// `~/.amux/worktrees/`（data_dir 同级）下确定路径并立即执行
+    /// `git worktree add`——失败时注册表尚未落盘，整体回滚返回错误。
     pub async fn create(
         &self,
         agent: &str,
@@ -144,19 +145,29 @@ impl SessionManager {
         let ts = now();
         log::info!("新建会话 {id}（agent={agent} cwd={cwd}，agent 侧会话延后创建）");
         let worktree_dir = if use_worktree {
+            // 前置校验：非 git 仓库直接报错，避免落到 raw git 输出
+            if !GitRunner::new().is_repo(cwd) {
+                return Err(SessionError::Storage(format!(
+                    "工作目录不是 git 仓库，无法启用 worktree: {cwd}"
+                )));
+            }
             let repo_name = std::path::Path::new(cwd)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "repo".into());
             // 随机串取 UUID 前 8 位：同仓库多会话并存、路径可读且免碰撞
             let rand: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-            self.data_dir
+            let target = self
+                .data_dir
                 .parent()
                 .unwrap_or(std::path::Path::new("/tmp"))
                 .join("worktrees")
-                .join(format!("{repo_name}-{rand}"))
-                .to_string_lossy()
-                .into_owned()
+                .join(format!("{repo_name}-{rand}"));
+            // docs/DESIGN.md「工作树存储」：会话创建时即落盘，而非首条指令时
+            GitRunner::new()
+                .create_worktree(cwd, &target)
+                .map_err(SessionError::Storage)?;
+            target.to_string_lossy().into_owned()
         } else {
             String::new()
         };
@@ -523,14 +534,7 @@ impl SessionManager {
         }
         meta.state = SessionState::Busy;
         meta.last_active_at = now();
-        // worktree 惰性创建（docs/DESIGN.md「工作树存储」）：路径在 session.new 已
-        // 确定，首次接收指令才落盘。放在 ACP 交互之前——失败即拒绝本次 prompt，
-        // 注册表尚未写 Busy，无需状态回滚。
-        if !meta.worktree_dir.is_empty() && !std::path::Path::new(&meta.worktree_dir).exists() {
-            GitRunner::new()
-                .create_worktree(&meta.cwd, std::path::Path::new(&meta.worktree_dir))
-                .map_err(SessionError::Storage)?;
-        }
+        // worktree 在 session.new 已落盘（docs/DESIGN.md「工作树存储」），此处不再创建。
         // agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
         // create/resume 共用此值，GUI 的 workspace/diff RPC 也按它下发。
         let cwd = if meta.worktree_dir.is_empty() {
@@ -847,7 +851,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worktree_lazy_create_and_delete_cascade() {
+    async fn worktree_eager_create_and_delete_cascade() {
         // data_dir 嵌套一层：worktree 根落在用例沙箱内（data_dir 同级 worktrees/）
         let case = std::env::temp_dir().join(format!(
             "amux-wt-{}-{}",
@@ -874,6 +878,7 @@ mod tests {
             Arc::new(SessionRegistry::open(&case.join("server").join("session.sqlite")).unwrap());
         let (mgr, _rx) = SessionManager::new(agents, registry, case.join("server"));
 
+        // session.new 即落盘工作树（docs/DESIGN.md「工作树存储」）
         let meta = mgr
             .create("codex", repo.to_str().unwrap(), true)
             .await
@@ -881,18 +886,15 @@ mod tests {
         assert!(meta
             .worktree_dir
             .starts_with(case.join("worktrees").to_str().unwrap()));
-        assert!(
-            !std::path::Path::new(&meta.worktree_dir).exists(),
-            "工作树应惰性创建：session.new 不落盘"
-        );
-
-        // 首次指令：工作树落盘并挂入主仓库
-        mgr.prompt(&meta.id, text("hi")).await.unwrap();
         let wt = std::path::PathBuf::from(&meta.worktree_dir);
-        assert!(wt.is_dir(), "首次 prompt 应创建工作树");
+        assert!(wt.is_dir(), "session.new 应立即创建工作树");
         assert!(wt.join(".git").is_file(), ".git 为文件是 worktree 的特征");
         let list = git(&repo, &["worktree", "list", "--porcelain"]);
         assert!(list.contains(meta.worktree_dir.trim()));
+
+        // 首次指令：工作树已就位，prompt 正常完成
+        mgr.prompt(&meta.id, text("hi")).await.unwrap();
+        assert!(wt.is_dir(), "prompt 后工作树仍应存在");
 
         // 删除会话：工作树级联移除
         mgr.delete(&meta.id).await.unwrap();
@@ -900,6 +902,30 @@ mod tests {
         let list = git(&repo, &["worktree", "list", "--porcelain"]);
         assert!(!list.contains(meta.worktree_dir.trim()));
         let _ = std::fs::remove_dir_all(&case);
+    }
+
+    #[tokio::test]
+    async fn worktree_create_rejects_non_git_cwd() {
+        let agents = Arc::new(AgentRegistry::new_for_tests());
+        let dir = std::env::temp_dir().join(format!(
+            "amux-wt-norepo-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+
+        // 非 git 目录启用 worktree 应直接拒绝
+        let err = mgr
+            .create("codex", "/tmp", true)
+            .await
+            .expect_err("非 git 仓库应失败");
+        assert!(matches!(err, SessionError::Storage(_)), "got: {err:?}");
+
+        // 失败路径不留痕：注册表应为空
+        let all = registry.list().unwrap();
+        assert!(all.is_empty(), "失败时不应写入注册表: {all:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

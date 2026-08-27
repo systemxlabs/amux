@@ -632,7 +632,7 @@ impl GitRunner {
         let _ = run(repo_cwd, &["worktree", "prune"]);
     }
 
-    /// 判定 cwd 是否为 git 仓库（worktree 开关的前置校验与惰性创建前的复验）。
+    /// 判定 cwd 是否为 git 仓库（worktree 开关的前置校验）。
     pub fn is_repo(&self, cwd: &str) -> bool {
         gix::discover(cwd)
             .ok()
