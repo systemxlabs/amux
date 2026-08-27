@@ -230,32 +230,47 @@ impl SessionManager {
                 .remove()
                 .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
         };
-        if !agent_session_id.is_empty() {
-            match self.agents.driver_for(&meta.agent) {
-                Ok(driver) => {
-                    if let Err(e) = driver.close(&agent_session_id) {
-                        log::error!("关闭 ACP 会话失败（继续本地删除）{session_id}: {e}");
-                    }
-                    if let Err(e) = driver.delete_session(&agent_session_id) {
-                        log::debug!("agent 不支持或删除 ACP 会话失败（忽略）{session_id}: {e}");
-                    }
-                }
-                Err(e) => {
-                    log::error!("解析 agent 驱动失败（继续本地删除）{session_id}: {e}");
-                }
-            }
-        }
+        // 元数据先行删除：删除 RPC 立即返回，会话列表随桌面端删除后的主动刷新
+        // 即刻生效；agent 往返与 worktree 清理较慢，交由后台任务异步完成。
         self.registry.delete(session_id)?;
         log.remove()
             .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")))?;
         self.invalidate_log_caches(session_id);
-        // worktree 级联清理（docs/DESIGN.md「工作树存储」）：尽力而为不阻断删除
-        if !meta.worktree_dir.is_empty() {
-            let wt = std::path::PathBuf::from(&meta.worktree_dir);
-            if wt.exists() {
-                GitRunner::new().remove_worktree(&meta.cwd, &wt);
+
+        // 资源清理（docs/DESIGN.md「工作树存储」与 ACP 会话生命周期）：
+        // ACP close/delete 往返 + worktree 目录清理，均为尽力而为不阻断。
+        let agents = self.agents.clone();
+        let data_dir = self.data_dir.clone();
+        let session_id2 = session_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if !agent_session_id.is_empty() {
+                match agents.driver_for(&meta.agent) {
+                    Ok(driver) => {
+                        if let Err(e) = driver.close(&agent_session_id) {
+                            log::error!("关闭 ACP 会话失败（继续本地删除）{session_id2}: {e}");
+                        }
+                        if let Err(e) = driver.delete_session(&agent_session_id) {
+                            log::debug!(
+                                "agent 不支持或删除 ACP 会话失败（忽略）{session_id2}: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("解析 agent 驱动失败（继续本地删除）{session_id2}: {e}");
+                    }
+                }
             }
-        }
+            if !meta.worktree_dir.is_empty() {
+                let wt = std::path::PathBuf::from(&meta.worktree_dir);
+                if wt.exists() {
+                    GitRunner::new().remove_worktree(&meta.cwd, &wt);
+                }
+            }
+            // 会话日志文件可能在删除前一刻仍有流式追加（并发 turn 兜底），再清一次
+            let _ = SessionLog::open(&data_dir, &session_id2).remove();
+            log::info!("会话资源清理完成 {session_id2}");
+        });
+
         // 控制块出 map：进行中的 prompt 持有 Arc 克隆仍能看到 deleted 标志；
         // 新请求将得到全新（未删除）的控制块——但会话已不在注册表，NotFound 兜底。
         self.controls.lock().unwrap().remove(session_id);
@@ -1192,9 +1207,17 @@ mod tests {
             "worktree 会话的 workspace_cwd 应返回 worktree 目录"
         );
 
-        // 删除会话：工作树级联移除
+        // 删除会话：工作树级联移除（资源清理已异步化，轮询等待后台完成）
         mgr.delete(&meta.id).await.unwrap();
-        assert!(!wt.exists(), "删除会话应级联删除工作树");
+        let mut removed = false;
+        for _ in 0..100 {
+            if !wt.exists() {
+                removed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(removed, "删除会话应级联删除工作树");
         let list = git(&repo, &["worktree", "list", "--porcelain"]);
         assert!(!list.contains(meta.worktree_dir.trim()));
         let _ = std::fs::remove_dir_all(&case);
@@ -2078,9 +2101,17 @@ mod tests {
         assert_eq!(closed.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         mgr.delete(&meta.id).await.unwrap();
-        assert_eq!(
-            closed.load(std::sync::atomic::Ordering::SeqCst),
-            1,
+        // 清理已异步化：轮询等待后台 driver.close 完成后再断言计数
+        let mut closed_seen = false;
+        for _ in 0..100 {
+            if closed.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+                closed_seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            closed_seen,
             "删除应触发一次 driver.close（ACP session/close）"
         );
         assert!(registry.get(&meta.id).unwrap().is_none(), "注册表应已删除");

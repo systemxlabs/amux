@@ -330,10 +330,16 @@ async fn session_lifecycle_state_change_and_delete() {
 
     let r = c.call("session.delete", json!({"sessionId": sid})).await;
     assert!(r.get("error").is_none(), "删除失败: {r}");
-    assert!(
-        mock_calls(&data_dir).contains("session/close"),
-        "删除应触发 ACP session/close"
-    );
+    // 资源清理异步化：close/delete 帧在删除 RPC 返回后于后台完成，轮询等待
+    let mut closed = false;
+    for _ in 0..50 {
+        if mock_calls(&data_dir).contains("session/close") {
+            closed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(closed, "后台清理应触发 ACP session/close");
     let list = c.call("session.list", json!({})).await;
     assert!(list["result"]["sessions"].as_array().unwrap().is_empty());
 }
