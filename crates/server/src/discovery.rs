@@ -1,5 +1,5 @@
 //! ACP agent 自动发现：PATH 探测已知 CLI，kimi 使用原生 `acp` 子命令，
-//! claude/codex 使用 npx 官方包装器。
+//! grok 使用原生 `agent` 子命令，claude/codex 使用 npx 官方包装器。
 //! 发现结果由 `AgentRegistry::launch_discovered` 在 server 启动时并行拉起。
 
 /// 自动发现的 ACP agent（含 ACP 子命令参数 / npx 包装器参数与附加环境变量）。
@@ -14,6 +14,7 @@ pub struct DiscoveredAgent {
 
 /// 自动发现已知的 ACP agent：
 /// - kimi：装有 `kimi` CLI 且 `kimi acp --help` 可用 → `kimi acp`
+/// - grok：装有 `grok` CLI 且 `grok agent --help` 可用 → `grok agent --always-approve stdio`
 /// - claude：装有 `claude` CLI 且 npx 可用 → `npx -y @agentclientprotocol/claude-agent-acp`
 /// - codex：装有 `codex` CLI 且 npx 可用 → `npx -y @agentclientprotocol/codex-acp`
 ///
@@ -32,6 +33,11 @@ pub(crate) fn discover_acp_agents() -> Vec<DiscoveredAgent> {
         if let Some(d) = discover_for_cli(cli, pkg, cli_bin, acp_supported, npx.clone()) {
             found.push(d);
         }
+    }
+    let grok_bin = find_on_path("grok");
+    let agent_supported = grok_bin.as_deref().map(has_agent_subcommand).unwrap_or(false);
+    if let Some(d) = discover_for_grok(grok_bin, agent_supported) {
+        found.push(d);
     }
     found
 }
@@ -71,6 +77,24 @@ fn discover_for_cli(
     }
 }
 
+/// grok 的发现决策（纯逻辑，便于单测）。
+fn discover_for_grok(cli_bin: Option<String>, agent_supported: bool) -> Option<DiscoveredAgent> {
+    let cli_bin = cli_bin?;
+    if !agent_supported {
+        return None;
+    }
+    Some(DiscoveredAgent {
+        name: "grok".to_string(),
+        bin: cli_bin,
+        args: vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string(),
+        ],
+        env: Vec::new(),
+    })
+}
+
 /// 在 PATH 上查找可执行文件（含 `.exe` 后缀剥离）。
 fn find_on_path(name: &str) -> Option<String> {
     let path = std::env::var("PATH").ok()?;
@@ -97,6 +121,20 @@ fn has_acp_subcommand(bin: &str) -> bool {
     }
     let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
     text.contains("acp")
+}
+
+/// 探测 `<bin> agent --help`：退出码 0 且输出提及 agent，
+/// 用于确认 grok CLI 的 `agent` 子命令可用。
+fn has_agent_subcommand(bin: &str) -> bool {
+    use std::process::Command;
+    let Ok(out) = Command::new(bin).args(["agent", "--help"]).output() else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    text.contains("agent")
 }
 
 #[cfg(unix)]
@@ -199,5 +237,25 @@ mod tests {
             None,
         )
         .is_none());
+    }
+
+    #[test]
+    fn discover_for_grok_native() {
+        let d = discover_for_grok(Some("/usr/bin/grok".into()), true).unwrap();
+        assert_eq!(d.name, "grok");
+        assert_eq!(d.bin, "/usr/bin/grok");
+        assert_eq!(d.args, vec!["agent", "--always-approve", "stdio"]);
+        assert!(d.env.is_empty());
+    }
+
+    #[test]
+    fn discover_for_grok_missing_or_unsupported() {
+        assert!(discover_for_grok(None, true).is_none());
+        assert!(discover_for_grok(Some("/usr/bin/grok".into()), false).is_none());
+    }
+
+    #[test]
+    fn has_agent_subcommand_detects() {
+        assert!(!has_agent_subcommand("/nonexistent/bin/definitely-not-here"));
     }
 }

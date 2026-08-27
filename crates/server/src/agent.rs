@@ -1,7 +1,7 @@
 //! Agent 驱动抽象：server 与 agent 的唯一接口。
 //! 本模块提供：
 //! - `AcpAgentDriver`：真实 ACP v1 对接（官方 SDK `agent-client-protocol`，
-//!   `AcpAgent` stdio 传输 + typed 请求/通知，`codex-acp` / `claude-acp` / `kimi acp`）
+//!   `AcpAgent` stdio 传输 + typed 请求/通知，`grok agent`、`codex-acp` / `claude-acp` / `kimi acp`）
 //! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
 //! - `AgentRegistry`：按 agent 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
 //!   agent（启动即拉起并复用；拉起失败标记不可用；
@@ -26,6 +26,7 @@ use protocol::AgentInfo;
 /// - `--agent` 指定的驱动（agent 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
 /// - 自动发现（无需 `--agent`）：
 ///   - 已知 CLI 的 `acp` 子命令探测（如 `kimi acp`，ACP 原生）
+///   - 已知 CLI 的 `agent` 子命令探测（如 `grok agent --always-approve stdio`）
 ///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
 ///   - 发现的 agent 在 server 启动时**直接拉起**（`launch_discovered`，后续
 ///     `driver_for` 复用缓存驱动）；
