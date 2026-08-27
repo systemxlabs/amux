@@ -39,6 +39,11 @@ pub struct SessionManager {
     tx: broadcast::Sender<ServerNotification>,
     /// 进行中的活动（`session.ongoing_activity`；按会话 id 独立存储）
     ongoing: Mutex<HashMap<String, Activity>>,
+    /// 当前 turn 的累积思考文本（多 chunk 拼接）。
+    /// `ongoing` 中的 `Activity::Thinking.content` 写入时引用这里，保证 GUI 看到
+    /// 的是「整个思考的前一部分」而不是最新一个流式片段。
+    /// 与 `ongoing` 生命周期一致：turn 结束随 `ongoing` 一起清理。
+    thinking_buf: Mutex<HashMap<String, (String, u64)>>,
     controls: Mutex<HashMap<String, Arc<SessionControl>>>,
     /// 已解析历史缓存（GUI 每 10s 轮询打开的会话；文件未变时免全量 JSONL 重解析）
     history_cache: Mutex<HashMap<String, LogCache<HistoryItem>>>,
@@ -83,6 +88,7 @@ impl SessionManager {
             data_dir,
             tx,
             ongoing: Mutex::new(HashMap::new()),
+            thinking_buf: Mutex::new(HashMap::new()),
             controls: Mutex::new(HashMap::new()),
             history_cache: Mutex::new(HashMap::new()),
             activities_cache: Mutex::new(HashMap::new()),
@@ -589,11 +595,26 @@ impl SessionManager {
                 AgentEvent::OutputChunk(text) => merger.push_output(text, now()),
                 AgentEvent::Thinking(text) => {
                     merger.push_thinking(text.clone(), now());
+                    // 累积写入 thinking_buf，再让 ongoing 引用累积内容——
+                    // 否则多个流式 chunk 到达时，GUI 看到的「思考中」只会是
+                    // 最新一段，落盘的历史活动（merger 累积）反而更全，行为不一致。
+                    let ts = now();
+                    let (accumulated, first_ts) = {
+                        let mut buf = self.thinking_buf.lock().unwrap();
+                        let entry = buf.entry(session_id.to_string()).or_insert_with(|| {
+                            (String::new(), ts)
+                        });
+                        if entry.1 == 0 {
+                            entry.1 = ts;
+                        }
+                        entry.0.push_str(&text);
+                        (entry.0.clone(), entry.1)
+                    };
                     self.ongoing.lock().unwrap().insert(
                         session_id.to_string(),
                         Activity::Thinking {
-                            timestamp: now(),
-                            content: text,
+                            timestamp: first_ts,
+                            content: accumulated,
                         },
                     );
                 }
@@ -697,6 +718,7 @@ impl SessionManager {
         reason: protocol::StateChangeReason,
     ) {
         self.ongoing.lock().unwrap().remove(session_id);
+        self.thinking_buf.lock().unwrap().remove(session_id);
         control.busy.store(false, Ordering::SeqCst);
         if !deleted {
             if let Err(e) = self
@@ -900,6 +922,64 @@ mod tests {
         fn shutdown(&self) {}
     }
 
+    /// 测试驱动：prompt 时按顺序推送多个 thinking chunk 再结束 turn。
+    /// 每发完一个 chunk 阻塞等待 `release`，让测试可以串行观察
+    /// `ongoing_activity` 在 chunk 累积过程中的中间态。
+    struct ThinkingChunksDriver {
+        chunks: Vec<&'static str>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl AgentDriver for ThinkingChunksDriver {
+        fn create_session(&self, _cwd: &str) -> Result<String, String> {
+            Ok("agent_thinking".into())
+        }
+
+        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn prompt(
+            &self,
+            _agent_session_id: &str,
+            _input: Vec<ContentBlock>,
+        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let chunks = self.chunks.clone();
+            let release = self.release.clone();
+            tokio::spawn(async move {
+                for c in chunks {
+                    let _ = tx.send(AgentEvent::Thinking(c.into())).await;
+                    release.notified().await;
+                }
+                let _ = tx
+                    .send(AgentEvent::TurnEnded(
+                        protocol::StateChangeReason::Completed,
+                    ))
+                    .await;
+            });
+            rx
+        }
+
+        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn list_skills(&self) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+
+        fn shutdown(&self) {}
+    }
+
     fn git(cwd: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .arg("-C")
@@ -1038,6 +1118,81 @@ mod tests {
         assert_eq!(stored.context_size, 53_000);
         assert_eq!(stored.context_window_size, 200_000);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ongoing_thinking_accumulates_across_chunks() {
+        // GUI 通过 session.ongoing_activity 看到「思考中」应当是整个 turn 的累积内容，
+        // 而不是最新一个流式 chunk（docs/PRD.md 实时活动展示期望）。
+        // prompt 由驱动在每个 chunk 后阻塞等待 release，测试用 wait_for_thinking
+        // 串行观察三个中间态：单段 → 两段 → 三段。
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "codex",
+            Arc::new(ThinkingChunksDriver {
+                chunks: vec!["先读 src/main.rs", "，再分析依赖", "，最后写结论"],
+                release: release.clone(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-thinking-accum-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry, dir.clone());
+        let mgr = Arc::new(mgr);
+
+        let meta = mgr.create("codex", "/tmp/think", false).await.unwrap();
+
+        // 异步推进 prompt；通过 release 闸门控制驱动节奏
+        let mgr_for_task = mgr.clone();
+        let id_for_task = meta.id.clone();
+        let prompt_task = tokio::spawn(async move {
+            mgr_for_task.prompt(&id_for_task, text("hi")).await
+        });
+
+        // 每个 chunk 之后释放 driver 推进下一个 chunk；最后一段也需释放以让 turn 收尾
+        for expected in [
+            "先读 src/main.rs",
+            "先读 src/main.rs，再分析依赖",
+            "先读 src/main.rs，再分析依赖，最后写结论",
+        ] {
+            wait_for_thinking(&mgr, &meta.id, expected).await;
+            release.notify_one();
+        }
+        prompt_task.await.unwrap().unwrap();
+
+        // turn 结束后 ongoing 应已清空
+        assert!(mgr.ongoing_activity(&meta.id).await.unwrap().is_none());
+        // 落盘的活动历史也只剩一条合并后的 thinking
+        let (acts, _, _) = mgr.activities(&meta.id, None, None).await.unwrap();
+        let thinking = acts
+            .iter()
+            .find_map(|a| match a {
+                Activity::Thinking { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("应有累积的 thinking 活动");
+        assert_eq!(thinking, "先读 src/main.rs，再分析依赖，最后写结论");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 轮询等待 ongoing 出现 expected 内容。10ms tick × 200 = 2s 上限；
+    /// 真实场景下 1 个 tick 即应到位（事件经 mpsc 同步分发）。
+    async fn wait_for_thinking(mgr: &SessionManager, sid: &str, expected: &str) {
+        for _ in 0..200 {
+            if let Some(Activity::Thinking { content, .. }) =
+                mgr.ongoing_activity(sid).await.unwrap()
+            {
+                if content == expected {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("ongoing thinking 内容始终未匹配: {expected}");
     }
 
     #[test]
