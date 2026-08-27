@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(meta[0].id, "orc_1");
         assert_eq!(meta[0].title, "计划A");
         assert_eq!(meta[0].description, "做完再审查");
-        assert_eq!(meta[0].preamble, "模板");
+        assert_eq!(meta[0].preamble, "计划");
         assert_eq!(meta[0].state, SessionState::Idle);
         assert!(meta[0].transcript.is_empty());
         assert!(meta[0].activities.is_empty());
@@ -364,7 +364,7 @@ mod tests {
         );
         // 补齐只影响 payload，元数据字段保持不变。
         assert_eq!(meta[0].title, "计划A");
-        assert_eq!(meta[0].preamble, "模板");
+        assert_eq!(meta[0].preamble, "计划");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
