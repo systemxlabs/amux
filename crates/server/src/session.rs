@@ -605,6 +605,9 @@ impl SessionManager {
                 .create_session(&cwd)
                 .map_err(SessionError::AgentUnavailable)?;
             self.registry.set_agent_session_id(session_id, &sid2)?;
+            // 先 upsert（内存 meta 里的 config_options 尚为空）再写入选项，
+            // 避免全字段 ON CONFLICT 覆盖把刚取到的选项冲回空
+            self.registry.upsert(&meta, &sid2)?;
             if !options.is_empty() {
                 self.registry.set_config_options(session_id, &options)?;
             }
@@ -612,7 +615,6 @@ impl SessionManager {
         } else {
             agent_session_id
         };
-        self.registry.upsert(&meta, &agent_session_id)?;
         Ok((driver, agent_session_id, cwd, old_state))
     }
 

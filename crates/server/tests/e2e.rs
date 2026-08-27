@@ -272,6 +272,12 @@ async fn session_lifecycle_state_change_and_delete() {
         !meta["title"].as_str().unwrap_or("").is_empty(),
         "首条 prompt 后标题非空: {meta}"
     );
+    // 回归：lazy 创建时选项不得被后续 upsert 覆盖为空（mock new 响应带 model 选项）
+    let config_options = meta["configOptions"].as_array().unwrap();
+    assert!(
+        config_options.iter().any(|o| o["id"] == "model"),
+        "会话选项应在首条 prompt 后持久化: {meta}"
+    );
     let r = c
         .call(
             "session.configure",
