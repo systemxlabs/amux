@@ -99,13 +99,14 @@ Server 作为 ACP client 与 ACP servers 通信
 - 权限自动审批
 - 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送实际指令时，才向 ACP Server 发送 `session/new` 请求创建 agent 侧会话
 - 惰性恢复已有会话：等待用户往已有会话发送指令时，才向 ACP Server 发送 `session/resume` 请求恢复 agent 侧已有会话
+- 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 ACP Server 发送 `session/set_config_option` 请求来设置当前会话选项
 - 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
 - 删除会话：当用户删除会话时，如果会话已打开，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
 
 ### 普通会话存储
 
 普通会话数据包含三部分
-- 元数据：存储在 `~/.amux/server/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、所属 Agent、Agent 会话 ID、工作目录、worktree 目录，最近活跃时间等
+- 元数据：存储在 `~/.amux/server/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、所属 Agent、Agent 会话 ID、会话选项、工作目录、worktree 目录，最近活跃时间等
 - 对话历史：存储在 `~/.amux/server/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和 agent 输出（agent 流式输出合并后写入）
 - 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
 
