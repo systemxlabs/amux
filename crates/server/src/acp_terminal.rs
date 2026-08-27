@@ -111,12 +111,32 @@ impl TerminalRegistry {
 
     /// 拉起子进程并注册 actor。环境继承 server 进程后覆盖 agent 补设的变量；
     /// 命令启动失败返回 Err（agent 视为请求错误）。
+    ///
+    /// 兼容性：规范形式是 `command` 为可执行文件、参数放 `args`；但 kimi acp 等
+    /// 实现会把整条命令行（含引号与参数）塞进 `command` 且 `args` 为空。此处按
+    /// 「args 非空 → 直接 exec；args 空且 command 含空白 → 交由 /bin/sh -c 原样
+    /// 执行」归一化，两类 agent 均正确。
     pub fn create(&self, req: &CreateTerminalRequest) -> Result<CreateTerminalResponse, String> {
         let limit = req.output_byte_limit.unwrap_or(DEFAULT_OUTPUT_LIMIT) as usize;
         let id = format!("term_{}", self.next_id.fetch_add(1, Ordering::SeqCst));
 
-        let mut cmd = tokio::process::Command::new(&req.command);
-        cmd.args(&req.args);
+        if let Some(cwd) = &req.cwd {
+            if !cwd.is_dir() {
+                return Err(format!("terminal/create 工作目录不存在: {}", cwd.display()));
+            }
+        }
+        let inline_shell = req.args.is_empty() && req.command.split_whitespace().nth(1).is_some();
+        let (program, args) = if inline_shell {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), req.command.clone()],
+            )
+        } else {
+            (req.command.clone(), req.args.clone())
+        };
+
+        let mut cmd = tokio::process::Command::new(&program);
+        cmd.args(&args);
         if let Some(cwd) = &req.cwd {
             cmd.current_dir(cwd);
         }
@@ -417,6 +437,29 @@ mod tests {
         wait_req(&reg, tid.as_str()).await;
         let out = output_of(&reg, tid.as_str()).await;
         assert_eq!(out.output.trim(), "e");
+    }
+
+    #[tokio::test]
+    async fn inline_command_line_without_args_executes_via_shell() {
+        // kimi acp 形态：整条命令行塞进 command、args 为空
+        let reg = registry();
+        let resp = reg
+            .create(&create_req("/bin/bash -lc 'echo amux-inline-ok'", &[]))
+            .expect("create");
+        let tid = resp.terminal_id.to_string();
+        let st = wait_req(&reg, tid.as_str()).await;
+        assert_eq!(st.exit_code, Some(0));
+        let out = output_of(&reg, tid.as_str()).await;
+        assert_eq!(out.output.trim(), "amux-inline-ok");
+    }
+
+    #[tokio::test]
+    async fn missing_cwd_reports_clear_error() {
+        let reg = registry();
+        let req = create_req("/bin/sh", &["-c", "true"])
+            .cwd(std::path::PathBuf::from("/nonexistent/amux-cwd"));
+        let err = reg.create(&req).expect_err("应失败");
+        assert!(err.contains("工作目录不存在"), "{err}");
     }
 
     #[tokio::test]
