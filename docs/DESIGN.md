@@ -111,7 +111,7 @@ Server 作为 ACP client 与 ACP servers 通信
 
 ### 工作树存储
 
-Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 内。在普通会话首次接收指令时惰性创建 worktree，普通会话被删除时，其关联的 worktree 也应一并删除。
+Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 内。普通会话创建时若指定了 worktree 方式，则创建 worktree，普通会话被删除时，其关联的 worktree 也应一并删除。
 
 ## 应用
 
