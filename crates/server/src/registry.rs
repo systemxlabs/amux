@@ -83,6 +83,13 @@ impl SessionRegistry {
                 config_options TEXT NOT NULL DEFAULT '[]'
             );",
         )?;
+        // server 重启后恢复的会话一律回到空闲：busy 状态由上一进程持有，
+        // 其 agent 侧 turn 已随进程终止，残留 busy 会令后续 prompt 永远被拒。
+        // agent_session_id 保留，下一次交互按设计走惰性 session/resume。
+        conn.execute(
+            "UPDATE sessions SET state = 'idle' WHERE state = 'busy'",
+            [],
+        )?;
         Ok(SessionRegistry {
             conn: Mutex::new(conn),
         })
@@ -400,6 +407,29 @@ mod tests {
         reg.upsert(&m2, &aid).unwrap();
         let got = reg.get("s1").unwrap().unwrap();
         assert_eq!(got.0.config_options, opts);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn reopen_resets_stale_busy_to_idle() {
+        // 回归：server 重启后残留 busy 会让 prompt 永远被拒（agent 侧 turn 已随
+        // 进程终止），重新打开注册表时必须复位为空闲。
+        let db = tmp_db("reset-busy");
+        {
+            let reg = SessionRegistry::open(&db).unwrap();
+            let (m, aid) = meta("s1", 100);
+            reg.upsert(&m, &aid).unwrap();
+            reg.update_state("s1", SessionState::Busy, 200).unwrap();
+            assert_eq!(reg.get("s1").unwrap().unwrap().0.state, SessionState::Busy);
+        }
+        // 原实例 drop 后重新打开：同一份 sqlite，模拟 server 重启
+        {
+            let reg = SessionRegistry::open(&db).unwrap();
+            let got = reg.get("s1").unwrap().unwrap();
+            assert_eq!(got.0.state, SessionState::Idle);
+            // agent 侧会话 id 保留：下一次交互按设计走惰性 session/resume
+            assert_eq!(got.1, "agent_s1");
+        }
         let _ = std::fs::remove_file(&db);
     }
 
