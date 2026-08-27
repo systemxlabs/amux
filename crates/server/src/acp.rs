@@ -48,6 +48,13 @@ pub enum AgentEvent {
     },
     /// ACP 请求或传输失败
     Error(String),
+    /// 会话上下文大小更新（ACP `usage_update`：当前上下文大小与窗口总大小，token）。
+    UsageUpdate {
+        /// 当前在上下文中的 token 数
+        used: u64,
+        /// 上下文窗口总大小（token）
+        size: u64,
+    },
     /// turn 完成（携带结束原因）。
     TurnEnded(protocol::StateChangeReason),
 }
@@ -692,9 +699,12 @@ async fn route_update(
                 title: tcu.fields.title.clone(),
                 content: tcu.fields.raw_input.as_ref().map(|v| v.to_string()),
             }),
-        // SessionInfoUpdate（ACP v1 未携带状态字段）/ UsageUpdate /
-        // AvailableCommandsUpdate / CurrentModeUpdate / ConfigOptionUpdate /
-        // Plan 等不产生 AgentEvent
+        SessionUpdate::UsageUpdate(update) => Some(AgentEvent::UsageUpdate {
+            used: update.used,
+            size: update.size,
+        }),
+        // SessionInfoUpdate（ACP v1 未携带状态字段）/ AvailableCommandsUpdate /
+        // CurrentModeUpdate / ConfigOptionUpdate / Plan 等不产生 AgentEvent
         _ => None,
     };
     if let Some(ev) = ev {
@@ -871,6 +881,26 @@ mod tests {
         );
         route_update(&routes, &notif).await;
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn route_update_usage_update() {
+        let (routes, mut rx) = route_with_channel();
+        let notif = SessionNotification::new(
+            SessionId::new("s1"),
+            SessionUpdate::UsageUpdate(agent_client_protocol::schema::v1::UsageUpdate::new(
+                53_000, 200_000,
+            )),
+        );
+        route_update(&routes, &notif).await;
+        let ev = rx.try_recv().expect("应收到 usage 事件");
+        match ev {
+            AgentEvent::UsageUpdate { used, size } => {
+                assert_eq!(used, 53_000);
+                assert_eq!(size, 200_000);
+            }
+            other => panic!("应为 UsageUpdate，得到 {other:?}"),
+        }
     }
 
     #[test]

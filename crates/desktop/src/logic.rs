@@ -64,6 +64,35 @@ pub fn sort_sessions_recent(meta: &mut [SessionMeta]) {
     meta.sort_by_key(|entry| std::cmp::Reverse(entry.last_active_at));
 }
 
+/// 会话上下文占用展示文案（token）：`已用 / 窗口（百分比%）`。
+/// 两者均为 0（尚未收到 `usage_update`）时返回 None（不展示）。
+pub fn context_usage_text(used: u64, window: u64) -> Option<String> {
+    if used == 0 && window == 0 {
+        return None;
+    }
+    let used_s = format_thousands(used);
+    if window == 0 {
+        return Some(format!("{used_s} token"));
+    }
+    let window_s = format_thousands(window);
+    let percent = (used as f64 / window as f64) * 100.0;
+    Some(format!("{used_s} / {window_s} token（{percent:.1}%）"))
+}
+
+/// 千分位分组（仅用于展示，非契约）。
+fn format_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DialogMsg {
     UserMessage {
@@ -359,6 +388,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn context_usage_text_formats_and_hides_unknown() {
+        // 尚未收到 usage_update：两者为 0 → 不展示
+        assert_eq!(context_usage_text(0, 0), None);
+        // 仅窗口已知：只展示已用
+        assert_eq!(context_usage_text(0, 200_000), Some("0 / 200,000 token（0.0%）".into()));
+        // 典型占用：展示已用 / 窗口 与百分比
+        assert_eq!(
+            context_usage_text(53_000, 200_000),
+            Some("53,000 / 200,000 token（26.5%）".into())
+        );
+        // 窗口未知：只展示已用量
+        assert_eq!(context_usage_text(1_234, 0), Some("1,234 token".into()));
+    }
+
     fn smeta(id: &str, last: u64) -> SessionMeta {
         SessionMeta {
             id: id.into(),
@@ -369,6 +413,8 @@ mod tests {
             created_at: 1,
             last_active_at: last,
             worktree_dir: String::new(),
+            context_size: 0,
+            context_window_size: 0,
         }
     }
 

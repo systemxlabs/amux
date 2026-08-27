@@ -42,6 +42,8 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
         created_at: row.get::<_, i64>("created_at")? as u64,
         last_active_at: row.get::<_, i64>("last_active_at")? as u64,
         worktree_dir: row.get("worktree_dir")?,
+        context_size: row.get::<_, i64>("context_size")? as u64,
+        context_window_size: row.get::<_, i64>("context_window_size")? as u64,
     };
     let agent_session_id: String = row.get("agent_session_id")?;
     Ok((meta, agent_session_id))
@@ -73,7 +75,9 @@ impl SessionRegistry {
                 agent_session_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_active_at INTEGER NOT NULL,
-                worktree_dir TEXT NOT NULL DEFAULT ''
+                worktree_dir TEXT NOT NULL DEFAULT '',
+                context_size INTEGER NOT NULL DEFAULT 0,
+                context_window_size INTEGER NOT NULL DEFAULT 0
             );",
         )?;
         Ok(SessionRegistry {
@@ -86,13 +90,14 @@ impl SessionRegistry {
         let conn = self.connection()?;
         conn.execute(
             "INSERT INTO sessions
-                (id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                (id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                 agent=excluded.agent, cwd=excluded.cwd, state=excluded.state,
                 title=excluded.title, agent_session_id=excluded.agent_session_id,
                 created_at=excluded.created_at, last_active_at=excluded.last_active_at,
-                worktree_dir=excluded.worktree_dir",
+                worktree_dir=excluded.worktree_dir,
+                context_size=excluded.context_size, context_window_size=excluded.context_window_size",
             params![
                 meta.id,
                 meta.agent,
@@ -102,7 +107,9 @@ impl SessionRegistry {
                 agent_session_id,
                 meta.created_at as i64,
                 meta.last_active_at as i64,
-                meta.worktree_dir
+                meta.worktree_dir,
+                meta.context_size as i64,
+                meta.context_window_size as i64,
             ],
         )?;
         Ok(())
@@ -112,7 +119,7 @@ impl SessionRegistry {
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<RegistryEntry>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir
+            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size
              FROM sessions WHERE id = ?1",
         )?;
         stmt.query_row(params![id], row_to_entry).optional()
@@ -122,7 +129,7 @@ impl SessionRegistry {
     pub fn list(&self) -> rusqlite::Result<Vec<RegistryEntry>> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir
+            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size
              FROM sessions ORDER BY last_active_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], row_to_entry)?;
@@ -168,6 +175,22 @@ impl SessionRegistry {
         conn.execute(
             "UPDATE sessions SET agent_session_id = ?1 WHERE id = ?2",
             params![agent_session_id, id],
+        )?;
+        Ok(())
+    }
+
+    /// 记录会话上下文大小（docs/DESIGN.md「ACP 通信」：接收 `usage_update`
+    /// 通知后写入当前上下文大小与窗口总大小，单位 token）。
+    pub fn set_context_size(
+        &self,
+        id: &str,
+        context_size: u64,
+        context_window_size: u64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE sessions SET context_size = ?1, context_window_size = ?2 WHERE id = ?3",
+            params![context_size as i64, context_window_size as i64, id],
         )?;
         Ok(())
     }
@@ -229,6 +252,8 @@ mod tests {
                 created_at: 1,
                 last_active_at,
                 worktree_dir: String::new(),
+                context_size: 0,
+                context_window_size: 0,
             },
             format!("agent_{id}"),
         )
@@ -263,6 +288,29 @@ mod tests {
         assert!(reg.delete("s1").unwrap());
         assert!(!reg.delete("s1").unwrap());
         assert!(reg.get("s1").unwrap().is_none());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn context_size_persists_and_roundtrips() {
+        let db = tmp_db("ctx");
+        let reg = SessionRegistry::open(&db).unwrap();
+        let (m, aid) = meta("s1", 100);
+        reg.upsert(&m, &aid).unwrap();
+
+        reg.set_context_size("s1", 53_000, 200_000).unwrap();
+        let got = reg.get("s1").unwrap().unwrap();
+        assert_eq!(got.0.context_size, 53_000);
+        assert_eq!(got.0.context_window_size, 200_000);
+
+        // upsert（标题/状态更新）不应覆盖已记录的上下文大小
+        let (mut m2, _) = meta("s1", 200);
+        m2.context_size = 60_000;
+        m2.context_window_size = 200_000;
+        reg.upsert(&m2, &aid).unwrap();
+        let got = reg.get("s1").unwrap().unwrap();
+        assert_eq!(got.0.context_size, 60_000);
+        assert_eq!(got.0.context_window_size, 200_000);
         let _ = std::fs::remove_file(&db);
     }
 

@@ -26,7 +26,7 @@ use agent_client_protocol::schema::v1::{
     PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionInfo,
     SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
 use agent_client_protocol::{Agent, JsonRpcRequest, Result, Stdio};
 use serde::{Deserialize, Serialize};
@@ -257,6 +257,10 @@ async fn run(state_file: &str) -> Result<()> {
                         SessionUpdate::AgentMessageChunk(ContentChunk::new(
                             ContentBlock::Text(TextContent::new("完成！")),
                         )),
+                    ))?;
+                    cx_task.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::UsageUpdate(UsageUpdate::new(53_000, 200_000)),
                     ))?;
 
                     let agent_mid = format!("a{}", history_len(&request.session_id.to_string()));

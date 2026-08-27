@@ -180,6 +180,8 @@ impl SessionManager {
             created_at: ts,
             last_active_at: ts,
             worktree_dir,
+            context_size: 0,
+            context_window_size: 0,
         };
         self.registry.upsert(&meta, "")?;
         self.control(&meta.id);
@@ -618,6 +620,14 @@ impl SessionManager {
                     });
                     log::error!("agent turn 失败 {session_id}: {detail}");
                 }
+                AgentEvent::UsageUpdate { used, size } => {
+                    // 记录会话上下文大小（docs/DESIGN.md「ACP 通信」）。
+                    if !control.deleted.load(Ordering::SeqCst) {
+                        if let Err(e) = self.registry.set_context_size(session_id, used, size) {
+                            log::error!("记录会话上下文大小失败 {session_id}: {e}");
+                        }
+                    }
+                }
             }
             // 活动实时逐条落盘：thinking 累积到 tool_call/error 才定稿，
             // 定稿即写，不等 turn 结束。删除与 prompt 并发时旧 turn 不得
@@ -834,6 +844,62 @@ mod tests {
         fn shutdown(&self) {}
     }
 
+    /// 测试驱动：prompt 时先发一条上下文大小更新，再正常结束 turn
+    /// （验证 usage_update → 注册表记录的链路）。
+    struct UsageDriver {
+        used: u64,
+        size: u64,
+    }
+
+    impl AgentDriver for UsageDriver {
+        fn create_session(&self, _cwd: &str) -> Result<String, String> {
+            Ok("agent_usage".into())
+        }
+
+        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn prompt(
+            &self,
+            _agent_session_id: &str,
+            _input: Vec<ContentBlock>,
+        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            let used = self.used;
+            let size = self.size;
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(AgentEvent::UsageUpdate { used, size })
+                    .await;
+                let _ = tx
+                    .send(AgentEvent::TurnEnded(
+                        protocol::StateChangeReason::Completed,
+                    ))
+                    .await;
+            });
+            rx
+        }
+
+        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn list_skills(&self) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+
+        fn shutdown(&self) {}
+    }
+
     fn git(cwd: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .arg("-C")
@@ -947,6 +1013,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn prompt_records_usage_update_context_size() {
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "codex",
+            Arc::new(UsageDriver {
+                used: 53_000,
+                size: 200_000,
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-usage-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+
+        let meta = mgr.create("codex", "/tmp/usage", false).await.unwrap();
+        mgr.prompt(&meta.id, text("hi")).await.unwrap();
+
+        let (stored, _) = registry.get(&meta.id).unwrap().unwrap();
+        assert_eq!(stored.context_size, 53_000);
+        assert_eq!(stored.context_window_size, 200_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn session_page_lazy_windows() {
         fn entry(id: &str, last: u64) -> RegistryEntry {
@@ -960,6 +1053,8 @@ mod tests {
                     created_at: 1,
                     last_active_at: last,
                     worktree_dir: String::new(),
+                    context_size: 0,
+                    context_window_size: 0,
                 },
                 format!("agent_{id}"),
             )
@@ -1015,6 +1110,8 @@ mod tests {
                     created_at: 1,
                     last_active_at: 100,
                     worktree_dir: String::new(),
+                    context_size: 0,
+                    context_window_size: 0,
                 },
                 String::new(),
             )
@@ -1045,6 +1142,8 @@ mod tests {
                     created_at: 1,
                     last_active_at,
                     worktree_dir: String::new(),
+                    context_size: 0,
+                    context_window_size: 0,
                 },
                 String::new(),
             )

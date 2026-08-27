@@ -80,6 +80,12 @@ pub struct SessionMeta {
     /// 空串 = 未启用 worktree。
     #[serde(default)]
     pub worktree_dir: String,
+    /// 当前上下文大小（token，ACP `usage_update` 的 used）；0 = 尚未收到通知。
+    #[serde(default)]
+    pub context_size: u64,
+    /// 上下文窗口总大小（token，ACP `usage_update` 的 size）；0 = 尚未收到通知。
+    #[serde(default)]
+    pub context_window_size: u64,
 }
 
 /// `session.new` 参数。

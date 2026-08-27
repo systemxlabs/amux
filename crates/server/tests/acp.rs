@@ -42,7 +42,14 @@ async fn acp_driver_full_flow() {
             break;
         }
     }
-    let _ = events;
+    let usage = events
+        .iter()
+        .find_map(|ev| match ev {
+            AgentEvent::UsageUpdate { used, size } => Some((*used, *size)),
+            _ => None,
+        })
+        .expect("prompt 事件流应收到 usage_update");
+    assert_eq!(usage, (53_000, 200_000));
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let approved = std::fs::read_to_string(&state_file).unwrap_or_default();

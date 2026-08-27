@@ -44,8 +44,9 @@ use crate::config::{
 use crate::diff::{diff_lines, DiffLineKind};
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
-    compose_prompt, compose_workflow_text, external_path_attachment, merge_session_window,
-    parse_at_references, path_attachment, read_path_context, DialogMsg, InputAttachment,
+    compose_prompt, compose_workflow_text, context_usage_text, external_path_attachment,
+    merge_session_window, parse_at_references, path_attachment, read_path_context, DialogMsg,
+    InputAttachment,
 };
 use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::text::{block_text, one_line};
@@ -1863,6 +1864,8 @@ impl AmuxApp {
                     created_at: sg.created_at,
                     last_active_at: sg.updated_at,
                     worktree_dir: String::new(),
+                    context_size: 0,
+                    context_window_size: 0,
                 })
             }
             None => None,
@@ -4844,6 +4847,20 @@ impl AmuxApp {
                 cx.theme().muted_foreground,
                 cx.theme().foreground,
             ))
+            .when(
+                matches!(self.selected, Some(Selected::Session { .. }))
+                    && context_usage_text(meta.context_size, meta.context_window_size).is_some(),
+                |view| {
+                    // 会话上下文占用（docs/DESIGN.md：usage_update 记录已用/窗口，token）
+                    view.child(info_row(
+                        "上下文",
+                        &context_usage_text(meta.context_size, meta.context_window_size)
+                            .expect("上方已判非 None"),
+                        cx.theme().muted_foreground,
+                        cx.theme().foreground,
+                    ))
+                },
+            )
             .child(info_row(
                 "创建时间",
                 &format_timestamp(meta.created_at),
