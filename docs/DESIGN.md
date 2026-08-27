@@ -73,6 +73,7 @@ Server 在启动阶段会自动从本机发现当前已安装的 Agent。
 | kimi | 本机装有 `kimi` CLI 且 `kimi acp --help` 可用 |
 | claude | 本机装有 `claude` CLI 且 npx 可用 |
 | codex | 本机装有 `codex` CLI 且 npx 可用 |
+| grok | 本机装有 `grok` CLI 且 `grok agent --help` 可用 |
 
 ### ACP Server 启动
 
@@ -83,6 +84,7 @@ Server 在启动阶段会同时通过子进程方式启动已发现的 ACP Serve
 | kimi | `kimi acp` |
 | claude | `npx -y @agentclientprotocol/claude-agent-acp` |
 | codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @agentclientprotocol/codex-acp` |
+| grok | `grok agent --always-approve stdio` |
 
 ### ACP Server 生命周期
 
