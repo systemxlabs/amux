@@ -456,7 +456,7 @@ impl SessionManager {
             self.finalize_turn(
                 session_id,
                 &control,
-                false,
+                control.deleted.load(Ordering::SeqCst),
                 protocol::StateChangeReason::Aborted,
             );
             return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
@@ -477,7 +477,7 @@ impl SessionManager {
             self.finalize_turn(
                 session_id,
                 &control,
-                false,
+                control.deleted.load(Ordering::SeqCst),
                 protocol::StateChangeReason::Aborted,
             );
             return Err(SessionError::AgentUnavailable(format!(
@@ -490,7 +490,12 @@ impl SessionManager {
             .run_turn(session_id, &driver, &agent_session_id, input, &control)
             .await;
 
-        self.finalize_turn(session_id, &control, false, turn_reason);
+        self.finalize_turn(
+            session_id,
+            &control,
+            control.deleted.load(Ordering::SeqCst),
+            turn_reason,
+        );
         log::info!(
             "prompt 完成 {session_id}（{}ms）",
             started.elapsed().as_millis()
@@ -770,6 +775,61 @@ mod tests {
         (Arc::new(mgr), rx)
     }
 
+    /// 阻塞型驱动：prompt 后等待 release 才结束 turn（用于控制 turn 生命周期，
+    /// 在 turn 进行中并发执行删除以验证删除语义）。
+    struct BlockingDriver {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl AgentDriver for BlockingDriver {
+        fn create_session(&self, _cwd: &str) -> Result<String, String> {
+            Ok("agent_blocking".into())
+        }
+
+        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn prompt(
+            &self,
+            _agent_session_id: &str,
+            _input: Vec<ContentBlock>,
+        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let started = self.started.clone();
+            let release = self.release.clone();
+            tokio::spawn(async move {
+                started.notify_one();
+                release.notified().await;
+                let _ = tx
+                    .send(AgentEvent::TurnEnded(
+                        protocol::StateChangeReason::Completed,
+                    ))
+                    .await;
+            });
+            rx
+        }
+
+        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn list_skills(&self) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+
+        fn shutdown(&self) {}
+    }
+
     fn git(cwd: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .arg("-C")
@@ -1043,59 +1103,6 @@ mod tests {
     }
     #[tokio::test]
     async fn prompt_persists_user_message_before_turn_ends() {
-        struct BlockingDriver {
-            started: Arc<Notify>,
-            release: Arc<Notify>,
-        }
-
-        impl AgentDriver for BlockingDriver {
-            fn create_session(&self, _cwd: &str) -> Result<String, String> {
-                Ok("agent_blocking".into())
-            }
-
-            fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn prompt(
-                &self,
-                _agent_session_id: &str,
-                _input: Vec<ContentBlock>,
-            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                let started = self.started.clone();
-                let release = self.release.clone();
-                tokio::spawn(async move {
-                    started.notify_one();
-                    release.notified().await;
-                    let _ = tx
-                        .send(AgentEvent::TurnEnded(
-                            protocol::StateChangeReason::Completed,
-                        ))
-                        .await;
-                });
-                rx
-            }
-
-            fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn close(&self, _agent_session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn list_skills(&self) -> Result<Vec<String>, String> {
-                Ok(Vec::new())
-            }
-
-            fn shutdown(&self) {}
-        }
-
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
@@ -1135,6 +1142,69 @@ mod tests {
 
         release.notify_one();
         prompt_task.await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[tokio::test]
+    async fn deleted_mid_turn_does_not_broadcast_state_change() {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "blocking",
+            Arc::new(BlockingDriver {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-del-mid-turn-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (manager, mut rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+        let manager = Arc::new(manager);
+        let meta = manager
+            .create("blocking", "/tmp/work", false)
+            .await
+            .unwrap();
+        let session_id = meta.id.clone();
+
+        // turn 进行中删除会话：finalize_turn 不应为已删除会话广播状态变更，
+        // 也不应使其在注册表中复活。
+        let prompt_manager = manager.clone();
+        let prompt_session_id = session_id.clone();
+        let prompt_task = tokio::spawn(async move {
+            prompt_manager
+                .prompt(&prompt_session_id, text("进行中"))
+                .await
+        });
+        started.notified().await;
+        manager.delete(&session_id).await.unwrap();
+
+        release.notify_one();
+        let prompt_result = prompt_task.await.unwrap();
+        assert!(
+            matches!(prompt_result, Err(SessionError::NotFound(_))),
+            "turn 结束后已删除会话应返回 NotFound: {prompt_result:?}"
+        );
+        assert!(
+            registry.get(&session_id).unwrap().is_none(),
+            "删除的会话不应在注册表中复活"
+        );
+
+        // 已删除会话不应再广播任何状态变更（删除期间收到的 Busy 广播除外）。
+        let mut saw_deleted_broadcast = false;
+        while let Ok(n) = rx.try_recv() {
+            let ServerNotification::StateChange(c) = n;
+            if c.session_id == session_id && c.new_state == SessionState::Idle {
+                saw_deleted_broadcast = true;
+            }
+        }
+        assert!(
+            !saw_deleted_broadcast,
+            "已删除会话不应广播 busy→idle 状态变更"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[tokio::test]
