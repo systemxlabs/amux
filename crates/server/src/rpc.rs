@@ -6,12 +6,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use protocol::{
-    ActivitiesResult, AgentListResult, AgentParams, HistoryResult, OngoingActivityResult, OpResult,
-    SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
-    SessionListParams, SessionListResult, SessionNewParams, SessionPageParams, SessionPromptParams,
-    SessionResult, SessionSetConfigOptionParams, WorkspaceDiffParams, WorkspaceDiffResult,
-    WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams, method, rpc_error,
-    server_error,
+    method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams, HistoryResult,
+    OngoingActivityResult, OpResult, SessionConfigureParams, SessionIdParams, SessionInfoParams,
+    SessionInfoResult, SessionListParams, SessionListResult, SessionNewParams, SessionPageParams,
+    SessionPromptParams, SessionResult, SessionSetConfigOptionParams, WorkspaceDiffParams,
+    WorkspaceDiffResult, WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
 use crate::error::SessionError;

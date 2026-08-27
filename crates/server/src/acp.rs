@@ -8,7 +8,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     BlobResourceContents, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
     ClientSessionCapabilities, CloseSessionRequest, ContentBlock as AcpContentBlock,
@@ -22,9 +21,10 @@ use agent_client_protocol::schema::v1::{
     StopReason, TerminalOutputRequest, TextContent, TextResourceContents, ToolKind,
     WaitForTerminalExitRequest,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::AcpAgent;
 use agent_client_protocol::ConnectionTo;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use protocol::ContentBlock;

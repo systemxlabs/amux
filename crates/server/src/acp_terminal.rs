@@ -463,21 +463,19 @@ mod tests {
     #[tokio::test]
     async fn unknown_terminal_ids_are_errors() {
         let reg = registry();
-        assert!(
-            reg.output(&TerminalOutputRequest::new(
+        assert!(reg
+            .output(&TerminalOutputRequest::new(
                 SessionId::new("s1"),
                 TerminalId::new("term_missing")
             ))
-            .is_err()
-        );
-        assert!(
-            reg.wait(&WaitForTerminalExitRequest::new(
+            .is_err());
+        assert!(reg
+            .wait(&WaitForTerminalExitRequest::new(
                 SessionId::new("s1"),
                 TerminalId::new("term_missing")
             ))
             .await
-            .is_err()
-        );
+            .is_err());
     }
 
     #[tokio::test]
@@ -493,13 +491,12 @@ mod tests {
         ))
         .expect("release 应成功");
         // 句柄已移除，后续访问报错
-        assert!(
-            reg.wait(&WaitForTerminalExitRequest::new(
+        assert!(reg
+            .wait(&WaitForTerminalExitRequest::new(
                 SessionId::new("s1"),
                 TerminalId::new(tid)
             ))
             .await
-            .is_err()
-        );
+            .is_err());
     }
 }

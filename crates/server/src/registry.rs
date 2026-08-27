@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use protocol::{SessionMeta, SessionState};
-use rusqlite::{Connection, OptionalExtension, Row, params, types::Type};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 
 /// SQLite 会话注册表（server 单写者：内部 Connection 用互斥锁串行化）。
 pub struct SessionRegistry {

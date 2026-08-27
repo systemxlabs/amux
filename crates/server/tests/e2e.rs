@@ -5,7 +5,7 @@
 //! session.configure、删除触发 ACP session/close + session/delete、workspace.diff/restore。
 
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 struct Client {
@@ -437,13 +437,11 @@ async fn workspace_list_and_read_browse_session_directory() {
         .await;
     assert!(root.get("error").is_none(), "list 失败: {root}");
     assert_eq!(root["result"]["path"], "");
-    assert!(
-        root["result"]["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["path"] == "src" && entry["isDir"] == true)
-    );
+    assert!(root["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == "src" && entry["isDir"] == true));
 
     let nested = c
         .call(

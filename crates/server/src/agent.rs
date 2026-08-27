@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub use crate::acp::{AcpAgentDriver, AgentDriver, AgentEvent, LaunchSummary, SharedDriver};
-use crate::discovery::{DiscoveredAgent, discover_acp_agents};
+use crate::discovery::{discover_acp_agents, DiscoveredAgent};
 use protocol::AgentInfo;
 
 /// agent 注册表（自动发现可执行路径，不要求手动指定）：
@@ -559,18 +559,16 @@ mod tests {
         reg.no_discovery = true;
         reg.force_stub = false;
         reg.refresh_discovery();
-        assert!(
-            reg.stub
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .is_some()
-        );
-        assert!(
-            reg.discovered
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .is_empty()
-        );
+        assert!(reg
+            .stub
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_some());
+        assert!(reg
+            .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
         reg.stub = std::sync::Mutex::new(None);
         reg.configured = Some((
             "mock_acp".to_string(),
@@ -580,12 +578,11 @@ mod tests {
         let agents = reg.list_agents();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].name, "mock_acp");
-        assert!(
-            reg.discovered
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .is_empty()
-        );
+        assert!(reg
+            .discovered
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
     }
     #[cfg(test)]
     fn test_registry(
@@ -732,21 +729,19 @@ mod tests {
             0,
             "AMUX_NO_DISCOVERY=1 不应拉起: {summary:?}"
         );
-        assert!(
-            reg.spawned
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .is_empty()
-        );
+        assert!(reg
+            .spawned
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
         let reg = test_registry(vec![entry.clone()], true, false, None);
         let summary = reg.launch_discovered();
         assert_eq!(summary.started + summary.failed, 0);
-        assert!(
-            reg.spawned
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .is_empty()
-        );
+        assert!(reg
+            .spawned
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
         let reg = test_registry(
             vec![entry.clone()],
             false,
@@ -755,11 +750,10 @@ mod tests {
         );
         let summary = reg.launch_discovered();
         assert_eq!(summary.started + summary.failed, 0);
-        assert!(
-            reg.spawned
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .is_empty()
-        );
+        assert!(reg
+            .spawned
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_empty());
     }
 }

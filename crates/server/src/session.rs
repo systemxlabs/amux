@@ -16,8 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use protocol::{
-    Activity, ContentBlock, HistoryItem, SessionMeta, SessionState, SessionStateChange,
-    generate_title,
+    generate_title, Activity, ContentBlock, HistoryItem, SessionMeta, SessionState,
+    SessionStateChange,
 };
 
 use crate::agent::{AgentEvent, AgentRegistry};
@@ -1170,10 +1170,9 @@ mod tests {
             .create("codex", repo.to_str().unwrap(), true)
             .await
             .unwrap();
-        assert!(
-            meta.worktree_dir
-                .starts_with(case.join("worktrees").to_str().unwrap())
-        );
+        assert!(meta
+            .worktree_dir
+            .starts_with(case.join("worktrees").to_str().unwrap()));
         let wt = std::path::PathBuf::from(&meta.worktree_dir);
         assert!(wt.is_dir(), "session.new 应立即创建工作树");
         assert!(wt.join(".git").is_file(), ".git 为文件是 worktree 的特征");
@@ -1741,10 +1740,9 @@ mod tests {
 
         let (acts, _, _) = mgr.activities(&meta.id, None, None).await.unwrap();
         assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
-        assert!(
-            acts.iter()
-                .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file"))
-        );
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")));
 
         let (list, _, _) = mgr.list(None, None).await.unwrap();
         assert_eq!(list[0].state, SessionState::Idle);

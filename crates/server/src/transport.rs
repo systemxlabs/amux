@@ -2,15 +2,15 @@
 //! 通知广播（仅 `session.state_change`；多客户端同一份流、互不踢出）。
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
-use protocol::{AuthParams, JsonRpcRequest, OpResult, method, notify, server_error};
+use protocol::{method, notify, server_error, AuthParams, JsonRpcRequest, OpResult};
 
 use crate::rpc::{Handlers, RpcError};
 use crate::session::ServerNotification;

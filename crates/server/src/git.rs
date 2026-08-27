@@ -743,16 +743,14 @@ mod tests {
         let r = GitRunner::new();
         let st = r.diff(dir.to_str().unwrap(), None);
         assert!(!st.not_repo);
-        assert!(
-            st.files
-                .iter()
-                .any(|f| f.path == "a.txt" && matches!(f.status, GitChangeStatus::Modified))
-        );
-        assert!(
-            st.files
-                .iter()
-                .any(|f| f.path == "new.txt" && matches!(f.status, GitChangeStatus::Added))
-        );
+        assert!(st
+            .files
+            .iter()
+            .any(|f| f.path == "a.txt" && matches!(f.status, GitChangeStatus::Modified)));
+        assert!(st
+            .files
+            .iter()
+            .any(|f| f.path == "new.txt" && matches!(f.status, GitChangeStatus::Added)));
     }
 
     #[test]
@@ -845,11 +843,9 @@ mod tests {
             std::fs::create_dir_all(&outside).unwrap();
             std::fs::write(outside.join("secret.txt"), "secret").unwrap();
             std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
-            assert!(
-                runner
-                    .read_workspace(cwd, "link/secret.txt", 0, 10)
-                    .is_err()
-            );
+            assert!(runner
+                .read_workspace(cwd, "link/secret.txt", 0, 10)
+                .is_err());
         }
     }
 

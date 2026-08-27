@@ -402,7 +402,10 @@ mod tests {
         // 尚未收到 usage_update：两者为 0 → 不展示
         assert_eq!(context_usage_text(0, 0), None);
         // 仅窗口已知：只展示已用
-        assert_eq!(context_usage_text(0, 200_000), Some("0 / 200,000 token（0.0%）".into()));
+        assert_eq!(
+            context_usage_text(0, 200_000),
+            Some("0 / 200,000 token（0.0%）".into())
+        );
         // 典型占用：展示已用 / 窗口 与百分比
         assert_eq!(
             context_usage_text(53_000, 200_000),

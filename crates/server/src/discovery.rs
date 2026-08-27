@@ -224,26 +224,22 @@ mod tests {
 
     #[test]
     fn discover_for_cli_missing_prereqs() {
-        assert!(
-            discover_for_cli(
-                "codex",
-                Some("@agentclientprotocol/codex-acp"),
-                None,
-                false,
-                Some("/usr/bin/npx".into()),
-            )
-            .is_none()
-        );
-        assert!(
-            discover_for_cli(
-                "codex",
-                Some("@agentclientprotocol/codex-acp"),
-                Some("/usr/bin/codex".into()),
-                false,
-                None,
-            )
-            .is_none()
-        );
+        assert!(discover_for_cli(
+            "codex",
+            Some("@agentclientprotocol/codex-acp"),
+            None,
+            false,
+            Some("/usr/bin/npx".into()),
+        )
+        .is_none());
+        assert!(discover_for_cli(
+            "codex",
+            Some("@agentclientprotocol/codex-acp"),
+            Some("/usr/bin/codex".into()),
+            false,
+            None,
+        )
+        .is_none());
     }
 
     #[test]

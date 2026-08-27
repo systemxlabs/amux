@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use protocol::{AgentInfo, SessionMeta};
 
 use crate::aggregate::SessionView;
-use crate::config::{MachineConfig, machine_ws_url};
+use crate::config::{machine_ws_url, MachineConfig};
 use crate::ws::WsClient;
 
 use protocol::GitDiffFile;

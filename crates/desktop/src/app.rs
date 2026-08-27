@@ -6,7 +6,6 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    WindowExt,
     alert::Alert,
     button::*,
     checkbox::Checkbox,
@@ -25,7 +24,7 @@ use gpui_component::{
     tag::Tag,
     text::TextView,
     tooltip::Tooltip,
-    *,
+    WindowExt, *,
 };
 
 use serde_json::json;
@@ -40,19 +39,19 @@ use protocol::{
 };
 
 use crate::config::{
-    ApiFormat, ConfigStore, OrchestratorConfig, QuickCommand, SkillEntry, WorkflowTemplate,
-    machine_ws_url,
+    machine_ws_url, ApiFormat, ConfigStore, OrchestratorConfig, QuickCommand, SkillEntry,
+    WorkflowTemplate,
 };
-use crate::diff::{DiffLineKind, diff_lines};
+use crate::diff::{diff_lines, DiffLineKind};
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
-    DialogMsg, InputAttachment, compose_prompt, compose_workflow_text, context_percent,
-    context_usage_text, external_path_attachment, merge_session_window, parse_at_references,
-    path_attachment, read_path_context,
+    compose_prompt, compose_workflow_text, context_percent, context_usage_text,
+    external_path_attachment, merge_session_window, parse_at_references, path_attachment,
+    read_path_context, DialogMsg, InputAttachment,
 };
 use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::text::{block_text, one_line};
-use crate::workflow::{AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine, now};
+use crate::workflow::{now, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小。
@@ -1002,40 +1001,36 @@ impl AmuxApp {
             self._tasks.push(t);
         }
 
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            loop {
-                let target = this
-                    .update_in(cx, |this, _w, _cx| this.open_session_target())
-                    .ok()
-                    .flatten();
-                if let Some((machine, id)) = target {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.refresh_dialog(window, cx, machine, id.clone());
-                        this.refresh_activities(window, cx, machine, id);
-                        cx.notify();
-                    });
-                }
-                cx.background_executor()
-                    .timer(Duration::from_secs(10))
-                    .await;
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
+            let target = this
+                .update_in(cx, |this, _w, _cx| this.open_session_target())
+                .ok()
+                .flatten();
+            if let Some((machine, id)) = target {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.refresh_dialog(window, cx, machine, id.clone());
+                    this.refresh_activities(window, cx, machine, id);
+                    cx.notify();
+                });
             }
+            cx.background_executor()
+                .timer(Duration::from_secs(10))
+                .await;
         });
         self._tasks.push(t);
 
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            loop {
-                let target = this
-                    .update_in(cx, |this, _w, _cx| this.open_session_target())
-                    .ok()
-                    .flatten();
-                if let Some((machine, id)) = target {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.refresh_ongoing(window, cx, machine, id);
-                        cx.notify();
-                    });
-                }
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
+            let target = this
+                .update_in(cx, |this, _w, _cx| this.open_session_target())
+                .ok()
+                .flatten();
+            if let Some((machine, id)) = target {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.refresh_ongoing(window, cx, machine, id);
+                    cx.notify();
+                });
             }
+            cx.background_executor().timer(Duration::from_secs(2)).await;
         });
         self._tasks.push(t);
     }
@@ -4502,12 +4497,10 @@ impl AmuxApp {
         };
         let Some(directory) = machine.workspace_directories.get(path) else {
             return if machine.workspace_loading.contains(path) {
-                vec![
-                    Label::new("加载中…")
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .into_any_element(),
-                ]
+                vec![Label::new("加载中…")
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .into_any_element()]
             } else {
                 Vec::new()
             };
