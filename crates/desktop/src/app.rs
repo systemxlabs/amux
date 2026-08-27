@@ -6,6 +6,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
+    WindowExt,
     alert::Alert,
     button::*,
     checkbox::Checkbox,
@@ -24,41 +25,41 @@ use gpui_component::{
     tag::Tag,
     text::TextView,
     tooltip::Tooltip,
-    WindowExt, *,
+    *,
 };
 
 use serde_json::json;
 
 use protocol::{
-    ActivitiesResult, Activity, AgentListResult, AgentParams, AgentSkillsResult, ContentBlock,
-    GitChangeStatus, HistoryResult, OngoingActivityResult, OpResult, SessionConfigKind,
-    SessionConfigOptionValue, SessionConfigureParams, SessionIdParams, SessionListResult,
-    SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
-    SessionState, SessionStateChange, StateChangeReason, WorkspaceDiffParams, WorkspaceDiffResult,
-    WorkspaceListResult, WorkspaceReadParams, WorkspaceReadResult, WorkspaceRestoreParams,
+    ActivitiesResult, Activity, AgentListResult, AgentParams, ContentBlock, GitChangeStatus,
+    HistoryResult, OngoingActivityResult, OpResult, SessionConfigKind, SessionConfigOptionValue,
+    SessionConfigureParams, SessionIdParams, SessionListResult, SessionMeta, SessionNewParams,
+    SessionPageParams, SessionPromptParams, SessionResult, SessionState, SessionStateChange,
+    StateChangeReason, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult,
+    WorkspaceReadParams, WorkspaceReadResult, WorkspaceRestoreParams,
 };
 
 use crate::config::{
-    machine_ws_url, ApiFormat, ConfigStore, OrchestratorConfig, QuickCommand, SkillEntry,
-    WorkflowTemplate,
+    ApiFormat, ConfigStore, OrchestratorConfig, QuickCommand, SkillEntry, WorkflowTemplate,
+    machine_ws_url,
 };
-use crate::diff::{diff_lines, DiffLineKind};
+use crate::diff::{DiffLineKind, diff_lines};
 use crate::display::{activity_display, info_row, machine_status_badge, short_cwd};
 use crate::logic::{
-    compose_prompt, compose_workflow_text, context_percent, context_usage_text,
-    external_path_attachment, merge_session_window, parse_at_references, path_attachment,
-    read_path_context, DialogMsg, InputAttachment,
+    DialogMsg, InputAttachment, compose_prompt, compose_workflow_text, context_percent,
+    context_usage_text, external_path_attachment, merge_session_window, parse_at_references,
+    path_attachment, read_path_context,
 };
 use crate::machine::{MachineStatus, MachineView, WorkspaceDirectory};
 use crate::text::{block_text, one_line};
-use crate::workflow::{now, AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
+use crate::workflow::{AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine, now};
 use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小。
 const PAGE_LIMIT: usize = 50;
 
 // 关闭设置浮窗（Escape）。浮窗为手搓 overlay，焦点落在其内部时该动作才可达；
-// 处理顺序 = 叠层从顶到底：内嵌表单对话框 > skills 弹窗 > 整个设置浮窗。
+// 处理顺序 = 叠层从顶到底：内嵌表单对话框（含技能表单/操作弹窗）> 整个设置浮窗。
 actions!(amux, [CloseSettingsOverlay]);
 
 #[derive(Clone, Copy, PartialEq)]
@@ -944,86 +945,97 @@ impl AmuxApp {
         let n = self.machines.len();
         for i in 0..n {
             let machine_name = self.machines[i].config.name.clone();
-            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
-                // 每轮按机器名解析当前 client：重连会替换 client 实例，
-                // 循环若持有启动时的旧克隆，重连后将永远请求失败（静默丢同步）
-                let resolved = this
-                    .update_in(cx, |this, _w, _cx| {
-                        this.machines
-                            .iter()
-                            .find(|m| m.config.name == machine_name)
-                            .map(|m| (m.client.clone(), m.connection_epoch))
-                    })
-                    .ok()
-                    .flatten();
-                if let Some((client, epoch)) = resolved {
-                    if let Ok(res) = client
-                        .request::<_, SessionListResult>(
-                            protocol::method::SESSION_LIST,
-                            Some(json!({ "limit": PAGE_LIMIT })),
-                        )
-                        .await
-                    {
-                        let sessions = res.sessions;
-                        let has_more = res.has_more;
-                        let next_before = res.next_before;
-                        let _ = this.update_in(cx, |this, _w, cx| {
-                            // epoch 不匹配说明响应跨越了一次重连：丢弃，等下一轮新连接的数据
-                            let Some(m) = this.machines.iter_mut().find(|m| {
-                                m.config.name == machine_name && m.connection_epoch == epoch
-                            }) else {
-                                return;
-                            };
-                            let (list, hm, nb) = if has_more {
-                                merge_session_window(&m.sessions, sessions, has_more, next_before)
-                            } else {
-                                (sessions, false, None)
-                            };
-                            m.sessions = list;
-                            m.sessions_has_more = hm;
-                            m.sessions_next_before = nb;
-                            crate::logic::sort_sessions_recent(&mut m.sessions);
-                            cx.notify();
-                        });
+            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                loop {
+                    // 每轮按机器名解析当前 client：重连会替换 client 实例，
+                    // 循环若持有启动时的旧克隆，重连后将永远请求失败（静默丢同步）
+                    let resolved = this
+                        .update_in(cx, |this, _w, _cx| {
+                            this.machines
+                                .iter()
+                                .find(|m| m.config.name == machine_name)
+                                .map(|m| (m.client.clone(), m.connection_epoch))
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some((client, epoch)) = resolved {
+                        if let Ok(res) = client
+                            .request::<_, SessionListResult>(
+                                protocol::method::SESSION_LIST,
+                                Some(json!({ "limit": PAGE_LIMIT })),
+                            )
+                            .await
+                        {
+                            let sessions = res.sessions;
+                            let has_more = res.has_more;
+                            let next_before = res.next_before;
+                            let _ = this.update_in(cx, |this, _w, cx| {
+                                // epoch 不匹配说明响应跨越了一次重连：丢弃，等下一轮新连接的数据
+                                let Some(m) = this.machines.iter_mut().find(|m| {
+                                    m.config.name == machine_name && m.connection_epoch == epoch
+                                }) else {
+                                    return;
+                                };
+                                let (list, hm, nb) = if has_more {
+                                    merge_session_window(
+                                        &m.sessions,
+                                        sessions,
+                                        has_more,
+                                        next_before,
+                                    )
+                                } else {
+                                    (sessions, false, None)
+                                };
+                                m.sessions = list;
+                                m.sessions_has_more = hm;
+                                m.sessions_next_before = nb;
+                                crate::logic::sort_sessions_recent(&mut m.sessions);
+                                cx.notify();
+                            });
+                        }
                     }
+                    cx.background_executor()
+                        .timer(Duration::from_secs(10))
+                        .await;
                 }
-                cx.background_executor()
-                    .timer(Duration::from_secs(10))
-                    .await;
             });
             self._tasks.push(t);
         }
 
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
-            let target = this
-                .update_in(cx, |this, _w, _cx| this.open_session_target())
-                .ok()
-                .flatten();
-            if let Some((machine, id)) = target {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.refresh_dialog(window, cx, machine, id.clone());
-                    this.refresh_activities(window, cx, machine, id);
-                    cx.notify();
-                });
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            loop {
+                let target = this
+                    .update_in(cx, |this, _w, _cx| this.open_session_target())
+                    .ok()
+                    .flatten();
+                if let Some((machine, id)) = target {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.refresh_dialog(window, cx, machine, id.clone());
+                        this.refresh_activities(window, cx, machine, id);
+                        cx.notify();
+                    });
+                }
+                cx.background_executor()
+                    .timer(Duration::from_secs(10))
+                    .await;
             }
-            cx.background_executor()
-                .timer(Duration::from_secs(10))
-                .await;
         });
         self._tasks.push(t);
 
-        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
-            let target = this
-                .update_in(cx, |this, _w, _cx| this.open_session_target())
-                .ok()
-                .flatten();
-            if let Some((machine, id)) = target {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.refresh_ongoing(window, cx, machine, id);
-                    cx.notify();
-                });
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            loop {
+                let target = this
+                    .update_in(cx, |this, _w, _cx| this.open_session_target())
+                    .ok()
+                    .flatten();
+                if let Some((machine, id)) = target {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.refresh_ongoing(window, cx, machine, id);
+                        cx.notify();
+                    });
+                }
+                cx.background_executor().timer(Duration::from_secs(2)).await;
             }
-            cx.background_executor().timer(Duration::from_secs(2)).await;
         });
         self._tasks.push(t);
     }
@@ -2254,36 +2266,6 @@ impl AmuxApp {
         cx.notify();
     }
 
-    fn fetch_agent_skills(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        machine: usize,
-        agent: String,
-    ) {
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        let client = m.client.clone();
-        let a = agent.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = AgentParams { agent: a.clone() };
-            let skills = client
-                .request::<_, AgentSkillsResult>(protocol::method::AGENT_SKILLS, Some(params))
-                .await
-                .map(|r| r.skills)
-                .unwrap_or_default();
-            let _ = this.update_in(cx, |this, _w, cx| {
-                if let Some(m) = this.machines.get_mut(machine) {
-                    m.skills = skills;
-                    m.skills_agent = Some(a);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     /// 通过普通会话执行技能操作，保留完整会话供用户继续干预。
     fn manage_skill_on_agent(
         &mut self,
@@ -3189,32 +3171,32 @@ impl AmuxApp {
                             .child(Label::new(label).text_sm().flex_1().min_w_0().truncate()),
                     )
                     // 会话上下文占用（docs/DESIGN.md：usage_update 记录的已用/窗口）
-                    .when(context_percent(s.context_size, s.context_window_size).is_some(), |row| {
-                        let percent = context_percent(s.context_size, s.context_window_size)
-                            .expect("上方已判非 None");
-                        let percent_text: SharedString =
-                            format!("{percent:.0}%").into();
-                        row.child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .w(px(40.))
-                                        .child(
+                    .when(
+                        context_percent(s.context_size, s.context_window_size).is_some(),
+                        |row| {
+                            let percent = context_percent(s.context_size, s.context_window_size)
+                                .expect("上方已判非 None");
+                            let percent_text: SharedString = format!("{percent:.0}%").into();
+                            row.child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        div().w(px(40.)).child(
                                             Progress::new(format!("sess-ctx-{machine}-{sid}"))
                                                 .value(percent)
                                                 .xsmall()
                                                 .color(cx.theme().primary),
                                         ),
-                                )
-                                .child(
-                                    Label::new(percent_text)
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground),
-                                ),
-                        )
-                    })
+                                    )
+                                    .child(
+                                        Label::new(percent_text)
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground),
+                                    ),
+                            )
+                        },
+                    )
                     .when(s.last_active_at > 0, |row| {
                         row.child(
                             Label::new(format_compact_time(s.last_active_at))
@@ -4520,10 +4502,12 @@ impl AmuxApp {
         };
         let Some(directory) = machine.workspace_directories.get(path) else {
             return if machine.workspace_loading.contains(path) {
-                vec![Label::new("加载中…")
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .into_any_element()]
+                vec![
+                    Label::new("加载中…")
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .into_any_element(),
+                ]
             } else {
                 Vec::new()
             };
@@ -5016,8 +5000,7 @@ impl AmuxApp {
                                 .find(|o| o.value == *current_value)
                                 .map(|o| o.name.clone())
                                 .unwrap_or_else(|| current_value.clone());
-                            let expanded =
-                                self.expanded_config_options.contains(&cfg_key);
+                            let expanded = self.expanded_config_options.contains(&cfg_key);
                             let key_toggle = cfg_key.clone();
                             let cid = cfg_key.clone();
                             body = body.child(
@@ -5062,32 +5045,27 @@ impl AmuxApp {
                                     let oname = o.name.clone();
                                     let btn_id = format!("cfg-opt-{cid}-{}", o.value);
                                     body = body.child(
-                                        h_flex()
-                                            .w_full()
-                                            .pl_4()
-                                            .child(
-                                                Button::new(btn_id)
-                                                    .small()
-                                                    .ghost()
-                                                    .when(o.value == *current_value, |b| {
-                                                        b.primary()
-                                                    })
-                                                    .label(oname)
-                                                    .on_click(cx.listener(
-                                                        move |this, _ev, window, cx| {
-                                                            this.set_session_config_option(
-                                                                window,
-                                                                cx,
-                                                                machine,
-                                                                sid.clone(),
-                                                                oid.clone(),
-                                                                SessionConfigOptionValue::ValueId {
-                                                                    value: oval.clone(),
-                                                                },
-                                                            );
-                                                        },
-                                                    )),
-                                            ),
+                                        h_flex().w_full().pl_4().child(
+                                            Button::new(btn_id)
+                                                .small()
+                                                .ghost()
+                                                .when(o.value == *current_value, |b| b.primary())
+                                                .label(oname)
+                                                .on_click(cx.listener(
+                                                    move |this, _ev, window, cx| {
+                                                        this.set_session_config_option(
+                                                            window,
+                                                            cx,
+                                                            machine,
+                                                            sid.clone(),
+                                                            oid.clone(),
+                                                            SessionConfigOptionValue::ValueId {
+                                                                value: oval.clone(),
+                                                            },
+                                                        );
+                                                    },
+                                                )),
+                                        ),
                                     );
                                 }
                             }
@@ -5855,12 +5833,6 @@ impl AmuxApp {
                             this.close_template_form(window, cx);
                         } else if this.skill_action_dialog.take().is_some() {
                             // 已取走即完成关闭
-                        } else if this
-                            .machines
-                            .iter_mut()
-                            .any(|m| m.show_skills.take().is_some())
-                        {
-                            // skills 弹窗已随 take 关闭
                         } else {
                             this.show_settings = false;
                         }
@@ -5894,93 +5866,6 @@ impl AmuxApp {
             .when(self.skill_action_dialog.is_some(), |overlay| {
                 overlay.child(self.render_skill_action_dialog(window, cx))
             })
-            .when(self.machines.iter().any(|m| m.show_skills.is_some()), |o| {
-                o.child(self.render_skills_dialog(window, cx))
-            })
-    }
-
-    fn render_skills_dialog(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let (mi, agent, skills) = self
-            .machines
-            .iter()
-            .enumerate()
-            .find_map(|(i, m)| {
-                m.show_skills
-                    .as_ref()
-                    .map(|(_, a)| (i, a.clone(), m.skills.clone()))
-            })
-            .unwrap_or((0, String::new(), Vec::new()));
-        let _ = mi;
-        let mut list = v_flex()
-            .gap_1()
-            .flex_1()
-            .id("skills-list")
-            .overflow_y_scroll()
-            .p_1();
-        if skills.is_empty() {
-            list = list.child(
-                Label::new("（无 skills）")
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground),
-            );
-        }
-        for s in &skills {
-            let s = s.clone();
-            list = list.child(
-                div()
-                    .p_1()
-                    .bg(cx.theme().muted)
-                    .rounded_md()
-                    .child(Label::new(s).text_sm()),
-            );
-        }
-        div()
-            .id("skills-dialog")
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                v_flex()
-                    .id("skills-card")
-                    .w(px(480.)) // skills 对话框固定尺寸
-                    .h(px(420.))
-                    .overflow_hidden()
-                    .bg(cx.theme().popover)
-                    .rounded_lg()
-                    .shadow_lg()
-                    .p_3()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .child(
-                                Label::new(format!("Skills · {agent}"))
-                                    .text_lg()
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("skills-close")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Close)
-                                    .tooltip("关闭")
-                                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                                        for m in this.machines.iter_mut() {
-                                            m.show_skills = None;
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(list),
-            )
     }
 
     fn render_settings_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6157,7 +6042,6 @@ impl AmuxApp {
                 for a in &m.agents {
                     let available = a.available;
                     let agent = a.name.clone();
-                    let agent_skills = agent.clone();
                     let agent_restart = agent.clone();
                     item = item.child(
                         h_flex()
@@ -6172,19 +6056,6 @@ impl AmuxApp {
                                 .text_sm(),
                             )
                             .child(div().flex_1())
-                            .child(
-                                Button::new(format!("skills-{i}-{agent}"))
-                                    .small()
-                                    .label("skills")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let agent = agent_skills.clone();
-                                        this.fetch_agent_skills(window, cx, i, agent.clone());
-                                        if let Some(m) = this.machines.get_mut(i) {
-                                            m.show_skills = Some((i, agent));
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
                             .child(
                                 Button::new(format!("restart-agent-{i}-{agent}"))
                                     .small()
@@ -6206,7 +6077,7 @@ impl AmuxApp {
                     .items_center()
                     .child(self.settings_header(
                         "机器管理",
-                        "接入 / 移除机器；每台机器自动发现 ACP agent，可查看 skills、重启",
+                        "接入 / 移除机器；每台机器自动发现 ACP agent，可重启",
                         cx.theme().muted_foreground,
                     ))
                     .child(div().flex_1())

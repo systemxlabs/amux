@@ -236,15 +236,18 @@ mod tests {
             _ => panic!("应为 AgentMessage"),
         }
         assert_eq!(acts.len(), 3, "thinking 合并 + tool + error");
-        assert!(acts
-            .iter()
-            .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "xy")));
-        assert!(acts
-            .iter()
-            .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "t")));
-        assert!(acts
-            .iter()
-            .any(|a| matches!(a, Activity::Error { detail, .. } if detail == "出错")));
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "xy"))
+        );
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "t"))
+        );
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Activity::Error { detail, .. } if detail == "出错"))
+        );
     }
 
     #[test]

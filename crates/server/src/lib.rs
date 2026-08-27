@@ -2,6 +2,7 @@
 //! 集成测试（tests/）复用实现（如 `AcpAgentDriver`）。
 
 pub mod acp;
+pub mod acp_terminal;
 pub mod agent;
 pub mod config;
 pub mod discovery;

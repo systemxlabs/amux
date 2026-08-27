@@ -26,12 +26,6 @@ pub struct AgentListResult {
     pub agents: Vec<AgentInfo>,
 }
 
-/// `agent.skills` 结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentSkillsResult {
-    pub skills: Vec<String>,
-}
-
 /// `agent.restart` / `workspace.restore` 通用操作结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

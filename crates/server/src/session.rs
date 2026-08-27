@@ -16,8 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use protocol::{
-    generate_title, Activity, ContentBlock, HistoryItem, SessionMeta, SessionState,
-    SessionStateChange,
+    Activity, ContentBlock, HistoryItem, SessionMeta, SessionState, SessionStateChange,
+    generate_title,
 };
 
 use crate::agent::{AgentEvent, AgentRegistry};
@@ -650,9 +650,9 @@ impl SessionManager {
                     let ts = now();
                     let (accumulated, first_ts) = {
                         let mut buf = self.thinking_buf.lock().unwrap();
-                        let entry = buf.entry(session_id.to_string()).or_insert_with(|| {
-                            (String::new(), ts)
-                        });
+                        let entry = buf
+                            .entry(session_id.to_string())
+                            .or_insert_with(|| (String::new(), ts));
                         if entry.1 == 0 {
                             entry.1 = ts;
                         }
@@ -926,11 +926,18 @@ mod tests {
     }
 
     impl AgentDriver for BlockingDriver {
-        fn create_session(&self, _cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+        fn create_session(
+            &self,
+            _cwd: &str,
+        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
             Ok(("agent_blocking".into(), Vec::new()))
         }
 
-        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+        fn resume_session(
+            &self,
+            _agent_session_id: &str,
+            _cwd: &str,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
             Ok(Vec::new())
         }
 
@@ -975,10 +982,6 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn list_skills(&self) -> Result<Vec<String>, String> {
-            Ok(Vec::new())
-        }
-
         fn shutdown(&self) {}
     }
 
@@ -990,11 +993,18 @@ mod tests {
     }
 
     impl AgentDriver for UsageDriver {
-        fn create_session(&self, _cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+        fn create_session(
+            &self,
+            _cwd: &str,
+        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
             Ok(("agent_usage".into(), Vec::new()))
         }
 
-        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+        fn resume_session(
+            &self,
+            _agent_session_id: &str,
+            _cwd: &str,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
             Ok(Vec::new())
         }
 
@@ -1007,9 +1017,7 @@ mod tests {
             let used = self.used;
             let size = self.size;
             tokio::spawn(async move {
-                let _ = tx
-                    .send(AgentEvent::UsageUpdate { used, size })
-                    .await;
+                let _ = tx.send(AgentEvent::UsageUpdate { used, size }).await;
                 let _ = tx
                     .send(AgentEvent::TurnEnded(
                         protocol::StateChangeReason::Completed,
@@ -1040,10 +1048,6 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn list_skills(&self) -> Result<Vec<String>, String> {
-            Ok(Vec::new())
-        }
-
         fn shutdown(&self) {}
     }
 
@@ -1056,11 +1060,18 @@ mod tests {
     }
 
     impl AgentDriver for ThinkingChunksDriver {
-        fn create_session(&self, _cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+        fn create_session(
+            &self,
+            _cwd: &str,
+        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
             Ok(("agent_thinking".into(), Vec::new()))
         }
 
-        fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+        fn resume_session(
+            &self,
+            _agent_session_id: &str,
+            _cwd: &str,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
             Ok(Vec::new())
         }
 
@@ -1104,10 +1115,6 @@ mod tests {
             _config_id: &str,
             _value: protocol::SessionConfigOptionValue,
         ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn list_skills(&self) -> Result<Vec<String>, String> {
             Ok(Vec::new())
         }
 
@@ -1163,9 +1170,10 @@ mod tests {
             .create("codex", repo.to_str().unwrap(), true)
             .await
             .unwrap();
-        assert!(meta
-            .worktree_dir
-            .starts_with(case.join("worktrees").to_str().unwrap()));
+        assert!(
+            meta.worktree_dir
+                .starts_with(case.join("worktrees").to_str().unwrap())
+        );
         let wt = std::path::PathBuf::from(&meta.worktree_dir);
         assert!(wt.is_dir(), "session.new 应立即创建工作树");
         assert!(wt.join(".git").is_file(), ".git 为文件是 worktree 的特征");
@@ -1219,7 +1227,10 @@ mod tests {
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), case.join("server"));
 
         // 超时会话：worktree 应被清理，字段清空，工作目录回退原始 cwd
-        let stale = mgr.create("codex", repo.to_str().unwrap(), true).await.unwrap();
+        let stale = mgr
+            .create("codex", repo.to_str().unwrap(), true)
+            .await
+            .unwrap();
         let stale_wt = PathBuf::from(&stale.worktree_dir);
         assert!(stale_wt.is_dir());
         // 把 last_active_at 拨回 8 天前（>7 天超时阈值）
@@ -1233,7 +1244,10 @@ mod tests {
             .unwrap();
 
         // 近期会话：worktree 保留
-        let recent = mgr.create("codex", repo.to_str().unwrap(), true).await.unwrap();
+        let recent = mgr
+            .create("codex", repo.to_str().unwrap(), true)
+            .await
+            .unwrap();
         let recent_wt = PathBuf::from(&recent.worktree_dir);
         assert!(recent_wt.is_dir());
 
@@ -1252,7 +1266,10 @@ mod tests {
             "清理后工作目录回退原始 cwd"
         );
         let list = git(&repo, &["worktree", "list", "--porcelain"]);
-        assert!(!list.contains(stale.worktree_dir.trim()), "主仓库不应再登记已清理 worktree");
+        assert!(
+            !list.contains(stale.worktree_dir.trim()),
+            "主仓库不应再登记已清理 worktree"
+        );
 
         let _ = std::fs::remove_dir_all(&case);
     }
@@ -1343,10 +1360,7 @@ mod tests {
             &self,
             _cwd: &str,
         ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-            Ok((
-                "agent_cfg".into(),
-                self.options.lock().unwrap().clone(),
-            ))
+            Ok(("agent_cfg".into(), self.options.lock().unwrap().clone()))
         }
 
         fn resume_session(
@@ -1409,10 +1423,6 @@ mod tests {
                 }
             }
             Ok(options.clone())
-        }
-
-        fn list_skills(&self) -> Result<Vec<String>, String> {
-            Ok(Vec::new())
         }
 
         fn shutdown(&self) {}
@@ -1483,7 +1493,10 @@ mod tests {
             other => panic!("应为 Select，得到 {other:?}"),
         }
         let (stored, _) = registry.get(&meta.id).unwrap().unwrap();
-        assert_eq!(stored.config_options, updated.config_options, "设置后应落库");
+        assert_eq!(
+            stored.config_options, updated.config_options,
+            "设置后应落库"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1516,9 +1529,8 @@ mod tests {
         // 异步推进 prompt；通过 release 闸门控制驱动节奏
         let mgr_for_task = mgr.clone();
         let id_for_task = meta.id.clone();
-        let prompt_task = tokio::spawn(async move {
-            mgr_for_task.prompt(&id_for_task, text("hi")).await
-        });
+        let prompt_task =
+            tokio::spawn(async move { mgr_for_task.prompt(&id_for_task, text("hi")).await });
 
         // 每个 chunk 之后释放 driver 推进下一个 chunk；最后一段也需释放以让 turn 收尾
         for expected in [
@@ -1729,9 +1741,10 @@ mod tests {
 
         let (acts, _, _) = mgr.activities(&meta.id, None, None).await.unwrap();
         assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
-        assert!(acts
-            .iter()
-            .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")));
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file"))
+        );
 
         let (list, _, _) = mgr.list(None, None).await.unwrap();
         assert_eq!(list[0].state, SessionState::Idle);
@@ -1866,11 +1879,18 @@ mod tests {
         }
 
         impl AgentDriver for StreamingDriver {
-            fn create_session(&self, _cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+            fn create_session(
+                &self,
+                _cwd: &str,
+            ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
                 Ok(("agent_stream".into(), Vec::new()))
             }
 
-            fn resume_session(&self, _agent_session_id: &str, _cwd: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            fn resume_session(
+                &self,
+                _agent_session_id: &str,
+                _cwd: &str,
+            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
                 Ok(Vec::new())
             }
 
@@ -1926,10 +1946,6 @@ mod tests {
                 _config_id: &str,
                 _value: protocol::SessionConfigOptionValue,
             ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-
-            fn list_skills(&self) -> Result<Vec<String>, String> {
                 Ok(Vec::new())
             }
 
@@ -1990,10 +2006,17 @@ mod tests {
             closed: Arc<std::sync::atomic::AtomicUsize>,
         }
         impl AgentDriver for Tracking {
-            fn create_session(&self, cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+            fn create_session(
+                &self,
+                cwd: &str,
+            ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
                 Ok((format!("agent_{}", cwd.replace('/', "_")), Vec::new()))
             }
-            fn resume_session(&self, _a: &str, _c: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            fn resume_session(
+                &self,
+                _a: &str,
+                _c: &str,
+            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
                 Ok(Vec::new())
             }
             fn prompt(
@@ -2031,9 +2054,7 @@ mod tests {
             ) -> Result<Vec<protocol::SessionConfigOption>, String> {
                 Ok(Vec::new())
             }
-            fn list_skills(&self) -> Result<Vec<String>, String> {
-                Ok(Vec::new())
-            }
+
             fn shutdown(&self) {}
         }
 
@@ -2089,10 +2110,17 @@ mod tests {
             cancels: Arc<std::sync::atomic::AtomicUsize>,
         }
         impl AgentDriver for Counting {
-            fn create_session(&self, cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+            fn create_session(
+                &self,
+                cwd: &str,
+            ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
                 Ok((format!("agent_{}", cwd.replace('/', "_")), Vec::new()))
             }
-            fn resume_session(&self, _a: &str, _c: &str) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            fn resume_session(
+                &self,
+                _a: &str,
+                _c: &str,
+            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
                 Ok(Vec::new())
             }
             fn prompt(
@@ -2129,9 +2157,7 @@ mod tests {
             ) -> Result<Vec<protocol::SessionConfigOption>, String> {
                 Ok(Vec::new())
             }
-            fn list_skills(&self) -> Result<Vec<String>, String> {
-                Ok(Vec::new())
-            }
+
             fn shutdown(&self) {}
         }
 

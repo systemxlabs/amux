@@ -8,25 +8,28 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    BlobResourceContents, BooleanConfigOptionCapabilities, CancelNotification,
-    ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
-    ContentBlock as AcpContentBlock, DeleteSessionRequest, EmbeddedResource,
-    EmbeddedResourceResource, InitializeRequest, NewSessionRequest, PermissionOption,
-    PermissionOptionId, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionConfigOption as AcpSessionConfigOption,
+    BlobResourceContents, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
+    ClientSessionCapabilities, CloseSessionRequest, ContentBlock as AcpContentBlock,
+    CreateTerminalRequest, DeleteSessionRequest, EmbeddedResource, EmbeddedResourceResource,
+    InitializeRequest, KillTerminalRequest, NewSessionRequest, PermissionOption,
+    PermissionOptionId, PermissionOptionKind, PromptRequest, ReleaseTerminalRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigOption as AcpSessionConfigOption,
     SessionConfigOptionValue as AcpSessionConfigOptionValue, SessionConfigOptionsCapabilities,
     SessionConfigSelectOptions, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    StopReason, TextContent, TextResourceContents, ToolKind,
+    StopReason, TerminalOutputRequest, TextContent, TextResourceContents, ToolKind,
+    WaitForTerminalExitRequest,
 };
-use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::{AcpAgent, ConnectionTo, JsonRpcRequest, JsonRpcResponse};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use agent_client_protocol::AcpAgent;
+use agent_client_protocol::ConnectionTo;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use protocol::ContentBlock;
+
+use crate::acp_terminal;
 
 /// 拉起的统计（server 启动日志用）。
 #[derive(Debug, Default, Clone, Copy)]
@@ -69,7 +72,10 @@ pub enum AgentEvent {
 /// 与单个 agent 的驱动接口（ACP v1 语义的投影）。
 pub trait AgentDriver: Send + Sync {
     /// 新建会话，返回 agent 侧会话 id 与初始配置选项
-    fn create_session(&self, cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String>;
+    fn create_session(
+        &self,
+        cwd: &str,
+    ) -> Result<(String, Vec<protocol::SessionConfigOption>), String>;
     /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史；
     /// 同一进程内对同一会话幂等——已恢复过则直接成功），返回会话配置选项
     fn resume_session(
@@ -98,8 +104,6 @@ pub trait AgentDriver: Send + Sync {
         config_id: &str,
         value: protocol::SessionConfigOptionValue,
     ) -> Result<Vec<protocol::SessionConfigOption>, String>;
-    /// 该 agent 安装的 skills 列表；查询失败必须显式返回错误。
-    fn list_skills(&self) -> Result<Vec<String>, String>;
     /// 关闭驱动自身，释放 ACP 子进程资源。
     fn shutdown(&self);
     /// 关闭并等待驱动后台线程退出（默认仅 shutdown、不等待；确定性退出路径使用，
@@ -139,7 +143,6 @@ enum AcpCall {
         config_id: String,
         value: protocol::SessionConfigOptionValue,
     },
-    ListSkills,
 }
 
 /// 主线程 → exec 线程的方法请求。
@@ -204,7 +207,7 @@ impl AcpAgentDriver {
             Err(_) => {
                 return Err(format!(
                     "ACP server 启动超时（{timeout_ms}ms 内未完成连接/initialize 握手）"
-                ))
+                ));
             }
         }
         Ok(AcpAgentDriver {
@@ -234,7 +237,10 @@ impl AcpAgentDriver {
 }
 
 impl AgentDriver for AcpAgentDriver {
-    fn create_session(&self, cwd: &str) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+    fn create_session(
+        &self,
+        cwd: &str,
+    ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
         let res = self.call(AcpCall::NewSession {
             cwd: cwd.to_string(),
         })?;
@@ -356,36 +362,7 @@ impl AgentDriver for AcpAgentDriver {
         })
         .map(|res| config_options_from_value(res.get("configOptions")))
     }
-
-    /// 经 ACP `skill/list` 查询该 agent 安装的 skills。
-    fn list_skills(&self) -> Result<Vec<String>, String> {
-        let res = self.call(AcpCall::ListSkills)?;
-        res.get("skills")
-            .and_then(|s| s.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
-                    .collect()
-            })
-            .ok_or_else(|| "skill/list 响应缺少 skills 数组".to_string())
-    }
 }
-
-/// ACP `skill/list` 响应（SDK schema v1 未收录；typed 化，避免 Value 松散承载）。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcResponse)]
-struct SkillListResponse {
-    skills: Vec<SkillInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SkillInfo {
-    name: String,
-}
-
-/// 自定义请求：ACP `skill/list`（SDK schema v1 未收录该方法）。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
-#[request(method = "skill/list", response = SkillListResponse)]
-struct SkillListRequest {}
 
 /// yolo 权限批准：从请求选项中选出要批准的选项（纯函数，可单测）。
 /// 优先 `AllowAlways` > `AllowOnce` > 任意非拒绝选项；
@@ -478,6 +455,11 @@ async fn connect_main(
     ready_tx: &std::sync::mpsc::Sender<Result<(), String>>,
     ready_sent: Arc<std::sync::atomic::AtomicBool>,
 ) -> agent_client_protocol::Result<()> {
+    // 本连接内的 ACP 终端宿主：terminal/* 反向请求在此执行命令并回收进程
+    let terminals: acp_terminal::SharedTerminals =
+        std::sync::Arc::new(acp_terminal::TerminalRegistry::new());
+    // 连接终止时回收剩余终端（service 循环结束时调用）
+    let shutdown_terminals = terminals.clone();
     agent_client_protocol::Client
         .builder()
         .name("amux-server")
@@ -504,6 +486,97 @@ async fn connect_main(
             },
             agent_client_protocol::on_receive_request!(),
         )
+        // ACP terminal/* 反向请求（初始化已声明 terminal 能力）
+        .on_receive_request(
+            {
+                let terminals = terminals.clone();
+                async move |request: CreateTerminalRequest, responder, _cx| {
+                    match terminals.create(&request) {
+                        Ok(resp) => {
+                            let _ = responder.respond(resp);
+                        }
+                        Err(e) => {
+                            log::warn!("{e}");
+                            let _ = responder.respond_with_internal_error(e);
+                        }
+                    }
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let terminals = terminals.clone();
+                async move |request: TerminalOutputRequest, responder, _cx| {
+                    match terminals.output(&request) {
+                        Ok(resp) => {
+                            let _ = responder.respond(resp);
+                        }
+                        Err(e) => {
+                            log::warn!("{e}");
+                            let _ = responder.respond_with_internal_error(e);
+                        }
+                    }
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let terminals = terminals.clone();
+                async move |request: WaitForTerminalExitRequest, responder, _cx| {
+                    match terminals.wait(&request).await {
+                        Ok(resp) => {
+                            let _ = responder.respond(resp);
+                        }
+                        Err(e) => {
+                            log::warn!("{e}");
+                            let _ = responder.respond_with_internal_error(e);
+                        }
+                    }
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let terminals = terminals.clone();
+                async move |request: KillTerminalRequest, responder, _cx| {
+                    match terminals.kill(&request) {
+                        Ok(resp) => {
+                            let _ = responder.respond(resp);
+                        }
+                        Err(e) => {
+                            log::warn!("{e}");
+                            let _ = responder.respond_with_internal_error(e);
+                        }
+                    }
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let terminals = terminals.clone();
+                async move |request: ReleaseTerminalRequest, responder, _cx| {
+                    match terminals.release(&request) {
+                        Ok(resp) => {
+                            let _ = responder.respond(resp);
+                        }
+                        Err(e) => {
+                            log::warn!("{e}");
+                            let _ = responder.respond_with_internal_error(e);
+                        }
+                    }
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .connect_with(
             agent,
             |cx: ConnectionTo<agent_client_protocol::Agent>| async move {
@@ -516,20 +589,19 @@ async fn connect_main(
                 // 超时则连接仍存活。
                 // 声明客户端能力：会话配置选项（docs/DESIGN.md「ACP 通信」——
                 // 会话选项由 ACP 会话提供，需客户端声明 configOptions 能力
-                // agent 才会在 new/resume 响应中下发选项并接受 set_config_option）。
+                // agent 才会在 new/resume 响应中下发选项并接受 set_config_option）
+                // 与 terminal/*（kimi acp 等将 shell 执行委托给客户端）。
                 let init_request = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
-                    ClientCapabilities::new().session(
-                        ClientSessionCapabilities::new().config_options(
-                            SessionConfigOptionsCapabilities::new()
-                                .boolean(BooleanConfigOptionCapabilities::new()),
-                        ),
-                    ),
+                    ClientCapabilities::new()
+                        .session(
+                            ClientSessionCapabilities::new().config_options(
+                                SessionConfigOptionsCapabilities::new()
+                                    .boolean(BooleanConfigOptionCapabilities::new()),
+                            ),
+                        )
+                        .terminal(true),
                 );
-                let init_result = match cx
-                    .send_request(init_request)
-                    .block_task()
-                    .await
-                {
+                let init_result = match cx.send_request(init_request).block_task().await {
                     core::result::Result::Ok(_) => {
                         log::debug!("initialize 完成");
                         core::result::Result::Ok(())
@@ -630,6 +702,8 @@ async fn connect_main(
                         }
                     }
                 }
+                // 服务循环结束（driver 已 shutdown）：回收本连接的终端子进程
+                shutdown_terminals.terminate_all().await;
                 core::result::Result::Ok(())
             },
         )
@@ -648,7 +722,6 @@ async fn dispatch_call(
         AcpCall::Close { .. } => "session/close",
         AcpCall::Delete { .. } => "session/delete",
         AcpCall::SetConfigOption { .. } => "session/set_config_option",
-        AcpCall::ListSkills => "skill/list",
     };
     log::debug!("调用 {label}");
     let result = dispatch_call_inner(cx, call).await;
@@ -733,14 +806,6 @@ async fn dispatch_call_inner(
                 .map_err(|e| format!("session/set_config_option 失败: {e}"))?;
             Ok(json!({ "configOptions": acp_config_options(Some(resp.config_options)) }))
         }
-        AcpCall::ListSkills => {
-            let resp = cx
-                .send_request(SkillListRequest {})
-                .block_task()
-                .await
-                .map_err(|e| format!("skill/list 失败: {e}"))?;
-            serde_json::to_value(resp).map_err(|e| format!("skill/list 序列化失败: {e}"))
-        }
     }
 }
 
@@ -795,11 +860,9 @@ async fn route_update(
             size: update.size,
         }),
         // ACP `config_options_update`：会话配置选项变更（完整集合）。
-        SessionUpdate::ConfigOptionUpdate(update) => {
-            Some(AgentEvent::ConfigOptions(acp_config_options(Some(
-                update.config_options.clone(),
-            ))))
-        }
+        SessionUpdate::ConfigOptionUpdate(update) => Some(AgentEvent::ConfigOptions(
+            acp_config_options(Some(update.config_options.clone())),
+        )),
         // SessionInfoUpdate（ACP v1 未携带状态字段）/ AvailableCommandsUpdate /
         // CurrentModeUpdate / Plan 等不产生 AgentEvent
         _ => None,
@@ -1050,7 +1113,8 @@ mod tests {
                 .title("运行测试")
                 .raw_input(serde_json::json!({"cmd": "cargo test"})),
         );
-        let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
+        let notif =
+            SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
         route_update(&routes, &notif).await;
         let ev = rx.try_recv().expect("应收到 tool_call_update 事件");
         match ev {
@@ -1073,16 +1137,17 @@ mod tests {
     async fn route_update_tool_call_update_kind_missing_keeps_others() {
         let (routes, mut rx) = route_with_channel();
         // ACP tool_call_update 的 kind 可选，常缺失；只更新 title。
-        let tcu = ToolCallUpdate::new(
-            "tc1",
-            ToolCallUpdateFields::new().title("更新后的标题"),
-        );
-        let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
+        let tcu = ToolCallUpdate::new("tc1", ToolCallUpdateFields::new().title("更新后的标题"));
+        let notif =
+            SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
         route_update(&routes, &notif).await;
         let ev = rx.try_recv().expect("应收到 tool_call_update 事件");
         match ev {
             AgentEvent::ToolCall { name, title, .. } => {
-                assert_eq!(name, None, "kind 缺失时 name 应为 None（沿用合并器中的同 id 名称）");
+                assert_eq!(
+                    name, None,
+                    "kind 缺失时 name 应为 None（沿用合并器中的同 id 名称）"
+                );
                 assert_eq!(title.as_deref(), Some("更新后的标题"));
             }
             other => panic!("应为 ToolCall，得到 {other:?}"),
@@ -1097,7 +1162,8 @@ mod tests {
             "tc1",
             ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
         );
-        let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
+        let notif =
+            SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
         route_update(&routes, &notif).await;
         assert!(rx.try_recv().is_err(), "仅 status 的 update 不应产生事件");
     }

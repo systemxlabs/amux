@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use protocol::{SessionMeta, SessionState};
-use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row, params, types::Type};
 
 /// SQLite 会话注册表（server 单写者：内部 Connection 用互斥锁串行化）。
 pub struct SessionRegistry {
@@ -45,8 +45,7 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
         worktree_dir: row.get("worktree_dir")?,
         context_size: row.get::<_, i64>("context_size")? as u64,
         context_window_size: row.get::<_, i64>("context_window_size")? as u64,
-        config_options: serde_json::from_str(&config_options)
-            .unwrap_or_default(),
+        config_options: serde_json::from_str(&config_options).unwrap_or_default(),
     };
     let agent_session_id: String = row.get("agent_session_id")?;
     Ok((meta, agent_session_id))
@@ -221,10 +220,7 @@ impl SessionRegistry {
     /// 避免 workspace RPC / prompt 指向已不存在的目录）。
     pub fn clear_worktree_dir(&self, id: &str) -> rusqlite::Result<()> {
         let conn = self.connection()?;
-        conn.execute(
-            "UPDATE sessions SET worktree_dir = '' WHERE id = ?1",
-            [id],
-        )?;
+        conn.execute("UPDATE sessions SET worktree_dir = '' WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -356,9 +352,7 @@ mod tests {
 
     #[test]
     fn config_options_roundtrip() {
-        use protocol::{
-            SessionConfigKind, SessionConfigOption, SessionConfigSelectEntry,
-        };
+        use protocol::{SessionConfigKind, SessionConfigOption, SessionConfigSelectEntry};
         let db = tmp_db("cfg");
         let reg = SessionRegistry::open(&db).unwrap();
         let (m, aid) = meta("s1", 100);
@@ -387,12 +381,17 @@ mod tests {
                 name: "推理级别".into(),
                 description: None,
                 category: None,
-                kind: SessionConfigKind::Boolean { current_value: true },
+                kind: SessionConfigKind::Boolean {
+                    current_value: true,
+                },
             },
         ];
         reg.set_config_options("s1", &opts).unwrap();
         let got = reg.get("s1").unwrap().unwrap();
-        assert_eq!(got.0.config_options, opts, "set_config_options 后应读回相同选项");
+        assert_eq!(
+            got.0.config_options, opts,
+            "set_config_options 后应读回相同选项"
+        );
 
         // upsert 为全字段覆盖（调用方从 get_entry 取 meta 携带最新选项）：
         // meta 未携带选项时覆盖为空——真实调用方不会这样做

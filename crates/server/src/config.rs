@@ -180,12 +180,16 @@ mod tests {
     #[test]
     fn invalid_arguments_are_rejected() {
         let env = env_of(&[("AMUX_TOKEN", "t")]);
-        assert!(parse_config(&env, &["--port".into(), "not-a-port".into()])
-            .unwrap_err()
-            .contains("有效端口"));
+        assert!(
+            parse_config(&env, &["--port".into(), "not-a-port".into()])
+                .unwrap_err()
+                .contains("有效端口")
+        );
         assert!(parse_config(&env, &["--token".into()]).is_err());
-        assert!(parse_config(&env, &["--unknown".into()])
-            .unwrap_err()
-            .contains("未知参数"));
+        assert!(
+            parse_config(&env, &["--unknown".into()])
+                .unwrap_err()
+                .contains("未知参数")
+        );
     }
 }

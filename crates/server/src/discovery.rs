@@ -35,7 +35,10 @@ pub(crate) fn discover_acp_agents() -> Vec<DiscoveredAgent> {
         }
     }
     let grok_bin = find_on_path("grok");
-    let agent_supported = grok_bin.as_deref().map(has_agent_subcommand).unwrap_or(false);
+    let agent_supported = grok_bin
+        .as_deref()
+        .map(has_agent_subcommand)
+        .unwrap_or(false);
     if let Some(d) = discover_for_grok(grok_bin, agent_supported) {
         found.push(d);
     }
@@ -221,22 +224,26 @@ mod tests {
 
     #[test]
     fn discover_for_cli_missing_prereqs() {
-        assert!(discover_for_cli(
-            "codex",
-            Some("@agentclientprotocol/codex-acp"),
-            None,
-            false,
-            Some("/usr/bin/npx".into()),
-        )
-        .is_none());
-        assert!(discover_for_cli(
-            "codex",
-            Some("@agentclientprotocol/codex-acp"),
-            Some("/usr/bin/codex".into()),
-            false,
-            None,
-        )
-        .is_none());
+        assert!(
+            discover_for_cli(
+                "codex",
+                Some("@agentclientprotocol/codex-acp"),
+                None,
+                false,
+                Some("/usr/bin/npx".into()),
+            )
+            .is_none()
+        );
+        assert!(
+            discover_for_cli(
+                "codex",
+                Some("@agentclientprotocol/codex-acp"),
+                Some("/usr/bin/codex".into()),
+                false,
+                None,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -256,6 +263,8 @@ mod tests {
 
     #[test]
     fn has_agent_subcommand_detects() {
-        assert!(!has_agent_subcommand("/nonexistent/bin/definitely-not-here"));
+        assert!(!has_agent_subcommand(
+            "/nonexistent/bin/definitely-not-here"
+        ));
     }
 }

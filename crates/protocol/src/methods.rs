@@ -8,8 +8,6 @@ pub mod method {
     pub const AGENT_LIST: &str = "agent.list";
     /// 重启指定 agent
     pub const AGENT_RESTART: &str = "agent.restart";
-    /// 查询指定 agent 的技能列表
-    pub const AGENT_SKILLS: &str = "agent.skills";
     /// 新建一个普通会话（惰性：仅 server 侧写入，不触发 ACP）
     pub const SESSION_NEW: &str = "session.new";
     /// 往指定普通会话发送指令

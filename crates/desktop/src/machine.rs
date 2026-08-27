@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use protocol::{AgentInfo, SessionMeta};
 
 use crate::aggregate::SessionView;
-use crate::config::{machine_ws_url, MachineConfig};
+use crate::config::{MachineConfig, machine_ws_url};
 use crate::ws::WsClient;
 
 use protocol::GitDiffFile;
@@ -69,9 +69,6 @@ pub(crate) struct MachineView {
     pub(crate) diff_error: Option<String>,
     pub(crate) diff_tree_collapsed: bool,
     pub(crate) diff_changes_collapsed: bool,
-    pub(crate) skills: Vec<String>,
-    pub(crate) skills_agent: Option<String>,
-    pub(crate) show_skills: Option<(usize, String)>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -114,9 +111,6 @@ impl MachineView {
             diff_error: None,
             diff_tree_collapsed: false,
             diff_changes_collapsed: false,
-            skills: Vec::new(),
-            skills_agent: None,
-            show_skills: None,
         }
     }
 }

@@ -9,7 +9,9 @@
 //! - `session/prompt` 先请求权限（期望 server yolo 自动批准），随后 sleep
 //!   `AMUX_MOCK_DELAY_MS`（默认 300ms）再发事件流与响应——保证忙时 prompt
 //!   （-32006）测试有确定性的 busy 窗口
-//! - `skill/list` 返回固定的 skills 列表。
+//! - `session/prompt` 指令为 `/terminal` 时，经 `terminal/create`、
+//!   `terminal/wait_for_exit`、`terminal/output`、`terminal/release` 全链路在
+//!   客户端执行 shell 并把结果作为 agent 输出回传（模拟 kimi acp 的行为）。
 //! - 把收到的**方法名**追加到 `<state_file>.calls`（供测试断言 server 的 ACP 调用面，
 //!   包括 open_session 不触发 `session/load`、resume 幂等只调一次及 close/delete）。
 //! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
@@ -20,19 +22,19 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, DeleteSessionRequest, DeleteSessionResponse, InitializeRequest,
-    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, MessageId, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse,
-    SessionConfigOption, SessionConfigOptionValue, SessionInfo, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    UsageUpdate,
+    ContentChunk, CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, MessageId, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse, ReleaseTerminalRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
+    ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue, SessionInfo,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, TerminalOutputRequest, TextContent, ToolCall,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+    WaitForTerminalExitRequest,
 };
-use agent_client_protocol::{Agent, JsonRpcRequest, Result, Stdio};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use agent_client_protocol::{Agent, Result, Stdio};
+use serde_json::{Value, json};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -68,14 +70,8 @@ fn config_options_for(sid: &str) -> Vec<SessionConfigOption> {
         "模型",
         current,
         vec![
-            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
-                "gpt-4o",
-                "GPT-4o",
-            ),
-            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
-                "gpt-5",
-                "GPT-5",
-            ),
+            agent_client_protocol::schema::v1::SessionConfigSelectOption::new("gpt-4o", "GPT-4o"),
+            agent_client_protocol::schema::v1::SessionConfigSelectOption::new("gpt-5", "GPT-5"),
         ],
     )]
 }
@@ -118,11 +114,6 @@ fn append_approved(state_file: &str) {
         });
 }
 
-/// 自定义请求：ACP `skill/list`（SDK schema v1 未收录该方法）。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
-#[request(method = "skill/list", response = serde_json::Value)]
-struct SkillListRequest {}
-
 fn main() -> Result<()> {
     let state_file = std::env::args()
         .nth(1)
@@ -146,7 +137,6 @@ async fn run(state_file: &str) -> Result<()> {
     let calls_delete = calls_file.clone();
     let calls_close = calls_file.clone();
     let calls_list = calls_file.clone();
-    let calls_skill = calls_file.clone();
     let calls_cfg = calls_file.clone();
     let state_prompt = state_file.clone();
     Agent
@@ -297,6 +287,50 @@ async fn run(state_file: &str) -> Result<()> {
                         tokio::time::sleep(Duration::from_millis(ms)).await;
                     }
 
+                    // 模拟 kimi acp 等把 shell 执行委托给客户端的 agent：指令为
+                    // /terminal 时经 terminal/create、wait_for_exit、output 全链路执行
+                    if user_text == "/terminal" {
+                        record_call(&format!("{state_file}.calls"), "terminal/create");
+                        let created = cx_task
+                            .send_request(
+                                CreateTerminalRequest::new(
+                                    request.session_id.clone(),
+                                    "/bin/sh",
+                                )
+                                .args(vec!["-c".into(), "echo amux-terminal-ok".into()]),
+                            )
+                            .block_task()
+                            .await?;
+                        let exit = cx_task
+                            .send_request(WaitForTerminalExitRequest::new(
+                                request.session_id.clone(),
+                                created.terminal_id.clone(),
+                            ))
+                            .block_task()
+                            .await?;
+                        let out = cx_task
+                            .send_request(TerminalOutputRequest::new(
+                                request.session_id.clone(),
+                                created.terminal_id.clone(),
+                            ))
+                            .block_task()
+                            .await?;
+                        let _ = cx_task.send_request(ReleaseTerminalRequest::new(
+                            request.session_id.clone(),
+                            created.terminal_id,
+                        ));
+                        cx_task.send_notification(SessionNotification::new(
+                            request.session_id.clone(),
+                            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                                TextContent::new(format!(
+                                    "exit={} out={}",
+                                    exit.exit_status.exit_code.unwrap_or_default(),
+                                    out.output.trim()
+                                )),
+                            ))),
+                        ))?;
+                    }
+
                     cx_task.send_notification(SessionNotification::new(
                         request.session_id.clone(),
                         SessionUpdate::AgentThoughtChunk(ContentChunk::new(
@@ -378,19 +412,6 @@ async fn run(state_file: &str) -> Result<()> {
                     .map(|(id, cwd)| SessionInfo::new(id.clone(), cwd.clone()))
                     .collect();
                 responder.respond(ListSessionsResponse::new(infos))
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |_request: SkillListRequest, responder, _cx| {
-                record_call(&calls_skill, "skill/list");
-                responder.respond(json!({
-                    "skills": [
-                        { "name": "web-browser" },
-                        { "name": "docs-search" },
-                        { "name": "code-analysis" }
-                    ]
-                }))
             },
             agent_client_protocol::on_receive_request!(),
         )

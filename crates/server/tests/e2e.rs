@@ -1,11 +1,11 @@
 //! 端到端集成测试：启动真实 server 二进制（test-server 固定用 mock_acp），
 //! 经 WebSocket + JSON-RPC 验证协议。
-//! 覆盖：认证（未认证 AUTH_FAILED / 成功）、agent.list/skills、会话惰性创建、
+//! 覆盖：认证（未认证 AUTH_FAILED / 成功）、agent.list、会话惰性创建、
 //! prompt（含 state_change busy→idle 推送）、session.history/activities/ongoing_activity 分页、
 //! session.configure、删除触发 ACP session/close + session/delete、workspace.diff/restore。
 
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
 struct Client {
@@ -206,7 +206,7 @@ async fn auth_required_and_enforced() {
 }
 
 #[tokio::test]
-async fn agent_list_and_skills() {
+async fn agent_list() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
     let list = c.call("agent.list", json!({})).await;
@@ -219,18 +219,6 @@ async fn agent_list_and_skills() {
     assert!(
         agents.contains(&"mock_acp"),
         "agent.list 应含 mock_acp: {list}"
-    );
-
-    let s = c.call("agent.skills", json!({"agent": "mock_acp"})).await;
-    let skills: Vec<&str> = s["result"]["skills"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|x| x.as_str())
-        .collect();
-    assert!(
-        skills.contains(&"web-browser"),
-        "mock_acp 应返回 skills: {skills:?}"
     );
 }
 
@@ -322,8 +310,7 @@ async fn session_lifecycle_state_change_and_delete() {
         "同 tool_call_id 的 tool_call + tool_call_update 应合并为一条活动: {acts:?}"
     );
     assert_eq!(
-        tool_calls[0]["title"],
-        "运行 cargo test 完成",
+        tool_calls[0]["title"], "运行 cargo test 完成",
         "update 的 title 应覆盖初始 title: {acts:?}"
     );
 
@@ -450,11 +437,13 @@ async fn workspace_list_and_read_browse_session_directory() {
         .await;
     assert!(root.get("error").is_none(), "list 失败: {root}");
     assert_eq!(root["result"]["path"], "");
-    assert!(root["result"]["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == "src" && entry["isDir"] == true));
+    assert!(
+        root["result"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "src" && entry["isDir"] == true)
+    );
 
     let nested = c
         .call(

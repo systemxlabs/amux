@@ -6,12 +6,12 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use protocol::{
-    method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams,
-    AgentSkillsResult, HistoryResult, OngoingActivityResult, OpResult, SessionConfigureParams,
-    SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
-    SessionSetConfigOptionParams, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListParams,
-    WorkspaceReadParams, WorkspaceRestoreParams,
+    ActivitiesResult, AgentListResult, AgentParams, HistoryResult, OngoingActivityResult, OpResult,
+    SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
+    SessionListParams, SessionListResult, SessionNewParams, SessionPageParams, SessionPromptParams,
+    SessionResult, SessionSetConfigOptionParams, WorkspaceDiffParams, WorkspaceDiffResult,
+    WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams, method, rpc_error,
+    server_error,
 };
 
 use crate::error::SessionError;
@@ -89,24 +89,6 @@ impl Handlers {
             method::AGENT_LIST => {
                 let agents = self.manager.agents().list_agents();
                 serde_json::to_value(AgentListResult { agents })
-                    .map_err(|e| RpcError::internal(e.to_string()))
-            }
-
-            method::AGENT_SKILLS => {
-                let p: AgentParams = parse(params)?;
-                let driver = self
-                    .manager
-                    .agents()
-                    .driver_for(&p.agent)
-                    .map_err(|e| RpcError {
-                        code: server_error::HARNESS_UNAVAILABLE,
-                        message: e,
-                    })?;
-                let skills = driver.list_skills().map_err(|e| RpcError {
-                    code: rpc_error::INTERNAL_ERROR,
-                    message: e,
-                })?;
-                serde_json::to_value(AgentSkillsResult { skills })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
 
