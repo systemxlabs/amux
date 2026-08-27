@@ -261,7 +261,7 @@ mod tests {
             id: "orc_1".into(),
             title: "计划A".into(),
             description: "做完再审查".into(),
-            preamble: "模板".into(),
+            preamble: "计划".into(),
             state: SessionState::Idle,
             transcript: vec![
                 OrcMsg::User {
@@ -300,7 +300,7 @@ mod tests {
             id: "orc_1".into(),
             title: "计划A".into(),
             description: "做完再审查".into(),
-            preamble: "模板".into(),
+            preamble: "计划".into(),
             state: SessionState::Idle,
             transcript: vec![
                 OrcMsg::User {

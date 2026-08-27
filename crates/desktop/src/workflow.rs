@@ -60,7 +60,7 @@ pub struct OrcSession {
     pub title: String,
     /// 用户自然语言计划（含 @ 引用展开的上下文）
     pub description: String,
-    /// 模板/系统指令（内置进编排 agent 的系统提示词，不进入会话历史）。
+    /// 工作流计划/系统指令（内置进编排 agent 的系统提示词，不进入会话历史）。
     pub preamble: String,
     pub state: SessionState,
     pub transcript: Vec<OrcMsg>,
@@ -903,7 +903,7 @@ impl OrcBackend for RigBackend {
             let mut preamble = self.preamble();
             if !ctx.preamble.trim().is_empty() {
                 preamble.push_str("\n\n");
-                preamble.push_str("【工作流模板/执行要求】\n");
+                preamble.push_str("【工作流计划/执行要求】\n");
                 preamble.push_str(ctx.preamble.trim());
             }
             let model = self.cfg.model.clone();
@@ -1755,12 +1755,12 @@ mod tests {
     }
 
     #[test]
-    fn template_as_preamble_not_in_history() {
+    fn plan_as_preamble_not_in_history() {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "",
             "",
-            "模板：先在测试机实现，再审查",
+            "计划：先在测试机实现，再审查",
             backend,
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -1769,7 +1769,7 @@ mod tests {
         assert!(engine.session.read().unwrap().transcript.is_empty());
         assert_eq!(
             engine.session.read().unwrap().preamble,
-            "模板：先在测试机实现，再审查"
+            "计划：先在测试机实现，再审查"
         );
         assert!(engine.session.read().unwrap().title.is_empty());
     }
@@ -1780,7 +1780,7 @@ mod tests {
         let engine = WorkflowEngine::new(
             "",
             "",
-            "模板：先实现后审查",
+            "计划：先实现后审查",
             backend,
             vec![],
             vec![MachineSummary::named("测试机", &["mock_acp"])],

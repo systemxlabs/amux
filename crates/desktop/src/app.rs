@@ -251,7 +251,7 @@ impl AmuxApp {
         });
         let tpl_name_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("模板名")
+                .placeholder("计划名")
                 .multi_line(true)
                 .auto_grow(2, 4)
         });
@@ -2753,9 +2753,9 @@ impl AmuxApp {
         let name = self.tpl_name_input.read(cx).value().trim().to_owned();
         let plan = self.tpl_desc_input.read(cx).value().trim().to_owned();
         if name.is_empty() {
-            self.settings_form_error = Some("请输入模板名称。".into());
+            self.settings_form_error = Some("请输入计划名称。".into());
         } else if plan.is_empty() {
-            self.settings_form_error = Some("请输入模板内容。".into());
+            self.settings_form_error = Some("请输入计划内容。".into());
         } else {
             if let Some(old) = self.tpl_edit_target.clone() {
                 if old != name {
@@ -2784,8 +2784,8 @@ impl AmuxApp {
             cx,
             "确认删除",
             true,
-            "删除工作流模板",
-            format!("确定删除工作流模板「{name}」吗？"),
+            "删除工作流计划",
+            format!("确定删除工作流计划「{name}」吗？"),
             move |this, _window, cx| {
                 let name = name.clone();
                 this.store.remove_template(&name);
@@ -3709,7 +3709,7 @@ impl AmuxApp {
                             v_flex()
                                 .gap_1()
                                 .child(
-                                    Label::new("工作流模板")
+                                    Label::new("工作流计划")
                                         .text_sm()
                                         .text_color(muted_foreground),
                                 )
@@ -3917,7 +3917,7 @@ impl AmuxApp {
     fn render_template_selector(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let templates = self.store.list_templates();
         if templates.is_empty() {
-            return Label::new("（无模板，可在设置中添加）").into_any_element();
+            return Label::new("（无计划，可在设置中添加）").into_any_element();
         }
         ButtonGroup::new("ns-tpl-group")
             .small()
@@ -5850,7 +5850,7 @@ impl AmuxApp {
             .child(self.settings_nav_item(
                 SettingsCategory::Templates,
                 "cat-tpl",
-                "工作流模板",
+                "工作流计划",
                 IconName::File,
                 cx,
             ))
@@ -6433,9 +6433,9 @@ impl AmuxApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let title = if self.tpl_edit_target.is_some() {
-            "编辑工作流模板"
+            "编辑工作流计划"
         } else {
-            "新增工作流模板"
+            "新增工作流计划"
         };
         let mut card = v_flex()
             .id("template-form-card")
@@ -6452,13 +6452,13 @@ impl AmuxApp {
                     .font_weight(FontWeight::SEMIBOLD),
             )
             .child(
-                Label::new("模板名称")
+                Label::new("计划名称")
                     .text_sm()
                     .text_color(cx.theme().muted_foreground),
             )
             .child(Input::new(&self.tpl_name_input))
             .child(
-                Label::new("模板内容")
+                Label::new("计划内容")
                     .text_sm()
                     .text_color(cx.theme().muted_foreground),
             )
@@ -6840,8 +6840,8 @@ impl AmuxApp {
                 h_flex()
                     .items_center()
                     .child(self.settings_header(
-                        "工作流模板",
-                        "模板的 plan 会作为工作流编排的系统指令注入",
+                        "工作流计划",
+                        "计划内容会作为工作流编排的系统指令注入",
                         cx.theme().muted_foreground,
                     ))
                     .child(div().flex_1())
@@ -6850,7 +6850,7 @@ impl AmuxApp {
                             .small()
                             .primary()
                             .icon(IconName::Plus)
-                            .tooltip("添加模板")
+                            .tooltip("添加计划")
                             .on_click(cx.listener(|this, _ev, window, cx| {
                                 this.open_template_form(window, cx, None);
                             })),
@@ -6858,7 +6858,7 @@ impl AmuxApp {
             )
             .when(templates.is_empty(), |view| {
                 view.child(
-                    Label::new("还没有工作流模板。点击右上角 + 创建一个可复用计划。")
+                    Label::new("还没有工作流计划。点击右上角 + 创建一个可复用计划。")
                         .text_sm()
                         .text_color(cx.theme().muted_foreground),
                 )

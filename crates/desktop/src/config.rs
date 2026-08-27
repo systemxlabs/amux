@@ -26,7 +26,7 @@ pub struct SkillEntry {
     pub description: String,
 }
 
-/// 工作流模板：name 唯一。
+/// 工作流计划：name 唯一。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowTemplate {
     pub name: String,
