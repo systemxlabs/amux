@@ -295,8 +295,15 @@ impl SessionManager {
 
     /// 返回普通会话绑定的工作目录。workspace RPC 不接受调用方自带 cwd，
     /// 避免借助已知 session id 浏览或修改另一目录。
+    /// worktree 会话（docs/DESIGN.md「工作树存储」）：agent 实际工作在 worktree，
+    /// 改动视图（diff/restore/list/read）应作用于 worktree 目录而非原始目录。
     pub fn workspace_cwd(&self, session_id: &str) -> Result<String, SessionError> {
-        Ok(self.get_entry(session_id)?.0.cwd)
+        let meta = self.get_entry(session_id)?.0;
+        Ok(if meta.worktree_dir.is_empty() {
+            meta.cwd
+        } else {
+            meta.worktree_dir
+        })
     }
 
     /// 关闭长时间无活动的 agent 侧会话（>timeout_ms）。候选选出后复核状态：
@@ -1049,6 +1056,13 @@ mod tests {
         mgr.prompt(&meta.id, text("hi")).await.unwrap();
         assert!(wt.is_dir(), "prompt 后工作树仍应存在");
 
+        // 改动视图（workspace RPC）应作用于 worktree 目录，而非原始工作目录
+        assert_eq!(
+            mgr.workspace_cwd(&meta.id).unwrap(),
+            meta.worktree_dir,
+            "worktree 会话的 workspace_cwd 应返回 worktree 目录"
+        );
+
         // 删除会话：工作树级联移除
         mgr.delete(&meta.id).await.unwrap();
         assert!(!wt.exists(), "删除会话应级联删除工作树");
@@ -1097,6 +1111,11 @@ mod tests {
         assert!(aid.is_empty(), "创建会话不应触发 ACP session/new");
 
         assert_eq!(meta.state, SessionState::Idle);
+        assert_eq!(
+            mgr.workspace_cwd(&meta.id).unwrap(),
+            "/tmp/lazy",
+            "非 worktree 会话的 workspace_cwd 返回原始 cwd"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
