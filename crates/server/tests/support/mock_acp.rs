@@ -254,6 +254,15 @@ async fn run(state_file: &str) -> Result<()> {
                     ))?;
                     cx_task.send_notification(SessionNotification::new(
                         request.session_id.clone(),
+                        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                            "tc1",
+                            ToolCallUpdateFields::new()
+                                .title("运行 cargo test 完成")
+                                .status(ToolCallStatus::Completed),
+                        )),
+                    ))?;
+                    cx_task.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
                         SessionUpdate::AgentMessageChunk(ContentChunk::new(
                             ContentBlock::Text(TextContent::new("完成！")),
                         )),

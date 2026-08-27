@@ -492,7 +492,8 @@ mod stub {
                     .await
                     .ok();
                 tx.send(AgentEvent::ToolCall {
-                    name: "read_file".into(),
+                    id: "tc1".into(),
+                    name: Some("read_file".into()),
                     title: Some("读取 src/main.rs".into()),
                     content: None,
                 })

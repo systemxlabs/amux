@@ -312,6 +312,20 @@ async fn session_lifecycle_state_change_and_delete() {
     let acts = a["result"]["activities"].as_array().unwrap();
     assert!(acts.iter().any(|x| x["kind"] == "thinking"), "{acts:?}");
     assert!(acts.iter().any(|x| x["kind"] == "tool_call"), "{acts:?}");
+    let tool_calls = acts
+        .iter()
+        .filter(|x| x["kind"] == "tool_call")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_calls.len(),
+        1,
+        "同 tool_call_id 的 tool_call + tool_call_update 应合并为一条活动: {acts:?}"
+    );
+    assert_eq!(
+        tool_calls[0]["title"],
+        "运行 cargo test 完成",
+        "update 的 title 应覆盖初始 title: {acts:?}"
+    );
 
     let oa = c
         .call("session.ongoing_activity", json!({"sessionId": sid}))

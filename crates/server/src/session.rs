@@ -619,16 +619,23 @@ impl SessionManager {
                     );
                 }
                 AgentEvent::ToolCall {
+                    id,
                     name,
                     title,
                     content,
                 } => {
-                    merger.push_tool_call(name.clone(), title.clone(), content.clone(), now());
+                    merger.push_tool_call(
+                        id.clone(),
+                        name.clone(),
+                        title.clone(),
+                        content.clone(),
+                        now(),
+                    );
                     self.ongoing.lock().unwrap().insert(
                         session_id.to_string(),
                         Activity::ToolCall {
                             timestamp: now(),
-                            name,
+                            name: name.unwrap_or_else(|| "tool_call".into()),
                             title,
                             content,
                         },
@@ -1518,11 +1525,14 @@ mod tests {
                     let _ = tx.send(AgentEvent::Thinking("思考中".into())).await;
                     let _ = tx
                         .send(AgentEvent::ToolCall {
-                            name: "read_file".into(),
+                            id: "tc1".into(),
+                            name: Some("read_file".into()),
                             title: None,
                             content: None,
                         })
                         .await;
+                    // tool_call 合并到同一条活动，遇到 output 后定稿并落盘。
+                    let _ = tx.send(AgentEvent::OutputChunk("完成".into())).await;
                     // 事件已发完但 turn 未结束（release 未放行）。
                     flushed.notify_one();
                     release.notified().await;
