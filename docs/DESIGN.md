@@ -26,7 +26,6 @@ Server 在未收到此认证消息并通过认证前，请求均返回认证失�
 |---|---|
 | `agent.list` | 查询当前机器的 agents，包含名称和可用性 |
 | `agent.restart` | 重启指定 agent |
-| `agent.skills` | 查询指定 agent 的技能列表 |
 | `session.new` | 新建一个普通会话 |
 | `session.prompt` | 往指定普通会话发送指令 |
 | `session.cancel` | 取消指定普通会话正在进行的工作 |
