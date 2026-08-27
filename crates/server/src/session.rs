@@ -332,6 +332,34 @@ impl SessionManager {
         Ok(closed)
     }
 
+    /// 清理超过 `timeout_ms` 不活跃会话的 worktree（docs/DESIGN.md「工作树
+    /// 存储」）。仅清理关联 worktree，会话本身保留；清理后清空元数据的
+    /// worktree_dir，使 agent 工作目录与 workspace RPC 回退到原始 cwd。
+    /// 删除失败的 worktree 保留字段，等待下轮清理重试。返回清理数量。
+    pub async fn cleanup_idle_worktrees(
+        &self,
+        now_ms: u64,
+        timeout_ms: u64,
+    ) -> Result<usize, SessionError> {
+        let candidates = self
+            .registry
+            .idle_worktree_candidates(now_ms, timeout_ms)
+            .unwrap_or_default();
+        let mut cleaned = 0;
+        for (sid, cwd, worktree_dir) in candidates {
+            let wt = PathBuf::from(&worktree_dir);
+            GitRunner::new().remove_worktree(&cwd, &wt);
+            if !wt.exists() {
+                if let Err(e) = self.registry.clear_worktree_dir(&sid) {
+                    log::error!("清空会话 worktree 目录失败 {sid}: {e}");
+                    continue;
+                }
+                cleaned += 1;
+            }
+        }
+        Ok(cleaned)
+    }
+
     /// 分页读对话历史：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
     pub async fn history(
         &self,
@@ -1068,6 +1096,72 @@ mod tests {
         assert!(!wt.exists(), "删除会话应级联删除工作树");
         let list = git(&repo, &["worktree", "list", "--porcelain"]);
         assert!(!list.contains(meta.worktree_dir.trim()));
+        let _ = std::fs::remove_dir_all(&case);
+    }
+
+    #[tokio::test]
+    async fn cleanup_idle_worktrees_removes_stale_keeps_recent() {
+        // data_dir 嵌套一层：worktree 根落在用例沙箱内（data_dir 同级 worktrees/）
+        let case = std::env::temp_dir().join(format!(
+            "amux-wt-cleanup-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(case.join("server").join("sessions")).unwrap();
+
+        let repo = case.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a.txt"), "v1\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init", "-q"]);
+
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "codex",
+            Arc::new(crate::agent::StubAgentDriver::new()),
+        ));
+        let registry =
+            Arc::new(SessionRegistry::open(&case.join("server").join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), case.join("server"));
+
+        // 超时会话：worktree 应被清理，字段清空，工作目录回退原始 cwd
+        let stale = mgr.create("codex", repo.to_str().unwrap(), true).await.unwrap();
+        let stale_wt = PathBuf::from(&stale.worktree_dir);
+        assert!(stale_wt.is_dir());
+        // 把 last_active_at 拨回 8 天前（>7 天超时阈值）
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let old_ts = now_ms - 8 * 24 * 3_600_000;
+        registry
+            .update_state(&stale.id, SessionState::Idle, old_ts)
+            .unwrap();
+
+        // 近期会话：worktree 保留
+        let recent = mgr.create("codex", repo.to_str().unwrap(), true).await.unwrap();
+        let recent_wt = PathBuf::from(&recent.worktree_dir);
+        assert!(recent_wt.is_dir());
+
+        let cleaned = mgr
+            .cleanup_idle_worktrees(now_ms, 7 * 24 * 3_600_000)
+            .await
+            .unwrap();
+        assert_eq!(cleaned, 1, "仅超期会话的 worktree 被清理");
+        assert!(!stale_wt.exists(), "超期 worktree 应被删除");
+        assert!(recent_wt.is_dir(), "近期 worktree 应保留");
+        let (stored, _) = registry.get(&stale.id).unwrap().unwrap();
+        assert_eq!(stored.worktree_dir, "", "清理后 worktree_dir 应清空");
+        assert_eq!(
+            mgr.workspace_cwd(&stale.id).unwrap(),
+            repo.to_str().unwrap(),
+            "清理后工作目录回退原始 cwd"
+        );
+        let list = git(&repo, &["worktree", "list", "--porcelain"]);
+        assert!(!list.contains(stale.worktree_dir.trim()), "主仓库不应再登记已清理 worktree");
+
         let _ = std::fs::remove_dir_all(&case);
     }
 

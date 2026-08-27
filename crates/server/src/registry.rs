@@ -195,6 +195,46 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// 清空会话的 worktree 目录（worktree 被自动清理后回退为原始工作目录，
+    /// 避免 workspace RPC / prompt 指向已不存在的目录）。
+    pub fn clear_worktree_dir(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE sessions SET worktree_dir = '' WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// 有 worktree 且超过 `idle_timeout_ms` 不活跃的 idle 会话候选
+    /// （docs/DESIGN.md「工作树存储」：不活跃会话自动清理其 worktree）。
+    /// 返回 (会话 id, 原始工作目录 cwd, worktree 目录)。
+    pub fn idle_worktree_candidates(
+        &self,
+        now: u64,
+        idle_timeout_ms: u64,
+    ) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, cwd, worktree_dir, last_active_at FROM sessions
+             WHERE state = 'idle' AND worktree_dir != ''",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>("id")?,
+                row.get::<_, String>("cwd")?,
+                row.get::<_, String>("worktree_dir")?,
+                row.get::<_, i64>("last_active_at")? as u64,
+            ))
+        })?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|(_, _, _, t)| now.saturating_sub(*t) > idle_timeout_ms)
+            .map(|(id, cwd, worktree_dir, _)| (id, cwd, worktree_dir))
+            .collect())
+    }
+
     /// server 启动时把异常退出残留的 Busy 会话重置为 Idle（无对应运行中 agent）。
     pub fn reset_busy_to_idle(&self) -> rusqlite::Result<usize> {
         let conn = self.connection()?;
@@ -311,6 +351,37 @@ mod tests {
         let got = reg.get("s1").unwrap().unwrap();
         assert_eq!(got.0.context_size, 60_000);
         assert_eq!(got.0.context_window_size, 200_000);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn idle_worktree_candidates_and_clear() {
+        let db = tmp_db("wtcand");
+        let reg = SessionRegistry::open(&db).unwrap();
+
+        // s1：有 worktree 且超时 → 候选
+        let (mut m1, a1) = meta("s1", 100);
+        m1.worktree_dir = "/tmp/wt1".into();
+        reg.upsert(&m1, &a1).unwrap();
+        // s2：无 worktree → 排除
+        let (m2, a2) = meta("s2", 100);
+        reg.upsert(&m2, &a2).unwrap();
+        // s3：有 worktree 但最近活跃 → 排除
+        let (mut m3, a3) = meta("s3", 100);
+        m3.worktree_dir = "/tmp/wt3".into();
+        reg.upsert(&m3, &a3).unwrap();
+        reg.update_state("s3", SessionState::Idle, 900).unwrap();
+
+        let now = 1000u64;
+        let cands = reg.idle_worktree_candidates(now, 500).unwrap();
+        assert_eq!(cands.len(), 1, "仅超时的 worktree 会话入候选: {cands:?}");
+        assert_eq!(cands[0], ("s1".into(), "/tmp".into(), "/tmp/wt1".into()));
+
+        // 清空字段后不再入候选
+        reg.clear_worktree_dir("s1").unwrap();
+        let got = reg.get("s1").unwrap().unwrap();
+        assert_eq!(got.0.worktree_dir, "");
+        assert!(reg.idle_worktree_candidates(now, 500).unwrap().is_empty());
         let _ = std::fs::remove_file(&db);
     }
 
