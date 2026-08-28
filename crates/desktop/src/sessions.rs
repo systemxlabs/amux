@@ -1507,31 +1507,32 @@ impl AmuxApp {
                             )),
                     )
                     .child(
-                        Button::new("send")
-                            .primary()
-                            .label("发送")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.send_prompt(window, cx);
-                            })),
-                    )
-                    // 常驻取消：不随忙闲出现/消失（此前条件渲染让「想取消时
-                    // 找不到按钮」）；空闲时点击为无害操作——会话侧静默吞掉
-                    // ACP 的无可取消错误，工作流侧走既有注入取消指令机制
-                    .child(
-                        Button::new("cancel-work")
-                            .small()
-                            .custom(
-                                ButtonCustomVariant::new(cx)
-                                    .color(gpui::transparent_black())
-                                    .foreground(cx.theme().danger)
-                                    .hover(cx.theme().danger.opacity(0.12))
-                                    .active(cx.theme().danger.opacity(0.2)),
-                            )
-                            .icon(IconName::Close)
-                            .label("取消")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.cancel_work(window, cx);
-                            })),
+                        v_flex()
+                            .gap_2()
+                            .child(Button::new("send").primary().label("发送").on_click(
+                                cx.listener(|this, _ev, window, cx| {
+                                    this.send_prompt(window, cx);
+                                }),
+                            ))
+                            // 常驻取消：不随忙闲出现/消失（此前条件渲染让「想取消时
+                            // 找不到按钮」）；空闲时点击为无害操作——会话侧静默吞掉
+                            // ACP 的无可取消错误，工作流侧走既有注入取消指令机制
+                            .child(
+                                Button::new("cancel-work")
+                                    .small()
+                                    .custom(
+                                        ButtonCustomVariant::new(cx)
+                                            .color(gpui::transparent_black())
+                                            .foreground(cx.theme().danger)
+                                            .hover(cx.theme().danger.opacity(0.12))
+                                            .active(cx.theme().danger.opacity(0.2)),
+                                    )
+                                    .icon(IconName::Close)
+                                    .label("取消")
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.cancel_work(window, cx);
+                                    })),
+                            ),
                     )
                     .when(self.input_attachments.len() > 1, |row| {
                         row.child(
