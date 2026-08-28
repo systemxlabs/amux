@@ -600,6 +600,11 @@ impl SessionManager {
             }
             sid2
         } else {
+            // resume 分支（已有 agent 侧会话）：busy 与活跃时间同样立即落盘
+            //（docs/DESIGN.md「普通会话状态」：状态以元数据为权威，变更需立即
+            // 落盘；否则 turn 进行中列表读到陈旧空闲，且并发 prompt 会放行）
+            self.registry
+                .update_state(session_id, SessionState::Busy, meta.last_active_at)?;
             agent_session_id
         };
         Ok((driver, agent_session_id, cwd, old_state))
@@ -1911,6 +1916,66 @@ mod tests {
             ["s3", "s2", "s1"]
         );
         assert!(!has_more);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn busy_state_persisted_immediately_on_resume_path() {
+        // docs/DESIGN.md「普通会话状态」：发送 session/prompt 时置工作中并立即
+        // 落盘。回归：resume 分支（已有 agent 侧会话）此前 busy 只改内存，
+        // turn 进行中列表读到陈旧空闲，且 Busy 前置检查放行并发 prompt。
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "blocking",
+            Arc::new(BlockingDriver {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-busy-resume-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (manager, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+        let manager = Arc::new(manager);
+        let meta = manager
+            .create("blocking", "/tmp/work", false)
+            .await
+            .unwrap();
+        let session_id = meta.id.clone();
+
+        // 第一轮：走惰性创建分支（upsert 已含 busy），正常结束
+        let pm = manager.clone();
+        let sid1 = session_id.clone();
+        let first = tokio::spawn(async move { pm.prompt(&sid1, text("第一轮")).await });
+        started.notified().await;
+        release.notify_one();
+        first.await.unwrap().unwrap();
+        let (m, aid) = registry.get(&session_id).unwrap().unwrap();
+        assert!(!aid.is_empty(), "首轮后应有 agent 侧会话 id");
+        assert_eq!(m.state, SessionState::Idle);
+
+        // 第二轮：走 resume 分支——turn 进行中元数据必须是工作中
+        let pm = manager.clone();
+        let sid2 = session_id.clone();
+        let second = tokio::spawn(async move { pm.prompt(&sid2, text("第二轮")).await });
+        started.notified().await;
+        let (m, _) = registry.get(&session_id).unwrap().unwrap();
+        assert_eq!(m.state, SessionState::Busy, "resume 分支的 busy 应立即落盘");
+        // 元数据为权威：并发 prompt 被拒绝
+        assert!(matches!(
+            manager.prompt(&session_id, text("并发")).await,
+            Err(SessionError::Busy)
+        ));
+
+        release.notify_one();
+        second.await.unwrap().unwrap();
+        let (m, _) = registry.get(&session_id).unwrap().unwrap();
+        assert_eq!(m.state, SessionState::Idle, "响应接收后回到空闲");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
