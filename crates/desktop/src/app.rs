@@ -17,10 +17,11 @@ use serde_json::json;
 
 use protocol::{
     ActivitiesResult, AgentListResult, AgentParams, ContentBlock, HistoryResult,
-    OngoingActivityResult, OpResult, SessionConfigureParams, SessionIdParams, SessionListResult,
-    SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
-    SessionState, SessionStateChange, StateChangeReason, WorkspaceDiffParams, WorkspaceDiffResult,
-    WorkspaceListResult, WorkspaceReadParams, WorkspaceReadResult, WorkspaceRestoreParams,
+    OngoingActivityResult, OpResult, SessionConfigureParams, SessionIdParams, SessionInfoParams,
+    SessionInfoResult, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
+    SessionPromptParams, SessionResult, SessionState, SessionStateChange, StateChangeReason,
+    WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListResult, WorkspaceReadParams,
+    WorkspaceReadResult, WorkspaceRestoreParams,
 };
 
 use crate::config::{
@@ -212,6 +213,9 @@ pub struct AmuxApp {
     pub(crate) activities_scroll: ScrollHandle,
     pub(crate) diff_scroll: ScrollHandle,
     pub(crate) workflow_dialog_limit: usize,
+    /// 会话列表滚动查询的页数 N（docs/DESIGN.md「会话列表滚动查询」）：
+    /// 「加载更多」每点击一次 +1，所有在线机器统一查询前 N 页。
+    pub(crate) list_pages: usize,
     pub(crate) activities_limit: usize,
     pub(crate) expanded_activities: std::collections::HashSet<String>,
     /// 以工作流会话 ID 为身份（同 Selected）
@@ -358,6 +362,7 @@ impl AmuxApp {
             activities_scroll: ScrollHandle::new(),
             diff_scroll: ScrollHandle::new(),
             workflow_dialog_limit: 50,
+            list_pages: 1,
             activities_limit: 100,
             expanded_activities: std::collections::HashSet::new(),
             expanded_workflows: std::collections::HashSet::new(),
@@ -481,9 +486,7 @@ impl AmuxApp {
 
     /// 工作流会话 ID → 引擎下标（UI 身份用 ID，引擎存放在 Vec，仅作解析）。
     pub(crate) fn workflow_idx(&self, wf_id: &str) -> Option<usize> {
-        self.workflows
-            .iter()
-            .position(|wf| wf.id() == wf_id)
+        self.workflows.iter().position(|wf| wf.id() == wf_id)
     }
 
     /// 工作流会话 ID → 引擎引用。
@@ -634,10 +637,7 @@ impl AmuxApp {
                     log::error!("推进工作流失败：{e}");
                 }
                 if let Err(e) = wf.persist(&session_dir) {
-                    log::error!(
-                        "工作流状态持久化失败 {}: {e}",
-                        wf.id()
-                    );
+                    log::error!("工作流状态持久化失败 {}: {e}", wf.id());
                 }
             })
             .await;
@@ -651,31 +651,91 @@ impl AmuxApp {
         let Some(m) = self.machines.get(idx) else {
             return;
         };
+        let n = self.list_pages;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = json!({ "limit": PAGE_LIMIT });
+            // 滚动查询（docs/DESIGN.md「会话列表滚动查询」）：取本在线机器前 N 页
+            let mut pages: Vec<SessionMeta> = Vec::new();
+            let mut before: Option<String> = None;
+            let mut has_more = false;
+            let mut next_before: Option<String> = None;
+            for _ in 0..n {
+                let params = json!({ "limit": PAGE_LIMIT, "before": before.clone() });
+                match client
+                    .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
+                    .await
+                {
+                    Ok(res) => {
+                        pages.extend(res.sessions);
+                        has_more = res.has_more;
+                        let nb = res.next_before;
+                        before = nb.clone();
+                        next_before = nb;
+                        if !has_more {
+                            break;
+                        }
+                    }
+                    // 刷新失败保持现状：离线/断连由列表的机器在线过滤兜底
+                    Err(_) => return,
+                }
+            }
+
+            // 应用前 N 页，并计算工作流关联会话中尚未出现在这些页里的 id
+            let missing = match this.update_in(cx, |this, _w, _cx| {
+                let Some(m) = this.machines.get_mut(idx) else {
+                    return Vec::new();
+                };
+                let (list, hm, nb) = merge_session_window(
+                    &m.sessions,
+                    std::mem::take(&mut pages),
+                    has_more,
+                    next_before,
+                );
+                m.sessions = list;
+                m.sessions_has_more = hm;
+                m.sessions_next_before = nb;
+                crate::logic::sort_sessions_recent(&mut m.sessions);
+                let child_ids: Vec<(usize, String)> = this
+                    .workflows
+                    .iter()
+                    .flat_map(|wf| {
+                        let children = wf.session.read().unwrap().children.clone();
+                        children.into_iter().map(|c| (c.machine_idx, c.id))
+                    })
+                    .collect();
+                child_ids
+                    .iter()
+                    .filter(|(cmi, cid)| *cmi == idx && !m.sessions.iter().any(|s| s.id == *cid))
+                    .map(|(_, cid)| cid.clone())
+                    .collect::<Vec<_>>()
+            }) {
+                Ok(missing) => missing,
+                Err(_) => return,
+            };
+            if missing.is_empty() {
+                let _ = this.update_in(cx, |_, _, cx| cx.notify());
+                return;
+            }
+
+            // 第 3/4 步：批量补查缺失的工作流关联会话（不改变分页游标）
             if let Ok(res) = client
-                .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
+                .request::<_, SessionInfoResult>(
+                    protocol::method::SESSION_INFO,
+                    Some(SessionInfoParams {
+                        session_ids: missing,
+                    }),
+                )
                 .await
             {
-                let sessions = res.sessions;
-                let has_more = res.has_more;
-                let next_before = res.next_before;
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
-                        let (list, hm, nb) = if has_more {
-                            merge_session_window(
-                                &m.sessions,
-                                sessions.clone(),
-                                has_more,
-                                next_before,
-                            )
-                        } else {
-                            (sessions.clone(), false, None)
-                        };
+                        let (list, _, _) = merge_session_window(
+                            &m.sessions,
+                            res.sessions,
+                            m.sessions_has_more,
+                            m.sessions_next_before.clone(),
+                        );
                         m.sessions = list;
-                        m.sessions_has_more = hm;
-                        m.sessions_next_before = nb;
                         crate::logic::sort_sessions_recent(&mut m.sessions);
                     }
                     cx.notify();
@@ -935,37 +995,15 @@ impl AmuxApp {
         .detach();
     }
 
-    pub(crate) fn load_more_sessions(&self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
-        let Some(m) = self.machines.get(machine) else {
-            return;
-        };
-        let Some(before) = m.sessions_next_before.clone() else {
-            return;
-        };
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = json!({ "limit": PAGE_LIMIT, "before": before });
-            if let Ok(res) = client
-                .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
-                .await
-            {
-                let sessions = res.sessions;
-                let has_more = res.has_more;
-                let next_before = res.next_before;
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    if let Some(m) = this.machines.get_mut(machine) {
-                        let (list, hm, nb) =
-                            merge_session_window(&m.sessions, sessions, has_more, next_before);
-                        m.sessions = list;
-                        m.sessions_has_more = hm;
-                        m.sessions_next_before = nb;
-                        crate::logic::sort_sessions_recent(&mut m.sessions);
-                    }
-                    cx.notify();
-                });
+    /// 「加载更早会话」：滚动查询页数 N +1，所有在线机器统一按前 N 页重新查询，
+    /// 随后各自补齐工作流关联会话（docs/DESIGN.md「会话列表滚动查询」）。
+    pub(crate) fn load_more_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.list_pages += 1;
+        for i in 0..self.machines.len() {
+            if matches!(self.machines[i].status, MachineStatus::Online) {
+                self.refresh_sessions(i, window, cx);
             }
-        })
-        .detach();
+        }
     }
 
     pub(crate) fn spawn_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -974,56 +1012,20 @@ impl AmuxApp {
             let machine_name = self.machines[i].config.name.clone();
             let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                 loop {
-                    // 每轮按机器名解析当前 client：重连会替换 client 实例，
-                    // 循环若持有启动时的旧克隆，重连后将永远请求失败（静默丢同步）
-                    let resolved = this
-                        .update_in(cx, |this, _w, _cx| {
-                            this.machines
-                                .iter()
-                                .find(|m| m.config.name == machine_name)
-                                .map(|m| (m.client.clone(), m.connection_epoch))
-                        })
-                        .ok()
-                        .flatten();
-                    if let Some((client, epoch)) = resolved {
-                        if let Ok(res) = client
-                            .request::<_, SessionListResult>(
-                                protocol::method::SESSION_LIST,
-                                Some(json!({ "limit": PAGE_LIMIT })),
-                            )
-                            .await
-                        {
-                            let sessions = res.sessions;
-                            let has_more = res.has_more;
-                            let next_before = res.next_before;
-                            let _ = this.update_in(cx, |this, _w, cx| {
-                                // epoch 不匹配说明响应跨越了一次重连：丢弃，等下一轮新连接的数据
-                                let Some(m) = this.machines.iter_mut().find(|m| {
-                                    m.config.name == machine_name && m.connection_epoch == epoch
-                                }) else {
-                                    return;
-                                };
-                                let (list, hm, nb) = if has_more {
-                                    merge_session_window(
-                                        &m.sessions,
-                                        sessions,
-                                        has_more,
-                                        next_before,
-                                    )
-                                } else {
-                                    (sessions, false, None)
-                                };
-                                m.sessions = list;
-                                m.sessions_has_more = hm;
-                                m.sessions_next_before = nb;
-                                crate::logic::sort_sessions_recent(&mut m.sessions);
-                                cx.notify();
-                            });
-                        }
-                    }
                     cx.background_executor()
                         .timer(Duration::from_secs(10))
                         .await;
+                    // 定时刷新统一走 refresh_sessions（含滚动查询 N 页与工作流
+                    // 关联会话补齐）；按机器名定位 idx，重连后 idx 仍有效
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if let Some(idx) = this
+                            .machines
+                            .iter()
+                            .position(|m| m.config.name == machine_name)
+                        {
+                            this.refresh_sessions(idx, window, cx);
+                        }
+                    });
                 }
             });
             self._tasks.push(t);
@@ -1157,7 +1159,12 @@ impl AmuxApp {
         cx.notify();
     }
 
-    pub(crate) fn open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wf_id: String) {
+    pub(crate) fn open_workflow(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        wf_id: String,
+    ) {
         if let Some(wf) = self.workflow(&wf_id) {
             // 惰性加载：仅在打开会话渲染对话/活动视图时，从 JSONL 按需补齐 payload。
             if let Err(e) = wf.backfill(&self.session_dir) {
@@ -1274,21 +1281,24 @@ impl AmuxApp {
                     });
                 }
                 self.dialog_scroll.scroll_to_bottom();
+                let prompt_params = params;
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
-                        .request_ok(
-                            protocol::method::SESSION_PROMPT,
-                            Some(serde_json::to_value(&params).unwrap()),
-                        )
+                        .request_ok(protocol::method::SESSION_PROMPT, Some(prompt_params))
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
-                        if let Err(error) = &result {
-                            w.push_notification(
-                                UiNotification::error(format!("发送失败：{error}"))
-                                    .title("消息未发送"),
-                                cx,
-                            );
-                            this.refresh_sessions(machine, w, cx);
+                        match &result {
+                            Err(error) => {
+                                w.push_notification(
+                                    UiNotification::error(format!("发送失败：{error}"))
+                                        .title("消息未发送"),
+                                    cx,
+                                );
+                            }
+                            // 发送用户消息即触发列表刷新（docs/DESIGN.md 会话列表刷新机制）
+                            Ok(()) => {
+                                this.refresh_sessions(machine, w, cx);
+                            }
                         }
                         this.refresh_dialog(w, cx, machine, id);
                         cx.notify();
@@ -1308,10 +1318,7 @@ impl AmuxApp {
                         wf.begin_busy();
                     }
                     if let Err(e) = wf.persist(&session_dir) {
-                        log::error!(
-                            "工作流用户消息持久化失败 {}: {e}",
-                            wf.id()
-                        );
+                        log::error!("工作流用户消息持久化失败 {}: {e}", wf.id());
                     }
                     should_advance
                 } else {
@@ -1322,16 +1329,10 @@ impl AmuxApp {
                     let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                         run_engine_on_tokio(async move {
                             if let Err(e) = wf.advance().await {
-                                log::error!(
-                                    "推进工作流失败 {}: {e}",
-                                    wf.id()
-                                );
+                                log::error!("推进工作流失败 {}: {e}", wf.id());
                             }
                             if let Err(e) = wf.persist(&session_dir) {
-                                log::error!(
-                                    "工作流状态持久化失败 {}: {e}",
-                                    wf.id()
-                                );
+                                log::error!("工作流状态持久化失败 {}: {e}", wf.id());
                             }
                         })
                         .await;
@@ -1346,7 +1347,12 @@ impl AmuxApp {
         self.input_attachments.clear();
     }
 
-    pub(crate) fn quick_command(&mut self, window: &mut Window, cx: &mut Context<Self>, cmd: &QuickCommand) {
+    pub(crate) fn quick_command(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        cmd: &QuickCommand,
+    ) {
         match self.selected.clone() {
             Some(Selected::Session { machine, id }) => {
                 let Some(m) = self.machine(machine) else {
@@ -1711,10 +1717,7 @@ impl AmuxApp {
         }
         if let Some(wf) = self.workflows.get(wi) {
             if let Err(e) = wf.persist(&session_dir) {
-                log::error!(
-                    "工作流创建后持久化失败 {}: {e}",
-                    wf.id()
-                );
+                log::error!("工作流创建后持久化失败 {}: {e}", wf.id());
             }
         }
         if should_advance {
@@ -1725,10 +1728,7 @@ impl AmuxApp {
                         log::error!("推进工作流失败 {}: {e}", wf.id());
                     }
                     if let Err(e) = wf.persist(&session_dir) {
-                        log::error!(
-                            "工作流状态持久化失败 {}: {e}",
-                            wf.id()
-                        );
+                        log::error!("工作流状态持久化失败 {}: {e}", wf.id());
                     }
                 })
                 .await;
@@ -1739,7 +1739,12 @@ impl AmuxApp {
         cx.notify();
     }
 
-    pub(crate) fn cancel_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wf_id: String) {
+    pub(crate) fn cancel_workflow(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        wf_id: String,
+    ) {
         let session_dir = self.session_dir.clone();
         let Some(engine) = self.workflow_idx(&wf_id) else {
             return;
@@ -1750,10 +1755,7 @@ impl AmuxApp {
                 wf.begin_busy();
             }
             if let Err(e) = wf.persist(&session_dir) {
-                log::error!(
-                    "工作流取消消息持久化失败 {}: {e}",
-                    wf.id()
-                );
+                log::error!("工作流取消消息持久化失败 {}: {e}", wf.id());
             }
             should_advance
         } else {
@@ -1767,10 +1769,7 @@ impl AmuxApp {
                         log::error!("取消推进工作流失败 {}: {e}", wf.id());
                     }
                     if let Err(e) = wf.persist(&session_dir) {
-                        log::error!(
-                            "工作流状态持久化失败 {}: {e}",
-                            wf.id()
-                        );
+                        log::error!("工作流状态持久化失败 {}: {e}", wf.id());
                     }
                 })
                 .await;
@@ -1807,7 +1806,12 @@ impl AmuxApp {
         );
     }
 
-    pub(crate) fn delete_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>, wf_id: String) {
+    pub(crate) fn delete_workflow(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        wf_id: String,
+    ) {
         let Some(idx) = self.workflow_idx(&wf_id) else {
             return;
         };
@@ -1872,9 +1876,7 @@ impl AmuxApp {
                         match WorkflowEngine::remove(&session_dir, &wf_id) {
                             Ok(()) => {
                                 // 选中态以工作流会话 ID 为身份：删除后无需平移其他引用
-                                this.workflows.retain(|workflow| {
-                                    workflow.id() != wf_id
-                                });
+                                this.workflows.retain(|workflow| workflow.id() != wf_id);
                                 if this.selected == Some(Selected::Workflow { id: wf_id.clone() }) {
                                     this.set_selected(None, w, cx);
                                 }
@@ -1966,7 +1968,12 @@ impl AmuxApp {
         }
     }
 
-    pub(crate) fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
+    pub(crate) fn load_diff(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+    ) {
         let Some(m) = self.machine(machine) else {
             return;
         };
@@ -2291,7 +2298,12 @@ impl AmuxApp {
         }
     }
 
-    pub(crate) fn send_selected_diff(&mut self, window: &mut Window, cx: &mut Context<Self>, machine: usize) {
+    pub(crate) fn send_selected_diff(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+    ) {
         let Some(m) = self.machine(machine) else {
             return;
         };
@@ -2531,7 +2543,12 @@ impl AmuxApp {
         true
     }
 
-    pub(crate) fn remove_machine(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+    pub(crate) fn remove_machine(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        idx: usize,
+    ) {
         if idx >= self.machines.len() {
             return;
         }
@@ -2750,7 +2767,12 @@ impl AmuxApp {
         cx.notify();
     }
 
-    pub(crate) fn confirm_remove_skill(&mut self, window: &mut Window, cx: &mut Context<Self>, name: String) {
+    pub(crate) fn confirm_remove_skill(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        name: String,
+    ) {
         self.confirm_dialog(
             window,
             cx,
@@ -2876,7 +2898,12 @@ impl AmuxApp {
     }
 
     /// 打开/切换/关闭右侧上下文面板：窗口向右扩展（中间面板宽度不变）。
-    pub(crate) fn set_panel(&mut self, window: &mut Window, cx: &mut Context<Self>, panel: Option<Panel>) {
+    pub(crate) fn set_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        panel: Option<Panel>,
+    ) {
         let new_delta = panel
             .map(Self::panel_width_logical)
             .map(|width| width + Self::PANEL_RESIZE_HANDLE_WIDTH)
@@ -2981,7 +3008,12 @@ impl AmuxApp {
 
 impl AmuxApp {
     /// 重连机器：重建其 WS 连接视图。
-    pub(crate) fn reconnect_machine(&mut self, window: &mut Window, cx: &mut Context<Self>, idx: usize) {
+    pub(crate) fn reconnect_machine(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        idx: usize,
+    ) {
         if idx >= self.machines.len() {
             return;
         }

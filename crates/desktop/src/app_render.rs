@@ -30,7 +30,10 @@ use protocol::{
     SessionResult, SessionState,
 };
 
-use crate::app::{AmuxApp, CloseSettingsOverlay, NewSessionMode, Panel, Selected, SessionListItem, SettingsCategory, SkillAction};
+use crate::app::{
+    AmuxApp, CloseSettingsOverlay, NewSessionMode, Panel, Selected, SessionListItem,
+    SettingsCategory, SkillAction,
+};
 use crate::config::ApiFormat;
 use crate::diff::{diff_lines, DiffLineKind};
 use crate::display::{info_row, machine_status_badge, short_cwd};
@@ -41,7 +44,11 @@ use crate::logic::{
 use crate::machine::MachineStatus;
 use crate::text::{block_text, format_local_time, one_line, TimePrecision};
 impl AmuxApp {
-    pub(crate) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_sidebar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let sidebar = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
         let foreground = cx.theme().foreground;
@@ -191,19 +198,20 @@ impl AmuxApp {
             })
             .collect();
 
-        for (mi, m) in self.machines.iter().enumerate() {
-            if m.sessions_has_more {
-                let name = m.config.name.clone();
-                rows.push(
-                    Button::new(format!("sessions-more-{mi}"))
-                        .small()
-                        .label(format!("加载更早会话（{name}）"))
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.load_more_sessions(window, cx, mi);
-                        }))
-                        .into_any_element(),
-                );
-            }
+        if self
+            .machines
+            .iter()
+            .any(|m| matches!(m.status, MachineStatus::Online) && m.sessions_has_more)
+        {
+            rows.push(
+                Button::new("sessions-more")
+                    .small()
+                    .label("加载更早会话")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.load_more_sessions(window, cx);
+                    }))
+                    .into_any_element(),
+            );
         }
         rows
     }
@@ -366,14 +374,15 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    pub(crate) fn render_workflow_row(&self, cx: &mut Context<Self>, wi: usize) -> gpui::AnyElement {
+    pub(crate) fn render_workflow_row(
+        &self,
+        cx: &mut Context<Self>,
+        wi: usize,
+    ) -> gpui::AnyElement {
         let Some(wf) = self.workflows.get(wi) else {
             return div().into_any();
         };
-        let wf_sel = self.selected
-            == Some(Selected::Workflow {
-                id: wf.id(),
-            });
+        let wf_sel = self.selected == Some(Selected::Workflow { id: wf.id() });
         let wf_id = wf.id();
         let (title, busy) = {
             let title = if wf.title_is_empty() {
@@ -597,7 +606,11 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    pub(crate) fn render_main(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_main(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         if self.selected.is_none() {
             return v_flex()
                 .flex_1()
@@ -622,7 +635,11 @@ impl AmuxApp {
             .into_any()
     }
 
-    pub(crate) fn render_center(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_center(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         if self.selected.is_none() {
             return self.render_new_session_view(window, cx);
         }
@@ -1114,7 +1131,11 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    pub(crate) fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_dialog(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let dialog: Vec<DialogMsg> = match &self.selected {
             Some(Selected::Session { machine, id }) => self
                 .machine(*machine)
@@ -1522,7 +1543,11 @@ impl AmuxApp {
         row
     }
 
-    pub(crate) fn render_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_input(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         v_flex()
             .gap_2()
@@ -2091,18 +2116,12 @@ impl AmuxApp {
                 .child(
                     Label::new(format!(
                         "子会话 {}",
-                        self.workflow(&id)
-                            .map(|w| w.child_count())
-                            .unwrap_or(0)
+                        self.workflow(&id).map(|w| w.child_count()).unwrap_or(0)
                     ))
                     .text_xs()
                     .text_color(cx.theme().muted_foreground),
                 );
-            for c in self
-                .workflow(&id)
-                .map(|w| w.children())
-                .unwrap_or_default()
-            {
+            for c in self.workflow(&id).map(|w| w.children()).unwrap_or_default() {
                 let step: SharedString = self
                     .machine(c.machine_idx)
                     .and_then(|m| m.sessions.iter().find(|s| s.id == c.id))
@@ -2299,7 +2318,12 @@ impl AmuxApp {
         }
     }
 
-    pub(crate) fn activity_row(&self, prefix: &str, a: &Activity, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn activity_row(
+        &self,
+        prefix: &str,
+        a: &Activity,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let key_toggle = Self::activity_row_key(prefix, a);
         let expanded = self.expanded_activities.contains(&key_toggle);
         // 整卡可点击切换展开：折叠恒为一行（截断省略），展开显示全文（可换行）。
@@ -2518,7 +2542,11 @@ impl AmuxApp {
         }
     }
 
-    pub(crate) fn render_diff_panel(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_diff_panel(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let machine = self.active_machine();
         let files = machine
             .and_then(|i| self.machine(i))
@@ -3874,7 +3902,10 @@ impl AmuxApp {
             .into_any()
     }
 
-    pub(crate) fn render_quick_commands_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_quick_commands_settings(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let commands = self.store.list_quick_commands();
         let items = commands
             .iter()
@@ -4154,4 +4185,3 @@ impl AmuxApp {
             .child(Label::new(subtitle).text_sm().text_color(muted_foreground))
     }
 }
-
