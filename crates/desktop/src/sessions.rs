@@ -24,15 +24,15 @@ use protocol::{
     SessionConfigKind, SessionConfigOptionsResult, SessionConfigOptionValue,
     SessionConfigSetting, SessionConfigureParams, SessionIdParams, SessionInfoParams,
     SessionInfoResult, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
-    SessionPromptParams, SessionResult, SessionState,
+    SessionPromptParams, SessionResult, SessionSlashCommandsResult, SessionState,
 };
 
 use crate::config::QuickCommand;
 use crate::display::short_cwd;
 use crate::logic::{
     activity_kind_detail, compose_prompt, compose_workflow_text, external_path_attachment,
-    image_attachment, merge_session_window, parse_at_references, path_attachment, DialogMsg,
-    InputAttachment,
+    filter_slash_commands, image_attachment, merge_session_window, parse_at_references,
+    path_attachment, slash_command_prefix, DialogMsg, InputAttachment,
 };
 use crate::machine::MachineStatus;
 use crate::text::{block_text, format_local_time, one_line, TimePrecision};
@@ -41,7 +41,7 @@ use protocol::Activity;
 
 use crate::app::{
     run_engine_on_tokio, AmuxApp, DraftKey, NewSessionMode, Panel, Selected, SelectedConfigOptions,
-    SessionListItem, SettingsCategory, PAGE_LIMIT,
+    SelectedSlashCommands, SessionListItem, SettingsCategory, PAGE_LIMIT,
 };
 
 impl AmuxApp {
@@ -382,7 +382,8 @@ impl AmuxApp {
         self.refresh_dialog(window, cx, machine, session_id.clone());
         self.refresh_activities(window, cx, machine, session_id.clone());
         self.refresh_ongoing(window, cx, machine, session_id.clone());
-        self.refresh_config_options(window, cx, machine, session_id);
+        self.refresh_config_options(window, cx, machine, session_id.clone());
+        self.refresh_slash_commands(window, cx, machine, session_id);
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -1435,6 +1436,8 @@ impl AmuxApp {
             })
             .child(
                 h_flex()
+                    // relative：斜杠命令上拉框（absolute 定位）的锚点
+                    .relative()
                     .gap_2()
                     .items_end()
                     .child(
@@ -1536,7 +1539,9 @@ impl AmuxApp {
                                     cx.notify();
                                 })),
                         )
-                    }),
+                    })
+                    // 斜杠命令上拉框（docs/PRD.md「会话交互视图」）
+                    .children(self.render_slash_menu(cx)),
             )
             // 会话选项（docs/PRD.md「会话交互视图」：位于输入框下方）
             .children(self.render_config_options_row(cx))
@@ -2296,6 +2301,133 @@ impl AmuxApp {
             });
         })
         .detach();
+    }
+
+    /// 查询选中会话的斜杠命令（`session.slash_commands`；docs/DESIGN.md
+    /// 「普通会话斜杠命令」：存储在 Server 内存，以 Agent 侧数据为权威）。
+    /// 尚无 agent 侧会话或 agent 未下发时为空；agent 侧会话在首条 prompt 时
+    /// 才惰性创建，命令集合由 turn 结束后的刷新补齐。
+    pub(crate) fn refresh_slash_commands(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        self.slash_commands = Some(SelectedSlashCommands {
+            machine,
+            session_id: session_id.clone(),
+            commands: Vec::new(),
+        });
+        let params = SessionIdParams {
+            session_id: session_id.clone(),
+        };
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let res = client
+                .request::<_, SessionSlashCommandsResult>(
+                    protocol::method::SESSION_SLASH_COMMANDS,
+                    Some(params),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, _w, cx| {
+                if let Some(cur) = &mut this.slash_commands {
+                    // 响应到达时选中会话已切换则丢弃陈旧结果
+                    if cur.machine == machine && cur.session_id == session_id {
+                        if let Ok(res) = res {
+                            cur.commands = res.commands;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 斜杠命令上拉框（docs/PRD.md「会话交互视图」：输入 `/` 时根据前缀匹配
+    /// 斜杠命令，弹出上拉框供用户选择）。可见性由当前输入文本派生：仅当选中
+    /// 普通会话、命令集合非空且输入正处于命令名输入中（`/` 开头、无空白）时
+    /// 展示前缀匹配项；点击项回填 `/name ` 后随前缀消失自动收起。
+    pub(crate) fn render_slash_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let selected = self.slash_commands.as_ref()?;
+        let Selected::Session { machine, id } = self.selected.as_ref()? else {
+            return None;
+        };
+        if selected.machine != *machine || selected.session_id != *id {
+            return None;
+        }
+        let text = self.input_state.read(cx).value().to_string();
+        let prefix = slash_command_prefix(&text)?;
+        let matched = filter_slash_commands(&selected.commands, prefix);
+        if matched.is_empty() {
+            return None;
+        }
+        let muted = cx.theme().muted_foreground;
+        let hover_bg = cx.theme().accent;
+        let rows = matched
+            .into_iter()
+            .map(|c| {
+                let name = c.name.clone();
+                let fill = format!("/{} ", c.name);
+                let hint = c.hint.clone();
+                div()
+                    .id(format!("slash-cmd-{}", c.name))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(hover_bg))
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        // 回填完整命令并留一个空格，供用户继续输入参数
+                        this.input_state
+                            .update(cx, |s, cx| s.set_value(&fill, window, cx));
+                        cx.notify();
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                Label::new(format!("/{name}"))
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(
+                                Label::new(hint.unwrap_or_else(|| c.description.clone()))
+                                    .text_sm()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(muted),
+                            ),
+                    )
+            })
+            .collect::<Vec<_>>();
+        Some(
+            v_flex()
+                .id("slash-menu")
+                .absolute()
+                // 锚在输入行容器上沿之上，向上展开（上拉）
+                .bottom(relative(1.0))
+                .left_0()
+                .w(px(480.))
+                .max_h(px(280.))
+                .overflow_y_scroll()
+                .p_1()
+                .gap_0p5()
+                .bg(cx.theme().popover)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_lg()
+                .shadow_lg()
+                .children(rows)
+                .into_any(),
+        )
     }
 
     /// 设置会话配置选项（`session.configure` 携带 config 设置；Server 向 ACP

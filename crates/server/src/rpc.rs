@@ -9,8 +9,9 @@ use protocol::{
     method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams, HistoryResult,
     OngoingActivityResult, OpResult, SessionConfigOptionsResult, SessionConfigureParams,
     SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, WorkspaceDiffParams,
-    WorkspaceDiffResult, WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
+    SessionSlashCommandsResult, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListParams,
+    WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
 use crate::error::SessionError;
@@ -178,6 +179,17 @@ impl Handlers {
                     .await
                     .map_err(map_session_err)?;
                 serde_json::to_value(SessionConfigOptionsResult { options })
+                    .map_err(|e| RpcError::internal(e.to_string()))
+            }
+
+            method::SESSION_SLASH_COMMANDS => {
+                let p: SessionIdParams = parse(params)?;
+                let commands = self
+                    .manager
+                    .slash_commands(&p.session_id)
+                    .await
+                    .map_err(map_session_err)?;
+                serde_json::to_value(SessionSlashCommandsResult { commands })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
 

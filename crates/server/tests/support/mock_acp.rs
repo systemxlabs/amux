@@ -21,17 +21,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, MessageId, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse, ReleaseTerminalRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
-    ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue, SessionInfo,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+    CancelNotification,
+    CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk, CreateTerminalRequest,
+    DeleteSessionRequest, DeleteSessionResponse, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, MessageId,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
+    PromptResponse, ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue,
+    SessionInfo, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, StopReason, TerminalOutputRequest, TextContent, ToolCall,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
-    WaitForTerminalExitRequest,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
+    UsageUpdate, WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{Agent, Result, Stdio};
 use serde_json::{json, Value};
@@ -363,6 +364,19 @@ async fn run(state_file: &str) -> Result<()> {
                     cx_task.send_notification(SessionNotification::new(
                         request.session_id.clone(),
                         SessionUpdate::UsageUpdate(UsageUpdate::new(53_000, 200_000)),
+                    ))?;
+                    // 斜杠命令集合（docs/DESIGN.md「普通会话斜杠命令」）：turn 内
+                    // 全量下发，供 session.slash_commands 查询验证
+                    cx_task.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+                            AvailableCommand::new("goal", "设置或查看本会话目标"),
+                            AvailableCommand::new("review", "审查当前改动").input(
+                                AvailableCommandInput::Unstructured(
+                                    UnstructuredCommandInput::new("审查重点"),
+                                ),
+                            ),
+                        ])),
                     ))?;
 
                     let agent_mid = format!("a{}", history_len(&request.session_id.to_string()));

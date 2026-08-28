@@ -65,6 +65,29 @@ pub fn sort_sessions_recent(meta: &mut [SessionMeta]) {
     meta.sort_by_key(|entry| std::cmp::Reverse(entry.last_active_at));
 }
 
+/// 斜杠命令前缀（docs/PRD.md「会话交互视图」：输入 `/` 时前缀匹配弹出上拉框）。
+/// 仅当输入以 `/` 开头且命令名 token 尚未输入完（`/` 后无空白）时返回
+/// `/` 之后的已输入前缀；其余（非 `/` 开头、含空白、正文提及 `/`）返回 None。
+pub fn slash_command_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    if rest.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(rest)
+}
+
+/// 前缀匹配斜杠命令（大小写不敏感，保持原顺序）。
+pub fn filter_slash_commands<'a>(
+    commands: &'a [protocol::SlashCommand],
+    prefix: &str,
+) -> Vec<&'a protocol::SlashCommand> {
+    let p = prefix.to_lowercase();
+    commands
+        .iter()
+        .filter(|c| c.name.to_lowercase().starts_with(&p))
+        .collect()
+}
+
 /// 会话上下文占用展示文案（token）：`已用 / 窗口（百分比%）`。
 /// 两者均为 0（尚未收到 `usage_update`）时返回 None（不展示）。
 pub fn context_usage_text(used: u64, window: u64) -> Option<String> {
@@ -584,5 +607,46 @@ mod tests {
             }],
         );
         assert_eq!(blocks.len(), 1);
+    }
+
+    #[::core::prelude::v1::test]
+    fn slash_prefix_only_while_typing_command_token() {
+        assert_eq!(slash_command_prefix("/"), Some(""));
+        assert_eq!(slash_command_prefix("/go"), Some("go"));
+        assert_eq!(slash_command_prefix("/GOAL"), Some("GOAL"));
+        // 命令名输入完成（空白开启参数）后不再弹出上拉框
+        assert_eq!(slash_command_prefix("/goal "), None);
+        assert_eq!(slash_command_prefix("/goal 做点事"), None);
+        assert_eq!(slash_command_prefix("/goal\n"), None);
+        // 正文提及 / 或空输入不触发
+        assert_eq!(slash_command_prefix("帮我 /goal"), None);
+        assert_eq!(slash_command_prefix(""), None);
+        assert_eq!(slash_command_prefix("path/is/here"), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn filter_slash_commands_matches_prefix_case_insensitively() {
+        let commands = vec![
+            protocol::SlashCommand {
+                name: "goal".into(),
+                description: "目标".into(),
+                hint: None,
+            },
+            protocol::SlashCommand {
+                name: "Review".into(),
+                description: "审查".into(),
+                hint: None,
+            },
+        ];
+        let names = |prefix: &str| {
+            filter_slash_commands(&commands, prefix)
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(""), vec!["goal", "Review"]);
+        assert_eq!(names("g"), vec!["goal"]);
+        assert_eq!(names("RE"), vec!["Review"]);
+        assert!(names("x").is_empty());
     }
 }

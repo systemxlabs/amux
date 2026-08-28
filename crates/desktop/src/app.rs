@@ -13,7 +13,8 @@ use gpui_component::{
 };
 
 use protocol::{
-    SessionConfigOption, SessionMeta, SessionState, SessionStateChange, StateChangeReason,
+    SessionConfigOption, SessionMeta, SessionState, SessionStateChange, SlashCommand,
+    StateChangeReason,
 };
 
 use crate::config::{ApiFormat, ConfigStore, SkillEntry, WorkflowTemplate};
@@ -102,6 +103,15 @@ pub(crate) struct SelectedConfigOptions {
     pub(crate) session_id: String,
     pub(crate) loading: bool,
     pub(crate) options: Vec<SessionConfigOption>,
+}
+
+/// 选中普通会话的斜杠命令（经 `session.slash_commands` 查询；
+/// docs/DESIGN.md「普通会话斜杠命令」：存储在 Server 内存，以 Agent 侧数据为权威）。
+#[derive(Default)]
+pub(crate) struct SelectedSlashCommands {
+    pub(crate) machine: usize,
+    pub(crate) session_id: String,
+    pub(crate) commands: Vec<SlashCommand>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -218,6 +228,8 @@ pub struct AmuxApp {
     pub(crate) expanded_workflows: std::collections::HashSet<String>,
     /// 选中普通会话的会话选项（`session.config_options`；以 Agent 侧数据为权威）
     pub(crate) config_options: Option<SelectedConfigOptions>,
+    /// 选中普通会话的斜杠命令（`session.slash_commands`；以 Agent 侧数据为权威）
+    pub(crate) slash_commands: Option<SelectedSlashCommands>,
     /// 设置浮窗焦点锚：打开时把焦点移入浮窗，Escape 动作（绑定
     /// SettingsOverlay key_context）才能被派发到 on_action
     pub(crate) settings_focus: FocusHandle,
@@ -364,6 +376,7 @@ impl AmuxApp {
             expanded_activities: std::collections::HashSet::new(),
             expanded_workflows: std::collections::HashSet::new(),
             config_options: None,
+            slash_commands: None,
             settings_focus: cx.focus_handle(),
             _subs: Vec::new(),
             _tasks: Vec::new(),
@@ -381,10 +394,14 @@ impl AmuxApp {
             &app.input_state,
             window,
             |this, _input, event, window, cx| {
-                if let InputEvent::PressEnter { shift, .. } = event {
-                    if !shift {
+                match event {
+                    InputEvent::PressEnter { shift: false, .. } => {
                         this.send_prompt(window, cx);
                     }
+                    // 输入变化触发整窗重绘：斜杠命令上拉框按当前输入前缀派生
+                    //（docs/PRD.md「会话交互视图」）
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
                 }
             },
         ));
@@ -484,8 +501,9 @@ impl AmuxApp {
         }
         this.refresh_sessions(idx, window, cx);
 
-        // turn 结束后选项可能经 config_option_update 变化：选中会话刷新会话选项
-        //（docs/DESIGN.md「普通会话选项」：以 Agent 侧数据为权威）
+        // turn 结束后选项可能经 config_option_update / available_commands_update
+        // 变化：选中会话刷新会话选项与斜杠命令（docs/DESIGN.md：均以 Agent 侧
+        // 数据为权威）
         if idle {
             let selected_matches = matches!(
                 &this.selected,
@@ -493,6 +511,7 @@ impl AmuxApp {
             );
             if selected_matches {
                 this.refresh_config_options(window, cx, idx, sid.clone());
+                this.refresh_slash_commands(window, cx, idx, sid.clone());
             }
         }
 

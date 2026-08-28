@@ -2,7 +2,8 @@
 //! 经 WebSocket + JSON-RPC 验证协议。
 //! 覆盖：认证（未认证 AUTH_FAILED / 成功）、agent.list、会话惰性创建、
 //! prompt（含 state_change busy→idle 推送）、session.history/activities/ongoing_activity 分页、
-//! session.configure、删除触发 ACP session/close + session/delete、workspace.diff/restore。
+//! session.configure、session.slash_commands、删除触发 ACP session/close + session/delete、
+//! workspace.diff/restore。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -411,6 +412,68 @@ async fn config_options_query_lazy_and_configure() {
     );
 
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[tokio::test]
+async fn slash_commands_notification_driven() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect(port, "test-token").await;
+
+    let created = c
+        .call(
+            "session.new",
+            json!({"agent": "mock_acp", "cwd": "/tmp/work"}),
+        )
+        .await;
+    let sid = created["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 查询不触发惰性创建（docs/DESIGN.md「普通会话斜杠命令」：仅由
+    // available_commands_update 通知驱动），尚无 agent 侧会话时返回空
+    let r = c
+        .call("session.slash_commands", json!({"sessionId": sid}))
+        .await;
+    assert!(
+        r["result"]["commands"].as_array().unwrap().is_empty(),
+        "无 agent 侧会话时斜杠命令为空: {r}"
+    );
+
+    // prompt 期间 agent 下发 available_commands_update，全量覆盖内存存储
+    c.fire(
+        "session.prompt",
+        json!({"sessionId": sid, "input": [{"type": "text", "text": "开始"}]}),
+    )
+    .await;
+    let got = c
+        .wait_notification(
+            "session.state_change",
+            |p| p["sessionId"] == json!(sid) && p["newState"] == "idle",
+            8000,
+        )
+        .await;
+    assert!(got, "prompt 应结束");
+
+    let r = c
+        .call("session.slash_commands", json!({"sessionId": sid}))
+        .await;
+    let commands = r["result"]["commands"].as_array().unwrap();
+    assert_eq!(commands.len(), 2, "{r}");
+    assert_eq!(commands[0]["name"], "goal");
+    assert_eq!(commands[0]["description"], "设置或查看本会话目标");
+    assert!(
+        commands[0].get("hint").is_none(),
+        "无输入提示的命令不应携带 hint: {r}"
+    );
+    assert_eq!(commands[1]["name"], "review");
+    assert_eq!(commands[1]["hint"], "审查重点", "{r}");
+
+    // 不存在的会话报 SESSION_NOT_FOUND
+    let r = c
+        .call("session.slash_commands", json!({"sessionId": "nope"}))
+        .await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
 }
 
 #[tokio::test]

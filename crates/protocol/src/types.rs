@@ -224,6 +224,27 @@ pub struct SessionConfigOptionsResult {
     pub options: Vec<SessionConfigOption>,
 }
 
+/// 会话斜杠命令（ACP `AvailableCommand` 的投影）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommand {
+    /// 命令名（如 `goal`，用户输入 `/goal` 调用）
+    pub name: String,
+    /// 命令功能描述
+    pub description: String,
+    /// 命令名之后的输入提示（ACP `UnstructuredCommandInput.hint`；无需输入则缺省）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// `session.slash_commands` 结果（docs/DESIGN.md「普通会话斜杠命令」：存储在内存，
+/// 以 Agent 侧数据为权威；尚无 agent 侧会话或 agent 未下发时为空）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSlashCommandsResult {
+    pub commands: Vec<SlashCommand>,
+}
+
 /// `session.list` 结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
