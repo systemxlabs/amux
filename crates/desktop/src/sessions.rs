@@ -346,7 +346,7 @@ impl AmuxApp {
             window,
             cx,
         );
-        self.set_panel(window, cx, None);
+        // 面板打开状态跨会话切换保持（docs/DESIGN.md：右侧上下文面板）。
         if let Some(m) = self.machines.get_mut(machine) {
             m.views.entry(session_id.clone()).or_default();
             m.diff_files.clear();
@@ -366,6 +366,15 @@ impl AmuxApp {
             m.workspace_read_loading = false;
             m.workspace_read_has_more = false;
             m.workspace_read_next_offset = 0;
+        }
+        // 会话级 diff/工作目录数据已清空，打开中的面板需按新会话重新加载；
+        // 必须在清除状态之后调用，否则会打乱 diff_request_id/loading 守卫。
+        match self.panel {
+            Some(Panel::Workspace) => {
+                self.load_workspace_list(window, cx, machine, String::new(), 0);
+            }
+            Some(Panel::Diff) => self.load_diff(window, cx, machine),
+            _ => {}
         }
         self.refresh_dialog(window, cx, machine, session_id.clone());
         self.refresh_activities(window, cx, machine, session_id.clone());

@@ -35,7 +35,8 @@ impl AmuxApp {
             }
         }
         self.set_selected(Some(Selected::Workflow { id: wf_id }), window, cx);
-        self.set_panel(window, cx, None);
+        // 面板打开状态跨会话切换保持；活动/详情面板均支持工作流视图，
+        // 工作目录/改动面板沿用机器级状态（与在会话面板上点击侧栏按钮一致）。
         self.workflow_dialog_limit = 50;
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
