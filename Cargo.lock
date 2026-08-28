@@ -2857,7 +2857,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c91d8cffac8849493a82233811bd02b2b183b8cf39bf704de0fa0841b737595"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -3515,7 +3515,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/longbridge/gpui-component#f96f1576ee704b48476f6782962690e0feb7985b"
+source = "git+https://github.com/longbridge/gpui-component#d4b3aee7801a0c56364f509e391a099251183d56"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3563,7 +3563,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/longbridge/gpui-component#f96f1576ee704b48476f6782962690e0feb7985b"
+source = "git+https://github.com/longbridge/gpui-component#d4b3aee7801a0c56364f509e391a099251183d56"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3577,7 +3577,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/longbridge/gpui-component#f96f1576ee704b48476f6782962690e0feb7985b"
+source = "git+https://github.com/longbridge/gpui-component#d4b3aee7801a0c56364f509e391a099251183d56"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7054,7 +7054,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
