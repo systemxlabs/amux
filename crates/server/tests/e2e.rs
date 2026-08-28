@@ -272,11 +272,19 @@ async fn session_lifecycle_state_change_and_delete() {
         !meta["title"].as_str().unwrap_or("").is_empty(),
         "首条 prompt 后标题非空: {meta}"
     );
-    // 回归：lazy 创建时选项不得被后续 upsert 覆盖为空（mock new 响应带 model 选项）
-    let config_options = meta["configOptions"].as_array().unwrap();
+    // 回归：会话选项不在元数据里（docs/DESIGN.md「普通会话存储」），改经
+    // session.config_options 查询（以 Agent 侧数据为权威，存于 Server 内存）
+    let cfg = c
+        .call("session.config_options", json!({"sessionId": sid}))
+        .await;
+    let options = cfg["result"]["options"].as_array().unwrap();
     assert!(
-        config_options.iter().any(|o| o["id"] == "model"),
-        "会话选项应在首条 prompt 后持久化: {meta}"
+        options.iter().any(|o| o["id"] == "model"),
+        "session.config_options 应返回 Agent 侧选项: {cfg}"
+    );
+    assert!(
+        meta.get("configOptions").is_none(),
+        "元数据不应再携带会话选项: {meta}"
     );
     let r = c
         .call(
@@ -342,6 +350,67 @@ async fn session_lifecycle_state_change_and_delete() {
     assert!(closed, "后台清理应触发 ACP session/close");
     let list = c.call("session.list", json!({})).await;
     assert!(list["result"]["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn config_options_query_lazy_and_configure() {
+    let (port, data_dir, _guard) = start_server_with_dir().await;
+    let mut c = Client::connect(port, "test-token").await;
+
+    let created = c
+        .call(
+            "session.new",
+            json!({"agent": "mock_acp", "cwd": "/tmp/work"}),
+        )
+        .await;
+    let sid = created["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !mock_calls(&data_dir).contains("session/new"),
+        "未查询选项/未发指令前不应触发 ACP"
+    );
+
+    // 查询会话选项触发惰性创建（docs/DESIGN.md「ACP 通信」）
+    let cfg = c
+        .call("session.config_options", json!({"sessionId": sid}))
+        .await;
+    assert!(
+        mock_calls(&data_dir).contains("session/new"),
+        "查询会话选项应触发惰性 session/new: {}",
+        mock_calls(&data_dir)
+    );
+    let options = cfg["result"]["options"].as_array().unwrap();
+    assert_eq!(options.len(), 1, "{cfg}");
+    assert_eq!(options[0]["id"], "model");
+    assert_eq!(options[0]["current_value"], "gpt-4o", "{cfg}");
+
+    // session.configure 携带会话选项设置：Server 转发 ACP
+    // session/set_config_option，响应全量覆盖内存存储
+    let r = c
+        .call(
+            "session.configure",
+            json!({
+                "sessionId": sid,
+                "config": {"configId": "model", "type": "value_id", "value": "gpt-5"}
+            }),
+        )
+        .await;
+    assert!(r.get("error").is_none(), "configure 应成功: {r}");
+    assert!(
+        mock_calls(&data_dir).contains("session/set_config_option"),
+        "configure(config) 应转发 ACP session/set_config_option"
+    );
+    let cfg = c
+        .call("session.config_options", json!({"sessionId": sid}))
+        .await;
+    assert_eq!(
+        cfg["result"]["options"][0]["current_value"], "gpt-5",
+        "设置后的选项应以 Agent 侧数据为权威: {cfg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 #[tokio::test]

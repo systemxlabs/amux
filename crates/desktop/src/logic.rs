@@ -478,7 +478,6 @@ mod tests {
             worktree_dir: String::new(),
             context_size: 0,
             context_window_size: 0,
-            config_options: Vec::new(),
         }
     }
 

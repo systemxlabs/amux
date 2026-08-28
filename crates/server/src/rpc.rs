@@ -7,9 +7,9 @@ use serde_json::Value;
 
 use protocol::{
     method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams, HistoryResult,
-    OngoingActivityResult, OpResult, SessionConfigureParams, SessionIdParams, SessionInfoParams,
-    SessionInfoResult, SessionListParams, SessionListResult, SessionNewParams, SessionPageParams,
-    SessionPromptParams, SessionResult, SessionSetConfigOptionParams, WorkspaceDiffParams,
+    OngoingActivityResult, OpResult, SessionConfigOptionsResult, SessionConfigureParams,
+    SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, WorkspaceDiffParams,
     WorkspaceDiffResult, WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
@@ -149,21 +149,35 @@ impl Handlers {
 
             method::SESSION_CONFIGURE => {
                 let p: SessionConfigureParams = parse(params)?;
-                self.manager
-                    .configure(&p.session_id, &p.title)
-                    .await
-                    .map_err(map_session_err)?;
+                if p.title.is_none() && p.config.is_none() {
+                    return Err(RpcError {
+                        code: server_error::INVALID_INPUT,
+                        message: "session.configure 至少设置标题或会话选项之一".into(),
+                    });
+                }
+                if let Some(title) = &p.title {
+                    self.manager
+                        .configure(&p.session_id, Some(title))
+                        .await
+                        .map_err(map_session_err)?;
+                }
+                if let Some(config) = &p.config {
+                    self.manager
+                        .set_config_option(&p.session_id, &config.config_id, config.value.clone())
+                        .await
+                        .map_err(map_session_err)?;
+                }
                 ok_op()
             }
 
-            method::SESSION_SET_CONFIG_OPTION => {
-                let p: SessionSetConfigOptionParams = parse(params)?;
-                let session = self
+            method::SESSION_CONFIG_OPTIONS => {
+                let p: SessionIdParams = parse(params)?;
+                let options = self
                     .manager
-                    .set_config_option(&p.session_id, &p.config_id, p.value)
+                    .config_options(&p.session_id)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(SessionResult { session })
+                serde_json::to_value(SessionConfigOptionsResult { options })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
 

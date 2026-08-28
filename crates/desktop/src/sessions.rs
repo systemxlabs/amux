@@ -6,11 +6,12 @@ use gpui_component::{
     checkbox::Checkbox,
     input::Input,
     label::Label,
-    menu::{ContextMenuExt, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     notification::Notification as UiNotification,
     popover::Popover,
     progress::Progress,
     spinner::Spinner,
+    switch::Switch,
     tag::Tag,
     text::TextView,
     tooltip::Tooltip,
@@ -20,10 +21,11 @@ use gpui_component::{
 use serde_json::json;
 
 use protocol::{
-    ActivitiesResult, ContentBlock, HistoryResult, OngoingActivityResult, SessionConfigOptionValue,
-    SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
-    SessionListResult, SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams,
-    SessionResult, SessionState,
+    ActivitiesResult, ContentBlock, HistoryResult, OngoingActivityResult, OpResult,
+    SessionConfigKind, SessionConfigOptionsResult, SessionConfigOptionValue,
+    SessionConfigSetting, SessionConfigureParams, SessionIdParams, SessionInfoParams,
+    SessionInfoResult, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
+    SessionPromptParams, SessionResult, SessionState,
 };
 
 use crate::config::QuickCommand;
@@ -39,8 +41,8 @@ use crate::workflow::now;
 use protocol::Activity;
 
 use crate::app::{
-    run_engine_on_tokio, AmuxApp, DraftKey, NewSessionMode, Panel, Selected, SessionListItem,
-    SettingsCategory, PAGE_LIMIT,
+    run_engine_on_tokio, AmuxApp, DraftKey, NewSessionMode, Panel, Selected, SelectedConfigOptions,
+    SessionListItem, SettingsCategory, PAGE_LIMIT,
 };
 
 impl AmuxApp {
@@ -380,7 +382,8 @@ impl AmuxApp {
         }
         self.refresh_dialog(window, cx, machine, session_id.clone());
         self.refresh_activities(window, cx, machine, session_id.clone());
-        self.refresh_ongoing(window, cx, machine, session_id);
+        self.refresh_ongoing(window, cx, machine, session_id.clone());
+        self.refresh_config_options(window, cx, machine, session_id);
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -677,7 +680,8 @@ impl AmuxApp {
         let title_trim = title.trim().to_string();
         let params = SessionConfigureParams {
             session_id,
-            title: title_trim,
+            title: Some(title_trim),
+            config: None,
         };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
@@ -734,7 +738,6 @@ impl AmuxApp {
                     worktree_dir: String::new(),
                     context_size: 0,
                     context_window_size: 0,
-                    config_options: Vec::new(),
                 })
             }
             None => None,
@@ -1543,6 +1546,141 @@ impl AmuxApp {
                         )
                     }),
             )
+            // 会话选项（docs/PRD.md「会话交互视图」：位于输入框下方）
+            .children(self.render_config_options_row(cx))
+    }
+
+    /// 会话选项行：select 类用下拉按钮、boolean 类用开关（docs/PRD.md
+    /// 「会话交互视图」：根据选项类型使用下拉框、开关等组件）。选项数据来自
+    /// `session.config_options`，以 Agent 侧数据为权威。
+    fn render_config_options_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let opts = self.config_options.as_ref()?;
+        let Selected::Session { machine, id } = self.selected.as_ref()? else {
+            return None;
+        };
+        if opts.options.is_empty() {
+            return None;
+        }
+        let machine = *machine;
+        let session_id = id.clone();
+        let weak = cx.weak_entity();
+        let muted = cx.theme().muted_foreground;
+        let mut row = h_flex().flex_wrap().gap_x_3().gap_y_1().items_center();
+        for opt in &opts.options {
+            let opt_id = opt.id.clone();
+            match &opt.kind {
+                SessionConfigKind::Select {
+                    current_value,
+                    options,
+                } => {
+                    let current_label = options
+                        .iter()
+                        .find(|o| o.value == *current_value)
+                        .map(|o| o.name.clone())
+                        .unwrap_or_else(|| current_value.clone());
+                    // 闭包要求 'static：把候选克隆为值对
+                    let entries: Vec<(String, String)> = options
+                        .iter()
+                        .map(|o| (o.value.clone(), o.name.clone()))
+                        .collect();
+                    let current_value = current_value.clone();
+                    let sid = session_id.clone();
+                    let oid = opt_id.clone();
+                    let weak = weak.clone();
+                    row = row.child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                Label::new(opt.name.clone())
+                                    .text_sm()
+                                    .text_color(muted),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "cfg-select-{machine}-{opt_id}"
+                                )))
+                                .small()
+                                .outline()
+                                .label(current_label)
+                                .dropdown_menu(move |menu, _window, _cx| {
+                                    let mut menu = menu;
+                                    for (value, name) in &entries {
+                                        let checked = value == &current_value;
+                                        let weak = weak.clone();
+                                        let sid = sid.clone();
+                                        let oid = oid.clone();
+                                        let value = value.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(name.clone())
+                                                .checked(checked)
+                                                .on_click(move |_ev, _window, cx| {
+                                                    let _ = weak.update_in(
+                                                        cx,
+                                                        |this, window, cx| {
+                                                            this.set_session_config_option(
+                                                                window,
+                                                                cx,
+                                                                machine,
+                                                                sid.clone(),
+                                                                oid.clone(),
+                                                                SessionConfigOptionValue::ValueId {
+                                                                    value: value.clone(),
+                                                                },
+                                                            );
+                                                        },
+                                                    );
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                }),
+                            ),
+                    );
+                }
+                SessionConfigKind::Boolean { current_value } => {
+                    let sid = session_id.clone();
+                    let oid = opt_id.clone();
+                    let checked = *current_value;
+                    let weak = weak.clone();
+                    row = row.child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                Label::new(opt.name.clone())
+                                    .text_sm()
+                                    .text_color(muted),
+                            )
+                            .child(
+                                Switch::new(SharedString::from(format!(
+                                    "cfg-switch-{machine}-{opt_id}"
+                                )))
+                                .small()
+                                .checked(checked)
+                                .on_click(move |_, _window, cx| {
+                                    let _ = weak.update_in(cx, |this, window, cx| {
+                                        this.set_session_config_option(
+                                            window,
+                                            cx,
+                                            machine,
+                                            sid.clone(),
+                                            oid.clone(),
+                                            SessionConfigOptionValue::Boolean {
+                                                value: !checked,
+                                            },
+                                        );
+                                    });
+                                }),
+                            ),
+                    );
+                }
+            }
+        }
+        if opts.loading {
+            row = row.child(Spinner::new().xsmall());
+        }
+        Some(row.into_any_element())
     }
 
     pub(crate) fn render_quick_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2115,8 +2253,62 @@ impl AmuxApp {
         row
     }
 
-    /// 设置会话配置选项（docs/DESIGN.md：Server 向 ACP Server 发送
-    /// `session/set_config_option`）。成功后刷新会话列表带回最新选项。
+    /// 查询选中会话的会话选项（`session.config_options`；docs/DESIGN.md
+    /// 「普通会话选项」：存储在 Server 内存，以 Agent 侧数据为权威）。
+    pub(crate) fn refresh_config_options(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        // 同一会话刷新时保留既有选项展示，避免轮询期间整行闪烁
+        let options = match &self.config_options {
+            Some(cur) if cur.machine == machine && cur.session_id == session_id => {
+                cur.options.clone()
+            }
+            _ => Vec::new(),
+        };
+        self.config_options = Some(SelectedConfigOptions {
+            machine,
+            session_id: session_id.clone(),
+            loading: true,
+            options,
+        });
+        cx.notify();
+        let params = SessionIdParams {
+            session_id: session_id.clone(),
+        };
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let res = client
+                .request::<_, SessionConfigOptionsResult>(
+                    protocol::method::SESSION_CONFIG_OPTIONS,
+                    Some(params),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, _w, cx| {
+                if let Some(cur) = &mut this.config_options {
+                    // 响应到达时选中会话已切换则丢弃陈旧结果
+                    if cur.machine == machine && cur.session_id == session_id {
+                        cur.loading = false;
+                        if let Ok(res) = res {
+                            cur.options = res.options;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 设置会话配置选项（`session.configure` 携带 config 设置；Server 向 ACP
+    /// Server 发送 `session/set_config_option`）。成功后重新查询选项，
+    /// 以 Agent 侧返回的全量集合刷新。
     pub(crate) fn set_session_config_option(
         &mut self,
         window: &mut Window,
@@ -2130,24 +2322,30 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
-        let params = json!({
-            "sessionId": session_id,
-            "configId": config_id,
-            "value": value,
-        });
+        let params = SessionConfigureParams {
+            session_id: session_id.clone(),
+            title: None,
+            config: Some(SessionConfigSetting {
+                config_id: config_id.clone(),
+                value,
+            }),
+        };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if client
-                .request::<_, SessionResult>(
-                    protocol::method::SESSION_SET_CONFIG_OPTION,
-                    Some(params),
-                )
-                .await
-                .is_ok()
-            {
-                let _ = this.update_in(cx, |this, w, cx| {
-                    this.refresh_sessions(machine, w, cx);
-                });
-            }
+            let res = client
+                .request::<_, OpResult>(protocol::method::SESSION_CONFIGURE, Some(params))
+                .await;
+            let _ = this.update_in(cx, |this, w, cx| match res {
+                Ok(_) => {
+                    this.refresh_config_options(w, cx, machine, session_id);
+                }
+                Err(error) => {
+                    w.push_notification(
+                        UiNotification::error(format!("会话选项设置失败：{error}"))
+                            .title("会话选项"),
+                        cx,
+                    );
+                }
+            });
         })
         .detach();
     }

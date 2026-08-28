@@ -1,8 +1,10 @@
 //! 会话管理：会话列表与历史权威在 server。
 //! - 会话元数据持久化于 SQLite（`session.sqlite`），列表由 server 维护
 //! - busy/idle 状态在 server 维护并存注册表；每次 Busy<->Idle 变更广播 `session.state_change`
-//! - 惰性会话：`session.new` 只写注册表，agent 侧会话延后到首条指令（`session.prompt`）
-//!   懒创建（ACP `session/new`），已有 agent 会话先经 `session/resume` 恢复
+//! - 惰性会话：`session.new` 只写注册表，agent 侧会话延后到首条指令
+//!   （`session.prompt`）或查询/设置会话选项时懒创建（ACP `session/new`），
+//!   已有 agent 会话先经 `session/resume` 恢复
+//! - 会话选项存储在内存，以 Agent 侧数据为权威（docs/DESIGN.md「普通会话选项」）
 //! - 删除会话先经 ACP `session/close` 释放资源，再尝试 `session/delete`；长时间无活动
 //!   会话只经 `session/close` 关闭并保留 server 历史
 //! - 对话历史与活动历史落 `data_dir/sessions/<id>_history.jsonl` / `<id>_activities.jsonl`
@@ -37,6 +39,10 @@ pub struct SessionManager {
     registry: Arc<SessionRegistry>,
     data_dir: PathBuf,
     tx: broadcast::Sender<ServerNotification>,
+    /// 会话选项（docs/DESIGN.md「普通会话选项」：存储在内存，以 Agent 侧数据为
+    /// 权威；new/resume 响应、`session/set_config_option` 响应与
+    /// `config_option_update` 通知均全量覆盖）。
+    config_options: Mutex<HashMap<String, Vec<protocol::SessionConfigOption>>>,
     /// 进行中的活动（`session.ongoing_activity`；按会话 id 独立存储）
     ongoing: Mutex<HashMap<String, Activity>>,
     /// 当前 turn 的累积思考文本（多 chunk 拼接）。
@@ -87,6 +93,7 @@ impl SessionManager {
             registry,
             data_dir,
             tx,
+            config_options: Mutex::new(HashMap::new()),
             ongoing: Mutex::new(HashMap::new()),
             thinking_buf: Mutex::new(HashMap::new()),
             controls: Mutex::new(HashMap::new()),
@@ -159,7 +166,6 @@ impl SessionManager {
             worktree_dir,
             context_size: 0,
             context_window_size: 0,
-            config_options: Vec::new(),
         };
         self.registry.upsert(&meta, "")?;
         self.control(&meta.id);
@@ -180,10 +186,87 @@ impl SessionManager {
     }
 
     /// 配置会话标题（用户可随时修改）。
-    pub async fn configure(&self, session_id: &str, title: &str) -> Result<(), SessionError> {
-        self.get_entry(session_id)?;
-        self.registry.set_title(session_id, title.trim(), now())?;
+    pub async fn configure(
+        &self,
+        session_id: &str,
+        title: Option<&str>,
+    ) -> Result<(), SessionError> {
+        if let Some(title) = title {
+            self.get_entry(session_id)?;
+            self.registry.set_title(session_id, title.trim(), now())?;
+        }
         Ok(())
+    }
+
+    /// agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
+    fn effective_cwd(meta: &SessionMeta) -> String {
+        if meta.worktree_dir.is_empty() {
+            meta.cwd.clone()
+        } else {
+            meta.worktree_dir.clone()
+        }
+    }
+
+    /// 覆盖写入内存中的会话选项（docs/DESIGN.md「普通会话选项」：以 Agent 侧
+    /// 数据为权威，new/resume 响应、set_config_option 响应与
+    /// config_option_update 通知均全量覆盖）。
+    fn store_config_options(&self, session_id: &str, options: Vec<protocol::SessionConfigOption>) {
+        self.config_options
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), options);
+    }
+
+    /// 惰性创建 agent 侧会话（docs/DESIGN.md「ACP 通信」）：发送指令或查询会话
+    /// 选项时才经 `session/new` 创建；new 响应携带的会话选项存入内存。已有
+    /// agent 侧会话时原样返回。
+    fn ensure_agent_session(
+        &self,
+        session_id: &str,
+        meta: &SessionMeta,
+        agent_session_id: &str,
+    ) -> Result<(crate::agent::SharedDriver, String), SessionError> {
+        let driver = self
+            .agents
+            .driver_for(&meta.agent)
+            .map_err(SessionError::AgentUnavailable)?;
+        if !agent_session_id.is_empty() {
+            return Ok((driver, agent_session_id.to_string()));
+        }
+        let (sid, options) = driver
+            .create_session(&Self::effective_cwd(meta))
+            .map_err(SessionError::AgentUnavailable)?;
+        self.registry.set_agent_session_id(session_id, &sid)?;
+        self.store_config_options(session_id, options);
+        Ok((driver, sid))
+    }
+
+    /// 查询会话选项（docs/DESIGN.md：查询会话选项同样触发惰性创建/恢复；
+    /// 返回内存存储的选项集合，Agent 侧数据为权威）。
+    pub async fn config_options(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
+        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        let (driver, agent_session_id) =
+            self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
+        // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
+        // 最新选项全量覆盖内存存储；幂等 resume 返回空集合时保持既有选项。
+        match driver.resume_session(&agent_session_id, &Self::effective_cwd(&meta)) {
+            Ok(options) => {
+                if !options.is_empty() {
+                    self.store_config_options(session_id, options);
+                }
+            }
+            Err(e) => log::error!("查询会话选项时 resume 失败 {session_id}: {e}"),
+        }
+        Ok(self
+            .config_options
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// 删除会话：若已有 agent 侧会话，先经 ACP
@@ -245,6 +328,7 @@ impl SessionManager {
         // 控制块出 map：进行中的 prompt 持有 Arc 克隆仍能看到 deleted 标志；
         // 新请求将得到全新（未删除）的控制块——但会话已不在注册表，NotFound 兜底。
         self.controls.lock().unwrap().remove(session_id);
+        self.config_options.lock().unwrap().remove(session_id);
         log::info!("删除会话 {session_id}");
         Ok(())
     }
@@ -312,6 +396,9 @@ impl SessionManager {
             if let Ok(driver) = self.agents.driver_for(&meta.agent) {
                 if driver.close(&aid).is_ok() {
                     if let Ok(()) = self.registry.set_agent_session_id(&sid, "") {
+                        // agent 侧会话已关闭，内存中的会话选项随之失效；
+                        // 下次交互惰性重建时以 Agent 侧数据重新覆盖
+                        self.config_options.lock().unwrap().remove(&sid);
                         closed += 1;
                     }
                 }
@@ -506,13 +593,11 @@ impl SessionManager {
         self.invalidate_log_caches(session_id);
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
-        // 恢复响应携带的最新配置选项（幂等 resume 返回空）同步到元数据。
+        // 恢复响应携带的最新配置选项（幂等 resume 返回空）全量覆盖内存存储。
         match driver.resume_session(&agent_session_id, &cwd) {
             Ok(options) => {
                 if !options.is_empty() {
-                    if let Err(e) = self.registry.set_config_options(session_id, &options) {
-                        log::error!("记录会话配置选项失败 {session_id}: {e}");
-                    }
+                    self.store_config_options(session_id, options);
                 }
             }
             Err(e) => {
@@ -587,25 +672,20 @@ impl SessionManager {
             .agents
             .driver_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        let agent_session_id = if agent_session_id.is_empty() {
-            let (sid2, options) = driver
-                .create_session(&cwd)
-                .map_err(SessionError::AgentUnavailable)?;
-            self.registry.set_agent_session_id(session_id, &sid2)?;
-            // 先 upsert（内存 meta 里的 config_options 尚为空）再写入选项，
-            // 避免全字段 ON CONFLICT 覆盖把刚取到的选项冲回空
-            self.registry.upsert(&meta, &sid2)?;
-            if !options.is_empty() {
-                self.registry.set_config_options(session_id, &options)?;
-            }
-            sid2
+        let (driver, agent_session_id) = if agent_session_id.is_empty() {
+            // 惰性创建 agent 侧会话，响应中的会话选项存入内存
+            //（docs/DESIGN.md「普通会话选项」）
+            let (driver, sid) = self.ensure_agent_session(session_id, &meta, "")?;
+            // 创建分支：upsert 覆盖 busy、标题与活跃时间
+            self.registry.upsert(&meta, &sid)?;
+            (driver, sid)
         } else {
             // resume 分支（已有 agent 侧会话）：busy 与活跃时间同样立即落盘
             //（docs/DESIGN.md「普通会话状态」：状态以元数据为权威，变更需立即
             // 落盘；否则 turn 进行中列表读到陈旧空闲，且并发 prompt 会放行）
             self.registry
                 .update_state(session_id, SessionState::Busy, meta.last_active_at)?;
-            agent_session_id
+            (driver, agent_session_id)
         };
         Ok((driver, agent_session_id, cwd, old_state))
     }
@@ -700,11 +780,9 @@ impl SessionManager {
                     }
                 }
                 AgentEvent::ConfigOptions(options) => {
-                    // 会话配置选项变更（ACP config_options_update）。
+                    // 会话配置选项变更（ACP config_options_update）：全量覆盖内存存储
                     if !control.deleted.load(Ordering::SeqCst) {
-                        if let Err(e) = self.registry.set_config_options(session_id, &options) {
-                            log::error!("记录会话配置选项失败 {session_id}: {e}");
-                        }
+                        self.store_config_options(session_id, options);
                     }
                 }
             }
@@ -811,46 +889,22 @@ impl SessionManager {
     }
 
     /// 设置会话配置选项（docs/DESIGN.md「ACP 通信」：Server 向 ACP Server
-    /// 发送 `session/set_config_option`）。返回更新后的会话元数据。
+    /// 发送 `session/set_config_option` 请求进行设置）。尚无 agent 侧会话时先
+    /// 惰性创建；响应中的会话选项全量覆盖内存存储，返回更新后的完整选项集合。
     pub async fn set_config_option(
         &self,
         session_id: &str,
         config_id: &str,
         value: protocol::SessionConfigOptionValue,
-    ) -> Result<SessionMeta, SessionError> {
+    ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
         let (meta, agent_session_id) = self.get_entry(session_id)?;
-        // 尚无 agent 侧会话（未发过指令）时先惰性创建，保证选项落到真实会话上
-        let agent_session_id = if agent_session_id.is_empty() {
-            let cwd = if meta.worktree_dir.is_empty() {
-                meta.cwd.clone()
-            } else {
-                meta.worktree_dir.clone()
-            };
-            let driver = self
-                .agents
-                .driver_for(&meta.agent)
-                .map_err(SessionError::AgentUnavailable)?;
-            let (sid, options) = driver
-                .create_session(&cwd)
-                .map_err(SessionError::AgentUnavailable)?;
-            self.registry.set_agent_session_id(session_id, &sid)?;
-            if !options.is_empty() {
-                self.registry.set_config_options(session_id, &options)?;
-            }
-            sid
-        } else {
-            agent_session_id
-        };
-        let driver = self
-            .agents
-            .driver_for(&meta.agent)
-            .map_err(SessionError::AgentUnavailable)?;
+        let (driver, agent_session_id) =
+            self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
         let options = driver
             .set_config_option(&agent_session_id, config_id, value)
             .map_err(SessionError::AgentUnavailable)?;
-        self.registry.set_config_options(session_id, &options)?;
-        let (updated, _) = self.get_entry(session_id)?;
-        Ok(updated)
+        self.store_config_options(session_id, options.clone());
+        Ok(options)
     }
 
     fn broadcast_state_change(
@@ -1351,7 +1405,7 @@ mod tests {
     }
 
     /// 测试驱动：持有会话配置选项，`set_config_option` 按 config_id 更新并返回完整集合
-    /// （验证 session.set_config_option → registry 记录的链路）。
+    /// （验证会话选项查询/设置 → 内存记录的链路）。
     struct ConfigDriver {
         options: std::sync::Mutex<Vec<protocol::SessionConfigOption>>,
     }
@@ -1430,7 +1484,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_config_option_updates_registry() {
+    async fn config_options_lazy_query_and_set() {
+        // docs/DESIGN.md「普通会话选项」：选项存储在内存，以 Agent 侧数据为权威；
+        // 查询会话选项同样触发惰性创建/恢复（docs/DESIGN.md「ACP 通信」）。
         let opts = vec![protocol::SessionConfigOption {
             id: "model".into(),
             name: "模型".into(),
@@ -1466,12 +1522,13 @@ mod tests {
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
 
         let meta = mgr.create("codex", "/tmp/cfg", false).await.unwrap();
-        // 尚无 agent 侧会话：首次 prompt 惰性创建时带回初始选项
-        mgr.prompt(&meta.id, text("hi")).await.unwrap();
-        let (stored, _) = registry.get(&meta.id).unwrap().unwrap();
-        assert_eq!(stored.config_options, opts, "惰性创建后应记录初始选项");
+        // 查询触发惰性创建：agent 侧会话建立，初始选项来自 new 响应
+        let stored = mgr.config_options(&meta.id).await.unwrap();
+        assert_eq!(stored, opts, "查询应惰性创建并返回 Agent 侧初始选项");
+        let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
+        assert!(!aid.is_empty(), "查询会话选项应已创建 agent 侧会话");
 
-        // 设置选项：更新后返回完整集合并落库
+        // 设置选项：set_config_option 响应全量覆盖内存存储
         let updated = mgr
             .set_config_option(
                 &meta.id,
@@ -1482,21 +1539,16 @@ mod tests {
             )
             .await
             .unwrap();
-        let model = updated
-            .config_options
-            .iter()
-            .find(|o| o.id == "model")
-            .expect("选项仍在");
-        match &model.kind {
+        match &updated[0].kind {
             protocol::SessionConfigKind::Select { current_value, .. } => {
                 assert_eq!(current_value, "gpt-5")
             }
             other => panic!("应为 Select，得到 {other:?}"),
         }
-        let (stored, _) = registry.get(&meta.id).unwrap().unwrap();
+        let again = mgr.config_options(&meta.id).await.unwrap();
         assert_eq!(
-            stored.config_options, updated.config_options,
-            "设置后应落库"
+            again, updated,
+            "后续查询应读到 Agent 侧最新的全量选项"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1896,7 +1948,6 @@ mod tests {
                     worktree_dir: String::new(),
                     context_size: 0,
                     context_window_size: 0,
-                    config_options: Vec::new(),
                 },
                 format!("agent_{id}"),
             );

@@ -1,16 +1,13 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    button::*, checkbox::Checkbox, label::Label, scroll::ScrollableElement, separator::Separator,
-    spinner::Spinner, text::TextView, *,
+    button::*, label::Label, scroll::ScrollableElement, separator::Separator, spinner::Spinner,
+    text::TextView, *,
 };
 
 use serde_json::json;
 
-use protocol::{
-    SessionConfigKind, SessionConfigOptionValue, SessionState, WorkspaceListResult,
-    WorkspaceReadParams, WorkspaceReadResult,
-};
+use protocol::{SessionState, WorkspaceListResult, WorkspaceReadParams, WorkspaceReadResult};
 
 use crate::display::info_row;
 use crate::logic::context_usage_text;
@@ -675,126 +672,6 @@ impl AmuxApp {
                                 .text_color(cx.theme().muted_foreground),
                         ),
                 );
-            }
-        }
-        // 会话选项（docs/DESIGN.md「ACP 通信」：选项由 ACP 会话提供，用户可基于
-        // 当前会话可选项设置）。select 点击展开候选，boolean 直接开关。
-        if let Some(Selected::Session { machine, id }) = self.selected.clone() {
-            if !meta.config_options.is_empty() {
-                body = body.child(Separator::horizontal().label("会话选项"));
-                for opt in &meta.config_options {
-                    let cfg_key = format!("{machine}:{id}:{}", opt.id);
-                    let cfg_name = opt.name.clone();
-                    match &opt.kind {
-                        SessionConfigKind::Select {
-                            current_value,
-                            options,
-                        } => {
-                            let current_label = options
-                                .iter()
-                                .find(|o| o.value == *current_value)
-                                .map(|o| o.name.clone())
-                                .unwrap_or_else(|| current_value.clone());
-                            let expanded = self.expanded_config_options.contains(&cfg_key);
-                            let key_toggle = cfg_key.clone();
-                            let cid = cfg_key.clone();
-                            body = body.child(
-                                h_flex()
-                                    .id(format!("cfg-row-{cfg_key}"))
-                                    .w_full()
-                                    .gap_1p5()
-                                    .items_center()
-                                    .cursor_pointer()
-                                    .hover(|d| d.bg(cx.theme().muted))
-                                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                                        if !this.expanded_config_options.remove(&key_toggle) {
-                                            this.expanded_config_options.insert(key_toggle.clone());
-                                        }
-                                        cx.notify();
-                                    }))
-                                    .child(Label::new(cfg_name).text_sm().flex_none())
-                                    .child(
-                                        Label::new(current_label)
-                                            .text_sm()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_color(cx.theme().muted_foreground),
-                                    )
-                                    .child(
-                                        Icon::new(if expanded {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        })
-                                        .xsmall()
-                                        .flex_none()
-                                        .text_color(cx.theme().muted_foreground),
-                                    ),
-                            );
-                            if expanded {
-                                for o in options {
-                                    let sid = id.clone();
-                                    let oid = opt.id.clone();
-                                    let oval = o.value.clone();
-                                    let oname = o.name.clone();
-                                    let btn_id = format!("cfg-opt-{cid}-{}", o.value);
-                                    body = body.child(
-                                        h_flex().w_full().pl_4().child(
-                                            Button::new(btn_id)
-                                                .small()
-                                                .ghost()
-                                                .when(o.value == *current_value, |b| b.primary())
-                                                .label(oname)
-                                                .on_click(cx.listener(
-                                                    move |this, _ev, window, cx| {
-                                                        this.set_session_config_option(
-                                                            window,
-                                                            cx,
-                                                            machine,
-                                                            sid.clone(),
-                                                            oid.clone(),
-                                                            SessionConfigOptionValue::ValueId {
-                                                                value: oval.clone(),
-                                                            },
-                                                        );
-                                                    },
-                                                )),
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                        SessionConfigKind::Boolean { current_value } => {
-                            let sid = id.clone();
-                            let oid = opt.id.clone();
-                            let checked = *current_value;
-                            body = body.child(
-                                h_flex()
-                                    .w_full()
-                                    .gap_1p5()
-                                    .items_center()
-                                    .child(Label::new(cfg_name).text_sm().flex_1())
-                                    .child(
-                                        Checkbox::new(format!("cfg-bool-{cfg_key}"))
-                                            .checked(checked)
-                                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                                this.set_session_config_option(
-                                                    window,
-                                                    cx,
-                                                    machine,
-                                                    sid.clone(),
-                                                    oid.clone(),
-                                                    SessionConfigOptionValue::Boolean {
-                                                        value: !checked,
-                                                    },
-                                                );
-                                            })),
-                                    ),
-                            );
-                        }
-                    }
-                }
             }
         }
         body.into_any()

@@ -80,10 +80,6 @@ pub struct SessionMeta {
     /// 上下文窗口总大小（token，ACP `usage_update` 的 size）；0 = 尚未收到通知。
     #[serde(default)]
     pub context_window_size: u64,
-    /// 会话支持的配置选项（源自 ACP session 的 config_options，如模型、推理级别）。
-    /// 空 = 会话尚未打开 agent 侧会话或 agent 不支持。
-    #[serde(default)]
-    pub config_options: Vec<SessionConfigOption>,
 }
 
 /// 会话配置选项（ACP `configOptions` 的投影；类型与协议对齐）。
@@ -126,7 +122,7 @@ pub struct SessionConfigSelectEntry {
     pub name: String,
 }
 
-/// `session.set_config_option` 要设置的值（ACP `SessionConfigOptionValue`）。
+/// 会话选项的取值（ACP `SessionConfigOptionValue`）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionConfigOptionValue {
@@ -136,7 +132,7 @@ pub enum SessionConfigOptionValue {
     Boolean { value: bool },
 }
 
-/// `session.set_config_option` 参数。
+/// `session.configure` 的 config 字段：设置一项会话选项。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSetConfigOptionParams {
@@ -173,12 +169,25 @@ pub struct SessionIdParams {
     pub session_id: String,
 }
 
-/// `session.configure` 参数。
+/// `session.configure` 中设置的会话选项（Server 转为 ACP
+/// `session/set_config_option` 请求；选项集合以 Agent 侧为权威）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionConfigSetting {
+    pub config_id: String,
+    #[serde(flatten)]
+    pub value: SessionConfigOptionValue,
+}
+
+/// `session.configure` 参数：会话标题与会话选项均可选，至少设置一项。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionConfigureParams {
     pub session_id: String,
-    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<SessionConfigSetting>,
 }
 
 /// `session.list` 惰性分页参数。
@@ -205,6 +214,14 @@ pub struct SessionPageParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionResult {
     pub session: SessionMeta,
+}
+
+/// `session.config_options` 结果（docs/DESIGN.md「普通会话选项」：存储在内存，
+/// 以 Agent 侧数据为权威；会话未打开 agent 侧会话或 agent 不支持时为空）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionConfigOptionsResult {
+    pub options: Vec<SessionConfigOption>,
 }
 
 /// `session.list` 结果。
@@ -549,7 +566,21 @@ mod tests {
         assert_eq!(id.session_id, "s1");
         let cfg: SessionConfigureParams =
             serde_json::from_str(r#"{"sessionId":"s1","title":"实现登录"}"#).unwrap();
-        assert_eq!(cfg.title, "实现登录");
+        assert_eq!(cfg.title.as_deref(), Some("实现登录"));
+        assert!(cfg.config.is_none(), "仅设置标题时 config 缺省");
+        let cfg: SessionConfigureParams = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "config": {"configId": "model", "type": "value_id", "value": "gpt-5"}
+        }))
+        .unwrap();
+        let set = cfg.config.expect("应带会话选项设置");
+        assert_eq!(set.config_id, "model");
+        assert_eq!(
+            set.value,
+            SessionConfigOptionValue::ValueId {
+                value: "gpt-5".into()
+            }
+        );
         let p: SessionListParams = serde_json::from_str(r#"{"limit":10}"#).unwrap();
         assert_eq!(p.limit, Some(10));
         let page: SessionPageParams = serde_json::from_str(r#"{"sessionId":"s1"}"#).unwrap();

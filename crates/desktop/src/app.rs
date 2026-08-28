@@ -12,7 +12,9 @@ use gpui_component::{
     *,
 };
 
-use protocol::{SessionMeta, SessionState, SessionStateChange, StateChangeReason};
+use protocol::{
+    SessionConfigOption, SessionMeta, SessionState, SessionStateChange, StateChangeReason,
+};
 
 use crate::config::{ApiFormat, ConfigStore, SkillEntry, WorkflowTemplate};
 use crate::logic::InputAttachment;
@@ -90,6 +92,16 @@ pub(crate) enum SettingsCategory {
 pub(crate) enum NewSessionMode {
     Direct,
     Workflow,
+}
+
+/// 选中普通会话的会话选项状态（经 `session.config_options` 查询；
+/// docs/DESIGN.md「普通会话选项」：存储在 Server 内存，以 Agent 侧数据为权威）。
+#[derive(Default)]
+pub(crate) struct SelectedConfigOptions {
+    pub(crate) machine: usize,
+    pub(crate) session_id: String,
+    pub(crate) loading: bool,
+    pub(crate) options: Vec<SessionConfigOption>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -204,8 +216,8 @@ pub struct AmuxApp {
     pub(crate) expanded_activities: std::collections::HashSet<String>,
     /// 以工作流会话 ID 为身份（同 Selected）
     pub(crate) expanded_workflows: std::collections::HashSet<String>,
-    /// 会话详情页展开的 select 配置选项（key = `{machine}:{session_id}:{config_id}`）
-    pub(crate) expanded_config_options: std::collections::HashSet<String>,
+    /// 选中普通会话的会话选项（`session.config_options`；以 Agent 侧数据为权威）
+    pub(crate) config_options: Option<SelectedConfigOptions>,
     /// 设置浮窗焦点锚：打开时把焦点移入浮窗，Escape 动作（绑定
     /// SettingsOverlay key_context）才能被派发到 on_action
     pub(crate) settings_focus: FocusHandle,
@@ -351,7 +363,7 @@ impl AmuxApp {
             activities_limit: 100,
             expanded_activities: std::collections::HashSet::new(),
             expanded_workflows: std::collections::HashSet::new(),
-            expanded_config_options: std::collections::HashSet::new(),
+            config_options: None,
             settings_focus: cx.focus_handle(),
             _subs: Vec::new(),
             _tasks: Vec::new(),
@@ -471,6 +483,18 @@ impl AmuxApp {
             }
         }
         this.refresh_sessions(idx, window, cx);
+
+        // turn 结束后选项可能经 config_option_update 变化：选中会话刷新会话选项
+        //（docs/DESIGN.md「普通会话选项」：以 Agent 侧数据为权威）
+        if idle {
+            let selected_matches = matches!(
+                &this.selected,
+                Some(Selected::Session { machine, id }) if *machine == idx && *id == sid
+            );
+            if selected_matches {
+                this.refresh_config_options(window, cx, idx, sid.clone());
+            }
+        }
 
         let Some(wi) = this.workflows.iter().position(|wf| {
             wf.session
