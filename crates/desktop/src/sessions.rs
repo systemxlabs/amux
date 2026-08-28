@@ -349,12 +349,14 @@ impl AmuxApp {
         // 面板打开状态跨会话切换保持（docs/DESIGN.md：右侧上下文面板）。
         if let Some(m) = self.machines.get_mut(machine) {
             m.views.entry(session_id.clone()).or_default();
-            m.diff_files.clear();
-            m.diff_not_repo = false;
-            m.diff_selection.clear();
-            m.diff_request_id = m.diff_request_id.saturating_add(1);
-            m.diff_loading = false;
-            m.diff_error = None;
+            m.diff.update(cx, |st, _| {
+                st.files.clear();
+                st.not_repo = false;
+                st.selection.clear();
+                st.request_id = st.request_id.saturating_add(1);
+                st.loading = false;
+                st.error = None;
+            });
             m.workspace_directories.clear();
             m.workspace_expanded.clear();
             m.workspace_loading.clear();

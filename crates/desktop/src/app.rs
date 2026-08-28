@@ -195,7 +195,7 @@ pub struct AmuxApp {
     pub(crate) workflow_template: Option<WorkflowTemplate>,
     pub(crate) dialog_scroll: ScrollHandle,
     pub(crate) activities_scroll: ScrollHandle,
-    pub(crate) diff_scroll: ScrollHandle,
+    pub(crate) diff_scroll: VirtualListScrollHandle,
     pub(crate) workflow_dialog_limit: usize,
     /// 会话列表滚动查询的页数 N（docs/DESIGN.md「会话列表滚动查询」）：
     /// 「加载更多」每点击一次 +1，所有在线机器统一查询前 N 页。
@@ -345,7 +345,7 @@ impl AmuxApp {
             workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
             activities_scroll: ScrollHandle::new(),
-            diff_scroll: ScrollHandle::new(),
+            diff_scroll: VirtualListScrollHandle::new(),
             workflow_dialog_limit: 50,
             list_pages: 1,
             activities_limit: 100,
@@ -377,7 +377,7 @@ impl AmuxApp {
             },
         ));
         for m in app.store.list_machines() {
-            app.machines.push(MachineView::new(m));
+            app.machines.push(MachineView::new(m, cx));
         }
         for i in 0..app.machines.len() {
             let client = app.machines[i].client.clone();

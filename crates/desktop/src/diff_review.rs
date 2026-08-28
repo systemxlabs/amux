@@ -1,6 +1,9 @@
+//! 改动审查面板：每机器的状态实体 + 面板渲染（虚拟化 diff 列表）。
+
 use std::collections::HashSet;
 
 use gpui::prelude::FluentBuilder;
+use gpui::ScrollStrategy;
 use gpui::*;
 use gpui_component::{
     button::*, checkbox::Checkbox, label::Label, notification::Notification as UiNotification,
@@ -8,14 +11,13 @@ use gpui_component::{
 };
 
 use protocol::{
-    ContentBlock, GitChangeStatus, OpResult, SessionPromptParams, WorkspaceDiffParams,
+    ContentBlock, GitChangeStatus, GitDiffFile, OpResult, SessionPromptParams, WorkspaceDiffParams,
     WorkspaceDiffResult, WorkspaceRestoreParams,
 };
 
-use crate::diff::{diff_lines, DiffLineKind};
-use crate::logic::{build_changed_file_tree, DiffFileTreeNode};
-
 use crate::app::{AmuxApp, Selected};
+use crate::diff::{diff_lines, DiffLine, DiffLineKind};
+use crate::logic::{build_changed_file_tree, DiffFileTreeNode};
 
 impl AmuxApp {
     pub(crate) fn load_diff(
@@ -37,18 +39,13 @@ impl AmuxApp {
             _ => return,
         };
         let client = m.client.clone();
-        let request_id = self
-            .machines
-            .get_mut(machine)
-            .map(|m| {
-                m.diff_request_id = m.diff_request_id.saturating_add(1);
-                m.diff_request_id
-            })
-            .unwrap_or_default();
-        if let Some(m) = self.machines.get_mut(machine) {
-            m.diff_loading = true;
-            m.diff_error = None;
-        }
+        // 请求 id / loading / error 存于本机器的 DiffReviewState 实体
+        let request_id = m.diff.update(cx, |st, _| {
+            st.request_id = st.request_id.saturating_add(1);
+            st.loading = true;
+            st.error = None;
+            st.request_id
+        });
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = WorkspaceDiffParams {
@@ -68,25 +65,27 @@ impl AmuxApp {
                 ) && this
                     .machines
                     .get(machine)
-                    .is_some_and(|m| m.diff_request_id == request_id);
+                    .is_some_and(|m| m.diff.read(cx).request_id == request_id);
                 if !is_current {
                     return;
                 }
                 let mut error_message = None;
                 if let Some(m) = this.machines.get_mut(machine) {
-                    match &res {
+                    m.diff.update(cx, |st, _| match &res {
                         Ok(r) => {
-                            m.diff_files = r.files.clone();
-                            m.diff_not_repo = r.not_repo;
+                            st.files = r.files.clone();
+                            st.not_repo = r.not_repo;
                         }
                         Err(error) => {
-                            m.diff_files.clear();
-                            m.diff_not_repo = false;
+                            st.files.clear();
+                            st.not_repo = false;
                             error_message = Some(format!("加载改动失败：{error}"));
                         }
-                    }
-                    m.diff_loading = false;
-                    m.diff_error = error_message.clone();
+                    });
+                    m.diff.update(cx, |st, _| {
+                        st.loading = false;
+                        st.error = error_message.clone();
+                    });
                 }
                 if let Some(error) = error_message {
                     w.push_notification(
@@ -153,25 +152,37 @@ impl AmuxApp {
         machine: usize,
         path: String,
         hunk: Option<usize>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let Some(m) = self.machines.get_mut(machine) else {
             return;
         };
         let key = (path, hunk);
-        if !m.diff_selection.remove(&key) {
-            m.diff_selection.insert(key);
-        }
+        m.diff.update(cx, |st, _| {
+            if !st.selection.remove(&key) {
+                st.selection.insert(key);
+            }
+        });
     }
 
-    pub(crate) fn is_diff_selected(&self, machine: usize, path: &str, hunk: Option<usize>) -> bool {
-        self.machine(machine)
-            .is_some_and(|m| m.diff_selection.contains(&(path.to_string(), hunk)))
+    pub(crate) fn is_diff_selected(
+        &self,
+        machine: usize,
+        path: &str,
+        hunk: Option<usize>,
+        cx: &Context<Self>,
+    ) -> bool {
+        self.machine(machine).is_some_and(|m| {
+            m.diff
+                .read(cx)
+                .selection
+                .contains(&(path.to_string(), hunk))
+        })
     }
 
-    pub(crate) fn clear_diff_selection(&mut self, machine: usize, _cx: &mut Context<Self>) {
+    pub(crate) fn clear_diff_selection(&mut self, machine: usize, cx: &mut Context<Self>) {
         if let Some(m) = self.machines.get_mut(machine) {
-            m.diff_selection.clear();
+            m.diff.update(cx, |st, _| st.selection.clear());
         }
     }
 
@@ -185,8 +196,10 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
-        let selection: HashSet<(String, Option<usize>)> = m.diff_selection.clone();
-        let files = m.diff_files.clone();
+        let (selection, files) = {
+            let st = m.diff.read(cx);
+            (st.selection.clone(), st.files.clone())
+        };
         let Some(Selected::Session { id, .. }) = self.selected.clone() else {
             return;
         };
@@ -264,11 +277,13 @@ impl AmuxApp {
                 DiffFileTreeNode::File { path_index } => {
                     let fi = *path_index;
                     let (additions, deletions) = {
-                        let files = &self.machines[machine_idx].diff_files;
+                        let files = &self.machines[machine_idx].diff.read(cx).files;
                         let f = &files[fi];
                         (f.additions, f.deletions)
                     };
-                    let tree_path = self.machines[machine_idx].diff_files[fi].path.clone();
+                    let tree_path = self.machines[machine_idx].diff.read(cx).files[fi]
+                        .path
+                        .clone();
                     let diff_scroll = self.diff_scroll.clone();
                     out.push(
                         h_flex()
@@ -280,8 +295,18 @@ impl AmuxApp {
                                     .xsmall()
                                     .ghost()
                                     .label(name.clone())
-                                    .on_click(cx.listener(move |_this, _ev, _window, _cx| {
-                                        diff_scroll.scroll_to_top_of_item(fi);
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        let files =
+                                            this.machines[machine_idx].diff.read(cx).files.clone();
+                                        let collapsed = this.machines[machine_idx]
+                                            .diff
+                                            .read(cx)
+                                            .changes_collapsed;
+                                        if let Some(row) =
+                                            Self::file_header_row(&files, collapsed, fi)
+                                        {
+                                            diff_scroll.scroll_to_item(row, ScrollStrategy::Top);
+                                        }
                                     })),
                             )
                             .child(
@@ -310,30 +335,30 @@ impl AmuxApp {
         let machine = self.active_machine();
         let files = machine
             .and_then(|i| self.machine(i))
-            .map(|m| m.diff_files.clone())
+            .map(|m| m.diff.read(cx).files.clone())
             .unwrap_or_default();
         let not_repo = machine
             .and_then(|i| self.machine(i))
-            .map(|m| m.diff_not_repo)
+            .map(|m| m.diff.read(cx).not_repo)
             .unwrap_or(false);
         let diff_loading = machine
             .and_then(|i| self.machine(i))
-            .map(|m| m.diff_loading)
+            .map(|m| m.diff.read(cx).loading)
             .unwrap_or(false);
         let diff_error = machine
             .and_then(|i| self.machine(i))
-            .and_then(|m| m.diff_error.clone());
+            .and_then(|m| m.diff.read(cx).error.clone());
         let has_selection = machine
             .and_then(|i| self.machine(i))
-            .is_some_and(|m| !m.diff_selection.is_empty());
+            .is_some_and(|m| !m.diff.read(cx).selection.is_empty());
         let can_send = matches!(&self.selected, Some(Selected::Session { .. }));
         let diff_tree_collapsed = machine
             .and_then(|i| self.machine(i))
-            .map(|m| m.diff_tree_collapsed)
+            .map(|m| m.diff.read(cx).tree_collapsed)
             .unwrap_or(false);
         let diff_changes_collapsed = machine
             .and_then(|i| self.machine(i))
-            .map(|m| m.diff_changes_collapsed)
+            .map(|m| m.diff.read(cx).changes_collapsed)
             .unwrap_or(false);
         let mut content_children: Vec<gpui::AnyElement> = Vec::new();
         let toolbar = h_flex()
@@ -381,7 +406,9 @@ impl AmuxApp {
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         if let Some(machine) = this.active_machine() {
                             if let Some(view) = this.machines.get_mut(machine) {
-                                view.diff_tree_collapsed = !view.diff_tree_collapsed;
+                                view.diff.update(cx, |st, _| {
+                                    st.tree_collapsed = !st.tree_collapsed;
+                                });
                             }
                             cx.notify();
                         }
@@ -399,7 +426,9 @@ impl AmuxApp {
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         if let Some(machine) = this.active_machine() {
                             if let Some(view) = this.machines.get_mut(machine) {
-                                view.diff_changes_collapsed = !view.diff_changes_collapsed;
+                                view.diff.update(cx, |st, _| {
+                                    st.changes_collapsed = !st.changes_collapsed;
+                                });
                             }
                             cx.notify();
                         }
@@ -470,268 +499,23 @@ impl AmuxApp {
         let changed_tree =
             build_changed_file_tree(&files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>());
         let mut tree_items: Vec<gpui::AnyElement> = Vec::new();
-        for f in files.iter() {
-            let path = f.path.clone();
-            let patch = f.patch.clone();
-            let additions = f.additions;
-            let deletions = f.deletions;
-            let file_selected = self.is_diff_selected(machine_idx, &path, None);
-            let path_for_restore = path.clone();
-            let patch_for_restore = patch.clone();
-            let mut file_children: Vec<gpui::AnyElement> = Vec::new();
-            file_children.push(
-                h_flex()
-                    .w_full()
-                    .p_2()
-                    .gap_2()
-                    .items_center()
-                    .bg(cx.theme().muted.opacity(0.35))
-                    .child(
-                        Checkbox::new(format!("diff-sel-file-{}", path))
-                            .checked(file_selected)
-                            .on_click({
-                                let app = cx.entity();
-                                let path = path.clone();
-                                move |_, _window, cx| {
-                                    app.update(cx, |this, cx| {
-                                        this.toggle_diff_selection(
-                                            machine_idx,
-                                            path.clone(),
-                                            None,
-                                            cx,
-                                        );
-                                        cx.notify();
-                                    });
-                                }
-                            }),
-                    )
-                    .child(
-                        // 路径用等宽字体：与 diff 正文一致的技术文本质感
-                        Label::new(path.clone())
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .font_weight(FontWeight::MEDIUM)
-                            .truncate(),
-                    )
-                    .child(
-                        Label::new(format!("+{additions}"))
-                            .text_xs()
-                            .text_color(cx.theme().success),
-                    )
-                    .child(
-                        Label::new(format!("-{deletions}"))
-                            .text_xs()
-                            .text_color(cx.theme().danger),
-                    )
-                    .child(
-                        match &f.status {
-                            GitChangeStatus::Added => Tag::success(),
-                            GitChangeStatus::Deleted => Tag::danger(),
-                            GitChangeStatus::Modified => Tag::warning(),
-                        }
-                        .small()
-                        .rounded_full()
-                        .child(
-                            Label::new(match &f.status {
-                                GitChangeStatus::Added => "A",
-                                GitChangeStatus::Deleted => "D",
-                                GitChangeStatus::Modified => "M",
-                            })
-                            .text_xs(),
-                        ),
-                    )
-                    .child(
-                        Button::new(format!("restore-{path}"))
-                            .small()
-                            .ghost()
-                            .icon(IconName::Undo)
-                            .label("撤销该文件")
-                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                if let Some((machine, _)) = this.selected_workspace() {
-                                    this.restore_workspace(
-                                        window,
-                                        cx,
-                                        machine,
-                                        Some(path_for_restore.clone()),
-                                        Some(patch_for_restore.clone()),
-                                    );
-                                }
-                            })),
-                    )
-                    .into_any_element(),
-            );
-            let hunks_iter: Box<dyn Iterator<Item = (usize, &protocol::GitDiffHunk)>> =
-                if diff_changes_collapsed {
-                    Box::new(std::iter::empty())
-                } else {
-                    Box::new(f.hunks.iter().enumerate())
-                };
-            for (hi, h) in hunks_iter {
-                let hunk_selected = self.is_diff_selected(machine_idx, &path, Some(hi));
-                let hunk_path = path.clone();
-                let hunk_patch = h.patch.clone();
-                let mut hunk_children: Vec<gpui::AnyElement> = Vec::new();
-                hunk_children.push(
-                    h_flex()
-                        .w_full()
-                        .h_7()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .bg(cx.theme().primary.opacity(0.12))
-                        .child(
-                            Checkbox::new(format!("diff-sel-hunk-{}-{hi}", hunk_path))
-                                .checked(hunk_selected)
-                                .on_click({
-                                    let app = cx.entity();
-                                    let hunk_path = hunk_path.clone();
-                                    move |_, _window, cx| {
-                                        app.update(cx, |this, cx| {
-                                            this.toggle_diff_selection(
-                                                machine_idx,
-                                                hunk_path.clone(),
-                                                Some(hi),
-                                                cx,
-                                            );
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        )
-                        .child(
-                            Label::new(h.header.clone())
-                                .text_xs()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_color(cx.theme().primary),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            Button::new(format!("restore-hunk-{path}-{hi}"))
-                                .small()
-                                .ghost()
-                                .icon(IconName::Undo)
-                                .label("撤销此块")
-                                .on_click(cx.listener({
-                                    let hunk_path = hunk_path.clone();
-                                    move |this, _ev, window, cx| {
-                                        if let Some((machine, _)) = this.selected_workspace() {
-                                            this.restore_workspace(
-                                                window,
-                                                cx,
-                                                machine,
-                                                Some(hunk_path.clone()),
-                                                Some(hunk_patch.clone()),
-                                            );
-                                        }
-                                    }
-                                })),
-                        )
-                        .into_any_element(),
-                );
-                for line in diff_lines(h) {
-                    let (background, marker, marker_color) = match line.kind {
-                        DiffLineKind::Addition => {
-                            (cx.theme().success.opacity(0.16), "+", cx.theme().success)
-                        }
-                        DiffLineKind::Deletion => {
-                            (cx.theme().danger.opacity(0.16), "-", cx.theme().danger)
-                        }
-                        DiffLineKind::Context => {
-                            (cx.theme().popover, " ", cx.theme().muted_foreground)
-                        }
-                    };
-                    hunk_children.push(
-                        // 代码视图：行号/标记为对齐的等宽数据列，固定像素宽度以保持跨行对齐
-                        h_flex()
-                            .w_full()
-                            .min_h(px(22.))
-                            .items_center()
-                            .bg(background)
-                            .child(
-                                div()
-                                    .w(px(48.))
-                                    .h_full()
-                                    .px_2()
-                                    .justify_end()
-                                    .border_r_1()
-                                    .border_color(cx.theme().border.opacity(0.45))
-                                    .child(
-                                        Label::new(
-                                            line.old_number
-                                                .map(|number| number.to_string())
-                                                .unwrap_or_default(),
-                                        )
-                                        .text_xs()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_color(cx.theme().muted_foreground),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(48.))
-                                    .h_full()
-                                    .px_2()
-                                    .justify_end()
-                                    .border_r_1()
-                                    .border_color(cx.theme().border.opacity(0.45))
-                                    .child(
-                                        Label::new(
-                                            line.new_number
-                                                .map(|number| number.to_string())
-                                                .unwrap_or_default(),
-                                        )
-                                        .text_xs()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_color(cx.theme().muted_foreground),
-                                    ),
-                            )
-                            .child(
-                                div().w(px(24.)).h_full().justify_center().child(
-                                    Label::new(marker)
-                                        .text_xs()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(marker_color),
-                                ),
-                            )
-                            .child(
-                                Label::new(line.content)
-                                    .text_xs()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .whitespace_nowrap()
-                                    .flex_shrink_0(),
-                            )
-                            .into_any_element(),
-                    );
-                }
-                file_children.push(
-                    v_flex()
-                        .w_full()
-                        .gap_0()
-                        .children(hunk_children)
-                        .into_any_element(),
-                );
-            }
-            content_children.push(
-                v_flex()
-                    .id(format!("diff-file-{path}"))
-                    .debug_selector(move || format!("dbg-diff-file-{path}"))
-                    // 滚动列的直接子项带 overflow_hidden 时，taffy 自动最小尺寸为 0，
-                    // 会被压缩进视口内导致内容永不溢出、无法滚动；显式禁用收缩。
-                    .flex_shrink_0()
-                    .w_full()
-                    .gap_0()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded_md()
-                    .overflow_hidden()
-                    .children(file_children)
-                    .into_any_element(),
-            );
-        }
         self.push_diff_file_tree_nodes(&changed_tree, &mut tree_items, 0, machine_idx, cx);
+        // 虚拟化：只渲染可视范围内的行（行高为文档化几何——diff 行等宽
+        // 字符不换行，高度固定）
+        let row_kinds = Self::diff_row_kinds(&files, diff_changes_collapsed);
+        let item_sizes = std::rc::Rc::new(
+            row_kinds
+                .iter()
+                .map(|k| size(px(100.), k.height()))
+                .collect::<Vec<_>>(),
+        );
+        let diff_list = v_virtual_list(
+            cx.entity(),
+            "diff-panel",
+            item_sizes,
+            move |this, range, window, cx| this.render_diff_rows(machine_idx, range, window, cx),
+        )
+        .track_scroll(&self.diff_scroll);
         let tree = if diff_tree_collapsed {
             v_flex()
                 .w_8()
@@ -774,21 +558,360 @@ impl AmuxApp {
                     .child(tree)
                     .child(
                         // 注意：h_flex() 默认 items_center，子项高度会退化为内容高度，
-                        // 必须显式 h_full 约束为行高，否则 overflow_y_scroll 不生效
+                        // 必须显式 h_full 约束为行高，否则虚拟列表无视口可滚
                         div()
                             .id("diff-panel")
                             .debug_selector(|| "dbg-diff-scroll".into())
-                            .v_flex()
                             .flex_1()
                             .h_full()
                             .min_w_0()
                             .min_h_0()
-                            .gap_2()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.diff_scroll)
-                            .children(content_children),
+                            .child(diff_list),
                     ),
             )
             .into_any()
     }
+    /// 扁平行描述（顺序 = 渲染顺序）。
+    pub(crate) fn diff_row_kinds(
+        files: &[GitDiffFile],
+        changes_collapsed: bool,
+    ) -> Vec<DiffRowKind> {
+        let mut rows = Vec::new();
+        for (fi, f) in files.iter().enumerate() {
+            rows.push(DiffRowKind::FileHeader(fi));
+            if changes_collapsed {
+                continue;
+            }
+            for (hi, h) in f.hunks.iter().enumerate() {
+                rows.push(DiffRowKind::HunkHeader(fi, hi));
+                for (li, _) in diff_lines(h).iter().enumerate() {
+                    rows.push(DiffRowKind::Line(fi, hi, li));
+                }
+            }
+        }
+        rows
+    }
+
+    /// 文件头所在行号（供文件树点击滚动定位）。
+    pub(crate) fn file_header_row(
+        files: &[GitDiffFile],
+        changes_collapsed: bool,
+        file_index: usize,
+    ) -> Option<usize> {
+        Self::diff_row_kinds(files, changes_collapsed)
+            .iter()
+            .position(|k| matches!(k, DiffRowKind::FileHeader(fi) if *fi == file_index))
+    }
+
+    /// 渲染 [range) 内的行（虚拟列表回调）。
+    pub(crate) fn render_diff_rows(
+        &self,
+        machine_idx: usize,
+        range: std::ops::Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(m) = self.machines.get(machine_idx) else {
+            return Vec::new();
+        };
+        let files = m.diff.read(cx).files.clone();
+        let changes_collapsed = m.diff.read(cx).changes_collapsed;
+        let row_kinds = Self::diff_row_kinds(&files, changes_collapsed);
+        let mut out = Vec::with_capacity(range.len());
+        for ix in range {
+            let Some(kind) = row_kinds.get(ix) else {
+                continue;
+            };
+            match *kind {
+                DiffRowKind::FileHeader(fi) => {
+                    if let Some(f) = files.get(fi) {
+                        out.push(self.render_diff_file_header_row(machine_idx, fi, f, cx));
+                    }
+                }
+                DiffRowKind::HunkHeader(fi, hi) => {
+                    if let Some(f) = files.get(fi) {
+                        if let Some(h) = f.hunks.get(hi) {
+                            out.push(self.render_diff_hunk_header_row(machine_idx, fi, hi, h, cx));
+                        }
+                    }
+                }
+                DiffRowKind::Line(fi, hi, li) => {
+                    if let Some(f) = files.get(fi) {
+                        if let Some(h) = f.hunks.get(hi) {
+                            if let Some(line) = diff_lines(h).get(li) {
+                                out.push(Self::render_diff_line_row(line, cx));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn render_diff_file_header_row(
+        &self,
+        machine_idx: usize,
+        _fi: usize,
+        f: &GitDiffFile,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let path = f.path.clone();
+        let path_for_restore = path.clone();
+        let patch_for_restore = f.patch.clone();
+        let dbg_path = path.clone();
+        let selected = self.is_diff_selected(machine_idx, &path, None, cx);
+        h_flex()
+            .id(ElementId::Name(format!("dbg-diff-file-{path}").into()))
+            .debug_selector(move || format!("dbg-diff-file-{dbg_path}"))
+            .w_full()
+            .h(px(40.0))
+            .px_2()
+            .gap_2()
+            .items_center()
+            .bg(cx.theme().muted.opacity(0.35))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                Checkbox::new(format!("diff-sel-file-{}", path))
+                    .checked(selected)
+                    .on_click({
+                        let app = cx.entity();
+                        let path = path.clone();
+                        move |_, _window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.toggle_diff_selection(machine_idx, path.clone(), None, cx);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(
+                Label::new(path.clone())
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .font_weight(FontWeight::MEDIUM)
+                    .truncate(),
+            )
+            .child(
+                Label::new(format!("+{}", f.additions))
+                    .text_xs()
+                    .text_color(cx.theme().success),
+            )
+            .child(
+                Label::new(format!("-{}", f.deletions))
+                    .text_xs()
+                    .text_color(cx.theme().danger),
+            )
+            .child(
+                match &f.status {
+                    GitChangeStatus::Added => Tag::success(),
+                    GitChangeStatus::Deleted => Tag::danger(),
+                    GitChangeStatus::Modified => Tag::warning(),
+                }
+                .small()
+                .rounded_full()
+                .child(
+                    Label::new(match &f.status {
+                        GitChangeStatus::Added => "A",
+                        GitChangeStatus::Deleted => "D",
+                        GitChangeStatus::Modified => "M",
+                    })
+                    .text_xs(),
+                ),
+            )
+            .child(
+                Button::new(format!("restore-{path}"))
+                    .small()
+                    .ghost()
+                    .icon(IconName::Undo)
+                    .label("撤销该文件")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some((machine, _)) = this.selected_workspace() {
+                            this.restore_workspace(
+                                window,
+                                cx,
+                                machine,
+                                Some(path_for_restore.clone()),
+                                Some(patch_for_restore.clone()),
+                            );
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_diff_hunk_header_row(
+        &self,
+        machine_idx: usize,
+        fi: usize,
+        hi: usize,
+        h: &protocol::GitDiffHunk,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let path = self.machines[machine_idx].diff.read(cx).files[fi]
+            .path
+            .clone();
+        let hunk_selected = self.is_diff_selected(machine_idx, &path, Some(hi), cx);
+        let hunk_path = path;
+        let hunk_patch = h.patch.clone();
+        h_flex()
+            .w_full()
+            .h(px(28.0))
+            .items_center()
+            .gap_2()
+            .px_2()
+            .bg(cx.theme().primary.opacity(0.12))
+            .child(
+                Checkbox::new(format!("diff-sel-hunk-{}-{hi}", hunk_path))
+                    .checked(hunk_selected)
+                    .on_click({
+                        let app = cx.entity();
+                        let hunk_path = hunk_path.clone();
+                        move |_, _window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.toggle_diff_selection(
+                                    machine_idx,
+                                    hunk_path.clone(),
+                                    Some(hi),
+                                    cx,
+                                );
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(
+                Label::new(h.header.clone())
+                    .text_xs()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_color(cx.theme().primary),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new(format!("restore-hunk-{hunk_path}-{hi}"))
+                    .small()
+                    .ghost()
+                    .icon(IconName::Undo)
+                    .label("撤销此块")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some((machine, _)) = this.selected_workspace() {
+                            this.restore_workspace(
+                                window,
+                                cx,
+                                machine,
+                                Some(hunk_path.clone()),
+                                Some(hunk_patch.clone()),
+                            );
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_diff_line_row(line: &DiffLine, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let (background, marker, marker_color) = match line.kind {
+            DiffLineKind::Addition => (cx.theme().success.opacity(0.16), "+", cx.theme().success),
+            DiffLineKind::Deletion => (cx.theme().danger.opacity(0.16), "-", cx.theme().danger),
+            DiffLineKind::Context => (cx.theme().popover, " ", cx.theme().muted_foreground),
+        };
+        h_flex()
+            .w_full()
+            .h(px(22.0))
+            .items_center()
+            .bg(background)
+            .child(
+                div()
+                    .w(px(48.))
+                    .h_full()
+                    .px_2()
+                    .justify_end()
+                    .border_r_1()
+                    .border_color(cx.theme().border.opacity(0.45))
+                    .child(
+                        Label::new(
+                            line.old_number
+                                .map(|number| number.to_string())
+                                .unwrap_or_default(),
+                        )
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_color(cx.theme().muted_foreground),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(48.))
+                    .h_full()
+                    .px_2()
+                    .justify_end()
+                    .border_r_1()
+                    .border_color(cx.theme().border.opacity(0.45))
+                    .child(
+                        Label::new(
+                            line.new_number
+                                .map(|number| number.to_string())
+                                .unwrap_or_default(),
+                        )
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_color(cx.theme().muted_foreground),
+                    ),
+            )
+            .child(
+                div().w(px(24.)).h_full().justify_center().child(
+                    Label::new(marker)
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(marker_color),
+                ),
+            )
+            .child(
+                Label::new(line.content.clone())
+                    .text_xs()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .whitespace_nowrap()
+                    .flex_shrink_0(),
+            )
+            .into_any_element()
+    }
+}
+
+/// 虚拟化 diff 列表的行描述（扁平化：文件头 / hunk 头 / diff 行）。
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DiffRowKind {
+    FileHeader(usize),
+    HunkHeader(usize, usize),
+    Line(usize, usize, usize),
+}
+
+impl DiffRowKind {
+    /// 文档化几何：diff 行等宽字符 whitespace_nowrap 不换行，行高固定，
+    /// 虚拟列表据此定位与渲染（超出行数不渲染）。
+    pub(crate) fn height(&self) -> Pixels {
+        match self {
+            DiffRowKind::FileHeader(_) => px(40.0),
+            DiffRowKind::HunkHeader(..) => px(28.0),
+            DiffRowKind::Line(..) => px(22.0),
+        }
+    }
+}
+
+/// 每机器的改动审查状态（docs/DESIGN.md「改动审查」）。
+/// 独立实体：diff 数据量与交互（选择/折叠/撤销）自成生命周期，
+/// 与机器连接状态、会话状态解耦。
+#[derive(Default)]
+pub(crate) struct DiffReviewState {
+    pub(crate) files: Vec<GitDiffFile>,
+    pub(crate) not_repo: bool,
+    pub(crate) selection: HashSet<(String, Option<usize>)>,
+    /// 陈旧响应丢弃：响应只在其 request_id 仍为最新时写入
+    pub(crate) request_id: u64,
+    pub(crate) loading: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) tree_collapsed: bool,
+    pub(crate) changes_collapsed: bool,
 }

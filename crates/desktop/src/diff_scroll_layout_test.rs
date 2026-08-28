@@ -1,9 +1,11 @@
 //! 改动审查 diff 滚动区布局回归测试：用真实 AmuxApp 渲染整条布局链。
 //!
-//! 历史回归（见 commit df93aa2 及本次）：h_flex 默认 items_center、以及 taffy
-//! flex 收缩会把滚动容器子项压进视口内（内容永不溢出），导致 overflow_y_scroll
-//! 的 max_offset 为 0，滚轮无法滚动。本测试锁定不变量：diff 滚动容器必须有
-//! 非零 max_offset，且滚轮事件能改变滚动偏移。
+//! 历史回归（见 commit df93aa2）：h_flex 默认 items_center、taffy flex 收缩
+//! 会把滚动容器子项压进视口内，导致滚动区 max_offset 为 0。
+//! 虚拟化后（v_virtual_list）滚动区改为按行高虚拟渲染：本测试锁定不变量为
+//! 1) 滚动容器 max_offset 反映全部行的总高（内容远大于视口仍可滚）；
+//! 2) 文件头行保持固定行高（40px，虚拟列表的尺寸契约）；
+//! 3) 滚轮事件能改变滚动偏移。
 
 use std::sync::Arc;
 
@@ -27,6 +29,7 @@ impl Render for DiffPanelHostView {
         let panel = self
             .app
             .update(cx, |app, cx| app.render_panel(window, cx))
+            .map(|p| p.into_any_element())
             .unwrap_or_else(|| div().into_any_element());
         div().size_full().child(panel)
     }
@@ -65,13 +68,16 @@ fn diff_panel_scroll_has_viewport_constraint(cx: &mut gpui::TestAppContext) {
 
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
-            let mut machine = MachineView::new(MachineConfig {
-                name: "test".into(),
-                url: "ws://127.0.0.1:9/".into(),
-                token: "t".into(),
-            });
+            let mut machine = MachineView::new(
+                MachineConfig {
+                    name: "test".into(),
+                    url: "ws://127.0.0.1:9/".into(),
+                    token: "t".into(),
+                },
+                cx,
+            );
             machine.status = MachineStatus::Online;
-            machine.diff_files = big_diff_files();
+            machine.diff.update(cx, |st, _| st.files = big_diff_files());
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
                 machine: 0,
@@ -85,7 +91,7 @@ fn diff_panel_scroll_has_viewport_constraint(cx: &mut gpui::TestAppContext) {
         });
     });
 
-    // 渲染真实 AmuxApp（根 → main_row → 面板 → diff 滚动区）。
+    // 渲染真实 AmuxApp（根 → main_row → 面板 → diff 虚拟列表）。
     cx.draw(point(px(0.), px(0.)), size(px(1024.), px(768.)), |_, cx| {
         cx.new(|_| DiffPanelHostView { app: app.clone() })
             .into_any_element()
@@ -93,22 +99,26 @@ fn diff_panel_scroll_has_viewport_constraint(cx: &mut gpui::TestAppContext) {
 
     let scroll = cx.update(|_, cx| app.read(cx).diff_scroll.clone());
 
-    // 回归点：文件卡（滚动列的直接子项，带 overflow_hidden）必须保持自然高度，
-    // 不被 taffy 压缩进视口（压缩后 max_offset=0、无法滚动）。
-    let card_sel: &'static str = Box::leak("dbg-diff-file-src/lib.rs".to_string().into_boxed_str());
-    let card_h = cx
-        .debug_bounds(card_sel)
-        .expect("diff 文件卡未渲染")
-        .size
-        .height;
-    assert!(
-        card_h > px(120. * 22.),
-        "diff 文件卡被压缩进视口（高度 {card_h}，应为 ~2640px）：滚动区将无内容可滚"
-    );
+    // 回归点 1：总内容高（40 文件头 + 28 hunk 头 + 120×22 行 = 2708px）远大于
+    // 视口，虚拟列表的 max_offset 必须反映全部行高而非可见行高。
     let max_offset = scroll.max_offset();
     assert!(
-        max_offset.y > px(0.),
-        "diff 滚动容器丢失视口约束（max_offset.y = {max_offset:?}），滚轮将无法滚动"
+        max_offset.y > px(1500.),
+        "diff 虚拟列表 max_offset 未反映全部行高（max_offset.y = {max_offset:?}）"
+    );
+
+    // 回归点 2：文件头行固定行高 40px（虚拟列表按此定位与渲染）。
+    let header_sel: &'static str =
+        Box::leak("dbg-diff-file-src/lib.rs".to_string().into_boxed_str());
+    let header_h = cx
+        .debug_bounds(header_sel)
+        .expect("diff 文件头行未渲染")
+        .size
+        .height;
+    assert_eq!(
+        header_h,
+        px(40.0),
+        "文件头行高应锁定为 40px（虚拟列表按此渲染）：{header_h}"
     );
 
     // 行为验证：在 diff 滚动区实测 bounds 中心滚轮，偏移必须变化。

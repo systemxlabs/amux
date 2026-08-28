@@ -2,7 +2,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     button::*, input::Input, label::Label, notification::Notification as UiNotification,
-    radio::RadioGroup, *,
+    radio::RadioGroup, FocusTrapElement as _, *,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig, SkillEntry, WorkflowTemplate};
@@ -389,6 +389,7 @@ impl AmuxApp {
                     })
                     // Escape 关闭：焦点锚在卡片上，动作按叠层从顶到底关闭
                     .track_focus(&self.settings_focus)
+                    .focus_trap("settings-trap", &self.settings_focus)
                     .key_context("SettingsOverlay")
                     .on_action(cx.listener(|this, _: &CloseSettingsOverlay, window, cx| {
                         if this.show_add_machine_form {
