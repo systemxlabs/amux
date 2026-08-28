@@ -30,7 +30,8 @@ Server 在未收到此认证消息并通过认证前，请求均返回认证失�
 | `session.prompt` | 往指定普通会话发送指令 |
 | `session.cancel` | 取消指定普通会话正在进行的工作 |
 | `session.delete` | 删除指定普通会话 |
-| `session.configure` | 配置指定普通会话：会话标题 |
+| `session.configure` | 配置指定普通会话：会话标题，会话选项等 |
+| `session.config_options` | 获取指定普通会话的会话选项 |
 | `session.history` | 分页查询指定普通会话的对话历史 |
 | `session.activities` | 分页查询指定普通会话的活动历史 |
 | `session.ongoing_activity` | 查询指定普通会话正在进行中的活动 |
@@ -98,9 +99,10 @@ Server 关闭时会同时关闭所有已启动的 ACP Servers，释放相应资�
 Server 作为 ACP client 与 ACP servers 通信
 - 采用 ACP V1 协议通信
 - 权限自动审批
-- 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送实际指令时，才向 ACP Server 发送 `session/new` 请求创建 agent 侧会话
-- 惰性恢复已有会话：等待用户往已有会话发送指令时，才向 ACP Server 发送 `session/resume` 请求恢复 agent 侧已有会话
-- 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 ACP Server 发送 `session/set_config_option` 请求来设置当前会话选项
+- Client 能力支持：Terminal、Boolean Config Options
+- 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送指令或查询会话选项时，才向 ACP Server 发送 `session/new` 请求创建 agent 侧会话
+- 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 ACP Server 发送 `session/resume` 请求恢复 agent 侧已有会话
+- 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 ACP Server 发送 `session/set_config_option` 请求进行设置
 - 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
 - 取消会话：当用户取消会话时，向 ACP Server 发送 `session/cancel` 请求来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
@@ -117,6 +119,13 @@ Server 作为 ACP client 与 ACP servers 通信
 - 当接收 `session/prompt` ACP 响应时，会话状态变为空闲
 - 当用户取消会话时，会话状态变为空闲
 
+### 普通会话选项
+
+普通会话选项存储在内存中，以 Agent 侧数据为权威
+- 新建或恢复 ACP 会话时，存储其会话选项在内存中
+- 当发送 `session/set_config_option` ACP 请求时，其响应中的会话选项全量覆盖内存存储
+- 当接收 `config_option_update` ACP 通知时，其通知中的会话选项全量覆盖内存存储
+
 ### 普通会话删除
 
 当用户请求删除普通会话时，立即从元数据中删除该普通会话，然后发起异步任务清理相关资源（如关闭或删除 agent 侧会话，清理关联的 worktree），随后返回响应。异步清理资源采用尽力而为的方式，不无限重试。
@@ -124,7 +133,7 @@ Server 作为 ACP client 与 ACP servers 通信
 ### 普通会话存储
 
 普通会话数据包含三部分
-- 元数据：存储在 `~/.amux/server/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、所属 Agent、Agent 会话 ID、会话选项、工作目录、worktree 目录、上下文大小、上下文窗口总大小、最近活跃时间等
+- 元数据：存储在 `~/.amux/server/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、所属 Agent、Agent 会话 ID、工作目录、worktree 目录、上下文大小、上下文窗口总大小、最近活跃时间、创建时间等
 - 对话历史：存储在 `~/.amux/server/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和 agent 输出（agent 流式输出合并后写入）
 - 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
 
