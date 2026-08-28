@@ -24,6 +24,8 @@ mod ws;
 
 #[cfg(test)]
 mod diff_scroll_layout_test;
+#[cfg(test)]
+mod dialog_image_render_test;
 
 use std::path::PathBuf;
 use std::sync::Arc;

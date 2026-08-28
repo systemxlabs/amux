@@ -17,6 +17,34 @@ pub fn block_text(content: &[ContentBlock]) -> String {
         .join("\n")
 }
 
+/// 对话气泡中的图片附件：把 Resource 块的 base64 blob 解码为 gpui 可渲染图片。
+/// 仅常见位图 mime 可解码（输入区附件只产生这些）；其余块忽略。
+pub fn message_images(content: &[ContentBlock]) -> Vec<gpui::Image> {
+    use base64::Engine;
+    content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Resource {
+                mime_type,
+                blob: Some(blob),
+                ..
+            } => {
+                let format = match mime_type.as_str() {
+                    "image/png" => gpui::ImageFormat::Png,
+                    "image/jpeg" => gpui::ImageFormat::Jpeg,
+                    "image/gif" => gpui::ImageFormat::Gif,
+                    "image/webp" => gpui::ImageFormat::Webp,
+                    "image/bmp" => gpui::ImageFormat::Bmp,
+                    _ => return None,
+                };
+                let bytes = base64::engine::general_purpose::STANDARD.decode(blob).ok()?;
+                Some(gpui::Image::from_bytes(format, bytes))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// 折叠空白为单个空格后再截断（单行展示用）。
 pub fn one_line(s: &str, max: usize) -> String {
     let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -111,6 +139,41 @@ mod tests {
             },
         ];
         assert_eq!(block_text(&mixed), "x");
+    }
+
+    #[test]
+    fn message_images_decode_image_resources_only() {
+        use base64::Engine;
+        let png_blob = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "看这张图".into(),
+            },
+            ContentBlock::Resource {
+                mime_type: "image/png".into(),
+                uri: None,
+                text: None,
+                blob: Some(png_blob.clone()),
+            },
+            // 非图片 mime 不产生图片
+            ContentBlock::Resource {
+                mime_type: "application/pdf".into(),
+                uri: None,
+                text: None,
+                blob: Some(png_blob),
+            },
+            // blob 缺失不产生图片
+            ContentBlock::Resource {
+                mime_type: "image/jpeg".into(),
+                uri: None,
+                text: None,
+                blob: None,
+            },
+        ];
+        let images = message_images(&blocks);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].bytes, [1u8, 2, 3]);
+        assert_eq!(images[0].format, gpui::ImageFormat::Png);
     }
 
     #[test]
