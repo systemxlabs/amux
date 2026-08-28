@@ -27,6 +27,8 @@ mod diff_scroll_layout_test;
 #[cfg(test)]
 mod dialog_image_render_test;
 #[cfg(test)]
+mod input_align_layout_test;
+#[cfg(test)]
 mod slash_menu_render_test;
 
 use std::path::PathBuf;

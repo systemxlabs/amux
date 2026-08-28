@@ -1443,8 +1443,11 @@ impl AmuxApp {
                     .child(
                         div()
                             .flex_1()
-                            .min_h(px(96.)) // 输入区最小高度（宽松命中区域）
                             .id("input-drop-zone")
+                            // 最小高度放在 Input 上而非本容器：容器若高于 Input
+                            // （auto_grow 的 3 行自然高 < 96px），底部对齐的按钮列
+                            // 会垂到输入框下沿之外（对齐回归见 input_align_layout_test）
+                            .debug_selector(|| "input-align-input".into())
                             .capture_action(cx.listener(|this, _: &Paste, _window, cx| {
                                 let Some(item) = cx.read_from_clipboard() else {
                                     cx.propagate();
@@ -1487,7 +1490,8 @@ impl AmuxApp {
                                     cx.propagate();
                                 }
                             }))
-                            .child(Input::new(&self.input_state))
+                            // 输入区最小高度（宽松命中区域），随 auto_grow 增高
+                            .child(Input::new(&self.input_state).min_h(px(96.)))
                             .can_drop(|dragged, _window, _cx| dragged.is::<ExternalPaths>())
                             .on_drop::<ExternalPaths>(cx.listener(
                                 |this, paths: &ExternalPaths, _window, cx| {
@@ -1502,6 +1506,7 @@ impl AmuxApp {
                     )
                     .child(
                         v_flex()
+                            .debug_selector(|| "input-align-btn-col".into())
                             .gap_2()
                             .child(Button::new("send").primary().label("发送").on_click(
                                 cx.listener(|this, _ev, window, cx| {
