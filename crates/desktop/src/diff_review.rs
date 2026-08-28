@@ -717,6 +717,10 @@ impl AmuxApp {
             content_children.push(
                 v_flex()
                     .id(format!("diff-file-{path}"))
+                    .debug_selector(move || format!("dbg-diff-file-{path}"))
+                    // 滚动列的直接子项带 overflow_hidden 时，taffy 自动最小尺寸为 0，
+                    // 会被压缩进视口内导致内容永不溢出、无法滚动；显式禁用收缩。
+                    .flex_shrink_0()
                     .w_full()
                     .gap_0()
                     .border_1()
@@ -773,6 +777,7 @@ impl AmuxApp {
                         // 必须显式 h_full 约束为行高，否则 overflow_y_scroll 不生效
                         div()
                             .id("diff-panel")
+                            .debug_selector(|| "dbg-diff-scroll".into())
                             .v_flex()
                             .flex_1()
                             .h_full()

@@ -22,6 +22,9 @@ mod workflow;
 mod workflow_view;
 mod ws;
 
+#[cfg(test)]
+mod diff_scroll_layout_test;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
