@@ -9,7 +9,6 @@ use gpui_component::{
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     notification::Notification as UiNotification,
     popover::Popover,
-    progress::Progress,
     spinner::Spinner,
     switch::Switch,
     tag::Tag,
@@ -21,7 +20,7 @@ use gpui_component::{
 use serde_json::json;
 
 use protocol::{
-    ActivitiesResult, ContentBlock, HistoryResult, OngoingActivityResult, OpResult,
+    ActivitiesResult, HistoryResult, OngoingActivityResult, OpResult,
     SessionConfigKind, SessionConfigOptionsResult, SessionConfigOptionValue,
     SessionConfigSetting, SessionConfigureParams, SessionIdParams, SessionInfoParams,
     SessionInfoResult, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
@@ -31,9 +30,9 @@ use protocol::{
 use crate::config::QuickCommand;
 use crate::display::short_cwd;
 use crate::logic::{
-    activity_kind_detail, compose_prompt, compose_workflow_text, context_percent,
-    external_path_attachment, image_attachment, merge_session_window, parse_at_references,
-    path_attachment, DialogMsg, InputAttachment,
+    activity_kind_detail, compose_prompt, compose_workflow_text, external_path_attachment,
+    image_attachment, merge_session_window, parse_at_references, path_attachment, DialogMsg,
+    InputAttachment,
 };
 use crate::machine::MachineStatus;
 use crate::text::{block_text, format_local_time, one_line, TimePrecision};
@@ -972,33 +971,6 @@ impl AmuxApp {
                             .gap_1()
                             .items_center()
                             .child(Label::new(label).text_sm().flex_1().min_w_0().truncate()),
-                    )
-                    // 会话上下文占用（docs/DESIGN.md：usage_update 记录的已用/窗口）
-                    .when(
-                        context_percent(s.context_size, s.context_window_size).is_some(),
-                        |row| {
-                            let percent = context_percent(s.context_size, s.context_window_size)
-                                .expect("上方已判非 None");
-                            let percent_text: SharedString = format!("{percent:.0}%").into();
-                            row.child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        div().w(px(40.)).child(
-                                            Progress::new(format!("sess-ctx-{machine}-{sid}"))
-                                                .value(percent)
-                                                .xsmall()
-                                                .color(cx.theme().primary),
-                                        ),
-                                    )
-                                    .child(
-                                        Label::new(percent_text)
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground),
-                                    ),
-                            )
-                        },
                     )
                     .when(s.last_active_at > 0, |row| {
                         row.child(
