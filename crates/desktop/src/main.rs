@@ -5,16 +5,21 @@
 
 mod aggregate;
 mod app;
-mod app_render;
 mod config;
 mod diff;
+mod diff_review;
 mod display;
 mod logic;
 mod machine;
+mod machines;
+mod panels;
+mod sessions;
+mod settings;
 mod text;
 mod theme;
 mod wfstore;
 mod workflow;
+mod workflow_view;
 mod ws;
 
 use std::path::PathBuf;

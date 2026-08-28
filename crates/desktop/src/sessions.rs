@@ -1,0 +1,2230 @@
+use gpui::prelude::FluentBuilder;
+use gpui::*;
+use gpui_component::{
+    alert::Alert,
+    button::*,
+    checkbox::Checkbox,
+    input::Input,
+    label::Label,
+    menu::{ContextMenuExt, PopupMenuItem},
+    notification::Notification as UiNotification,
+    popover::Popover,
+    progress::Progress,
+    spinner::Spinner,
+    tag::Tag,
+    text::TextView,
+    tooltip::Tooltip,
+    *,
+};
+
+use serde_json::json;
+
+use protocol::{
+    ActivitiesResult, ContentBlock, HistoryResult, OngoingActivityResult, SessionConfigOptionValue,
+    SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
+    SessionListResult, SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams,
+    SessionResult, SessionState,
+};
+
+use crate::config::QuickCommand;
+use crate::display::short_cwd;
+use crate::logic::{
+    activity_kind_detail, compose_prompt, compose_workflow_text, context_percent,
+    external_path_attachment, merge_session_window, parse_at_references, path_attachment,
+    DialogMsg, InputAttachment,
+};
+use crate::machine::MachineStatus;
+use crate::text::{block_text, format_local_time, one_line, TimePrecision};
+use crate::workflow::now;
+use protocol::Activity;
+
+use crate::app::{
+    run_engine_on_tokio, AmuxApp, DraftKey, NewSessionMode, Panel, Selected, SessionListItem,
+    SettingsCategory, PAGE_LIMIT,
+};
+
+impl AmuxApp {
+    pub(crate) fn refresh_sessions(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(m) = self.machines.get(idx) else {
+            return;
+        };
+        let count = self.list_pages * PAGE_LIMIT;
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            // 滚动查询（docs/DESIGN.md「会话列表滚动查询」）：按数量查询前 N 页
+            //（N × 每页 PAGE_LIMIT 条）
+            let params = json!({ "limit": count });
+            let (pages, has_more) = match client
+                .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
+                .await
+            {
+                // 刷新失败保持现状：离线/断连由列表的机器在线过滤兜底
+                Ok(res) => (res.sessions, res.has_more),
+                Err(_) => return,
+            };
+
+            // 应用查询结果，并计算工作流关联会话中尚未出现在其中的 id
+            let missing = match this.update_in(cx, |this, _w, _cx| {
+                let Some(m) = this.machines.get_mut(idx) else {
+                    return Vec::new();
+                };
+                let (list, hm) = merge_session_window(&m.sessions, pages, has_more);
+                m.sessions = list;
+                m.sessions_has_more = hm;
+                crate::logic::sort_sessions_recent(&mut m.sessions);
+                let child_ids: Vec<(usize, String)> = this
+                    .workflows
+                    .iter()
+                    .flat_map(|wf| {
+                        let children = wf.session.read().unwrap().children.clone();
+                        children.into_iter().map(|c| (c.machine_idx, c.id))
+                    })
+                    .collect();
+                child_ids
+                    .iter()
+                    .filter(|(cmi, cid)| *cmi == idx && !m.sessions.iter().any(|s| s.id == *cid))
+                    .map(|(_, cid)| cid.clone())
+                    .collect::<Vec<_>>()
+            }) {
+                Ok(missing) => missing,
+                Err(_) => return,
+            };
+            if missing.is_empty() {
+                let _ = this.update_in(cx, |_, _, cx| cx.notify());
+                return;
+            }
+
+            // 第 2 步补齐：批量查询缺失的工作流关联会话
+            if let Ok(res) = client
+                .request::<_, SessionInfoResult>(
+                    protocol::method::SESSION_INFO,
+                    Some(SessionInfoParams {
+                        session_ids: missing,
+                    }),
+                )
+                .await
+            {
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    if let Some(m) = this.machines.get_mut(idx) {
+                        let (list, _) =
+                            merge_session_window(&m.sessions, res.sessions, m.sessions_has_more);
+                        m.sessions = list;
+                        crate::logic::sort_sessions_recent(&mut m.sessions);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn refresh_dialog(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionPageParams {
+                session_id: session_id.clone(),
+                limit: Some(PAGE_LIMIT),
+                before: None,
+            };
+            if let Ok(res) = client
+                .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
+                .await
+            {
+                let items = res.items;
+                let has_more = res.has_more;
+                let next_before = res.next_before.map(|v| v as usize);
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    // 新消息到达前若已在底部，追加内容后保持贴底，避免新消息被遮挡。
+                    let was_at_bottom = this.dialog_at_bottom();
+                    if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(v) = m.views.get_mut(&session_id) {
+                            v.set_history_page(&items, has_more, next_before);
+                        }
+                    }
+                    if was_at_bottom {
+                        this.dialog_scroll.scroll_to_bottom();
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn refresh_activities(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        // 面板未打开时不主动刷新活动。
+        if self.panel != Some(Panel::Activities) {
+            return;
+        }
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionPageParams {
+                session_id: session_id.clone(),
+                limit: Some(PAGE_LIMIT),
+                before: None,
+            };
+            if let Ok(res) = client
+                .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
+                .await
+            {
+                let acts = res.activities;
+                let has_more = res.has_more;
+                let next_before = res.next_before.map(|v| v as usize);
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    // 新活动到达前若已在底部，追加内容后保持贴底。
+                    let was_at_bottom = this.activities_at_bottom();
+                    if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(v) = m.views.get_mut(&session_id) {
+                            v.set_activities_page(acts, has_more, next_before);
+                        }
+                    }
+                    if was_at_bottom {
+                        this.activities_scroll.scroll_to_bottom();
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn refresh_ongoing(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionIdParams {
+                session_id: session_id.clone(),
+            };
+            if let Ok(res) = client
+                .request::<_, OngoingActivityResult>(
+                    protocol::method::SESSION_ONGOING_ACTIVITY,
+                    Some(params),
+                )
+                .await
+            {
+                let act = res.activity;
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(v) = m.views.get_mut(&session_id) {
+                            v.set_live(act);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn load_more_history(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+            return;
+        };
+        let Some(view) = self.machines.get(machine).and_then(|m| m.views.get(&id)) else {
+            return;
+        };
+        let Some(before) = view.history_next_before else {
+            return;
+        };
+        let client = self.machines[machine].client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionPageParams {
+                session_id: id.clone(),
+                limit: Some(PAGE_LIMIT),
+                before: Some(before as u64),
+            };
+            if let Ok(res) = client
+                .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
+                .await
+            {
+                let items = res.items;
+                let has_more = res.has_more;
+                let next_before = res.next_before.map(|v| v as usize);
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    if let Some(view) = this
+                        .machines
+                        .get_mut(machine)
+                        .and_then(|m| m.views.get_mut(&id))
+                    {
+                        view.prepend_history_page(&items, has_more, next_before);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn load_more_activities(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+            return;
+        };
+        let Some(view) = self.machines.get(machine).and_then(|m| m.views.get(&id)) else {
+            return;
+        };
+        let Some(before) = view.activities_next_before else {
+            return;
+        };
+        let client = self.machines[machine].client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionPageParams {
+                session_id: id.clone(),
+                limit: Some(PAGE_LIMIT),
+                before: Some(before as u64),
+            };
+            if let Ok(res) = client
+                .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
+                .await
+            {
+                let acts = res.activities;
+                let has_more = res.has_more;
+                let next_before = res.next_before.map(|v| v as usize);
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    if let Some(view) = this
+                        .machines
+                        .get_mut(machine)
+                        .and_then(|m| m.views.get_mut(&id))
+                    {
+                        view.prepend_activities_page(acts, has_more, next_before);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 「加载更早会话」：滚动查询页数 N +1，所有在线机器统一按前 N 页重新查询，
+    /// 随后各自补齐工作流关联会话（docs/DESIGN.md「会话列表滚动查询」）。
+    pub(crate) fn load_more_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.list_pages += 1;
+        for i in 0..self.machines.len() {
+            if matches!(self.machines[i].status, MachineStatus::Online) {
+                self.refresh_sessions(i, window, cx);
+            }
+        }
+    }
+
+    pub(crate) fn open_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        self.set_selected(
+            Some(Selected::Session {
+                machine,
+                id: session_id.clone(),
+            }),
+            window,
+            cx,
+        );
+        self.set_panel(window, cx, None);
+        if let Some(m) = self.machines.get_mut(machine) {
+            m.views.entry(session_id.clone()).or_default();
+            m.diff_files.clear();
+            m.diff_not_repo = false;
+            m.diff_selection.clear();
+            m.diff_request_id = m.diff_request_id.saturating_add(1);
+            m.diff_loading = false;
+            m.diff_error = None;
+            m.workspace_directories.clear();
+            m.workspace_expanded.clear();
+            m.workspace_loading.clear();
+            m.workspace_list_request_id = m.workspace_list_request_id.saturating_add(1);
+            m.workspace_read_request_id = m.workspace_read_request_id.saturating_add(1);
+            m.workspace_file = None;
+            m.workspace_content.clear();
+            m.workspace_error = None;
+            m.workspace_read_loading = false;
+            m.workspace_read_has_more = false;
+            m.workspace_read_next_offset = 0;
+        }
+        self.refresh_dialog(window, cx, machine, session_id.clone());
+        self.refresh_activities(window, cx, machine, session_id.clone());
+        self.refresh_ongoing(window, cx, machine, session_id);
+        self.dialog_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    pub(crate) fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.input_state.read(cx).value().to_string();
+        let attachments = self.input_attachments.clone();
+        if text.trim().is_empty() && attachments.is_empty() {
+            return;
+        }
+        let (clean_text, refs) = parse_at_references(&text);
+        let mut all = attachments;
+        for r in refs {
+            all.push(path_attachment(&r));
+        }
+        let blocks = compose_prompt(&clean_text, &all);
+        let Some(target) = self.selected.clone() else {
+            cx.notify();
+            return;
+        };
+        match target {
+            Selected::Session { machine, id } => {
+                let Some(m) = self.machine(machine) else {
+                    return;
+                };
+                let client = m.client.clone();
+                let params = SessionPromptParams {
+                    session_id: id.clone(),
+                    input: blocks.clone(),
+                };
+                if let Some(m) = self.machine_mut(machine) {
+                    // 本地仅缓存对话视图；会话状态由服务端权威维护，
+                    // 经 state_change 推送 / 会话列表轮询同步，应用侧不做乐观改写
+                    let v = m.views.entry(id.clone()).or_default();
+                    v.dialog.push(DialogMsg::UserMessage {
+                        content: blocks.clone(),
+                        timestamp: now(),
+                    });
+                }
+                self.dialog_scroll.scroll_to_bottom();
+                let prompt_params = params;
+                cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                    let result = client
+                        .request_ok(protocol::method::SESSION_PROMPT, Some(prompt_params))
+                        .await;
+                    let _ = this.update_in(cx, |this, w, cx| {
+                        match &result {
+                            Err(error) => {
+                                w.push_notification(
+                                    UiNotification::error(format!("发送失败：{error}"))
+                                        .title("消息未发送"),
+                                    cx,
+                                );
+                            }
+                            // 发送用户消息即触发列表刷新（docs/DESIGN.md 会话列表刷新机制）
+                            Ok(()) => {
+                                this.refresh_sessions(machine, w, cx);
+                            }
+                        }
+                        this.refresh_dialog(w, cx, machine, id);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            Selected::Workflow { id } => {
+                let session_dir = self.session_dir.clone();
+                let workflow_text = compose_workflow_text(&clean_text, &all);
+                let Some(engine) = self.workflow_idx(&id) else {
+                    return;
+                };
+                let should_advance = if let Some(wf) = self.workflows.get_mut(engine) {
+                    let should_advance = wf.record_user(&workflow_text);
+                    if should_advance {
+                        wf.begin_busy();
+                    }
+                    if let Err(e) = wf.persist(&session_dir) {
+                        log::error!("工作流用户消息持久化失败 {}: {e}", wf.id());
+                    }
+                    should_advance
+                } else {
+                    false
+                };
+                if should_advance {
+                    let wf = self.workflows[engine].clone();
+                    let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                        run_engine_on_tokio(async move {
+                            if let Err(e) = wf.advance().await {
+                                log::error!("推进工作流失败 {}: {e}", wf.id());
+                            }
+                            if let Err(e) = wf.persist(&session_dir) {
+                                log::error!("工作流状态持久化失败 {}: {e}", wf.id());
+                            }
+                        })
+                        .await;
+                        let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
+                    });
+                    self._tasks.push(t);
+                }
+            }
+        }
+        self.input_state
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.input_attachments.clear();
+    }
+
+    pub(crate) fn quick_command(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        cmd: &QuickCommand,
+    ) {
+        match self.selected.clone() {
+            Some(Selected::Session { machine, id }) => {
+                let Some(m) = self.machine(machine) else {
+                    return;
+                };
+                let client = m.client.clone();
+                let params = SessionPromptParams {
+                    session_id: id.clone(),
+                    input: vec![ContentBlock::Text {
+                        text: cmd.prompt.clone(),
+                    }],
+                };
+                cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+                    let result = client
+                        .request_ok(
+                            protocol::method::SESSION_PROMPT,
+                            Some(serde_json::to_value(&params).unwrap()),
+                        )
+                        .await;
+                    let _ = this.update_in(cx, |this, w, cx| {
+                        if let Err(error) = &result {
+                            w.push_notification(
+                                UiNotification::error(format!("发送失败：{error}"))
+                                    .title("快捷指令未发送"),
+                                cx,
+                            );
+                        }
+                        this.refresh_dialog(w, cx, machine, id);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            Some(Selected::Workflow { .. }) => {
+                // 快捷指令作为用户输入进入工作流会话。
+                self.input_state
+                    .update(cx, |s, cx| s.set_value(&cmd.prompt, window, cx));
+                self.send_prompt(window, cx);
+            }
+            None => {}
+        }
+    }
+
+    pub(crate) fn cancel_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Selected::Workflow { id }) = self.selected.clone() {
+            self.cancel_workflow(window, cx, id);
+            cx.notify();
+            return;
+        }
+        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+            return;
+        };
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        // 空闲会话本就无可取消：ACP 侧报错属预期，静默忽略以免污染状态徽章；
+        // 忙碌中取消失败才值得提示
+        let was_busy = m
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .is_some_and(|s| s.state == SessionState::Busy);
+        let client = m.client.clone();
+        let sid = id.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionIdParams {
+                session_id: sid.clone(),
+            };
+            let res = client
+                .request_ok(
+                    protocol::method::SESSION_CANCEL,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, w, cx| {
+                if let Err(error) = &res {
+                    if was_busy {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.notice = Some(format!("取消失败（{error}）"));
+                        }
+                    }
+                }
+                this.refresh_dialog(w, cx, machine, sid);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn delete_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        let sid = session_id.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionIdParams {
+                session_id: sid.clone(),
+            };
+            let res = client
+                .request_ok(
+                    protocol::method::SESSION_DELETE,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, w, cx| {
+                match res {
+                    Ok(_) => {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.sessions.retain(|s| s.id != sid);
+                            m.views.remove(&sid);
+                        }
+                        let machine_name = this
+                            .machine(machine)
+                            .map(|m| m.config.name.clone())
+                            .unwrap_or_default();
+                        if let Some(Selected::Session { id, .. }) = this.selected.clone() {
+                            if id == sid {
+                                this.set_selected(None, w, cx);
+                            }
+                        }
+                        this.drafts.retain(|key, _| match key {
+                            DraftKey::Session { id, machine } => {
+                                *id != sid || *machine != machine_name
+                            }
+                            DraftKey::Workflow { .. } => true,
+                        });
+                        this.refresh_sessions(machine, w, cx);
+                    }
+                    Err(error) => {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.notice = Some(format!("删除会话失败（{error}）"));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn confirm_delete_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        self.confirm_dialog(
+            window,
+            cx,
+            "确认删除",
+            true,
+            "删除会话",
+            format!("确定删除会话 {session_id} 吗？删除后历史一并移除，不可恢复。"),
+            move |this, window, cx| {
+                let sid = session_id.clone();
+                this.delete_session(window, cx, machine, sid);
+            },
+        );
+    }
+
+    pub(crate) fn rename_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+        title: String,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        let title_trim = title.trim().to_string();
+        let params = SessionConfigureParams {
+            session_id,
+            title: title_trim,
+        };
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let res = client
+                .request_ok(
+                    protocol::method::SESSION_CONFIGURE,
+                    Some(serde_json::to_value(&params).unwrap()),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, w, cx| {
+                match res {
+                    Err(error) => {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.notice = Some(format!("重命名失败（{error}）"));
+                        }
+                    }
+                    Ok(()) => {
+                        this.renaming_session = None;
+                        // 主动刷新会话列表以体现新标题（修复 M1：重命名后不主动刷新）
+                        this.refresh_sessions(machine, w, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn available_agent(&self, idx: usize) -> Option<String> {
+        self.machine(idx).and_then(|m| {
+            m.agents
+                .iter()
+                .find(|a| a.available)
+                .map(|a| a.name.clone())
+        })
+    }
+
+    pub(crate) fn selected_meta(&self) -> Option<SessionMeta> {
+        match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
+                .cloned(),
+            Some(Selected::Workflow { id }) => {
+                let wf = self.workflows.get(self.workflow_idx(id)?)?;
+                let sg = wf.snapshot();
+                Some(SessionMeta {
+                    id: sg.id.clone(),
+                    agent: "编排".into(),
+                    cwd: String::new(),
+                    state: sg.state,
+                    title: sg.title.clone(),
+                    created_at: sg.created_at,
+                    last_active_at: sg.updated_at,
+                    worktree_dir: String::new(),
+                    context_size: 0,
+                    context_window_size: 0,
+                    config_options: Vec::new(),
+                })
+            }
+            None => None,
+        }
+    }
+
+    pub(crate) fn create_session_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let machine = self.new_session_machine.unwrap_or(0);
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let machine_name = m.config.name.clone();
+        let cwd = self.session_cwd_input.read(cx).value().trim().to_owned();
+        if cwd.is_empty() {
+            self.new_session_error = Some("请输入工作目录，或选择一个常用工作目录。".into());
+            cx.notify();
+            return;
+        }
+        self.new_session_error = None;
+        let agent = match self.new_session_agent.clone() {
+            Some(a) => a,
+            None => match self.available_agent(machine) {
+                Some(a) => a,
+                None => {
+                    if let Some(m) = self.machine_mut(machine) {
+                        m.notice = Some("无可用 agent".into());
+                    }
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+        let params = SessionNewParams {
+            agent: agent.clone(),
+            cwd: cwd.clone(),
+            use_worktree: self.new_session_worktree,
+        };
+        let client = self.machines[machine].client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let res = client
+                .request::<_, SessionResult>(protocol::method::SESSION_NEW, Some(params))
+                .await;
+            let _ = this.update_in(cx, |this, w, cx| {
+                match &res {
+                    Ok(res) => {
+                        let new_id = res.session.id.clone();
+                        if !new_id.is_empty() {
+                            this.store
+                                .record_recent_workspace(&machine_name, &cwd, now());
+                            this.refresh_sessions(machine, w, cx);
+                            this.open_session(w, cx, machine, new_id);
+                        } else {
+                            w.push_notification(
+                                UiNotification::error("服务器返回了无效的会话信息")
+                                    .title("创建会话失败"),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        w.push_notification(
+                            UiNotification::error(format!("无法创建会话：{error}"))
+                                .title("创建会话失败"),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn selected_draft_key(&self) -> Option<DraftKey> {
+        match self.selected.as_ref()? {
+            Selected::Session { machine, id } => Some(DraftKey::Session {
+                machine: self.machines.get(*machine)?.config.name.clone(),
+                id: id.clone(),
+            }),
+            Selected::Workflow { id } => Some(DraftKey::Workflow { id: id.clone() }),
+        }
+    }
+
+    pub(crate) fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        // 子会话只挂在工作流会话下，顶层列表跳过
+        let child_ids: std::collections::HashSet<String> = self
+            .workflows
+            .iter()
+            .flat_map(|wf| {
+                wf.session
+                    .read()
+                    .unwrap()
+                    .children
+                    .iter()
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut items: Vec<(u64, SessionListItem)> = Vec::new();
+        for (mi, m) in self.machines.iter().enumerate() {
+            // 离线/认证失败/连接中的机器不展示其会话：数据是上次刷新的陈旧缓存
+            // 且不可操作；机器恢复在线后随 10s 定时刷新自动重现
+            if !matches!(m.status, MachineStatus::Online) {
+                continue;
+            }
+            for s in &m.sessions {
+                if child_ids.contains(s.id.as_str()) {
+                    continue;
+                }
+                items.push((
+                    s.last_active_at,
+                    SessionListItem::Session {
+                        machine: mi,
+                        meta: s.clone(),
+                    },
+                ));
+            }
+        }
+        for (wi, wf) in self.workflows.iter().enumerate() {
+            let s_guard = wf.snapshot();
+            let mut recency = s_guard.updated_at;
+            for c in &s_guard.children {
+                if let Some(mm) = self.machines.get(c.machine_idx) {
+                    if let Some(s) = mm.sessions.iter().find(|s| s.id == c.id) {
+                        recency = recency.max(s.last_active_at);
+                    }
+                }
+            }
+            items.push((recency, SessionListItem::Workflow { idx: wi }));
+        }
+        items.sort_by_key(|(rec, _)| std::cmp::Reverse(*rec));
+
+        let mut rows: Vec<gpui::AnyElement> = items
+            .into_iter()
+            .map(|(_, item)| match item {
+                SessionListItem::Session { machine, meta } => {
+                    self.render_session_row(cx, machine, &meta)
+                }
+                SessionListItem::Workflow { idx } => self.render_workflow_row(cx, idx),
+            })
+            .collect();
+
+        if self
+            .machines
+            .iter()
+            .any(|m| matches!(m.status, MachineStatus::Online) && m.sessions_has_more)
+        {
+            rows.push(
+                Button::new("sessions-more")
+                    .small()
+                    .label("加载更早会话")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.load_more_sessions(window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        rows
+    }
+
+    pub(crate) fn render_session_row(
+        &self,
+        cx: &mut Context<Self>,
+        machine: usize,
+        s: &SessionMeta,
+    ) -> gpui::AnyElement {
+        let sid = s.id.clone();
+        let sel = self.selected
+            == Some(Selected::Session {
+                machine,
+                id: sid.clone(),
+            });
+        let title = if s.title.is_empty() {
+            format!("（未命名）{}", short_cwd(&s.cwd))
+        } else {
+            s.title.clone()
+        };
+        // 重命名预填用原始标题（title 是含「（未命名）/目录」回退的展示文案）
+        let raw_title = s.title.clone();
+        let busy = s.state == SessionState::Busy;
+        let label: SharedString = title.clone().into();
+        let active = cx.theme().list_active;
+        let border = cx.theme().list_active_border;
+
+        if self.renaming_session.as_ref() == Some(&(machine, sid.clone())) {
+            let sid2 = sid.clone();
+            return v_flex()
+                .gap_1()
+                .child(Input::new(&self.title_input))
+                .child(
+                    Button::new(format!("rename-save-{sid}"))
+                        .small()
+                        .primary()
+                        .label("保存")
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            let title = this.title_input.read(cx).value().to_string();
+                            this.rename_session(window, cx, machine, sid2.clone(), title);
+                        })),
+                )
+                .into_any_element();
+        }
+
+        let sid_open = sid.clone();
+        // 右键菜单交给 ContextMenu 组件：外点/Esc 关闭、键盘导航、焦点恢复由其负责。
+        // 菜单构建闭包与各条目回调均为 Fn，逐层持有独立克隆
+        let app = cx.entity();
+        let sid_menu = sid.clone();
+        div()
+            .id(format!("sess-row-{machine}-{sid}"))
+            .relative()
+            .w_full()
+            .rounded_md()
+            .bg(active.opacity(if sel { 1.0 } else { 0.0 }))
+            .when(sel, |d| d.border_1().border_color(border))
+            .hover(|d| d.bg(cx.theme().list_hover))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                this.open_session(window, cx, machine, sid_open.clone());
+            }))
+            .context_menu(move |menu, _window, _cx| {
+                menu.item(PopupMenuItem::new("重命名").on_click({
+                    let app = app.clone();
+                    let sid = sid_menu.clone();
+                    let raw_title = raw_title.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.selected = Some(Selected::Session {
+                                machine,
+                                id: sid.clone(),
+                            });
+                            this.renaming_session = Some((machine, sid.clone()));
+                            this.title_input
+                                .update(cx, |s, cx| s.set_value(&raw_title, window, cx));
+                            cx.notify();
+                        });
+                    }
+                }))
+                .item(PopupMenuItem::new("删除会话").on_click({
+                    let app = app.clone();
+                    let sid = sid_menu.clone();
+                    move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.confirm_delete_session(window, cx, machine, sid.clone());
+                        });
+                    }
+                }))
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .h_8()
+                    .px_1()
+                    .gap_1p5()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::SquareTerminal)
+                            .small()
+                            .text_color(if sel {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().muted_foreground
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .id(format!("sess-title-{machine}-{sid}"))
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .items_center()
+                            .child(Label::new(label).text_sm().flex_1().min_w_0().truncate()),
+                    )
+                    // 会话上下文占用（docs/DESIGN.md：usage_update 记录的已用/窗口）
+                    .when(
+                        context_percent(s.context_size, s.context_window_size).is_some(),
+                        |row| {
+                            let percent = context_percent(s.context_size, s.context_window_size)
+                                .expect("上方已判非 None");
+                            let percent_text: SharedString = format!("{percent:.0}%").into();
+                            row.child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        div().w(px(40.)).child(
+                                            Progress::new(format!("sess-ctx-{machine}-{sid}"))
+                                                .value(percent)
+                                                .xsmall()
+                                                .color(cx.theme().primary),
+                                        ),
+                                    )
+                                    .child(
+                                        Label::new(percent_text)
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground),
+                                    ),
+                            )
+                        },
+                    )
+                    .when(s.last_active_at > 0, |row| {
+                        row.child(
+                            Label::new(format_local_time(s.last_active_at, TimePrecision::Compact))
+                                .text_xs()
+                                .flex_none()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    })
+                    .child(if busy {
+                        Spinner::new()
+                            .xsmall()
+                            .color(cx.theme().primary)
+                            .into_any_element()
+                    } else {
+                        div().size_2().into_any_element()
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn render_dialog(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let dialog: Vec<DialogMsg> = match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| m.views.get(id))
+                .map(|v| v.dialog.clone())
+                .unwrap_or_default(),
+            Some(Selected::Workflow { id }) => self
+                .workflow(id)
+                .map(|w| {
+                    let sg = w.snapshot();
+                    let all = sg.to_dialog();
+                    let start = all.len().saturating_sub(self.workflow_dialog_limit);
+                    all[start..].to_vec()
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let agent_label: SharedString = match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| {
+                    let machine_name = m.config.name.clone();
+                    m.sessions
+                        .iter()
+                        .find(|s| &s.id == id)
+                        .map(|s| format!("{}@{machine_name}", s.agent).into())
+                })
+                .unwrap_or_else(|| "Agent".into()),
+            Some(Selected::Workflow { .. }) => "编排".into(),
+            None => "Agent".into(),
+        };
+        let primary = cx.theme().primary;
+        let primary_foreground = cx.theme().primary_foreground;
+        let popover = cx.theme().popover;
+        let border = cx.theme().border;
+        let muted_foreground = cx.theme().muted_foreground;
+        let rows = dialog
+            .iter()
+            .map(|item| match item {
+                DialogMsg::UserMessage { content, timestamp } => {
+                    let text = block_text(content);
+                    // 气泡贴内容：按最长行估算宽度，短消息收拢；长消息触顶换行。
+                    // 下限需容纳「我 + 时间戳」头部行
+                    let bubble_w = crate::text::estimate_bubble_width(
+                        &text,
+                        crate::theme::FONT_BODY.as_f32(),
+                        132.,
+                        720., // 消息气泡最大宽度（内容可读性上限）
+                    );
+                    div().id(("row", *timestamp)).w_full().child(
+                        div()
+                            .ml_auto()
+                            .flex_none()
+                            .w(bubble_w)
+                            .overflow_hidden()
+                            .p_3()
+                            .v_flex()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(primary)
+                            .shadow_sm()
+                            .child(
+                                Label::new("我")
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(primary_foreground),
+                            )
+                            .child(
+                                Label::new(format_local_time(*timestamp, TimePrecision::Seconds))
+                                    .text_xs()
+                                    .text_color(cx.theme().primary_foreground.opacity(0.78)),
+                            )
+                            .child(
+                                TextView::markdown(format!("umd-{timestamp}"), text)
+                                    .selectable(true)
+                                    .text_color(primary_foreground),
+                            ),
+                    )
+                }
+                DialogMsg::AgentMessage { content, timestamp } => {
+                    let text = block_text(content);
+                    let bubble_w = crate::text::estimate_bubble_width(
+                        &text,
+                        crate::theme::FONT_BODY.as_f32(),
+                        132.,
+                        720., // 消息气泡最大宽度（内容可读性上限）
+                    );
+                    div().id(("row", *timestamp)).w_full().child(
+                        div()
+                            .flex_none()
+                            .w(bubble_w)
+                            .overflow_hidden()
+                            .p_3()
+                            .v_flex()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(popover)
+                            .border_1()
+                            .border_color(border)
+                            .shadow_sm()
+                            .child(
+                                Label::new(agent_label.clone())
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(muted_foreground),
+                            )
+                            .child(
+                                Label::new(format_local_time(*timestamp, TimePrecision::Seconds))
+                                    .text_xs()
+                                    .text_color(muted_foreground),
+                            )
+                            .child(
+                                TextView::markdown(format!("amd-{timestamp}"), block_text(content))
+                                    .selectable(true),
+                            ),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let history_has_more = match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| m.views.get(id))
+                .map(|v| v.history_has_more)
+                .unwrap_or(false),
+            _ => false,
+        };
+        let mut content = Vec::new();
+        if let Some(Selected::Workflow { id }) = &self.selected {
+            let total = self
+                .workflow(id)
+                .map(|w| w.snapshot().transcript.len())
+                .unwrap_or(0);
+            if total > self.workflow_dialog_limit {
+                content.push(
+                    Button::new("load-more-workflow-history")
+                        .small()
+                        .ghost()
+                        .label(format!("加载更早消息（共 {total} 条）"))
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.workflow_dialog_limit += 100;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        if history_has_more {
+            content.push(
+                Button::new("load-more-history")
+                    .small()
+                    .ghost()
+                    .label("加载更早消息")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.load_more_history(window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        content.extend(rows.into_iter().map(|r| r.into_any_element()));
+        if content.is_empty() {
+            // 空态：图标 + 引导文案居中，弱化存在感
+            div()
+                .id("dialog-empty")
+                .flex_1()
+                .v_flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::Inbox)
+                        .large()
+                        .text_color(muted_foreground.opacity(0.55)),
+                )
+                .child(
+                    Label::new("选择左侧会话查看对话，或输入消息开始")
+                        .text_sm()
+                        .text_color(muted_foreground),
+                )
+                .into_any()
+        } else {
+            div()
+                .id("dialog")
+                .v_flex()
+                .flex_1()
+                .gap_4()
+                .p_2()
+                .overflow_y_scroll()
+                .track_scroll(&self.dialog_scroll)
+                .children(content)
+                .into_any()
+        }
+    }
+
+    pub(crate) fn render_activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current: Option<Activity> = match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| m.views.get(id))
+                .and_then(|v| v.live.clone()),
+            Some(Selected::Workflow { id }) => {
+                let busy = self
+                    .workflow(id)
+                    .is_some_and(|wf| wf.state() == SessionState::Busy);
+                if busy {
+                    Some(Activity::Thinking {
+                        timestamp: 0,
+                        content: "正在编排决策/推进…".into(),
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let warning = cx.theme().warning;
+        let warning_foreground = cx.theme().warning_foreground;
+        let danger = cx.theme().danger;
+        match &current {
+            Some(Activity::Thinking { content, .. }) => h_flex()
+                .w_full()
+                .gap_2()
+                .p_2()
+                .bg(warning.opacity(0.16))
+                .border_1()
+                .border_color(warning.opacity(0.45))
+                .rounded_md()
+                .child(Spinner::new())
+                .child(
+                    Label::new(format!("思考中：{}", one_line(content, 120)))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(warning_foreground),
+                )
+                .into_any(),
+            Some(Activity::ToolCall { name, title, .. }) => h_flex()
+                .w_full()
+                .gap_2()
+                .p_2()
+                .bg(warning.opacity(0.16))
+                .border_1()
+                .border_color(warning.opacity(0.45))
+                .rounded_md()
+                .child(Spinner::new())
+                .child(
+                    Label::new(format!(
+                        "工具调用：{} {}",
+                        name,
+                        one_line(title.as_deref().unwrap_or(""), 120)
+                    ))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(warning_foreground),
+                )
+                .into_any(),
+            Some(Activity::Compaction { detail, .. }) => h_flex()
+                .w_full()
+                .gap_2()
+                .p_2()
+                .bg(warning.opacity(0.16))
+                .border_1()
+                .border_color(warning.opacity(0.45))
+                .rounded_md()
+                .child(
+                    Label::new(format!("上下文压缩：{}", one_line(detail, 120)))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(warning_foreground),
+                )
+                .into_any(),
+            Some(Activity::Error { detail, .. }) => h_flex()
+                .w_full()
+                .gap_2()
+                .p_2()
+                .bg(danger.opacity(0.12))
+                .border_1()
+                .border_color(danger.opacity(0.45))
+                .rounded_md()
+                .child(
+                    Label::new(format!("错误：{}", one_line(detail, 120)))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(danger),
+                )
+                .into_any(),
+            None => div().id("activity-bar-empty").into_any(),
+        }
+    }
+
+    /// 活动行身份：语义键（aggregate::activity_key）+ 前缀，而非下标——加载更早
+    /// 活动会前移插入，下标键会让展开态漂移到其他条目。工具调用附名称以区分
+    /// 同毫秒的多个调用。
+    pub(crate) fn activity_row_key(prefix: &str, a: &Activity) -> String {
+        let (kind, ts) = crate::aggregate::activity_key(a);
+        match a {
+            Activity::ToolCall { name, .. } => format!("{prefix}-{kind}-{ts}-{name}"),
+            _ => format!("{prefix}-{kind}-{ts}"),
+        }
+    }
+
+    pub(crate) fn activity_row(
+        &self,
+        prefix: &str,
+        a: &Activity,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let key_toggle = Self::activity_row_key(prefix, a);
+        let expanded = self.expanded_activities.contains(&key_toggle);
+        // 整卡可点击切换展开：折叠恒为一行（截断省略），展开显示全文（可换行）。
+        // 不再用字符数阈值裁剪——截断交给样式层，展开态即原始 detail。
+        let (_, ts) = crate::aggregate::activity_key(a);
+        let (kind, detail) = activity_kind_detail(a);
+        div()
+            .id(key_toggle.clone())
+            .w_full()
+            .p_2()
+            .bg(cx.theme().muted.opacity(0.55))
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|d| d.bg(cx.theme().muted))
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                if !this.expanded_activities.remove(&key_toggle) {
+                    this.expanded_activities.insert(key_toggle.clone());
+                }
+                cx.notify();
+            }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .child(
+                        Label::new(format_local_time(ts, TimePrecision::Seconds))
+                            .text_xs()
+                            .flex_none()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .flex_none()
+                        .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Label::new(kind.to_string())
+                            .text_xs()
+                            .flex_none()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Label::new(detail.to_string())
+                            .text_sm()
+                            .flex_1()
+                            .min_w_0()
+                            .when(!expanded, |l| l.truncate()),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn render_input(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted_foreground = cx.theme().muted_foreground;
+        v_flex()
+            .gap_2()
+            .pt_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            // 附件 chips：点击单个 chip 即移除该附件（原仅支持一键清空）
+            .when(!self.input_attachments.is_empty(), |view| {
+                view.child(h_flex().flex_wrap().gap_1().children(
+                    self.input_attachments.iter().enumerate().map(|(i, a)| {
+                        let label: SharedString = match a {
+                            InputAttachment::Path { path, .. } => path.clone().into(),
+                            InputAttachment::Image { name, .. } => name.clone().into(),
+                        };
+                        let tooltip_label = label.clone();
+                        div()
+                            .id(format!("attachment-chip-{a:?}"))
+                            .max_w(px(280.))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(cx.theme().muted)
+                            .hover(|d| d.bg(cx.theme().secondary_hover))
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip_label.clone()).build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.input_attachments.remove(i);
+                                cx.notify();
+                            }))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_1()
+                                    .overflow_hidden()
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .xsmall()
+                                            .text_color(muted_foreground),
+                                    )
+                                    .child(
+                                        Label::new(label.clone())
+                                            .text_xs()
+                                            .text_color(muted_foreground)
+                                            .truncate(),
+                                    ),
+                            )
+                    }),
+                ))
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_end()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(96.)) // 输入区最小高度（宽松命中区域）
+                            .id("input-drop-zone")
+                            .child(Input::new(&self.input_state))
+                            .can_drop(|dragged, _window, _cx| dragged.is::<ExternalPaths>())
+                            .on_drop::<ExternalPaths>(cx.listener(
+                                |this, paths: &ExternalPaths, _window, cx| {
+                                    for p in paths.paths() {
+                                        this.input_attachments.push(external_path_attachment(
+                                            &p.display().to_string(),
+                                        ));
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                    )
+                    .child(
+                        Button::new("send")
+                            .primary()
+                            .label("发送")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.send_prompt(window, cx);
+                            })),
+                    )
+                    // 常驻取消：不随忙闲出现/消失（此前条件渲染让「想取消时
+                    // 找不到按钮」）；空闲时点击为无害操作——会话侧静默吞掉
+                    // ACP 的无可取消错误，工作流侧走既有注入取消指令机制
+                    .child(
+                        Button::new("cancel-work")
+                            .small()
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(gpui::transparent_black())
+                                    .foreground(cx.theme().danger)
+                                    .hover(cx.theme().danger.opacity(0.12))
+                                    .active(cx.theme().danger.opacity(0.2)),
+                            )
+                            .icon(IconName::Close)
+                            .label("取消")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.cancel_work(window, cx);
+                            })),
+                    )
+                    .when(self.input_attachments.len() > 1, |row| {
+                        row.child(
+                            Button::new("clear-attachments")
+                                .small()
+                                .ghost()
+                                .label("清空附件")
+                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    this.input_attachments.clear();
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+    }
+
+    pub(crate) fn render_quick_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let commands = self.store.list_quick_commands();
+        // ghost：输入区上方的快捷入口应视觉后退，不与发送按钮争夺注意力
+        let mut row = h_flex().flex_wrap().gap_1();
+        for c in commands {
+            let name = c.name.clone();
+            let cmd = c.clone();
+            row = row.child(
+                Button::new(format!("qc-{}", c.name))
+                    .small()
+                    .ghost()
+                    .label(name)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.quick_command(window, cx, &cmd);
+                    })),
+            );
+        }
+        row
+    }
+
+    pub(crate) fn render_center(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if self.selected.is_none() {
+            return self.render_new_session_view(window, cx);
+        }
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(self.render_session_header(cx))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_stretch()
+                    .child(self.render_dialog(window, cx))
+                    .child(self.render_floating_buttons(window, cx)),
+            )
+            .into_any()
+    }
+
+    pub(crate) fn render_new_session_view(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mode = self.new_session_mode;
+        let popover = cx.theme().popover;
+        let border = cx.theme().border;
+        let foreground = cx.theme().foreground;
+        let muted_foreground = cx.theme().muted_foreground;
+        let mut card = v_flex()
+            .w_full()
+            .max_w(px(640.)) // 新建会话卡片最大宽度（固定容器尺寸）
+            .gap_3()
+            .p_4()
+            .bg(popover)
+            .rounded_lg()
+            .border_1()
+            .border_color(border)
+            .shadow_lg()
+            .child(
+                Label::new("新会话")
+                    .text_xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(foreground),
+            )
+            .child(
+                // 分段单选：模式切换用库 ButtonGroup（选中态/圆角拼接由其负责）
+                ButtonGroup::new("ns-mode")
+                    .small()
+                    .w_full()
+                    .child(
+                        Button::new("ns-mode-direct")
+                            .flex_1()
+                            .label("普通")
+                            .selected(mode == NewSessionMode::Direct),
+                    )
+                    .child(
+                        Button::new("ns-mode-tpl")
+                            .flex_1()
+                            .label("工作流")
+                            .selected(mode == NewSessionMode::Workflow),
+                    )
+                    .on_click(cx.listener(|this, clicks: &Vec<usize>, _window, cx| {
+                        if clicks.contains(&0) {
+                            this.new_session_mode = NewSessionMode::Direct;
+                        } else if clicks.contains(&1) {
+                            this.new_session_mode = NewSessionMode::Workflow;
+                        }
+                        cx.notify();
+                    })),
+            );
+        match mode {
+            NewSessionMode::Direct => {
+                if self.machines.is_empty() {
+                    // 无机器时提示并引导到设置。
+                    card = card.child(
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                Alert::warning(
+                                    "ns-no-machines-alert",
+                                    "请先在设置 → 机器管理中注册一台 amux server。",
+                                )
+                                .title("尚未注册机器"),
+                            )
+                            .child(
+                                Button::new("ns-goto-machine-settings")
+                                    .small()
+                                    .primary()
+                                    .label("去注册机器")
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.open_settings(
+                                            window,
+                                            cx,
+                                            Some(SettingsCategory::Machines),
+                                        );
+                                    })),
+                            ),
+                    );
+                } else {
+                    card = card
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_6()
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new("机器")
+                                                .text_sm()
+                                                .text_color(muted_foreground),
+                                        )
+                                        .child(self.render_machine_selector(cx)),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new("Agent")
+                                                .text_sm()
+                                                .text_color(muted_foreground),
+                                        )
+                                        .child(self.render_harness_selector(cx)),
+                                ),
+                        )
+                        .child(self.render_workspace_picker(cx))
+                        // worktree 开关（docs/PRD.md）：勾选后 agent 在独立工作树中
+                        // 工作，主仓库工作区不受影响；路径由 server 统一分配
+                        .child(
+                            Checkbox::new("ns-worktree-toggle")
+                                .label("使用 worktree")
+                                .checked(self.new_session_worktree)
+                                .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                                    this.new_session_worktree = *checked;
+                                    cx.notify();
+                                })),
+                        )
+                        .when_some(self.new_session_error.clone(), |view, error| {
+                            view.child(Alert::error("ns-create-error", error))
+                        })
+                        .child(
+                            Button::new("ns-create")
+                                .primary()
+                                .mt_2()
+                                .label("创建会话")
+                                .on_click(cx.listener(|this, _ev, window, cx| {
+                                    this.create_session_only(window, cx);
+                                })),
+                        );
+                }
+            }
+            NewSessionMode::Workflow => {
+                if !self.store.orchestrator().is_configured() {
+                    card = card.child(
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                Alert::warning(
+                                    "ns-no-orch-alert",
+                                    "请先配置 API 格式、Base URL、API Key 和模型名称。",
+                                )
+                                .title("编排智能体尚未配置"),
+                            )
+                            .child(
+                                Button::new("ns-goto-orch-settings")
+                                    .small()
+                                    .primary()
+                                    .label("去配置编排 agent")
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.open_settings(
+                                            window,
+                                            cx,
+                                            Some(SettingsCategory::Orchestrator),
+                                        );
+                                    })),
+                            ),
+                    );
+                } else {
+                    card = card
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    Label::new("工作流计划")
+                                        .text_sm()
+                                        .text_color(muted_foreground),
+                                )
+                                .child(self.render_template_selector(cx)),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    Label::new(if self.workflow_template.is_some() {
+                                        "本次工作流目标（可留空，稍后在会话中输入）"
+                                    } else {
+                                        "自然语言执行计划"
+                                    })
+                                    .text_sm()
+                                    .text_color(muted_foreground),
+                                )
+                                .child(Input::new(&self.workflow_input)),
+                        );
+                    if let Some(err) = &self.workflow_error {
+                        card = card.child(Alert::error("ns-wf-error", err.clone()));
+                    }
+                    card = card.child(
+                        Button::new("ns-create-workflow")
+                            .primary()
+                            .label("创建工作流会话")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.create_workflow(window, cx);
+                            })),
+                    );
+                }
+            }
+        }
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .child(card)
+            .into_any()
+    }
+
+    pub(crate) fn render_workspace_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let machine = self.new_session_machine.unwrap_or(0);
+        let Some(m) = self.machine(machine) else {
+            return v_flex().into_any();
+        };
+        let dirs = self.store.recent_workspaces_for_machine(&m.config.name);
+        // 有最近目录时输入框本身即 Popover 触发器（Input 实现 Selectable，
+        // 开启态由组件在触发器上呈现选中样式），点击即弹出最近目录；
+        // 外点/Esc 关闭、选项回填后经 on_open_change 回写关闭
+        let app = cx.entity();
+        let open = self.show_workspace_dropdown;
+        let store = self.store.clone();
+        let machine_name = m.config.name.clone();
+        v_flex()
+            .gap_1()
+            .child(
+                Label::new("工作目录")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .when(dirs.is_empty(), |view| {
+                view.child(Input::new(&self.session_cwd_input))
+            })
+            .when(!dirs.is_empty(), |view| {
+                view.child(
+                    Popover::new("workspace-picker")
+                        .anchor(Anchor::BottomLeft)
+                        .open(open)
+                        .on_open_change({
+                            let app = app.clone();
+                            move |is_open, _window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.show_workspace_dropdown = *is_open;
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .trigger(
+                            Input::new(&self.session_cwd_input).suffix(
+                                Icon::new(IconName::ChevronDown)
+                                    .small()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                        )
+                        .content(move |_, _window, cx| {
+                            // 受控开启：选项点击后经 AmuxApp 关闭（on_open_change 回写）。
+                            // 选项为手搓行而非 Button——库 Button 内容层硬编码居中，
+                            // 全宽下拉项无法左对齐（同目录树行）
+                            let dirs = store.recent_workspaces_for_machine(&machine_name);
+                            let hover_bg = cx.theme().accent;
+                            v_flex()
+                                .id("workspace-picker-list")
+                                .w(rems(26.))
+                                .max_h(rems(16.))
+                                .overflow_y_scroll()
+                                .gap_0p5()
+                                .children(dirs.into_iter().map(|dir| {
+                                    let app = app.clone();
+                                    let dir_val = dir.clone();
+                                    div()
+                                        .id(format!("ns-workspace-option-{dir}"))
+                                        .w_full()
+                                        .h_6()
+                                        .flex()
+                                        .items_center()
+                                        .px_2()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(move |d| d.bg(hover_bg))
+                                        .on_click(move |_, window, cx| {
+                                            app.update(cx, |this, cx| {
+                                                this.session_cwd_input.update(cx, |s, cx| {
+                                                    s.set_value(&dir_val, window, cx)
+                                                });
+                                                this.show_workspace_dropdown = false;
+                                                this.new_session_error = None;
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(
+                                            // 展示完整路径；溢出时头部截断——路径尾部
+                                            // （最具体的目录段）始终可见
+                                            Label::new(dir.clone())
+                                                .text_sm()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis_start(),
+                                        )
+                                }))
+                        }),
+                )
+            })
+            .into_any()
+    }
+
+    pub(crate) fn render_machine_selector(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let selected_machine = self
+            .new_session_machine
+            .filter(|i| *i < self.machines.len())
+            .or_else(|| (!self.machines.is_empty()).then_some(0));
+        if self.machines.is_empty() {
+            return Label::new("（请先在设置中添加机器）").into_any_element();
+        }
+        // ButtonGroup 单选组：子按钮 on_click 由组统一接管（按下索引回传）
+        ButtonGroup::new("ns-machine-group")
+            .small()
+            .flex_wrap()
+            .children(self.machines.iter().enumerate().map(|(i, m)| {
+                Button::new(format!("ns-machine-{i}"))
+                    .label(m.config.name.clone())
+                    .selected(selected_machine == Some(i))
+            }))
+            .on_click(cx.listener(move |this, clicks: &Vec<usize>, _window, cx| {
+                let Some(&ix) = clicks.first() else {
+                    return;
+                };
+                this.new_session_machine = Some(ix);
+                this.new_session_agent = None;
+                this.new_session_error = None;
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    pub(crate) fn render_session_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (label, status) = match &self.selected {
+            Some(Selected::Session { machine, id }) => {
+                let Some(machine_view) = self.machine(*machine) else {
+                    return h_flex().into_any();
+                };
+                let Some(session) = machine_view.sessions.iter().find(|s| s.id == *id) else {
+                    return h_flex().into_any();
+                };
+                let available = machine_view.status.online()
+                    && machine_view
+                        .agents
+                        .iter()
+                        .any(|agent| agent.name == session.agent && agent.available);
+                (
+                    format!("{}@{}", session.agent, machine_view.config.name),
+                    if available { "可用" } else { "不可用" },
+                )
+            }
+            Some(Selected::Workflow { id }) => {
+                let Some(workflow) = self.workflow(id) else {
+                    return h_flex().into_any();
+                };
+                (
+                    "编排智能体".to_string(),
+                    if workflow.state() == SessionState::Busy {
+                        "工作中"
+                    } else if self.store.orchestrator().is_configured() {
+                        "可用"
+                    } else {
+                        "不可用"
+                    },
+                )
+            }
+            None => return h_flex().into_any(),
+        };
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Label::new(label)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground),
+            )
+            .child(if status == "可用" {
+                Tag::success()
+                    .small()
+                    .rounded_full()
+                    .child(Label::new(status).text_xs())
+                    .into_any_element()
+            } else {
+                Tag::danger()
+                    .small()
+                    .rounded_full()
+                    .child(Label::new(status).text_xs())
+                    .into_any_element()
+            })
+            .into_any()
+    }
+
+    pub(crate) fn render_activities_panel(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut activities_has_more = false;
+        match &self.selected {
+            Some(Selected::Session { machine, id }) => {
+                let view = self.machine(*machine).and_then(|m| m.views.get(id));
+                let activities = view.map(|v| v.activities.clone()).unwrap_or_default();
+                activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
+                rows = activities
+                    .iter()
+                    .map(|a| self.activity_row("act", a, cx))
+                    .collect();
+            }
+            Some(Selected::Workflow { id }) => {
+                if let Some(wf) = self.workflow(id) {
+                    let sg = wf.snapshot();
+                    rows = sg
+                        .activities
+                        .iter()
+                        .map(|a| self.activity_row("wf-act", a, cx))
+                        .collect();
+                }
+            }
+            _ => {}
+        }
+        let total = rows.len();
+        let start = if activities_has_more {
+            0
+        } else {
+            total.saturating_sub(self.activities_limit)
+        };
+        let has_more = activities_has_more || start > 0;
+        let mut children: Vec<gpui::AnyElement> = Vec::new();
+        if has_more {
+            children.push(
+                Button::new("load-more-activities")
+                    .small()
+                    .ghost()
+                    .label("加载更早活动")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.load_more_activities(window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        children.extend(rows.into_iter().skip(start));
+        v_flex()
+            .w_full()
+            .h_full()
+            .gap_2()
+            .p_3()
+            .bg(cx.theme().popover)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .child(
+                        Label::new("会话活动历史")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("close-panel-activities")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("关闭面板")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.set_panel(window, cx, None);
+                            })),
+                    ),
+            )
+            .child(
+                // v_flex 让卡片间 gap 生效（原为普通 div，gap 无效导致卡片贴叠）
+                div()
+                    .id("activities-panel")
+                    .flex_1()
+                    .v_flex()
+                    .gap_2()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.activities_scroll)
+                    .children(children),
+            )
+            .into_any()
+    }
+
+    pub(crate) fn render_harness_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let machine = self
+            .new_session_machine
+            .filter(|i| *i < self.machines.len())
+            .or_else(|| (!self.machines.is_empty()).then_some(0));
+        let mut row = h_flex().gap_1().flex_wrap();
+        let Some(mi) = machine else {
+            return row.child(Label::new("（无机器）"));
+        };
+        let agents = self
+            .machine(mi)
+            .map(|m| m.agents.clone())
+            .unwrap_or_default();
+        if agents.is_empty() {
+            return row.child(Label::new("（未发现 agent）"));
+        }
+        for a in &agents {
+            let name = a.name.clone();
+            let name_click = name.clone();
+            let selected = self.new_session_agent.as_deref() == Some(name.as_str());
+            let mut btn = Button::new(format!("ns-agent-{name}"))
+                .small()
+                .label(name)
+                .when(selected, |b| b.primary());
+            if !a.available {
+                btn = btn.disabled(true);
+            }
+            let available = a.available;
+            row = row.child(btn.on_click(cx.listener(move |this, _ev, _window, cx| {
+                if available {
+                    this.new_session_agent = Some(name_click.clone());
+                    cx.notify();
+                }
+            })));
+        }
+        row
+    }
+
+    /// 设置会话配置选项（docs/DESIGN.md：Server 向 ACP Server 发送
+    /// `session/set_config_option`）。成功后刷新会话列表带回最新选项。
+    pub(crate) fn set_session_config_option(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+        config_id: String,
+        value: SessionConfigOptionValue,
+    ) {
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        let params = json!({
+            "sessionId": session_id,
+            "configId": config_id,
+            "value": value,
+        });
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            if client
+                .request::<_, SessionResult>(
+                    protocol::method::SESSION_SET_CONFIG_OPTION,
+                    Some(params),
+                )
+                .await
+                .is_ok()
+            {
+                let _ = this.update_in(cx, |this, w, cx| {
+                    this.refresh_sessions(machine, w, cx);
+                });
+            }
+        })
+        .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{swap_draft, Draft};
+    use std::collections::HashMap;
+
+    fn session_key(machine: &str, id: &str) -> DraftKey {
+        DraftKey::Session {
+            machine: machine.into(),
+            id: id.into(),
+        }
+    }
+
+    fn draft(text: &str) -> Draft {
+        Draft {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn draft_isolated_per_session() {
+        let mut drafts = HashMap::new();
+
+        // 在 A 输入后切到 B：A 的草稿留存，B 拿到空草稿
+        swap_draft(
+            &mut drafts,
+            Some(session_key("m1", "s-a")),
+            draft("a"),
+            Some(session_key("m1", "s-b")),
+        );
+        assert_eq!(drafts[&session_key("m1", "s-a")].text, "a");
+
+        // 在 B 输入后切回 A：两边各自看到自己的内容
+        let for_a = swap_draft(
+            &mut drafts,
+            Some(session_key("m1", "s-b")),
+            draft("b"),
+            Some(session_key("m1", "s-a")),
+        );
+        assert_eq!(drafts[&session_key("m1", "s-b")].text, "b");
+        assert_eq!(for_a.text, "a");
+        assert!(!drafts.contains_key(&session_key("m1", "s-a")));
+    }
+
+    #[::core::prelude::v1::test]
+    fn empty_input_on_leaving_clears_draft() {
+        // 曾在 A 留过草稿，之后清空输入再离开，不应残留旧草稿
+        let mut drafts = HashMap::new();
+        swap_draft(&mut drafts, None, draft(""), Some(session_key("m1", "s-a")));
+        swap_draft(&mut drafts, None, draft(""), Some(session_key("m1", "s-b")));
+
+        // 回到 A 带出旧草稿
+        let for_a = swap_draft(
+            &mut drafts,
+            Some(session_key("m1", "s-b")),
+            draft(""),
+            Some(session_key("m1", "s-a")),
+        );
+        assert_eq!(for_a.text, "");
+
+        // 带着空输入再次离开 A
+        let for_b = swap_draft(
+            &mut drafts,
+            Some(session_key("m1", "s-a")),
+            draft(""),
+            Some(session_key("m1", "s-b")),
+        );
+        assert_eq!(for_b.text, "");
+        assert!(drafts.is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn unowned_input_is_dropped_without_selection() {
+        // 未选中会话时输入区无主，切换不应把内容挂到新会话头上
+        let mut drafts = HashMap::new();
+        let for_a = swap_draft(
+            &mut drafts,
+            None,
+            draft("x"),
+            Some(session_key("m1", "s-a")),
+        );
+        assert_eq!(for_a.text, "");
+        assert!(drafts.is_empty());
+    }
+}
