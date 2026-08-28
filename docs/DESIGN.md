@@ -106,6 +106,10 @@ Server 作为 ACP client 与 ACP servers 通信
 - 删除会话：当用户删除会话时，如果会话已打开，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
 - 会话上下文大小：接收 ACP Server 的 `usage_update` 通知并记录会话的上下文窗口总大小和当前上下文大小
 
+### 普通会话删除
+
+当用户请求删除普通会话时，立即从元数据中删除该普通会话，然后发起异步任务清理相关资源（如关闭或删除 agent 侧会话，清理关联的 worktree），随后返回响应。异步清理资源采用尽力而为的方式，不无限重试。
+
 ### 普通会话存储
 
 普通会话数据包含三部分

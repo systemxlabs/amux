@@ -3108,6 +3108,11 @@ impl AmuxApp {
             .collect();
         let mut items: Vec<(u64, SessionListItem)> = Vec::new();
         for (mi, m) in self.machines.iter().enumerate() {
+            // 离线/认证失败/连接中的机器不展示其会话：数据是上次刷新的陈旧缓存
+            // 且不可操作；机器恢复在线后随 10s 定时刷新自动重现
+            if !matches!(m.status, MachineStatus::Online) {
+                continue;
+            }
             for s in &m.sessions {
                 if child_ids.contains(s.id.as_str()) {
                     continue;
