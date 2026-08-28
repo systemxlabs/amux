@@ -651,49 +651,29 @@ impl AmuxApp {
         let Some(m) = self.machines.get(idx) else {
             return;
         };
-        let n = self.list_pages;
+        let count = self.list_pages * PAGE_LIMIT;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            // 滚动查询（docs/DESIGN.md「会话列表滚动查询」）：取本在线机器前 N 页
-            let mut pages: Vec<SessionMeta> = Vec::new();
-            let mut before: Option<String> = None;
-            let mut has_more = false;
-            let mut next_before: Option<String> = None;
-            for _ in 0..n {
-                let params = json!({ "limit": PAGE_LIMIT, "before": before.clone() });
-                match client
-                    .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
-                    .await
-                {
-                    Ok(res) => {
-                        pages.extend(res.sessions);
-                        has_more = res.has_more;
-                        let nb = res.next_before;
-                        before = nb.clone();
-                        next_before = nb;
-                        if !has_more {
-                            break;
-                        }
-                    }
-                    // 刷新失败保持现状：离线/断连由列表的机器在线过滤兜底
-                    Err(_) => return,
-                }
-            }
+            // 滚动查询（docs/DESIGN.md「会话列表滚动查询」）：按数量查询前 N 页
+            //（N × 每页 PAGE_LIMIT 条）
+            let params = json!({ "limit": count });
+            let (pages, has_more) = match client
+                .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
+                .await
+            {
+                // 刷新失败保持现状：离线/断连由列表的机器在线过滤兜底
+                Ok(res) => (res.sessions, res.has_more),
+                Err(_) => return,
+            };
 
-            // 应用前 N 页，并计算工作流关联会话中尚未出现在这些页里的 id
+            // 应用查询结果，并计算工作流关联会话中尚未出现在其中的 id
             let missing = match this.update_in(cx, |this, _w, _cx| {
                 let Some(m) = this.machines.get_mut(idx) else {
                     return Vec::new();
                 };
-                let (list, hm, nb) = merge_session_window(
-                    &m.sessions,
-                    std::mem::take(&mut pages),
-                    has_more,
-                    next_before,
-                );
+                let (list, hm) = merge_session_window(&m.sessions, pages, has_more);
                 m.sessions = list;
                 m.sessions_has_more = hm;
-                m.sessions_next_before = nb;
                 crate::logic::sort_sessions_recent(&mut m.sessions);
                 let child_ids: Vec<(usize, String)> = this
                     .workflows
@@ -717,7 +697,7 @@ impl AmuxApp {
                 return;
             }
 
-            // 第 3/4 步：批量补查缺失的工作流关联会话（不改变分页游标）
+            // 第 2 步补齐：批量查询缺失的工作流关联会话
             if let Ok(res) = client
                 .request::<_, SessionInfoResult>(
                     protocol::method::SESSION_INFO,
@@ -729,12 +709,8 @@ impl AmuxApp {
             {
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(m) = this.machines.get_mut(idx) {
-                        let (list, _, _) = merge_session_window(
-                            &m.sessions,
-                            res.sessions,
-                            m.sessions_has_more,
-                            m.sessions_next_before.clone(),
-                        );
+                        let (list, _) =
+                            merge_session_window(&m.sessions, res.sessions, m.sessions_has_more);
                         m.sessions = list;
                         crate::logic::sort_sessions_recent(&mut m.sessions);
                     }

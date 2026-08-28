@@ -372,18 +372,17 @@ async fn session_list_pagination() {
 
     let first = c.call("session.list", json!({"limit": 2})).await;
     let sessions = first["result"]["sessions"].as_array().unwrap();
-    assert_eq!(sessions.len(), 2, "limit=2 应返回一窗: {first}");
+    assert_eq!(sessions.len(), 2, "limit=2 应返回前 2 条: {first}");
     assert_eq!(first["result"]["hasMore"], true);
-    let next_before = first["result"]["nextBefore"].as_str().unwrap();
     assert_eq!(sessions[0]["id"], json!(sids[2]), "最晚 prompt 排最前");
     assert_eq!(sessions[1]["id"], json!(sids[1]));
 
-    let second = c
-        .call("session.list", json!({"limit": 2, "before": next_before}))
-        .await;
+    // 按数量查询：数量增大是更长前缀，不重不漏
+    let second = c.call("session.list", json!({"limit": 3})).await;
     let s2 = second["result"]["sessions"].as_array().unwrap();
-    assert_eq!(s2.len(), 1);
-    assert_eq!(s2[0]["id"], json!(sids[0]));
+    assert_eq!(s2.len(), 3);
+    assert_eq!(s2[0]["id"], json!(sids[2]));
+    assert_eq!(s2[2]["id"], json!(sids[0]));
     assert_eq!(second["result"]["hasMore"], false);
 }
 

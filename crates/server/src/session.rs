@@ -24,7 +24,7 @@ use crate::agent::{AgentEvent, AgentRegistry};
 use crate::error::SessionError;
 use crate::git::GitRunner;
 use crate::history::{SessionLog, TurnMerger};
-use crate::registry::{RegistryEntry, SessionRegistry};
+use crate::registry::SessionRegistry;
 
 /// server → GUI 的会话状态通知。
 #[derive(Debug, Clone)]
@@ -94,35 +94,6 @@ impl SessionManager {
             activities_cache: Mutex::new(HashMap::new()),
         };
         (manager, rx)
-    }
-
-    /// 会话列表惰性分页（纯函数，可单测）：
-    /// `all` 已按最近活跃时间和会话 ID 降序排列；`before` 是上一页末尾生成的
-    /// 不透明游标。复合游标避免会话列表变化或时间戳相同时重复、跳过条目。
-    pub fn session_page(
-        all: &[RegistryEntry],
-        limit: usize,
-        before: Option<&str>,
-    ) -> (Vec<RegistryEntry>, bool, Option<String>) {
-        let start = before
-            .and_then(|cursor| cursor.split_once(':'))
-            .and_then(|(timestamp, id)| Some((timestamp.parse::<u64>().ok()?, id)))
-            .and_then(|(timestamp, id)| {
-                all.iter().position(|(meta, _)| {
-                    meta.last_active_at < timestamp
-                        || (meta.last_active_at == timestamp && meta.id.as_str() < id)
-                })
-            })
-            .unwrap_or(0);
-        let limit = limit.max(1);
-        let end = start.saturating_add(limit).min(all.len());
-        let window = all[start..end].to_vec();
-        let has_more = end < all.len();
-        let next_before = has_more
-            .then(|| window.last())
-            .flatten()
-            .map(|(meta, _)| format!("{}:{}", meta.last_active_at, meta.id));
-        (window, has_more, next_before)
     }
 
     /// 惰性加载切窗（纯函数）：按 limit 与 before 游标计算 [start, end) 与是否还有更早。
@@ -279,16 +250,17 @@ impl SessionManager {
     }
 
     /// 惰性分页会话列表：按最近活跃降序切窗。
+    /// 按数量查询最近活跃的普通会话（docs/DESIGN.md `session.list`）：
+    /// 返回按最近活跃排序的前缀（至多 limit 条），has_more 表示是否还有更多。
     pub async fn list(
         &self,
         limit: Option<usize>,
-        before: Option<String>,
-    ) -> Result<(Vec<SessionMeta>, bool, Option<String>), SessionError> {
+    ) -> Result<(Vec<SessionMeta>, bool), SessionError> {
         let all = self.registry.list()?;
-        let (window, has_more, next_before) =
-            Self::session_page(&all, limit.unwrap_or(50), before.as_deref());
-        let metas = window.into_iter().map(|(m, _)| m).collect();
-        Ok((metas, has_more, next_before))
+        let limit = limit.unwrap_or(50).max(1);
+        let has_more = all.len() > limit;
+        let metas = all.into_iter().take(limit).map(|(m, _)| m).collect();
+        Ok((metas, has_more))
     }
 
     /// 批量查询指定会话。不存在的 id 静默跳过。
@@ -1599,137 +1571,6 @@ mod tests {
     }
 
     #[test]
-    fn session_page_lazy_windows() {
-        fn entry(id: &str, last: u64) -> RegistryEntry {
-            (
-                SessionMeta {
-                    id: id.into(),
-                    agent: "codex".into(),
-                    cwd: "/tmp".into(),
-                    state: SessionState::Idle,
-                    title: String::new(),
-                    created_at: 1,
-                    last_active_at: last,
-                    worktree_dir: String::new(),
-                    context_size: 0,
-                    context_window_size: 0,
-                    config_options: Vec::new(),
-                },
-                format!("agent_{id}"),
-            )
-        }
-        let all = vec![
-            entry("s9", 900),
-            entry("s8", 800),
-            entry("s7", 700),
-            entry("s6", 600),
-            entry("s5", 500),
-            entry("s4", 400),
-        ];
-
-        let (w, more, nb) = SessionManager::session_page(&all, 2, None);
-        assert_eq!(w.len(), 2);
-        assert_eq!(w[0].0.id, "s9");
-        assert_eq!(w[1].0.id, "s8");
-        assert!(more);
-        assert_eq!(nb, Some("800:s8".into()));
-
-        let (w, more, nb) = SessionManager::session_page(&all, 2, Some("800:s8"));
-        assert_eq!(
-            w.iter().map(|(m, _)| m.id.as_str()).collect::<Vec<_>>(),
-            ["s7", "s6"]
-        );
-        assert!(more);
-        assert_eq!(nb, Some("600:s6".into()));
-
-        let (w, more, nb) = SessionManager::session_page(&all, 2, Some("600:s6"));
-        assert_eq!(
-            w.iter().map(|(m, _)| m.id.as_str()).collect::<Vec<_>>(),
-            ["s5", "s4"]
-        );
-        assert!(!more);
-        assert_eq!(nb, None);
-
-        let (w, more, nb) = SessionManager::session_page(&[], 2, None);
-        assert!(w.is_empty());
-        assert!(!more);
-        assert_eq!(nb, None);
-    }
-
-    #[test]
-    fn session_page_keeps_same_timestamp_entries() {
-        let entry = |id: &str| {
-            (
-                SessionMeta {
-                    id: id.into(),
-                    agent: "codex".into(),
-                    cwd: "/tmp".into(),
-                    state: SessionState::Idle,
-                    title: String::new(),
-                    created_at: 1,
-                    last_active_at: 100,
-                    worktree_dir: String::new(),
-                    context_size: 0,
-                    context_window_size: 0,
-                    config_options: Vec::new(),
-                },
-                String::new(),
-            )
-        };
-        let all = vec![entry("s3"), entry("s2"), entry("s1")];
-        let (first, more, cursor) = SessionManager::session_page(&all, 2, None);
-        assert_eq!(first.len(), 2);
-        assert!(more);
-        let (second, more, next) = SessionManager::session_page(&all, 2, cursor.as_deref());
-        assert_eq!(
-            second.iter().map(|e| e.0.id.as_str()).collect::<Vec<_>>(),
-            ["s1"]
-        );
-        assert!(!more);
-        assert_eq!(next, None);
-    }
-
-    #[test]
-    fn session_page_cursor_survives_newer_session() {
-        let entry = |id: &str, last_active_at| {
-            (
-                SessionMeta {
-                    id: id.into(),
-                    agent: "codex".into(),
-                    cwd: "/tmp".into(),
-                    state: SessionState::Idle,
-                    title: String::new(),
-                    created_at: 1,
-                    last_active_at,
-                    worktree_dir: String::new(),
-                    context_size: 0,
-                    context_window_size: 0,
-                    config_options: Vec::new(),
-                },
-                String::new(),
-            )
-        };
-        let first_snapshot = vec![entry("s3", 300), entry("s2", 200), entry("s1", 100)];
-        let (first, _, cursor) = SessionManager::session_page(&first_snapshot, 2, None);
-        assert_eq!(first.last().unwrap().0.id, "s2");
-
-        let changed_snapshot = vec![
-            entry("new", 400),
-            entry("s3", 300),
-            entry("s2", 200),
-            entry("s1", 100),
-        ];
-        let (second, _, _) = SessionManager::session_page(&changed_snapshot, 2, cursor.as_deref());
-        assert_eq!(
-            second
-                .iter()
-                .map(|entry| entry.0.id.as_str())
-                .collect::<Vec<_>>(),
-            ["s1"]
-        );
-    }
-
-    #[test]
     fn window_items_lazy_loading_slices() {
         let (start, end, has_more) = SessionManager::window_items(1000, 200, None);
         assert_eq!((start, end, has_more), (800, 1000, true));
@@ -1748,7 +1589,7 @@ mod tests {
 
         mgr.prompt(&meta.id, text("实现登录功能")).await.unwrap();
 
-        let (list, _, _) = mgr.list(None, None).await.unwrap();
+        let (list, _) = mgr.list(None).await.unwrap();
         assert_eq!(list[0].title, "实现登录功能");
 
         let log = SessionLog::open(&mgr.data_dir, &meta.id);
@@ -1769,7 +1610,7 @@ mod tests {
             .iter()
             .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")));
 
-        let (list, _, _) = mgr.list(None, None).await.unwrap();
+        let (list, _) = mgr.list(None).await.unwrap();
         assert_eq!(list[0].state, SessionState::Idle);
         assert!(mgr.ongoing_activity(&meta.id).await.unwrap().is_none());
 
@@ -2023,6 +1864,56 @@ mod tests {
         prompt_task.await.unwrap().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[tokio::test]
+    async fn session_list_count_semantics() {
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "codex",
+            Arc::new(crate::agent::StubAgentDriver::new()),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-list-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+        for (id, ts) in [("s1", 100), ("s2", 200), ("s3", 300)] {
+            let (mut m, aid) = (
+                SessionMeta {
+                    id: id.into(),
+                    agent: "codex".into(),
+                    cwd: "/tmp".into(),
+                    state: SessionState::Idle,
+                    title: String::new(),
+                    created_at: 1,
+                    last_active_at: ts,
+                    worktree_dir: String::new(),
+                    context_size: 0,
+                    context_window_size: 0,
+                    config_options: Vec::new(),
+                },
+                format!("agent_{id}"),
+            );
+            registry.upsert(&m, &aid).unwrap();
+            let _ = &mut m;
+        }
+        // 按数量查询：前缀 + has_more；数量增大是更长前缀，不重不漏
+        let (metas, has_more) = mgr.list(Some(2)).await.unwrap();
+        assert_eq!(
+            metas.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["s3", "s2"]
+        );
+        assert!(has_more);
+        let (metas, has_more) = mgr.list(Some(3)).await.unwrap();
+        assert_eq!(
+            metas.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["s3", "s2", "s1"]
+        );
+        assert!(!has_more);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn delete_triggers_driver_close() {
         struct Tracking {

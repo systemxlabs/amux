@@ -210,17 +210,10 @@ impl Handlers {
 
             method::SESSION_LIST => {
                 let p: SessionListParams = parse(params)?;
-                let (sessions, has_more, next_before) = self
-                    .manager
-                    .list(p.limit, p.before)
-                    .await
-                    .map_err(map_session_err)?;
-                serde_json::to_value(SessionListResult {
-                    sessions,
-                    has_more,
-                    next_before,
-                })
-                .map_err(|e| RpcError::internal(e.to_string()))
+                let (sessions, has_more) =
+                    self.manager.list(p.limit).await.map_err(map_session_err)?;
+                serde_json::to_value(SessionListResult { sessions, has_more })
+                    .map_err(|e| RpcError::internal(e.to_string()))
             }
 
             method::SESSION_INFO => {
@@ -300,7 +293,6 @@ mod tests {
     fn parse_null_params_yields_defaults() {
         let p: SessionListParams = parse(&None).expect("null params 应解析为默认值");
         assert_eq!(p.limit, None);
-        assert_eq!(p.before, None);
         let p: SessionListParams =
             parse(&Some(serde_json::Value::Null)).expect("显式 null 同样默认");
         assert_eq!(p.limit, None);
