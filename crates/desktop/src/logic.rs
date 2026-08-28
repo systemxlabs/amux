@@ -341,44 +341,21 @@ pub fn compose_workflow_text(text: &str, attachments: &[InputAttachment]) -> Str
     result
 }
 
-/// 改动审查视图左侧文件树节点：仅由改动文件的路径聚合而成。
-/// 目录节点始终全展开渲染，无需折叠状态。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiffFileTreeNode {
-    Dir(BTreeMap<String, DiffFileTreeNode>),
-    /// 叶子：对应 diff_files 的下标（供点击滚动定位）。
-    File {
-        path_index: usize,
-    },
-}
+/// 改动审查视图左侧文件树：按文件所在父目录路径分组（docs/PRD.md「文件改动审查视图」）。
+/// 键为父目录路径（根目录文件为空串），值为其下改动文件在 diff 列表中的下标；
+/// BTreeMap 保证分组按路径排序。
+pub type ChangedFileGroups = BTreeMap<String, Vec<usize>>;
 
-/// 把改动文件路径列表聚合成目录树。目录按名称排序，叶子保留原下标。
-pub fn build_changed_file_tree(paths: &[impl AsRef<str>]) -> BTreeMap<String, DiffFileTreeNode> {
-    let mut root = BTreeMap::new();
+pub fn group_changed_files_by_parent(paths: &[impl AsRef<str>]) -> ChangedFileGroups {
+    let mut groups: ChangedFileGroups = BTreeMap::new();
     for (path_index, path) in paths.iter().enumerate() {
-        let parts: Vec<&str> = path.as_ref().split('/').collect();
-        let mut cursor: &mut BTreeMap<String, DiffFileTreeNode> = &mut root;
-        for (i, part) in parts.iter().enumerate() {
-            if i + 1 == parts.len() {
-                cursor.insert((*part).to_string(), DiffFileTreeNode::File { path_index });
-            } else {
-                let entry = cursor
-                    .entry((*part).to_string())
-                    .or_insert_with(|| DiffFileTreeNode::Dir(BTreeMap::new()));
-                cursor = entry.dir_mut();
-            }
-        }
+        let parent = match path.as_ref().rsplit_once('/') {
+            Some((dir, _)) => dir.to_string(),
+            None => String::new(),
+        };
+        groups.entry(parent).or_default().push(path_index);
     }
-    root
-}
-
-impl DiffFileTreeNode {
-    fn dir_mut(&mut self) -> &mut BTreeMap<String, DiffFileTreeNode> {
-        match self {
-            DiffFileTreeNode::Dir(children) => children,
-            DiffFileTreeNode::File { .. } => unreachable!("路径组件不应重名：文件与目录同名"),
-        }
-    }
+    groups
 }
 
 #[cfg(test)]
@@ -388,48 +365,26 @@ mod tests {
     use protocol::SessionState;
 
     #[test]
-    fn changed_file_tree_groups_and_sorts() {
+    fn changed_files_group_by_parent_dir() {
         let paths = [
-            "src/main.rs",
             "src/ui/panel.rs",
-            "docs/DESIGN.md",
+            "src/ui/list.rs",
+            "src/main.rs",
             "README.md",
         ];
-        let tree = build_changed_file_tree(&paths);
-        // 顶层键按字典序排序：README.md（大写 R）< docs < src
-        let top: Vec<&String> = tree.keys().collect();
-        assert_eq!(top, ["README.md", "docs", "src"]);
-        assert_eq!(
-            tree["docs"],
-            DiffFileTreeNode::Dir(
-                [(
-                    "DESIGN.md".to_string(),
-                    DiffFileTreeNode::File { path_index: 2 }
-                )]
-                .into()
-            )
-            .clone()
-        );
-        assert_eq!(tree["README.md"], DiffFileTreeNode::File { path_index: 3 });
-        // src 下既有文件又有目录，两级结构
-        match &tree["src"] {
-            DiffFileTreeNode::Dir(children) => {
-                assert!(matches!(
-                    children["main.rs"],
-                    DiffFileTreeNode::File { path_index: 0 }
-                ));
-                assert!(matches!(children["ui"], DiffFileTreeNode::Dir(_)));
-            }
-            other => panic!("应为目录节点: {other:?}"),
-        }
+        let groups = group_changed_files_by_parent(&paths);
+        // 分组键按路径排序：""（根）< "src" < "src/ui"
+        let keys: Vec<&String> = groups.keys().collect();
+        assert_eq!(keys, ["", "src", "src/ui"]);
+        assert_eq!(groups[""], &[3]);
+        assert_eq!(groups["src"], &[2]);
+        assert_eq!(groups["src/ui"], &[0, 1]);
     }
 
     #[test]
-    fn changed_file_tree_keeps_file_at_each_level() {
-        // 同名前缀：a.txt 是文件、another 是另一文件，互不影响
-        let tree = build_changed_file_tree(&["a/b/c.rs", "d.rs"]);
-        assert!(matches!(&tree["a"], DiffFileTreeNode::Dir(_)));
-        assert_eq!(tree["d.rs"], DiffFileTreeNode::File { path_index: 1 });
+    fn changed_files_group_keeps_order_within_dir() {
+        let groups = group_changed_files_by_parent(&["b/b2.rs", "a.rs", "b/a1.rs"]);
+        assert_eq!(groups["b"], &[0, 2]);
     }
 
     fn rw(machine: &str, workspace: &str, last_used: u64) -> RecentWorkspace {

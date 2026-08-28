@@ -17,7 +17,7 @@ use protocol::{
 
 use crate::app::{AmuxApp, Selected};
 use crate::diff::{diff_lines, DiffLine, DiffLineKind};
-use crate::logic::{build_changed_file_tree, DiffFileTreeNode};
+use crate::logic::group_changed_files_by_parent;
 
 impl AmuxApp {
     pub(crate) fn load_diff(
@@ -245,88 +245,6 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 递归渲染改动文件树的节点（目录 + 文件叶子）。
-    /// 目录行全展开；文件行点击后滚动到右侧对应 diff 块。层级经缩进左对齐。
-    pub(crate) fn push_diff_file_tree_nodes(
-        &self,
-        nodes: &std::collections::BTreeMap<String, DiffFileTreeNode>,
-        out: &mut Vec<gpui::AnyElement>,
-        depth: usize,
-        machine_idx: usize,
-        cx: &mut Context<Self>,
-    ) {
-        for (name, node) in nodes {
-            match node {
-                DiffFileTreeNode::Dir(children) => {
-                    out.push(
-                        h_flex()
-                            .items_center()
-                            .pl(px((depth * 12 + 4) as f32))
-                            .py_0p5()
-                            .child(
-                                Label::new(name.clone())
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .truncate()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .into_any_element(),
-                    );
-                    self.push_diff_file_tree_nodes(children, out, depth + 1, machine_idx, cx);
-                }
-                DiffFileTreeNode::File { path_index } => {
-                    let fi = *path_index;
-                    let (additions, deletions) = {
-                        let files = &self.machines[machine_idx].diff.read(cx).files;
-                        let f = &files[fi];
-                        (f.additions, f.deletions)
-                    };
-                    let tree_path = self.machines[machine_idx].diff.read(cx).files[fi]
-                        .path
-                        .clone();
-                    let diff_scroll = self.diff_scroll.clone();
-                    out.push(
-                        h_flex()
-                            .items_center()
-                            .pl(px((depth * 12 + 4) as f32))
-                            .min_w_0()
-                            .child(
-                                Button::new(format!("diff-tree-{tree_path}"))
-                                    .xsmall()
-                                    .ghost()
-                                    .label(name.clone())
-                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                        let files =
-                                            this.machines[machine_idx].diff.read(cx).files.clone();
-                                        let collapsed = this.machines[machine_idx]
-                                            .diff
-                                            .read(cx)
-                                            .changes_collapsed;
-                                        if let Some(row) =
-                                            Self::file_header_row(&files, collapsed, fi)
-                                        {
-                                            diff_scroll.scroll_to_item(row, ScrollStrategy::Top);
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Label::new(format!("+{additions}"))
-                                    .text_xs()
-                                    .ml_1()
-                                    .text_color(cx.theme().success),
-                            )
-                            .child(
-                                Label::new(format!("-{deletions}"))
-                                    .text_xs()
-                                    .text_color(cx.theme().danger),
-                            )
-                            .into_any_element(),
-                    );
-                }
-            }
-        }
-    }
-
     pub(crate) fn render_diff_panel(
         &self,
         _window: &mut Window,
@@ -495,11 +413,101 @@ impl AmuxApp {
                 .child(toolbar)
                 .into_any();
         };
-        // 左侧文件树：按路径聚合的目录树，默认全展开、左对齐，仅含改动文件
-        let changed_tree =
-            build_changed_file_tree(&files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>());
+        // 左侧文件树区域：按父目录路径分组展示，分组默认展开、可单独折叠，
+        // 仅含改动文件（docs/PRD.md「文件改动审查视图」）
+        let groups = group_changed_files_by_parent(
+            &files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+        );
+        let collapsed_groups = self.machines[machine_idx]
+            .diff
+            .read(cx)
+            .collapsed_groups
+            .clone();
         let mut tree_items: Vec<gpui::AnyElement> = Vec::new();
-        self.push_diff_file_tree_nodes(&changed_tree, &mut tree_items, 0, machine_idx, cx);
+        for (dir, indices) in &groups {
+            let collapsed = collapsed_groups.contains(dir);
+            let group_label = if dir.is_empty() {
+                "（根目录）".to_string()
+            } else {
+                dir.clone()
+            };
+            let group_key = dir.clone();
+            // 分组头：点击单独展开/折叠
+            tree_items.push(
+                h_flex()
+                    .id(ElementId::Name(format!("diff-group-{dir}").into()))
+                    .items_center()
+                    .gap_1()
+                    .py_0p5()
+                    .pl(px(4.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        if let Some(m) = this.machines.get_mut(machine_idx) {
+                            m.diff.update(cx, |st, _| {
+                                if !st.collapsed_groups.remove(&group_key) {
+                                    st.collapsed_groups.insert(group_key.clone());
+                                }
+                            });
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        Label::new(if collapsed { "▸" } else { "▾" })
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Label::new(group_label)
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Label::new(format!("{}", indices.len()))
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .into_any_element(),
+            );
+            if collapsed {
+                continue;
+            }
+            for fi in indices {
+                let Some(f) = files.get(*fi) else { continue };
+                let path = f.path.clone();
+                let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let diff_scroll = self.diff_scroll.clone();
+                // 行号在本帧内确定（虚拟列表按位置定位），闭包只需捕获数值
+                let row_ix = file_header_row_of(&files, *fi);
+                tree_items.push(
+                    h_flex()
+                        .items_center()
+                        .pl(px(20.0))
+                        .min_w_0()
+                        .child(
+                            Button::new(format!("diff-tree-{path}"))
+                                .xsmall()
+                                .ghost()
+                                .label(file_name)
+                                .on_click(cx.listener(move |_this, _ev, _window, _cx| {
+                                    diff_scroll.scroll_to_item(row_ix, ScrollStrategy::Top);
+                                })),
+                        )
+                        .child(
+                            Label::new(format!("+{}", f.additions))
+                                .text_xs()
+                                .text_color(cx.theme().success),
+                        )
+                        .child(
+                            Label::new(format!("-{}", f.deletions))
+                                .text_xs()
+                                .text_color(cx.theme().danger),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
         // 虚拟化：只渲染可视范围内的行（行高为文档化几何——diff 行等宽
         // 字符不换行，高度固定）
         let row_kinds = Self::diff_row_kinds(&files, diff_changes_collapsed);
@@ -590,17 +598,6 @@ impl AmuxApp {
             }
         }
         rows
-    }
-
-    /// 文件头所在行号（供文件树点击滚动定位）。
-    pub(crate) fn file_header_row(
-        files: &[GitDiffFile],
-        changes_collapsed: bool,
-        file_index: usize,
-    ) -> Option<usize> {
-        Self::diff_row_kinds(files, changes_collapsed)
-            .iter()
-            .position(|k| matches!(k, DiffRowKind::FileHeader(fi) if *fi == file_index))
     }
 
     /// 渲染 [range) 内的行（虚拟列表回调）。
@@ -880,6 +877,21 @@ impl AmuxApp {
     }
 }
 
+/// 文件头所在虚拟行号（供文件树点击滚动定位）。
+fn file_header_row_of(files: &[GitDiffFile], file_index: usize) -> usize {
+    let mut row = 0usize;
+    for (seen, f) in files.iter().enumerate() {
+        if seen == file_index {
+            return row;
+        }
+        row += 1 + f.hunks.len(); // 文件头 + 各 hunk 头
+        for h in &f.hunks {
+            row += diff_lines(h).len();
+        }
+    }
+    row
+}
+
 /// 虚拟化 diff 列表的行描述（扁平化：文件头 / hunk 头 / diff 行）。
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum DiffRowKind {
@@ -914,4 +926,6 @@ pub(crate) struct DiffReviewState {
     pub(crate) error: Option<String>,
     pub(crate) tree_collapsed: bool,
     pub(crate) changes_collapsed: bool,
+    /// 单独折叠的分组（父目录路径）；缺失即展开（docs/PRD.md：分组默认展开）
+    pub(crate) collapsed_groups: HashSet<String>,
 }
