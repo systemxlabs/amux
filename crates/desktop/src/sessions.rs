@@ -496,47 +496,11 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         cmd: &QuickCommand,
     ) {
-        match self.selected.clone() {
-            Some(Selected::Session { machine, id }) => {
-                let Some(m) = self.machine(machine) else {
-                    return;
-                };
-                let client = m.client.clone();
-                let params = SessionPromptParams {
-                    session_id: id.clone(),
-                    input: vec![ContentBlock::Text {
-                        text: cmd.prompt.clone(),
-                    }],
-                };
-                cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                    let result = client
-                        .request_ok(
-                            protocol::method::SESSION_PROMPT,
-                            Some(serde_json::to_value(&params).unwrap()),
-                        )
-                        .await;
-                    let _ = this.update_in(cx, |this, w, cx| {
-                        if let Err(error) = &result {
-                            w.push_notification(
-                                UiNotification::error(format!("发送失败：{error}"))
-                                    .title("快捷指令未发送"),
-                                cx,
-                            );
-                        }
-                        this.refresh_dialog(w, cx, machine, id);
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            Some(Selected::Workflow { .. }) => {
-                // 快捷指令作为用户输入进入工作流会话。
-                self.input_state
-                    .update(cx, |s, cx| s.set_value(&cmd.prompt, window, cx));
-                self.send_prompt(window, cx);
-            }
-            None => {}
-        }
+        // 快捷指令等价于把提示词填入输入框后走统一的发送链路
+        // （本地回显、贴底滚动、完成后的对话/列表刷新都由 send_prompt 承担）
+        self.input_state
+            .update(cx, |s, cx| s.set_value(&cmd.prompt, window, cx));
+        self.send_prompt(window, cx);
     }
 
     pub(crate) fn cancel_work(&mut self, window: &mut Window, cx: &mut Context<Self>) {
