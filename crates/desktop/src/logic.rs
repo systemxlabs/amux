@@ -217,6 +217,16 @@ pub fn external_path_attachment(path: &str) -> InputAttachment {
     path_attachment(path)
 }
 
+/// 将原始图片字节编码为 ACP resource 附件。
+pub fn image_attachment(name: &str, mime_type: &str, bytes: &[u8]) -> InputAttachment {
+    use base64::Engine;
+    InputAttachment::Image {
+        name: name.to_string(),
+        mime_type: mime_type.to_string(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    }
+}
+
 /// 解析输入文本中的 @ 引用，将文件或目录作为上下文。
 /// 返回（清理后的文本，引用列表）。
 pub fn parse_at_references(text: &str) -> (String, Vec<String>) {

@@ -4,7 +4,7 @@ use gpui_component::{
     alert::Alert,
     button::*,
     checkbox::Checkbox,
-    input::Input,
+    input::{Input, Paste},
     label::Label,
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     notification::Notification as UiNotification,
@@ -32,8 +32,8 @@ use crate::config::QuickCommand;
 use crate::display::short_cwd;
 use crate::logic::{
     activity_kind_detail, compose_prompt, compose_workflow_text, context_percent,
-    external_path_attachment, merge_session_window, parse_at_references, path_attachment,
-    DialogMsg, InputAttachment,
+    external_path_attachment, image_attachment, merge_session_window, parse_at_references,
+    path_attachment, DialogMsg, InputAttachment,
 };
 use crate::machine::MachineStatus;
 use crate::text::{block_text, format_local_time, one_line, TimePrecision};
@@ -1493,6 +1493,48 @@ impl AmuxApp {
                             .flex_1()
                             .min_h(px(96.)) // 输入区最小高度（宽松命中区域）
                             .id("input-drop-zone")
+                            .capture_action(cx.listener(|this, _: &Paste, _window, cx| {
+                                let Some(item) = cx.read_from_clipboard() else {
+                                    cx.propagate();
+                                    return;
+                                };
+                                let mut handled = false;
+                                let mut image_index = 0;
+                                for entry in item.entries() {
+                                    match entry {
+                                        ClipboardEntry::Image(image) => {
+                                            image_index += 1;
+                                            let name = format!(
+                                                "paste-{}.{}",
+                                                image_index,
+                                                image.format.extension()
+                                            );
+                                            this.input_attachments.push(image_attachment(
+                                                &name,
+                                                image.format.mime_type(),
+                                                &image.bytes,
+                                            ));
+                                            handled = true;
+                                        }
+                                        ClipboardEntry::ExternalPaths(paths) => {
+                                            for p in paths.paths() {
+                                                this.input_attachments.push(
+                                                    external_path_attachment(
+                                                        &p.to_string_lossy(),
+                                                    ),
+                                                );
+                                            }
+                                            handled = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if handled {
+                                    cx.notify();
+                                } else {
+                                    cx.propagate();
+                                }
+                            }))
                             .child(Input::new(&self.input_state))
                             .can_drop(|dragged, _window, _cx| dragged.is::<ExternalPaths>())
                             .on_drop::<ExternalPaths>(cx.listener(
