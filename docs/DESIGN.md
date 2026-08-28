@@ -32,6 +32,7 @@ Server 在未收到此认证消息并通过认证前，请求均返回认证失�
 | `session.delete` | 删除指定普通会话 |
 | `session.configure` | 配置指定普通会话：会话标题，会话选项等 |
 | `session.config_options` | 获取指定普通会话的会话选项 |
+| `session.slash_commands` | 获取指定普通会话的斜杠命令 |
 | `session.history` | 分页查询指定普通会话的对话历史 |
 | `session.activities` | 分页查询指定普通会话的活动历史 |
 | `session.ongoing_activity` | 查询指定普通会话正在进行中的活动 |
@@ -125,6 +126,10 @@ Server 作为 ACP client 与 ACP servers 通信
 - 新建或恢复 ACP 会话时，存储其会话选项在内存中
 - 当发送 `session/set_config_option` ACP 请求时，其响应中的会话选项全量覆盖内存存储
 - 当接收 `config_option_update` ACP 通知时，其通知中的会话选项全量覆盖内存存储
+
+### 普通会话斜杠命令
+
+普通会话斜杠命令存储在内存中，以 Agent 侧数据为权威，当接收 `available_commands_update` ACP 通知时，其通知中的斜杠命令全量覆盖内存存储。
 
 ### 普通会话删除
 
