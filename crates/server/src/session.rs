@@ -675,18 +675,16 @@ impl SessionManager {
         let (driver, agent_session_id) = if agent_session_id.is_empty() {
             // 惰性创建 agent 侧会话，响应中的会话选项存入内存
             //（docs/DESIGN.md「普通会话选项」）
-            let (driver, sid) = self.ensure_agent_session(session_id, &meta, "")?;
-            // 创建分支：upsert 覆盖 busy、标题与活跃时间
-            self.registry.upsert(&meta, &sid)?;
-            (driver, sid)
+            self.ensure_agent_session(session_id, &meta, "")?
         } else {
-            // resume 分支（已有 agent 侧会话）：busy 与活跃时间同样立即落盘
-            //（docs/DESIGN.md「普通会话状态」：状态以元数据为权威，变更需立即
-            // 落盘；否则 turn 进行中列表读到陈旧空闲，且并发 prompt 会放行）
-            self.registry
-                .update_state(session_id, SessionState::Busy, meta.last_active_at)?;
             (driver, agent_session_id)
         };
+        // 创建与 resume 分支统一 upsert：busy、首条 prompt 生成的标题与活跃时间
+        // 立即落盘（docs/DESIGN.md「普通会话状态」：状态以元数据为权威，变更需
+        // 立即落盘；否则 turn 进行中列表读到陈旧空闲，且并发 prompt 会放行）。
+        // resume 分支若只更新状态，先查过会话选项的会话（agent 侧会话已提前
+        // 创建）首条 prompt 生成的标题将永远不落盘。
+        self.registry.upsert(&meta, &agent_session_id)?;
         Ok((driver, agent_session_id, cwd, old_state))
     }
 
@@ -1685,6 +1683,22 @@ mod tests {
         assert!(saw, "prompt 结束应广播 busy→idle");
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
     }
+
+    #[tokio::test]
+    async fn prompt_persists_title_when_agent_session_precreated() {
+        // GUI 选中会话即查询会话选项，选项查询会惰性创建 agent 侧会话并落盘
+        // agent_session_id；首条 prompt 因此走 resume 分支，生成的标题仍须落盘。
+        let (mgr, _rx) = stub_manager("codex");
+        let meta = mgr.create("codex", "/tmp/work", false).await.unwrap();
+
+        mgr.config_options(&meta.id).await.unwrap();
+        mgr.prompt(&meta.id, text("实现登录功能")).await.unwrap();
+
+        let (list, _) = mgr.list(None).await.unwrap();
+        assert_eq!(list[0].title, "实现登录功能");
+        let _ = std::fs::remove_dir_all(&mgr.data_dir);
+    }
+
     #[tokio::test]
     async fn prompt_persists_user_message_before_turn_ends() {
         let started = Arc::new(Notify::new());
