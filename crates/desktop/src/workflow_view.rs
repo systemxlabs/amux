@@ -53,8 +53,6 @@ impl AmuxApp {
         if sessions.is_empty() {
             return;
         }
-        let clients: Vec<WsClient> = self.machines.iter().map(|m| m.client.clone()).collect();
-        let summaries = self.machine_summaries();
         for s in sessions {
             // 每个工作流独立 backend：RigBackend 的 synced_children/synced_activities
             // 是单轮 decide 的回传槽位，共享实例会在并发推进时互相覆盖
@@ -62,8 +60,7 @@ impl AmuxApp {
             self.workflows.push(WorkflowEngine::restore(
                 s,
                 self.orchestrator_backend(),
-                clients.clone(),
-                summaries.clone(),
+                self.machine_hub.clone(),
                 &self.session_dir,
             ));
         }
@@ -114,16 +111,13 @@ impl AmuxApp {
             .map(|r| read_path_context(r))
             .collect::<Vec<_>>()
             .join("\n");
-        let clients: Vec<WsClient> = self.machines.iter().map(|m| m.client.clone()).collect();
-        let summaries = self.machine_summaries();
         let backend = self.orchestrator_backend();
         let engine = WorkflowEngine::new(
             &clean,
             &context,
             preamble.as_deref().unwrap_or(""),
             backend,
-            clients.clone(),
-            summaries,
+            self.machine_hub.clone(),
             &self.session_dir,
         );
         let wi = self.workflows.len();
@@ -277,10 +271,7 @@ impl AmuxApp {
                         session_id: sid.clone(),
                     };
                     client
-                        .request_ok(
-                            protocol::method::SESSION_DELETE,
-                            Some(serde_json::to_value(&params).unwrap()),
-                        )
+                        .request_ok(protocol::method::SESSION_DELETE, Some(params))
                         .await
                         .map_err(|error| format!("删除关联普通会话 {sid} 失败：{error}"))?;
                 }

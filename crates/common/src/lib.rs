@@ -3,5 +3,3 @@
 pub mod log;
 pub mod session_log;
 pub mod text;
-
-pub use log::*;

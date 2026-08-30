@@ -20,9 +20,9 @@ struct DialogHostView {
 
 impl Render for DialogHostView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let dialog = self
-            .app
-            .update(cx, |app, cx| app.render_dialog(window, cx).into_any_element());
+        let dialog = self.app.update(cx, |app, cx| {
+            app.render_dialog(window, cx).into_any_element()
+        });
         div().size_full().child(dialog)
     }
 }
@@ -46,7 +46,7 @@ fn dialog_renders_user_message_with_image(cx: &mut gpui::TestAppContext) {
         .decode(TINY_PNG_BASE64)
         .unwrap();
 
-    cx.update(|window, cx| {
+    cx.update(|_window, cx| {
         app.update(cx, |app, cx| {
             let mut machine = MachineView::new(
                 MachineConfig {

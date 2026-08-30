@@ -6,7 +6,7 @@ use protocol::{Activity, HistoryItem};
 
 use crate::logic::{history_to_dialog, DialogMsg};
 
-/// 普通会话视图：对话气泡 + 活动历史 + 实时活动 + busy。
+/// 普通会话视图：对话气泡 + 活动历史 + 实时活动。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SessionView {
     pub dialog: Vec<DialogMsg>,
@@ -15,9 +15,8 @@ pub struct SessionView {
     pub history_next_before: Option<usize>,
     pub activities_has_more: bool,
     pub activities_next_before: Option<usize>,
-    /// 当前实时活动（进行中；空闲 None）。
+    /// 当前实时活动（进行中；空闲 None）。忙碌即 live.is_some()。
     pub live: Option<Activity>,
-    pub busy: bool,
 }
 
 impl SessionView {
@@ -132,15 +131,9 @@ impl SessionView {
         self.activities_next_before = next_before;
     }
 
-    /// 设置实时活动。有进行中活动即视为 busy；无（None）则回到空闲。
+    /// 设置实时活动；无（None）即回到空闲。
     pub fn set_live(&mut self, live: Option<Activity>) {
-        self.busy = live.is_some();
         self.live = live;
-    }
-
-    /// 从会话元数据状态同步 busy。
-    pub fn set_busy(&mut self, busy: bool) {
-        self.busy = busy;
     }
 }
 
@@ -324,7 +317,6 @@ mod tests {
             timestamp: 1,
             content: "x".into(),
         }));
-        assert!(view.busy);
         assert!(view.live.is_some());
     }
 }

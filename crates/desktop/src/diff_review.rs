@@ -231,10 +231,7 @@ impl AmuxApp {
                 input: vec![ContentBlock::Text { text: prompt }],
             };
             let _ = client
-                .request_ok(
-                    protocol::method::SESSION_PROMPT,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::SESSION_PROMPT, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 this.refresh_dialog(w, cx, machine, session_id);

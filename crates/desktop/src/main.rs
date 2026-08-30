@@ -23,9 +23,9 @@ mod workflow_view;
 mod ws;
 
 #[cfg(test)]
-mod diff_scroll_layout_test;
-#[cfg(test)]
 mod dialog_image_render_test;
+#[cfg(test)]
+mod diff_scroll_layout_test;
 #[cfg(test)]
 mod input_align_layout_test;
 #[cfg(test)]
@@ -72,10 +72,12 @@ fn main() {
         gpui_component::init(cx);
         // 应用退出时确定性关闭全部 WS 连接；
         // 进程退出兜底之外的显式关闭，避免 in-flight 请求被硬掐）
-        // Subscription 需保活：drop 即注销，故显式绑定
-        let _quit_subscription = cx.on_app_quit(|_cx| async {
+        // Subscription drop 即注销，而本闭包体在事件循环开始前就会结束，
+        // 局部绑定保不住它——注册一次后有意泄漏，生命周期覆盖整个进程。
+        let quit_subscription = cx.on_app_quit(|_cx| async {
             crate::ws::close_all();
         });
+        std::mem::forget(quit_subscription);
         theme::sync_appearance(None, cx);
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {

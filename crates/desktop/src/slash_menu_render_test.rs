@@ -25,9 +25,9 @@ struct InputHostView {
 
 impl Render for InputHostView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        let input = self
-            .app
-            .update(cx, |app, cx| app.render_input(window, cx).into_any_element());
+        let input = self.app.update(cx, |app, cx| {
+            app.render_input(window, cx).into_any_element()
+        });
         div().size_full().child(input)
     }
 }
@@ -118,6 +118,7 @@ fn slash_menu_visibility_follows_input_prefix(cx: &mut gpui::TestAppContext) {
         });
     });
     cx.draw(point(px(0.), px(0.)), size(px(1024.), px(768.)), |_, cx| {
-        cx.new(|_| InputHostView { app: app.clone() }).into_any_element()
+        cx.new(|_| InputHostView { app: app.clone() })
+            .into_any_element()
     });
 }

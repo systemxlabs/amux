@@ -37,7 +37,9 @@ pub fn message_images(content: &[ContentBlock]) -> Vec<gpui::Image> {
                     "image/bmp" => gpui::ImageFormat::Bmp,
                     _ => return None,
                 };
-                let bytes = base64::engine::general_purpose::STANDARD.decode(blob).ok()?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(blob)
+                    .ok()?;
                 Some(gpui::Image::from_bytes(format, bytes))
             }
             _ => None,

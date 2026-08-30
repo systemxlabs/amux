@@ -370,8 +370,9 @@ impl SessionManager {
     pub async fn info(&self, session_ids: &[String]) -> Result<Vec<SessionMeta>, SessionError> {
         let mut metas = Vec::new();
         for id in session_ids {
-            if self.registry.get(id)?.is_some() {
-                metas.push(self.get_entry(id)?.0);
+            // 单次查询同时完成「是否存在」与「取元数据」，避免重复读注册表
+            if let Some((meta, _)) = self.registry.get(id)? {
+                metas.push(meta);
             }
         }
         Ok(metas)
@@ -1563,10 +1564,7 @@ mod tests {
             other => panic!("应为 Select，得到 {other:?}"),
         }
         let again = mgr.config_options(&meta.id).await.unwrap();
-        assert_eq!(
-            again, updated,
-            "后续查询应读到 Agent 侧最新的全量选项"
-        );
+        assert_eq!(again, updated, "后续查询应读到 Agent 侧最新的全量选项");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

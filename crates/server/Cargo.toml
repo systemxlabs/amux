@@ -12,13 +12,14 @@ amux-common = { path = "../common" }
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+# 按需声明特性：macros(select!/main/test)、rt-multi-thread、net、process、io-util、signal、sync、time
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "process", "io-util", "signal", "sync", "time"] }
 tokio-tungstenite.workspace = true
 futures-util = "0.3"
 # 强类型错误（rpc 边界一次映射 JSON-RPC 错误码）
 thiserror = "2"
 # ACP 官方 SDK（docs/DESIGN.md §9）：Client 角色 + schema v1 + AcpAgent stdio 传输
-agent-client-protocol = { version = "1", features = ["unstable"] }
+agent-client-protocol = { workspace = true, features = ["unstable"] }
 uuid.workspace = true
 # 会话注册表持久化（docs/DESIGN.md §3.3/§4.3：server 单写者，同步 API）
 rusqlite = { version = "0.40", features = ["bundled"] }

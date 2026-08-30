@@ -9,10 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::{
-    BlobResourceContents, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
-    ClientSessionCapabilities, CloseSessionRequest, ContentBlock as AcpContentBlock,
-    CreateTerminalRequest, DeleteSessionRequest, EmbeddedResource, EmbeddedResourceResource,
-    AvailableCommandInput, InitializeRequest, KillTerminalRequest, NewSessionRequest,
+    AvailableCommandInput, BlobResourceContents, BooleanConfigOptionCapabilities,
+    CancelNotification, ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
+    ContentBlock as AcpContentBlock, CreateTerminalRequest, DeleteSessionRequest, EmbeddedResource,
+    EmbeddedResourceResource, InitializeRequest, KillTerminalRequest, NewSessionRequest,
     PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
     ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
@@ -208,13 +208,7 @@ impl AcpAgentDriver {
                 .build()
                 .expect("构建 tokio runtime 失败");
             rt.block_on(exec_main(
-                &bin,
-                &args,
-                &env,
-                exec_rx,
-                routes2,
-                commands2,
-                ready_tx,
+                &bin, &args, &env, exec_rx, routes2, commands2, ready_tx,
             ));
         });
         let timeout_ms = std::env::var("AMUX_ACP_SPAWN_TIMEOUT_MS")
@@ -471,8 +465,15 @@ async fn exec_main(
         agent
     };
 
-    let result =
-        connect_main(agent, &mut req_rx, routes, commands, &ready_tx, ready_sent.clone()).await;
+    let result = connect_main(
+        agent,
+        &mut req_rx,
+        routes,
+        commands,
+        &ready_tx,
+        ready_sent.clone(),
+    )
+    .await;
 
     // 连接异常结束：若就绪信号尚未发出（连接建立前传输层失败：二进制缺失 /
     // 进程立即退出 / npx 不可用 / 无网络），补报为 spawn 失败；若已报过就绪，
@@ -1091,9 +1092,9 @@ fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        AvailableCommand, AvailableCommandsUpdate, ConfigOptionUpdate, ContentBlock as AcpContentBlock,
-        ContentChunk, SessionConfigOption, SessionConfigSelectOption, SessionId, TextContent,
-        ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        AvailableCommandsUpdate, ConfigOptionUpdate, ContentBlock as AcpContentBlock, ContentChunk,
+        SessionConfigOption, SessionConfigSelectOption, SessionId, TextContent, ToolCall,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
     use tokio::sync::mpsc;
 
@@ -1120,25 +1121,18 @@ mod tests {
         route_update(
             &routes,
             &commands,
-            &notif(vec![agent_client_protocol::schema::v1::AvailableCommand::new(
-                "goal",
-                "目标",
-            )]),
+            &notif(vec![
+                agent_client_protocol::schema::v1::AvailableCommand::new("goal", "目标"),
+            ]),
         )
         .await;
         assert_eq!(
-            commands
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")["s1"]
-                .len(),
+            commands.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].len(),
             1
         );
         // 新通知全量覆盖旧集合（docs/DESIGN.md「普通会话斜杠命令」）
         route_update(&routes, &commands, &notif(Vec::new())).await;
-        assert!(commands
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")["s1"]
-            .is_empty());
+        assert!(commands.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].is_empty());
         // 无 prompt 路由时通知仍被缓存（不产生事件流）
     }
 

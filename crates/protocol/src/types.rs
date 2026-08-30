@@ -132,16 +132,6 @@ pub enum SessionConfigOptionValue {
     Boolean { value: bool },
 }
 
-/// `session.configure` 的 config 字段：设置一项会话选项。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionSetConfigOptionParams {
-    pub session_id: String,
-    pub config_id: String,
-    #[serde(flatten)]
-    pub value: SessionConfigOptionValue,
-}
-
 /// `session.new` 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

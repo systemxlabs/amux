@@ -20,7 +20,7 @@ use protocol::{
 use crate::config::{ApiFormat, ConfigStore, SkillEntry, WorkflowTemplate};
 use crate::logic::InputAttachment;
 use crate::machine::{MachineStatus, MachineView};
-use crate::workflow::WorkflowEngine;
+use crate::workflow::{MachineHub, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小。
@@ -159,6 +159,9 @@ impl SkillAction {
 pub struct AmuxApp {
     pub(crate) store: Arc<ConfigStore>,
     pub(crate) machines: Vec<MachineView>,
+    /// 机器运行时注册表：机器增删/重连/状态变化时同步，
+    /// 工作流引擎每次推进经此取最新连接（不持有陈旧快照）。
+    pub(crate) machine_hub: Arc<MachineHub>,
     pub(crate) workflows: Vec<WorkflowEngine>,
     pub(crate) session_dir: PathBuf,
     pub(crate) selected: Option<Selected>,
@@ -314,6 +317,7 @@ impl AmuxApp {
         let mut app = AmuxApp {
             store,
             machines: Vec::new(),
+            machine_hub: Arc::new(MachineHub::default()),
             workflows: Vec::new(),
             session_dir: PathBuf::new(),
             selected: None,
@@ -408,6 +412,7 @@ impl AmuxApp {
         for m in app.store.list_machines() {
             app.machines.push(MachineView::new(m, cx));
         }
+        app.sync_machine_hub();
         for i in 0..app.machines.len() {
             let client = app.machines[i].client.clone();
             let t = app.spawn_machine_tasks(window, cx, i, client);
@@ -470,6 +475,8 @@ impl AmuxApp {
             }
             _ => {}
         }
+        // 在线状态可能已变：工作流推进前依赖 hub 快照看到最新机器视图
+        this.sync_machine_hub();
         cx.notify();
     }
 
@@ -494,9 +501,6 @@ impl AmuxApp {
         if let Some(m) = this.machines.get_mut(idx) {
             if let Some(s) = m.sessions.iter_mut().find(|s| s.id == sid) {
                 s.state = new_state;
-            }
-            if let Some(v) = m.views.get_mut(&sid) {
-                v.set_busy(!idle);
             }
         }
         this.refresh_sessions(idx, window, cx);
@@ -628,12 +632,28 @@ impl AmuxApp {
     ) -> Task<()> {
         let mut notify_rx = self.machines[idx].client.subscribe();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            while let Ok(n) = notify_rx.recv().await {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    Self::on_notify(this, window, cx, idx, &n);
-                });
+            // Lagged 只是慢消费者丢消息，通道仍存活——必须继续消费，
+            // 否则通知洪峰过后该机器的 state_change 驱动将永久失效
+            loop {
+                match notify_rx.recv().await {
+                    Ok(n) => {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            Self::on_notify(this, window, cx, idx, &n);
+                        });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        log::warn!("机器 #{idx} 通知积压，跳过 {missed} 条");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         })
+    }
+
+    /// 用当前机器视图整体刷新运行时注册表（增删/重连/状态变化后调用）。
+    pub(crate) fn sync_machine_hub(&self) {
+        let clients = self.machines.iter().map(|m| m.client.clone()).collect();
+        self.machine_hub.sync(self.machine_summaries(), clients);
     }
 
     /// 切换选中会话。输入框是全局单例，直接换会话会把 A 的未发送内容串到 B，
@@ -999,8 +1019,6 @@ impl AmuxApp {
             .into_any()
     }
 }
-
-impl AmuxApp {}
 
 pub(crate) enum SessionListItem {
     Session { machine: usize, meta: SessionMeta },

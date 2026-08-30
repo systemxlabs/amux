@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 logforth = { version = "0.30", features = ["starter-log"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1" }
 tokio-tungstenite = "0.30"
 agent-client-protocol = "1"
 uuid = { version = "1", features = ["v4"] }

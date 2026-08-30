@@ -94,6 +94,30 @@ pub struct MachineSummary {
     pub agents: Vec<AgentSlot>,
 }
 
+/// 机器运行时注册表：应用侧在机器增删/重连/状态变化时整体同步，
+/// 工作流引擎每次推进前快照最新连接与摘要。引擎不再持有冻结的
+/// WsClient 列表——否则重连后旧连接的接收端已关闭，工作流从此
+/// 无法下发/取消任何子会话，新增机器也对编排 LLM 不可见。
+#[derive(Default)]
+pub struct MachineHub {
+    entries: std::sync::Mutex<Vec<(MachineSummary, WsClient)>>,
+}
+
+impl MachineHub {
+    /// 应用侧机器视图整体替换（顺序与 app.machines 一致，
+    /// 保住 ChildSession.machine_idx 的下标语义）。clients 可短于
+    /// machines（缺客户端即该机不可达，zip 截断）。
+    pub fn sync(&self, machines: Vec<MachineSummary>, clients: Vec<WsClient>) {
+        *self.entries.lock().unwrap() = machines.into_iter().zip(clients).collect();
+    }
+
+    /// 推进前快照：拿到最新连接与摘要。
+    pub fn snapshot(&self) -> (Vec<MachineSummary>, Vec<WsClient>) {
+        let entries = self.entries.lock().unwrap();
+        entries.iter().cloned().unzip()
+    }
+}
+
 impl MachineSummary {
     #[cfg(test)]
     pub fn named(name: &str, agents: &[&str]) -> Self {
@@ -177,8 +201,7 @@ pub struct WorkflowEngine {
     /// 后台推进不再「克隆-跑-整引擎回写」，并发分叉与后写覆盖随之消失。
     pub session: Arc<RwLock<OrcSession>>,
     backend: Arc<dyn OrcBackend>,
-    clients: Vec<WsClient>,
-    machines: Vec<MachineSummary>,
+    hub: Arc<MachineHub>,
     gate: Arc<Mutex<AdvanceGate>>,
     /// 工作中收到的用户消息（steer 注入；当前轮结束后合并）。
     steer_inbox: Arc<Mutex<Vec<String>>>,
@@ -196,8 +219,7 @@ impl WorkflowEngine {
         context: &str,
         preamble: &str,
         backend: Arc<dyn OrcBackend>,
-        clients: Vec<WsClient>,
-        machines: Vec<MachineSummary>,
+        hub: Arc<MachineHub>,
         data_dir: &Path,
     ) -> Self {
         let full = if context.trim().is_empty() {
@@ -236,8 +258,7 @@ impl WorkflowEngine {
         WorkflowEngine {
             session: Arc::new(RwLock::new(session)),
             backend,
-            clients,
-            machines,
+            hub,
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
             busy_children: Arc::new(Mutex::new(0)),
@@ -248,13 +269,13 @@ impl WorkflowEngine {
     pub fn restore(
         mut session: OrcSession,
         backend: Arc<dyn OrcBackend>,
-        clients: Vec<WsClient>,
-        machines: Vec<MachineSummary>,
+        hub: Arc<MachineHub>,
         data_dir: &Path,
     ) -> Self {
         // 应用重开后工作流会话回到空闲，重新启动需用户手动触发。
         session.state = SessionState::Idle;
         // 子会话只持久化机器名和旧下标；应用重启或机器列表变化后按机器名重新绑定。
+        let (machines, _) = hub.snapshot();
         for child in &mut session.children {
             child.machine_idx = machines
                 .iter()
@@ -264,8 +285,7 @@ impl WorkflowEngine {
         WorkflowEngine {
             session: Arc::new(RwLock::new(session)),
             backend,
-            clients,
-            machines,
+            hub,
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
             busy_children: Arc::new(Mutex::new(0)),
@@ -413,6 +433,8 @@ impl WorkflowEngine {
     }
 
     fn build_context(&self) -> OrcContext {
+        // 每次推进前快照：连接与摘要取自 hub 最新状态（重连/加机后即时生效）
+        let (machines, clients) = self.hub.snapshot();
         let s = self.session.read().expect("RwLock 中毒");
         OrcContext {
             plan: s.description.clone(),
@@ -426,8 +448,8 @@ impl WorkflowEngine {
                 })
                 .collect(),
             child_sessions: s.children.clone(),
-            clients: self.clients.clone(),
-            machines: self.machines.clone(),
+            clients,
+            machines,
             steer_inbox: Arc::clone(&self.steer_inbox),
         }
     }
@@ -460,8 +482,8 @@ impl WorkflowEngine {
                     text: format!(
                         "关联普通会话 {session_id}@{machine} 检测到状态变更：{old} -> {new}，\
                          变更原因为{why}",
-                        old = state_label(old_state),
-                        new = state_label(new_state),
+                        old = old_state.as_str(),
+                        new = new_state.as_str(),
                         why = reason_label(reason),
                     ),
 
@@ -1043,13 +1065,6 @@ impl OrcBackend for RigBackend {
     }
 }
 
-fn state_label(s: SessionState) -> &'static str {
-    match s {
-        SessionState::Idle => "idle",
-        SessionState::Busy => "busy",
-    }
-}
-
 /// 状态变更原因的中文标注，用于注入编排对话流。
 fn reason_label(r: StateChangeReason) -> &'static str {
     match r {
@@ -1207,7 +1222,7 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
             Some(m) => serde_json::json!({
                 "id": c.id,
                 "title": m.title,
-                "state": state_label(m.state),
+                "state": m.state.as_str(),
                 "lastActiveAt": m.last_active_at,
                 "machine": c.machine_name,
                 "agent": m.agent,
@@ -1396,6 +1411,12 @@ mod tests {
         (vec![c], m)
     }
 
+    fn test_hub(machines: Vec<MachineSummary>, clients: Vec<WsClient>) -> Arc<MachineHub> {
+        let hub = MachineHub::default();
+        hub.sync(machines, clients);
+        Arc::new(hub)
+    }
+
     /// 每个测试独立的临时数据目录（活动实时落盘与持久化测试共用）。
     fn temp_data_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1452,8 +1473,7 @@ mod tests {
             "",
             "",
             backend,
-            clients,
-            vec![m],
+            test_hub(vec![m], clients),
             &temp_data_dir(),
         );
         assert_eq!(engine.session.read().unwrap().title, "实现登录功能");
@@ -1475,8 +1495,7 @@ mod tests {
             "@src/main.rs 的内容……",
             "",
             backend,
-            clients,
-            vec![m],
+            test_hub(vec![m], clients),
             &temp_data_dir(),
         );
         assert!(engine
@@ -1500,8 +1519,14 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "已按指令取消".into(),
         }]);
-        let engine =
-            WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            backend,
+            test_hub(vec![m], clients),
+            &temp_data_dir(),
+        );
         assert!(engine.cancel(), "空闲工作流取消应立即推进");
         assert!(engine
             .session
@@ -1526,8 +1551,14 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "本轮静默".into(),
         }]);
-        let engine =
-            WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            backend,
+            test_hub(vec![m], clients),
+            &temp_data_dir(),
+        );
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
@@ -1572,8 +1603,14 @@ mod tests {
         let backend = FakeBackend::new(vec![Decision {
             summary: "不应发生".into(),
         }]);
-        let engine =
-            WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &temp_data_dir());
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            backend,
+            test_hub(vec![m], clients),
+            &temp_data_dir(),
+        );
         engine.session.write().unwrap().children.push(ChildSession {
             id: "s_child".into(),
             machine_idx: 0,
@@ -1604,7 +1641,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("计划A", "", "", backend, clients, vec![m], &dir);
+        let engine =
+            WorkflowEngine::new("计划A", "", "", backend, test_hub(vec![m], clients), &dir);
         let id = engine.session.read().unwrap().id.clone();
         engine.record_user("立即保存");
         engine.persist(&dir).unwrap();
@@ -1629,7 +1667,7 @@ mod tests {
             summary: "恢复后推进".into(),
         }]);
         let (clients2, m2) = clients_with_machines();
-        let engine2 = WorkflowEngine::restore(opened, backend2, clients2, vec![m2], &dir);
+        let engine2 = WorkflowEngine::restore(opened, backend2, test_hub(vec![m2], clients2), &dir);
         engine2.start().await.unwrap();
         assert!(engine2
             .session
@@ -1665,7 +1703,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("计划B", "", "", backend, clients, vec![m], &dir);
+        let engine =
+            WorkflowEngine::new("计划B", "", "", backend, test_hub(vec![m], clients), &dir);
         let id = engine.session.read().unwrap().id.clone();
         engine.record_user("准备保存");
         engine.persist(&dir).unwrap();
@@ -1677,8 +1716,7 @@ mod tests {
         let engine2 = WorkflowEngine::restore(
             sessions[0].clone(),
             FakeBackend::new(vec![]),
-            clients2,
-            vec![m2],
+            test_hub(vec![m2], clients2),
             &dir,
         );
         engine2.backfill(&dir).unwrap();
@@ -1710,7 +1748,7 @@ mod tests {
         let dir = temp_data_dir();
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, clients, vec![m], &dir);
+        let engine = WorkflowEngine::new("计划", "", "", backend, test_hub(vec![m], clients), &dir);
         let id = engine.session.read().unwrap().id.clone();
 
         engine.record_activity(Activity::Thinking {
@@ -1768,8 +1806,7 @@ mod tests {
             "",
             "",
             backend,
-            vec![],
-            vec![MachineSummary::named("测试机", &["mock_acp"])],
+            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
             &temp_data_dir(),
         );
         let engine = engine;
@@ -1797,8 +1834,7 @@ mod tests {
             "",
             "计划：先在测试机实现，再审查",
             backend,
-            vec![],
-            vec![MachineSummary::named("测试机", &["mock_acp"])],
+            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
             &temp_data_dir(),
         );
         assert!(engine.session.read().unwrap().transcript.is_empty());
@@ -1817,8 +1853,7 @@ mod tests {
             "",
             "计划：先实现后审查",
             backend,
-            vec![],
-            vec![MachineSummary::named("测试机", &["mock_acp"])],
+            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
             &temp_data_dir(),
         );
         let should_advance = engine.record_user("实现登录功能");
@@ -1841,8 +1876,10 @@ mod tests {
             "",
             "",
             backend,
-            vec![client],
-            vec![MachineSummary::named("测试机", &["kimi"])],
+            test_hub(
+                vec![MachineSummary::named("测试机", &["kimi"])],
+                vec![client],
+            ),
             &temp_data_dir(),
         );
         let res = engine.start().await;
@@ -1888,8 +1925,7 @@ mod tests {
             "",
             "",
             backend,
-            vec![],
-            vec![MachineSummary::named("测试机", &["mock_acp"])],
+            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
             &temp_data_dir(),
         );
         let engine = engine;

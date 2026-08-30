@@ -156,16 +156,6 @@ impl WsClient {
     }
 }
 
-/// 单条连接的退出原因。
-enum ConnectionOutcome {
-    /// 已认证后连接断开（server 重启/网络抖动）
-    Disconnected,
-    /// 认证被拒（token 错误等）
-    AuthFailed,
-    /// 客户端全部销毁：整个连接任务退出
-    ClientClosed,
-}
-
 /// 单次连接尝试。失败（连不上 / 认证失败 / 已连接后断开）即终止，
 /// 不做自动重连：机器保持离线或认证失败状态，由用户手动触发重连。
 async fn run_loop(
@@ -185,9 +175,7 @@ async fn run_loop(
                 method: "connected".into(),
                 params: Value::Null,
             });
-            // 认证/断开通知由 serve_connection 发出；返回后不再重连
-            let _outcome =
-                serve_connection(ws, token, &mut req_rx, &close_rx.clone(), &notify_tx).await;
+            serve_connection(ws, token, &mut req_rx, &close_rx.clone(), &notify_tx).await;
         }
         Err(e) => {
             log::debug!("连接失败: {e}");
@@ -201,7 +189,8 @@ async fn run_loop(
 }
 
 /// 服务单条已建立的 WS 连接：auth 握手 → 请求/通知收发循环，直至断开、
-/// 认证失败或收到显式关闭信号。
+/// 认证失败或收到显式关闭信号。信封统一用 protocol::jsonrpc 强类型，
+/// 不手工拼帧/取键（响应键名以协议类型为准）。
 async fn serve_connection(
     ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -210,7 +199,7 @@ async fn serve_connection(
     req_rx: &mut mpsc::Receiver<ClientReq>,
     close_rx: &tokio::sync::watch::Receiver<bool>,
     notify_tx: &broadcast::Sender<Notification>,
-) -> ConnectionOutcome {
+) {
     let mut close_rx = close_rx.clone();
     let (mut sink, mut source) = ws.split();
     let mut pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> = HashMap::new();
@@ -218,17 +207,15 @@ async fn serve_connection(
     let mut authed = false;
     let auth_id = next_id;
     next_id += 1;
-    let auth_frame = json!({
-        "jsonrpc": "2.0", "id": auth_id,
-        "method": protocol::method::AUTH,
-        "params": { "token": token },
-    });
-    if sink
-        .send(Message::Text(auth_frame.to_string().into()))
-        .await
-        .is_err()
-    {
-        return ConnectionOutcome::Disconnected;
+    let auth_frame = protocol::JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: auth_id.into(),
+        method: protocol::method::AUTH.into(),
+        params: Some(json!({ "token": token })),
+    };
+    let auth_frame = serde_json::to_string(&auth_frame).expect("auth 帧序列化失败");
+    if sink.send(Message::Text(auth_frame.into())).await.is_err() {
+        return;
     }
 
     loop {
@@ -236,12 +223,12 @@ async fn serve_connection(
             _ = close_rx.changed() => {
                 if *close_rx.borrow() {
                     log::info!("收到关闭信号");
-                    return ConnectionOutcome::ClientClosed;
+                    return;
                 }
             }
             req = req_rx.recv() => {
                 let Some(req) = req else {
-                    return ConnectionOutcome::ClientClosed;
+                    return;
                 };
                 if !authed {
                     let _ = req.resp.send(Err(RpcError {
@@ -252,12 +239,14 @@ async fn serve_connection(
                 }
                 let id = next_id;
                 next_id += 1;
-                let frame = json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "method": req.method,
-                    "params": req.params.unwrap_or(Value::Null),
-                });
-                if sink.send(Message::Text(frame.to_string().into())).await.is_err() {
+                let frame = protocol::JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    id: id.into(),
+                    method: req.method,
+                    params: req.params,
+                };
+                let Ok(frame) = serde_json::to_string(&frame) else { continue };
+                if sink.send(Message::Text(frame.into())).await.is_err() {
                     break;
                 }
                 pending.insert(id, req.resp);
@@ -267,46 +256,44 @@ async fn serve_connection(
                 let Ok(msg) = msg else { break };
                 let Message::Text(t) = msg else { continue };
                 let Ok(v) = serde_json::from_str::<Value>(&t) else { continue };
-                if let Some(id) = v.get("id").and_then(|i| i.as_u64()) {
-                    if id == auth_id {
-                        // auth 响应：无论成败，认证阶段结束；失败则按退避重连
-                        if let Some(err) = v.get("error") {
-                            let code = err.get("code").and_then(|c| c.as_i64())
-                                .unwrap_or(-1) as i32;
-                            let message = err.get("message").and_then(|m| m.as_str())
-                                .unwrap_or("").to_string();
-                            log::warn!("认证失败 [{code}]: {message}");
-                            let _ = notify_tx.send(Notification {
-                                method: "auth_failed".into(),
-                                params: json!({ "code": code, "message": message }),
-                            });
-                            return ConnectionOutcome::AuthFailed;
-                        }
-                        log::info!("认证成功");
-                        authed = true;
+                // 带 Number id 的帧是响应；其余（缺 id）按 server → GUI 通知处理
+                let Ok(resp) = serde_json::from_value::<protocol::JsonRpcResponse>(v.clone()) else {
+                    if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
+                        // server → GUI 通知（唯一主动推送 session.state_change）
+                        log::debug!("通知 {method}");
                         let _ = notify_tx.send(Notification {
-                            method: "auth_ok".into(),
-                            params: Value::Null,
+                            method: method.to_string(),
+                            params: v.get("params").cloned().unwrap_or(Value::Null),
                         });
-                        continue;
                     }
-                    if let Some(resp) = pending.remove(&id) {
-                        if let Some(err) = v.get("error") {
-                            let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1) as i32;
-                            let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-                            log::warn!("请求 #{id} 失败 [{code}]: {message}");
-                            let _ = resp.send(Err(RpcError { code, message }));
-                        } else {
-                            let _ = resp.send(Ok(v.get("result").cloned().unwrap_or(Value::Null)));
-                        }
+                    continue;
+                };
+                let protocol::JsonRpcId::Number(id) = resp.id else { continue };
+                if id == auth_id {
+                    // auth 响应：无论成败，认证阶段结束；失败则按退避重连
+                    if let Some(err) = resp.error {
+                        log::warn!("认证失败 [{}]: {}", err.code, err.message);
+                        let _ = notify_tx.send(Notification {
+                            method: "auth_failed".into(),
+                            params: json!({ "code": err.code, "message": err.message }),
+                        });
+                        return;
                     }
-                } else if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-                    // server → GUI 通知（唯一主动推送 session.state_change）
-                    log::debug!("通知 {method}");
+                    log::info!("认证成功");
+                    authed = true;
                     let _ = notify_tx.send(Notification {
-                        method: method.to_string(),
-                        params: v.get("params").cloned().unwrap_or(Value::Null),
+                        method: "auth_ok".into(),
+                        params: Value::Null,
                     });
+                    continue;
+                }
+                if let Some(resp_tx) = pending.remove(&id) {
+                    if let Some(err) = resp.error {
+                        log::warn!("请求 #{id} 失败 [{}]: {}", err.code, err.message);
+                        let _ = resp_tx.send(Err(RpcError { code: err.code, message: err.message }));
+                    } else {
+                        let _ = resp_tx.send(Ok(resp.result.unwrap_or(Value::Null)));
+                    }
                 }
             }
         }
@@ -324,7 +311,6 @@ async fn serve_connection(
             message: "连接断开".into(),
         }));
     }
-    ConnectionOutcome::Disconnected
 }
 
 #[cfg(test)]

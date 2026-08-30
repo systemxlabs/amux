@@ -41,7 +41,6 @@ impl MachineStatus {
 pub(crate) struct MachineView {
     pub(crate) config: MachineConfig,
     pub(crate) client: WsClient,
-    pub(crate) connection_epoch: u64,
     pub(crate) status: MachineStatus,
     pub(crate) notice: Option<String>,
     pub(crate) agents: Vec<AgentInfo>,
@@ -77,7 +76,6 @@ impl MachineView {
             diff: cx.new(|_| crate::diff_review::DiffReviewState::default()),
             client: WsClient::connect_with_token(url, config.token.clone()),
             config,
-            connection_epoch: 1,
             status: MachineStatus::Connecting,
             notice: None,
             agents: Vec::new(),

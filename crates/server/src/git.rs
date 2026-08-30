@@ -508,11 +508,17 @@ impl GitRunner {
     /// - 都不给：全部变更——`git restore` 全部 tracked 变更 + `git clean` 全部 untracked
     pub fn restore(&self, cwd: &str, path: Option<&str>, patch: Option<&str>) -> OpResult {
         if let Some(p) = patch {
-            // 唯一临时目录（并发 revert 不互相覆盖；uuid v4）
+            // 唯一临时目录（并发 revert 不互相覆盖；uuid v4），apply 后立即清理
             let dir = std::env::temp_dir().join(format!("amux-revert-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&dir).ok();
+            if std::fs::create_dir_all(&dir).is_err() {
+                return op_err("创建临时目录失败");
+            }
+            let cleanup = || {
+                let _ = std::fs::remove_dir_all(&dir);
+            };
             let patch_file = dir.join("revert.patch");
             if std::fs::write(&patch_file, p).is_err() {
+                cleanup();
                 return op_err("写入 patch 失败");
             }
             // patch 路径以仓库根为基准：从仓库根应用（cwd 为其子目录时也正确）
@@ -520,7 +526,7 @@ impl GitRunner {
                 .ok()
                 .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
                 .unwrap_or_else(|| std::path::PathBuf::from(cwd));
-            return match run(
+            let result = match run(
                 apply_dir.to_string_lossy().as_ref(),
                 &["apply", "--reverse", patch_file.to_string_lossy().as_ref()],
             ) {
@@ -530,6 +536,8 @@ impl GitRunner {
                 },
                 Err(e) => op_err(e.stderr.trim()),
             };
+            cleanup();
+            return result;
         }
         if let Some(target) = path {
             let target = match validate_restore_path(cwd, target) {

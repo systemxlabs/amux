@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use gpui::{AppContext, IntoElement, point, px, size};
+use gpui::{point, px, size, AppContext, IntoElement};
 
 use crate::app::{AmuxApp, Selected};
 use crate::config::{ConfigStore, MachineConfig};
@@ -45,9 +45,11 @@ fn input_buttons_align_with_input_bottom(cx: &mut gpui::TestAppContext) {
     });
 
     // 渲染真实 AmuxApp 根视图（main_row → render_main → render_input）
-    cx.draw(point(px(0.), px(0.)), size(px(1200.), px(800.)), |_, cx| {
-        app.clone().into_any_element()
-    });
+    cx.draw(
+        point(px(0.), px(0.)),
+        size(px(1200.), px(800.)),
+        |_, _cx| app.clone().into_any_element(),
+    );
 
     let input = cx
         .debug_bounds("input-align-input")

@@ -84,10 +84,7 @@ impl AmuxApp {
                     }],
                 };
                 client
-                    .request_ok(
-                        protocol::method::SESSION_PROMPT,
-                        Some(serde_json::to_value(&input).unwrap()),
-                    )
+                    .request_ok(protocol::method::SESSION_PROMPT, Some(input))
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok::<String, String>(session_id)
@@ -121,16 +118,18 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
-        let params = AgentParams { agent };
+        let params = AgentParams {
+            agent: agent.clone(),
+        };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
-                .request_ok(
-                    protocol::method::AGENT_RESTART,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::AGENT_RESTART, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let _ = res;
+                // 重启失败要可见（机器卡片 notice），否则用户无从感知
+                if let (Err(e), Some(m)) = (&res, this.machines.get_mut(machine)) {
+                    m.notice = Some(format!("agent「{agent}」重启失败：{e}"));
+                }
                 this.fetch_agents(machine, window, cx);
                 cx.notify();
             });
@@ -192,10 +191,10 @@ impl AmuxApp {
         let cfg = self.machines[idx].config.clone();
         let client = WsClient::connect_with_token(machine_ws_url(&cfg), cfg.token.clone());
         self.machines[idx].client = client.clone();
-        self.machines[idx].connection_epoch = self.machines[idx].connection_epoch.saturating_add(1);
         self.machines[idx].status = MachineStatus::Connecting;
         self.machines[idx].notice = None;
         self.machines[idx].views.clear();
+        self.sync_machine_hub();
         let t = self.spawn_machine_tasks(window, cx, idx, client);
         self._tasks.push(t);
         // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
@@ -248,8 +247,10 @@ impl AmuxApp {
         let client = self.machines[idx].client.clone();
         let t = self.spawn_machine_tasks(window, cx, idx, client);
         self._tasks.push(t);
-        self.fetch_agents(idx, window, cx);
-        self.refresh_sessions(idx, window, cx);
+        self.sync_machine_hub();
+        // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
+        // 提前发的 agent.list 必然失败并把 notice 染成「agent 列表获取失败」。
+        // 初始数据由 on_notify 的 auth_ok 分支统一拉取（同重连流程）。
         self.machine_form_error = None;
         cx.notify();
         true
@@ -294,6 +295,7 @@ impl AmuxApp {
             DraftKey::Workflow { .. } => true,
         });
         self.machines.remove(idx);
+        self.sync_machine_hub();
         for wf in self.workflows.iter_mut() {
             let mut children_guard = wf.session.write().unwrap();
             for c in children_guard.children.iter_mut() {

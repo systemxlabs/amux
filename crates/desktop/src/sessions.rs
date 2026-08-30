@@ -17,13 +17,11 @@ use gpui_component::{
     *,
 };
 
-use serde_json::json;
-
 use protocol::{
-    ActivitiesResult, HistoryResult, OngoingActivityResult, OpResult,
-    SessionConfigKind, SessionConfigOptionsResult, SessionConfigOptionValue,
-    SessionConfigSetting, SessionConfigureParams, SessionIdParams, SessionInfoParams,
-    SessionInfoResult, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
+    ActivitiesResult, HistoryResult, OngoingActivityResult, OpResult, SessionConfigKind,
+    SessionConfigOptionValue, SessionConfigOptionsResult, SessionConfigSetting,
+    SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
+    SessionListParams, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
     SessionPromptParams, SessionResult, SessionSlashCommandsResult, SessionState,
 };
 
@@ -54,7 +52,7 @@ impl AmuxApp {
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             // 滚动查询（docs/DESIGN.md「会话列表滚动查询」）：按数量查询前 N 页
             //（N × 每页 PAGE_LIMIT 条）
-            let params = json!({ "limit": count });
+            let params = SessionListParams { limit: Some(count) };
             let (pages, has_more) = match client
                 .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
                 .await
@@ -325,6 +323,19 @@ impl AmuxApp {
     /// 随后各自补齐工作流关联会话（docs/DESIGN.md「会话列表滚动查询」）。
     pub(crate) fn load_more_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.list_pages += 1;
+        self.refresh_all_online(window, cx);
+    }
+
+    /// 「收起」：页数归 1（PRD「左侧面板」），重新按单页查询。
+    pub(crate) fn collapse_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_pages == 1 {
+            return;
+        }
+        self.list_pages = 1;
+        self.refresh_all_online(window, cx);
+    }
+
+    fn refresh_all_online(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for i in 0..self.machines.len() {
             if matches!(self.machines[i].status, MachineStatus::Online) {
                 self.refresh_sessions(i, window, cx);
@@ -529,10 +540,7 @@ impl AmuxApp {
                 session_id: sid.clone(),
             };
             let res = client
-                .request_ok(
-                    protocol::method::SESSION_CANCEL,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::SESSION_CANCEL, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 if let Err(error) = &res {
@@ -567,10 +575,7 @@ impl AmuxApp {
                 session_id: sid.clone(),
             };
             let res = client
-                .request_ok(
-                    protocol::method::SESSION_DELETE,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::SESSION_DELETE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match res {
@@ -649,10 +654,7 @@ impl AmuxApp {
         };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
-                .request_ok(
-                    protocol::method::SESSION_CONFIGURE,
-                    Some(serde_json::to_value(&params).unwrap()),
-                )
+                .request_ok(protocol::method::SESSION_CONFIGURE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match res {
@@ -844,10 +846,26 @@ impl AmuxApp {
             })
             .collect();
 
-        if self
+        let any_online = self
             .machines
             .iter()
-            .any(|m| matches!(m.status, MachineStatus::Online) && m.sessions_has_more)
+            .any(|m| matches!(m.status, MachineStatus::Online));
+        if any_online && self.list_pages > 1 {
+            rows.push(
+                Button::new("sessions-collapse")
+                    .small()
+                    .label("收起")
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.collapse_sessions(window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if any_online
+            && self
+                .machines
+                .iter()
+                .any(|m| matches!(m.status, MachineStatus::Online) && m.sessions_has_more)
         {
             rows.push(
                 Button::new("sessions-more")
@@ -1052,7 +1070,7 @@ impl AmuxApp {
                         // 图片附件需足够宽度展示缩略图
                         bubble_w = bubble_w.max(px(280.));
                     }
-                    div().id(("row", *timestamp)).w_full().child(
+                    div().id(("user-row", *timestamp)).w_full().child(
                         div()
                             .ml_auto()
                             .flex_none()
@@ -1098,7 +1116,7 @@ impl AmuxApp {
                         132.,
                         720., // 消息气泡最大宽度（内容可读性上限）
                     );
-                    div().id(("row", *timestamp)).w_full().child(
+                    div().id(("agent-row", *timestamp)).w_full().child(
                         div()
                             .flex_none()
                             .w(bubble_w)
@@ -1399,7 +1417,7 @@ impl AmuxApp {
                         };
                         let tooltip_label = label.clone();
                         div()
-                            .id(format!("attachment-chip-{a:?}"))
+                            .id(("attachment-chip", i))
                             .max_w(px(280.))
                             .px_2()
                             .py_0p5()
@@ -1474,9 +1492,7 @@ impl AmuxApp {
                                         ClipboardEntry::ExternalPaths(paths) => {
                                             for p in paths.paths() {
                                                 this.input_attachments.push(
-                                                    external_path_attachment(
-                                                        &p.to_string_lossy(),
-                                                    ),
+                                                    external_path_attachment(&p.to_string_lossy()),
                                                 );
                                             }
                                             handled = true;
@@ -1593,11 +1609,7 @@ impl AmuxApp {
                         h_flex()
                             .gap_1()
                             .items_center()
-                            .child(
-                                Label::new(opt.name.clone())
-                                    .text_sm()
-                                    .text_color(muted),
-                            )
+                            .child(Label::new(opt.name.clone()).text_sm().text_color(muted))
                             .child(
                                 Button::new(SharedString::from(format!(
                                     "cfg-select-{machine}-{opt_id}"
@@ -1605,22 +1617,23 @@ impl AmuxApp {
                                 .small()
                                 .outline()
                                 .label(current_label)
-                                .dropdown_menu(move |menu, _window, _cx| {
-                                    let mut menu = menu;
-                                    for (value, name) in &entries {
-                                        let checked = value == &current_value;
-                                        let weak = weak.clone();
-                                        let sid = sid.clone();
-                                        let oid = oid.clone();
-                                        let value = value.clone();
-                                        menu = menu.item(
-                                            PopupMenuItem::new(name.clone())
-                                                .checked(checked)
-                                                .on_click(move |_ev, _window, cx| {
-                                                    let _ = weak.update_in(
-                                                        cx,
-                                                        |this, window, cx| {
-                                                            this.set_session_config_option(
+                                .dropdown_menu(
+                                    move |menu, _window, _cx| {
+                                        let mut menu = menu;
+                                        for (value, name) in &entries {
+                                            let checked = value == &current_value;
+                                            let weak = weak.clone();
+                                            let sid = sid.clone();
+                                            let oid = oid.clone();
+                                            let value = value.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new(name.clone())
+                                                    .checked(checked)
+                                                    .on_click(move |_ev, _window, cx| {
+                                                        let _ = weak.update_in(
+                                                            cx,
+                                                            |this, window, cx| {
+                                                                this.set_session_config_option(
                                                                 window,
                                                                 cx,
                                                                 machine,
@@ -1630,13 +1643,14 @@ impl AmuxApp {
                                                                     value: value.clone(),
                                                                 },
                                                             );
-                                                        },
-                                                    );
-                                                }),
-                                        );
-                                    }
-                                    menu
-                                }),
+                                                            },
+                                                        );
+                                                    }),
+                                            );
+                                        }
+                                        menu
+                                    },
+                                ),
                             ),
                     );
                 }
@@ -1649,31 +1663,29 @@ impl AmuxApp {
                         h_flex()
                             .gap_1()
                             .items_center()
-                            .child(
-                                Label::new(opt.name.clone())
-                                    .text_sm()
-                                    .text_color(muted),
-                            )
+                            .child(Label::new(opt.name.clone()).text_sm().text_color(muted))
                             .child(
                                 Switch::new(SharedString::from(format!(
                                     "cfg-switch-{machine}-{opt_id}"
                                 )))
                                 .small()
                                 .checked(checked)
-                                .on_click(move |_, _window, cx| {
-                                    let _ = weak.update_in(cx, |this, window, cx| {
-                                        this.set_session_config_option(
-                                            window,
-                                            cx,
-                                            machine,
-                                            sid.clone(),
-                                            oid.clone(),
-                                            SessionConfigOptionValue::Boolean {
-                                                value: !checked,
-                                            },
-                                        );
-                                    });
-                                }),
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        let _ = weak.update_in(cx, |this, window, cx| {
+                                            this.set_session_config_option(
+                                                window,
+                                                cx,
+                                                machine,
+                                                sid.clone(),
+                                                oid.clone(),
+                                                SessionConfigOptionValue::Boolean {
+                                                    value: !checked,
+                                                },
+                                            );
+                                        });
+                                    },
+                                ),
                             ),
                     );
                 }
