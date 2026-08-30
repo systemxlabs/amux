@@ -52,6 +52,7 @@ Server 主动推送通知
 |---|---|
 | `session.state_change` | 普通会话状态变更事件，包含变更原因 |
 | `terminal.output` | 终端输出事件 |
+| `terminal.exit` | 终端进程退出事件 |
 
 ## Server
 
@@ -160,7 +161,7 @@ Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 
 
 终端与应用连接绑定，当应用与 Server 连接断开，其关联的终端资源被释放。
 
-Server 发送终端输出事件时，仅向该终端关联的应用连接发送。
+Server 发送终端事件时，仅向该终端关联的应用连接发送。
 
 ## 应用
 
