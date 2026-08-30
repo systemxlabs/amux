@@ -881,7 +881,8 @@ impl AmuxApp {
     pub(crate) fn panel_width_logical(panel: Panel) -> f32 {
         match panel {
             Panel::Workspace => 520.0,
-            Panel::Diff => 460.0,
+            // diff 行内容较宽，默认给足横向空间（可拖拽 300-800 再调）
+            Panel::Diff => 560.0,
             Panel::Detail => 360.0,
             Panel::Activities => 400.0,
             Panel::Terminal => 560.0,

@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 
 use gpui::prelude::FluentBuilder;
-use gpui::ScrollStrategy;
 use gpui::*;
 use gpui_component::{
     button::*, checkbox::Checkbox, label::Label, notification::Notification as UiNotification,
@@ -475,7 +474,7 @@ impl AmuxApp {
                             .text_color(cx.theme().muted_foreground),
                     )
                     .child(
-                        Label::new(format!("{}", indices.len()))
+                        Label::new(format!("{} 文件", indices.len()))
                             .text_xs()
                             .text_color(cx.theme().muted_foreground),
                     )
@@ -489,23 +488,47 @@ impl AmuxApp {
                 let path = f.path.clone();
                 let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
                 let diff_scroll = self.diff_scroll.clone();
+                let item_sizes = item_sizes.clone();
+                let app = cx.entity();
                 // 行号在本帧内确定（虚拟列表按位置定位），闭包只需捕获数值
                 let Some(&row_ix) = file_header_rows.get(*fi) else {
                     continue;
                 };
                 tree_items.push(
+                    // 手搓 stateful 行 + on_click：组件 Button 在此滚动容器内
+                    // 点击不触发（分组头同款模式可点），且整行热区更好点
                     h_flex()
+                        .id(ElementId::Name(format!("diff-tree-{path}").into()))
                         .items_center()
                         .pl(px(20.0))
+                        .pr_1()
+                        .py_0p5()
                         .min_w_0()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(cx.theme().list_hover))
+                        .on_click(move |_ev, _window, cx| {
+                            // scroll_to_item 是非严格模式，目标行已可见时不滚动；
+                            // PRD 要求点击文件必达对应 diff 区域，直接按行高
+                            // 累计设置滚动偏移（行高为文档化固定几何）。
+                            // set_offset 不触发重绘，必须显式 notify
+                            let y: f32 = item_sizes
+                                .iter()
+                                .take(row_ix)
+                                .map(|s| s.height.as_f32())
+                                .sum();
+                            diff_scroll
+                                .base_handle()
+                                .set_offset(point(px(0.), px(-y)));
+                            app.update(cx, |_, cx| cx.notify());
+                        })
                         .child(
-                            Button::new(format!("diff-tree-{path}"))
-                                .xsmall()
-                                .ghost()
-                                .label(file_name)
-                                .on_click(cx.listener(move |_this, _ev, _window, _cx| {
-                                    diff_scroll.scroll_to_item(row_ix, ScrollStrategy::Top);
-                                })),
+                            Label::new(file_name)
+                                .text_xs()
+                                .truncate()
+                                .min_w_0()
+                                .flex_1()
+                                .text_color(cx.theme().foreground),
                         )
                         .child(
                             Label::new(format!("+{}", f.additions))
@@ -514,6 +537,7 @@ impl AmuxApp {
                         )
                         .child(
                             Label::new(format!("-{}", f.deletions))
+                                .ml_1()
                                 .text_xs()
                                 .text_color(cx.theme().danger),
                         )
@@ -538,7 +562,7 @@ impl AmuxApp {
                 .into_any_element()
         } else {
             v_flex()
-                .w(px(220.0)) // diff 文件树面板固定宽度
+                .w(px(190.0)) // diff 文件树固定宽度（压缩些给 diff 内容区让位）
                 .h_full()
                 .min_h_0()
                 .gap_1()
@@ -649,6 +673,9 @@ impl AmuxApp {
         let path_for_restore = path.clone();
         let patch_for_restore = f.patch.clone();
         let dbg_path = path.clone();
+        // 深路径截断保留尾部（…/末级目录/文件名），完整路径放 tooltip；
+        // Label::truncate 保留头部，深路径会全变成「…」看不出文件
+        let display_path = display_path_tail(&path);
         let selected = self.is_diff_selected(machine_idx, &path, None, cx);
         h_flex()
             .id(ElementId::Name(format!("dbg-diff-file-{path}").into()))
@@ -676,7 +703,7 @@ impl AmuxApp {
                     }),
             )
             .child(
-                Label::new(path.clone())
+                Label::new(display_path)
                     .flex_1()
                     .min_w_0()
                     .text_sm()
@@ -716,7 +743,7 @@ impl AmuxApp {
                     .small()
                     .ghost()
                     .icon(IconName::Undo)
-                    .label("撤销该文件")
+                    .tooltip("撤销该文件全部改动")
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         if let Some((machine, _)) = this.selected_workspace() {
                             this.restore_workspace(
@@ -784,7 +811,7 @@ impl AmuxApp {
                     .small()
                     .ghost()
                     .icon(IconName::Undo)
-                    .label("撤销此块")
+                    .tooltip("撤销此块改动")
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         if let Some((machine, _)) = this.selected_workspace() {
                             this.restore_workspace(
@@ -867,6 +894,15 @@ impl AmuxApp {
             )
             .into_any_element()
     }
+}
+
+/// 深路径截断保留尾部：…/末级目录/文件名（截断保留开头会让深路径全变「…」）。
+fn display_path_tail(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() <= 2 {
+        return path.to_string();
+    }
+    format!("…/{}", parts[parts.len() - 2..].join("/"))
 }
 
 /// 扁平行描述（顺序 = 渲染顺序；仅在行模型重建时调用一次）。
