@@ -4,6 +4,8 @@
 //! 「终端历史由应用侧维护」）；渲染按行聚合格子为带背景色的文本 run。
 //! 终端实体属于 MachineView（应用连接维度），输入经 `terminal.input` 上行。
 
+use std::ops::Range;
+
 use base64::Engine as _;
 use gpui::*;
 use gpui_component::{label::Label, v_flex};
@@ -12,7 +14,7 @@ use protocol::{OpResult, TerminalInputParams, TerminalResizeParams};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 
 const FONT_SIZE: f32 = 13.0;
@@ -76,6 +78,10 @@ pub(crate) struct TerminalState {
     pub(crate) exited: bool,
     pub(crate) cols: u16,
     pub(crate) rows: u16,
+    /// IME 组合中的文本（拼音等；提交前不上屏，由平台候选窗展示）
+    marked_text: Option<String>,
+    /// 最近一次画布实测区（IME 候选窗锚定光标用）
+    last_bounds: Option<Bounds<Pixels>>,
 }
 
 impl TerminalState {
@@ -107,6 +113,8 @@ impl TerminalState {
             exited: false,
             cols,
             rows,
+            marked_text: None,
+            last_bounds: None,
         }
     }
 
@@ -133,10 +141,42 @@ impl TerminalState {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // 粘贴：macOS Cmd+V / 其他平台 Ctrl+V（剪贴板是 IME 之外输入中文的主要途径）
+        let m = &event.keystroke.modifiers;
+        let paste_modifier = if cfg!(target_os = "macos") {
+            m.platform
+        } else {
+            m.control
+        };
+        if paste_modifier && event.keystroke.key == "v" {
+            cx.stop_propagation();
+            self.paste(cx);
+            return;
+        }
         let Some(bytes) = keystroke_to_bytes(&event.keystroke) else {
             return;
         };
         cx.stop_propagation();
+        self.send_input(bytes, cx);
+    }
+
+    /// 粘贴剪贴板文本：终端处于 bracketed paste 模式（应用开启 DECSET 2004）时
+    /// 原样包裹发送，多行粘贴不会被逐行当作回车执行；否则换行归一为 \r。
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let Some(text) = item.text() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let bytes = if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+            format!("\x1b[200~{text}\x1b[201~").into_bytes()
+        } else {
+            text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+        };
         self.send_input(bytes, cx);
     }
 
@@ -207,16 +247,26 @@ impl Render for TerminalState {
             .on_scroll_wheel(cx.listener(Self::handle_scroll))
             .children(rows);
 
-        // 隐形画布：在 paint 阶段拿到真实 bounds 驱动行列同步
+        // 隐形画布：在 paint 阶段拿到真实 bounds 驱动行列同步 + 注册 IME 输入处理器
         let paint_weak = weak.clone();
         container = container.child(canvas(
             |_bounds, _window, _cx| (),
-            move |canvas_bounds, (), _window, cx| {
+            move |canvas_bounds, (), window, cx| {
                 // 实体可能在 paint 前被丢弃（切换会话等），失败可安全忽略
                 let _ = paint_weak.update(cx, |state, cx| {
+                    state.last_bounds = Some(canvas_bounds);
                     // 画布随容器铺满，bounds 即终端可视区
                     state.sync_size(canvas_bounds.size.width, canvas_bounds.size.height, cx);
                 });
+                // IME：焦点在终端上时注册输入处理器（每帧重注册，gpui 每帧清空）
+                if let Some(view) = paint_weak.upgrade() {
+                    let focus = view.read(cx).focus.clone();
+                    window.handle_input(
+                        &focus,
+                        ElementInputHandler::new(canvas_bounds, view),
+                        cx,
+                    );
+                }
             },
         ));
         let _ = weak;
@@ -378,6 +428,108 @@ fn color_to_hsla(
         Color::Indexed(i) => indexed_palette(i, colors),
     };
     gpui::rgb(((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32).into()
+}
+
+/// IME 文本输入（docs 限制外的补充能力）：中文/日文等组合输入经
+/// `EntityInputHandler` 注入。GPUI 平台层保证分发不重不漏——IME 输入源激活时
+/// printable 按键优先送输入处理器，否则走 `on_key_down` 字节路径。
+/// 组合中的 marked text 不在网格内预览（由平台候选窗展示），提交后整段发送。
+impl EntityInputHandler for TerminalState {
+    fn text_for_range(
+        &mut self,
+        _range: Range<usize>,
+        _adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        // 终端无文本缓冲语义
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        // 返回 marked text 末尾的空选区，给 IME 一个落点
+        let len = self
+            .marked_text
+            .as_deref()
+            .map(|t| t.encode_utf16().count())
+            .unwrap_or(0);
+        Some(UTF16Selection {
+            range: len..len,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        let len = self.marked_text.as_deref()?.encode_utf16().count();
+        Some(0..len)
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.marked_text = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // IME 提交（或平台直接插入）：整段作为输入字节发送
+        self.marked_text = None;
+        if !text.is_empty() {
+            self.send_input(text.as_bytes().to_vec(), cx);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked_text = Some(new_text.to_string());
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // 候选窗锚定到光标所在格子
+        let bounds = self.last_bounds?;
+        let content = self.term.renderable_content();
+        let col = content.cursor.point.column.0 as f32 * CELL_WIDTH;
+        let row = (content.cursor.point.line.0 + content.display_offset as i32).max(0) as f32
+            * CELL_HEIGHT;
+        Some(Bounds::new(
+            bounds.origin + point(px(col), px(row)),
+            size(px(CELL_WIDTH), px(CELL_HEIGHT)),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
 }
 
 /// 16 色默认盘（VS Code Dark+ 近似）。
