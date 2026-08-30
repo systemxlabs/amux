@@ -17,7 +17,7 @@ use protocol::{
     StateChangeReason,
 };
 
-use crate::config::{ApiFormat, ConfigStore, SkillEntry, WorkflowTemplate};
+use crate::config::{ConfigStore, SkillEntry, WorkflowTemplate};
 use crate::logic::InputAttachment;
 use crate::machine::{MachineStatus, MachineView};
 use crate::workflow::{MachineHub, WorkflowEngine};
@@ -172,10 +172,6 @@ pub struct AmuxApp {
     pub(crate) panel_delta_px: f32,
     pub(crate) panel_resize_origin: Option<f32>,
     pub(crate) panel_resize_initial: f32,
-    pub(crate) show_settings: bool,
-    pub(crate) show_add_machine_form: bool,
-    pub(crate) machine_form_error: Option<String>,
-    pub(crate) settings_category: SettingsCategory,
     pub(crate) new_session_mode: NewSessionMode,
     pub(crate) input_state: Entity<InputState>,
     pub(crate) input_attachments: Vec<InputAttachment>,
@@ -183,30 +179,9 @@ pub struct AmuxApp {
     pub(crate) drafts: HashMap<DraftKey, Draft>,
     pub(crate) session_cwd_input: Entity<InputState>,
     pub(crate) workflow_input: Entity<InputState>,
-    pub(crate) machine_name_input: Entity<InputState>,
-    pub(crate) machine_url_input: Entity<InputState>,
-    pub(crate) machine_token_input: Entity<InputState>,
-    pub(crate) qc_name_input: Entity<InputState>,
-    pub(crate) qc_prompt_input: Entity<InputState>,
-    pub(crate) skill_name_input: Entity<InputState>,
-    pub(crate) skill_desc_input: Entity<InputState>,
-    pub(crate) tpl_name_input: Entity<InputState>,
-    pub(crate) tpl_desc_input: Entity<InputState>,
-    pub(crate) orch_api_format: ApiFormat,
-    pub(crate) orch_base_input: Entity<InputState>,
-    pub(crate) orch_key_input: Entity<InputState>,
-    pub(crate) orch_model_input: Entity<InputState>,
-    pub(crate) orchestrator_form_error: Option<String>,
-    pub(crate) orchestrator_form_status: Option<String>,
-    pub(crate) settings_form_error: Option<String>,
     pub(crate) title_input: Entity<InputState>,
-    pub(crate) qc_edit_target: Option<String>,
-    pub(crate) skill_edit_target: Option<String>,
-    pub(crate) tpl_edit_target: Option<String>,
-    pub(crate) show_quick_command_form: bool,
-    pub(crate) show_skill_form: bool,
-    pub(crate) show_template_form: bool,
-    pub(crate) skill_action_dialog: Option<(SkillEntry, SkillAction)>,
+    /// 设置域状态（浮窗开关/导航与全部表单）：所有权与逻辑归 settings.rs
+    pub(crate) settings: crate::settings::SettingsState,
     pub(crate) renaming_session: Option<(usize, String)>,
     /// 同 Selected：以工作流会话 ID 为身份
     pub(crate) renaming_workflow: Option<String>,
@@ -233,9 +208,6 @@ pub struct AmuxApp {
     pub(crate) config_options: Option<SelectedConfigOptions>,
     /// 选中普通会话的斜杠命令（`session.slash_commands`；以 Agent 侧数据为权威）
     pub(crate) slash_commands: Option<SelectedSlashCommands>,
-    /// 设置浮窗焦点锚：打开时把焦点移入浮窗，Escape 动作（绑定
-    /// SettingsOverlay key_context）才能被派发到 on_action
-    pub(crate) settings_focus: FocusHandle,
     /// 持有订阅以避免其随 drop 自动取消
     pub(crate) _subs: Vec<Subscription>,
     pub(crate) _tasks: Vec<Task<()>>,
@@ -258,60 +230,7 @@ impl AmuxApp {
                 .placeholder("用自然语言描述完整执行计划（支持 @ 引用上下文）…")
                 .multi_line(true)
         });
-        let machine_name_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("名称，如 localpc"));
-        let machine_url_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("连接地址 ws://host:port"));
-        let machine_token_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Token")
-                .masked(true)
-        });
-        let qc_name_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("指令名")
-                .multi_line(true)
-                .auto_grow(2, 4)
-        });
-        let qc_prompt_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("提示词（发给 agent 的一段话）")
-                .multi_line(true)
-                .auto_grow(3, 8)
-        });
-        let skill_name_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("名称")
-                .multi_line(true)
-                .auto_grow(2, 4)
-        });
-        let skill_desc_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("描述（仓库/资源 URL 或安装方法）")
-                .multi_line(true)
-                .auto_grow(3, 8)
-        });
-        let tpl_name_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("计划名")
-                .multi_line(true)
-                .auto_grow(2, 4)
-        });
-        let tpl_desc_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("执行计划（自然语言描述）")
-                .multi_line(true)
-                .auto_grow(3, 8)
-        });
-        let orch_base_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Base URL（如 https://api…/v1）"));
-        let orch_key_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("API Key")
-                .masked(true)
-        });
-        let orch_model_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("模型名（如 gpt-4.1）"));
+        let settings = crate::settings::SettingsState::new(window, cx);
         let title_input = cx.new(|cx| InputState::new(window, cx));
 
         let mut app = AmuxApp {
@@ -328,40 +247,14 @@ impl AmuxApp {
             panel_delta_px: 0.0,
             panel_resize_origin: None,
             panel_resize_initial: 0.0,
-            show_settings: false,
-            show_add_machine_form: false,
-            machine_form_error: None,
-            settings_category: SettingsCategory::Machines,
+            settings,
             new_session_mode: NewSessionMode::Direct,
             input_state,
             input_attachments: Vec::new(),
             drafts: HashMap::new(),
             session_cwd_input,
             workflow_input,
-            machine_name_input,
-            machine_url_input,
-            machine_token_input,
-            qc_name_input,
-            qc_prompt_input,
-            skill_name_input,
-            skill_desc_input,
-            tpl_name_input,
-            tpl_desc_input,
-            orch_base_input,
-            orch_key_input,
-            orch_model_input,
-            orch_api_format: ApiFormat::ChatCompletions,
-            orchestrator_form_error: None,
-            orchestrator_form_status: None,
-            settings_form_error: None,
             title_input,
-            qc_edit_target: None,
-            skill_edit_target: None,
-            tpl_edit_target: None,
-            show_quick_command_form: false,
-            show_skill_form: false,
-            show_template_form: false,
-            skill_action_dialog: None,
             renaming_session: None,
             renaming_workflow: None,
             new_session_machine: None,
@@ -381,7 +274,6 @@ impl AmuxApp {
             expanded_workflows: std::collections::HashSet::new(),
             config_options: None,
             slash_commands: None,
-            settings_focus: cx.focus_handle(),
             _subs: Vec::new(),
             _tasks: Vec::new(),
         };
@@ -1077,8 +969,8 @@ impl Render for AmuxApp {
             .bg(cx.theme().background)
             .child(title_bar)
             .child(main_row);
-        if self.show_settings {
-            root = root.child(self.render_settings_overlay(window, cx));
+        if self.settings.show {
+            root = root.child(self.render_settings_overlay(cx));
         }
         if let Some(layer) = Root::render_sheet_layer(window, cx) {
             root = root.child(layer);

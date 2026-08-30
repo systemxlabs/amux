@@ -77,7 +77,10 @@ fn diff_panel_scroll_has_viewport_constraint(cx: &mut gpui::TestAppContext) {
                 cx,
             );
             machine.status = MachineStatus::Online;
-            machine.diff.update(cx, |st, _| st.files = big_diff_files());
+            machine.diff.update(cx, |st, _| {
+                st.files = big_diff_files();
+                st.rebuild_rows();
+            });
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
                 machine: 0,

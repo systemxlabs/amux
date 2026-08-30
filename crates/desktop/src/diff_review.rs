@@ -75,10 +75,12 @@ impl AmuxApp {
                         Ok(r) => {
                             st.files = r.files.clone();
                             st.not_repo = r.not_repo;
+                            st.rebuild_rows();
                         }
                         Err(error) => {
                             st.files.clear();
                             st.not_repo = false;
+                            st.rebuild_rows();
                             error_message = Some(format!("加载改动失败：{error}"));
                         }
                     });
@@ -275,6 +277,17 @@ impl AmuxApp {
             .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).changes_collapsed)
             .unwrap_or(false);
+        let (_rows, item_sizes, file_header_rows) = machine
+            .and_then(|i| self.machine(i))
+            .map(|m| {
+                let st = m.diff.read(cx);
+                (
+                    st.rows.clone(),
+                    st.item_sizes.clone(),
+                    st.file_header_rows.clone(),
+                )
+            })
+            .unwrap_or_default();
         let mut content_children: Vec<gpui::AnyElement> = Vec::new();
         let toolbar = h_flex()
             .items_center()
@@ -343,6 +356,7 @@ impl AmuxApp {
                             if let Some(view) = this.machines.get_mut(machine) {
                                 view.diff.update(cx, |st, _| {
                                     st.changes_collapsed = !st.changes_collapsed;
+                                    st.rebuild_rows();
                                 });
                             }
                             cx.notify();
@@ -476,7 +490,9 @@ impl AmuxApp {
                 let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
                 let diff_scroll = self.diff_scroll.clone();
                 // 行号在本帧内确定（虚拟列表按位置定位），闭包只需捕获数值
-                let row_ix = file_header_row_of(&files, *fi);
+                let Some(&row_ix) = file_header_rows.get(*fi) else {
+                    continue;
+                };
                 tree_items.push(
                     h_flex()
                         .items_center()
@@ -507,13 +523,6 @@ impl AmuxApp {
         }
         // 虚拟化：只渲染可视范围内的行（行高为文档化几何——diff 行等宽
         // 字符不换行，高度固定）
-        let row_kinds = Self::diff_row_kinds(&files, diff_changes_collapsed);
-        let item_sizes = std::rc::Rc::new(
-            row_kinds
-                .iter()
-                .map(|k| size(px(100.), k.height()))
-                .collect::<Vec<_>>(),
-        );
         let diff_list = v_virtual_list(
             cx.entity(),
             "diff-panel",
@@ -576,27 +585,6 @@ impl AmuxApp {
             )
             .into_any()
     }
-    /// 扁平行描述（顺序 = 渲染顺序）。
-    pub(crate) fn diff_row_kinds(
-        files: &[GitDiffFile],
-        changes_collapsed: bool,
-    ) -> Vec<DiffRowKind> {
-        let mut rows = Vec::new();
-        for (fi, f) in files.iter().enumerate() {
-            rows.push(DiffRowKind::FileHeader(fi));
-            if changes_collapsed {
-                continue;
-            }
-            for (hi, h) in f.hunks.iter().enumerate() {
-                rows.push(DiffRowKind::HunkHeader(fi, hi));
-                for (li, _) in diff_lines(h).iter().enumerate() {
-                    rows.push(DiffRowKind::Line(fi, hi, li));
-                }
-            }
-        }
-        rows
-    }
-
     /// 渲染 [range) 内的行（虚拟列表回调）。
     pub(crate) fn render_diff_rows(
         &self,
@@ -609,9 +597,12 @@ impl AmuxApp {
             return Vec::new();
         };
         let files = m.diff.read(cx).files.clone();
-        let changes_collapsed = m.diff.read(cx).changes_collapsed;
-        let row_kinds = Self::diff_row_kinds(&files, changes_collapsed);
+        let row_kinds = m.diff.read(cx).rows.clone();
         let mut out = Vec::with_capacity(range.len());
+        // 同 hunk 的连续行只解析一次（可视行有序，命中率高）；
+        // 此前每行都全量解析所在 hunk
+        let mut memo_key: (usize, usize) = (usize::MAX, usize::MAX);
+        let mut memo_lines: Vec<DiffLine> = Vec::new();
         for ix in range {
             let Some(kind) = row_kinds.get(ix) else {
                 continue;
@@ -632,7 +623,11 @@ impl AmuxApp {
                 DiffRowKind::Line(fi, hi, li) => {
                     if let Some(f) = files.get(fi) {
                         if let Some(h) = f.hunks.get(hi) {
-                            if let Some(line) = diff_lines(h).get(li) {
+                            if memo_key != (fi, hi) {
+                                memo_lines = diff_lines(h);
+                                memo_key = (fi, hi);
+                            }
+                            if let Some(line) = memo_lines.get(li) {
                                 out.push(Self::render_diff_line_row(line, cx));
                             }
                         }
@@ -874,19 +869,22 @@ impl AmuxApp {
     }
 }
 
-/// 文件头所在虚拟行号（供文件树点击滚动定位）。
-fn file_header_row_of(files: &[GitDiffFile], file_index: usize) -> usize {
-    let mut row = 0usize;
-    for (seen, f) in files.iter().enumerate() {
-        if seen == file_index {
-            return row;
+/// 扁平行描述（顺序 = 渲染顺序；仅在行模型重建时调用一次）。
+fn build_diff_rows(files: &[GitDiffFile], changes_collapsed: bool) -> Vec<DiffRowKind> {
+    let mut rows = Vec::new();
+    for (fi, f) in files.iter().enumerate() {
+        rows.push(DiffRowKind::FileHeader(fi));
+        if changes_collapsed {
+            continue;
         }
-        row += 1 + f.hunks.len(); // 文件头 + 各 hunk 头
-        for h in &f.hunks {
-            row += diff_lines(h).len();
+        for (hi, h) in f.hunks.iter().enumerate() {
+            rows.push(DiffRowKind::HunkHeader(fi, hi));
+            for (li, _) in diff_lines(h).iter().enumerate() {
+                rows.push(DiffRowKind::Line(fi, hi, li));
+            }
         }
     }
-    row
+    rows
 }
 
 /// 虚拟化 diff 列表的行描述（扁平化：文件头 / hunk 头 / diff 行）。
@@ -925,4 +923,35 @@ pub(crate) struct DiffReviewState {
     pub(crate) changes_collapsed: bool,
     /// 单独折叠的分组（父目录路径）；缺失即展开（docs/PRD.md：分组默认展开）
     pub(crate) collapsed_groups: HashSet<String>,
+    /// 扁平行模型缓存（含每行尺寸与文件头行号索引）：仅在 files /
+    /// changes_collapsed 变更的写点重建一次。此前渲染路径每帧重建行模型并对
+    /// 每个 hunk 全量解析 diff_lines，大 diff 时是 O(n²)/帧。
+    pub(crate) rows: std::rc::Rc<Vec<DiffRowKind>>,
+    pub(crate) item_sizes: std::rc::Rc<Vec<gpui::Size<Pixels>>>,
+    /// 文件头所在虚拟行号（按文件下标索引），供文件树点击滚动定位
+    pub(crate) file_header_rows: Vec<usize>,
+}
+
+impl DiffReviewState {
+    /// 行模型重建（files / changes_collapsed 变更后调用）。
+    pub(crate) fn rebuild_rows(&mut self) {
+        let rows = build_diff_rows(&self.files, self.changes_collapsed);
+        // 文件头行号：顺序扫描一次（rows 与 files 同序）
+        let mut header_rows = Vec::with_capacity(self.files.len());
+        for (ix, row) in rows.iter().enumerate() {
+            if let DiffRowKind::FileHeader(fi) = row {
+                if *fi == header_rows.len() {
+                    header_rows.push(ix);
+                }
+            }
+        }
+        self.rows = std::rc::Rc::new(rows);
+        self.item_sizes = std::rc::Rc::new(
+            self.rows
+                .iter()
+                .map(|k| gpui::size(px(100.), k.height()))
+                .collect(),
+        );
+        self.file_header_rows = header_rows;
+    }
 }

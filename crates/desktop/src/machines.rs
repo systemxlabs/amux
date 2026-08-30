@@ -52,11 +52,14 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         agent: String,
         skill: SkillEntry,
         action: SkillAction,
     ) {
+        let Some(machine) = self.machine_idx_by_name(machine_name) else {
+            return;
+        };
         let Some(m) = self.machine(machine) else {
             return;
         };
@@ -207,18 +210,6 @@ impl AmuxApp {
         cx.notify();
     }
 
-    pub(crate) fn close_add_machine_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_add_machine_form = false;
-        self.machine_form_error = None;
-        self.machine_name_input
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        self.machine_url_input
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        self.machine_token_input
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        cx.notify();
-    }
-
     pub(crate) fn add_machine(
         &mut self,
         window: &mut Window,
@@ -237,7 +228,7 @@ impl AmuxApp {
             None
         };
         if let Some(error) = validation_error {
-            self.machine_form_error = Some(error.into());
+            self.settings.machine_form_error = Some(error.into());
             cx.notify();
             return false;
         }
@@ -255,7 +246,7 @@ impl AmuxApp {
         // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
         // 提前发的 agent.list 必然失败并把 notice 染成「agent 列表获取失败」。
         // 初始数据由 on_notify 的 auth_ok 分支统一拉取（同重连流程）。
-        self.machine_form_error = None;
+        self.settings.machine_form_error = None;
         cx.notify();
         true
     }
@@ -278,7 +269,8 @@ impl AmuxApp {
                 .iter()
                 .any(|child| child.machine_idx == idx)
         }) {
-            self.machine_form_error = Some("请先删除关联工作流会话，再移除该机器。".into());
+            self.settings.machine_form_error =
+                Some("请先删除关联工作流会话，再移除该机器。".into());
             cx.notify();
             return;
         }
