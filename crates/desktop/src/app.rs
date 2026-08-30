@@ -525,7 +525,12 @@ impl AmuxApp {
     }
 
     /// 关闭并移除指定终端（server 侧杀 PTY；断连时 server 自行回收）。
-    pub(crate) fn close_terminal(&mut self, cx: &mut Context<Self>, machine_idx: usize, id: String) {
+    pub(crate) fn close_terminal(
+        &mut self,
+        cx: &mut Context<Self>,
+        machine_idx: usize,
+        id: String,
+    ) {
         let Some(m) = self.machine_mut(machine_idx) else {
             return;
         };
@@ -866,7 +871,9 @@ impl AmuxApp {
         }
     }
 
-    /// 打开/切换/关闭右侧上下文面板：窗口向右扩展（中间面板宽度不变）。
+    /// 打开/切换/关闭右侧上下文面板：面板锚定窗口右缘**向左展开**——窗口
+    /// 尺寸不变，中间列被压缩（同 Codex/VS Code 的 docked 分栏惯例）。
+    /// 面板是 main_row 的 flex 兄弟节点，宽度归零即完全折叠。
     pub(crate) fn set_panel(
         &mut self,
         window: &mut Window,
@@ -878,10 +885,6 @@ impl AmuxApp {
             .map(|width| width + Self::PANEL_RESIZE_HANDLE_WIDTH)
             .unwrap_or(0.0)
             * window.scale_factor();
-        let bounds = window.bounds();
-        // 当前窗口宽度已经包含旧面板；先还原中间区域宽度，再应用新面板宽度。
-        // 直接用 new_delta 计算会让 resize 成为 no-op，导致面板覆盖中间区域的悬浮按钮。
-        let base = bounds.size.width - self.panel_delta_px.into();
         if panel == Some(Panel::Activities) && self.panel != Some(Panel::Activities) {
             self.activities_limit = 100;
             self.activities_scroll.scroll_to_bottom();
@@ -890,8 +893,6 @@ impl AmuxApp {
         self.panel_delta_px = new_delta;
         self.panel_resize_origin = None;
         self.panel_resize_initial = new_delta;
-        let width: gpui::Pixels = base + new_delta.into();
-        window.resize(gpui::Size::new(width, bounds.size.height));
         cx.notify();
     }
 
@@ -928,10 +929,17 @@ impl AmuxApp {
                 let Some(origin) = this.panel_resize_origin else {
                     return;
                 };
+                // 向左拖（x 变小）即面板变宽；上限同时受 800 逻辑像素与
+                // 窗口可用宽度约束（保住侧栏与最小中间列宽）
+                let scale = window.scale_factor();
+                let avail = window.bounds().size.width.as_f32() / scale
+                    - crate::theme::SIDEBAR_WIDTH
+                    - 320.0; // 最小中间列宽
+                let max_w = 800.0f32.min(avail.max(300.0));
                 let next = (this.panel_resize_initial + origin - event.event.position.x.as_f32())
                     .clamp(
-                        (300.0 + Self::PANEL_RESIZE_HANDLE_WIDTH) * window.scale_factor(),
-                        (800.0 + Self::PANEL_RESIZE_HANDLE_WIDTH) * window.scale_factor(),
+                        (300.0 + Self::PANEL_RESIZE_HANDLE_WIDTH) * scale,
+                        (max_w + Self::PANEL_RESIZE_HANDLE_WIDTH) * scale,
                     );
                 this.resize_panel(window, cx, next);
             }));
@@ -950,12 +958,13 @@ impl AmuxApp {
         )
     }
 
-    pub(crate) fn resize_panel(&mut self, window: &mut Window, cx: &mut Context<Self>, width: f32) {
-        let current = self.panel_delta_px;
-        let bounds = window.bounds();
-        let base = bounds.size.width - current.into();
+    pub(crate) fn resize_panel(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+        width: f32,
+    ) {
         self.panel_delta_px = width;
-        window.resize(gpui::Size::new(base + width.into(), bounds.size.height));
         cx.notify();
     }
 
