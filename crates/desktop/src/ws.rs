@@ -205,6 +205,14 @@ async fn serve_connection(
     let mut pending: HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> = HashMap::new();
     let mut next_id: u64 = 1;
     let mut authed = false;
+    // 心跳：周期 ping，超过 HEARTBEAT_TIMEOUT 未见任何入站帧即判定半开断连。
+    // TCP 半开（拔网线/server 假死）下 select 永远不会唤醒，请求将永久挂起、
+    // 机器状态也永远显示在线；超时走既有断连路径（离线标记 + 在途请求报错）。
+    const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_seen = std::time::Instant::now();
     let auth_id = next_id;
     next_id += 1;
     let auth_frame = protocol::JsonRpcRequest {
@@ -251,9 +259,19 @@ async fn serve_connection(
                 }
                 pending.insert(id, req.resp);
             }
+            _ = heartbeat.tick() => {
+                if last_seen.elapsed() > HEARTBEAT_TIMEOUT {
+                    log::warn!("连接无响应（心跳超时），判定断开");
+                    break;
+                }
+                if sink.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
             msg = source.next() => {
                 let Some(msg) = msg else { break };
                 let Ok(msg) = msg else { break };
+                last_seen = std::time::Instant::now();
                 let Message::Text(t) = msg else { continue };
                 let Ok(v) = serde_json::from_str::<Value>(&t) else { continue };
                 // 带 Number id 的帧是响应；其余（缺 id）按 server → GUI 通知处理

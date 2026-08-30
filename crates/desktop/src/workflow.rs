@@ -641,19 +641,42 @@ impl WorkflowEngine {
         crate::wfstore::save(data_dir, &snapshot)
     }
 
+    /// 后台持久化：UI 线程只克隆引擎句柄（session 为 Arc<RwLock>），读盘写在
+    /// tokio 后台完成。并发写以「整文件原子替换 + 唯一临时名」保证不损坏。
+    pub fn persist_in_background(&self, data_dir: PathBuf) {
+        let engine = self.clone();
+        crate::ws::runtime().spawn(async move {
+            if let Err(e) = engine.persist(&data_dir) {
+                log::error!("工作流状态持久化失败 {}: {e}", engine.id());
+            }
+        });
+    }
+
     pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
         // 惰性元数据加载：只读 sqlite，不读取 transcript/activities 两份 JSONL。
         crate::wfstore::load_all_meta(data_dir)
     }
 
     /// 按需补齐：把会话的 transcript/activities 从 JSONL 读入（仅打开渲染视图时调用）。
+    /// 读盘在锁外完成，短暂持锁合并——避免持写锁做 IO 阻塞渲染与后台推进。
     pub fn backfill(&self, data_dir: &Path) -> std::io::Result<()> {
-        let mut s = self.session.write().expect("RwLock 中毒");
-        if !s.transcript.is_empty() || !s.activities.is_empty() {
-            // 已加载过（例如推进中正在写内存），避免用磁盘旧快照覆盖活跃状态。
-            return Ok(());
-        }
-        crate::wfstore::load_payload(data_dir, &mut s)
+        let id = {
+            let s = self.session.read().expect("RwLock 中毒");
+            if !s.transcript.is_empty() || !s.activities.is_empty() {
+                // 已加载过（例如推进中正在写内存），避免用磁盘旧快照覆盖活跃状态。
+                return Ok(());
+            }
+            s.id.clone()
+        };
+        let (transcript, activities) = crate::wfstore::load_payload(data_dir, &id)?;
+        self.with_session(|s| {
+            // 竞态兜底：读盘期间若已有内容写入内存（推进已开始），不覆盖
+            if s.transcript.is_empty() && s.activities.is_empty() {
+                s.transcript = transcript;
+                s.activities = activities;
+            }
+        });
+        Ok(())
     }
 
     pub fn remove(data_dir: &Path, id: &str) -> std::io::Result<()> {
@@ -1657,7 +1680,9 @@ mod tests {
 
         // 打开会话时按需补齐，再 restore 推进。
         let mut opened = sessions[0].clone();
-        crate::wfstore::load_payload(&dir, &mut opened).unwrap();
+        let (transcript, activities) = crate::wfstore::load_payload(&dir, &opened.id).unwrap();
+        opened.transcript = transcript;
+        opened.activities = activities;
         assert!(opened
             .transcript
             .iter()
@@ -1682,7 +1707,9 @@ mod tests {
         let reloaded = WorkflowEngine::load_all(&dir).unwrap();
         assert!(reloaded[0].transcript.is_empty());
         let mut opened2 = reloaded[0].clone();
-        crate::wfstore::load_payload(&dir, &mut opened2).unwrap();
+        let (transcript2, activities2) = crate::wfstore::load_payload(&dir, &opened2.id).unwrap();
+        opened2.transcript = transcript2;
+        opened2.activities = activities2;
         assert!(opened2
             .transcript
             .iter()

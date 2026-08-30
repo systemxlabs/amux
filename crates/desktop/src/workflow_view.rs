@@ -133,9 +133,7 @@ impl AmuxApp {
             }
         }
         if let Some(wf) = self.workflows.get(wi) {
-            if let Err(e) = wf.persist(&session_dir) {
-                log::error!("工作流创建后持久化失败 {}: {e}", wf.id());
-            }
+            wf.persist_in_background(session_dir.clone());
         }
         if should_advance {
             let wf = self.workflows[wi].clone();
@@ -171,9 +169,7 @@ impl AmuxApp {
             if should_advance {
                 wf.begin_busy();
             }
-            if let Err(e) = wf.persist(&session_dir) {
-                log::error!("工作流取消消息持久化失败 {}: {e}", wf.id());
-            }
+            wf.persist_in_background(session_dir.clone());
             should_advance
         } else {
             false
@@ -352,7 +348,7 @@ impl AmuxApp {
             .and_then(|wi| self.workflows.get_mut(wi))
         {
             wf.session.write().unwrap().title = title.trim().to_string();
-            let _ = wf.persist(&self.session_dir);
+            wf.persist_in_background(self.session_dir.clone());
         }
         self.renaming_workflow = None;
         cx.notify();

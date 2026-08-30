@@ -562,8 +562,10 @@ impl AmuxApp {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                // 域标识：按钮 id 用机器名而非下标（机器顺序变化不影响身份）
+                // 域标识：按钮 id 与回调捕获均用机器名而非下标（机器顺序变化不影响身份）
                 let machine_name = m.config.name.clone();
+                let reconnect_name = machine_name.clone();
+                let remove_name = machine_name.clone();
                 let mut item = v_flex()
                     .gap_1()
                     .p_2()
@@ -586,21 +588,25 @@ impl AmuxApp {
                             ))
                             .child(div().flex_1())
                             .child(
-                                Button::new(format!("restart-m-{i}"))
-                                    .small()
-                                    .label("重连")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let name = this.machines[i].config.name.clone();
-                                        this.confirm_reconnect_machine(window, cx, i, name);
-                                    })),
+                                Button::new(SharedString::from(format!(
+                                    "reconnect-m-{machine_name}"
+                                )))
+                                .small()
+                                .label("重连")
+                                .on_click(cx.listener(
+                                    move |this, _ev, window, cx| {
+                                        let name = reconnect_name.clone();
+                                        this.confirm_reconnect_machine(window, cx, name);
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new(format!("remove-{i}"))
+                                Button::new(SharedString::from(format!("remove-m-{machine_name}")))
                                     .small()
                                     .label("移除")
                                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let name = this.machines[i].config.name.clone();
-                                        this.confirm_remove_machine(window, cx, i, name);
+                                        let name = remove_name.clone();
+                                        this.confirm_remove_machine(window, cx, name);
                                     })),
                             ),
                     )

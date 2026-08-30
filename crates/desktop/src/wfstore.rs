@@ -8,9 +8,7 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-#[cfg(test)]
-use protocol::Activity;
-use protocol::{ContentBlock, HistoryItem};
+use protocol::{Activity, ContentBlock, HistoryItem};
 use rusqlite::{params, Connection};
 
 use crate::workflow::{ChildSession, OrcMsg, OrcSession};
@@ -33,7 +31,9 @@ fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("jsonl.tmp");
+    // 唯一临时名：persist 可能并发（后台任务 + 推进任务），固定 tmp 名会让
+    // 两个写者交错写同一文件、rename 后得到损坏 JSONL
+    let tmp = path.with_extension(format!("jsonl.tmp.{}", uuid::Uuid::new_v4().simple()));
     {
         let mut f = std::fs::File::create(&tmp)?;
         for item in items {
@@ -105,6 +105,8 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
     std::fs::create_dir_all(data_dir)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let conn = Connection::open(sqlite_path(data_dir))?;
+    // 多个写者可能并发持久化（各自独立连接）：等锁而非报 "database is locked"
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
@@ -219,13 +221,13 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     .collect()
 }
 
-/// 惰性加载（按需补齐）：把指定会话的 transcript/activities 从其对应 JSONL 读入，
-/// 其余字段保持不动。仅在打开会话渲染对话/活动视图时调用。
-pub fn load_payload(data_dir: &Path, session: &mut OrcSession) -> io::Result<()> {
-    session.transcript =
-        transcript_from_history(&read_jsonl(&history_path(data_dir, &session.id))?);
-    session.activities = read_jsonl(&activities_path(data_dir, &session.id))?;
-    Ok(())
+/// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
+/// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
+/// 调用方可先在锁外读盘、再短暂持锁合并——避免持写锁做 IO 阻塞渲染与后台推进。
+pub fn load_payload(data_dir: &Path, id: &str) -> io::Result<(Vec<OrcMsg>, Vec<Activity>)> {
+    let transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, id))?);
+    let activities = read_jsonl(&activities_path(data_dir, id))?;
+    Ok((transcript, activities))
 }
 
 pub fn remove(data_dir: &Path, id: &str) -> io::Result<()> {
@@ -344,7 +346,9 @@ mod tests {
         assert!(meta[0].activities.is_empty());
 
         // 按需补齐：打开会话时才把 transcript/activities 从 JSONL 恢复出来。
-        load_payload(&dir, &mut meta[0]).unwrap();
+        let (transcript, activities) = load_payload(&dir, &meta[0].id).unwrap();
+        meta[0].transcript = transcript;
+        meta[0].activities = activities;
         assert_eq!(meta[0].transcript.len(), 2);
         assert!(matches!(
             &meta[0].transcript[0],

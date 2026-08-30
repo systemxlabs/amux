@@ -12,6 +12,11 @@ use crate::ws::WsClient;
 use crate::app::{AmuxApp, DraftKey, Selected, SkillAction};
 
 impl AmuxApp {
+    /// 按机器名（稳定域身份）解析当前下标。
+    pub(crate) fn machine_idx_by_name(&self, name: &str) -> Option<usize> {
+        self.machines.iter().position(|m| m.config.name == name)
+    }
+
     pub(crate) fn fetch_agents(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = self.machines.get(idx) else {
             return;
@@ -162,7 +167,6 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        idx: usize,
         name: String,
     ) {
         self.confirm_dialog(
@@ -173,21 +177,21 @@ impl AmuxApp {
             "重连机器",
             format!("确定重连机器「{name}」吗？"),
             move |this, window, cx| {
-                this.reconnect_machine(window, cx, idx);
+                this.reconnect_machine(window, cx, &name);
             },
         );
     }
 
-    /// 重连机器：重建其 WS 连接视图。
+    /// 重连机器：重建其 WS 连接视图（按稳定机器名定位，删机重排不影响身份）。
     pub(crate) fn reconnect_machine(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        idx: usize,
+        name: &str,
     ) {
-        if idx >= self.machines.len() {
+        let Some(idx) = self.machine_idx_by_name(name) else {
             return;
-        }
+        };
         let cfg = self.machines[idx].config.clone();
         let client = WsClient::connect_with_token(machine_ws_url(&cfg), cfg.token.clone());
         self.machines[idx].client = client.clone();
@@ -195,7 +199,7 @@ impl AmuxApp {
         self.machines[idx].notice = None;
         self.machines[idx].views.clear();
         self.sync_machine_hub();
-        let t = self.spawn_machine_tasks(window, cx, idx, client);
+        let t = self.spawn_machine_tasks(window, cx, name.to_string(), client);
         self._tasks.push(t);
         // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
         // 提前发的 agent.list 必然失败并把 notice 染成「agent 列表获取失败」。
@@ -245,7 +249,7 @@ impl AmuxApp {
         let idx = self.machines.len();
         self.machines.push(view);
         let client = self.machines[idx].client.clone();
-        let t = self.spawn_machine_tasks(window, cx, idx, client);
+        let t = self.spawn_machine_tasks(window, cx, name, client);
         self._tasks.push(t);
         self.sync_machine_hub();
         // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
@@ -260,11 +264,11 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        idx: usize,
+        name: &str,
     ) {
-        if idx >= self.machines.len() {
+        let Some(idx) = self.machine_idx_by_name(name) else {
             return;
-        }
+        };
         if self.workflows.iter().any(|workflow| {
             workflow
                 .session
@@ -315,7 +319,6 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        idx: usize,
         name: String,
     ) {
         self.confirm_dialog(
@@ -326,7 +329,7 @@ impl AmuxApp {
             "移除机器",
             format!("确定移除机器「{name}」吗？其本地注册信息将被删除。"),
             move |this, window, cx| {
-                this.remove_machine(window, cx, idx);
+                this.remove_machine(window, cx, &name);
             },
         );
     }

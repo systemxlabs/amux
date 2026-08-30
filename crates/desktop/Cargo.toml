@@ -12,8 +12,8 @@ amux-common = { path = "../common" }
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# 按需声明特性：macros(select!/test)、rt-multi-thread、net、sync
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync"] }
+# 按需声明特性：macros(select!/test)、rt-multi-thread、net、sync、time（心跳）
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-tungstenite.workspace = true
 uuid.workspace = true
 futures-util = "0.3"

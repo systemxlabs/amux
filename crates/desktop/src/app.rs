@@ -414,12 +414,13 @@ impl AmuxApp {
         }
         app.sync_machine_hub();
         for i in 0..app.machines.len() {
+            let name = app.machines[i].config.name.clone();
             let client = app.machines[i].client.clone();
-            let t = app.spawn_machine_tasks(window, cx, i, client);
+            let t = app.spawn_machine_tasks(window, cx, name, client);
             app._tasks.push(t);
-            app.refresh_sessions(i, window, cx);
-            app.fetch_agents(i, window, cx);
         }
+        // 初始数据不在此处拉取：认证握手完成前请求会被拒绝，
+        // 由 on_notify 的 auth_ok 分支统一拉取（同加机/重连流程）
         app.restore_workflows(window, cx);
         app.spawn_polling(window, cx);
         app.setup_orch_inputs(window, cx);
@@ -627,22 +628,36 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        idx: usize,
+        name: String,
         _client: WsClient,
     ) -> Task<()> {
-        let mut notify_rx = self.machines[idx].client.subscribe();
+        let mut notify_rx = self
+            .machine_idx_by_name(&name)
+            .and_then(|idx| self.machines.get(idx))
+            .expect("机器已存在")
+            .client
+            .subscribe();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            // Lagged 只是慢消费者丢消息，通道仍存活——必须继续消费，
-            // 否则通知洪峰过后该机器的 state_change 驱动将永久失效
+            // 以机器名（稳定域身份）为捕获，而非 Vec 下标——删机会使下标左移，
+            // 旧任务按旧 idx 写状态会串到另一台机器。机器移除后任务退出。
             loop {
                 match notify_rx.recv().await {
                     Ok(n) => {
+                        let mut gone = false;
                         let _ = this.update_in(cx, |this, window, cx| {
-                            Self::on_notify(this, window, cx, idx, &n);
+                            match this.machine_idx_by_name(&name) {
+                                Some(idx) => Self::on_notify(this, window, cx, idx, &n),
+                                None => gone = true,
+                            }
                         });
+                        if gone {
+                            return;
+                        }
                     }
+                    // Lagged 只是慢消费者丢消息，通道仍存活——必须继续消费，
+                    // 否则通知洪峰过后该机器的 state_change 驱动将永久失效
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                        log::warn!("机器 #{idx} 通知积压，跳过 {missed} 条");
+                        log::warn!("机器 {name} 通知积压，跳过 {missed} 条");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }

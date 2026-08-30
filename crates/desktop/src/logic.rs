@@ -304,7 +304,13 @@ pub fn read_path_context(path: &str) -> String {
     } else if is_image_path(path) {
         format!("[图片 {path}]（请用工具按此路径读取图片）")
     } else if p.is_file() {
-        let content = std::fs::read_to_string(p).unwrap_or_default();
+        // 限量读：只取开头若干字节（4000 字符的 UTF-8 上界），大文件不整读进内存
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        if let Ok(f) = std::fs::File::open(p) {
+            let _ = f.take(16_384).read_to_end(&mut bytes);
+        }
+        let content = String::from_utf8_lossy(&bytes);
         let excerpt: String = content.chars().take(4000).collect();
         format!("[文件 {path}]\n{excerpt}")
     } else {
