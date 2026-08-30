@@ -18,11 +18,7 @@ struct TestConn {
 
 fn test_conn(conn_id: u64) -> TestConn {
     let (tx, rx) = tokio::sync::mpsc::channel(256);
-    TestConn {
-        conn_id,
-        rx,
-        tx,
-    }
+    TestConn { conn_id, rx, tx }
 }
 
 /// 收集帧直到谓词命中（限时兜底；慢机器上 shell 启动可能需要数百 ms）。
@@ -90,8 +86,7 @@ async fn open_echo_exit_roundtrip() {
     service
         .input(TerminalInputParams {
             terminal_id: terminal_id.clone(),
-            data: base64::engine::general_purpose::STANDARD
-                .encode(format!("echo {mark}\n")),
+            data: base64::engine::general_purpose::STANDARD.encode(format!("echo {mark}\n")),
         })
         .expect("写入输入应成功");
 
@@ -157,7 +152,9 @@ async fn close_and_conn_binding() {
     let _ = other;
     let err = service
         .close(
-            protocol::TerminalIdParams { terminal_id: id.clone() },
+            protocol::TerminalIdParams {
+                terminal_id: id.clone(),
+            },
             999,
         )
         .unwrap_err();
@@ -165,7 +162,12 @@ async fn close_and_conn_binding() {
 
     // 所属连接显式关闭 → 后续操作报终端不存在
     service
-        .close(protocol::TerminalIdParams { terminal_id: id.clone() }, 7)
+        .close(
+            protocol::TerminalIdParams {
+                terminal_id: id.clone(),
+            },
+            7,
+        )
         .expect("所属连接关闭应成功");
     let err = service
         .resize(protocol::TerminalResizeParams {

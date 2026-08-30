@@ -144,21 +144,25 @@ impl AmuxApp {
             )
             .child(h_flex().flex_wrap().gap_1().px_3().pb_2().child(tabs))
             .child(
-                div().flex_1().min_h_0().when_some(active_view, |body, view| {
-                    body.child(view)
-                }).when(!has_active, |body| {
-                    body.child(
-                        v_flex().flex_1().items_center().justify_center().child(
-                            Label::new(if online {
-                                "暂无终端，点击 + 新建"
-                            } else {
-                                "机器离线，无法使用终端"
-                            })
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground),
-                        ),
-                    )
-                }),
+                // v_flex：终端视图依赖 flex 拉伸撑满剩余高度（块级 div 会让
+                // 子容器高度塌缩成内容行数）
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .when_some(active_view, |body, view| body.child(view))
+                    .when(!has_active, |body| {
+                        body.child(
+                            v_flex().flex_1().items_center().justify_center().child(
+                                Label::new(if online {
+                                    "暂无终端，点击 + 新建"
+                                } else {
+                                    "机器离线，无法使用终端"
+                                })
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground),
+                            ),
+                        )
+                    }),
             )
             .into_any()
     }

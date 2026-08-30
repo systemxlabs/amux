@@ -153,7 +153,10 @@ impl TerminalService {
                 killer: Arc::new(Mutex::new(killer)),
             },
         );
-        log::info!("终端 {terminal_id} 已打开（连接 {}，{cols}x{rows}，cwd {cwd}）", conn.conn_id);
+        log::info!(
+            "终端 {terminal_id} 已打开（连接 {}，{cols}x{rows}，cwd {cwd}）",
+            conn.conn_id
+        );
 
         // 输出泵：PTY 字节 → base64 → 所属连接直发。进程退出后发 exit 通知并回收。
         let this = self.clone();
@@ -182,14 +185,12 @@ impl TerminalService {
             }
             if eof {
                 let _ = frame_tx
-                    .send(
-                        notification_frame(
-                            notify::TERMINAL_EXIT,
-                            &TerminalExitNotification {
-                                terminal_id: pump_id.clone(),
-                            },
-                        ),
-                    )
+                    .send(notification_frame(
+                        notify::TERMINAL_EXIT,
+                        &TerminalExitNotification {
+                            terminal_id: pump_id.clone(),
+                        },
+                    ))
                     .await;
                 log::info!("终端 {pump_id} 进程已退出（连接 {exit_conn_id}）");
                 this.remove(&pump_id);

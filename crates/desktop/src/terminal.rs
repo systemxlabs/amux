@@ -133,7 +133,10 @@ impl TerminalState {
             let _: Result<OpResult, _> = client
                 .request(
                     protocol::method::TERMINAL_INPUT,
-                    Some(TerminalInputParams { terminal_id: id, data }),
+                    Some(TerminalInputParams {
+                        terminal_id: id,
+                        data,
+                    }),
                 )
                 .await;
         })
@@ -195,7 +198,12 @@ impl TerminalState {
     }
 
     /// 画布实测尺寸 → 行列变化时同步 Term 网格并上报 terminal.resize。
+    /// 布局未就绪时 bounds 可能退化为 0：直接忽略，绝不能把 0 除行高 clamp 成
+    /// 最小值——那会把 PTY 缩到 2 行，输出全部丢失（曾因此"看不到输出"）。
     fn sync_size(&mut self, width: Pixels, height: Pixels, cx: &mut Context<Self>) {
+        if width < px(CELL_WIDTH) || height < px(CELL_HEIGHT) {
+            return;
+        }
         let cols = ((width.as_f32() / CELL_WIDTH).floor() as u16).clamp(2, 500);
         let rows = ((height.as_f32() / CELL_HEIGHT).floor() as u16).clamp(2, 200);
         if cols == self.cols && rows == self.rows {
@@ -247,28 +255,33 @@ impl Render for TerminalState {
             .on_scroll_wheel(cx.listener(Self::handle_scroll))
             .children(rows);
 
-        // 隐形画布：在 paint 阶段拿到真实 bounds 驱动行列同步 + 注册 IME 输入处理器
+        // 隐形画布：绝对定位铺满容器（默认样式尺寸为 0，曾把 resize 退化成 2 行），
+        // 在 paint 阶段拿到真实 bounds 驱动行列同步 + 注册 IME 输入处理器
         let paint_weak = weak.clone();
-        container = container.child(canvas(
-            |_bounds, _window, _cx| (),
-            move |canvas_bounds, (), window, cx| {
-                // 实体可能在 paint 前被丢弃（切换会话等），失败可安全忽略
-                let _ = paint_weak.update(cx, |state, cx| {
-                    state.last_bounds = Some(canvas_bounds);
-                    // 画布随容器铺满，bounds 即终端可视区
-                    state.sync_size(canvas_bounds.size.width, canvas_bounds.size.height, cx);
-                });
-                // IME：焦点在终端上时注册输入处理器（每帧重注册，gpui 每帧清空）
-                if let Some(view) = paint_weak.upgrade() {
-                    let focus = view.read(cx).focus.clone();
-                    window.handle_input(
-                        &focus,
-                        ElementInputHandler::new(canvas_bounds, view),
-                        cx,
-                    );
-                }
-            },
-        ));
+        container = container.child(
+            canvas(
+                |_bounds, _window, _cx| (),
+                move |canvas_bounds, (), window, cx| {
+                    // 实体可能在 paint 前被丢弃（切换会话等），失败可安全忽略
+                    let _ = paint_weak.update(cx, |state, cx| {
+                        state.last_bounds = Some(canvas_bounds);
+                        // 画布随容器铺满，bounds 即终端可视区
+                        state.sync_size(canvas_bounds.size.width, canvas_bounds.size.height, cx);
+                    });
+                    // IME：焦点在终端上时注册输入处理器（每帧重注册，gpui 每帧清空）
+                    if let Some(view) = paint_weak.upgrade() {
+                        let focus = view.read(cx).focus.clone();
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(canvas_bounds, view),
+                            cx,
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
+        );
         let _ = weak;
 
         if self.exited {
@@ -281,11 +294,7 @@ impl Render for TerminalState {
                     .py_1()
                     .rounded_md()
                     .bg(rgb(0x3a2a2a))
-                    .child(
-                        Label::new("进程已退出")
-                            .text_xs()
-                            .text_color(rgb(0xf0c0c0)),
-                    ),
+                    .child(Label::new("进程已退出").text_xs().text_color(rgb(0xf0c0c0))),
             );
         }
         container

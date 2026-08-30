@@ -872,7 +872,11 @@ async fn terminal_open_input_output_and_connection_binding() {
 
     // shell 启动输出（提示符）到达所属连接
     let got = c1
-        .wait_notification("terminal.output", |p| p["terminalId"] == json!(terminal_id), 5000)
+        .wait_notification(
+            "terminal.output",
+            |p| p["terminalId"] == json!(terminal_id),
+            5000,
+        )
         .await;
     assert!(got, "c1 应收到终端输出");
 
@@ -888,23 +892,33 @@ async fn terminal_open_input_output_and_connection_binding() {
     let mark = format!("amux-e2e-{}", uuid::Uuid::new_v4().simple());
     let input = base64::engine::general_purpose::STANDARD.encode(format!("echo {mark}\n"));
     let w = c1
-        .call("terminal.input", json!({"terminalId": terminal_id, "data": input}))
+        .call(
+            "terminal.input",
+            json!({"terminalId": terminal_id, "data": input}),
+        )
         .await;
     assert!(w.get("error").is_none(), "terminal.input 应成功: {w}");
     let echoed = c1
-        .wait_notification("terminal.output", |p| {
-            p["data"]
-                .as_str()
-                .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
-                .map(|b| String::from_utf8_lossy(&b).contains(&mark))
-                .unwrap_or(false)
-        }, 5000)
+        .wait_notification(
+            "terminal.output",
+            |p| {
+                p["data"]
+                    .as_str()
+                    .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                    .map(|b| String::from_utf8_lossy(&b).contains(&mark))
+                    .unwrap_or(false)
+            },
+            5000,
+        )
         .await;
     assert!(echoed, "回显输出应包含 {mark}");
 
     // resize 正常
     let resized = c1
-        .call("terminal.resize", json!({"terminalId": terminal_id, "cols": 100, "rows": 30}))
+        .call(
+            "terminal.resize",
+            json!({"terminalId": terminal_id, "cols": 100, "rows": 30}),
+        )
         .await;
     assert!(resized.get("error").is_none(), "resize 应成功: {resized}");
 
@@ -918,9 +932,15 @@ async fn terminal_open_input_output_and_connection_binding() {
     let closed = c1
         .call("terminal.close", json!({"terminalId": terminal_id}))
         .await;
-    assert!(closed.get("error").is_none(), "所属连接关闭应成功: {closed}");
+    assert!(
+        closed.get("error").is_none(),
+        "所属连接关闭应成功: {closed}"
+    );
     let after = c1
-        .call("terminal.input", json!({"terminalId": terminal_id, "data": ""}))
+        .call(
+            "terminal.input",
+            json!({"terminalId": terminal_id, "data": ""}),
+        )
         .await;
     assert_eq!(after["error"]["code"], json!(-32006));
     let _ = std::fs::remove_dir_all(&data_dir);
