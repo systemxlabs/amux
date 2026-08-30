@@ -42,11 +42,16 @@ Server 在未收到此认证消息并通过认证前，请求均返回认证失�
 | `workspace.restore` | 可按文件或代码块撤销普通会话工作目录的改动 |
 | `workspace.list` | 分页查看普通会话工作目录指定文件夹列表 |
 | `workspace.read` | 分页查看普通会话工作目录指定路径文本文件内容 |
+| `terminal.open` | 打开一个终端，指定 cwd 和 size 等，返回终端 ID |
+| `terminal.resize` | 调整指定终端窗口大小 |
+| `terminal.input` |  向指定终端输入内容 |
+| `terminal.close` |  关闭指定终端 |
 
 Server 主动推送通知
 | 通知 | 描述 |
 |---|---|
 | `session.state_change` | 普通会话状态变更事件，包含变更原因 |
+| `terminal.output` | 终端输出事件 |
 
 ## Server
 
@@ -57,6 +62,7 @@ Server 主动推送通知
 - 会话元数据持久化：`rusqlite`
 - ACP：`agent-client-protocol` 官方 SDK
 - Git：`gitoxide` / git CLI
+- PTY：`portable-pty`
 
 ### Server 启动
 
@@ -146,7 +152,15 @@ Server 作为 ACP client 与 ACP servers 通信
 
 Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 内。普通会话创建时若指定了 worktree 方式，则创建 worktree，普通会话被删除时，其关联的 worktree 也应一并删除。
 
-当普通会话超过 7 天不活跃时，自动清理其关联的 worktree。
+当普通会话超过 7 天不活跃时，自动清理其关联的 worktree，后续可按需重新创建。
+
+### 终端
+
+应用可创建一个或多个终端，终端不在多应用间共享，终端历史由应用侧维护，Server 侧终端存储在内存中。
+
+终端与应用连接绑定，当应用与 Server 连接断开，其关联的终端资源被释放。
+
+Server 发送终端输出事件时，仅向该终端关联的应用连接发送。
 
 ## 应用
 
@@ -299,6 +313,7 @@ Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 
 
 - GUI：`gpui` + `gpui-component`
 - 编排智能体：`rig`
+- 终端：`alacritty_terminal`
 
 ### Web 应用
 待定
