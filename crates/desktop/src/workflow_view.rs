@@ -522,15 +522,29 @@ impl AmuxApp {
                 .border_color(cx.theme().border)
                 .child(Input::new(&self.title_input))
                 .child(
-                    Button::new(format!("wf-rename-save-{wf_id}"))
-                        .small()
-                        .primary()
-                        .label("保存")
-                        .on_click(cx.listener(move |this, _ev, _window, cx| {
-                            let title = this.title_input.read(cx).value().to_string();
-                            this.rename_workflow(cx, &wf_id2.clone(), title);
-                        })),
-                )
+                    h_flex().gap_1().child(
+                        Button::new(format!("wf-rename-save-{wf_id}"))
+                            .small()
+                            .primary()
+                            .flex_1()
+                            .label("保存")
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                let title = this.title_input.read(cx).value().to_string();
+                                this.rename_workflow(cx, &wf_id2.clone(), title);
+                            })),
+                        ),
+                    )
+                    .child(
+                        Button::new(format!("wf-rename-cancel-{wf_id}"))
+                            .small()
+                            .ghost()
+                            .flex_1()
+                            .label("取消")
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.renaming_workflow = None;
+                                cx.notify();
+                            })),
+                    )
                 .into_any_element();
         }
 

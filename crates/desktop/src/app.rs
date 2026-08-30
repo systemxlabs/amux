@@ -304,6 +304,23 @@ impl AmuxApp {
                 }
             },
         ));
+        // 标题重命名输入框（会话/工作流共用）：Enter 保存；取消走「取消」按钮。
+        // 此前 Enter 无响应、也无取消路径，重命名会一直挂在编辑态
+        app._subs.push(cx.subscribe_in(
+            &app.title_input,
+            window,
+            |this, _input, event, window, cx| {
+                if let InputEvent::PressEnter { shift: false, .. } = event {
+                    if let Some((machine, sid)) = this.renaming_session.clone() {
+                        let title = this.title_input.read(cx).value().to_string();
+                        this.rename_session(window, cx, machine, sid, title);
+                    } else if let Some(wf) = this.renaming_workflow.clone() {
+                        let title = this.title_input.read(cx).value().to_string();
+                        this.rename_workflow(cx, &wf, title);
+                    }
+                }
+            },
+        ));
         for m in app.store.list_machines() {
             app.machines.push(MachineView::new(m, cx));
         }

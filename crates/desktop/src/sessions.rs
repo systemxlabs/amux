@@ -908,18 +908,32 @@ impl AmuxApp {
                 .gap_1()
                 .child(Input::new(&self.title_input))
                 .child(
-                    Button::new(format!("rename-save-{sid}"))
-                        .small()
-                        .primary()
-                        .label("保存")
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            let title = this.title_input.read(cx).value().to_string();
-                            this.rename_session(window, cx, machine, sid2.clone(), title);
-                        })),
-                )
+                    h_flex().gap_1().child(
+                        Button::new(format!("rename-save-{sid}"))
+                            .small()
+                            .primary()
+                            .flex_1()
+                            .label("保存")
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                let title = this.title_input.read(cx).value().to_string();
+                                this.rename_session(window, cx, machine, sid2.clone(), title);
+                            })),
+                        ),
+                    )
+                    .child(
+                        // 取消路径：此前重命名只能保存，Esc 无效会一直挂在编辑态
+                        Button::new(format!("rename-cancel-{sid}"))
+                            .small()
+                            .ghost()
+                            .flex_1()
+                            .label("取消")
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.renaming_session = None;
+                                cx.notify();
+                            })),
+                    )
                 .into_any_element();
         }
-
         let sid_open = sid.clone();
         // 右键菜单交给 ContextMenu 组件：外点/Esc 关闭、键盘导航、焦点恢复由其负责。
         // 菜单构建闭包与各条目回调均为 Fn，逐层持有独立克隆
@@ -1188,6 +1202,12 @@ impl AmuxApp {
         }
         content.extend(rows.into_iter().map(|r| r.into_any_element()));
         if content.is_empty() {
+            // 空态：区分「未选中会话」与「已选中但暂无消息」，避免文案误导
+            let hint = if self.selected.is_none() {
+                "选择左侧会话查看对话，或输入消息开始"
+            } else {
+                "暂无消息，输入消息开始对话"
+            };
             // 空态：图标 + 引导文案居中，弱化存在感
             div()
                 .id("dialog-empty")
@@ -1201,11 +1221,7 @@ impl AmuxApp {
                         .large()
                         .text_color(muted_foreground.opacity(0.55)),
                 )
-                .child(
-                    Label::new("选择左侧会话查看对话，或输入消息开始")
-                        .text_sm()
-                        .text_color(muted_foreground),
-                )
+                .child(Label::new(hint).text_sm().text_color(muted_foreground))
                 .into_any()
         } else {
             div()
