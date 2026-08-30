@@ -25,6 +25,8 @@ uuid.workspace = true
 rusqlite = { version = "0.40", features = ["bundled"] }
 # git 能力（workspace.diff/restore）用 gitoxide；只开用到的特性以精简依赖树
 gix = { version = "0.87", default-features = false, features = ["basic", "status", "sha1"] }
+portable-pty = "0.9"
+base64 = "0.22"
 
 [[bin]]
 name = "mock_acp"

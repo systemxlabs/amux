@@ -89,6 +89,7 @@ pub mod server_error {
     pub const HARNESS_UNAVAILABLE: i32 = -32002;
     pub const SESSION_BUSY: i32 = -32003;
     pub const INVALID_INPUT: i32 = -32005;
+    pub const TERMINAL_NOT_FOUND: i32 = -32006;
 }
 
 #[cfg(test)]

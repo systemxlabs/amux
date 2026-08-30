@@ -12,6 +12,7 @@ pub mod history;
 pub mod registry;
 pub mod rpc;
 pub mod session;
+pub mod terminal;
 pub mod transport;
 
 pub use crate::rpc::{Handlers, RpcError};

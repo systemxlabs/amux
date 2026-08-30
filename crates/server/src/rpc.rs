@@ -10,13 +10,15 @@ use protocol::{
     OngoingActivityResult, OpResult, SessionConfigOptionsResult, SessionConfigureParams,
     SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
     SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
-    SessionSlashCommandsResult, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListParams,
-    WorkspaceReadParams, WorkspaceRestoreParams,
+    SessionSlashCommandsResult, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
+    TerminalOpenResult, TerminalResizeParams, WorkspaceDiffParams, WorkspaceDiffResult,
+    WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
 use crate::error::SessionError;
 use crate::git::GitRunner;
 use crate::session::SessionManager;
+use crate::terminal::{ConnScope, TerminalService};
 
 #[derive(Debug)]
 pub struct RpcError {
@@ -81,10 +83,16 @@ fn ok_op() -> Result<Value, RpcError> {
 pub struct Handlers {
     pub manager: Arc<SessionManager>,
     pub git: GitRunner,
+    pub terminals: Arc<TerminalService>,
 }
 
 impl Handlers {
-    pub async fn handle(&self, method: &str, params: &Option<Value>) -> Result<Value, RpcError> {
+    pub async fn handle(
+        &self,
+        method: &str,
+        params: &Option<Value>,
+        conn: &ConnScope,
+    ) -> Result<Value, RpcError> {
         match method {
             method::AGENT_LIST => {
                 let agents = self.manager.agents().list_agents();
@@ -299,6 +307,31 @@ impl Handlers {
                     .read_workspace(&cwd, &p.path, p.offset, p.limit)
                     .map_err(RpcError::internal)?;
                 serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
+            }
+
+            method::TERMINAL_OPEN => {
+                let p: TerminalOpenParams = parse(params)?;
+                let terminal_id = self.terminals.open(p, conn)?;
+                serde_json::to_value(TerminalOpenResult { terminal_id })
+                    .map_err(|e| RpcError::internal(e.to_string()))
+            }
+
+            method::TERMINAL_RESIZE => {
+                let p: TerminalResizeParams = parse(params)?;
+                self.terminals.resize(p)?;
+                ok_op()
+            }
+
+            method::TERMINAL_INPUT => {
+                let p: TerminalInputParams = parse(params)?;
+                self.terminals.input(p)?;
+                ok_op()
+            }
+
+            method::TERMINAL_CLOSE => {
+                let p: TerminalIdParams = parse(params)?;
+                self.terminals.close(p, conn.conn_id)?;
+                ok_op()
             }
 
             _ => Err(RpcError {

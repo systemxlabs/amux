@@ -512,6 +512,65 @@ fn workspace_read_limit() -> usize {
     400
 }
 
+/// `terminal.open` 参数。
+/// docs/DESIGN.md「终端」：终端不跨应用共享、与连接绑定；cwd 由应用指定
+/// （普通会话场景为工作目录或 worktree 目录）。size 为初始行列——避免
+/// 「先 80×24 再 resize」竞态导致 vim/htop 等全屏程序初始渲染错乱。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOpenParams {
+    pub cwd: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// `terminal.open` 结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOpenResult {
+    pub terminal_id: String,
+}
+
+/// `terminal.close` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalIdParams {
+    pub terminal_id: String,
+}
+
+/// `terminal.resize` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalResizeParams {
+    pub terminal_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// `terminal.input` 参数。data 为 base64 编码的原始字节流
+/// （终端输入是按键字节而非 UTF-8 命令文本，经 base64 走 JSON-RPC 文本消息）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalInputParams {
+    pub terminal_id: String,
+    pub data: String,
+}
+
+/// `terminal.output` 通知负载。data 为 base64 编码的 PTY 输出字节流。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOutputNotification {
+    pub terminal_id: String,
+    pub data: String,
+}
+
+/// `terminal.exit` 通知负载（docs 未单列该通知；用于客户端感知 shell 退出并清理）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalExitNotification {
+    pub terminal_id: String,
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }

@@ -41,10 +41,23 @@ pub mod method {
     pub const WORKSPACE_LIST: &str = "workspace.list";
     /// 分页读取工作目录文本文件内容
     pub const WORKSPACE_READ: &str = "workspace.read";
+    /// 打开一个终端（指定 cwd 与初始行列），返回终端 ID
+    pub const TERMINAL_OPEN: &str = "terminal.open";
+    /// 调整指定终端的行列尺寸
+    pub const TERMINAL_RESIZE: &str = "terminal.resize";
+    /// 向指定终端写入输入字节流（base64）
+    pub const TERMINAL_INPUT: &str = "terminal.input";
+    /// 关闭指定终端
+    pub const TERMINAL_CLOSE: &str = "terminal.close";
 }
 
 /// server → GUI 通知名。
 pub mod notify {
     /// 普通会话状态变更事件（工作流驱动等依赖它）
     pub const SESSION_STATE_CHANGE: &str = "session.state_change";
+    /// 终端输出事件（PTY 字节流，base64）。仅推送给该终端所属的应用连接，
+    /// 不进入 `session.state_change` 的全局广播流
+    pub const TERMINAL_OUTPUT: &str = "terminal.output";
+    /// 终端进程退出事件（shell 敲 exit 或异常终止；客户端据此清理 UI 状态）
+    pub const TERMINAL_EXIT: &str = "terminal.exit";
 }

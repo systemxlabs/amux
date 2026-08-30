@@ -845,3 +845,83 @@ async fn busy_prompt_rejected_and_cancel_works() {
     );
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+use base64::Engine as _;
+
+/// 终端端到端：真实 WS 连接上走 terminal.open/input/resize/close，
+/// 验证输出仅发所属连接（不走全局广播）与关闭的连接归属校验。
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_open_input_output_and_connection_binding() {
+    let (port, data_dir, _guard) = start_server_with_dir().await;
+    let mut c1 = Client::connect(port, "test-token").await;
+    let mut c2 = Client::connect(port, "test-token").await;
+
+    // 打开终端（cwd 用临时目录，shell 可正常落位）
+    let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+    let opened = c1
+        .call("terminal.open", json!({"cwd": cwd, "cols": 80, "rows": 24}))
+        .await;
+    assert!(
+        opened.get("error").is_none(),
+        "terminal.open 应成功: {opened}"
+    );
+    let terminal_id = opened["result"]["terminalId"]
+        .as_str()
+        .expect("open 应返回 terminalId")
+        .to_string();
+
+    // shell 启动输出（提示符）到达所属连接
+    let got = c1
+        .wait_notification("terminal.output", |p| p["terminalId"] == json!(terminal_id), 5000)
+        .await;
+    assert!(got, "c1 应收到终端输出");
+
+    // 其他连接不收到终端帧：c2 的下一个响应前不得出现 terminal.output 通知
+    let listed = c2.call("agent.list", json!({})).await;
+    assert!(listed.get("error").is_none());
+    assert!(
+        !c2.notifications.iter().any(|(m, _)| m == "terminal.output"),
+        "终端输出不应广播到其他连接"
+    );
+
+    // 输入 echo：回显内容经输出帧返回（真实 PTY 字节流路径）
+    let mark = format!("amux-e2e-{}", uuid::Uuid::new_v4().simple());
+    let input = base64::engine::general_purpose::STANDARD.encode(format!("echo {mark}\n"));
+    let w = c1
+        .call("terminal.input", json!({"terminalId": terminal_id, "data": input}))
+        .await;
+    assert!(w.get("error").is_none(), "terminal.input 应成功: {w}");
+    let echoed = c1
+        .wait_notification("terminal.output", |p| {
+            p["data"]
+                .as_str()
+                .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                .map(|b| String::from_utf8_lossy(&b).contains(&mark))
+                .unwrap_or(false)
+        }, 5000)
+        .await;
+    assert!(echoed, "回显输出应包含 {mark}");
+
+    // resize 正常
+    let resized = c1
+        .call("terminal.resize", json!({"terminalId": terminal_id, "cols": 100, "rows": 30}))
+        .await;
+    assert!(resized.get("error").is_none(), "resize 应成功: {resized}");
+
+    // 非所属连接越权关闭被拒（TERMINAL_NOT_FOUND）
+    let rejected = c2
+        .call("terminal.close", json!({"terminalId": terminal_id}))
+        .await;
+    assert_eq!(rejected["error"]["code"], json!(-32006));
+
+    // 所属连接显式关闭 → 后续操作报终端不存在
+    let closed = c1
+        .call("terminal.close", json!({"terminalId": terminal_id}))
+        .await;
+    assert!(closed.get("error").is_none(), "所属连接关闭应成功: {closed}");
+    let after = c1
+        .call("terminal.input", json!({"terminalId": terminal_id, "data": ""}))
+        .await;
+    assert_eq!(after["error"]["code"], json!(-32006));
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

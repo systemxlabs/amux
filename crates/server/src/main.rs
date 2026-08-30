@@ -137,6 +137,7 @@ async fn main() {
     let handlers = Arc::new(Handlers {
         manager: manager.clone(),
         git: GitRunner::new(),
+        terminals: Arc::new(amux_server::terminal::TerminalService::new()),
     });
 
     let transport = Transport::new(TransportOptions {

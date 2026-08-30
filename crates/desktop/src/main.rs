@@ -15,6 +15,7 @@ mod machines;
 mod panels;
 mod sessions;
 mod settings;
+mod terminal;
 mod text;
 mod theme;
 mod wfstore;

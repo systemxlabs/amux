@@ -13,9 +13,11 @@ use gpui_component::{
 };
 
 use protocol::{
-    SessionConfigOption, SessionMeta, SessionState, SessionStateChange, SlashCommand,
-    StateChangeReason,
+    OpResult, SessionConfigOption, SessionMeta, SessionState, SessionStateChange, SlashCommand,
+    StateChangeReason, TerminalOpenParams, TerminalOpenResult,
 };
+
+use base64::Engine as _;
 
 use crate::config::{ConfigStore, SkillEntry, WorkflowTemplate};
 use crate::logic::InputAttachment;
@@ -36,6 +38,7 @@ pub(crate) enum Panel {
     Diff,
     Detail,
     Activities,
+    Terminal,
 }
 
 /// 未发送输入草稿的会话身份：普通会话以机器名（store 内的持久身份，
@@ -359,6 +362,9 @@ impl AmuxApp {
             "disconnected" => {
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = MachineStatus::Offline;
+                    // 终端随连接生死（docs/DESIGN.md「终端」），server 已释放，UI 同步清理
+                    m.terminals.clear();
+                    m.active_terminal = None;
                 }
             }
             // 唯一主动推送 `session.state_change`：
@@ -366,10 +372,177 @@ impl AmuxApp {
             _ if n.method == protocol::notify::SESSION_STATE_CHANGE => {
                 Self::on_state_change(this, window, cx, idx, n);
             }
+            _ if n.method == protocol::notify::TERMINAL_OUTPUT => {
+                Self::on_terminal_output(this, cx, idx, n);
+            }
+            _ if n.method == protocol::notify::TERMINAL_EXIT => {
+                Self::on_terminal_exit(this, cx, idx, n);
+            }
             _ => {}
         }
         // 在线状态可能已变：工作流推进前依赖 hub 快照看到最新机器视图
         this.sync_machine_hub();
+        cx.notify();
+    }
+
+    /// 终端输出：按 terminal_id 路由到对应视图实体并喂入 VT 状态机。
+    pub(crate) fn on_terminal_output(
+        this: &mut Self,
+        cx: &mut Context<Self>,
+        idx: usize,
+        n: &WsNotification,
+    ) {
+        let Ok(payload) =
+            serde_json::from_value::<protocol::TerminalOutputNotification>(n.params.clone())
+        else {
+            log::warn!("terminal.output 通知负载解析失败");
+            return;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&payload.data) else {
+            return;
+        };
+        let Some(m) = this.machines.get_mut(idx) else {
+            return;
+        };
+        let Some(entry) = m
+            .terminals
+            .iter()
+            .find(|t| t.id == payload.terminal_id)
+            .cloned()
+        else {
+            return;
+        };
+        entry.view.update(cx, |state, cx| state.advance(&bytes, cx));
+    }
+
+    /// 终端进程退出：标记残屏，由用户关闭标签。
+    pub(crate) fn on_terminal_exit(
+        this: &mut Self,
+        cx: &mut Context<Self>,
+        idx: usize,
+        n: &WsNotification,
+    ) {
+        let Ok(payload) =
+            serde_json::from_value::<protocol::TerminalExitNotification>(n.params.clone())
+        else {
+            return;
+        };
+        let Some(m) = this.machines.get_mut(idx) else {
+            return;
+        };
+        let Some(entry) = m
+            .terminals
+            .iter()
+            .find(|t| t.id == payload.terminal_id)
+            .cloned()
+        else {
+            return;
+        };
+        entry.view.update(cx, |state, cx| {
+            state.exited = true;
+            cx.notify();
+        });
+    }
+
+    /// 在当前选中普通会话的上下文新建终端（cwd 取工作目录/worktree）。
+    /// docs/DESIGN.md「终端」：终端不归属会话、连接绑定；open 携带初始行列，
+    /// 避免先 80×24 再 resize 的全屏程序初始渲染错乱。
+    pub(crate) fn spawn_terminal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine_idx: usize,
+    ) {
+        let Some((_, cwd)) = self.selected_workspace() else {
+            return;
+        };
+        let Some(session_id) = self.open_session_target().map(|(_, id)| id) else {
+            return;
+        };
+        let Some(m) = self.machine_mut(machine_idx) else {
+            return;
+        };
+        if !m.status.online() {
+            m.notice = Some("机器离线，无法打开终端".into());
+            cx.notify();
+            return;
+        }
+        let client = m.client.clone();
+        // 面板宽 560（上下扣掉标题栏/输入区等约 320）：与打开后的实际网格接近，
+        // 打开后的画布实测仍会触发一次 resize 精调
+        let cols = 68u16;
+        let rows = 24u16;
+        let title = cwd
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&cwd)
+            .to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let opened = client
+                .request::<_, TerminalOpenResult>(
+                    protocol::method::TERMINAL_OPEN,
+                    Some(TerminalOpenParams {
+                        cwd: cwd.clone(),
+                        cols,
+                        rows,
+                    }),
+                )
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let Some(m) = this.machine_mut(machine_idx) else {
+                    return;
+                };
+                match opened {
+                    Ok(result) => {
+                        let terminal_id = result.terminal_id.clone();
+                        let view = cx.new(|cx| {
+                            crate::terminal::TerminalState::new(
+                                terminal_id.clone(),
+                                client.clone(),
+                                cols,
+                                rows,
+                                cx,
+                            )
+                        });
+                        m.terminals.push(crate::terminal::TerminalEntry {
+                            id: terminal_id.clone(),
+                            session_id: session_id.clone(),
+                            title: title.clone(),
+                            view: view.clone(),
+                        });
+                        m.active_terminal = Some(terminal_id.clone());
+                        window.focus(&view.read(cx).focus.clone(), cx);
+                    }
+                    Err(e) => {
+                        m.notice = Some(format!("打开终端失败：{e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 关闭并移除指定终端（server 侧杀 PTY；断连时 server 自行回收）。
+    pub(crate) fn close_terminal(&mut self, cx: &mut Context<Self>, machine_idx: usize, id: String) {
+        let Some(m) = self.machine_mut(machine_idx) else {
+            return;
+        };
+        m.terminals.retain(|t| t.id != id);
+        if m.active_terminal.as_deref() == Some(id.as_str()) {
+            m.active_terminal = m.terminals.last().map(|t| t.id.clone());
+        }
+        let client = m.client.clone();
+        cx.spawn(async move |_, _cx| {
+            let _: Result<OpResult, _> = client
+                .request(
+                    protocol::method::TERMINAL_CLOSE,
+                    Some(protocol::TerminalIdParams { terminal_id: id }),
+                )
+                .await;
+        })
+        .detach();
         cx.notify();
     }
 
@@ -689,6 +862,7 @@ impl AmuxApp {
             Panel::Diff => 460.0,
             Panel::Detail => 360.0,
             Panel::Activities => 400.0,
+            Panel::Terminal => 560.0,
         }
     }
 
@@ -731,6 +905,7 @@ impl AmuxApp {
             Some(Panel::Diff) => self.render_diff_panel(window, cx),
             Some(Panel::Detail) => self.render_detail_panel(window, cx),
             Some(Panel::Activities) => self.render_activities_panel(window, cx),
+            Some(Panel::Terminal) => self.render_terminal_panel(window, cx),
             None => return None,
         };
         let panel_width =

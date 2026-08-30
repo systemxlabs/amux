@@ -32,6 +32,7 @@ jiff = "0.2"
 # 直接依赖 rig-core 而非 rig facade，避免拉入 rig-agent / rig-derive
 #（取消语义由引擎自研工具循环驱动，不使用 agent 运行时）
 rig-core = { version = "0.42", default-features = false, features = ["reqwest", "rustls"] }
+alacritty_terminal = "0.25"
 
 # 测试专用：rig-core MockCompletionModel/MockTurn（薄工具循环单测；不进 release 构建）
 [dev-dependencies]

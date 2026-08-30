@@ -1,8 +1,9 @@
 //! WebSocket 传输层：token 认证、连接管理、JSON-RPC 分发、
 //! 通知广播（仅 `session.state_change`；多客户端同一份流、互不踢出）。
+//! 终端输出帧走每连接专属通道直发，不进全局广播（见 terminal.rs）。
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -14,6 +15,7 @@ use protocol::{method, notify, server_error, AuthParams, JsonRpcRequest, OpResul
 
 use crate::rpc::{Handlers, RpcError};
 use crate::session::ServerNotification;
+use crate::terminal::ConnScope;
 
 pub struct TransportOptions {
     pub host: String,
@@ -86,6 +88,7 @@ impl Transport {
             handlers,
             logger,
         };
+        let next_conn_id = AtomicU64::new(1);
         loop {
             let (stream, peer) = match listener.accept().await {
                 Ok(v) => v,
@@ -100,8 +103,9 @@ impl Transport {
                 logger: ctx.logger.clone(),
             };
             let notify_rx = tx.subscribe();
+            let conn_id = next_conn_id.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
-                handle_connection(stream, peer, conn, notify_rx).await;
+                handle_connection(stream, peer, conn, notify_rx, conn_id).await;
             });
         }
     }
@@ -112,6 +116,7 @@ async fn handle_connection(
     peer: SocketAddr,
     opts: ConnectionCtx,
     mut notify_rx: tokio::sync::broadcast::Receiver<String>,
+    conn_id: u64,
 ) {
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
@@ -120,7 +125,7 @@ async fn handle_connection(
             return;
         }
     };
-    opts.log(format!("连接: {peer}"));
+    opts.log(format!("连接: {peer} (#{conn_id})"));
 
     let (mut sink, mut source) = ws.split();
     let handlers = opts.handlers.clone();
@@ -129,6 +134,12 @@ async fn handle_connection(
     let token = opts.token.clone();
     // 请求处理与通知发送解耦：dispatch 在独立任务，响应经通道回传
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<String>(64);
+    // 终端输出帧专属通道：满时施加背压而非丢弃（与终端语义一致）
+    let (term_tx, mut term_rx) = tokio::sync::mpsc::channel::<String>(256);
+    let conn_scope = ConnScope {
+        conn_id,
+        frame_tx: term_tx.clone(),
+    };
 
     loop {
         tokio::select! {
@@ -144,6 +155,12 @@ async fn handle_connection(
                         opts.log(format!("通知积压，跳过 {missed} 条"));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            frame = term_rx.recv() => {
+                let Some(frame) = frame else { break };
+                if sink.send(Message::Text(frame.into())).await.is_err() {
+                    break;
                 }
             }
             resp = resp_rx.recv() => {
@@ -176,7 +193,9 @@ async fn handle_connection(
                 // auth 响应已处理后才会被派发，不会与认证发生竞态。
                 let is_auth = req.method == method::AUTH;
                 if is_auth && !authenticated.load(Ordering::SeqCst) {
-                    if let Some(resp) = dispatch(&handlers, req, &token, &authenticated).await {
+                    if let Some(resp) =
+                        dispatch(&handlers, req, &token, &authenticated, &conn_scope).await
+                    {
                         let Ok(frame) = serde_json::to_string(&resp) else {
                             break;
                         };
@@ -190,8 +209,9 @@ async fn handle_connection(
                 let resp_tx = resp_tx.clone();
                 let authenticated = authenticated.clone();
                 let token = token.clone();
+                let conn_scope = conn_scope.clone();
                 tokio::spawn(async move {
-                    if let Some(resp) = dispatch(&handlers, req, &token, &authenticated).await {
+                    if let Some(resp) = dispatch(&handlers, req, &token, &authenticated, &conn_scope).await {
                         let frame = serde_json::to_string(&resp).unwrap_or_default();
                         let _ = resp_tx.send(frame).await;
                     }
@@ -199,7 +219,9 @@ async fn handle_connection(
             }
         }
     }
-    opts.log(format!("断开: {peer}"));
+    // 断连清理：释放该连接打开的终端（PTY 进程随连接生死，docs/DESIGN.md「终端」）
+    handlers.terminals.release_conn(conn_id);
+    opts.log(format!("断开: {peer} (#{conn_id})"));
 }
 
 /// Parse error 响应（id 未知，恒为 Null）。
@@ -223,6 +245,7 @@ async fn dispatch(
     req: JsonRpcRequest,
     token: &str,
     authenticated: &Arc<AtomicBool>,
+    conn: &ConnScope,
 ) -> Option<protocol::JsonRpcResponse> {
     if req.jsonrpc != "2.0" {
         return Some(protocol::JsonRpcResponse {
@@ -274,7 +297,7 @@ async fn dispatch(
     );
     log::debug!("请求 {} {summary}", req.method);
     let started = std::time::Instant::now();
-    let result = handlers.handle(&req.method, &req.params).await;
+    let result = handlers.handle(&req.method, &req.params, conn).await;
     let (result, error) = match result {
         Ok(v) => (Some(v), None),
         Err(RpcError { code, message }) => {

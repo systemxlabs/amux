@@ -17,6 +17,151 @@ use crate::text::{format_local_time, TimePrecision};
 use crate::app::{AmuxApp, Panel, Selected};
 
 impl AmuxApp {
+    /// 终端面板：当前会话上下文的终端标签 + 活动终端视图（仅普通会话入口可达）。
+    pub(crate) fn render_terminal_panel(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some((machine_idx, session_id)) = self.open_session_target() else {
+            return v_flex()
+                .w_full()
+                .h_full()
+                .p_3()
+                .bg(cx.theme().popover)
+                .child(Label::new("未选择会话"))
+                .into_any();
+        };
+        let (terminals, active_terminal, online) = self
+            .machine(machine_idx)
+            .map(|m| {
+                (
+                    m.terminals
+                        .iter()
+                        .filter(|t| t.session_id == session_id)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    m.active_terminal.clone(),
+                    m.status.online(),
+                )
+            })
+            .unwrap_or_default();
+
+        // 终端标签行：点击切换 + 关闭；末尾“新建终端”
+        let mut tabs = h_flex().flex_wrap().gap_1();
+        for entry in &terminals {
+            let entry_id = entry.id.clone();
+            let entry_close = entry.id.clone();
+            let tab_id = entry.id.clone();
+            let active = active_terminal.as_deref() == Some(entry.id.as_str());
+            tabs = tabs.child(
+                h_flex()
+                    .id(format!("terminal-tab-{entry_id}"))
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .when(active, |d| d.bg(cx.theme().list_active))
+                    .when(!active, |d| d.bg(cx.theme().muted.opacity(0.35)))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some(m) = this.machine_mut(machine_idx) {
+                            m.active_terminal = Some(entry_id.clone());
+                        }
+                        let focus = this
+                            .machine(machine_idx)
+                            .and_then(|m| m.terminals.iter().find(|t| t.id == entry_id))
+                            .map(|t| t.view.read(cx).focus.clone());
+                        if let Some(focus) = focus {
+                            window.focus(&focus, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        Label::new(entry.title.clone())
+                            .text_xs()
+                            .max_w_24()
+                            .truncate(),
+                    )
+                    .child(
+                        Button::new(format!("terminal-tab-close-{tab_id}"))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.close_terminal(cx, machine_idx, entry_close.clone());
+                            })),
+                    ),
+            );
+        }
+        tabs = tabs.child(
+            Button::new("terminal-new")
+                .small()
+                .ghost()
+                .icon(IconName::Plus)
+                .tooltip("新建终端")
+                .disabled(!online)
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    this.spawn_terminal(window, cx, machine_idx);
+                })),
+        );
+
+        let active_view = terminals
+            .iter()
+            .find(|t| active_terminal.as_deref() == Some(t.id.as_str()))
+            .map(|t| t.view.clone());
+
+        let has_active = active_view.is_some();
+        v_flex()
+            .w_full()
+            .h_full()
+            .bg(cx.theme().popover)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        Label::new("终端")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("close-panel-terminal")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("关闭面板")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.set_panel(window, cx, None);
+                            })),
+                    ),
+            )
+            .child(h_flex().flex_wrap().gap_1().px_3().pb_2().child(tabs))
+            .child(
+                div().flex_1().min_h_0().when_some(active_view, |body, view| {
+                    body.child(view)
+                }).when(!has_active, |body| {
+                    body.child(
+                        v_flex().flex_1().items_center().justify_center().child(
+                            Label::new(if online {
+                                "暂无终端，点击 + 新建"
+                            } else {
+                                "机器离线，无法使用终端"
+                            })
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                        ),
+                    )
+                }),
+            )
+            .into_any()
+    }
     pub(crate) fn load_workspace_list(
         &mut self,
         window: &mut Window,
@@ -714,6 +859,19 @@ impl AmuxApp {
                 IconName::Inbox,
                 cx,
             ))
+            // 终端入口仅普通会话可达（docs/PRD.md 右侧面板「终端：仅普通会话展示」）
+            .when(
+                matches!(self.selected, Some(Selected::Session { .. })),
+                |rail| {
+                    rail.child(self.render_rail_button(
+                        Panel::Terminal,
+                        "float-terminal",
+                        "终端",
+                        IconName::SquareTerminal,
+                        cx,
+                    ))
+                },
+            )
     }
 
     /// 单个面板切换入口：再次点击同一面板即关闭；打开工作目录/改动面板时顺带加载。
