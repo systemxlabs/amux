@@ -8,7 +8,7 @@ use std::ops::Range;
 
 use base64::Engine as _;
 use gpui::*;
-use gpui_component::{label::Label, v_flex};
+use gpui_component::{label::Label, v_flex, ActiveTheme};
 use protocol::{OpResult, TerminalInputParams, TerminalResizeParams};
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -25,13 +25,55 @@ const CELL_HEIGHT: f32 = FONT_SIZE * 1.3;
 /// 滚动缓冲行数（应用侧历史；Term 网格一次性按总行数分配内存，取值需克制）
 const SCROLLBACK_LINES: usize = 5_000;
 
-const TERM_FONT_FAMILY: &str = if cfg!(target_os = "macos") {
-    "Menlo"
-} else if cfg!(target_os = "windows") {
-    "Consolas"
-} else {
-    "DejaVu Sans Mono"
-};
+/// 终端渲染的主题样式：跟随应用明暗主题（docs/PRD 右侧面板与全局主题一致）。
+struct TermThemeStyle {
+    dark: bool,
+    bg: Hsla,
+    mono_font: SharedString,
+}
+
+/// 默认 16 色盘（近似 VS Code 明/暗两套，保证两主题下的可读性）。
+const DARK_PALETTE: [(NamedColor, u32); 18] = [
+    (NamedColor::Foreground, 0xd4d4d4),
+    (NamedColor::Background, 0x161617),
+    (NamedColor::Cursor, 0xd4d4d4),
+    (NamedColor::Black, 0x2a2a2b),
+    (NamedColor::Red, 0xcd3131),
+    (NamedColor::Green, 0x0dbc79),
+    (NamedColor::Yellow, 0xe5e510),
+    (NamedColor::Blue, 0x2472c8),
+    (NamedColor::Magenta, 0xbc3fbc),
+    (NamedColor::Cyan, 0x11a8cd),
+    (NamedColor::White, 0xe5e5e5),
+    (NamedColor::BrightBlack, 0x767676),
+    (NamedColor::BrightRed, 0xf14c4c),
+    (NamedColor::BrightGreen, 0x23d18b),
+    (NamedColor::BrightYellow, 0xf5f543),
+    (NamedColor::BrightBlue, 0x3b8eea),
+    (NamedColor::BrightMagenta, 0xd670d6),
+    (NamedColor::BrightCyan, 0x29b8db),
+];
+
+const LIGHT_PALETTE: [(NamedColor, u32); 18] = [
+    (NamedColor::Foreground, 0x383a42),
+    (NamedColor::Background, 0xffffff),
+    (NamedColor::Cursor, 0x383a42),
+    (NamedColor::Black, 0x000000),
+    (NamedColor::Red, 0xcd3131),
+    (NamedColor::Green, 0x00bc00),
+    (NamedColor::Yellow, 0x949800),
+    (NamedColor::Blue, 0x0451a5),
+    (NamedColor::Magenta, 0xbc05bc),
+    (NamedColor::Cyan, 0x0598bc),
+    (NamedColor::White, 0x555555),
+    (NamedColor::BrightBlack, 0x666666),
+    (NamedColor::BrightRed, 0xcd3131),
+    (NamedColor::BrightGreen, 0x05bc79),
+    (NamedColor::BrightYellow, 0x949800),
+    (NamedColor::BrightBlue, 0x0451a5),
+    (NamedColor::BrightMagenta, 0xbc05bc),
+    (NamedColor::BrightCyan, 0x0598bc),
+];
 
 /// alacritty 事件汇（本视图不消费 term 事件，beep/title 等一律忽略）。
 struct TermProxy;
@@ -236,7 +278,14 @@ impl TerminalState {
 
 impl Render for TerminalState {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.snapshot_rows();
+        // 终端配色跟随应用主题（docs/DESIGN.md 未规定，取自 PRD 右侧面板观感一致性）
+        let theme = cx.theme().clone();
+        let style = TermThemeStyle {
+            dark: theme.is_dark(),
+            bg: theme.background,
+            mono_font: theme.mono_font_family.clone(),
+        };
+        let rows = self.snapshot_rows(&style);
         let focus = self.focus.clone();
         let weak = cx.entity().downgrade();
         let mut container = v_flex()
@@ -246,7 +295,7 @@ impl Render for TerminalState {
             .min_h_0()
             .w_full()
             .overflow_hidden()
-            .bg(rgb(0x161617))
+            .bg(style.bg)
             .track_focus(&focus)
             .on_click(cx.listener(|this, _ev, window, cx| {
                 window.focus(&this.focus.clone(), cx);
@@ -293,8 +342,8 @@ impl Render for TerminalState {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x3a2a2a))
-                    .child(Label::new("进程已退出").text_xs().text_color(rgb(0xf0c0c0))),
+                    .bg(theme.danger.opacity(0.15))
+                    .child(Label::new("进程已退出").text_xs().text_color(theme.danger)),
             );
         }
         container
@@ -303,7 +352,7 @@ impl Render for TerminalState {
 
 /// 可见网格 → 按行带样式文本 run。
 impl TerminalState {
-    fn snapshot_rows(&self) -> Vec<AnyElement> {
+    fn snapshot_rows(&self, style: &TermThemeStyle) -> Vec<AnyElement> {
         let content = self.term.renderable_content();
         let screen_lines = self.term.screen_lines();
         let offset = content.display_offset;
@@ -330,20 +379,25 @@ impl TerminalState {
                 && indexed.point.column.0 == cursor_col;
             rows[row as usize].push((
                 cell.c,
-                CellStyle::of(cell.fg, cell.bg, cell.flags, is_cursor, content.colors),
+                CellStyle::of(cell.fg, cell.bg, cell.flags, is_cursor, content.colors, style),
             ));
         }
 
         rows.into_iter()
             .enumerate()
-            .map(|(row_idx, cells)| self.render_row(row_idx, cells))
+            .map(|(row_idx, cells)| self.render_row(row_idx, cells, style))
             .collect()
     }
 
-    fn render_row(&self, _row_idx: usize, cells: Vec<(char, CellStyle)>) -> AnyElement {
+    fn render_row(
+        &self,
+        _row_idx: usize,
+        cells: Vec<(char, CellStyle)>,
+        style: &TermThemeStyle,
+    ) -> AnyElement {
         let mut text = String::new();
         let mut runs: Vec<TextRun> = Vec::new();
-        let font = font(TERM_FONT_FAMILY);
+        let font = font(style.mono_font.clone());
         for (ch, style) in cells {
             let run_font = Font {
                 weight: if style.bold {
@@ -407,9 +461,10 @@ impl CellStyle {
         flags: Flags,
         is_cursor: bool,
         colors: &alacritty_terminal::term::color::Colors,
+        style: &TermThemeStyle,
     ) -> Self {
-        let mut fg = color_to_hsla(fg, colors, true);
-        let mut bg = color_to_hsla(bg, colors, false);
+        let mut fg = color_to_hsla(fg, colors, style);
+        let mut bg = color_to_hsla(bg, colors, style);
         if flags.contains(Flags::INVERSE) || is_cursor {
             std::mem::swap(&mut fg, &mut bg);
         }
@@ -423,20 +478,73 @@ impl CellStyle {
     }
 }
 
+/// 终端色 → Hsla。默认前景/背景取应用主题 token（默认盘仅兜底 ANSI 命名色）。
 fn color_to_hsla(
     color: Color,
     colors: &alacritty_terminal::term::color::Colors,
-    is_fg: bool,
+    style: &TermThemeStyle,
 ) -> Hsla {
     let rgb = match color {
+        Color::Named(NamedColor::Foreground) => colors[NamedColor::Foreground].unwrap_or_else(|| {
+            rgb_from_hex(if style.dark { 0xd4d4d4 } else { 0x383a42 })
+        }),
+        Color::Named(NamedColor::Background) => {
+            colors[NamedColor::Background].unwrap_or_else(|| rgb_from_hsla(style.bg))
+        }
         Color::Named(name) => {
-            let default = default_palette(name, is_fg);
+            let default = default_palette(name, style.dark);
             colors[name].unwrap_or(default)
         }
         Color::Spec(rgb) => rgb,
-        Color::Indexed(i) => indexed_palette(i, colors),
+        Color::Indexed(i) => indexed_palette(i, colors, style.dark),
     };
     gpui::rgb(((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32).into()
+}
+
+fn rgb_from_hex(hex: u32) -> Rgb {
+    Rgb {
+        r: (hex >> 16) as u8,
+        g: (hex >> 8) as u8,
+        b: hex as u8,
+    }
+}
+
+/// 主题背景 Hsla → Rgb（用于把主题 token 喂给终端默认背景）。
+fn rgb_from_hsla(color: Hsla) -> Rgb {
+    // 手写 HSL→RGB：gpui 的 Hsla 无到 alacritty Rgb 的桥
+    let (r, g, b) = hsl_to_rgb(color.h, color.s, color.l);
+    Rgb {
+        r: (r * 255.0) as u8,
+        g: (g * 255.0) as u8,
+        b: (b * 255.0) as u8,
+    }
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s == 0.0 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let hue = |t: f32| -> f32 {
+        let mut t = t;
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    (hue(h + 1.0 / 3.0), hue(h), hue(h - 1.0 / 3.0))
 }
 
 /// IME 文本输入（docs 限制外的补充能力）：中文/日文等组合输入经
@@ -541,56 +649,33 @@ impl EntityInputHandler for TerminalState {
     }
 }
 
-/// 16 色默认盘（VS Code Dark+ 近似）。
-fn default_palette(name: NamedColor, is_fg: bool) -> Rgb {
-    use NamedColor::*;
-    const TABLE: [(NamedColor, u32); 18] = [
-        (Foreground, 0xd4d4d4),
-        (Background, 0x161617),
-        (Cursor, 0xd4d4d4),
-        (Black, 0x2a2a2b),
-        (Red, 0xcd3131),
-        (Green, 0x0dbc79),
-        (Yellow, 0xe5e510),
-        (Blue, 0x2472c8),
-        (Magenta, 0xbc3fbc),
-        (Cyan, 0x11a8cd),
-        (White, 0xe5e5e5),
-        (BrightBlack, 0x767676),
-        (BrightRed, 0xf14c4c),
-        (BrightGreen, 0x23d18b),
-        (BrightYellow, 0xf5f543),
-        (BrightBlue, 0x3b8eea),
-        (BrightMagenta, 0xd670d6),
-        (BrightCyan, 0x29b8db),
-    ];
-    if name == BrightWhite {
-        return Rgb {
-            r: 0xff,
-            g: 0xff,
-            b: 0xff,
-        };
-    }
-    let _ = is_fg;
-    for (candidate, hex) in TABLE {
-        if candidate == name {
+/// 16 色默认盘：按主题明暗取对应色表。
+fn default_palette(name: NamedColor, dark: bool) -> Rgb {
+    let table: &[(NamedColor, u32); 18] = if dark { &DARK_PALETTE } else { &LIGHT_PALETTE };
+    for (candidate, hex) in table {
+        if *candidate == name {
             return Rgb {
-                r: (hex >> 16) as u8,
-                g: (hex >> 8) as u8,
-                b: hex as u8,
+                r: (*hex >> 16) as u8,
+                g: (*hex >> 8) as u8,
+                b: *hex as u8,
             };
         }
     }
     // Dim 变体未单列：回退前景色
+    let fallback = if dark { 0xd4d4d4 } else { 0x383a42 };
     Rgb {
-        r: 0xd4,
-        g: 0xd4,
-        b: 0xd4,
+        r: (fallback >> 16) as u8,
+        g: (fallback >> 8) as u8,
+        b: fallback as u8,
     }
 }
 
 /// xterm 256 色标准盘（0-15 走 16 色默认盘）。
-fn indexed_palette(i: u8, colors: &alacritty_terminal::term::color::Colors) -> Rgb {
+fn indexed_palette(
+    i: u8,
+    colors: &alacritty_terminal::term::color::Colors,
+    dark: bool,
+) -> Rgb {
     if let Some(rgb) = colors[i as usize] {
         return rgb;
     }
@@ -614,7 +699,7 @@ fn indexed_palette(i: u8, colors: &alacritty_terminal::term::color::Colors) -> R
                 14 => NamedColor::BrightCyan,
                 _ => NamedColor::BrightWhite,
             };
-            default_palette(named, false)
+            default_palette(named, dark)
         }
         16..=231 => {
             let i = i as u32 - 16;
