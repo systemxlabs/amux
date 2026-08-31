@@ -169,7 +169,7 @@ pub struct AmuxApp {
     pub(crate) session_dir: PathBuf,
     pub selected: Option<Selected>,
     pub panel: Option<Panel>,
-    pub(crate) sidebar_width_px: f32,
+    pub sidebar_width_px: f32,
     pub(crate) sidebar_resize_origin: Option<f32>,
     pub(crate) sidebar_resize_initial: f32,
     pub panel_delta_px: f32,
@@ -215,6 +215,13 @@ pub struct AmuxApp {
     pub(crate) _subs: Vec<Subscription>,
     pub(crate) _tasks: Vec<Task<()>>,
 }
+
+/// 侧栏拖拽手柄的载荷类型。`on_drag_move` 是窗口级全局监听，仅按载荷
+/// TypeId 区分来源：两个手柄若共用 `()`，任一拖拽都会触发两者的调整逻辑。
+struct SidebarResizeDrag;
+
+/// 右侧面板拖拽手柄的载荷类型（见 `SidebarResizeDrag`）。
+struct PanelResizeDrag;
 
 impl AmuxApp {
     pub(crate) const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
@@ -934,6 +941,7 @@ impl AmuxApp {
             self.panel_delta_px / window.scale_factor() - Self::PANEL_RESIZE_HANDLE_WIDTH;
         let handle = div()
             .id("panel-resize-handle")
+            .debug_selector(|| "panel-resize-handle".into())
             .w(px(Self::PANEL_RESIZE_HANDLE_WIDTH)) // 拖拽手柄宽度：物理命中区域
             .h_full()
             .bg(cx.theme().border.opacity(0.35))
@@ -945,25 +953,29 @@ impl AmuxApp {
                     this.panel_resize_initial = this.panel_delta_px;
                 }),
             )
-            .on_drag((), |_, _, _, cx| cx.new(|_| Empty))
-            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<()>, window, cx| {
-                let Some(origin) = this.panel_resize_origin else {
-                    return;
-                };
-                // 向左拖（x 变小）即面板变宽；上限同时受 800 逻辑像素与
-                // 窗口可用宽度约束（保住侧栏与最小中间列宽）
-                let scale = window.scale_factor();
-                let avail = window.bounds().size.width.as_f32() / scale
-                    - crate::theme::SIDEBAR_WIDTH
-                    - 320.0; // 最小中间列宽
-                let max_w = 800.0f32.min(avail.max(300.0));
-                let next = (this.panel_resize_initial + origin - event.event.position.x.as_f32())
+            .on_drag(PanelResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<PanelResizeDrag>, window, cx| {
+                    let Some(origin) = this.panel_resize_origin else {
+                        return;
+                    };
+                    // 向左拖（x 变小）即面板变宽；上限同时受 800 逻辑像素与
+                    // 窗口可用宽度约束（保住侧栏与最小中间列宽）
+                    let scale = window.scale_factor();
+                    let avail = window.bounds().size.width.as_f32() / scale
+                        - crate::theme::SIDEBAR_WIDTH
+                        - 320.0; // 最小中间列宽
+                    let max_w = 800.0f32.min(avail.max(300.0));
+                    let next = (this.panel_resize_initial
+                        + origin
+                        - event.event.position.x.as_f32())
                     .clamp(
                         (300.0 + Self::PANEL_RESIZE_HANDLE_WIDTH) * scale,
                         (max_w + Self::PANEL_RESIZE_HANDLE_WIDTH) * scale,
                     );
-                this.resize_panel(window, cx, next);
-            }));
+                    this.resize_panel(window, cx, next);
+                }),
+            );
         Some(
             h_flex()
                 .h_full()
@@ -1073,6 +1085,7 @@ impl AmuxApp {
             );
         let resize_handle = div()
             .id("sidebar-resize-handle")
+            .debug_selector(|| "sidebar-resize-handle".into())
             .w(px(5.0)) // 拖拽手柄宽度：物理命中区域
             .h_full()
             .bg(sidebar_border.opacity(0.6))
@@ -1084,17 +1097,19 @@ impl AmuxApp {
                     this.sidebar_resize_initial = this.sidebar_width_px;
                 }),
             )
-            .on_drag((), |_, _, _, cx| cx.new(|_| Empty))
-            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<()>, window, cx| {
-                let Some(origin) = this.sidebar_resize_origin else {
-                    return;
-                };
-                let next = (this.sidebar_resize_initial
-                    + (event.event.position.x.as_f32() - origin))
-                    .clamp(180.0 * window.scale_factor(), 420.0 * window.scale_factor());
-                this.sidebar_width_px = next;
-                cx.notify();
-            }));
+            .on_drag(SidebarResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<SidebarResizeDrag>, window, cx| {
+                    let Some(origin) = this.sidebar_resize_origin else {
+                        return;
+                    };
+                    let next = (this.sidebar_resize_initial
+                        + (event.event.position.x.as_f32() - origin))
+                        .clamp(180.0 * window.scale_factor(), 420.0 * window.scale_factor());
+                    this.sidebar_width_px = next;
+                    cx.notify();
+                }),
+            );
         h_flex()
             .w(px(sidebar_width)) // 拖拽解析出的运行时宽度（随 pointer 事件更新）
             .h_full()
