@@ -2126,14 +2126,14 @@ impl AmuxApp {
                 )
             }
             Some(Selected::Workflow { id }) => {
-                let Some(workflow) = self.workflow(id) else {
+                // header 仅标注 agent 名称与可用状态（docs/PRD.md）：工作状态
+                // 由会话列表转圈与对话区实时活动表达
+                let Some(_workflow) = self.workflow(id) else {
                     return h_flex().into_any();
                 };
                 (
                     "编排智能体".to_string(),
-                    if workflow.state() == SessionState::Busy {
-                        "工作中"
-                    } else if self.store.orchestrator().is_configured() {
+                    if self.store.orchestrator().is_configured() {
                         "可用"
                     } else {
                         "不可用"
