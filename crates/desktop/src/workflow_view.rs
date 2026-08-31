@@ -8,6 +8,7 @@ use gpui_component::{
     input::Input,
     label::Label,
     menu::{ContextMenuExt, PopupMenuItem},
+    popover::Popover,
     spinner::Spinner,
     tag::Tag,
     *,
@@ -68,23 +69,14 @@ impl AmuxApp {
     }
 
     pub(crate) fn create_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let goal = self.workflow_input.read(cx).value().to_string();
-        let template = self.workflow_template.take();
-        let description = if goal.trim().is_empty() {
-            template
-                .as_ref()
-                .map(|t| t.name.clone())
-                .unwrap_or_default()
-        } else {
-            goal.trim().to_string()
-        };
-        if template.is_none() && description.is_empty() {
-            self.workflow_error = Some("请先用自然语言描述执行计划".into());
+        let goal = self.workflow_input.read(cx).value().trim().to_string();
+        if goal.is_empty() {
+            self.workflow_error = Some("请先手动输入工作流计划，或从下拉选择已保存的工作流".into());
             cx.notify();
             return;
         }
-        let preamble = template.map(|t| t.plan);
-        self.create_workflow_with(window, cx, description, preamble);
+        let description = goal;
+        self.create_workflow_with(window, cx, description, None);
         self.workflow_input
             .update(cx, |s, cx| s.set_value("", window, cx));
     }
@@ -600,41 +592,93 @@ impl AmuxApp {
             .into_any_element()
     }
 
+    /// 工作流计划输入：输入框可手动输入；有已保存工作流时输入框本身即
+    /// Popover 触发器（同工作目录选择），下拉项展示名称与计划（截断），
+    /// 选择后把工作流计划内容复制到输入框。
     pub(crate) fn render_template_selector(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let templates = self.store.list_templates();
-        if templates.is_empty() {
-            return Label::new("（无计划，可在设置中添加）").into_any_element();
-        }
-        ButtonGroup::new("ns-tpl-group")
-            .small()
-            .flex_wrap()
-            .children(templates.iter().map(|t| {
-                let sel = self
-                    .workflow_template
-                    .as_ref()
-                    .is_some_and(|x| x.name == t.name);
-                Button::new(format!("ns-tpl-{}", t.name))
-                    .label(t.name.clone())
-                    .selected(sel)
-            }))
-            // 单选组回传按下索引；再次点击已选模板取消选择
-            .on_click(cx.listener(move |this, clicks: &Vec<usize>, _window, cx| {
-                let Some(&ix) = clicks.first() else {
-                    return;
-                };
-                if let Some(t) = this.store.list_templates().get(ix) {
-                    if this
-                        .workflow_template
-                        .as_ref()
-                        .is_some_and(|x| x.name == t.name)
-                    {
-                        this.workflow_template = None;
-                    } else {
-                        this.workflow_template = Some(t.clone());
+        let app = cx.entity();
+        let open = self.show_workflow_dropdown;
+        let content = if templates.is_empty() {
+            Input::new(&self.workflow_input).into_any_element()
+        } else {
+            Popover::new("workflow-plan-picker")
+                .anchor(Anchor::BottomLeft)
+                .open(open)
+                .on_open_change({
+                    let app = app.clone();
+                    move |is_open, _window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.show_workflow_dropdown = *is_open;
+                            cx.notify();
+                        });
                     }
-                }
-                cx.notify();
-            }))
-            .into_any_element()
+                })
+                .trigger(
+                    Input::new(&self.workflow_input).suffix(
+                        Icon::new(IconName::ChevronDown)
+                            .small()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+                )
+                .content({
+                    let store = self.store.clone();
+                    move |_, _window, cx| {
+                        // 受控开启：选项点击后经 AmuxApp 关闭（on_open_change 回写）
+                        let hover_bg = cx.theme().accent;
+                        v_flex()
+                            .id("workflow-plan-picker-list")
+                            .w(rems(30.))
+                            .max_h(rems(16.))
+                            .overflow_y_scroll()
+                            .gap_0p5()
+                            .children(store.list_templates().into_iter().map(|t| {
+                                let app = app.clone();
+                                let name = t.name.clone();
+                                let plan = t.plan.clone();
+                                let plan_head = plan.lines().next().unwrap_or_default().to_string();
+                                div()
+                                    .id(format!("ns-tpl-option-{name}"))
+                                    .w_full()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(move |d| d.bg(hover_bg))
+                                    .on_click(move |_, window, cx| {
+                                        // 把工作流计划内容复制到输入框，供手动微调
+                                        app.update(cx, |this, cx| {
+                                            this.workflow_input
+                                                .update(cx, |s, cx| s.set_value(&plan, window, cx));
+                                            this.show_workflow_dropdown = false;
+                                            this.workflow_error = None;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(
+                                        v_flex()
+                                            .gap_0p5()
+                                            .min_w_0()
+                                            .child(
+                                                Label::new(name)
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM),
+                                            )
+                                            .child(
+                                                // 计划为多行文本：仅展示首行并截断
+                                                Label::new(plan_head)
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis(),
+                                            ),
+                                    )
+                            }))
+                    }
+                })
+                .into_any_element()
+        };
+        v_flex().gap_1().child(content).into_any_element()
     }
 }

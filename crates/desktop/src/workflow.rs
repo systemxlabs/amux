@@ -58,6 +58,8 @@ pub struct ChildSession {
 pub struct OrcSession {
     pub id: String,
     pub title: String,
+    /// 完整执行计划（用户输入原文，不含 @ 引用展开的上下文；随元数据持久化）
+    pub plan: String,
     /// 用户自然语言计划（含 @ 引用展开的上下文）
     pub description: String,
     /// 工作流计划/系统指令（内置进编排 agent 的系统提示词，不进入会话历史）。
@@ -246,6 +248,7 @@ impl WorkflowEngine {
         let session = OrcSession {
             id: format!("orc_{}", uuid::Uuid::new_v4()),
             title: generate_title(description),
+            plan: description.to_string(),
             description: full,
             preamble: preamble.to_string(),
             state: SessionState::Idle,

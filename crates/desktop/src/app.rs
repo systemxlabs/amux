@@ -20,7 +20,7 @@ use protocol::{
 
 use base64::Engine as _;
 
-use crate::config::{ConfigStore, SkillEntry, WorkflowTemplate};
+use crate::config::{ConfigStore, SkillEntry};
 use crate::logic::InputAttachment;
 use crate::machine::{MachineStatus, MachineView};
 use crate::workflow::{MachineHub, WorkflowEngine};
@@ -196,8 +196,9 @@ pub struct AmuxApp {
     pub(crate) new_session_worktree: bool,
     pub(crate) new_session_error: Option<String>,
     pub(crate) show_workspace_dropdown: bool,
+    /// 新建工作流视图的工作流下拉弹层开启态
+    pub(crate) show_workflow_dropdown: bool,
     pub(crate) workflow_error: Option<String>,
-    pub(crate) workflow_template: Option<WorkflowTemplate>,
     pub(crate) dialog_scroll: ScrollHandle,
     pub(crate) activities_scroll: ScrollHandle,
     pub(crate) plan_scroll: ScrollHandle,
@@ -240,7 +241,7 @@ impl AmuxApp {
         });
         let workflow_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("用自然语言描述完整执行计划（支持 @ 引用上下文）…")
+                .placeholder("手动输入工作流计划，或点击右侧箭头选择已保存的工作流…")
                 .multi_line(true)
         });
         let settings = crate::settings::SettingsState::new(window, cx);
@@ -275,8 +276,8 @@ impl AmuxApp {
             new_session_worktree: false,
             new_session_error: None,
             show_workspace_dropdown: false,
+            show_workflow_dropdown: false,
             workflow_error: None,
-            workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
             activities_scroll: ScrollHandle::new(),
             plan_scroll: ScrollHandle::new(),

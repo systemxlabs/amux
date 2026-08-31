@@ -1944,31 +1944,21 @@ impl AmuxApp {
                             ),
                     );
                 } else {
-                    card = card
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    Label::new("工作流计划")
-                                        .text_sm()
-                                        .text_color(muted_foreground),
-                                )
-                                .child(self.render_template_selector(cx)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    Label::new(if self.workflow_template.is_some() {
-                                        "本次工作流目标（可留空，稍后在会话中输入）"
-                                    } else {
-                                        "自然语言执行计划"
-                                    })
+                    card = card.child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                Label::new("工作流计划")
                                     .text_sm()
                                     .text_color(muted_foreground),
-                                )
-                                .child(Input::new(&self.workflow_input)),
-                        );
+                            )
+                            .child(self.render_template_selector(cx))
+                            .child(
+                                Label::new("创建后编排 agent 将按计划推进")
+                                    .text_sm()
+                                    .text_color(muted_foreground),
+                            ),
+                    );
                     if let Some(err) = &self.workflow_error {
                         card = card.child(Alert::error("ns-wf-error", err.clone()));
                     }

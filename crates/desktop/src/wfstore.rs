@@ -120,6 +120,19 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
             updated_at INTEGER NOT NULL
         );",
     )?;
+    // 执行计划列（docs/DESIGN.md「工作流会话存储」）：既有库缺列时补齐，
+    // 免除用户手动清库
+    let has_plan: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'plan'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_plan == 0 {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN plan TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
     Ok(conn)
 }
 
@@ -135,13 +148,14 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     conn.execute(
         "INSERT INTO sessions
-            (id, title, state, last_active_at, children, description, preamble,
+            (id, title, state, last_active_at, children, description, plan, preamble,
              created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(id) DO UPDATE SET
             title=excluded.title, state=excluded.state,
             last_active_at=excluded.last_active_at, children=excluded.children,
-            description=excluded.description, preamble=excluded.preamble,
+            description=excluded.description, plan=excluded.plan,
+            preamble=excluded.preamble,
             created_at=excluded.created_at, updated_at=excluded.updated_at",
         params![
             session.id,
@@ -150,6 +164,7 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
             session.updated_at as i64,
             children,
             session.description,
+            session.plan,
             session.preamble,
             session.created_at as i64,
             session.updated_at as i64,
@@ -171,7 +186,7 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, state, last_active_at, children, description, preamble,
+            "SELECT id, title, state, last_active_at, children, description, plan, preamble,
                 created_at, updated_at
          FROM sessions ORDER BY last_active_at DESC",
         )
@@ -186,8 +201,9 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
-                row.get::<_, i64>(7)? as u64,
+                row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)? as u64,
+                row.get::<_, i64>(9)? as u64,
             ))
         })
         .map_err(io::Error::other)?;
@@ -199,6 +215,7 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
             last_active_at,
             children,
             description,
+            plan,
             preamble,
             created_at,
             updated_at,
@@ -208,6 +225,7 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
         Ok(OrcSession {
             id,
             title,
+            plan,
             description,
             preamble,
             state: state_from(&state)?,
@@ -262,6 +280,7 @@ mod tests {
         let session = OrcSession {
             id: "orc_1".into(),
             title: "计划A".into(),
+            plan: "第一步：实现\n第二步：审查".into(),
             description: "做完再审查".into(),
             preamble: "计划".into(),
             state: SessionState::Idle,
@@ -301,6 +320,7 @@ mod tests {
         let session = OrcSession {
             id: "orc_1".into(),
             title: "计划A".into(),
+            plan: "第一步：实现\n第二步：审查".into(),
             description: "做完再审查".into(),
             preamble: "计划".into(),
             state: SessionState::Idle,
@@ -340,6 +360,8 @@ mod tests {
         assert_eq!(meta[0].id, "orc_1");
         assert_eq!(meta[0].title, "计划A");
         assert_eq!(meta[0].description, "做完再审查");
+        // 执行计划列（docs/DESIGN.md「工作流会话存储」）完整往返
+        assert_eq!(meta[0].plan, "第一步：实现\n第二步：审查");
         assert_eq!(meta[0].preamble, "计划");
         assert_eq!(meta[0].state, SessionState::Idle);
         assert!(meta[0].transcript.is_empty());
