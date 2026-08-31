@@ -236,7 +236,8 @@ impl WorkflowEngine {
         let t = now();
         let session = OrcSession {
             id: format!("orc_{}", uuid::Uuid::new_v4()),
-            title: generate_title(description),
+            // 标题由用户首个指令生成（record_user），不取自工作流计划
+            title: String::new(),
             plan: description.to_string(),
             description: full,
             preamble: preamble.to_string(),
@@ -1480,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn title_generated_from_description() {
+    fn title_empty_until_first_user_message() {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
         let engine = WorkflowEngine::new(
@@ -1491,11 +1492,21 @@ mod tests {
             test_hub(vec![m], clients),
             &temp_data_dir(),
         );
-        let session = engine.session.read().unwrap();
-        assert_eq!(session.title, "实现登录功能");
-        // 计划存元数据（plan/description），不进对话消息历史
-        assert_eq!(session.plan, "实现登录功能\n然后写测试");
-        assert!(session.transcript.is_empty());
+        {
+            let session = engine.session.read().unwrap();
+            // 新建时标题为空（列表显示占位），由用户首个指令生成
+            assert!(session.title.is_empty());
+            // 计划存元数据（plan/description），不进对话消息历史
+            assert_eq!(session.plan, "实现登录功能\n然后写测试");
+            assert!(session.transcript.is_empty());
+        }
+        // 用户首条指令生成标题
+        engine.record_user("实现登录功能");
+        assert_eq!(
+            engine.session.read().unwrap().title,
+            "实现登录功能",
+            "标题应取自用户首个指令"
+        );
     }
 
     #[test]
@@ -1662,7 +1673,8 @@ mod tests {
         let sessions = WorkflowEngine::load_all(&dir).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
-        assert_eq!(sessions[0].title, "计划A");
+        // 标题由用户首个指令（而非工作流计划）生成
+        assert_eq!(sessions[0].title, "立即保存");
         // 惰性元数据加载：启动路径不读取 transcript。
         assert!(sessions[0].transcript.is_empty());
         assert!(sessions[0].activities.is_empty());
