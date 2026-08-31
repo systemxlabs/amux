@@ -2,7 +2,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     button::*, label::Label, scroll::ScrollableElement, separator::Separator, spinner::Spinner,
-    text::TextView, *,
+    text::TextView, tooltip::Tooltip, *,
 };
 
 use serde_json::json;
@@ -1005,7 +1005,8 @@ impl AmuxApp {
             )
     }
 
-    /// 单个面板切换入口：再次点击同一面板即关闭；打开工作目录/改动面板时顺带加载。
+    /// 单个面板切换入口（icon-only，悬浮弹出文字标签）：再次点击同一面板即关闭；
+    /// 打开工作目录/改动面板时顺带加载。
     /// `icon` 按当前着色构造（普通按钮为单一图标，改动按钮为 +/− 组合）。
     pub(crate) fn render_rail_button(
         &self,
@@ -1016,21 +1017,20 @@ impl AmuxApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let active = self.panel == Some(panel);
-        let (icon_color, label_color) = if active {
-            (cx.theme().primary, cx.theme().foreground)
+        let icon_color = if active {
+            cx.theme().primary
         } else {
-            (cx.theme().muted_foreground, cx.theme().muted_foreground)
+            cx.theme().muted_foreground
         };
         div()
             .id(id.to_string())
             .v_flex()
             .items_center()
-            .gap_0p5()
-            .px_2()
-            .py_1p5()
+            .p_2()
             .rounded_md()
             .when(active, |d| d.bg(cx.theme().list_active))
             .hover(|d| d.bg(cx.theme().list_hover))
+            .tooltip(move |window, _cx| Tooltip::new(label).build(window, _cx))
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 let next = if this.panel == Some(panel) {
                     None
@@ -1062,7 +1062,6 @@ impl AmuxApp {
                 }
             }))
             .child(icon(icon_color))
-            .child(Label::new(label).text_xs().text_color(label_color))
             .into_any_element()
     }
 }
