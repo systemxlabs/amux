@@ -10,7 +10,6 @@ use gpui_component::{
     menu::{ContextMenuExt, PopupMenuItem},
     popover::Popover,
     spinner::Spinner,
-    tag::Tag,
     *,
 };
 
@@ -371,21 +370,8 @@ impl AmuxApp {
                             .flex_1()
                             .min_w_0()
                             .truncate(),
-                    )
-                    .child(if busy {
-                        Tag::warning()
-                            .small()
-                            .rounded_full()
-                            .child(Label::new("编排中…").text_xs())
-                            .into_any_element()
-                    } else {
-                        Tag::secondary()
-                            .outline()
-                            .small()
-                            .rounded_full()
-                            .child(Label::new("空闲").text_xs())
-                            .into_any_element()
-                    }),
+                    ), // 状态展示同普通会话行（docs/PRD.md：状态通过转圈表示
+                       // 工作中，涵盖编排调度中与关联普通会话工作中），空闲无指示
             )
             .child(
                 Button::new(format!("wf-toggle-{wf_id}"))
