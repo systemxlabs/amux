@@ -214,13 +214,13 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 
 | 工具 | 用途 |
 |---|---|
-| `list_agents` | 已注册机器及各机器的 agent 列表：机器在线状态、agent 可用性 |
-| `list_sessions` | 本工作流的关联普通会话列表（标题、状态、最近活跃、机器在线与否）|
-| `create_session` | 向指定机器、指定 agent 与工作目录创建关联普通会话，返回会话 ID |
-| `prompt_session` | 向关联普通会话下发指令 |
-| `cancel_session` | 取消关联普通会话进行中的工作 |
-| `read_session_history` | 按窗口 / 游标读取关联普通会话对话内容 |
-| `read_session_activities` | 按窗口 / 游标读取关联普通会话活动内容 |
+| `list_agents` | 已注册机器及各机器的 agent 列表：机器状态、agent 状态等 |
+| `list_sessions` | 本工作流的关联普通会话列表（标题、状态、最近活跃、机器状态、agent 状态等）|
+| `create_session` | 创建关联普通会话 |
+| `prompt_session` | 向指定关联普通会话下发指令 |
+| `cancel_session` | 取消指定关联普通会话进行中的工作 |
+| `read_session_history` | 分页读取关联普通会话对话内容 |
+| `read_session_activities` | 分页读取关联普通会话活动内容 |
 
 编排智能体实现应支持 steer，当工作流会话处于工作中时，接收的用户消息以 steer 方式注入。
 
