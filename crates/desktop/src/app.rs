@@ -1191,10 +1191,8 @@ impl Render for AmuxApp {
             .items_stretch()
             .child(self.render_sidebar(window, cx))
             .child(self.render_main(window, cx));
-        if let Some(p) = panel {
-            main_row = main_row.child(p);
-        }
-        // 右缘面板切换栏固定在最右侧，面板向左展开，避免拖拽时被面板覆盖。
+        // 右缘面板切换栏放在面板左侧、主内容区右侧；
+        // 面板向左展开时按钮随主内容区一起左移，始终可见。
         if self.selected.is_some() {
             main_row = main_row.child(
                 div()
@@ -1203,6 +1201,9 @@ impl Render for AmuxApp {
                     .items_center()
                     .child(self.render_floating_buttons(window, cx)),
             );
+        }
+        if let Some(p) = panel {
+            main_row = main_row.child(p);
         }
         let mut root = v_flex()
             .size_full()
