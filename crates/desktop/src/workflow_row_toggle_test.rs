@@ -81,8 +81,5 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
     );
     cx.simulate_click(point(px(600.), px(15.)), gpui::Modifiers::default());
     let list = cx.debug_bounds("wf-children-list");
-    assert!(
-        list.is_none(),
-        "再次点击箭头后子会话列表应隐藏: {list:?}"
-    );
+    assert!(list.is_none(), "再次点击箭头后子会话列表应隐藏: {list:?}");
 }
