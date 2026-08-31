@@ -869,16 +869,20 @@ where
         for text in steers {
             history.push(Message::user(format!("用户：{text}")));
         }
-        // builder 把 prompt 追加到 chat_history 末尾，因此最后一条单独传
+        // builder 把 prompt 追加到 chat_history 末尾，因此最后一条单独传；
+        // 请求后必须放回 history——否则作为 prompt 传出的工具结果消息会从
+        // 后续轮次序列中消失，deepseek 等严格校验的 API 会报 400
+        // "insufficient tool messages following tool_calls message"
         let prompt = history.pop().ok_or("编排对话历史为空")?;
         let resp = model
-            .completion_request(prompt)
+            .completion_request(prompt.clone())
             .preamble(preamble.to_string())
             .messages(history.iter().cloned())
             .tools(tool_defs.clone())
             .send()
             .await
             .map_err(|e| format!("编排 agent 调用失败: {e}"))?;
+        history.push(prompt);
         let text = assistant_text(&resp.choice);
         let calls: Vec<ToolCall> = resp
             .choice
@@ -1415,7 +1419,9 @@ async fn read_session_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::providers::openai as rig_openai;
     use rig_core::test_utils::{MockCompletionModel, MockTurn};
+    use serde_json::json;
 
     fn machines() -> Vec<MachineSummary> {
         vec![MachineSummary::named("测试机", &["mock_acp"])]
@@ -2062,5 +2068,58 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("未结束 turn"));
         assert_eq!(model.request_count(), MAX_TOOL_TURNS);
+    }
+
+    /// wire 级回归：工具循环各轮请求转成 OpenAI wire 消息后，assistant
+    /// (tool_calls) 必须紧跟匹配其 id 的 tool 消息（deepseek 曾报
+    /// "insufficient tool messages following tool_calls message"）。含 steer
+    /// 插话与多轮工具调用场景。
+    #[tokio::test]
+    async fn tool_loop_wire_sequence_keeps_tool_results_adjacent() {
+        let model = MockCompletionModel::from_turns([
+            MockTurn::tool_call("call_1", "list_agents", serde_json::json!({})),
+            MockTurn::tool_call("call_2", "list_sessions", serde_json::json!({})),
+            MockTurn::text("已完成本轮调度"),
+        ]);
+        let inbox = Mutex::new(vec!["换一个 agent 重试".to_string()]);
+        let live = test_live();
+        run_tool_loop(
+            model.clone(),
+            "preamble",
+            vec![Message::user("计划")],
+            &inbox,
+            &live,
+        )
+        .await
+        .expect("循环应正常结束");
+
+        for (round, req) in model.requests().iter().enumerate() {
+            let mut wire: Vec<rig_openai::Message> = Vec::new();
+            for m in req.chat_history.iter() {
+                wire.extend(Vec::<rig_openai::Message>::try_from(m.clone()).unwrap());
+            }
+            // 逐条扫描 wire 消息：assistant(tool_calls) 之后必须由 id 匹配的
+            // tool 消息全部应答后才能出现其他消息
+            let mut awaiting: Vec<String> = Vec::new();
+            for m in &wire {
+                match m {
+                    rig_openai::Message::Assistant { tool_calls, .. } => {
+                        assert!(
+                            awaiting.is_empty(),
+                            "第 {round} 轮请求中前一组 tool_calls 尚未全部应答: {awaiting:?}\n{wire:#?}"
+                        );
+                        awaiting = tool_calls.iter().map(|tc| tc.id.clone()).collect();
+                    }
+                    rig_openai::Message::ToolResult { tool_call_id, .. } => {
+                        awaiting.retain(|id| *id != *tool_call_id);
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                awaiting.is_empty(),
+                "第 {round} 轮请求中 tool 消息未覆盖全部 tool_call id: {awaiting:?}\n{wire:#?}"
+            );
+        }
     }
 }
