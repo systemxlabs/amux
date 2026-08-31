@@ -31,6 +31,9 @@ impl AmuxApp {
                     if let Some(m) = this.machines.get_mut(idx) {
                         m.agents = result.agents;
                     }
+                    // agent 列表异步到达，晚于 auth_ok 时的 hub 快照；工作流
+                    // 编排的 list_agents 读 hub，必须在此重同步
+                    this.sync_machine_hub();
                     cx.notify();
                 });
             }
