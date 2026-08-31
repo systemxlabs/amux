@@ -413,7 +413,9 @@ impl AmuxApp {
                     .unwrap_or(0),
             )
         });
-        let mut content = v_flex().gap_1();
+        let mut content = v_flex()
+            .gap_1()
+            .debug_selector(|| "wf-children-list".into());
         for c in &children {
             let cid = c.id.clone();
             let cid_open = cid.clone();
@@ -517,6 +519,7 @@ impl AmuxApp {
         let title_menu = title.clone();
         div()
             .id(format!("wf-row-{wf_id}"))
+            .debug_selector(|| "wf-row".into())
             .relative()
             .w_full()
             .rounded_md()
