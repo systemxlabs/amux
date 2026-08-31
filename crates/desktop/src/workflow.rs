@@ -229,21 +229,10 @@ impl WorkflowEngine {
         } else {
             format!("{description}\n\n[上下文]\n{context}")
         };
-        let mut transcript = Vec::new();
-        if !description.trim().is_empty() {
-            transcript.push(OrcMsg::User {
-                text: description.to_string(),
-
-                timestamp: now(),
-            });
-        }
-        if !context.trim().is_empty() {
-            transcript.push(OrcMsg::User {
-                text: "已附加 @ 引用的上下文".into(),
-
-                timestamp: now(),
-            });
-        }
+        let transcript = Vec::new();
+        // 执行计划不进对话消息历史：计划存元数据（plan/description 字段，
+        // docs/DESIGN.md「工作流会话存储」），用户在对话界面输入消息再驱动
+        // （输入消息经 record_user 进 transcript 并触发推进）。
         let t = now();
         let session = OrcSession {
             id: format!("orc_{}", uuid::Uuid::new_v4()),
@@ -1502,14 +1491,11 @@ mod tests {
             test_hub(vec![m], clients),
             &temp_data_dir(),
         );
-        assert_eq!(engine.session.read().unwrap().title, "实现登录功能");
-        assert!(engine
-            .session
-            .read()
-            .unwrap()
-            .transcript
-            .iter()
-            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "实现登录功能\n然后写测试")));
+        let session = engine.session.read().unwrap();
+        assert_eq!(session.title, "实现登录功能");
+        // 计划存元数据（plan/description），不进对话消息历史
+        assert_eq!(session.plan, "实现登录功能\n然后写测试");
+        assert!(session.transcript.is_empty());
     }
 
     #[test]
@@ -1840,6 +1826,16 @@ mod tests {
             &temp_data_dir(),
         );
         let engine = engine;
+        engine
+            .session
+            .write()
+            .unwrap()
+            .transcript
+            .push(OrcMsg::User {
+                text: "开始".into(),
+
+                timestamp: now(),
+            });
         engine
             .session
             .write()

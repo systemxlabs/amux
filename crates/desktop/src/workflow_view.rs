@@ -116,32 +116,11 @@ impl AmuxApp {
         let data_dir = self.data_dir.clone();
         self.workflows.push(engine);
         let wf_id = self.workflows[wi].id();
+        // 新建仅落元数据（含执行计划），不驱动：用户在对话界面输入消息后
+        // 经 record_user 触发推进（同普通会话的对话驱动模式）
         self.set_selected(Some(Selected::Workflow { id: wf_id }), window, cx);
-        let should_advance =
-            !clean.trim().is_empty() || preamble.as_deref().is_some_and(|p| !p.trim().is_empty());
-        if should_advance {
-            if let Some(wf) = self.workflows.get_mut(wi) {
-                wf.begin_busy();
-            }
-        }
         if let Some(wf) = self.workflows.get(wi) {
             wf.persist_in_background(data_dir.clone());
-        }
-        if should_advance {
-            let wf = self.workflows[wi].clone();
-            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                run_engine_on_tokio(async move {
-                    if let Err(e) = wf.advance().await {
-                        log::error!("推进工作流失败 {}: {e}", wf.id());
-                    }
-                    if let Err(e) = wf.persist(&data_dir) {
-                        log::error!("工作流状态持久化失败 {}: {e}", wf.id());
-                    }
-                })
-                .await;
-                let _ = this.update_in(cx, |_this, _w, cx| cx.notify());
-            });
-            self._tasks.push(t);
         }
         cx.notify();
     }
