@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    button::*, dialog::DialogButtonProps, input::Input, input::InputState, label::Label,
+    button::*, input::Input, input::InputState, label::Label,
     notification::Notification as UiNotification, radio::RadioGroup, FocusTrapElement as _, *,
 };
 
@@ -229,9 +229,9 @@ impl AmuxApp {
     }
 
     /// 统一表单对话框：gpui-component Dialog 承载——Escape 关闭、遮罩点击关闭、
-    /// 焦点陷阱与恢复、确定/取消按钮键盘可达均由库提供（此前手搓 overlay 的
-    /// 表单对话框 Tab 进不去、Escape 失效）。字段区每次渲染重新求值，校验错误
-    /// 随状态即时刷新；`on_ok` 返回 false 表示校验失败，对话框保持打开。
+    /// 焦点陷阱与恢复由库提供。库版 Dialog 不渲染 button_props 的确定/取消
+    /// 按钮（仅 AlertDialog 会），必须自带 footer；字段区每次渲染重新求值，
+    /// 校验错误随状态即时刷新，`on_ok` 返回 false 表示校验失败，对话框保持打开。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_form_dialog(
         &self,
@@ -254,15 +254,36 @@ impl AmuxApp {
             dialog
                 .title(title)
                 .width(width)
-                .button_props(
-                    DialogButtonProps::default()
-                        .show_cancel(true)
-                        .cancel_text("取消")
-                        .ok_text(ok_label),
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("form-dialog-cancel")
+                                .small()
+                                .label("取消")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("form-dialog-ok")
+                                .small()
+                                .primary()
+                                .label(ok_label)
+                                .on_click({
+                                    let on_ok = on_ok.clone();
+                                    let app_for_ok = app_for_ok.clone();
+                                    move |_, window, cx| {
+                                        let mut ok = false;
+                                        app_for_ok.update(cx, |this, cx| {
+                                            ok = on_ok(this, window, cx);
+                                        });
+                                        if ok {
+                                            window.close_dialog(cx);
+                                        }
+                                    }
+                                }),
+                        ),
                 )
-                .on_ok(move |_, window, cx| {
-                    app_for_ok.update(cx, |this, cx| on_ok(this, window, cx))
-                })
                 .content(move |content, _window, cx| {
                     app.update(cx, |this, cx| content.child(build_fields(this, cx)))
                 })
