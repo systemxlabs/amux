@@ -33,6 +33,7 @@ Server 在未收到此认证消息并通过认证前，请求均返回认证失�
 | `session.configure` | 配置指定普通会话：会话标题，会话选项等 |
 | `session.config_options` | 获取指定普通会话的会话选项 |
 | `session.slash_commands` | 获取指定普通会话的斜杠命令 |
+| `session.plan` | 获取指定普通会话的 agent 计划 |
 | `session.history` | 分页查询指定普通会话的对话历史 |
 | `session.activities` | 分页查询指定普通会话的活动历史 |
 | `session.ongoing_activity` | 查询指定普通会话正在进行中的活动 |
@@ -114,7 +115,7 @@ Server 作为 ACP client 与 ACP servers 通信
 - 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
 - 取消会话：当用户取消会话时，向 ACP Server 发送 `session/cancel` 请求来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
-- 会话上下文大小：接收 ACP Server 的 `usage_update` 通知并记录会话的上下文窗口总大小和当前上下文大小
+- 会话上下文大小：接收 ACP Server 的 `session/update` 通知的 `usage_update` 类型并记录会话的上下文窗口总大小和当前上下文大小
 
 ### 普通会话状态
 
@@ -132,11 +133,15 @@ Server 作为 ACP client 与 ACP servers 通信
 普通会话选项存储在内存中，以 Agent 侧数据为权威
 - 新建或恢复 ACP 会话时，存储其会话选项在内存中
 - 当发送 `session/set_config_option` ACP 请求时，其响应中的会话选项全量覆盖内存存储
-- 当接收 `config_option_update` ACP 通知时，其通知中的会话选项全量覆盖内存存储
+- 当接收 `session/update` ACP 通知的 `config_option_update` 类型时，其通知中的会话选项全量覆盖内存存储
 
 ### 普通会话斜杠命令
 
-普通会话斜杠命令存储在内存中，以 Agent 侧数据为权威，当接收 `available_commands_update` ACP 通知时，其通知中的斜杠命令全量覆盖内存存储。
+普通会话斜杠命令存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `available_commands_update` 类型时，其通知中的斜杠命令全量覆盖内存存储。
+
+### 普通会话计划
+
+普通会话计划存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `plan` 类型时，其通知中的计划全量覆盖内存存储。
 
 ### 普通会话删除
 
