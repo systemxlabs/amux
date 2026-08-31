@@ -19,6 +19,16 @@ use crate::text::{format_local_time, TimePrecision};
 
 use crate::app::{AmuxApp, Panel, Selected};
 
+/// 改动面板图标：文件 diff（文件轮廓内含 +/−）。gpui-component 默认图标集
+/// 无对应图标，SVG 由应用自有资产提供（main.rs `AmuxAssets`）。
+struct FileDiffIcon;
+
+impl IconNamed for FileDiffIcon {
+    fn path(self) -> SharedString {
+        "icons/file-diff.svg".into()
+    }
+}
+
 impl AmuxApp {
     /// 计划面板：展示会话计划（docs/PRD.md「会话计划」），若无则空白。
     /// 仅普通会话持有计划（计划来自该会话 agent 的 ACP `plan` 通知）；
@@ -928,25 +938,54 @@ impl AmuxApp {
                 Panel::Workspace,
                 "float-workspace",
                 "目录",
-                IconName::FolderOpen,
+                |color| {
+                    Icon::new(IconName::FolderOpen)
+                        .text_color(color)
+                        .into_any_element()
+                },
                 cx,
             ))
-            .child(self.render_rail_button(Panel::Diff, "float-diff", "改动", IconName::File, cx))
+            // 改动按钮：文件 diff 图标（内含 +/−）
+            .child(self.render_rail_button(
+                Panel::Diff,
+                "float-diff",
+                "改动",
+                |color| Icon::new(FileDiffIcon).text_color(color).into_any_element(),
+                cx,
+            ))
             .child(self.render_rail_button(
                 Panel::Detail,
                 "float-detail",
                 "详情",
-                IconName::Info,
+                |color| {
+                    Icon::new(IconName::Info)
+                        .text_color(color)
+                        .into_any_element()
+                },
                 cx,
             ))
             .child(self.render_rail_button(
                 Panel::Activities,
                 "float-activities",
                 "活动",
-                IconName::Inbox,
+                |color| {
+                    Icon::new(IconName::Inbox)
+                        .text_color(color)
+                        .into_any_element()
+                },
                 cx,
             ))
-            .child(self.render_rail_button(Panel::Plan, "float-plan", "计划", IconName::Map, cx))
+            .child(self.render_rail_button(
+                Panel::Plan,
+                "float-plan",
+                "计划",
+                |color| {
+                    Icon::new(IconName::Map)
+                        .text_color(color)
+                        .into_any_element()
+                },
+                cx,
+            ))
             // 终端入口仅普通会话可达（docs/PRD.md 右侧面板「终端：仅普通会话展示」）
             .when(
                 matches!(self.selected, Some(Selected::Session { .. })),
@@ -955,7 +994,11 @@ impl AmuxApp {
                         Panel::Terminal,
                         "float-terminal",
                         "终端",
-                        IconName::SquareTerminal,
+                        |color| {
+                            Icon::new(IconName::SquareTerminal)
+                                .text_color(color)
+                                .into_any_element()
+                        },
                         cx,
                     ))
                 },
@@ -963,12 +1006,13 @@ impl AmuxApp {
     }
 
     /// 单个面板切换入口：再次点击同一面板即关闭；打开工作目录/改动面板时顺带加载。
+    /// `icon` 按当前着色构造（普通按钮为单一图标，改动按钮为 +/− 组合）。
     pub(crate) fn render_rail_button(
         &self,
         panel: Panel,
         id: &str,
         label: &'static str,
-        icon: IconName,
+        icon: impl Fn(Hsla) -> AnyElement,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let active = self.panel == Some(panel);
@@ -1017,7 +1061,7 @@ impl AmuxApp {
                     }
                 }
             }))
-            .child(Icon::new(icon).text_color(icon_color))
+            .child(icon(icon_color))
             .child(Label::new(label).text_xs().text_color(label_color))
             .into_any_element()
     }
