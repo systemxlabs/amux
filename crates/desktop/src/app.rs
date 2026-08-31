@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     button::*,
@@ -1190,18 +1191,28 @@ impl Render for AmuxApp {
             .min_h_0()
             .items_stretch()
             .child(self.render_sidebar(window, cx))
-            .child(self.render_main(window, cx));
-        // 右缘面板切换栏放在面板左侧、主内容区右侧；
-        // 面板向左展开时按钮随主内容区一起左移，始终可见。
-        if self.selected.is_some() {
-            main_row = main_row.child(
+            // 中间面板：悬浮按钮叠加在其右缘之上（不占布局空间），
+            // 面板向左展开时随中列右缘移动，始终可见
+            .child(
                 div()
-                    .h_full()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .child(self.render_floating_buttons(window, cx)),
+                    .child(self.render_main(window, cx))
+                    .when(self.selected.is_some(), |wrapper| {
+                        wrapper.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right_1()
+                                .flex()
+                                .items_center()
+                                .child(self.render_floating_buttons(window, cx)),
+                        )
+                    }),
             );
-        }
         if let Some(p) = panel {
             main_row = main_row.child(p);
         }
