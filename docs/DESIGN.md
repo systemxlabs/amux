@@ -241,7 +241,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 ### 工作流会话存储
 
 工作流会话数据包含三部分
-- 元数据：存储在 `~/.amux/app/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、最近活跃时间、关联普通会话等
+- 元数据：存储在 `~/.amux/app/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、执行计划、最近活跃时间、关联普通会话等
 - 对话历史：存储在 `~/.amux/app/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出（流式输出合并后写入）
 - 活动历史：存储在 `~/.amux/app/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
 
