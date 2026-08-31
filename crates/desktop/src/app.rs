@@ -1188,6 +1188,16 @@ impl Render for AmuxApp {
         if let Some(p) = panel {
             main_row = main_row.child(p);
         }
+        // 右缘面板切换栏固定在最右侧，面板向左展开，避免拖拽时被面板覆盖。
+        if self.selected.is_some() {
+            main_row = main_row.child(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(self.render_floating_buttons(window, cx)),
+            );
+        }
         let mut root = v_flex()
             .size_full()
             .relative()

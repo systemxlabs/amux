@@ -1740,8 +1740,7 @@ impl AmuxApp {
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .child(self.render_dialog(window, cx))
-                    .child(self.render_floating_buttons(window, cx)),
+                    .child(self.render_dialog(window, cx)),
             )
             .into_any()
     }
