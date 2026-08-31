@@ -168,7 +168,7 @@ pub struct AmuxApp {
     /// 工作流引擎每次推进经此取最新连接（不持有陈旧快照）。
     pub(crate) machine_hub: Arc<MachineHub>,
     pub(crate) workflows: Vec<WorkflowEngine>,
-    pub(crate) session_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
     pub selected: Option<Selected>,
     pub panel: Option<Panel>,
     pub sidebar_width_px: f32,
@@ -252,7 +252,7 @@ impl AmuxApp {
             machines: Vec::new(),
             machine_hub: Arc::new(MachineHub::default()),
             workflows: Vec::new(),
-            session_dir: PathBuf::new(),
+            data_dir: PathBuf::new(),
             selected: None,
             panel: None,
             sidebar_width_px: crate::theme::SIDEBAR_WIDTH * window.scale_factor(),
@@ -301,7 +301,9 @@ impl AmuxApp {
         // Tab/Shift+Tab 进终端输入：终端 context 比 Root 的全局 tab（焦点循环）
         // 更深、优先级更高，防止按 Tab 抢走焦点导致终端收不到输入
         crate::terminal::init(cx);
-        app.session_dir = app.store.session_dir();
+        // 数据根（~/.amux/app）：session.sqlite 与 sessions/ JSONL 的统一根，
+        // 与 amux_common::session_log 的目录约定一致
+        app.data_dir = app.store.data_dir();
         // Enter 提交发送：Input 组件在 submit_on_enter 时消费 Enter 键并发出
         // PressEnter，父级无法再通过 on_key_down 捕获，因此在此订阅事件。
         app._subs.push(cx.subscribe_in(
@@ -650,13 +652,13 @@ impl AmuxApp {
             Some(wf) => wf.clone(),
             None => return,
         };
-        let session_dir = this.session_dir.clone();
+        let data_dir = this.data_dir.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             run_engine_on_tokio(async move {
                 if let Err(e) = wf.on_child_state(&sid, old_state, new_state, reason).await {
                     log::error!("推进工作流失败：{e}");
                 }
-                if let Err(e) = wf.persist(&session_dir) {
+                if let Err(e) = wf.persist(&data_dir) {
                     log::error!("工作流状态持久化失败 {}: {e}", wf.id());
                 }
             })

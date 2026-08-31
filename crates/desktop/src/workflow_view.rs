@@ -31,7 +31,7 @@ impl AmuxApp {
     ) {
         if let Some(wf) = self.workflow(&wf_id) {
             // 惰性加载：仅在打开会话渲染对话/活动视图时，从 JSONL 按需补齐 payload。
-            if let Err(e) = wf.backfill(&self.session_dir) {
+            if let Err(e) = wf.backfill(&self.data_dir) {
                 log::error!("补齐工作流历史失败：{e}");
             }
         }
@@ -44,7 +44,7 @@ impl AmuxApp {
     }
 
     pub(crate) fn restore_workflows(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let sessions = match WorkflowEngine::load_all(&self.session_dir) {
+        let sessions = match WorkflowEngine::load_all(&self.data_dir) {
             Ok(sessions) => sessions,
             Err(e) => {
                 log::error!("加载工作流失败：{e}");
@@ -62,7 +62,7 @@ impl AmuxApp {
                 s,
                 self.orchestrator_backend(),
                 self.machine_hub.clone(),
-                &self.session_dir,
+                &self.data_dir,
             ));
         }
         cx.notify();
@@ -110,10 +110,10 @@ impl AmuxApp {
             preamble.as_deref().unwrap_or(""),
             backend,
             self.machine_hub.clone(),
-            &self.session_dir,
+            &self.data_dir,
         );
         let wi = self.workflows.len();
-        let session_dir = self.session_dir.clone();
+        let data_dir = self.data_dir.clone();
         self.workflows.push(engine);
         let wf_id = self.workflows[wi].id();
         self.set_selected(Some(Selected::Workflow { id: wf_id }), window, cx);
@@ -125,7 +125,7 @@ impl AmuxApp {
             }
         }
         if let Some(wf) = self.workflows.get(wi) {
-            wf.persist_in_background(session_dir.clone());
+            wf.persist_in_background(data_dir.clone());
         }
         if should_advance {
             let wf = self.workflows[wi].clone();
@@ -134,7 +134,7 @@ impl AmuxApp {
                     if let Err(e) = wf.advance().await {
                         log::error!("推进工作流失败 {}: {e}", wf.id());
                     }
-                    if let Err(e) = wf.persist(&session_dir) {
+                    if let Err(e) = wf.persist(&data_dir) {
                         log::error!("工作流状态持久化失败 {}: {e}", wf.id());
                     }
                 })
@@ -152,7 +152,7 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         wf_id: String,
     ) {
-        let session_dir = self.session_dir.clone();
+        let data_dir = self.data_dir.clone();
         let Some(engine) = self.workflow_idx(&wf_id) else {
             return;
         };
@@ -161,7 +161,7 @@ impl AmuxApp {
             if should_advance {
                 wf.begin_busy();
             }
-            wf.persist_in_background(session_dir.clone());
+            wf.persist_in_background(data_dir.clone());
             should_advance
         } else {
             false
@@ -173,7 +173,7 @@ impl AmuxApp {
                     if let Err(e) = wf.advance().await {
                         log::error!("取消推进工作流失败 {}: {e}", wf.id());
                     }
-                    if let Err(e) = wf.persist(&session_dir) {
+                    if let Err(e) = wf.persist(&data_dir) {
                         log::error!("工作流状态持久化失败 {}: {e}", wf.id());
                     }
                 })
@@ -248,7 +248,7 @@ impl AmuxApp {
             .collect();
         let missing_machine = targets.len() != children.len();
         let remote_targets = targets.clone();
-        let session_dir = self.session_dir.clone();
+        let data_dir = self.data_dir.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = run_engine_on_tokio(async move {
                 if missing_machine {
@@ -275,7 +275,7 @@ impl AmuxApp {
                                 m.views.remove(sid);
                             }
                         }
-                        match WorkflowEngine::remove(&session_dir, &wf_id) {
+                        match WorkflowEngine::remove(&data_dir, &wf_id) {
                             Ok(()) => {
                                 // 选中态以工作流会话 ID 为身份：删除后无需平移其他引用
                                 this.workflows.retain(|workflow| workflow.id() != wf_id);
@@ -340,7 +340,7 @@ impl AmuxApp {
             .and_then(|wi| self.workflows.get_mut(wi))
         {
             wf.session.write().unwrap().title = title.trim().to_string();
-            wf.persist_in_background(self.session_dir.clone());
+            wf.persist_in_background(self.data_dir.clone());
         }
         self.renaming_workflow = None;
         cx.notify();

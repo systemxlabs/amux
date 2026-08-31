@@ -446,9 +446,11 @@ impl ConfigStore {
         std::fs::write(path, json)
     }
 
-    /// 工作流会话持久化目录（~/.amux/app/sessions/）。
-    pub fn session_dir(&self) -> PathBuf {
-        self.data_dir.join("sessions")
+    /// 应用数据根目录（~/.amux/app/）。工作流元数据 session.sqlite 与
+    /// sessions/ 子目录（对话/活动 JSONL）均以它为根（docs/DESIGN.md
+    /// 「工作流会话存储」）。
+    pub fn data_dir(&self) -> PathBuf {
+        self.data_dir.clone()
     }
 }
 

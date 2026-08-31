@@ -499,7 +499,7 @@ impl AmuxApp {
                 .detach();
             }
             Selected::Workflow { id } => {
-                let session_dir = self.session_dir.clone();
+                let data_dir = self.data_dir.clone();
                 let workflow_text = compose_workflow_text(&clean_text, &all);
                 let Some(engine) = self.workflow_idx(&id) else {
                     return;
@@ -509,7 +509,7 @@ impl AmuxApp {
                     if should_advance {
                         wf.begin_busy();
                     }
-                    wf.persist_in_background(session_dir.clone());
+                    wf.persist_in_background(data_dir.clone());
                     should_advance
                 } else {
                     false
@@ -521,7 +521,7 @@ impl AmuxApp {
                             if let Err(e) = wf.advance().await {
                                 log::error!("推进工作流失败 {}: {e}", wf.id());
                             }
-                            if let Err(e) = wf.persist(&session_dir) {
+                            if let Err(e) = wf.persist(&data_dir) {
                                 log::error!("工作流状态持久化失败 {}: {e}", wf.id());
                             }
                         })
