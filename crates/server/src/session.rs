@@ -260,13 +260,7 @@ impl SessionManager {
             }
             Err(e) => log::error!("查询会话选项时 resume 失败 {session_id}: {e}"),
         }
-        Ok(self
-            .config_options
-            .lock()
-            .unwrap()
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default())
+        Ok(self.current_config_options(session_id))
     }
 
     /// 查询会话斜杠命令（docs/DESIGN.md「普通会话斜杠命令」：存储在内存，
@@ -936,11 +930,30 @@ impl SessionManager {
         let (meta, agent_session_id) = self.get_entry(session_id)?;
         let (driver, agent_session_id) =
             self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
+        log::info!(
+            "会话选项设置请求：session={session_id} agent_session={agent_session_id} config_id={config_id} value={value:?}"
+        );
         let options = driver
             .set_config_option(&agent_session_id, config_id, value)
             .map_err(SessionError::AgentUnavailable)?;
+        if options.is_empty() {
+            // agent 未在响应中携带 configOptions（如不支持该回执）：与 resume
+            // 幂等返回空集合的语义一致，保留既有选项而非覆盖成空
+            log::info!("会话选项设置响应未携带 configOptions，保留既有选项");
+            return Ok(self.current_config_options(session_id));
+        }
         self.store_config_options(session_id, options.clone());
         Ok(options)
+    }
+
+    /// 当前内存中的会话选项（无则空）。
+    fn current_config_options(&self, session_id: &str) -> Vec<protocol::SessionConfigOption> {
+        self.config_options
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn broadcast_state_change(

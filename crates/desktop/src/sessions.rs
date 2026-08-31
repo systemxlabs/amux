@@ -2514,15 +2514,24 @@ impl AmuxApp {
                 value,
             }),
         };
+        log::info!(
+            "发送会话选项设置：machine={} session={session_id} config_id={config_id} params={:?}",
+            m.config.name,
+            params.config
+        );
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
                 .request::<_, OpResult>(protocol::method::SESSION_CONFIGURE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| match res {
                 Ok(_) => {
+                    log::info!(
+                        "会话选项设置成功，刷新选项：session={session_id} config_id={config_id}"
+                    );
                     this.refresh_config_options(w, cx, machine, session_id);
                 }
                 Err(error) => {
+                    log::error!("会话选项设置失败：{error}");
                     w.push_notification(
                         UiNotification::error(format!("会话选项设置失败：{error}"))
                             .title("会话选项"),
