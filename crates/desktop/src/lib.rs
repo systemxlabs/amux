@@ -26,4 +26,6 @@ pub mod ws;
 #[cfg(test)]
 mod terminal_tab_test;
 #[cfg(test)]
+mod workflow_detail_panel_test;
+#[cfg(test)]
 mod workflow_row_toggle_test;

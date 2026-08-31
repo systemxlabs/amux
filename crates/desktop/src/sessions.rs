@@ -727,6 +727,8 @@ impl AmuxApp {
                 .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
                 .cloned(),
             Some(Selected::Workflow { id }) => {
+                // 工作流会话详情数据仅来自应用侧会话元数据；cwd/worktree/context
+                // 为普通会话字段，工作流会话不适用，置空占位（详情面板按类型过滤展示）
                 let wf = self.workflows.get(self.workflow_idx(id)?)?;
                 let sg = wf.snapshot();
                 Some(SessionMeta {

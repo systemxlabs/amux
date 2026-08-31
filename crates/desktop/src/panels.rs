@@ -759,6 +759,9 @@ impl AmuxApp {
         let Some(meta) = self.selected_meta() else {
             return div().w_full().child(Label::new("未选择会话")).into_any();
         };
+        // 工作流会话详情数据仅来自应用侧会话元数据（OrcSession，见 wfstore）：
+        // 无工作目录等普通会话字段，下方对应行按选中类型过滤
+        let is_workflow = matches!(self.selected, Some(Selected::Workflow { .. }));
         let mut body = v_flex()
             .w_full()
             .h_full()
@@ -799,13 +802,20 @@ impl AmuxApp {
                 cx.theme().muted_foreground,
                 cx.theme().foreground,
             ))
-            .child(info_row(
-                "工作目录",
-                &meta.cwd,
-                cx.theme().muted_foreground,
-                cx.theme().foreground,
-            ))
-            .when(!meta.worktree_dir.is_empty(), |view| {
+            // 工作目录（仅普通会话展示：工作流会话无工作目录）
+            .when(!is_workflow, |view| {
+                view.child(
+                    div()
+                        .debug_selector(|| "detail-cwd-row".into())
+                        .child(info_row(
+                            "工作目录",
+                            &meta.cwd,
+                            cx.theme().muted_foreground,
+                            cx.theme().foreground,
+                        )),
+                )
+            })
+            .when(!is_workflow && !meta.worktree_dir.is_empty(), |view| {
                 // worktree 会话：agent 实际工作在工作树内，展示以便定位
                 view.child(info_row(
                     "worktree",
@@ -872,6 +882,53 @@ impl AmuxApp {
             cx.theme().muted_foreground,
             cx.theme().foreground,
         ));
+        if let Some(Selected::Workflow { id }) = &self.selected {
+            // 关联普通会话（仅工作流会话展示）：列表数据仅来自应用侧会话元数据
+            // （OrcSession.children，含会话 ID 与所属机器名），不查询各机器状态
+            if let Some(wf) = self.workflow(id) {
+                let children = wf.children();
+                body = body.child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .debug_selector(|| "wf-detail-children".into())
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Label::new("关联普通会话")
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground),
+                                )
+                                .child(
+                                    Label::new(children.len().to_string())
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .children(children.into_iter().map(|c| {
+                            h_flex()
+                                .w_full()
+                                .gap_1p5()
+                                .items_center()
+                                .debug_selector(|| "wf-detail-child".into())
+                                .child(
+                                    Icon::new(IconName::SquareTerminal)
+                                        .small()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .child(Label::new(c.id).text_sm().flex_1().min_w_0().truncate())
+                                .child(
+                                    Label::new(c.machine_name)
+                                        .text_xs()
+                                        .flex_none()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                        })),
+                );
+            }
+        }
         body.into_any()
     }
 
