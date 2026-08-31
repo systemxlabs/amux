@@ -1051,10 +1051,12 @@ fn acp_config_options(
                 id: opt.id.0.to_string(),
                 name: opt.name,
                 description: opt.description,
+                // category 序列化为不带 JSON 引号的 snake_case 字符串（如 model）
                 category: opt
                     .category
                     .as_ref()
-                    .map(|c| serde_json::to_string(c).unwrap_or_default()),
+                    .and_then(|c| serde_json::to_value(c).ok())
+                    .and_then(|v| v.as_str().map(str::to_string)),
                 kind,
             }
         })
