@@ -617,14 +617,17 @@ impl AmuxApp {
         let read_has_more = machine.workspace_read_has_more;
         let read_next_offset = machine.workspace_read_next_offset;
         let file = workspace_file.clone();
-        let tree = v_flex()
-            .gap_0()
-            .w(px(220.0)) // 文件树面板固定宽度
-            .p_1()
-            .bg(cx.theme().muted.opacity(0.35))
-            .rounded_md()
-            .overflow_y_scrollbar()
-            .children(self.render_workspace_tree(machine_idx, "", 0, cx));
+        // 折叠时左侧文件树整个不渲染，展开/折叠由工具栏按钮控制
+        let tree = (!machine.workspace_tree_collapsed).then(|| {
+            v_flex()
+                .gap_0()
+                .w(px(220.0)) // 文件树面板固定宽度
+                .p_1()
+                .bg(cx.theme().muted.opacity(0.35))
+                .rounded_md()
+                .overflow_y_scrollbar()
+                .children(self.render_workspace_tree(machine_idx, "", 0, cx))
+        });
 
         let mut content = v_flex().flex_1().min_w_0().h_full().gap_2().child(
             Label::new(
@@ -709,6 +712,24 @@ impl AmuxApp {
                     )
                     .child(div().flex_1())
                     .child(
+                        Button::new("workspace-toggle-tree")
+                            .small()
+                            .ghost()
+                            .label(if machine.workspace_tree_collapsed {
+                                "展开文件树"
+                            } else {
+                                "折叠文件树"
+                            })
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                if let Some(machine) = this.active_machine() {
+                                    if let Some(m) = this.machines.get_mut(machine) {
+                                        m.workspace_tree_collapsed = !m.workspace_tree_collapsed;
+                                    }
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(
                         Button::new("close-panel-workspace")
                             .small()
                             .ghost()
@@ -724,7 +745,7 @@ impl AmuxApp {
                     .flex_1()
                     .min_h_0()
                     .gap_2()
-                    .child(tree)
+                    .children(tree)
                     .child(content),
             )
             .into_any()
