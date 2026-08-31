@@ -146,8 +146,14 @@ async fn run(state_file: &str) -> Result<()> {
         .on_receive_request(
             async move |initialize: InitializeRequest, responder, _cx| {
                 responder.respond(
-                    InitializeResponse::new(initialize.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new()),
+                    InitializeResponse::new(initialize.protocol_version).agent_capabilities(
+                        AgentCapabilities::new().session_capabilities(
+                            agent_client_protocol::schema::v1::SessionCapabilities::new()
+                                .delete(
+                                    agent_client_protocol::schema::v1::SessionDeleteCapabilities::new(),
+                                ),
+                        ),
+                    ),
                 )
             },
             agent_client_protocol::on_receive_request!(),

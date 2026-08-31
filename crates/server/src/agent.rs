@@ -17,7 +17,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-pub use crate::acp::{AcpAgentDriver, AgentDriver, AgentEvent, LaunchSummary, SharedDriver};
+pub use crate::acp::{
+    AcpAgentDriver, AgentDriver, AgentEvent, AgentSessionCaps, LaunchSummary, SharedDriver,
+};
 use crate::discovery::{discover_acp_agents, DiscoveredAgent};
 use protocol::AgentInfo;
 

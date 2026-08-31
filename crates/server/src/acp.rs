@@ -115,6 +115,10 @@ pub trait AgentDriver: Send + Sync {
     fn session_plan(&self, _agent_session_id: &str) -> Vec<protocol::SessionPlanEntry> {
         Vec::new()
     }
+    /// 会话建立时记录的 agent 侧能力（docs/DESIGN.md）。默认全不支持。
+    fn session_caps(&self, _agent_session_id: &str) -> AgentSessionCaps {
+        AgentSessionCaps::default()
+    }
     /// 关闭驱动自身，释放 ACP 子进程资源。
     fn shutdown(&self);
     /// 关闭并等待驱动后台线程退出（默认仅 shutdown、不等待；确定性退出路径使用，
@@ -183,6 +187,24 @@ pub struct AcpAgentDriver {
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
+/// 会话建立时 agent 侧声明的能力快照（docs/DESIGN.md：server 在内存中记住
+/// 每个 session 建立时 agent 侧的能力）。能力由 initialize 握手的
+/// agentCapabilities 声明，按 agent sessionId 存档于连接级缓存。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentSessionCaps {
+    /// agent 是否支持 `session/delete`
+    pub delete: bool,
+}
+
+/// initialize 响应的 agentCapabilities → 会话能力快照（纯函数，可单测）。
+fn session_caps_from_agent_caps(
+    caps: &agent_client_protocol::schema::v1::AgentCapabilities,
+) -> AgentSessionCaps {
+    AgentSessionCaps {
+        delete: caps.session_capabilities.delete.is_some(),
+    }
+}
+
 /// `session/update` 通知处理器共享的连接级状态（驱动与 exec 线程各持一份克隆）。
 #[derive(Clone, Default)]
 struct SessionCaches {
@@ -194,6 +216,10 @@ struct SessionCaches {
     commands: Arc<Mutex<HashMap<String, Vec<protocol::SlashCommand>>>>,
     /// 会话计划：agent sessionId -> 最近一次 `plan` 通知的全量条目（缓存理由同上）。
     plans: Arc<Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>>>,
+    /// initialize 握手声明的连接默认能力（会话建立时按 sessionId 落档）
+    default_caps: Arc<Mutex<AgentSessionCaps>>,
+    /// 会话能力：agent sessionId -> 建立时 agent 侧声明的快照
+    caps: Arc<Mutex<HashMap<String, AgentSessionCaps>>>,
 }
 
 impl AcpAgentDriver {
@@ -358,7 +384,7 @@ impl AgentDriver for AcpAgentDriver {
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .remove(agent_session_id);
-        // agent 侧会话已关闭，缓存的斜杠命令与计划随之失效
+        // agent 侧会话已关闭，缓存的斜杠命令、计划与能力档随之失效
         self.caches
             .commands
             .lock()
@@ -366,6 +392,11 @@ impl AgentDriver for AcpAgentDriver {
             .remove(agent_session_id);
         self.caches
             .plans
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .remove(agent_session_id);
+        self.caches
+            .caps
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .remove(agent_session_id);
@@ -378,6 +409,15 @@ impl AgentDriver for AcpAgentDriver {
     /// 删除 agent 侧会话：close 之后，agent 支持
     /// 删除才调用；不支持删除的 agent 返回 METHOD_NOT_FOUND 类错误，调用方忽略）。
     fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
+        // 会话建立时 agent 未声明 sessionCapabilities.delete：不发请求直接报不支持
+        //（调用方按「不支持」忽略）。避免对 codex 这类声明语义缺失的 agent
+        // 发出必然失败的 session/delete（"no rollout found"）。
+        if !self.session_caps(agent_session_id).delete {
+            return Err(
+                "agent 不支持 session/delete（initialize 未声明 sessionCapabilities.delete）"
+                    .into(),
+            );
+        }
         self.call(AcpCall::Delete {
             sid: agent_session_id.to_string(),
         })
@@ -417,6 +457,16 @@ impl AgentDriver for AcpAgentDriver {
             .get(agent_session_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn session_caps(&self, agent_session_id: &str) -> AgentSessionCaps {
+        self.caches
+            .caps
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .get(agent_session_id)
+            .copied()
+            .unwrap_or(*self.caches.default_caps.lock().unwrap())
     }
 }
 
@@ -520,14 +570,18 @@ async fn connect_main(
         .builder()
         .name("amux-server")
         .on_receive_notification(
-            async move |notif: SessionNotification, _cx| {
-                let SessionCaches {
-                    routes,
-                    commands,
-                    plans,
-                } = caches.clone();
-                route_update(&routes, &commands, &plans, &notif).await;
-                Ok(())
+            {
+                let caches = caches.clone();
+                async move |notif: SessionNotification, _cx| {
+                    let SessionCaches {
+                        routes,
+                        commands,
+                        plans,
+                        ..
+                    } = caches.clone();
+                    route_update(&routes, &commands, &plans, &notif).await;
+                    Ok(())
+                }
             },
             agent_client_protocol::on_receive_notification!(),
         )
@@ -638,9 +692,10 @@ async fn connect_main(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(
-            agent,
-            |cx: ConnectionTo<agent_client_protocol::Agent>| async move {
+        .connect_with(agent, {
+            let caches = caches.clone();
+            move |cx: ConnectionTo<agent_client_protocol::Agent>| async move {
+                let caches = caches;
                 let req_rx = req_rx;
                 // 初始化握手（版本协商）。失败需区分两种情形：
                 // - **协议级失败**（agent 存活但不实现 initialize，如返回 method not
@@ -663,7 +718,11 @@ async fn connect_main(
                         .terminal(true),
                 );
                 let init_result = match cx.send_request(init_request).block_task().await {
-                    core::result::Result::Ok(_) => {
+                    core::result::Result::Ok(resp) => {
+                        // 记录 agent 侧声明的连接默认能力（docs/DESIGN.md：
+                        // server 在内存中记住 agent 侧能力）
+                        *caches.default_caps.lock().unwrap() =
+                            session_caps_from_agent_caps(&resp.agent_capabilities);
                         log::debug!("initialize 完成");
                         core::result::Result::Ok(())
                     }
@@ -697,8 +756,34 @@ async fn connect_main(
                     match req {
                         ExecReq::Call { call, resp } => {
                             let cx = cx.clone();
+                            let caches = caches.clone();
                             tokio::spawn(async move {
                                 let result = dispatch_call(&cx, &call).await;
+                                // 会话建立成功：按 sessionId 落档建立时的 agent 侧能力
+                                if let Ok(value) = &result {
+                                    let sid = value.get("sessionId").and_then(|v| v.as_str());
+                                    let caps = *caches.default_caps.lock().unwrap();
+                                    match call {
+                                        AcpCall::NewSession { .. } => {
+                                            if let Some(sid) = sid {
+                                                caches
+                                                    .caps
+                                                    .lock()
+                                                    .expect("Mutex 中毒（临界区内不应 panic）")
+                                                    .insert(sid.to_string(), caps);
+                                            }
+                                        }
+                                        AcpCall::Resume { sid, .. } => {
+                                            caches
+                                                .caps
+                                                .lock()
+                                                .expect("Mutex 中毒（临界区内不应 panic）")
+                                                .entry(sid)
+                                                .or_insert(caps);
+                                        }
+                                        _ => {}
+                                    }
+                                }
                                 let _ = resp.send(result);
                             });
                         }
@@ -766,8 +851,8 @@ async fn connect_main(
                 // 服务循环结束（driver 已 shutdown）：回收本连接的终端子进程
                 shutdown_terminals.terminate_all().await;
                 core::result::Result::Ok(())
-            },
-        )
+            }
+        })
         .await
 }
 
@@ -1166,6 +1251,21 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let routes = Mutex::new(HashMap::from([("s1".to_string(), tx)]));
         (routes, rx)
+    }
+
+    #[test]
+    fn session_caps_from_agent_capabilities() {
+        use agent_client_protocol::schema::v1::{
+            AgentCapabilities, SessionCapabilities, SessionDeleteCapabilities,
+        };
+        // 未声明 sessionCapabilities.delete：不支持删除
+        let caps = session_caps_from_agent_caps(&AgentCapabilities::new());
+        assert!(!caps.delete);
+        // 声明 `{}`：支持删除
+        let caps = session_caps_from_agent_caps(&AgentCapabilities::new().session_capabilities(
+            SessionCapabilities::new().delete(SessionDeleteCapabilities::new()),
+        ));
+        assert!(caps.delete);
     }
 
     #[tokio::test]
