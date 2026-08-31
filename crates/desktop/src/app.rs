@@ -103,11 +103,11 @@ pub(crate) enum NewSessionMode {
 /// 选中普通会话的会话选项状态（经 `session.config_options` 查询；
 /// docs/DESIGN.md「普通会话选项」：存储在 Server 内存，以 Agent 侧数据为权威）。
 #[derive(Default)]
-pub(crate) struct SelectedConfigOptions {
-    pub(crate) machine: usize,
-    pub(crate) session_id: String,
-    pub(crate) loading: bool,
-    pub(crate) options: Vec<SessionConfigOption>,
+pub struct SelectedConfigOptions {
+    pub machine: usize,
+    pub session_id: String,
+    pub loading: bool,
+    pub options: Vec<SessionConfigOption>,
 }
 
 /// 选中普通会话的斜杠命令（经 `session.slash_commands` 查询；
@@ -211,7 +211,7 @@ pub struct AmuxApp {
     /// 以工作流会话 ID 为身份（同 Selected）
     pub(crate) expanded_workflows: std::collections::HashSet<String>,
     /// 选中普通会话的会话选项（`session.config_options`；以 Agent 侧数据为权威）
-    pub(crate) config_options: Option<SelectedConfigOptions>,
+    pub config_options: Option<SelectedConfigOptions>,
     /// 选中普通会话的斜杠命令（`session.slash_commands`；以 Agent 侧数据为权威）
     pub slash_commands: Option<SelectedSlashCommands>,
     /// 持有订阅以避免其随 drop 自动取消
@@ -616,7 +616,7 @@ impl AmuxApp {
                 Some(Selected::Session { machine, id }) if *machine == idx && *id == sid
             );
             if selected_matches {
-                this.refresh_config_options(window, cx, idx, sid.clone());
+                this.refresh_config_options(cx, idx, sid.clone());
                 this.refresh_slash_commands(window, cx, idx, sid.clone());
             }
         }

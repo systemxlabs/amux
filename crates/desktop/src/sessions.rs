@@ -431,7 +431,7 @@ impl AmuxApp {
         self.refresh_dialog(window, cx, machine, session_id.clone());
         self.refresh_activities(window, cx, machine, session_id.clone());
         self.refresh_ongoing(window, cx, machine, session_id.clone());
-        self.refresh_config_options(window, cx, machine, session_id.clone());
+        self.refresh_config_options(cx, machine, session_id.clone());
         self.refresh_slash_commands(window, cx, machine, session_id);
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
@@ -1615,6 +1615,10 @@ impl AmuxApp {
     /// 会话选项行：select 类用下拉按钮、boolean 类用开关（docs/PRD.md
     /// 「会话交互视图」：根据选项类型使用下拉框、开关等组件）。选项数据来自
     /// `session.config_options`，以 Agent 侧数据为权威。
+    ///
+    /// 菜单项/开关的回调运行在窗口事件分发栈内（`&mut App` 上下文），此时
+    /// `weak.update_in` 会因窗口已在 update stack 上而静默失败——必须用
+    /// `entity.update`（同会话右键菜单的可用模式），实体更新内再异步发起请求。
     fn render_config_options_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let opts = self.config_options.as_ref()?;
         let Selected::Session { machine, id } = self.selected.as_ref()? else {
@@ -1625,7 +1629,7 @@ impl AmuxApp {
         }
         let machine = *machine;
         let session_id = id.clone();
-        let weak = cx.weak_entity();
+        let app = cx.entity();
         let muted = cx.theme().muted_foreground;
         let mut row = h_flex().flex_wrap().gap_x_3().gap_y_1().items_center();
         for opt in &opts.options {
@@ -1648,11 +1652,13 @@ impl AmuxApp {
                     let current_value = current_value.clone();
                     let sid = session_id.clone();
                     let oid = opt_id.clone();
-                    let weak = weak.clone();
+                    let app = app.clone();
+                    let dbg_id = opt_id.clone();
                     row = row.child(
                         h_flex()
                             .gap_1()
                             .items_center()
+                            .debug_selector(move || format!("cfg-row-{machine}-{dbg_id}"))
                             .child(Label::new(opt.name.clone()).text_sm().text_color(muted))
                             .child(
                                 Button::new(SharedString::from(format!(
@@ -1666,7 +1672,7 @@ impl AmuxApp {
                                         let mut menu = menu;
                                         for (value, name) in &entries {
                                             let checked = value == &current_value;
-                                            let weak = weak.clone();
+                                            let app = app.clone();
                                             let sid = sid.clone();
                                             let oid = oid.clone();
                                             let value = value.clone();
@@ -1674,11 +1680,8 @@ impl AmuxApp {
                                                 PopupMenuItem::new(name.clone())
                                                     .checked(checked)
                                                     .on_click(move |_ev, _window, cx| {
-                                                        let _ = weak.update_in(
-                                                            cx,
-                                                            |this, window, cx| {
-                                                                this.set_session_config_option(
-                                                                window,
+                                                        app.update(cx, |this, cx| {
+                                                            this.set_session_config_option(
                                                                 cx,
                                                                 machine,
                                                                 sid.clone(),
@@ -1687,8 +1690,7 @@ impl AmuxApp {
                                                                     value: value.clone(),
                                                                 },
                                                             );
-                                                            },
-                                                        );
+                                                        });
                                                     }),
                                             );
                                         }
@@ -1702,7 +1704,7 @@ impl AmuxApp {
                     let sid = session_id.clone();
                     let oid = opt_id.clone();
                     let checked = *current_value;
-                    let weak = weak.clone();
+                    let app = app.clone();
                     row = row.child(
                         h_flex()
                             .gap_1()
@@ -1716,9 +1718,8 @@ impl AmuxApp {
                                 .checked(checked)
                                 .on_click(
                                     move |_, _window, cx| {
-                                        let _ = weak.update_in(cx, |this, window, cx| {
+                                        app.update(cx, |this, cx| {
                                             this.set_session_config_option(
-                                                window,
                                                 cx,
                                                 machine,
                                                 sid.clone(),
@@ -2312,9 +2313,9 @@ impl AmuxApp {
 
     /// 查询选中会话的会话选项（`session.config_options`；docs/DESIGN.md
     /// 「普通会话选项」：存储在 Server 内存，以 Agent 侧数据为权威）。
+    /// 不依赖 window 上下文：供浮层菜单回调等窗口 update stack 内的场景调用。
     pub(crate) fn refresh_config_options(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
         session_id: String,
@@ -2340,7 +2341,7 @@ impl AmuxApp {
         let params = SessionIdParams {
             session_id: session_id.clone(),
         };
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let res = client
                 .request::<_, SessionConfigOptionsResult>(
                     protocol::method::SESSION_CONFIG_OPTIONS,
@@ -2493,9 +2494,9 @@ impl AmuxApp {
     /// 设置会话配置选项（`session.configure` 携带 config 设置；Server 向 ACP
     /// Server 发送 `session/set_config_option`）。成功后重新查询选项，
     /// 以 Agent 侧返回的全量集合刷新。
+    /// 不依赖 window 上下文：供浮层菜单回调等窗口 update stack 内的场景调用。
     pub(crate) fn set_session_config_option(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
         session_id: String,
@@ -2519,7 +2520,7 @@ impl AmuxApp {
             m.config.name,
             params.config
         );
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let res = client
                 .request::<_, OpResult>(protocol::method::SESSION_CONFIGURE, Some(params))
                 .await;
@@ -2528,7 +2529,7 @@ impl AmuxApp {
                     log::info!(
                         "会话选项设置成功，刷新选项：session={session_id} config_id={config_id}"
                     );
-                    this.refresh_config_options(w, cx, machine, session_id);
+                    this.refresh_config_options(cx, machine, session_id);
                 }
                 Err(error) => {
                     log::error!("会话选项设置失败：{error}");
