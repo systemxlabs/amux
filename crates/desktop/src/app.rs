@@ -908,11 +908,17 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         panel: Option<Panel>,
     ) {
-        let new_delta = panel
-            .map(Self::panel_width_logical)
-            .map(|width| width + Self::PANEL_RESIZE_HANDLE_WIDTH)
-            .unwrap_or(0.0)
-            * window.scale_factor();
+        // 在已打开的面板之间切换时保持用户调整后的宽度；
+        // 首次打开或关闭时回退到面板默认值。
+        let new_delta = if panel.is_some() && self.panel.is_some() {
+            self.panel_delta_px
+        } else {
+            panel
+                .map(Self::panel_width_logical)
+                .map(|width| width + Self::PANEL_RESIZE_HANDLE_WIDTH)
+                .unwrap_or(0.0)
+                * window.scale_factor()
+        };
         if panel == Some(Panel::Activities) && self.panel != Some(Panel::Activities) {
             self.activities_limit = 100;
             self.activities_scroll.scroll_to_bottom();
