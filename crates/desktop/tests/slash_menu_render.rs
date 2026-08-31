@@ -7,9 +7,9 @@ use gpui::{div, point, px, size, AppContext, IntoElement, ParentElement, Render,
 
 use protocol::SlashCommand;
 
-use crate::app::{AmuxApp, Selected, SelectedSlashCommands};
-use crate::config::{ConfigStore, MachineConfig};
-use crate::machine::{MachineStatus, MachineView};
+use amux_desktop::app::{AmuxApp, Selected, SelectedSlashCommands};
+use amux_desktop::config::{ConfigStore, MachineConfig};
+use amux_desktop::machine::{MachineStatus, MachineView};
 
 fn command(name: &str) -> SlashCommand {
     SlashCommand {

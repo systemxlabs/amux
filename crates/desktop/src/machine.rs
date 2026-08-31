@@ -38,17 +38,17 @@ impl MachineStatus {
     }
 }
 
-pub(crate) struct MachineView {
+pub struct MachineView {
     pub(crate) config: MachineConfig,
     pub(crate) client: WsClient,
-    pub(crate) status: MachineStatus,
+    pub status: MachineStatus,
     pub(crate) notice: Option<String>,
     pub(crate) agents: Vec<AgentInfo>,
-    pub(crate) sessions: Vec<SessionMeta>,
+    pub sessions: Vec<SessionMeta>,
     pub(crate) sessions_has_more: bool,
     /// 每机器独立的改动审查状态（含陈旧响应防乱的 request_id）
-    pub(crate) diff: gpui::Entity<crate::diff_review::DiffReviewState>,
-    pub(crate) views: std::collections::HashMap<String, SessionView>,
+    pub diff: gpui::Entity<crate::diff_review::DiffReviewState>,
+    pub views: std::collections::HashMap<String, SessionView>,
     pub(crate) workspace_directories: HashMap<String, WorkspaceDirectory>,
     pub(crate) workspace_expanded: HashSet<String>,
     pub(crate) workspace_loading: HashSet<String>,
@@ -73,7 +73,7 @@ pub(crate) struct WorkspaceDirectory {
 }
 
 impl MachineView {
-    pub(crate) fn new(config: MachineConfig, cx: &mut gpui::App) -> Self {
+    pub fn new(config: MachineConfig, cx: &mut gpui::App) -> Self {
         let url = machine_ws_url(&config);
         MachineView {
             diff: cx.new(|_| crate::diff_review::DiffReviewState::default()),

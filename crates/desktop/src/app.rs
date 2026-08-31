@@ -33,7 +33,7 @@ pub(crate) const PAGE_LIMIT: usize = 50;
 actions!(amux, [CloseSettingsOverlay]);
 
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Panel {
+pub enum Panel {
     Workspace,
     Diff,
     Detail,
@@ -111,14 +111,14 @@ pub(crate) struct SelectedConfigOptions {
 /// 选中普通会话的斜杠命令（经 `session.slash_commands` 查询；
 /// docs/DESIGN.md「普通会话斜杠命令」：存储在 Server 内存，以 Agent 侧数据为权威）。
 #[derive(Default)]
-pub(crate) struct SelectedSlashCommands {
-    pub(crate) machine: usize,
-    pub(crate) session_id: String,
-    pub(crate) commands: Vec<SlashCommand>,
+pub struct SelectedSlashCommands {
+    pub machine: usize,
+    pub session_id: String,
+    pub commands: Vec<SlashCommand>,
 }
 
 #[derive(Clone, PartialEq)]
-pub(crate) enum Selected {
+pub enum Selected {
     Session {
         machine: usize,
         id: String,
@@ -161,22 +161,22 @@ impl SkillAction {
 
 pub struct AmuxApp {
     pub(crate) store: Arc<ConfigStore>,
-    pub(crate) machines: Vec<MachineView>,
+    pub machines: Vec<MachineView>,
     /// 机器运行时注册表：机器增删/重连/状态变化时同步，
     /// 工作流引擎每次推进经此取最新连接（不持有陈旧快照）。
     pub(crate) machine_hub: Arc<MachineHub>,
     pub(crate) workflows: Vec<WorkflowEngine>,
     pub(crate) session_dir: PathBuf,
-    pub(crate) selected: Option<Selected>,
-    pub(crate) panel: Option<Panel>,
+    pub selected: Option<Selected>,
+    pub panel: Option<Panel>,
     pub(crate) sidebar_width_px: f32,
     pub(crate) sidebar_resize_origin: Option<f32>,
     pub(crate) sidebar_resize_initial: f32,
-    pub(crate) panel_delta_px: f32,
+    pub panel_delta_px: f32,
     pub(crate) panel_resize_origin: Option<f32>,
     pub(crate) panel_resize_initial: f32,
     pub(crate) new_session_mode: NewSessionMode,
-    pub(crate) input_state: Entity<InputState>,
+    pub input_state: Entity<InputState>,
     pub(crate) input_attachments: Vec<InputAttachment>,
     /// 各会话未发送的输入草稿（输入框为全局单例，切换会话时按 DraftKey 换入换出）
     pub(crate) drafts: HashMap<DraftKey, Draft>,
@@ -198,7 +198,7 @@ pub struct AmuxApp {
     pub(crate) workflow_template: Option<WorkflowTemplate>,
     pub(crate) dialog_scroll: ScrollHandle,
     pub(crate) activities_scroll: ScrollHandle,
-    pub(crate) diff_scroll: VirtualListScrollHandle,
+    pub diff_scroll: VirtualListScrollHandle,
     pub(crate) workflow_dialog_limit: usize,
     /// 会话列表滚动查询的页数 N（docs/DESIGN.md「会话列表滚动查询」）：
     /// 「加载更多」每点击一次 +1，所有在线机器统一查询前 N 页。
@@ -210,7 +210,7 @@ pub struct AmuxApp {
     /// 选中普通会话的会话选项（`session.config_options`；以 Agent 侧数据为权威）
     pub(crate) config_options: Option<SelectedConfigOptions>,
     /// 选中普通会话的斜杠命令（`session.slash_commands`；以 Agent 侧数据为权威）
-    pub(crate) slash_commands: Option<SelectedSlashCommands>,
+    pub slash_commands: Option<SelectedSlashCommands>,
     /// 持有订阅以避免其随 drop 自动取消
     pub(crate) _subs: Vec<Subscription>,
     pub(crate) _tasks: Vec<Task<()>>,
@@ -917,7 +917,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    pub(crate) fn render_panel(
+    pub fn render_panel(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,

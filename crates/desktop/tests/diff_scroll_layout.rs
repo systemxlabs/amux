@@ -16,9 +16,9 @@ use gpui::{
 
 use protocol::{GitChangeStatus, GitDiffFile, GitDiffHunk};
 
-use crate::app::{AmuxApp, Panel, Selected};
-use crate::config::{ConfigStore, MachineConfig};
-use crate::machine::{MachineStatus, MachineView};
+use amux_desktop::app::{AmuxApp, Panel, Selected};
+use amux_desktop::config::{ConfigStore, MachineConfig};
+use amux_desktop::machine::{MachineStatus, MachineView};
 
 struct DiffPanelHostView {
     app: gpui::Entity<AmuxApp>,

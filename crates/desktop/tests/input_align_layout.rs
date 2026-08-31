@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use gpui::{point, px, size, AppContext, IntoElement};
 
-use crate::app::{AmuxApp, Selected};
-use crate::config::{ConfigStore, MachineConfig};
-use crate::machine::{MachineStatus, MachineView};
+use amux_desktop::app::{AmuxApp, Selected};
+use amux_desktop::config::{ConfigStore, MachineConfig};
+use amux_desktop::machine::{MachineStatus, MachineView};
 
 #[gpui::test]
 fn input_buttons_align_with_input_bottom(cx: &mut gpui::TestAppContext) {

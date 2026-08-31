@@ -1,44 +1,11 @@
-//! amux GUI 桌面应用入口。
-//! 三栏（侧边栏/对话/上下文面板）多机器客户端；本地数据拆到 `~/.amux/app/` 多个文件。
-
-#![recursion_limit = "512"]
-
-mod aggregate;
-mod app;
-mod config;
-mod diff;
-mod diff_review;
-mod display;
-mod logic;
-mod machine;
-mod machines;
-mod panels;
-mod sessions;
-mod settings;
-mod terminal;
-mod text;
-mod theme;
-mod wfstore;
-mod workflow;
-mod workflow_view;
-mod ws;
-
-#[cfg(test)]
-mod dialog_image_render_test;
-#[cfg(test)]
-mod diff_scroll_layout_test;
-#[cfg(test)]
-mod input_align_layout_test;
-#[cfg(test)]
-mod slash_menu_render_test;
-#[cfg(test)]
-mod terminal_tab_test;
+//! amux GUI 桌面应用入口（crate 结构见 `lib.rs`）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use app::AmuxApp;
-use config::ConfigStore;
+use amux_desktop::app::AmuxApp;
+use amux_desktop::config::ConfigStore;
+use amux_desktop::theme;
 use gpui::*;
 use gpui_component::*;
 use gpui_component_assets::Assets;
@@ -78,7 +45,7 @@ fn main() {
         // Subscription drop 即注销，而本闭包体在事件循环开始前就会结束，
         // 局部绑定保不住它——注册一次后有意泄漏，生命周期覆盖整个进程。
         let quit_subscription = cx.on_app_quit(|_cx| async {
-            crate::ws::close_all();
+            amux_desktop::ws::close_all();
         });
         std::mem::forget(quit_subscription);
         theme::sync_appearance(None, cx);

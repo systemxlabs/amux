@@ -10,9 +10,9 @@ use gpui::{div, point, px, size, AppContext, IntoElement, ParentElement, Render,
 
 use protocol::ContentBlock;
 
-use crate::app::{AmuxApp, Selected};
-use crate::config::{ConfigStore, MachineConfig};
-use crate::machine::{MachineStatus, MachineView};
+use amux_desktop::app::{AmuxApp, Selected};
+use amux_desktop::config::{ConfigStore, MachineConfig};
+use amux_desktop::machine::{MachineStatus, MachineView};
 
 struct DialogHostView {
     app: gpui::Entity<AmuxApp>,
@@ -70,7 +70,7 @@ fn dialog_renders_user_message_with_image(cx: &mut gpui::TestAppContext) {
                 context_window_size: 0,
             });
             let view = machine.views.entry("session-1".into()).or_default();
-            view.dialog.push(crate::logic::DialogMsg::UserMessage {
+            view.dialog.push(amux_desktop::logic::DialogMsg::UserMessage {
                 content: vec![
                     ContentBlock::Text {
                         text: "看这张图".into(),

@@ -942,8 +942,8 @@ impl DiffRowKind {
 /// 独立实体：diff 数据量与交互（选择/折叠/撤销）自成生命周期，
 /// 与机器连接状态、会话状态解耦。
 #[derive(Default)]
-pub(crate) struct DiffReviewState {
-    pub(crate) files: Vec<GitDiffFile>,
+pub struct DiffReviewState {
+    pub files: Vec<GitDiffFile>,
     pub(crate) not_repo: bool,
     pub(crate) selection: HashSet<(String, Option<usize>)>,
     /// 陈旧响应丢弃：响应只在其 request_id 仍为最新时写入
@@ -965,7 +965,7 @@ pub(crate) struct DiffReviewState {
 
 impl DiffReviewState {
     /// 行模型重建（files / changes_collapsed 变更后调用）。
-    pub(crate) fn rebuild_rows(&mut self) {
+    pub fn rebuild_rows(&mut self) {
         let rows = build_diff_rows(&self.files, self.changes_collapsed);
         // 文件头行号：顺序扫描一次（rows 与 files 同序）
         let mut header_rows = Vec::with_capacity(self.files.len());

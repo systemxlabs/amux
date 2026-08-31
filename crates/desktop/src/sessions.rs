@@ -1023,7 +1023,7 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    pub(crate) fn render_dialog(
+    pub fn render_dialog(
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -1410,7 +1410,7 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    pub(crate) fn render_input(
+    pub fn render_input(
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -1478,7 +1478,7 @@ impl AmuxApp {
                             .id("input-drop-zone")
                             // 最小高度放在 Input 上而非本容器：容器若高于 Input
                             // （auto_grow 的 3 行自然高 < 96px），底部对齐的按钮列
-                            // 会垂到输入框下沿之外（对齐回归见 input_align_layout_test）
+                            // 会垂到输入框下沿之外（对齐回归见 tests/input_align_layout.rs）
                             .debug_selector(|| "input-align-input".into())
                             .capture_action(cx.listener(|this, _: &Paste, _window, cx| {
                                 let Some(item) = cx.read_from_clipboard() else {
@@ -2383,7 +2383,7 @@ impl AmuxApp {
     /// 斜杠命令，弹出上拉框供用户选择）。可见性由当前输入文本派生：仅当选中
     /// 普通会话、命令集合非空且输入正处于命令名输入中（`/` 开头、无空白）时
     /// 展示前缀匹配项；点击项回填 `/name ` 后随前缀消失自动收起。
-    pub(crate) fn render_slash_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub fn render_slash_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let selected = self.slash_commands.as_ref()?;
         let Selected::Session { machine, id } = self.selected.as_ref()? else {
             return None;
