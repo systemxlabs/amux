@@ -31,6 +31,8 @@ mod diff_scroll_layout_test;
 mod input_align_layout_test;
 #[cfg(test)]
 mod slash_menu_render_test;
+#[cfg(test)]
+mod terminal_tab_test;
 
 use std::path::PathBuf;
 use std::sync::Arc;

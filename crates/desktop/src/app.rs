@@ -286,6 +286,9 @@ impl AmuxApp {
             CloseSettingsOverlay,
             Some("SettingsOverlay"),
         )]);
+        // Tab/Shift+Tab 进终端输入：终端 context 比 Root 的全局 tab（焦点循环）
+        // 更深、优先级更高，防止按 Tab 抢走焦点导致终端收不到输入
+        crate::terminal::init(cx);
         app.session_dir = app.store.session_dir();
         // Enter 提交发送：Input 组件在 submit_on_enter 时消费 Enter 键并发出
         // PressEnter，父级无法再通过 on_key_down 捕获，因此在此订阅事件。

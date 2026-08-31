@@ -75,6 +75,19 @@ const LIGHT_PALETTE: [(NamedColor, u32); 18] = [
     (NamedColor::BrightCyan, 0x0598bc),
 ];
 
+// Tab/Shift+Tab 进终端输入：GPUI 中 action 绑定先于 key_down 监听器派发，
+// gpui-component 的 Root 又全局绑定了 tab（焦点循环），终端不持更深的绑定
+// 就会被抢焦点、整体失联（表现为"卡死"）。
+actions!(terminal, [Tab, BackTab]);
+
+/// 注册终端按键绑定（app 启动与测试共用）。
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("tab", Tab, Some("Terminal")),
+        KeyBinding::new("shift-tab", BackTab, Some("Terminal")),
+    ]);
+}
+
 /// alacritty 事件汇（本视图不消费 term 事件，beep/title 等一律忽略）。
 struct TermProxy;
 
@@ -183,6 +196,15 @@ impl TerminalState {
                 .await;
         })
         .detach();
+    }
+
+    /// Tab/Shift+Tab 走 action 路径（见 actions! 说明），发送对应字节序列。
+    fn on_tab(&mut self, _: &Tab, _window: &mut Window, cx: &mut Context<Self>) {
+        self.send_input(vec![b'\t'], cx);
+    }
+
+    fn on_back_tab(&mut self, _: &BackTab, _window: &mut Window, cx: &mut Context<Self>) {
+        self.send_input(b"\x1b[Z".to_vec(), cx);
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -297,9 +319,12 @@ impl Render for TerminalState {
             .overflow_hidden()
             .bg(style.bg)
             .track_focus(&focus)
+            .key_context("Terminal")
             .on_click(cx.listener(|this, _ev, window, cx| {
                 window.focus(&this.focus.clone(), cx);
             }))
+            .on_action(cx.listener(Self::on_tab))
+            .on_action(cx.listener(Self::on_back_tab))
             .on_key_down(cx.listener(Self::handle_key))
             .on_scroll_wheel(cx.listener(Self::handle_scroll))
             .children(rows);
@@ -731,13 +756,7 @@ fn keystroke_to_bytes(ks: &Keystroke) -> Option<Vec<u8>> {
     let key = ks.key.as_str();
     match key {
         "enter" => return Some(vec![b'\r']),
-        "tab" => {
-            return Some(if m.shift {
-                b"\x1b[Z".to_vec()
-            } else {
-                vec![b'\t']
-            })
-        }
+        // tab/shift-tab 由 action 路径处理（绑定先于 key_down 派发，走不到这里）
         "backspace" => return Some(vec![0x7f]),
         "escape" => return Some(b"\x1b".to_vec()),
         "left" | "right" | "up" | "down" | "home" | "end" => {
