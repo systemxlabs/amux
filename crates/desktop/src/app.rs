@@ -242,6 +242,7 @@ impl AmuxApp {
         let workflow_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("手动输入工作流计划，或点击右侧箭头选择已保存的工作流…")
+                .auto_grow(3, 10)
                 .multi_line(true)
         });
         let settings = crate::settings::SettingsState::new(window, cx);
