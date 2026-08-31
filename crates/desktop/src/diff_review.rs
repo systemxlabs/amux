@@ -547,24 +547,8 @@ impl AmuxApp {
             move |this, range, window, cx| this.render_diff_rows(machine_idx, range, window, cx),
         )
         .track_scroll(&self.diff_scroll);
-        let tree = if diff_tree_collapsed {
-            v_flex()
-                .id("diff-collapsed-tree")
-                .w_8()
-                .h_full()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|d| d.bg(cx.theme().list_hover))
-                .on_click(cx.listener(move |this, _ev, _window, cx| {
-                    if let Some(view) = this.machines.get_mut(machine_idx) {
-                        view.diff.update(cx, |st, _| st.tree_collapsed = false);
-                        cx.notify();
-                    }
-                }))
-                .child(Label::new("树").text_sm())
-                .into_any_element()
-        } else {
+        // 折叠时左侧区域整个不渲染，展开/折叠由工具栏按钮控制
+        let tree = (!diff_tree_collapsed).then(|| {
             v_flex()
                 .w(px(190.0)) // diff 文件树固定宽度（压缩些给 diff 内容区让位）
                 .h_full()
@@ -580,8 +564,7 @@ impl AmuxApp {
                         .font_weight(FontWeight::SEMIBOLD),
                 )
                 .children(tree_items)
-                .into_any_element()
-        };
+        });
         v_flex()
             .w_full()
             .h_full()
@@ -597,7 +580,7 @@ impl AmuxApp {
                     .min_w_0()
                     .min_h_0()
                     .gap_2()
-                    .child(tree)
+                    .children(tree)
                     .child(
                         // 注意：h_flex() 默认 items_center，子项高度会退化为内容高度，
                         // 必须显式 h_full 约束为行高，否则虚拟列表无视口可滚
