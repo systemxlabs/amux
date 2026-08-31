@@ -959,96 +959,106 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_machines_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let machines = self
-            .machines
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                // 域标识：按钮 id 与回调捕获均用机器名而非下标（机器顺序变化不影响身份）
-                let machine_name = m.config.name.clone();
-                let reconnect_name = machine_name.clone();
-                let remove_name = machine_name.clone();
-                let mut item = v_flex()
-                    .gap_1()
-                    .p_2()
-                    .bg(cx.theme().muted)
-                    .rounded_md()
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(
-                                Label::new(&m.config.name)
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM),
-                            )
-                            .child(machine_status_badge(
-                                (&m.status, m.notice.as_deref()),
-                                cx.theme().success,
-                                cx.theme().danger,
-                                cx.theme().warning,
-                            ))
-                            .child(div().flex_1())
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "reconnect-m-{machine_name}"
-                                )))
-                                .small()
-                                .label("重连")
-                                .on_click(cx.listener(
-                                    move |this, _ev, window, cx| {
+        let machines =
+            self.machines
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    // 域标识：按钮 id 与回调捕获均用机器名而非下标（机器顺序变化不影响身份）
+                    let machine_name = m.config.name.clone();
+                    let reconnect_name = machine_name.clone();
+                    let remove_name = machine_name.clone();
+                    let mut item = v_flex()
+                        .gap_1()
+                        .p_2()
+                        .bg(cx.theme().muted)
+                        .rounded_md()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(
+                                    Label::new(&m.config.name)
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM),
+                                )
+                                .child(machine_status_badge(
+                                    (&m.status, m.notice.as_deref()),
+                                    cx.theme().success,
+                                    cx.theme().danger,
+                                    cx.theme().warning,
+                                ))
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "reconnect-m-{machine_name}"
+                                    )))
+                                    .small()
+                                    .label("重连")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
                                         let name = reconnect_name.clone();
                                         this.confirm_reconnect_machine(window, cx, name);
-                                    },
-                                )),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("remove-m-{machine_name}")))
+                                    })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "rediscover-m-{machine_name}"
+                                    )))
+                                    .small()
+                                    .label("重新发现")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        this.confirm_rediscover_agents(window, cx, i);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "remove-m-{machine_name}"
+                                    )))
                                     .small()
                                     .label("移除")
                                     .on_click(cx.listener(move |this, _ev, window, cx| {
                                         let name = remove_name.clone();
                                         this.confirm_remove_machine(window, cx, name);
                                     })),
-                            ),
-                    )
-                    .child(
-                        Label::new(&m.config.url)
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .truncate(),
-                    );
-                for a in &m.agents {
-                    let available = a.available;
-                    let agent = a.name.clone();
-                    let agent_restart = agent.clone();
-                    item = item.child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                Label::new(format!(
-                                    "{} · {}",
-                                    agent,
-                                    if available { "可用" } else { "不可用" }
-                                ))
-                                .text_sm(),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Button::new(format!("restart-agent-{machine_name}-{agent}"))
-                                    .small()
-                                    .label("重启")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let agent = agent_restart.clone();
-                                        this.confirm_restart_agent(window, cx, i, agent);
-                                    })),
-                            ),
-                    );
-                }
-                item
-            })
-            .collect::<Vec<_>>();
+                                ),
+                        )
+                        .child(
+                            Label::new(&m.config.url)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate(),
+                        );
+                    for a in &m.agents {
+                        let available = a.available;
+                        let agent = a.name.clone();
+                        let agent_restart = agent.clone();
+                        item = item.child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    Label::new(format!(
+                                        "{} · {}",
+                                        agent,
+                                        if available { "可用" } else { "不可用" }
+                                    ))
+                                    .text_sm(),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new(format!("restart-agent-{machine_name}-{agent}"))
+                                        .small()
+                                        .label("重启")
+                                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                                            let agent = agent_restart.clone();
+                                            this.confirm_restart_agent(window, cx, i, agent);
+                                        })),
+                                ),
+                        );
+                    }
+                    item
+                })
+                .collect::<Vec<_>>();
         v_flex()
             .gap_2()
             .child(
@@ -1056,7 +1066,7 @@ impl AmuxApp {
                     .items_center()
                     .child(self.settings_header(
                         "机器管理",
-                        "接入 / 移除机器；每台机器自动发现 ACP agent，可重启",
+                        "接入 / 移除机器；每台机器自动发现 ACP agent，可重启 / 重新发现",
                         cx.theme().muted_foreground,
                     ))
                     .child(div().flex_1())

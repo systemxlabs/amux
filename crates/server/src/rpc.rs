@@ -112,6 +112,11 @@ impl Handlers {
                 ok_op()
             }
 
+            method::AGENT_REDISCOVER => {
+                self.manager.agents().rediscover_agents();
+                ok_op()
+            }
+
             method::SESSION_NEW => {
                 let p: SessionNewParams = parse(params)?;
                 let session = self

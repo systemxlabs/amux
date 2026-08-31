@@ -1202,13 +1202,12 @@ impl Render for AmuxApp {
                     .child(self.render_main(window, cx))
                     .when(self.selected.is_some(), |wrapper| {
                         wrapper.child(
+                            // PRD「悬浮按钮——悬浮于右侧上方，竖向排列」：
+                            // 右上角贴边，不占布局空间
                             div()
                                 .absolute()
-                                .top_0()
-                                .bottom_0()
+                                .top_2()
                                 .right_1()
-                                .flex()
-                                .items_center()
                                 .child(self.render_floating_buttons(window, cx)),
                         )
                     }),

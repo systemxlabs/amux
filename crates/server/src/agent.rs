@@ -413,6 +413,14 @@ impl AgentRegistry {
             }
         }
     }
+    /// 重新发现 agents（`agent.rediscover`）：重扫本机 ACP agent 并拉起未运行的。
+    /// 已运行的复用现有驱动不重复拉起；此前拉起失败的在此重试。stub/no_discovery
+    /// 模式下为 no-op。
+    pub fn rediscover_agents(&self) -> LaunchSummary {
+        self.refresh_discovery();
+        self.launch_discovered()
+    }
+
     pub fn shutdown_all(&self) {
         if let Some((_, d)) = &self.configured {
             if let Some(override_driver) = self
@@ -755,5 +763,39 @@ mod tests {
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .is_empty());
+    }
+
+    #[test]
+    fn rediscover_agents_noop_when_disabled_or_stub() {
+        let entry = DiscoveredAgent {
+            name: "mock_acp".into(),
+            bin: sibling_bin("mock_acp").display().to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+        };
+        // no_discovery / force_stub / stub 三种受限模式均为 no-op：
+        // 重新发现不会拉起任何 agent（docs/DESIGN.md `agent.rediscover`）
+        for reg in [
+            test_registry(vec![entry.clone()], false, true, None),
+            test_registry(vec![entry.clone()], true, false, None),
+            test_registry(
+                vec![entry],
+                false,
+                false,
+                Some(Arc::new(StubAgentDriver::new())),
+            ),
+        ] {
+            let summary = reg.rediscover_agents();
+            assert_eq!(
+                summary.started + summary.failed,
+                0,
+                "受限模式 rediscover 不应拉起: {summary:?}"
+            );
+            assert!(reg
+                .spawned
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .is_empty());
+        }
     }
 }

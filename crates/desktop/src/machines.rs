@@ -145,6 +145,53 @@ impl AmuxApp {
         .detach();
     }
 
+    /// 重新发现机器上的 agents（`agent.rediscover`）：server 重扫本机并拉起
+    /// 未运行的 agent，成功后刷新 agent 列表。
+    pub(crate) fn rediscover_agents(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+    ) {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let res = client
+                .request_ok::<()>(protocol::method::AGENT_REDISCOVER, None)
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // 失败要可见（机器卡片 notice），否则用户无从感知
+                if let (Err(e), Some(m)) = (&res, this.machines.get_mut(machine)) {
+                    m.notice = Some(format!("重新发现 agents 失败：{e}"));
+                }
+                this.fetch_agents(machine, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn confirm_rediscover_agents(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+    ) {
+        self.confirm_dialog(
+            window,
+            cx,
+            "重新发现",
+            false,
+            "重新发现 agents",
+            "确定重新扫描本机 agents 吗？".to_string(),
+            move |this, window, cx| {
+                this.rediscover_agents(window, cx, machine);
+            },
+        );
+    }
+
     pub(crate) fn confirm_restart_agent(
         &mut self,
         window: &mut Window,
