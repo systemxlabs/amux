@@ -419,15 +419,13 @@ impl AmuxApp {
         for c in &children {
             let cid = c.id.clone();
             let cid_open = cid.clone();
-            let machine_name = c.machine_name.clone();
-            let machine_click = machine_name.clone();
+            let machine_click = c.machine_name.clone();
             let meta = self
                 .machine(c.machine_idx)
                 .and_then(|machine| machine.sessions.iter().find(|s| s.id == c.id));
             let step = meta
                 .map(|m| m.title.clone())
                 .unwrap_or_else(|| "（会话不存在）".into());
-            let agent = meta.map(|m| m.agent.clone()).unwrap_or_default();
             let busy = meta.is_some_and(|m| m.state == SessionState::Busy);
             content = content.child(
                 h_flex()
@@ -441,7 +439,6 @@ impl AmuxApp {
                             .id(format!("wf-child-title-{wf_id}-{cid}"))
                             .flex_1()
                             .min_w_0()
-                            .gap_1p5()
                             .items_center()
                             .on_click(cx.listener(move |this, _ev, window, cx| {
                                 let mi = this
@@ -451,13 +448,9 @@ impl AmuxApp {
                                     .unwrap_or(0);
                                 this.open_session(window, cx, mi, cid_open.clone());
                             }))
-                            .child(Label::new(step).text_sm().flex_1().min_w_0().truncate())
-                            .child(
-                                Label::new(format!("{agent}@{machine_name}"))
-                                    .text_xs()
-                                    .flex_none()
-                                    .text_color(cx.theme().muted_foreground),
-                            ),
+                            // 会话列表每行只展示标题与状态（docs/PRD.md「左侧面板」）；
+                            // agent@机器 属于对话视图 header，不在此处重复
+                            .child(Label::new(step).text_sm().flex_1().min_w_0().truncate()),
                     )
                     .child(if busy {
                         Spinner::new()

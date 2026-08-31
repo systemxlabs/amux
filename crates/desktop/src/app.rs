@@ -23,7 +23,7 @@ use base64::Engine as _;
 use crate::config::{ConfigStore, SkillEntry};
 use crate::logic::InputAttachment;
 use crate::machine::{MachineStatus, MachineView};
-use crate::workflow::{MachineHub, WorkflowEngine};
+use crate::workflow::{HubEvent, MachineHub, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小。
@@ -167,7 +167,8 @@ pub struct AmuxApp {
     /// 机器运行时注册表：机器增删/重连/状态变化时同步，
     /// 工作流引擎每次推进经此取最新连接（不持有陈旧快照）。
     pub(crate) machine_hub: Arc<MachineHub>,
-    pub(crate) workflows: Vec<WorkflowEngine>,
+    /// 工作流会话引擎（集成测试直接注入/断言工作流状态）
+    pub workflows: Vec<WorkflowEngine>,
     pub(crate) data_dir: PathBuf,
     pub selected: Option<Selected>,
     pub panel: Option<Panel>,
@@ -349,6 +350,32 @@ impl AmuxApp {
             let t = app.spawn_machine_tasks(window, cx, name, client);
             app._tasks.push(t);
         }
+        // 编排引擎事件订阅：create_session 挂载新子会话后即时刷新对应机器
+        // 会话列表，让新会话立即以「关联普通会话」形式出现在工作流会话下
+        //（否则下次轮询/状态变更前会以独立普通会话身份展示）
+        let mut hub_events = app.machine_hub.subscribe();
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            loop {
+                match hub_events.recv().await {
+                    Ok(HubEvent::ChildMounted { machine_name, .. }) => {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if let Some(idx) = this
+                                .machines
+                                .iter()
+                                .position(|m| m.config.name == machine_name)
+                            {
+                                this.refresh_sessions(idx, window, cx);
+                            }
+                            cx.notify();
+                        });
+                    }
+                    // 事件积压丢帧只影响刷新时机（10s 轮询兜底），继续消费
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        app._tasks.push(t);
         // 初始数据不在此处拉取：认证握手完成前请求会被拒绝，
         // 由 on_notify 的 auth_ok 分支统一拉取（同加机/重连流程）
         app.restore_workflows(window, cx);
@@ -586,7 +613,9 @@ impl AmuxApp {
         cx.notify();
     }
 
-    pub(crate) fn on_state_change(
+    /// 处理 `session.state_change` 通知：更新本地会话状态并驱动工作流推进
+    ///（集成测试经此模拟 server 推送）。
+    pub fn on_state_change(
         this: &mut Self,
         window: &mut Window,
         cx: &mut Context<Self>,

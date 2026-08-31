@@ -96,13 +96,35 @@ pub struct MachineSummary {
     pub agents: Vec<AgentSlot>,
 }
 
+/// 引擎 → 应用事件（应用订阅后即时刷新 UI）。
+#[derive(Debug, Clone)]
+pub enum HubEvent {
+    /// 编排智能体已挂载新的关联普通会话（create_session 工具执行成功）。
+    ChildMounted {
+        machine_name: String,
+        session_id: String,
+    },
+}
+
 /// 机器运行时注册表：应用侧在机器增删/重连/状态变化时整体同步，
 /// 工作流引擎每次推进前快照最新连接与摘要。引擎不再持有冻结的
 /// WsClient 列表——否则重连后旧连接的接收端已关闭，工作流从此
 /// 无法下发/取消任何子会话，新增机器也对编排 LLM 不可见。
-#[derive(Default)]
+/// 同时充当引擎 → 应用的轻量事件通道（子会话挂载后通知应用即时刷新）。
+#[derive(Debug)]
 pub struct MachineHub {
     entries: std::sync::Mutex<Vec<(MachineSummary, WsClient)>>,
+    events: tokio::sync::broadcast::Sender<HubEvent>,
+}
+
+impl Default for MachineHub {
+    fn default() -> Self {
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        MachineHub {
+            entries: std::sync::Mutex::new(Vec::new()),
+            events,
+        }
+    }
 }
 
 impl MachineHub {
@@ -117,6 +139,20 @@ impl MachineHub {
     pub fn snapshot(&self) -> (Vec<MachineSummary>, Vec<WsClient>) {
         let entries = self.entries.lock().unwrap();
         entries.iter().cloned().unzip()
+    }
+
+    /// 通知应用：编排智能体已挂载新的关联普通会话（create_session 工具）。
+    /// 事件丢失只影响刷新时机（应用侧 10s 轮询兜底），不阻塞编排。
+    pub fn child_mounted(&self, machine_name: &str, session_id: &str) {
+        let _ = self.events.send(HubEvent::ChildMounted {
+            machine_name: machine_name.to_string(),
+            session_id: session_id.to_string(),
+        });
+    }
+
+    /// 订阅引擎事件（应用侧）。
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<HubEvent> {
+        self.events.subscribe()
     }
 }
 
@@ -138,14 +174,22 @@ impl MachineSummary {
 }
 
 /// 编排上下文（每次 decide 的输入）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OrcContext {
     pub plan: String,
     pub preamble: String,
     pub transcript: Vec<String>,
     pub child_sessions: Vec<ChildSession>,
+    /// 引擎共享会话：create_session 工具即时挂载子会话，
+    /// 不等整轮 decide 结束就让 GUI 看到关联关系
+    pub session: Arc<RwLock<OrcSession>>,
     pub clients: Vec<WsClient>,
     pub machines: Vec<MachineSummary>,
+    /// 引擎 → 应用事件通道：挂载新子会话后通知应用即时刷新会话列表
+    pub hub: Arc<MachineHub>,
+    /// 子会话挂载后的即时落库钩子（create_session 工具挂载后立即调用；
+    /// 整轮结束后的 persist 只兜底全量快照）
+    pub persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
     /// 编排进行中用户插话的实时通道：RigBackend 工具循环在每轮请求边界 drain，
     /// 注入为 user 消息。
     /// 与 `WorkflowEngine.steer_inbox` 是同一个 Arc；advance 收尾的 absorb_steer 只兜底剩余项。
@@ -428,6 +472,13 @@ impl WorkflowEngine {
     fn build_context(&self) -> OrcContext {
         // 每次推进前快照：连接与摘要取自 hub 最新状态（重连/加机后即时生效）
         let (machines, clients) = self.hub.snapshot();
+        // 子会话挂载后立即落库（后台任务写盘），不依赖整轮结束后的 persist 快照
+        let engine = self.clone();
+        let data_dir = self.data_dir.clone();
+        let persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>> =
+            Some(Arc::new(move || {
+                engine.persist_in_background(data_dir.clone());
+            }));
         let s = self.session.read().expect("RwLock 中毒");
         OrcContext {
             plan: s.description.clone(),
@@ -441,8 +492,11 @@ impl WorkflowEngine {
                 })
                 .collect(),
             child_sessions: s.children.clone(),
+            session: Arc::clone(&self.session),
             clients,
             machines,
+            hub: Arc::clone(&self.hub),
+            persist_on_child_mounted,
             steer_inbox: Arc::clone(&self.steer_inbox),
         }
     }
@@ -701,6 +755,12 @@ struct LiveRuntime {
     machines: Vec<MachineSummary>,
     clients: Vec<WsClient>,
     children: Arc<Mutex<Vec<ChildSession>>>,
+    /// 引擎共享会话：create_session 工具即时挂载子会话（不等整轮 decide 结束）
+    session: Arc<RwLock<OrcSession>>,
+    /// 引擎 → 应用事件通道：挂载新子会话后通知应用即时刷新会话列表
+    hub: Arc<MachineHub>,
+    /// 子会话挂载后的即时落库钩子（见 `OrcContext.persist_on_child_mounted`）
+    persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
     activities: Arc<Mutex<Vec<Activity>>>,
 }
 
@@ -728,6 +788,25 @@ impl LiveRuntime {
             .find(|c| c.id == session_id)
             .cloned()
             .ok_or_else(|| format!("关联普通会话不存在: {session_id}"))
+    }
+
+    /// 挂载子会话：同时写入工具循环列表、引擎共享会话并立即落库。
+    /// 引擎会话即时更新让 GUI 立即把新会话视为工作流关联会话；
+    /// 工具循环列表供本 turn 内 list_sessions 立即可见；立即落库保证
+    /// 应用崩溃/退出时关联关系不丢（不等整轮结束后的 persist 快照）。
+    fn mount_child(&self, child: ChildSession) {
+        self.children
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .push(child.clone());
+        self.session
+            .write()
+            .expect("RwLock 中毒（临界区内不应 panic）")
+            .children
+            .push(child);
+        if let Some(persist) = &self.persist_on_child_mounted {
+            persist();
+        }
     }
 
     fn record_tool(&self, name: &str, title: impl Into<String>, content: impl Into<String>) {
@@ -988,6 +1067,9 @@ impl OrcBackend for RigBackend {
                 machines: ctx.machines.clone(),
                 clients: ctx.clients.clone(),
                 children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
+                session: ctx.session.clone(),
+                hub: ctx.hub.clone(),
+                persist_on_child_mounted: ctx.persist_on_child_mounted.clone(),
                 activities: Arc::new(Mutex::new(Vec::new())),
             };
             preamble.push_str("\n\n【工作流执行计划】\n");
@@ -1291,18 +1373,19 @@ async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<S
         return Err("创建会话未返回 id".to_string());
     }
     let machine_name = args.machine.clone();
-    live.children
-        .lock()
-        .expect("Mutex 中毒（临界区内不应 panic）")
-        .push(ChildSession {
-            id: sid.clone(),
-            machine_idx: idx,
-            machine_name,
-        });
+    // 即时挂载：子会话立即进入工作流会话关联列表（不等整轮 decide 结束），
+    // 并通知应用刷新会话列表——否则在下次轮询/状态变更前，新会话会以
+    // 独立普通会话身份出现在侧栏，而非挂在工作流会话之下
+    live.mount_child(ChildSession {
+        id: sid.clone(),
+        machine_idx: idx,
+        machine_name: machine_name.clone(),
+    });
+    live.hub.child_mounted(&machine_name, &sid);
     live.record_tool(
         "create_session",
         "创建关联普通会话",
-        format!("{}@{}", sid, args.machine),
+        format!("{}@{}", sid, machine_name),
     );
     Ok(sid)
 }
@@ -1451,6 +1534,19 @@ mod tests {
     }
 
     fn test_live() -> LiveRuntime {
+        let session = Arc::new(RwLock::new(OrcSession {
+            id: "orc_test".into(),
+            title: String::new(),
+            plan: String::new(),
+            description: String::new(),
+            preamble: String::new(),
+            state: SessionState::Idle,
+            transcript: Vec::new(),
+            children: Vec::new(),
+            activities: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }));
         LiveRuntime {
             machines: vec![MachineSummary::named("测试机", &["mock_acp"])],
             clients: vec![WsClient::connect_with_token(
@@ -1458,7 +1554,96 @@ mod tests {
                 "unused".into(),
             )],
             children: Arc::new(Mutex::new(Vec::new())),
+            session,
+            hub: Arc::new(MachineHub::default()),
+            persist_on_child_mounted: None,
             activities: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// 回归：create_session 挂载子会话必须同时写入引擎共享会话（GUI 即时可见），
+    /// 否则整轮 decide 结束前，新会话会以独立普通会话身份出现在会话列表。
+    #[test]
+    fn mount_child_registers_into_tool_list_and_engine_session() {
+        let live = test_live();
+        live.mount_child(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+        });
+        assert_eq!(
+            live.children.lock().unwrap().len(),
+            1,
+            "工具循环内 list_sessions 应立即看到新子会话"
+        );
+        assert_eq!(
+            live.session.read().unwrap().children.len(),
+            1,
+            "引擎共享会话应立即挂载子会话（关联关系即时生效）"
+        );
+    }
+
+    /// 回归：create_session 挂载子会话后应立即写入元数据库（sqlite），
+    /// 不等整轮 decide 结束——否则应用中途退出会丢失关联关系。
+    #[test]
+    fn mounted_child_is_persisted_immediately() {
+        let dir = temp_data_dir();
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            FakeBackend::new_for_tests(),
+            test_hub(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![WsClient::connect_with_token(
+                    "ws://127.0.0.1:1".into(),
+                    "unused".into(),
+                )],
+            ),
+            &dir,
+        );
+        let ctx = engine.build_context();
+        // 同步落库钩子（真实钩子为后台 persist_in_background，这里同步执行以便断言）
+        let persist_engine = engine.clone();
+        let persist_dir = dir.clone();
+        let live = LiveRuntime {
+            machines: ctx.machines.clone(),
+            clients: ctx.clients.clone(),
+            children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
+            session: ctx.session.clone(),
+            hub: ctx.hub.clone(),
+            persist_on_child_mounted: Some(Arc::new(move || {
+                let _ = persist_engine.persist(&persist_dir);
+            })),
+            activities: Arc::new(Mutex::new(Vec::new())),
+        };
+        live.mount_child(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+        });
+        // 未等整轮 decide 结束：元数据库应立即包含刚挂载的子会话
+        let sessions = WorkflowEngine::load_all(&dir).unwrap();
+        assert_eq!(sessions[0].children.len(), 1);
+        assert_eq!(sessions[0].children[0].id, "s_child");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 子会话挂载事件可被应用侧订阅到（驱动即时刷新）。
+    #[test]
+    fn child_mounted_event_reaches_subscriber() {
+        let hub = MachineHub::default();
+        let mut rx = hub.subscribe();
+        hub.child_mounted("测试机", "s_child");
+        match rx.try_recv() {
+            Ok(HubEvent::ChildMounted {
+                machine_name,
+                session_id,
+            }) => {
+                assert_eq!(machine_name, "测试机");
+                assert_eq!(session_id, "s_child");
+            }
+            other => panic!("应收到 ChildMounted 事件，实际 {other:?}"),
         }
     }
 
