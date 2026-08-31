@@ -61,7 +61,7 @@ fn resize_handles_are_isolated(cx: &mut gpui::TestAppContext) {
 
     // AmuxApp 必须是窗口根视图：手柄 mouse_down 内部的 window.refresh()
     // 会触发测试平台按根视图重绘，根视图若为空则整个事件监听帧被清空。
-    let (app, mut cx) = cx.add_window_view(|window, cx| {
+    let (app, cx) = cx.add_window_view(|window, cx| {
         gpui_component::init(cx);
         let store = Arc::new(ConfigStore::new(data_dir));
         AmuxApp::new(store, window, cx)
@@ -94,29 +94,31 @@ fn resize_handles_are_isolated(cx: &mut gpui::TestAppContext) {
     cx.draw(point(px(0.), px(0.)), size(px(1400.), px(900.)), |_, _| {
         app.clone().into_any_element()
     });
-    let (s0, p0) = read_widths(&mut cx, &app);
+    let (s0, p0) = read_widths(cx, &app);
     let handle = cx
         .debug_bounds("sidebar-resize-handle")
         .expect("侧栏手柄未渲染");
     drag(
-        &mut cx,
+        cx,
         handle.center(),
         point(handle.center().x + px(60.), handle.center().y),
     );
-    let (s1, p1) = read_widths(&mut cx, &app);
+    let (s1, p1) = read_widths(cx, &app);
     assert!(s1 > s0, "拖侧栏手柄应加宽侧栏（{s0} → {s1}）");
     assert_eq!(p1, p0, "拖侧栏手柄不应影响右侧面板宽度");
 
     // 回归点 2：拖面板手柄只收窄面板——侧栏 origin 已残留，
     // 旧实现会在此同步漂移侧栏。窗口 960×540 逻辑像素（scale 2）下面板已到
     // 可用宽度上限，故向右拖（收窄）验证面板自身变化。
-    let handle = cx.debug_bounds("panel-resize-handle").expect("面板手柄未渲染");
+    let handle = cx
+        .debug_bounds("panel-resize-handle")
+        .expect("面板手柄未渲染");
     drag(
-        &mut cx,
+        cx,
         handle.center(),
         point(handle.center().x + px(60.), handle.center().y),
     );
-    let (s2, p2) = read_widths(&mut cx, &app);
+    let (s2, p2) = read_widths(cx, &app);
     assert!(p2 < p1, "拖面板手柄应收窄面板（{p1} → {p2}）");
     assert_eq!(s2, s1, "拖面板手柄不应影响侧栏宽度");
 
@@ -125,11 +127,11 @@ fn resize_handles_are_isolated(cx: &mut gpui::TestAppContext) {
         .debug_bounds("sidebar-resize-handle")
         .expect("侧栏手柄未渲染");
     drag(
-        &mut cx,
+        cx,
         handle.center(),
         point(handle.center().x + px(40.), handle.center().y),
     );
-    let (s3, p3) = read_widths(&mut cx, &app);
+    let (s3, p3) = read_widths(cx, &app);
     assert!(s3 > s2, "拖侧栏手柄应继续加宽侧栏（{s2} → {s3}）");
     assert_eq!(p3, p2, "再拖侧栏手柄不应影响右侧面板宽度");
 }

@@ -1023,11 +1023,7 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    pub fn render_dialog(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    pub fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let dialog: Vec<DialogMsg> = match &self.selected {
             Some(Selected::Session { machine, id }) => self
                 .machine(*machine)
@@ -1410,11 +1406,7 @@ impl AmuxApp {
             .into_any_element()
     }
 
-    pub fn render_input(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub fn render_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted_foreground = cx.theme().muted_foreground;
         v_flex()
             .gap_2()

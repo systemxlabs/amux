@@ -549,9 +549,20 @@ impl AmuxApp {
         .track_scroll(&self.diff_scroll);
         let tree = if diff_tree_collapsed {
             v_flex()
+                .id("diff-collapsed-tree")
                 .w_8()
                 .h_full()
-                .child(Label::new("树"))
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|d| d.bg(cx.theme().list_hover))
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    if let Some(view) = this.machines.get_mut(machine_idx) {
+                        view.diff.update(cx, |st, _| st.tree_collapsed = false);
+                        cx.notify();
+                    }
+                }))
+                .child(Label::new("树").text_sm())
                 .into_any_element()
         } else {
             v_flex()

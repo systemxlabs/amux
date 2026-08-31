@@ -70,20 +70,21 @@ fn dialog_renders_user_message_with_image(cx: &mut gpui::TestAppContext) {
                 context_window_size: 0,
             });
             let view = machine.views.entry("session-1".into()).or_default();
-            view.dialog.push(amux_desktop::logic::DialogMsg::UserMessage {
-                content: vec![
-                    ContentBlock::Text {
-                        text: "看这张图".into(),
-                    },
-                    ContentBlock::Resource {
-                        mime_type: "image/png".into(),
-                        uri: None,
-                        text: None,
-                        blob: Some(base64::engine::general_purpose::STANDARD.encode(&blob)),
-                    },
-                ],
-                timestamp: 1_000,
-            });
+            view.dialog
+                .push(amux_desktop::logic::DialogMsg::UserMessage {
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "看这张图".into(),
+                        },
+                        ContentBlock::Resource {
+                            mime_type: "image/png".into(),
+                            uri: None,
+                            text: None,
+                            blob: Some(base64::engine::general_purpose::STANDARD.encode(&blob)),
+                        },
+                    ],
+                    timestamp: 1_000,
+                });
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
                 machine: 0,

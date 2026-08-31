@@ -954,8 +954,8 @@ impl AmuxApp {
                 }),
             )
             .on_drag(PanelResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<PanelResizeDrag>, window, cx| {
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<PanelResizeDrag>, window, cx| {
                     let Some(origin) = this.panel_resize_origin else {
                         return;
                     };
@@ -966,16 +966,15 @@ impl AmuxApp {
                         - crate::theme::SIDEBAR_WIDTH
                         - 320.0; // 最小中间列宽
                     let max_w = 800.0f32.min(avail.max(300.0));
-                    let next = (this.panel_resize_initial
-                        + origin
+                    let next = (this.panel_resize_initial + origin
                         - event.event.position.x.as_f32())
                     .clamp(
                         (300.0 + Self::PANEL_RESIZE_HANDLE_WIDTH) * scale,
                         (max_w + Self::PANEL_RESIZE_HANDLE_WIDTH) * scale,
                     );
                     this.resize_panel(window, cx, next);
-                }),
-            );
+                },
+            ));
         Some(
             h_flex()
                 .h_full()
@@ -1098,8 +1097,8 @@ impl AmuxApp {
                 }),
             )
             .on_drag(SidebarResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<SidebarResizeDrag>, window, cx| {
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<SidebarResizeDrag>, window, cx| {
                     let Some(origin) = this.sidebar_resize_origin else {
                         return;
                     };
@@ -1108,8 +1107,8 @@ impl AmuxApp {
                         .clamp(180.0 * window.scale_factor(), 420.0 * window.scale_factor());
                     this.sidebar_width_px = next;
                     cx.notify();
-                }),
-            );
+                },
+            ));
         h_flex()
             .w(px(sidebar_width)) // 拖拽解析出的运行时宽度（随 pointer 事件更新）
             .h_full()
