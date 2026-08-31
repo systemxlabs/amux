@@ -532,19 +532,19 @@ impl AmuxApp {
                                 let title = this.title_input.read(cx).value().to_string();
                                 this.rename_workflow(cx, &wf_id2.clone(), title);
                             })),
-                        ),
-                    )
-                    .child(
-                        Button::new(format!("wf-rename-cancel-{wf_id}"))
-                            .small()
-                            .ghost()
-                            .flex_1()
-                            .label("取消")
-                            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                this.renaming_workflow = None;
-                                cx.notify();
-                            })),
-                    )
+                    ),
+                )
+                .child(
+                    Button::new(format!("wf-rename-cancel-{wf_id}"))
+                        .small()
+                        .ghost()
+                        .flex_1()
+                        .label("取消")
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.renaming_workflow = None;
+                            cx.notify();
+                        })),
+                )
                 .into_any_element();
         }
 

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use gpui::{
     actions, div, px, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-    KeyBinding, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    KeyBinding, ParentElement, Render, Styled, Window,
 };
 use gpui_component::{v_flex, ActiveTheme};
 
@@ -64,7 +64,7 @@ fn tab_keeps_focus_in_terminal(cx: &mut gpui::TestAppContext) {
 
     let stolen = Rc::new(std::cell::Cell::new(false));
     let stolen_for_host = stolen.clone();
-    let (host, cx) = cx.add_window_view(|window, cx| {
+    let (host, cx) = cx.add_window_view(|_window, cx| {
         // 连接目标不可达即可：send_input 静默失败，不影响焦点断言
         let client = WsClient::connect_with_token("ws://127.0.0.1:9/".into(), "t".into());
         let terminal = cx.new(|cx| TerminalState::new("tab-test".into(), client, 80, 24, cx));

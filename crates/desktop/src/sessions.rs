@@ -918,20 +918,20 @@ impl AmuxApp {
                                 let title = this.title_input.read(cx).value().to_string();
                                 this.rename_session(window, cx, machine, sid2.clone(), title);
                             })),
-                        ),
-                    )
-                    .child(
-                        // 取消路径：此前重命名只能保存，Esc 无效会一直挂在编辑态
-                        Button::new(format!("rename-cancel-{sid}"))
-                            .small()
-                            .ghost()
-                            .flex_1()
-                            .label("取消")
-                            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                this.renaming_session = None;
-                                cx.notify();
-                            })),
-                    )
+                    ),
+                )
+                .child(
+                    // 取消路径：此前重命名只能保存，Esc 无效会一直挂在编辑态
+                    Button::new(format!("rename-cancel-{sid}"))
+                        .small()
+                        .ghost()
+                        .flex_1()
+                        .label("取消")
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            this.renaming_session = None;
+                            cx.notify();
+                        })),
+                )
                 .into_any_element();
         }
         let sid_open = sid.clone();

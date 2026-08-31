@@ -6,7 +6,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     button::*, checkbox::Checkbox, label::Label, notification::Notification as UiNotification,
-    scroll::ScrollableElement, spinner::Spinner, tag::Tag, *,
+    scroll::ScrollableElement, spinner::Spinner, tag::Tag, tooltip::Tooltip, *,
 };
 
 use protocol::{
@@ -512,9 +512,7 @@ impl AmuxApp {
                                 .take(row_ix)
                                 .map(|s| s.height.as_f32())
                                 .sum();
-                            diff_scroll
-                                .base_handle()
-                                .set_offset(point(px(0.), px(-y)));
+                            diff_scroll.base_handle().set_offset(point(px(0.), px(-y)));
                             app.update(cx, |_, cx| cx.notify());
                         })
                         .child(
@@ -668,13 +666,12 @@ impl AmuxApp {
         let path_for_restore = path.clone();
         let patch_for_restore = f.patch.clone();
         let dbg_path = path.clone();
-        // 深路径截断保留尾部（…/末级目录/文件名），完整路径放 tooltip；
-        // Label::truncate 保留头部，深路径会全变成「…」看不出文件
-        let display_path = display_path_tail(&path);
         let selected = self.is_diff_selected(machine_idx, &path, None, cx);
+        let path_for_tooltip = path.clone();
         h_flex()
             .id(ElementId::Name(format!("dbg-diff-file-{path}").into()))
             .debug_selector(move || format!("dbg-diff-file-{dbg_path}"))
+            .tooltip(move |window, cx| Tooltip::new(path_for_tooltip.clone()).build(window, cx))
             .w_full()
             .h(px(40.0))
             .px_2()
@@ -698,13 +695,22 @@ impl AmuxApp {
                     }),
             )
             .child(
-                Label::new(display_path)
+                div()
                     .flex_1()
                     .min_w_0()
-                    .text_sm()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .font_weight(FontWeight::MEDIUM)
-                    .truncate(),
+                    .h_full()
+                    .overflow_x_hidden()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .child(
+                        Label::new(path.clone())
+                            .text_sm()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .font_weight(FontWeight::MEDIUM)
+                            .whitespace_nowrap()
+                            .flex_shrink_0(),
+                    ),
             )
             .child(
                 Label::new(format!("+{}", f.additions))
@@ -889,15 +895,6 @@ impl AmuxApp {
             )
             .into_any_element()
     }
-}
-
-/// 深路径截断保留尾部：…/末级目录/文件名（截断保留开头会让深路径全变「…」）。
-fn display_path_tail(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() <= 2 {
-        return path.to_string();
-    }
-    format!("…/{}", parts[parts.len() - 2..].join("/"))
 }
 
 /// 扁平行描述（顺序 = 渲染顺序；仅在行模型重建时调用一次）。

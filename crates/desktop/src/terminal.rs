@@ -404,7 +404,14 @@ impl TerminalState {
                 && indexed.point.column.0 == cursor_col;
             rows[row as usize].push((
                 cell.c,
-                CellStyle::of(cell.fg, cell.bg, cell.flags, is_cursor, content.colors, style),
+                CellStyle::of(
+                    cell.fg,
+                    cell.bg,
+                    cell.flags,
+                    is_cursor,
+                    content.colors,
+                    style,
+                ),
             ));
         }
 
@@ -510,9 +517,8 @@ fn color_to_hsla(
     style: &TermThemeStyle,
 ) -> Hsla {
     let rgb = match color {
-        Color::Named(NamedColor::Foreground) => colors[NamedColor::Foreground].unwrap_or_else(|| {
-            rgb_from_hex(if style.dark { 0xd4d4d4 } else { 0x383a42 })
-        }),
+        Color::Named(NamedColor::Foreground) => colors[NamedColor::Foreground]
+            .unwrap_or_else(|| rgb_from_hex(if style.dark { 0xd4d4d4 } else { 0x383a42 })),
         Color::Named(NamedColor::Background) => {
             colors[NamedColor::Background].unwrap_or_else(|| rgb_from_hsla(style.bg))
         }
@@ -549,7 +555,11 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     if s == 0.0 {
         return (l, l, l);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let hue = |t: f32| -> f32 {
         let mut t = t;
@@ -696,11 +706,7 @@ fn default_palette(name: NamedColor, dark: bool) -> Rgb {
 }
 
 /// xterm 256 色标准盘（0-15 走 16 色默认盘）。
-fn indexed_palette(
-    i: u8,
-    colors: &alacritty_terminal::term::color::Colors,
-    dark: bool,
-) -> Rgb {
+fn indexed_palette(i: u8, colors: &alacritty_terminal::term::color::Colors, dark: bool) -> Rgb {
     if let Some(rgb) = colors[i as usize] {
         return rgb;
     }
