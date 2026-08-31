@@ -1,8 +1,8 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    button::*, label::Label, scroll::ScrollableElement, separator::Separator, spinner::Spinner,
-    text::TextView, tooltip::Tooltip, *,
+    button::*, label::Label, scroll::ScrollableElement, spinner::Spinner, text::TextView,
+    tooltip::Tooltip, *,
 };
 
 use serde_json::json;
@@ -872,80 +872,18 @@ impl AmuxApp {
             cx.theme().muted_foreground,
             cx.theme().foreground,
         ));
-        if let Some(Selected::Workflow { id }) = self.selected.clone() {
-            // 无运行中的推进时无需取消（工作流无终态，空闲即可直接下发新指令）
-            let busy = self
-                .workflow(&id)
-                .is_some_and(|w| w.state() == SessionState::Busy);
-            let id_cancel = id.clone();
-            let id_delete = id.clone();
-            body = body
-                .child(Separator::horizontal().label("工作流会话"))
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new("wf-cancel")
-                                .small()
-                                .when(!busy, |b| b.disabled(true))
-                                .label("取消")
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    this.cancel_workflow(window, cx, id_cancel.clone());
-                                })),
-                        )
-                        .child(
-                            Button::new("wf-delete")
-                                .small()
-                                .danger()
-                                .label("删除工作流")
-                                .on_click(cx.listener(move |this, _ev, window, cx| {
-                                    this.confirm_delete_workflow(window, cx, id_delete.clone());
-                                })),
-                        ),
-                )
-                .child(
-                    Label::new(format!(
-                        "子会话 {}",
-                        self.workflow(&id).map(|w| w.child_count()).unwrap_or(0)
-                    ))
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground),
-                );
-            for c in self.workflow(&id).map(|w| w.children()).unwrap_or_default() {
-                let step: SharedString = self
-                    .machine(c.machine_idx)
-                    .and_then(|m| m.sessions.iter().find(|s| s.id == c.id))
-                    .map(|s| s.title.clone())
-                    .unwrap_or_else(|| "（会话不存在）".into())
-                    .into();
-                body = body.child(
-                    h_flex()
-                        .w_full()
-                        .gap_1p5()
-                        .items_center()
-                        .child(
-                            Icon::new(IconName::SquareTerminal)
-                                .small()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(Label::new(step).text_sm().flex_1().min_w_0().truncate())
-                        .child(
-                            Label::new(c.id)
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground),
-                        ),
-                );
-            }
-        }
         body.into_any()
     }
 
     /// 右缘悬浮面板切换栏：图标 + 微标签的纵向导航条（活动栏样式）。
+    /// 面板入口按会话类型过滤（docs/PRD.md「右侧面板」）：工作目录/文件改动/
+    /// 会话计划/终端仅普通会话展示，工作流会话仅详情与活动。
     pub(crate) fn render_floating_buttons(
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let is_session = matches!(self.selected, Some(Selected::Session { .. }));
         v_flex()
             .gap_0p5()
             .p_1()
@@ -955,25 +893,30 @@ impl AmuxApp {
             .border_1()
             .border_color(cx.theme().border)
             .shadow_sm()
-            .child(self.render_rail_button(
-                Panel::Workspace,
-                "float-workspace",
-                "目录",
-                |color| {
-                    Icon::new(IconName::FolderOpen)
-                        .text_color(color)
-                        .into_any_element()
-                },
-                cx,
-            ))
-            // 改动按钮：文件 diff 图标（内含 +/−）
-            .child(self.render_rail_button(
-                Panel::Diff,
-                "float-diff",
-                "改动",
-                |color| Icon::new(FileDiffIcon).text_color(color).into_any_element(),
-                cx,
-            ))
+            // 工作目录（仅普通会话展示）
+            .when(is_session, |rail| {
+                rail.child(self.render_rail_button(
+                    Panel::Workspace,
+                    "float-workspace",
+                    "目录",
+                    |color| {
+                        Icon::new(IconName::FolderOpen)
+                            .text_color(color)
+                            .into_any_element()
+                    },
+                    cx,
+                ))
+            })
+            // 改动按钮：文件 diff 图标（内含 +/−）；仅普通会话展示
+            .when(is_session, |rail| {
+                rail.child(self.render_rail_button(
+                    Panel::Diff,
+                    "float-diff",
+                    "改动",
+                    |color| Icon::new(FileDiffIcon).text_color(color).into_any_element(),
+                    cx,
+                ))
+            })
             .child(self.render_rail_button(
                 Panel::Detail,
                 "float-detail",
@@ -996,34 +939,34 @@ impl AmuxApp {
                 },
                 cx,
             ))
-            .child(self.render_rail_button(
-                Panel::Plan,
-                "float-plan",
-                "计划",
-                |color| {
-                    Icon::new(IconName::Map)
-                        .text_color(color)
-                        .into_any_element()
-                },
-                cx,
-            ))
-            // 终端入口仅普通会话可达（docs/PRD.md 右侧面板「终端：仅普通会话展示」）
-            .when(
-                matches!(self.selected, Some(Selected::Session { .. })),
-                |rail| {
-                    rail.child(self.render_rail_button(
-                        Panel::Terminal,
-                        "float-terminal",
-                        "终端",
-                        |color| {
-                            Icon::new(IconName::SquareTerminal)
-                                .text_color(color)
-                                .into_any_element()
-                        },
-                        cx,
-                    ))
-                },
-            )
+            // 会话计划（仅普通会话展示）
+            .when(is_session, |rail| {
+                rail.child(self.render_rail_button(
+                    Panel::Plan,
+                    "float-plan",
+                    "计划",
+                    |color| {
+                        Icon::new(IconName::Map)
+                            .text_color(color)
+                            .into_any_element()
+                    },
+                    cx,
+                ))
+            })
+            // 终端（仅普通会话展示）
+            .when(is_session, |rail| {
+                rail.child(self.render_rail_button(
+                    Panel::Terminal,
+                    "float-terminal",
+                    "终端",
+                    |color| {
+                        Icon::new(IconName::SquareTerminal)
+                            .text_color(color)
+                            .into_any_element()
+                    },
+                    cx,
+                ))
+            })
     }
 
     /// 单个面板切换入口（icon-only，悬浮弹出文字标签）：再次点击同一面板即关闭；

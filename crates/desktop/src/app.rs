@@ -799,6 +799,19 @@ impl AmuxApp {
         self.input_attachments = draft.attachments;
         self.input_state
             .update(cx, |s, cx| s.set_value(&draft.text, window, cx));
+        // 工作目录/文件改动/会话计划/终端仅普通会话展示（docs/PRD.md「右侧面板」）：
+        // 切到工作流会话时关闭残留的普通会话专属面板
+        if !matches!(self.selected, Some(Selected::Session { .. }))
+            && matches!(
+                self.panel,
+                Some(Panel::Workspace)
+                    | Some(Panel::Diff)
+                    | Some(Panel::Plan)
+                    | Some(Panel::Terminal)
+            )
+        {
+            self.panel = None;
+        }
     }
 
     /// 当前被选中的普通会话（machine 下标 + id）。
