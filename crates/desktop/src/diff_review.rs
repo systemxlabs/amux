@@ -473,11 +473,6 @@ impl AmuxApp {
                             .truncate()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(
-                        Label::new(format!("{} 文件", indices.len()))
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground),
-                    )
                     .into_any_element(),
             );
             if collapsed {
