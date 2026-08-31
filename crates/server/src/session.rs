@@ -288,6 +288,24 @@ impl SessionManager {
         Ok(driver.available_commands(&agent_session_id))
     }
 
+    /// 查询会话计划（docs/DESIGN.md「普通会话计划」：存储在内存，以 Agent 侧
+    /// 数据为权威，由 ACP `plan` 通知驱动）。查询不触发惰性创建：尚无
+    /// agent 侧会话时返回空。
+    pub async fn plan(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<protocol::SessionPlanEntry>, SessionError> {
+        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        if agent_session_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let driver = self
+            .agents
+            .driver_for(&meta.agent)
+            .map_err(SessionError::AgentUnavailable)?;
+        Ok(driver.session_plan(&agent_session_id))
+    }
+
     /// 删除会话：若已有 agent 侧会话，先经 ACP
     /// `session/close` 关闭；若 ACP Server 支持会话删除，再发 `session/delete`
     /// （不支持删除的 agent 报错，按「不支持」忽略）。ACP 失败不阻断本地删除。

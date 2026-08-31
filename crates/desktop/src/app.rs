@@ -38,6 +38,7 @@ pub enum Panel {
     Diff,
     Detail,
     Activities,
+    Plan,
     Terminal,
 }
 
@@ -198,6 +199,7 @@ pub struct AmuxApp {
     pub(crate) workflow_template: Option<WorkflowTemplate>,
     pub(crate) dialog_scroll: ScrollHandle,
     pub(crate) activities_scroll: ScrollHandle,
+    pub(crate) plan_scroll: ScrollHandle,
     pub diff_scroll: VirtualListScrollHandle,
     pub(crate) workflow_dialog_limit: usize,
     /// 会话列表滚动查询的页数 N（docs/DESIGN.md「会话列表滚动查询」）：
@@ -276,6 +278,7 @@ impl AmuxApp {
             workflow_template: None,
             dialog_scroll: ScrollHandle::new(),
             activities_scroll: ScrollHandle::new(),
+            plan_scroll: ScrollHandle::new(),
             diff_scroll: VirtualListScrollHandle::new(),
             workflow_dialog_limit: 50,
             list_pages: 1,
@@ -695,7 +698,8 @@ impl AmuxApp {
             if let Some((machine, id)) = target {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.refresh_dialog(window, cx, machine, id.clone());
-                    this.refresh_activities(window, cx, machine, id);
+                    this.refresh_activities(window, cx, machine, id.clone());
+                    this.refresh_plan(window, cx, machine, id);
                     cx.notify();
                 });
             }
@@ -895,6 +899,7 @@ impl AmuxApp {
             Panel::Diff => 560.0,
             Panel::Detail => 360.0,
             Panel::Activities => 400.0,
+            Panel::Plan => 360.0,
             Panel::Terminal => 560.0,
         }
     }
@@ -940,6 +945,7 @@ impl AmuxApp {
             Some(Panel::Diff) => self.render_diff_panel(window, cx),
             Some(Panel::Detail) => self.render_detail_panel(window, cx),
             Some(Panel::Activities) => self.render_activities_panel(window, cx),
+            Some(Panel::Plan) => self.render_plan_panel(window, cx),
             Some(Panel::Terminal) => self.render_terminal_panel(window, cx),
             None => return None,
         };

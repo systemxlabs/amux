@@ -23,6 +23,8 @@ pub mod method {
     /// 获取指定普通会话的斜杠命令（由 ACP `available_commands_update` 通知驱动，
     /// 查询不触发惰性创建）
     pub const SESSION_SLASH_COMMANDS: &str = "session.slash_commands";
+    /// 获取指定普通会话的 agent 计划（由 ACP `plan` 通知驱动，查询不触发惰性创建）
+    pub const SESSION_PLAN: &str = "session.plan";
     /// 分页查询指定普通会话的对话历史
     pub const SESSION_HISTORY: &str = "session.history";
     /// 分页查询指定普通会话的活动历史

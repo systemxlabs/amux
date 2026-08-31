@@ -477,6 +477,62 @@ async fn slash_commands_notification_driven() {
 }
 
 #[tokio::test]
+async fn plan_notification_driven() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect(port, "test-token").await;
+
+    let created = c
+        .call(
+            "session.new",
+            json!({"agent": "mock_acp", "cwd": "/tmp/work"}),
+        )
+        .await;
+    let sid = created["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 查询不触发惰性创建（docs/DESIGN.md「普通会话计划」：仅由 plan 通知驱动），
+    // 尚无 agent 侧会话时返回空
+    let r = c.call("session.plan", json!({"sessionId": sid})).await;
+    assert!(
+        r["result"]["entries"].as_array().unwrap().is_empty(),
+        "无 agent 侧会话时计划为空: {r}"
+    );
+
+    // prompt 期间 agent 下发 plan 通知，全量覆盖内存存储
+    c.fire(
+        "session.prompt",
+        json!({"sessionId": sid, "input": [{"type": "text", "text": "开始"}]}),
+    )
+    .await;
+    let got = c
+        .wait_notification(
+            "session.state_change",
+            |p| p["sessionId"] == json!(sid) && p["newState"] == "idle",
+            8000,
+        )
+        .await;
+    assert!(got, "prompt 应结束");
+
+    let r = c.call("session.plan", json!({"sessionId": sid})).await;
+    let entries = r["result"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3, "{r}");
+    assert_eq!(entries[0]["content"], "梳理需求");
+    assert_eq!(entries[0]["priority"], "high");
+    assert_eq!(entries[0]["status"], "completed");
+    assert_eq!(entries[1]["content"], "实现功能");
+    assert_eq!(entries[1]["status"], "in_progress");
+    assert_eq!(entries[2]["content"], "可选优化");
+    assert_eq!(entries[2]["priority"], "low");
+    assert_eq!(entries[2]["status"], "pending");
+
+    // 不存在的会话报 SESSION_NOT_FOUND
+    let r = c.call("session.plan", json!({"sessionId": "nope"})).await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+}
+
+#[tokio::test]
 async fn session_list_pagination() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;

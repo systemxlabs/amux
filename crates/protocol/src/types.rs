@@ -235,6 +235,42 @@ pub struct SessionSlashCommandsResult {
     pub commands: Vec<SlashCommand>,
 }
 
+/// 会话计划条目的相对重要度（ACP `PlanEntryPriority` 的投影）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPlanPriority {
+    High,
+    Medium,
+    Low,
+}
+
+/// 会话计划条目的执行状态（ACP `PlanEntryStatus` 的投影）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPlanStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// 会话计划条目（agent 完成用户复杂指令的一个步骤；ACP `PlanEntry` 的投影）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPlanEntry {
+    /// 条目描述
+    pub content: String,
+    pub priority: SessionPlanPriority,
+    pub status: SessionPlanStatus,
+}
+
+/// `session.plan` 结果（docs/DESIGN.md「普通会话计划」：存储在内存，以 Agent 侧
+/// 数据为权威；尚无 agent 侧会话或 agent 未下发时为空）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPlanResult {
+    pub entries: Vec<SessionPlanEntry>,
+}
+
 /// `session.list` 结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

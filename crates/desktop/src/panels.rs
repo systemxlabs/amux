@@ -7,7 +7,10 @@ use gpui_component::{
 
 use serde_json::json;
 
-use protocol::{SessionState, WorkspaceListResult, WorkspaceReadParams, WorkspaceReadResult};
+use protocol::{
+    SessionPlanEntry, SessionPlanStatus, SessionState, WorkspaceListResult, WorkspaceReadParams,
+    WorkspaceReadResult,
+};
 
 use crate::display::info_row;
 use crate::logic::context_usage_text;
@@ -17,6 +20,86 @@ use crate::text::{format_local_time, TimePrecision};
 use crate::app::{AmuxApp, Panel, Selected};
 
 impl AmuxApp {
+    /// 计划面板：展示会话计划（docs/PRD.md「会话计划」），若无则空白。
+    /// 仅普通会话持有计划（计划来自该会话 agent 的 ACP `plan` 通知）；
+    /// 工作流为多子会话聚合，不展示。
+    pub(crate) fn render_plan_panel(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let plan = match &self.selected {
+            Some(Selected::Session { machine, id }) => self
+                .machine(*machine)
+                .and_then(|m| m.views.get(id))
+                .map(|v| v.plan.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        v_flex()
+            .w_full()
+            .h_full()
+            .gap_2()
+            .p_3()
+            .bg(cx.theme().popover)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .child(
+                        Label::new("会话计划")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("close-panel-plan")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("关闭面板")
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                this.set_panel(window, cx, None);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("plan-panel")
+                    .debug_selector(|| "plan-panel".into())
+                    .flex_1()
+                    .v_flex()
+                    .gap_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.plan_scroll)
+                    .children(plan.iter().map(|e| Self::plan_entry_row(e, cx))),
+            )
+            .into_any()
+    }
+
+    /// 单条计划条目：状态符号 + 描述。完成置灰，进行中高亮（docs/PRD.md「会话计划」）。
+    fn plan_entry_row(entry: &SessionPlanEntry, cx: &mut Context<AmuxApp>) -> gpui::AnyElement {
+        let (glyph, color) = match entry.status {
+            SessionPlanStatus::Completed => ("✓", cx.theme().muted_foreground),
+            SessionPlanStatus::InProgress => ("●", cx.theme().primary),
+            SessionPlanStatus::Pending => ("○", cx.theme().muted_foreground),
+        };
+        let done = entry.status == SessionPlanStatus::Completed;
+        h_flex()
+            .items_start()
+            .gap_1p5()
+            .py_0p5()
+            .child(Label::new(glyph).text_sm().text_color(color).w(px(14.0)))
+            .child(
+                Label::new(entry.content.clone())
+                    .text_sm()
+                    .when(done, |l| l.text_color(cx.theme().muted_foreground))
+                    .flex_1(),
+            )
+            .into_any_element()
+    }
+
     /// 终端面板：当前会话上下文的终端标签 + 活动终端视图（仅普通会话入口可达）。
     pub(crate) fn render_terminal_panel(
         &self,
@@ -863,6 +946,7 @@ impl AmuxApp {
                 IconName::Inbox,
                 cx,
             ))
+            .child(self.render_rail_button(Panel::Plan, "float-plan", "计划", IconName::Map, cx))
             // 终端入口仅普通会话可达（docs/PRD.md 右侧面板「终端：仅普通会话展示」）
             .when(
                 matches!(self.selected, Some(Selected::Session { .. })),
@@ -925,6 +1009,11 @@ impl AmuxApp {
                 if next == Some(Panel::Activities) {
                     if let Some((machine, id)) = this.open_session_target() {
                         this.refresh_activities(window, cx, machine, id);
+                    }
+                }
+                if next == Some(Panel::Plan) {
+                    if let Some((machine, id)) = this.open_session_target() {
+                        this.refresh_plan(window, cx, machine, id);
                     }
                 }
             }))

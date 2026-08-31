@@ -110,6 +110,11 @@ pub trait AgentDriver: Send + Sync {
     fn available_commands(&self, _agent_session_id: &str) -> Vec<protocol::SlashCommand> {
         Vec::new()
     }
+    /// 会话当前计划（最近一次 ACP `plan` 通知的全量条目；无通知则空，
+    /// docs/DESIGN.md「普通会话计划」）。默认空（不支持计划的驱动）。
+    fn session_plan(&self, _agent_session_id: &str) -> Vec<protocol::SessionPlanEntry> {
+        Vec::new()
+    }
     /// 关闭驱动自身，释放 ACP 子进程资源。
     fn shutdown(&self);
     /// 关闭并等待驱动后台线程退出（默认仅 shutdown、不等待；确定性退出路径使用，
@@ -168,18 +173,27 @@ enum ExecReq {
 pub struct AcpAgentDriver {
     /// 主线程 → exec 线程的请求发送端；shutdown 时置 None 以优雅结束 exec 线程
     exec_tx: Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>,
-    /// 会话事件路由：agent sessionId -> prompt 的事件接收端
-    routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
-    /// 会话斜杠命令：agent sessionId -> 最近一次 `available_commands_update`
-    /// 的全量集合。缓存在驱动层而非事件流——通知可能出现在无 prompt 路由的
-    /// 窗口（如 session/new 后 agent 立即下发）。
-    commands: Arc<Mutex<HashMap<String, Vec<protocol::SlashCommand>>>>,
+    /// 连接级缓存与事件路由（与 exec 线程的通知处理器共享）
+    caches: SessionCaches,
     /// 本进程内已 resume 过的会话（server 重启后从注册表恢复的会话首次交互前
     /// 经 ACP `session/resume` 恢复 agent 上下文。
     resumed: Arc<Mutex<HashSet<String>>>,
     /// exec 线程句柄（Mutex 包装以便 `shutdown_and_join` 从 &self 取出并 join；
     /// 连接由 SDK 管理，线程结束即子进程清理）
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// `session/update` 通知处理器共享的连接级状态（驱动与 exec 线程各持一份克隆）。
+#[derive(Clone, Default)]
+struct SessionCaches {
+    /// 会话事件路由：agent sessionId -> prompt 的事件接收端
+    routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
+    /// 会话斜杠命令：agent sessionId -> 最近一次 `available_commands_update`
+    /// 的全量集合。缓存在驱动层而非事件流——通知可能出现在无 prompt 路由的
+    /// 窗口（如 session/new 后 agent 立即下发）。
+    commands: Arc<Mutex<HashMap<String, Vec<protocol::SlashCommand>>>>,
+    /// 会话计划：agent sessionId -> 最近一次 `plan` 通知的全量条目（缓存理由同上）。
+    plans: Arc<Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>>>,
 }
 
 impl AcpAgentDriver {
@@ -195,10 +209,8 @@ impl AcpAgentDriver {
     pub fn spawn(bin: &str, args: &[&str], env: &[(String, String)]) -> Result<Self, String> {
         let (exec_tx, exec_rx) = std::sync::mpsc::sync_channel::<ExecReq>(32);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-        let routes = Arc::new(Mutex::new(HashMap::new()));
-        let routes2 = routes.clone();
-        let commands = Arc::new(Mutex::new(HashMap::new()));
-        let commands2 = commands.clone();
+        let caches = SessionCaches::default();
+        let caches2 = caches.clone();
         let bin = bin.to_string();
         let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let env = env.to_vec();
@@ -207,9 +219,7 @@ impl AcpAgentDriver {
                 .enable_all()
                 .build()
                 .expect("构建 tokio runtime 失败");
-            rt.block_on(exec_main(
-                &bin, &args, &env, exec_rx, routes2, commands2, ready_tx,
-            ));
+            rt.block_on(exec_main(&bin, &args, &env, exec_rx, caches2, ready_tx));
         });
         let timeout_ms = std::env::var("AMUX_ACP_SPAWN_TIMEOUT_MS")
             .ok()
@@ -226,8 +236,7 @@ impl AcpAgentDriver {
         }
         Ok(AcpAgentDriver {
             exec_tx: Mutex::new(Some(exec_tx)),
-            routes,
-            commands,
+            caches,
             resumed: Arc::new(Mutex::new(HashSet::new())),
             thread: Mutex::new(Some(thread)),
         })
@@ -303,20 +312,21 @@ impl AgentDriver for AcpAgentDriver {
         input: Vec<ContentBlock>,
     ) -> mpsc::Receiver<AgentEvent> {
         let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-        self.routes
+        self.caches
+            .routes
             .lock()
             .unwrap()
             .insert(agent_session_id.to_string(), tx.clone());
         let req = ExecReq::Prompt {
             sid: agent_session_id.to_string(),
             prompt: input,
-            routes: self.routes.clone(),
+            routes: self.caches.routes.clone(),
         };
         let send_result = self
             .sender()
             .and_then(|sender| sender.send(req).map_err(|_| "agent 已关闭".to_string()));
         if let Err(error) = send_result {
-            self.routes.lock().unwrap().remove(agent_session_id);
+            self.caches.routes.lock().unwrap().remove(agent_session_id);
             let _ = tx.try_send(AgentEvent::Error(error));
             let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
         }
@@ -348,8 +358,14 @@ impl AgentDriver for AcpAgentDriver {
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .remove(agent_session_id);
-        // agent 侧会话已关闭，缓存的斜杠命令随之失效
-        self.commands
+        // agent 侧会话已关闭，缓存的斜杠命令与计划随之失效
+        self.caches
+            .commands
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .remove(agent_session_id);
+        self.caches
+            .plans
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .remove(agent_session_id);
@@ -384,7 +400,18 @@ impl AgentDriver for AcpAgentDriver {
     }
 
     fn available_commands(&self, agent_session_id: &str) -> Vec<protocol::SlashCommand> {
-        self.commands
+        self.caches
+            .commands
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .get(agent_session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn session_plan(&self, agent_session_id: &str) -> Vec<protocol::SessionPlanEntry> {
+        self.caches
+            .plans
             .lock()
             .expect("Mutex 中毒（临界区内不应 panic）")
             .get(agent_session_id)
@@ -425,8 +452,7 @@ async fn exec_main(
     args: &[String],
     env: &[(String, String)],
     exec_rx: std::sync::mpsc::Receiver<ExecReq>,
-    routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
-    commands: Arc<Mutex<HashMap<String, Vec<protocol::SlashCommand>>>>,
+    caches: SessionCaches,
     ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     // std exec_rx → tokio 通道（阻塞转发，供 select 使用）
@@ -465,15 +491,7 @@ async fn exec_main(
         agent
     };
 
-    let result = connect_main(
-        agent,
-        &mut req_rx,
-        routes,
-        commands,
-        &ready_tx,
-        ready_sent.clone(),
-    )
-    .await;
+    let result = connect_main(agent, &mut req_rx, caches, &ready_tx, ready_sent.clone()).await;
 
     // 连接异常结束：若就绪信号尚未发出（连接建立前传输层失败：二进制缺失 /
     // 进程立即退出 / npx 不可用 / 无网络），补报为 spawn 失败；若已报过就绪，
@@ -489,8 +507,7 @@ async fn exec_main(
 async fn connect_main(
     agent: AcpAgent,
     req_rx: &mut mpsc::Receiver<ExecReq>,
-    routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
-    commands: Arc<Mutex<HashMap<String, Vec<protocol::SlashCommand>>>>,
+    caches: SessionCaches,
     ready_tx: &std::sync::mpsc::Sender<Result<(), String>>,
     ready_sent: Arc<std::sync::atomic::AtomicBool>,
 ) -> agent_client_protocol::Result<()> {
@@ -504,7 +521,12 @@ async fn connect_main(
         .name("amux-server")
         .on_receive_notification(
             async move |notif: SessionNotification, _cx| {
-                route_update(&routes, &commands, &notif).await;
+                let SessionCaches {
+                    routes,
+                    commands,
+                    plans,
+                } = caches.clone();
+                route_update(&routes, &commands, &plans, &notif).await;
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -864,6 +886,7 @@ fn stop_reason_reason(reason: StopReason) -> protocol::StateChangeReason {
 async fn route_update(
     routes: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
     commands: &Mutex<HashMap<String, Vec<protocol::SlashCommand>>>,
+    plans: &Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>>,
     notif: &SessionNotification,
 ) {
     let ev = match &notif.update {
@@ -916,7 +939,20 @@ async fn route_update(
                 );
             None
         }
-        // SessionInfoUpdate（ACP v1 未携带状态字段）/ CurrentModeUpdate / Plan 等
+        // ACP `plan`：agent 计划全量覆盖驱动内存缓存
+        //（docs/DESIGN.md「普通会话计划」：以 Agent 侧数据为权威）。
+        // 不产生事件流，理由同上。
+        SessionUpdate::Plan(update) => {
+            plans
+                .lock()
+                .expect("Mutex 中毒（临界区内不应 panic）")
+                .insert(
+                    notif.session_id.to_string(),
+                    acp_plan(update.entries.clone()),
+                );
+            None
+        }
+        // SessionInfoUpdate（ACP v1 未携带状态字段）/ CurrentModeUpdate 等
         // 不产生 AgentEvent
         _ => None,
     };
@@ -1043,6 +1079,29 @@ fn acp_slash_commands(
         .collect()
 }
 
+/// ACP `PlanEntry` 列表 → amux 协议投影（priority/status 非穷尽枚举按通配回落 Medium/Pending）。
+fn acp_plan(
+    entries: Vec<agent_client_protocol::schema::v1::PlanEntry>,
+) -> Vec<protocol::SessionPlanEntry> {
+    use agent_client_protocol::schema::v1::{PlanEntryPriority, PlanEntryStatus};
+    entries
+        .into_iter()
+        .map(|e| protocol::SessionPlanEntry {
+            content: e.content,
+            priority: match e.priority {
+                PlanEntryPriority::High => protocol::SessionPlanPriority::High,
+                PlanEntryPriority::Low => protocol::SessionPlanPriority::Low,
+                _ => protocol::SessionPlanPriority::Medium,
+            },
+            status: match e.status {
+                PlanEntryStatus::InProgress => protocol::SessionPlanStatus::InProgress,
+                PlanEntryStatus::Completed => protocol::SessionPlanStatus::Completed,
+                _ => protocol::SessionPlanStatus::Pending,
+            },
+        })
+        .collect()
+}
+
 /// 从 ACP 方法响应 json 中解析 configOptions 字段（缺省为空）。
 fn config_options_from_value(v: Option<&Value>) -> Vec<protocol::SessionConfigOption> {
     v.and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1121,6 +1180,7 @@ mod tests {
         route_update(
             &routes,
             &commands,
+            &Mutex::new(HashMap::new()),
             &notif(vec![
                 agent_client_protocol::schema::v1::AvailableCommand::new("goal", "目标"),
             ]),
@@ -1131,9 +1191,70 @@ mod tests {
             1
         );
         // 新通知全量覆盖旧集合（docs/DESIGN.md「普通会话斜杠命令」）
-        route_update(&routes, &commands, &notif(Vec::new())).await;
+        route_update(
+            &routes,
+            &commands,
+            &Mutex::new(HashMap::new()),
+            &notif(Vec::new()),
+        )
+        .await;
         assert!(commands.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].is_empty());
         // 无 prompt 路由时通知仍被缓存（不产生事件流）
+    }
+
+    #[tokio::test]
+    async fn route_update_plan_overwrites_cache() {
+        use agent_client_protocol::schema::v1::{
+            Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+        };
+        let routes = Mutex::new(HashMap::new());
+        let plans: Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>> =
+            Mutex::new(HashMap::new());
+        let notif = |entries: Vec<agent_client_protocol::schema::v1::PlanEntry>| {
+            SessionNotification::new(
+                SessionId::new("s1"),
+                SessionUpdate::Plan(Plan::new(entries)),
+            )
+        };
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &plans,
+            &notif(vec![
+                PlanEntry::new(
+                    "第一步",
+                    PlanEntryPriority::High,
+                    PlanEntryStatus::InProgress,
+                ),
+                PlanEntry::new("收尾", PlanEntryPriority::Low, PlanEntryStatus::Pending),
+            ]),
+        )
+        .await;
+        let cached = plans.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].clone();
+        assert_eq!(
+            cached,
+            vec![
+                protocol::SessionPlanEntry {
+                    content: "第一步".to_string(),
+                    priority: protocol::SessionPlanPriority::High,
+                    status: protocol::SessionPlanStatus::InProgress,
+                },
+                protocol::SessionPlanEntry {
+                    content: "收尾".to_string(),
+                    priority: protocol::SessionPlanPriority::Low,
+                    status: protocol::SessionPlanStatus::Pending,
+                },
+            ]
+        );
+        // 新通知全量覆盖旧计划（docs/DESIGN.md「普通会话计划」）
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &plans,
+            &notif(Vec::new()),
+        )
+        .await;
+        assert!(plans.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].is_empty());
     }
 
     #[tokio::test]
@@ -1145,7 +1266,13 @@ mod tests {
                 TextContent::new("收到"),
             ))),
         );
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         assert!(rx.try_recv().is_err());
     }
 
@@ -1158,7 +1285,13 @@ mod tests {
                 TextContent::new("输出"),
             ))),
         );
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         let ev = rx.try_recv().expect("应收到事件");
         assert!(matches!(ev, AgentEvent::OutputChunk(s) if s == "输出"));
     }
@@ -1172,7 +1305,13 @@ mod tests {
                 TextContent::new("思考中"),
             ))),
         );
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         let ev = rx.try_recv().expect("应收到 thinking 事件");
         assert!(matches!(ev, AgentEvent::Thinking(s) if s == "思考中"));
     }
@@ -1185,7 +1324,13 @@ mod tests {
             .status(ToolCallStatus::Pending)
             .raw_input(serde_json::json!({"command": "cargo test"}));
         let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCall(tc));
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         let ev = rx.try_recv().expect("应收到 tool_call 事件");
         match ev {
             AgentEvent::ToolCall {
@@ -1215,7 +1360,13 @@ mod tests {
         );
         let notif =
             SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         let ev = rx.try_recv().expect("应收到 tool_call_update 事件");
         match ev {
             AgentEvent::ToolCall {
@@ -1240,7 +1391,13 @@ mod tests {
         let tcu = ToolCallUpdate::new("tc1", ToolCallUpdateFields::new().title("更新后的标题"));
         let notif =
             SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         let ev = rx.try_recv().expect("应收到 tool_call_update 事件");
         match ev {
             AgentEvent::ToolCall { name, title, .. } => {
@@ -1264,7 +1421,13 @@ mod tests {
         );
         let notif =
             SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         assert!(rx.try_recv().is_err(), "仅 status 的 update 不应产生事件");
     }
 
@@ -1277,7 +1440,13 @@ mod tests {
                 agent_client_protocol::schema::v1::SessionInfoUpdate::new(),
             ),
         );
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         assert!(rx.try_recv().is_err());
     }
 
@@ -1290,7 +1459,13 @@ mod tests {
                 53_000, 200_000,
             )),
         );
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         let ev = rx.try_recv().expect("应收到 usage 事件");
         match ev {
             AgentEvent::UsageUpdate { used, size } => {
@@ -1314,7 +1489,13 @@ mod tests {
             SessionId::new("s1"),
             SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![opt])),
         );
-        route_update(&routes, &Mutex::new(HashMap::new()), &notif).await;
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
         let ev = rx.try_recv().expect("应收到 config_options 事件");
         match ev {
             AgentEvent::ConfigOptions(opts) => {

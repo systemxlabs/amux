@@ -22,7 +22,8 @@ use protocol::{
     SessionConfigOptionValue, SessionConfigOptionsResult, SessionConfigSetting,
     SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
     SessionListParams, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
-    SessionPromptParams, SessionResult, SessionSlashCommandsResult, SessionState,
+    SessionPlanResult, SessionPromptParams, SessionResult, SessionSlashCommandsResult,
+    SessionState,
 };
 
 use crate::config::QuickCommand;
@@ -232,6 +233,43 @@ impl AmuxApp {
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
                             v.set_live(act);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 拉取当前会话的 agent 计划（docs/PRD.md「会话计划」面板）。
+    /// 面板未打开时不主动刷新，与 refresh_activities 同策略。
+    pub(crate) fn refresh_plan(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        session_id: String,
+    ) {
+        if self.panel != Some(Panel::Plan) {
+            return;
+        }
+        let Some(m) = self.machines.get(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = SessionIdParams {
+                session_id: session_id.clone(),
+            };
+            if let Ok(res) = client
+                .request::<_, SessionPlanResult>(protocol::method::SESSION_PLAN, Some(params))
+                .await
+            {
+                let _ = this.update_in(cx, |this, _w, cx| {
+                    if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(v) = m.views.get_mut(&session_id) {
+                            v.set_plan(res.entries);
                         }
                     }
                     cx.notify();

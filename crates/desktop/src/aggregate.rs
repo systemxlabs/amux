@@ -2,11 +2,11 @@
 //! `session.history` / `session.activities` / `session.ongoing_activity` 拉取的数据
 //! 聚合为对话气泡与活动列表。纯函数，与 GPUI/WS 分离，便于单测。
 
-use protocol::{Activity, HistoryItem};
+use protocol::{Activity, HistoryItem, SessionPlanEntry};
 
 use crate::logic::{history_to_dialog, DialogMsg};
 
-/// 普通会话视图：对话气泡 + 活动历史 + 实时活动。
+/// 普通会话视图：对话气泡 + 活动历史 + 实时活动 + agent 计划。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SessionView {
     pub dialog: Vec<DialogMsg>,
@@ -17,6 +17,8 @@ pub struct SessionView {
     pub activities_next_before: Option<usize>,
     /// 当前实时活动（进行中；空闲 None）。忙碌即 live.is_some()。
     pub live: Option<Activity>,
+    /// agent 计划（`session.plan` 查询结果，全量替换）。
+    pub plan: Vec<SessionPlanEntry>,
 }
 
 impl SessionView {
@@ -134,6 +136,11 @@ impl SessionView {
     /// 设置实时活动；无（None）即回到空闲。
     pub fn set_live(&mut self, live: Option<Activity>) {
         self.live = live;
+    }
+
+    /// 设置 agent 计划（docs/DESIGN.md「普通会话计划」：Agent 侧数据为权威，全量覆盖）。
+    pub fn set_plan(&mut self, entries: Vec<SessionPlanEntry>) {
+        self.plan = entries;
     }
 }
 

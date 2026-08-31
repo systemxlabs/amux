@@ -9,7 +9,7 @@ use protocol::{
     method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams, HistoryResult,
     OngoingActivityResult, OpResult, SessionConfigOptionsResult, SessionConfigureParams,
     SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
-    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult,
+    SessionNewParams, SessionPageParams, SessionPlanResult, SessionPromptParams, SessionResult,
     SessionSlashCommandsResult, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
     TerminalOpenResult, TerminalResizeParams, WorkspaceDiffParams, WorkspaceDiffResult,
     WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
@@ -198,6 +198,17 @@ impl Handlers {
                     .await
                     .map_err(map_session_err)?;
                 serde_json::to_value(SessionSlashCommandsResult { commands })
+                    .map_err(|e| RpcError::internal(e.to_string()))
+            }
+
+            method::SESSION_PLAN => {
+                let p: SessionIdParams = parse(params)?;
+                let entries = self
+                    .manager
+                    .plan(&p.session_id)
+                    .await
+                    .map_err(map_session_err)?;
+                serde_json::to_value(SessionPlanResult { entries })
                     .map_err(|e| RpcError::internal(e.to_string()))
             }
 

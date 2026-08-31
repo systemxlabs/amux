@@ -26,10 +26,10 @@ use agent_client_protocol::schema::v1::{
     CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse, InitializeRequest,
     InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, MessageId, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, PromptRequest, PromptResponse, ReleaseTerminalRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
-    ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue, SessionInfo,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptRequest,
+    PromptResponse, ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue,
+    SessionInfo, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, StopReason, TerminalOutputRequest, TextContent, ToolCall,
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
     UsageUpdate, WaitForTerminalExitRequest,
@@ -375,6 +375,28 @@ async fn run(state_file: &str) -> Result<()> {
                                 AvailableCommandInput::Unstructured(
                                     UnstructuredCommandInput::new("审查重点"),
                                 ),
+                            ),
+                        ])),
+                    ))?;
+                    // agent 计划（docs/DESIGN.md「普通会话计划」）：turn 内全量下发，
+                    // 供 session.plan 查询验证
+                    cx_task.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::Plan(Plan::new(vec![
+                            PlanEntry::new(
+                                "梳理需求",
+                                PlanEntryPriority::High,
+                                PlanEntryStatus::Completed,
+                            ),
+                            PlanEntry::new(
+                                "实现功能",
+                                PlanEntryPriority::High,
+                                PlanEntryStatus::InProgress,
+                            ),
+                            PlanEntry::new(
+                                "可选优化",
+                                PlanEntryPriority::Low,
+                                PlanEntryStatus::Pending,
                             ),
                         ])),
                     ))?;
