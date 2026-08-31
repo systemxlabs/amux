@@ -1055,7 +1055,7 @@ impl AmuxApp {
                     .items_center()
                     .child(div().size_2().rounded_full().bg(cx.theme().primary))
                     .child(
-                        Label::new("amux")
+                        Label::new("会话")
                             .text_xl()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(foreground),
