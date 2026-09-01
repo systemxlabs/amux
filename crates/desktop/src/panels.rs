@@ -267,16 +267,14 @@ impl AmuxApp {
         path: String,
         offset: usize,
     ) {
-        let Some(m) = self.machine(machine) else {
+        let Some((selected_machine, session_id)) = self.open_session_target() else {
             return;
         };
-        let client = m.client.clone();
-        let session_id = match &self.selected {
-            Some(Selected::Session {
-                id,
-                machine: selected_machine,
-            }) if *selected_machine == machine => id.clone(),
-            _ => return,
+        if selected_machine != machine {
+            return;
+        }
+        let Some(client) = self.machine(machine).map(|m| m.client.clone()) else {
+            return;
         };
         let request_id = self
             .machines
@@ -349,16 +347,14 @@ impl AmuxApp {
         path: String,
         offset: usize,
     ) {
-        let Some(m) = self.machine(machine) else {
+        let Some((selected_machine, session_id)) = self.open_session_target() else {
             return;
         };
-        let client = m.client.clone();
-        let session_id = match &self.selected {
-            Some(Selected::Session {
-                id,
-                machine: selected_machine,
-            }) if *selected_machine == machine => id.clone(),
-            _ => return,
+        if selected_machine != machine {
+            return;
+        }
+        let Some(client) = self.machine(machine).map(|m| m.client.clone()) else {
+            return;
         };
         let request_id = self
             .machines
