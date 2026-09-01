@@ -387,6 +387,8 @@ pub struct WorkflowEngine {
     /// 工具调用。动作结束即清除——历史活动不充当实时展示（修复工具执行
     /// 完毕后实时活动条一直展示）。与 `OrcContext.current` 是同一个 Arc。
     current_activity: Arc<Mutex<Option<Activity>>>,
+    /// 串行化同一工作流的后台持久化，避免旧快照在新快照之后落盘。
+    persist_lock: Arc<Mutex<()>>,
 }
 
 impl WorkflowEngine {
@@ -431,6 +433,7 @@ impl WorkflowEngine {
             busy_children: Arc::new(Mutex::new(0)),
             data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
+            persist_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -459,6 +462,7 @@ impl WorkflowEngine {
             busy_children: Arc::new(Mutex::new(0)),
             data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
+            persist_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -835,6 +839,7 @@ impl WorkflowEngine {
     }
 
     pub fn persist(&self, data_dir: &Path) -> std::io::Result<()> {
+        let _persist = self.persist_lock.lock();
         let snapshot = self.session.read().clone();
         crate::wfstore::save(data_dir, &snapshot)
     }

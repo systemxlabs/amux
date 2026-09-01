@@ -31,8 +31,8 @@ fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // 唯一临时名：persist 可能并发（后台任务 + 推进任务），固定 tmp 名会让
-    // 两个写者交错写同一文件、rename 后得到损坏 JSONL
+    // 唯一临时名避免不同写者交错使用同一临时文件；同一工作流的调用方
+    // 另外通过 WorkflowEngine::persist_lock 串行化快照提交。
     let tmp = path.with_extension(format!("jsonl.tmp.{}", uuid::Uuid::new_v4().simple()));
     {
         let mut f = std::fs::File::create(&tmp)?;
@@ -301,7 +301,6 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     .collect()
 }
 
-/// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
 /// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
 /// 调用方可先在锁外读盘、再短暂持锁合并——避免持写锁做 IO 阻塞渲染与后台推进。
 pub fn load_payload(data_dir: &Path, id: &str) -> io::Result<(Vec<OrcMsg>, Vec<Activity>)> {

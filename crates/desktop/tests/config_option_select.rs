@@ -11,7 +11,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{point, px, size, AppContext, IntoElement, Modifiers, ParentElement, Render, Styled};
+use gpui::{point, px, AppContext, Modifiers};
 
 use amux_desktop::app::{AmuxApp, Selected, SelectedConfigOptions};
 use amux_desktop::config::{ConfigStore, MachineConfig};
@@ -22,12 +22,12 @@ use protocol::{SessionConfigKind, SessionConfigOption, SessionConfigSelectEntry}
 #[gpui::test]
 fn config_option_select_triggers_configure(cx: &mut gpui::TestAppContext) {
     let data_dir = std::env::temp_dir().join(format!("amux-cfg-option-{}", std::process::id()));
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     // Root 必须是窗口根视图（push_notification 等组件层依赖 Root::update）
     let app = Rc::new(std::cell::RefCell::new(None));
     let app_for_window = app.clone();
-    let (root, cx) = cx.add_window_view(|window, cx| {
+    let (_root, cx) = cx.add_window_view(|window, cx| {
         let store = Arc::new(ConfigStore::new(data_dir));
         let app = cx.new(|cx| AmuxApp::new(store, window, cx));
         *app_for_window.borrow_mut() = Some(app.clone());

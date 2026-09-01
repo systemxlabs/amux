@@ -68,6 +68,8 @@ struct LogCache<T> {
 struct SessionControl {
     busy: AtomicBool,
     deleted: AtomicBool,
+    /// 串行化删除与 agent 侧会话创建/元数据写回，避免删除竞态下会话复活。
+    lifecycle: Mutex<()>,
 }
 
 fn now() -> u64 {
@@ -181,6 +183,7 @@ impl SessionManager {
                 Arc::new(SessionControl {
                     busy: AtomicBool::new(false),
                     deleted: AtomicBool::new(false),
+                    lifecycle: Mutex::new(()),
                 })
             })
             .clone()
@@ -308,6 +311,9 @@ impl SessionManager {
     pub async fn delete(&self, session_id: &str) -> Result<(), SessionError> {
         let control = self.control(session_id);
         control.deleted.store(true, Ordering::SeqCst);
+        // setup_prompt 持有同一把锁直到 agent session id 与 Busy 元数据写回完成。
+        // 删除先标记 deleted，再等待临界区结束，保证不会在删除后复活会话。
+        let _lifecycle = control.lifecycle.lock();
         let log = SessionLog::open(&self.data_dir, session_id);
         let entry = self.registry.get(session_id)?;
         let Some((meta, agent_session_id)) = entry else {
@@ -587,7 +593,10 @@ impl SessionManager {
             return Err(SessionError::Busy);
         }
 
-        let setup = self.setup_prompt(session_id, &input).await;
+        // 删除会先标记 deleted 并等待这把锁；持有期间完成 agent session 创建、
+        // Busy 元数据写回和用户消息首写，避免删除后旧 prompt 再创建日志。
+        let lifecycle = control.lifecycle.lock();
+        let setup = self.setup_prompt(session_id, &input, &control);
         let (driver, agent_session_id, cwd, old_state) = match setup {
             Ok(value) => value,
             Err(error) => {
@@ -623,6 +632,9 @@ impl SessionManager {
             return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
         }
         self.invalidate_log_caches(session_id);
+        // 从这里开始删除可以安全清理日志；后续 turn 只会追加活动/历史，且均受
+        // deleted 标记保护，不会在删除后重新创建已删除会话。
+        drop(lifecycle);
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
         // 恢复响应携带的最新配置选项（幂等 resume 返回空）全量覆盖内存存储。
@@ -677,11 +689,15 @@ impl SessionManager {
     }
 
     /// prompt 前置准备：读元数据、生成标题、置 Busy、惰性创建 agent 侧会话。
-    async fn setup_prompt(
+    fn setup_prompt(
         &self,
         session_id: &str,
         input: &[ContentBlock],
+        control: &SessionControl,
     ) -> Result<(crate::agent::SharedDriver, String, String, SessionState), SessionError> {
+        if control.deleted.load(Ordering::SeqCst) {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
         let (mut meta, agent_session_id) = self.get_entry(session_id)?;
         let old_state = meta.state;
         if meta.state == SessionState::Busy {

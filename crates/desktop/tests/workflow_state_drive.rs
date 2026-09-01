@@ -16,7 +16,6 @@ use amux_desktop::workflow::{
     ChildSession, Decision, MachineHub, OrcBackend, OrcContext, OrcMsg, WorkflowEngine,
 };
 use amux_desktop::ws::Notification as WsNotification;
-use gpui::AppContext;
 use serde_json::json;
 
 /// 阻塞编排后端：decide 永不返回。注入发生在 decide 之前，阻塞保证
@@ -52,7 +51,7 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
     // create_session 即时挂载后的形态）。不注册机器：on_state_change 里
     // 的 refresh_sessions 会因无机器提前返回，避免额外跨线程任务。
     cx.update(|_window, cx| {
-        app.update(cx, |app, cx| {
+        app.update(cx, |app, _cx| {
             app.workflows.push(WorkflowEngine::new(
                 "测试计划",
                 "",

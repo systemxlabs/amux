@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use gpui::{point, px, size, AppContext};
+use gpui::{point, px};
 
 use crate::app::AmuxApp;
 use crate::config::{ApiFormat, ConfigStore, OrchestratorConfig};
@@ -21,7 +21,7 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
         gpui_component::init(cx);
         let store = Arc::new(ConfigStore::new(data_dir));
         // 编排 agent 需已配置才能创建工作流（推进调用会失败，不影响本测试）
-        store.save_orchestrator(&OrchestratorConfig {
+        let _ = store.save_orchestrator(&OrchestratorConfig {
             api_format: ApiFormat::ChatCompletions,
             base_url: "http://127.0.0.1:9/v1".into(),
             api_key: "k".into(),
@@ -36,7 +36,6 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
                 .update(cx, |s, cx| s.set_value("测试计划", window, cx));
             app.create_workflow(window, cx);
             // 注入一个已关联的普通子会话（模拟编排调度后的形态）
-            let wf_id = app.workflows[0].id();
             app.workflows[0]
                 .session
                 .write()
@@ -46,17 +45,11 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
                     machine_idx: 0,
                     machine_name: "test".into(),
                 });
-            let _ = wf_id;
         });
     });
 
     // 触发一次窗口绘制：点击标题栏空白（无副作用）
     cx.simulate_click(point(px(600.), px(15.)), gpui::Modifiers::default());
-
-    let wf_id = cx.update(|_, cx| {
-        let id = app.read(cx).workflows[0].id();
-        id
-    });
 
     // 点击 toggle 按钮（行右缘：空闲时行尾为 8px 占位，按钮在其左侧）
     let row = cx.debug_bounds("wf-row").expect("工作流行应参与布局");
@@ -69,8 +62,7 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
     cx.simulate_click(point(px(600.), px(15.)), gpui::Modifiers::default());
 
     // 展开后：子会话列表容器渲染（含关联普通会话行）
-    let list = cx
-        .debug_bounds("wf-children-list")
+    cx.debug_bounds("wf-children-list")
         .expect("点击展开箭头后子会话列表应渲染");
 
     // 再次点击：折叠后子会话列表消失
