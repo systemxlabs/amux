@@ -864,13 +864,8 @@ impl AmuxApp {
     }
 
     pub(crate) fn is_selected_session(&self, machine: usize, session_id: &str) -> bool {
-        matches!(
-            &self.selected,
-            Some(Selected::Session {
-                machine: selected_machine,
-                id
-            }) if *selected_machine == machine && id == session_id
-        )
+        self.open_session_target()
+            .is_some_and(|(selected_machine, id)| selected_machine == machine && id == session_id)
     }
 
     pub(crate) fn machine(&self, i: usize) -> Option<&MachineView> {
