@@ -834,8 +834,8 @@ impl AmuxApp {
                 cx.theme().muted_foreground,
                 cx.theme().foreground,
             ));
-        if let Some(Selected::Session { machine, .. }) = &self.selected {
-            if let Some(machine_view) = self.machine(*machine) {
+        if let Some((machine, _)) = self.open_session_target() {
+            if let Some(machine_view) = self.machine(machine) {
                 body = body
                     .child(info_row(
                         "机器",
