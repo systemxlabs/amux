@@ -1286,19 +1286,18 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current: Option<Activity> = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.views.get(id))
-                .and_then(|v| v.live.clone()),
-            Some(Selected::Workflow { id }) => {
-                // 实时活动只展示编排智能体正在进行的动作（流式思考增量、
-                // 执行中的工具调用），动作结束即清除。历史活动不充当实时
-                // 展示（修复工具执行完毕后活动条一直转圈）；编排智能体
-                // 空闲而关联会话仍工作时，活动条为空。
-                self.workflow(id).and_then(|wf| wf.current_activity())
-            }
-            _ => None,
+        let current: Option<Activity> = if let Some((machine, id)) = self.open_session_target() {
+            self.machine(machine)
+                .and_then(|m| m.views.get(&id))
+                .and_then(|v| v.live.clone())
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            // 实时活动只展示编排智能体正在进行的动作（流式思考增量、
+            // 执行中的工具调用），动作结束即清除。历史活动不充当实时
+            // 展示（修复工具执行完毕后活动条一直转圈）；编排智能体
+            // 空闲而关联会话仍工作时，活动条为空。
+            self.workflow(id).and_then(|wf| wf.current_activity())
+        } else {
+            None
         };
         let warning = cx.theme().warning;
         let warning_foreground = cx.theme().warning_foreground;
