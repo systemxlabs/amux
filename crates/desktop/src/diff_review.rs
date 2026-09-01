@@ -14,7 +14,7 @@ use protocol::{
     WorkspaceDiffResult, WorkspaceRestoreParams,
 };
 
-use crate::app::{AmuxApp, Selected};
+use crate::app::AmuxApp;
 use crate::diff::{diff_lines, DiffLine, DiffLineKind};
 use crate::logic::group_changed_files_by_parent;
 
@@ -193,10 +193,9 @@ impl AmuxApp {
             let st = m.diff.read(cx);
             (st.selection.clone(), st.files.clone())
         };
-        let Some(Selected::Session { id, .. }) = self.selected.clone() else {
+        let Some(session_id) = self.open_session_target().map(|(_, id)| id) else {
             return;
         };
-        let session_id = id.clone();
 
         let mut patches: Vec<String> = Vec::new();
         for f in &files {
