@@ -831,12 +831,15 @@ impl AmuxApp {
     }
 
     pub(crate) fn selected_draft_key(&self) -> Option<DraftKey> {
-        match self.selected.as_ref()? {
-            Selected::Session { machine, id } => Some(DraftKey::Session {
-                machine: self.machines.get(*machine)?.config.name.clone(),
-                id: id.clone(),
-            }),
-            Selected::Workflow { id } => Some(DraftKey::Workflow { id: id.clone() }),
+        if let Some((machine, id)) = self.open_session_target() {
+            Some(DraftKey::Session {
+                machine: self.machines.get(machine)?.config.name.clone(),
+                id,
+            })
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            Some(DraftKey::Workflow { id: id.clone() })
+        } else {
+            None
         }
     }
 
