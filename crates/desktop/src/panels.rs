@@ -815,7 +815,7 @@ impl AmuxApp {
                 cx.theme().foreground,
             ))
             .when(
-                matches!(self.selected, Some(Selected::Session { .. }))
+                self.open_session_target().is_some()
                     && context_usage_text(meta.context_size, meta.context_window_size).is_some(),
                 |view| {
                     // 会话上下文占用（docs/DESIGN.md：usage_update 记录已用/窗口，token）
