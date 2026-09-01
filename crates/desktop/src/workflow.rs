@@ -31,10 +31,10 @@ use rig_core::streaming::StreamedAssistantContent;
 use serde::{Deserialize, Serialize};
 
 use protocol::{
-    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult, SessionIdParams,
-    SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams, SessionInfoParams,
-    SessionInfoResult, SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams,
-    SessionResult, SessionState, StateChangeReason,
+    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult,
+    SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams, SessionIdParams,
+    SessionInfoParams, SessionInfoResult, SessionMeta, SessionNewParams, SessionPageParams,
+    SessionPromptParams, SessionResult, SessionState, StateChangeReason,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig};
@@ -298,9 +298,6 @@ pub trait OrcBackend: Send + Sync {
     fn take_synced_children(&self) -> Option<Vec<ChildSession>> {
         None
     }
-    fn take_synced_activities(&self) -> Option<Vec<Activity>> {
-        None
-    }
 }
 
 /// 取消按钮注入的固定用户消息：
@@ -316,13 +313,57 @@ struct AdvanceGate {
 }
 
 /// running 标志的 drop 兜底：turn 中途 panic/早退也不会把引擎永久卡在「推进中」。
+/// 释放门闩后同步工作流状态，避免最后一个子会话在编排 turn 结束前完成时
+/// 把状态错误地改成空闲，或 turn 异常退出后永远保持工作中。
 struct GateGuard {
     gate: Arc<Mutex<AdvanceGate>>,
+    busy_children: Arc<Mutex<usize>>,
+    session: Arc<RwLock<OrcSession>>,
+    active: bool,
+}
+
+impl GateGuard {
+    /// 在已持有 gate 时正常结束推进。
+    fn finish_locked(
+        active: &mut bool,
+        busy_children: &Arc<Mutex<usize>>,
+        session: &Arc<RwLock<OrcSession>>,
+        gate: &mut AdvanceGate,
+    ) {
+        if !*active {
+            return;
+        }
+        gate.running = false;
+        let busy = *busy_children.lock() > 0;
+        let mut session = session.write();
+        session.state = if busy {
+            SessionState::Busy
+        } else {
+            SessionState::Idle
+        };
+        session.updated_at = now();
+        *active = false;
+    }
+
+    /// 正常结束时在同一 gate 临界区内释放 running 并同步最终状态。
+    /// 释放后新的用户消息才能可靠地判断为「启动新 turn」，旧 guard 也不能
+    /// 在新 turn 已开始后再次把 running 改回 false。
+    fn finish(&mut self) {
+        if !self.active {
+            return;
+        }
+        let gate_arc = Arc::clone(&self.gate);
+        let busy_children = Arc::clone(&self.busy_children);
+        let session = Arc::clone(&self.session);
+        let mut gate = gate_arc.lock();
+        Self::finish_locked(&mut self.active, &busy_children, &session, &mut gate);
+    }
 }
 
 impl Drop for GateGuard {
     fn drop(&mut self) {
-        self.gate.lock().running = false;
+        // panic/错误早退兜底；正常路径已由 finish 释放并使 guard 失效。
+        self.finish();
     }
 }
 
@@ -511,8 +552,11 @@ impl WorkflowEngine {
             }
             g.running = true;
         }
-        let _guard = GateGuard {
+        let mut guard = GateGuard {
             gate: self.gate.clone(),
+            busy_children: self.busy_children.clone(),
+            session: self.session.clone(),
+            active: true,
         };
         loop {
             self.with_session(|s| {
@@ -524,9 +568,15 @@ impl WorkflowEngine {
             self.with_session(|s| s.updated_at = now());
             let rerun = {
                 let mut g = self.gate.lock();
-                let r = g.requested || self.absorb_steer();
+                let steer_added = self.absorb_steer_locked();
+                let rerun = g.requested || steer_added;
                 g.requested = false;
-                r
+                if !rerun {
+                    let busy_children = Arc::clone(&guard.busy_children);
+                    let session = Arc::clone(&guard.session);
+                    GateGuard::finish_locked(&mut guard.active, &busy_children, &session, &mut g);
+                }
+                rerun
             };
             if !rerun {
                 return result;
@@ -568,9 +618,6 @@ impl WorkflowEngine {
         }
         if let Some(kids) = self.backend.take_synced_children() {
             self.with_session(|s| s.children = kids);
-        }
-        if let Some(activities) = self.backend.take_synced_activities() {
-            self.record_activities(activities);
         }
         Ok(())
     }
@@ -694,11 +741,11 @@ impl WorkflowEngine {
         }
     }
 
-    /// 工作流级忙闲：有忙碌子会话即工作中。
     fn sync_state(&self) {
-        let busy = *self.busy_children.lock() > 0;
+        let orchestrating = self.gate.lock().running;
+        let child_busy = *self.busy_children.lock() > 0;
         self.with_session(|s| {
-            s.state = if busy {
+            s.state = if orchestrating || child_busy {
                 SessionState::Busy
             } else {
                 SessionState::Idle
@@ -714,13 +761,24 @@ impl WorkflowEngine {
         });
     }
 
-    /// 返回是否应立即启动推进（false = 已在工作（steer 入队））。
-    /// 工作流无终态：任何时刻的用户消息都推进。
+    /// 返回是否应立即启动推进（false = 编排 turn 已在工作，消息走 steer）。
+    /// 子会话忙但编排空闲时仍应启动新的编排 turn，不能把用户消息留在 steer 队列。
     pub fn record_user(&self, text: &str) -> bool {
-        let busy = {
-            let s = self.session.read();
-            s.state == SessionState::Busy
-        };
+        // gate 同时保护「turn 是否运行」与 steer 入队：不能先读 running、释放锁，
+        // 再入队，否则恰好撞上 turn 收尾时可能既没被本轮吸收，也没触发新 turn。
+        // 锁顺序固定为 gate → steer_inbox → session，与推进收尾一致。
+        let mut gate = self.gate.lock();
+        let orchestrating = gate.running;
+        let mut steer = orchestrating.then(|| self.steer_inbox.lock());
+        if let Some(steer) = &mut steer {
+            steer.push(text.to_string());
+        }
+        if orchestrating {
+            // 当前 turn 收尾后必须再跑一轮；消息已先写入 transcript，不能依赖
+            // absorb_steer 通过「新增 transcript」来判断是否需要重跑。
+            // gate 保护下设置 requested，与收尾检查原子配对。
+            gate.requested = true;
+        }
         self.with_session(|s| {
             if s.description.trim().is_empty() {
                 s.description = text.trim().to_string();
@@ -730,21 +788,23 @@ impl WorkflowEngine {
             }
             s.transcript.push(OrcMsg::User {
                 text: text.to_string(),
-
                 timestamp: now(),
             });
             s.updated_at = now();
         });
-        if busy {
-            // 工作中以 steer 注入，当前 turn 结束后再跑一轮。
-            self.steer_inbox.lock().push(text.to_string());
-            return false;
-        }
-        true
+        drop(steer);
+        drop(gate);
+        !orchestrating
     }
 
     /// 把 inbox 中尚未出现在 transcript 的 steer 消息合并进来。
     pub fn absorb_steer(&self) -> bool {
+        let _gate = self.gate.lock();
+        self.absorb_steer_locked()
+    }
+
+    /// 调用方已持有 gate 时消费 steer，避免推进收尾重复获取 gate。
+    fn absorb_steer_locked(&self) -> bool {
         let msgs = std::mem::take(&mut *self.steer_inbox.lock());
         let mut added = false;
         for text in msgs {
@@ -859,7 +919,6 @@ struct LiveRuntime {
     persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
     /// 编排工具调用活动钩子（见 `OrcContext.record_tool_activity`）
     record_tool_activity: Option<Arc<dyn Fn(Activity) + Send + Sync>>,
-    activities: Arc<Mutex<Vec<Activity>>>,
     /// 编排输出草稿（见 `OrcContext.draft`）：流式文本实时进 transcript
     draft: Arc<OrcDraft>,
     /// 进行中实时活动槽（见 `OrcContext.current`）
@@ -901,15 +960,6 @@ impl LiveRuntime {
         if let Some(persist) = &self.persist_on_child_mounted {
             persist();
         }
-    }
-
-    fn record_tool(&self, name: &str, title: impl Into<String>, content: impl Into<String>) {
-        self.activities.lock().push(Activity::ToolCall {
-            timestamp: now(),
-            name: name.to_string(),
-            title: Some(title.into()),
-            content: Some(content.into()),
-        });
     }
 
     /// 进行中实时活动：思考中（流式增量即更新；非思考态则新建）。
@@ -1287,7 +1337,6 @@ where
 pub struct RigBackend {
     cfg: OrchestratorConfig,
     synced_children: Mutex<Option<Vec<ChildSession>>>,
-    synced_activities: Mutex<Option<Vec<Activity>>>,
 }
 
 impl RigBackend {
@@ -1295,7 +1344,6 @@ impl RigBackend {
         RigBackend {
             cfg,
             synced_children: Mutex::new(None),
-            synced_activities: Mutex::new(None),
         }
     }
 
@@ -1339,7 +1387,6 @@ impl OrcBackend for RigBackend {
                 hub: ctx.hub.clone(),
                 persist_on_child_mounted: ctx.persist_on_child_mounted.clone(),
                 record_tool_activity: ctx.record_tool_activity.clone(),
-                activities: Arc::new(Mutex::new(Vec::new())),
                 draft: Arc::clone(&ctx.draft),
                 current: Arc::clone(&ctx.current),
             };
@@ -1403,18 +1450,12 @@ impl OrcBackend for RigBackend {
             };
             let kids = live.children.lock().clone();
             *self.synced_children.lock() = Some(kids);
-            let activities = live.activities.lock().clone();
-            *self.synced_activities.lock() = Some(activities);
             Ok(Decision { summary: text })
         })
     }
 
     fn take_synced_children(&self) -> Option<Vec<ChildSession>> {
         self.synced_children.lock().take()
-    }
-
-    fn take_synced_activities(&self) -> Option<Vec<Activity>> {
-        self.synced_activities.lock().take()
     }
 }
 
@@ -1501,29 +1542,34 @@ async fn dispatch_tool(
     let result = match name {
         "list_agents" => list_agents(live).await,
         "list_sessions" => list_sessions(live).await,
-        "create_session" => create_session(live, parse_args(name, args)?).await,
-        "prompt_session" => prompt_session(live, parse_args(name, args)?).await,
-        "cancel_session" => cancel_session(live, parse_args(name, args)?).await,
-        "configure_session" => configure_session(live, parse_args(name, args)?).await,
-        "get_session_config_options" => {
-            get_session_config_options(live, parse_args(name, args)?).await
+        "create_session" => match parse_args(name, args) {
+            Ok(args) => create_session(live, args).await,
+            Err(error) => Err(error),
         },
-        "read_session_history" => {
-            read_session_page(
-                live,
-                parse_args(name, args)?,
-                protocol::method::SESSION_HISTORY,
-            )
-            .await
-        }
-        "read_session_activities" => {
-            read_session_page(
-                live,
-                parse_args(name, args)?,
-                protocol::method::SESSION_ACTIVITIES,
-            )
-            .await
-        }
+        "prompt_session" => match parse_args(name, args) {
+            Ok(args) => prompt_session(live, args).await,
+            Err(error) => Err(error),
+        },
+        "cancel_session" => match parse_args(name, args) {
+            Ok(args) => cancel_session(live, args).await,
+            Err(error) => Err(error),
+        },
+        "configure_session" => match parse_args(name, args) {
+            Ok(args) => configure_session(live, args).await,
+            Err(error) => Err(error),
+        },
+        "get_session_config_options" => match parse_args(name, args) {
+            Ok(args) => get_session_config_options(live, args).await,
+            Err(error) => Err(error),
+        },
+        "read_session_history" => match parse_args(name, args) {
+            Ok(args) => read_session_page(live, args, protocol::method::SESSION_HISTORY).await,
+            Err(error) => Err(error),
+        },
+        "read_session_activities" => match parse_args(name, args) {
+            Ok(args) => read_session_page(live, args, protocol::method::SESSION_ACTIVITIES).await,
+            Err(error) => Err(error),
+        },
         other => Err(format!("未知工具: {other}")),
     };
     live.clear_current();
@@ -1553,7 +1599,6 @@ async fn list_agents(live: &LiveRuntime) -> Result<String, String> {
         })
         .collect();
     let output = serde_json::to_string(&v).map_err(|e| format!("序列化失败: {e}"))?;
-    live.record_tool("list_agents", "查询可用 agent", "");
     Ok(output)
 }
 
@@ -1620,7 +1665,6 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
         })
         .collect();
     let output = serde_json::to_string(&v).map_err(|e| format!("序列化失败: {e}"))?;
-    live.record_tool("list_sessions", "查询关联普通会话", "");
     Ok(output)
 }
 
@@ -1662,11 +1706,6 @@ async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<S
         machine_name: machine_name.clone(),
     });
     live.hub.child_mounted(&machine_name, &sid);
-    live.record_tool(
-        "create_session",
-        "创建关联普通会话",
-        format!("{}@{}", sid, machine_name),
-    );
     Ok(sid)
 }
 
@@ -1691,11 +1730,6 @@ async fn prompt_session(live: &LiveRuntime, args: PromptSessionArgs) -> Result<S
         .request_ok(protocol::method::SESSION_PROMPT, Some(input))
         .await
         .map_err(|e| e.to_string())?;
-    live.record_tool(
-        "prompt_session",
-        "下发指令",
-        format!("session={}", args.session),
-    );
     Ok("已下发".into())
 }
 
@@ -1720,11 +1754,6 @@ async fn cancel_session(live: &LiveRuntime, args: SessionRefArgs) -> Result<Stri
         )
         .await
         .map_err(|e| e.to_string())?;
-    live.record_tool(
-        "cancel_session",
-        "取消关联普通会话",
-        format!("session={}", args.session),
-    );
     Ok("已取消".into())
 }
 
@@ -1761,11 +1790,6 @@ async fn configure_session(
         )
         .await
         .map_err(|e| e.to_string())?;
-    live.record_tool(
-        "configure_session",
-        "配置关联普通会话",
-        format!("session={}", args.session),
-    );
     Ok("已配置".into())
 }
 
@@ -1788,11 +1812,6 @@ async fn get_session_config_options(
         )
         .await
         .map_err(|e| e.to_string())?;
-    live.record_tool(
-        "get_session_config_options",
-        "获取关联普通会话选项",
-        format!("session={}", args.session),
-    );
     serde_json::to_string(&result).map_err(|e| format!("序列化失败: {e}"))
 }
 
@@ -1834,16 +1853,6 @@ async fn read_session_page(
             .map_err(|e| e.to_string())?;
         serde_json::to_value(r).unwrap()
     };
-    let tool_name = if method == protocol::method::SESSION_HISTORY {
-        "read_session_history"
-    } else {
-        "read_session_activities"
-    };
-    live.record_tool(
-        tool_name,
-        "读取关联普通会话",
-        format!("method={method} session={}", args.session),
-    );
     Ok(res.to_string())
 }
 
@@ -1906,7 +1915,6 @@ mod tests {
             hub: Arc::new(MachineHub::default()),
             persist_on_child_mounted: None,
             record_tool_activity: None,
-            activities: Arc::new(Mutex::new(Vec::new())),
             current: Arc::new(Mutex::new(None)),
         }
     }
@@ -1967,7 +1975,6 @@ mod tests {
                 let _ = persist_engine.persist(&persist_dir);
             })),
             record_tool_activity: None,
-            activities: Arc::new(Mutex::new(Vec::new())),
             current: Arc::new(Mutex::new(None)),
         };
         live.mount_child(ChildSession {
@@ -2376,7 +2383,7 @@ mod tests {
     #[tokio::test]
     async fn configure_session_rejects_empty_configuration_before_rpc() {
         let live = test_live();
-        live.children.lock().unwrap().push(ChildSession {
+        live.children.lock().push(ChildSession {
             id: "child-1".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
@@ -2515,6 +2522,10 @@ mod tests {
             .await
             .expect_err("参数缺失应报错");
         assert!(err.contains("create_session 参数解析失败"));
+        assert!(
+            live.current.lock().is_none(),
+            "工具参数解析失败也必须清理实时活动"
+        );
     }
 
     #[tokio::test]
@@ -2555,6 +2566,65 @@ mod tests {
         assert_eq!(engine.session.read().state, SessionState::Idle);
     }
 
+    #[test]
+    fn user_message_starts_turn_when_only_child_is_busy() {
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            FakeBackend::new_for_tests(),
+            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            &temp_data_dir(),
+        );
+        engine.session.write().children.push(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+        });
+        engine.note_child_state("s_child", SessionState::Idle, SessionState::Busy);
+
+        assert!(engine.record_user("继续处理"));
+        assert!(engine.steer_inbox.lock().is_empty());
+    }
+
+    #[test]
+    fn user_message_requests_rerun_when_orchestrator_is_busy() {
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            FakeBackend::new_for_tests(),
+            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            &temp_data_dir(),
+        );
+        engine.gate.lock().running = true;
+
+        assert!(!engine.record_user("中途补充"));
+        let gate = engine.gate.lock();
+        assert!(gate.requested, "中途消息必须请求下一轮推进");
+        drop(gate);
+        assert_eq!(engine.steer_inbox.lock().as_slice(), ["中途补充"]);
+    }
+
+    #[test]
+    fn workflow_stays_busy_while_orchestrator_turn_runs() {
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            FakeBackend::new_for_tests(),
+            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            &temp_data_dir(),
+        );
+        engine.gate.lock().running = true;
+
+        engine.sync_state();
+        assert_eq!(engine.state(), SessionState::Busy);
+
+        engine.gate.lock().running = false;
+        engine.sync_state();
+        assert_eq!(engine.state(), SessionState::Idle);
+    }
     #[tokio::test]
     async fn tool_loop_runs_tools_then_returns_text() {
         let model = MockCompletionModel::from_stream_turns([
