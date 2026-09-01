@@ -1210,14 +1210,11 @@ impl AmuxApp {
                 }
             })
             .collect::<Vec<_>>();
-        let history_has_more = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.views.get(id))
-                .map(|v| v.history_has_more)
-                .unwrap_or(false),
-            _ => false,
-        };
+        let history_has_more = self
+            .open_session_target()
+            .and_then(|(machine, id)| self.machine(machine).and_then(|m| m.views.get(&id)))
+            .map(|v| v.history_has_more)
+            .unwrap_or(false);
         let mut content = Vec::new();
         if let Some(Selected::Workflow { id }) = &self.selected {
             let total = self
