@@ -334,13 +334,13 @@ impl Handlers {
 
             method::TERMINAL_RESIZE => {
                 let p: TerminalResizeParams = parse(params)?;
-                self.terminals.resize(p)?;
+                self.terminals.resize(p, conn.conn_id)?;
                 ok_op()
             }
 
             method::TERMINAL_INPUT => {
                 let p: TerminalInputParams = parse(params)?;
-                self.terminals.input(p)?;
+                self.terminals.input(p, conn.conn_id)?;
                 ok_op()
             }
 

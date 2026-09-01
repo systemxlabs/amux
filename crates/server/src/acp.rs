@@ -377,10 +377,10 @@ impl AgentDriver for AcpAgentDriver {
 
     fn close(&self, agent_session_id: &str) -> Result<(), String> {
         self.resumed.lock().remove(agent_session_id);
-        // agent 侧会话已关闭，缓存的斜杠命令、计划与能力档随之失效
+        // Keep the capability snapshot until delete_session() has checked it:
+        // close is intentionally followed by session/delete on supported agents.
         self.caches.commands.lock().remove(agent_session_id);
         self.caches.plans.lock().remove(agent_session_id);
-        self.caches.caps.lock().remove(agent_session_id);
         self.call(AcpCall::Close {
             sid: agent_session_id.to_string(),
         })
@@ -394,15 +394,21 @@ impl AgentDriver for AcpAgentDriver {
         //（调用方按「不支持」忽略）。避免对 codex 这类声明语义缺失的 agent
         // 发出必然失败的 session/delete（"no rollout found"）。
         if !self.session_caps(agent_session_id).delete {
+            self.caches.caps.lock().remove(agent_session_id);
             return Err(
                 "agent 不支持 session/delete（initialize 未声明 sessionCapabilities.delete）"
                     .into(),
             );
         }
-        self.call(AcpCall::Delete {
-            sid: agent_session_id.to_string(),
-        })
-        .map(|_| ())
+        let result = self
+            .call(AcpCall::Delete {
+                sid: agent_session_id.to_string(),
+            })
+            .map(|_| ());
+        if result.is_ok() {
+            self.caches.caps.lock().remove(agent_session_id);
+        }
+        result
     }
 
     /// 设置会话配置选项（ACP `session/set_config_option`），返回更新后的完整选项集合。

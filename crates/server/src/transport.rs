@@ -76,9 +76,20 @@ impl Transport {
         let tx_clone = tx.clone();
         let mut notify_rx = notifications;
         tokio::spawn(async move {
-            while let Ok(n) = notify_rx.recv().await {
-                if let Some(frame) = notification_frame(&n) {
-                    let _ = tx_clone.send(frame);
+            loop {
+                match notify_rx.recv().await {
+                    Ok(n) => {
+                        if let Some(frame) = notification_frame(&n) {
+                            let _ = tx_clone.send(frame);
+                        }
+                    }
+                    // A slow subscriber may miss old notifications. Keep consuming
+                    // newer events; ending this task would disable state broadcasts
+                    // for every connection until the server restarts.
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        log::warn!("服务端通知积压，跳过 {missed} 条");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -146,7 +157,11 @@ async fn handle_connection(
             n = notify_rx.recv() => {
                 match n {
                     Ok(frame) => {
-                        if sink.send(Message::Text(frame.into())).await.is_err() {
+                        // Notifications are connection-scoped after authentication;
+                        // do not leak session ids to unauthenticated peers.
+                        if authenticated.load(Ordering::SeqCst)
+                            && sink.send(Message::Text(frame.into())).await.is_err()
+                        {
                             break;
                         }
                     }
