@@ -262,7 +262,7 @@ impl AmuxApp {
         let has_selection = machine
             .and_then(|i| self.machine(i))
             .is_some_and(|m| !m.diff.read(cx).selection.is_empty());
-        let can_send = matches!(&self.selected, Some(Selected::Session { .. }));
+        let can_send = self.open_session_target().is_some();
         let diff_tree_collapsed = machine
             .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).tree_collapsed)

@@ -923,7 +923,7 @@ impl AmuxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_session = matches!(self.selected, Some(Selected::Session { .. }));
+        let is_session = self.open_session_target().is_some();
         v_flex()
             .gap_0p5()
             .p_1()
