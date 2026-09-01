@@ -846,7 +846,7 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
         },
         ToolDefinition {
             name: "list_sessions".into(),
-            description: "本工作流的关联普通会话列表（标题、状态、最近活跃、机器在线与否）".into(),
+            description: "本工作流的关联普通会话列表（标题、状态、创建/活跃时间、机器在线与否、工作目录、worktree 目录、上下文用量）".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDefinition {
@@ -1352,10 +1352,15 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
                 "id": c.id,
                 "title": m.title,
                 "state": m.state.as_str(),
+                "createdAt": m.created_at,
                 "lastActiveAt": m.last_active_at,
                 "machine": c.machine_name,
                 "agent": m.agent,
                 "machineOnline": online_of(c),
+                "cwd": m.cwd,
+                "worktreeDir": m.worktree_dir,
+                "contextSize": m.context_size,
+                "contextWindowSize": m.context_window_size,
             }),
             // server 侧已不存在（被删除等）：显式告知编排者
             None => serde_json::json!({
