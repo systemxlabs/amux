@@ -299,37 +299,41 @@ impl AmuxApp {
         .detach();
     }
 
-    pub(crate) fn load_more_history(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn load_more_selected_page<R, T>(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        next_before: fn(&crate::aggregate::SessionView) -> Option<usize>,
+        method: &'static str,
+        decode: impl FnOnce(R) -> (Vec<T>, bool, Option<u64>) + 'static,
+        apply: impl FnOnce(&mut crate::aggregate::SessionView, Vec<T>, bool, Option<usize>) + 'static,
+    ) where
+        R: serde::de::DeserializeOwned + 'static,
+        T: 'static,
+    {
         let Some(Selected::Session { machine, id }) = self.selected.clone() else {
             return;
         };
-        let Some(view) = self.machines.get(machine).and_then(|m| m.views.get(&id)) else {
-            return;
-        };
-        let Some(before) = view.history_next_before else {
+        let Some(before) = self
+            .machines
+            .get(machine)
+            .and_then(|m| m.views.get(&id))
+            .and_then(next_before)
+        else {
             return;
         };
         let client = self.machines[machine].client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionPageParams {
-                session_id: id.clone(),
-                limit: Some(PAGE_LIMIT),
-                before: Some(before as u64),
-            };
-            if let Ok(res) = client
-                .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
-                .await
+            if let Ok((items, has_more, next_before)) =
+                request_session_page(client, method, id.clone(), Some(before as u64), decode).await
             {
-                let items = res.items;
-                let has_more = res.has_more;
-                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     if let Some(view) = this
                         .machines
                         .get_mut(machine)
                         .and_then(|m| m.views.get_mut(&id))
                     {
-                        view.prepend_history_page(&items, has_more, next_before);
+                        apply(view, items, has_more, next_before);
                     }
                     cx.notify();
                 });
@@ -338,43 +342,30 @@ impl AmuxApp {
         .detach();
     }
 
+    pub(crate) fn load_more_history(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_more_selected_page(
+            window,
+            cx,
+            |view| view.history_next_before,
+            protocol::method::SESSION_HISTORY,
+            |res: HistoryResult| (res.items, res.has_more, res.next_before),
+            |view, items, has_more, next_before| {
+                view.prepend_history_page(&items, has_more, next_before)
+            },
+        );
+    }
+
     pub(crate) fn load_more_activities(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
-            return;
-        };
-        let Some(view) = self.machines.get(machine).and_then(|m| m.views.get(&id)) else {
-            return;
-        };
-        let Some(before) = view.activities_next_before else {
-            return;
-        };
-        let client = self.machines[machine].client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionPageParams {
-                session_id: id.clone(),
-                limit: Some(PAGE_LIMIT),
-                before: Some(before as u64),
-            };
-            if let Ok(res) = client
-                .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
-                .await
-            {
-                let acts = res.activities;
-                let has_more = res.has_more;
-                let next_before = res.next_before.map(|v| v as usize);
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    if let Some(view) = this
-                        .machines
-                        .get_mut(machine)
-                        .and_then(|m| m.views.get_mut(&id))
-                    {
-                        view.prepend_activities_page(acts, has_more, next_before);
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        self.load_more_selected_page(
+            window,
+            cx,
+            |view| view.activities_next_before,
+            protocol::method::SESSION_ACTIVITIES,
+            |res: ActivitiesResult| (res.activities, res.has_more, res.next_before),
+            |view, activities, has_more, next_before| {
+                view.prepend_activities_page(activities, has_more, next_before)
+            },
+        );
     }
 
     /// 「加载更早会话」：滚动查询页数 N +1，所有在线机器统一按前 N 页重新查询，
