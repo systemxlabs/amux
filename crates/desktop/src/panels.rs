@@ -1048,7 +1048,7 @@ impl AmuxApp {
                     }
                 }
                 if next == Some(Panel::Diff) {
-                    if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
+                    if let Some((machine, _)) = this.open_session_target() {
                         this.load_diff(window, cx, machine);
                     }
                 }
