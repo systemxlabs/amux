@@ -271,6 +271,22 @@ impl SessionManager {
         Ok(self.current_config_options(session_id))
     }
 
+    /// 获取已存在的 agent 侧会话；不会触发惰性创建。
+    fn existing_agent_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(crate::agent::SharedDriver, String)>, SessionError> {
+        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        if agent_session_id.is_empty() {
+            return Ok(None);
+        }
+        let driver = self
+            .agents
+            .driver_for(&meta.agent)
+            .map_err(SessionError::AgentUnavailable)?;
+        Ok(Some((driver, agent_session_id)))
+    }
+
     /// 查询会话斜杠命令（docs/DESIGN.md「普通会话斜杠命令」：存储在内存，
     /// 以 Agent 侧数据为权威，由 ACP `available_commands_update` 通知驱动）。
     /// 查询不触发惰性创建：尚无 agent 侧会话时返回空（agent 侧会话创建后
@@ -279,14 +295,9 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SlashCommand>, SessionError> {
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
-        if agent_session_id.is_empty() {
+        let Some((driver, agent_session_id)) = self.existing_agent_session(session_id)? else {
             return Ok(Vec::new());
-        }
-        let driver = self
-            .agents
-            .driver_for(&meta.agent)
-            .map_err(SessionError::AgentUnavailable)?;
+        };
         Ok(driver.available_commands(&agent_session_id))
     }
 
@@ -297,14 +308,9 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SessionPlanEntry>, SessionError> {
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
-        if agent_session_id.is_empty() {
+        let Some((driver, agent_session_id)) = self.existing_agent_session(session_id)? else {
             return Ok(Vec::new());
-        }
-        let driver = self
-            .agents
-            .driver_for(&meta.agent)
-            .map_err(SessionError::AgentUnavailable)?;
+        };
         Ok(driver.session_plan(&agent_session_id))
     }
 
