@@ -2423,10 +2423,8 @@ impl AmuxApp {
     /// 展示前缀匹配项；点击项回填 `/name ` 后随前缀消失自动收起。
     pub fn render_slash_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let selected = self.slash_commands.as_ref()?;
-        let Selected::Session { machine, id } = self.selected.as_ref()? else {
-            return None;
-        };
-        if selected.machine != *machine || selected.session_id != *id {
+        let (machine, id) = self.open_session_target()?;
+        if selected.machine != machine || selected.session_id != id {
             return None;
         }
         let text = self.input_state.read(cx).value().to_string();
