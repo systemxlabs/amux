@@ -84,10 +84,13 @@ async fn open_echo_exit_roundtrip() {
     // 输入 `echo <mark>`：回显内容必须出现在输出帧中（真实 PTY + shell 路径）
     let mark = format!("amux-echo-{}", uuid::Uuid::new_v4().simple());
     service
-        .input(TerminalInputParams {
-            terminal_id: terminal_id.clone(),
-            data: base64::engine::general_purpose::STANDARD.encode(format!("echo {mark}\n")),
-        })
+        .input(
+            TerminalInputParams {
+                terminal_id: terminal_id.clone(),
+                data: base64::engine::general_purpose::STANDARD.encode(format!("echo {mark}\n")),
+            },
+            conn.conn_id,
+        )
         .expect("写入输入应成功");
 
     let frames = frames_until(&mut rx, |m, p| {
@@ -103,10 +106,13 @@ async fn open_echo_exit_roundtrip() {
 
     // 交互式 shell 输入 exit 退出 → 收到 terminal.exit 通知
     service
-        .input(TerminalInputParams {
-            terminal_id: terminal_id.clone(),
-            data: base64::engine::general_purpose::STANDARD.encode("exit\n"),
-        })
+        .input(
+            TerminalInputParams {
+                terminal_id: terminal_id.clone(),
+                data: base64::engine::general_purpose::STANDARD.encode("exit\n"),
+            },
+            conn.conn_id,
+        )
         .expect("写入 exit 应成功");
     let frames = frames_until(&mut rx, |m, _| m == notify::TERMINAL_EXIT).await;
     let (_, exit_params) = frames.last().expect("已确认 exit 存在");
@@ -114,10 +120,13 @@ async fn open_echo_exit_roundtrip() {
 
     // 退出后条目已摘除：再写入输入应返回 TERMINAL_NOT_FOUND
     let err = service
-        .input(TerminalInputParams {
-            terminal_id,
-            data: String::new(),
-        })
+        .input(
+            TerminalInputParams {
+                terminal_id,
+                data: String::new(),
+            },
+            conn.conn_id,
+        )
         .unwrap_err();
     assert_eq!(err.code, protocol::server_error::TERMINAL_NOT_FOUND);
 }
@@ -144,12 +153,28 @@ async fn close_and_conn_binding() {
         )
         .expect("打开终端应成功");
 
-    // 其他连接不能关闭本连接的终端
-    let other = ConnScope {
-        conn_id: 999,
-        frame_tx: tokio::sync::mpsc::channel(1).0,
-    };
-    let _ = other;
+    // 其他连接不能操控或关闭本连接的终端
+    let err = service
+        .input(
+            TerminalInputParams {
+                terminal_id: id.clone(),
+                data: String::new(),
+            },
+            999,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, protocol::server_error::TERMINAL_NOT_FOUND);
+    let err = service
+        .resize(
+            protocol::TerminalResizeParams {
+                terminal_id: id.clone(),
+                cols: 20,
+                rows: 5,
+            },
+            999,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, protocol::server_error::TERMINAL_NOT_FOUND);
     let err = service
         .close(
             protocol::TerminalIdParams {
@@ -170,11 +195,14 @@ async fn close_and_conn_binding() {
         )
         .expect("所属连接关闭应成功");
     let err = service
-        .resize(protocol::TerminalResizeParams {
-            terminal_id: id,
-            cols: 20,
-            rows: 5,
-        })
+        .resize(
+            protocol::TerminalResizeParams {
+                terminal_id: id,
+                cols: 20,
+                rows: 5,
+            },
+            42,
+        )
         .unwrap_err();
     assert_eq!(err.code, protocol::server_error::TERMINAL_NOT_FOUND);
 }
@@ -206,11 +234,14 @@ async fn release_conn_kills_terminals() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         assert!(tokio::time::Instant::now() < deadline, "终端未被释放");
-        match service.resize(protocol::TerminalResizeParams {
-            terminal_id: id.clone(),
-            cols: 20,
-            rows: 5,
-        }) {
+        match service.resize(
+            protocol::TerminalResizeParams {
+                terminal_id: id.clone(),
+                cols: 20,
+                rows: 5,
+            },
+            42,
+        ) {
             Ok(()) => tokio::time::sleep(Duration::from_millis(50)).await,
             Err(RpcError { code, .. }) => {
                 assert_eq!(code, protocol::server_error::TERMINAL_NOT_FOUND);
