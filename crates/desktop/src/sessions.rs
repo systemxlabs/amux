@@ -1631,14 +1631,10 @@ impl AmuxApp {
     /// `entity.update`（同会话右键菜单的可用模式），实体更新内再异步发起请求。
     fn render_config_options_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let opts = self.config_options.as_ref()?;
-        let Selected::Session { machine, id } = self.selected.as_ref()? else {
-            return None;
-        };
+        let (machine, session_id) = self.open_session_target()?;
         if opts.options.is_empty() {
             return None;
         }
-        let machine = *machine;
-        let session_id = id.clone();
         let app = cx.entity();
         let muted = cx.theme().muted_foreground;
         let mut row = h_flex().flex_wrap().gap_x_3().gap_y_1().items_center();
