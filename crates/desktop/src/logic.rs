@@ -172,7 +172,7 @@ pub fn activity_kind_detail(a: &Activity) -> (String, String) {
     }
 }
 
-/// 输入附件：@ 引用文件/目录、拖拽文件/图片。
+/// 输入附件：拖拽文件/图片。
 /// 图片以路径引用传递（不读二进制内容）——主流 agent CLI 自身具备按路径读取
 /// 图片的能力，GUI 侧 read_to_string 二进制只会得到空串（曾为坏路径）。
 #[derive(Debug, Clone, PartialEq)]
@@ -189,7 +189,7 @@ pub enum InputAttachment {
     },
 }
 
-/// 路径 → 路径附件，供拖拽文件/目录与 `@` 引用共用。
+/// 路径 → 路径附件，供拖拽文件/目录使用。
 pub fn path_attachment(path: &str) -> InputAttachment {
     InputAttachment::Path {
         path: path.to_string(),
@@ -241,41 +241,6 @@ pub fn image_attachment(name: &str, mime_type: &str, bytes: &[u8]) -> InputAttac
     }
 }
 
-/// 解析输入文本中的 @ 引用，将文件或目录作为上下文。
-/// 返回（清理后的文本，引用列表）。
-pub fn parse_at_references(text: &str) -> (String, Vec<String>) {
-    let mut refs = Vec::new();
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(pos) = rest.find('@') {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos + 1..];
-        let end = after
-            .find(|c: char| c.is_whitespace() || c == '@')
-            .unwrap_or(after.len());
-        let path = after[..end].trim();
-        if path.is_empty() {
-            out.push('@');
-            rest = after;
-            continue;
-        }
-        let prev_is_word = out
-            .chars()
-            .last()
-            .map(|c| c.is_alphanumeric())
-            .unwrap_or(false);
-        if prev_is_word {
-            out.push('@');
-            rest = after;
-            continue;
-        }
-        refs.push(path.to_string());
-        rest = &after[end..];
-    }
-    out.push_str(rest);
-    (out, refs)
-}
-
 /// 常见图片扩展名（按路径引用传递、不读内容）。
 fn is_image_path(path: &str) -> bool {
     matches!(
@@ -288,7 +253,7 @@ fn is_image_path(path: &str) -> bool {
     )
 }
 
-/// 读取 @ 引用路径为上下文文本。图片文件只传路径引用（二进制读成文本无意义）。
+/// 读取路径为上下文文本。图片文件只传路径引用（二进制读成文本无意义）。
 pub fn read_path_context(path: &str) -> String {
     let p = std::path::Path::new(path);
     if p.is_dir() {
@@ -352,7 +317,7 @@ pub fn compose_prompt(text: &str, attachments: &[InputAttachment]) -> Vec<Conten
 }
 
 /// 工作流编排器当前使用文本上下文；将附件内容显式带入工作流 transcript，
-/// 避免工作流输入丢失 `@` 引用和拖拽附件。
+/// 避免工作流输入丢失拖拽附件。
 pub fn compose_workflow_text(text: &str, attachments: &[InputAttachment]) -> String {
     let mut result = text.to_string();
     for attachment in attachments {
@@ -582,16 +547,6 @@ mod tests {
             detail: "失败".into(),
         };
         assert_eq!(activity_kind_detail(&err), ("错误".into(), "失败".into()));
-    }
-
-    #[test]
-    fn parse_at_references_extracts_paths_and_cleans_text() {
-        let (text, refs) = parse_at_references("用 @src/main.rs 的代码实现功能");
-        assert_eq!(text, "用  的代码实现功能");
-        assert_eq!(refs, vec!["src/main.rs"]);
-        let (text, refs) = parse_at_references("联系 a@b.com 或 @ ");
-        assert_eq!(refs.len(), 0);
-        assert_eq!(text, "联系 a@b.com 或 @ ");
     }
 
     #[test]

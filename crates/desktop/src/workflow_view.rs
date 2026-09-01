@@ -15,7 +15,6 @@ use gpui_component::{
 
 use protocol::{SessionIdParams, SessionState};
 
-use crate::logic::{parse_at_references, read_path_context};
 use crate::workflow::{AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 use crate::ws::WsClient;
 
@@ -96,16 +95,10 @@ impl AmuxApp {
             return;
         }
         self.workflow_error = None;
-        let (clean, refs) = parse_at_references(&description);
-        let context = refs
-            .iter()
-            .map(|r| read_path_context(r))
-            .collect::<Vec<_>>()
-            .join("\n");
         let backend = self.orchestrator_backend();
         let engine = WorkflowEngine::new(
-            &clean,
-            &context,
+            &description,
+            "",
             preamble.as_deref().unwrap_or(""),
             backend,
             self.machine_hub.clone(),

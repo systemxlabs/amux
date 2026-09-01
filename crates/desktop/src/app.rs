@@ -233,7 +233,7 @@ impl AmuxApp {
     pub fn new(store: Arc<ConfigStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("输入消息，Enter 发送；Shift+Enter 换行；@ 引用文件/目录作为上下文")
+                .placeholder("输入消息，Enter 发送；Shift+Enter 换行")
                 .auto_grow(3, 8)
                 .submit_on_enter(true)
         });

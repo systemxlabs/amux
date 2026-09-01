@@ -62,9 +62,9 @@ pub struct ChildSession {
 pub struct OrcSession {
     pub id: String,
     pub title: String,
-    /// 完整执行计划（用户输入原文，不含 @ 引用展开的上下文；随元数据持久化）
+    /// 完整执行计划（用户输入原文，不含上下文附件展开的内容；随元数据持久化）
     pub plan: String,
-    /// 用户自然语言计划（含 @ 引用展开的上下文）
+    /// 用户自然语言计划（含上下文附件展开的内容）
     pub description: String,
     /// 工作流计划/系统指令（内置进编排 agent 的系统提示词，不进入会话历史）。
     pub preamble: String,
@@ -1940,7 +1940,7 @@ mod tests {
         let backend = FakeBackend::new(vec![]);
         let engine = WorkflowEngine::new(
             "实现功能",
-            "@src/main.rs 的内容……",
+            "src/main.rs 的内容……",
             "",
             backend,
             test_hub(vec![m], clients),

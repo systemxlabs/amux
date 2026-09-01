@@ -30,8 +30,8 @@ use crate::config::QuickCommand;
 use crate::display::short_cwd;
 use crate::logic::{
     activity_kind_detail, compose_prompt, compose_workflow_text, external_path_attachment,
-    filter_slash_commands, image_attachment, merge_session_window, parse_at_references,
-    path_attachment, slash_command_prefix, DialogMsg, InputAttachment,
+    filter_slash_commands, image_attachment, merge_session_window, slash_command_prefix,
+    DialogMsg, InputAttachment,
 };
 use crate::machine::MachineStatus;
 use crate::text::{block_text, format_local_time, one_line, TimePrecision};
@@ -443,12 +443,7 @@ impl AmuxApp {
         if text.trim().is_empty() && attachments.is_empty() {
             return;
         }
-        let (clean_text, refs) = parse_at_references(&text);
-        let mut all = attachments;
-        for r in refs {
-            all.push(path_attachment(&r));
-        }
-        let blocks = compose_prompt(&clean_text, &all);
+        let blocks = compose_prompt(&text, &attachments);
         let Some(target) = self.selected.clone() else {
             cx.notify();
             return;
@@ -500,7 +495,7 @@ impl AmuxApp {
             }
             Selected::Workflow { id } => {
                 let data_dir = self.data_dir.clone();
-                let workflow_text = compose_workflow_text(&clean_text, &all);
+                let workflow_text = compose_workflow_text(&text, &attachments);
                 let Some(engine) = self.workflow_idx(&id) else {
                     return;
                 };
