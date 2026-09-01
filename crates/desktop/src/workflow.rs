@@ -790,8 +790,13 @@ impl WorkflowEngine {
         });
     }
 
-    pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
+    pub fn load_window(data_dir: &Path, limit: usize) -> std::io::Result<(Vec<OrcSession>, bool)> {
         // 惰性元数据加载：只读 sqlite，不读取 transcript/activities 两份 JSONL。
+        crate::wfstore::load_meta_window(data_dir, limit)
+    }
+
+    pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
+        // 保留全量读取入口供存储测试和需要完整数据的调用方使用。
         crate::wfstore::load_all_meta(data_dir)
     }
 

@@ -182,13 +182,75 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
 
 /// 惰性加载（元数据）：仅从 sqlite 读取会话骨架，不读取 transcript/activities
 /// 两份 JSONL 文件体。调用方仅在渲染对话/活动视图（`load_payload`）时才按需补齐。
+pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<OrcSession>, bool)> {
+    let conn = open_db(data_dir).map_err(io::Error::other)?;
+    let query_limit = limit.saturating_add(1) as i64;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, state, last_active_at, children, description, plan, preamble,
+                created_at, updated_at
+         FROM sessions ORDER BY last_active_at DESC, id DESC LIMIT ?1",
+        )
+        .map_err(io::Error::other)?;
+    let rows = stmt
+        .query_map([query_limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as u64,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)? as u64,
+                row.get::<_, i64>(9)? as u64,
+            ))
+        })
+        .map_err(io::Error::other)?;
+    let mut sessions: Vec<OrcSession> = rows
+        .map(|row| -> io::Result<OrcSession> {
+            let (
+                id,
+                title,
+                state,
+                last_active_at,
+                children,
+                description,
+                plan,
+                preamble,
+                created_at,
+                updated_at,
+            ) = row.map_err(io::Error::other)?;
+            let children: Vec<ChildSession> =
+                serde_json::from_str(&children).map_err(io::Error::other)?;
+            Ok(OrcSession {
+                id,
+                title,
+                plan,
+                description,
+                preamble,
+                state: state_from(&state)?,
+                transcript: Vec::new(),
+                children,
+                activities: Vec::new(),
+                created_at,
+                updated_at: last_active_at.max(updated_at),
+            })
+        })
+        .collect::<io::Result<_>>()?;
+    let has_more = sessions.len() > limit;
+    sessions.truncate(limit);
+    Ok((sessions, has_more))
+}
+
 pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let mut stmt = conn
         .prepare(
             "SELECT id, title, state, last_active_at, children, description, plan, preamble,
                 created_at, updated_at
-         FROM sessions ORDER BY last_active_at DESC",
+         FROM sessions ORDER BY last_active_at DESC, id DESC",
         )
         .map_err(io::Error::other)?;
     let rows = stmt
@@ -310,6 +372,52 @@ mod tests {
 
         remove(&dir, "orc_1").unwrap();
         assert!(load_all_meta(&dir).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn meta_window_limits_and_orders_sessions() {
+        let dir = temp();
+        let _ = std::fs::remove_dir_all(&dir);
+        let oldest = OrcSession {
+            id: "orc_old".into(),
+            title: "旧工作流".into(),
+            plan: String::new(),
+            description: String::new(),
+            preamble: String::new(),
+            state: SessionState::Idle,
+            transcript: Vec::new(),
+            children: Vec::new(),
+            activities: Vec::new(),
+            created_at: 1,
+            updated_at: 10,
+        };
+        let mut middle = oldest.clone();
+        middle.id = "orc_middle".into();
+        middle.title = "中间工作流".into();
+        middle.updated_at = 20;
+        let mut newest = oldest.clone();
+        newest.id = "orc_new".into();
+        newest.title = "新工作流".into();
+        newest.updated_at = 30;
+        save(&dir, &oldest).unwrap();
+        save(&dir, &middle).unwrap();
+        save(&dir, &newest).unwrap();
+
+        let (window, has_more) = load_meta_window(&dir, 2).unwrap();
+        assert!(has_more);
+        assert_eq!(
+            window
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["orc_new", "orc_middle"]
+        );
+        let (window, has_more) = load_meta_window(&dir, 3).unwrap();
+        assert!(!has_more);
+        assert_eq!(window.len(), 3);
+        assert_eq!(window[2].id, "orc_old");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

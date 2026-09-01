@@ -68,13 +68,15 @@ impl AmuxApp {
                 let Some(m) = this.machines.get_mut(idx) else {
                     return Vec::new();
                 };
-                let (list, hm) = merge_session_window(&m.sessions, pages, has_more);
-                m.sessions = list;
-                m.sessions_has_more = hm;
+                // 当前请求代表整个前 N 页窗口；替换而不是追加，收起分页时
+                // 才不会把此前加载的更早会话继续留在列表中。
+                m.sessions = pages;
+                m.sessions_has_more = has_more;
                 crate::logic::sort_sessions_recent(&mut m.sessions);
                 let child_ids: Vec<(usize, String)> = this
                     .workflows
                     .iter()
+                    .filter(|wf| this.visible_workflows.contains(&wf.id()))
                     .flat_map(|wf| {
                         let children = wf.session.read().children.clone();
                         children.into_iter().map(|c| (c.machine_idx, c.id))
@@ -361,6 +363,7 @@ impl AmuxApp {
     /// 随后各自补齐工作流关联会话（docs/DESIGN.md「会话列表滚动查询」）。
     pub(crate) fn load_more_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.list_pages += 1;
+        self.restore_workflows(window, cx);
         self.refresh_all_online(window, cx);
     }
 
@@ -370,6 +373,7 @@ impl AmuxApp {
             return;
         }
         self.list_pages = 1;
+        self.restore_workflows(window, cx);
         self.refresh_all_online(window, cx);
     }
 
@@ -825,6 +829,7 @@ impl AmuxApp {
         let child_ids: std::collections::HashSet<String> = self
             .workflows
             .iter()
+            .filter(|wf| self.visible_workflows.contains(&wf.id()))
             .flat_map(|wf| {
                 wf.session
                     .read()
@@ -855,6 +860,9 @@ impl AmuxApp {
             }
         }
         for (wi, wf) in self.workflows.iter().enumerate() {
+            if !self.visible_workflows.contains(&wf.id()) {
+                continue;
+            }
             let s_guard = wf.snapshot();
             let mut recency = s_guard.updated_at;
             for c in &s_guard.children {
@@ -882,7 +890,7 @@ impl AmuxApp {
             .machines
             .iter()
             .any(|m| matches!(m.status, MachineStatus::Online));
-        if any_online && self.list_pages > 1 {
+        if self.list_pages > 1 {
             rows.push(
                 Button::new("sessions-collapse")
                     .small()
@@ -893,12 +901,12 @@ impl AmuxApp {
                     .into_any_element(),
             );
         }
-        if any_online
+        let sessions_have_more = any_online
             && self
                 .machines
                 .iter()
-                .any(|m| matches!(m.status, MachineStatus::Online) && m.sessions_has_more)
-        {
+                .any(|m| matches!(m.status, MachineStatus::Online) && m.sessions_has_more);
+        if sessions_have_more || self.workflow_has_more {
             rows.push(
                 Button::new("sessions-more")
                     .small()

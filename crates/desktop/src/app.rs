@@ -208,6 +208,10 @@ pub struct AmuxApp {
     /// 会话列表滚动查询的页数 N（docs/DESIGN.md「会话列表滚动查询」）：
     /// 「加载更多」每点击一次 +1，所有在线机器统一查询前 N 页。
     pub(crate) list_pages: usize,
+    /// 当前窗口之外仍有本地工作流会话（与普通会话的 `sessions_has_more` 对应）。
+    pub(crate) workflow_has_more: bool,
+    /// 当前会话列表窗口内的工作流 ID；引擎可保留已加载的更早会话，但不渲染它们。
+    pub(crate) visible_workflows: std::collections::HashSet<String>,
     pub(crate) activities_limit: usize,
     pub(crate) expanded_activities: std::collections::HashSet<String>,
     /// 以工作流会话 ID 为身份（同 Selected）
@@ -286,6 +290,8 @@ impl AmuxApp {
             diff_scroll: VirtualListScrollHandle::new(),
             workflow_dialog_limit: 50,
             list_pages: 1,
+            workflow_has_more: false,
+            visible_workflows: std::collections::HashSet::new(),
             activities_limit: 100,
             expanded_activities: std::collections::HashSet::new(),
             expanded_workflows: std::collections::HashSet::new(),

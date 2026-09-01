@@ -42,22 +42,27 @@ impl AmuxApp {
     }
 
     pub(crate) fn restore_workflows(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let sessions = match WorkflowEngine::load_all(&self.data_dir) {
-            Ok(sessions) => sessions,
+        let (sessions, has_more) = match WorkflowEngine::load_window(
+            &self.data_dir,
+            self.list_pages.saturating_mul(crate::app::PAGE_LIMIT),
+        ) {
+            Ok(result) => result,
             Err(e) => {
                 log::error!("加载工作流失败：{e}");
                 return;
             }
         };
-        if sessions.is_empty() {
-            return;
-        }
-        for s in sessions {
+        self.workflow_has_more = has_more;
+        self.visible_workflows = sessions.iter().map(|session| session.id.clone()).collect();
+        for session in sessions {
+            if self.workflow_idx(&session.id).is_some() {
+                continue;
+            }
             // 每个工作流独立 backend：RigBackend 的 synced_children/synced_activities
             // 是单轮 decide 的回传槽位，共享实例会在并发推进时互相覆盖
             // （A 可能取到 B 的子会话快照）
             self.workflows.push(WorkflowEngine::restore(
-                s,
+                session,
                 self.orchestrator_backend(),
                 self.machine_hub.clone(),
                 &self.data_dir,
@@ -108,6 +113,7 @@ impl AmuxApp {
         let data_dir = self.data_dir.clone();
         self.workflows.push(engine);
         let wf_id = self.workflows[wi].id();
+        self.visible_workflows.insert(wf_id.clone());
         // 新建仅落元数据（含执行计划），不驱动：用户在对话界面输入消息后
         // 经 record_user 触发推进（同普通会话的对话驱动模式）
         self.set_selected(Some(Selected::Workflow { id: wf_id }), window, cx);
@@ -246,6 +252,7 @@ impl AmuxApp {
                             Ok(()) => {
                                 // 选中态以工作流会话 ID 为身份：删除后无需平移其他引用
                                 this.workflows.retain(|workflow| workflow.id() != wf_id);
+                                this.visible_workflows.remove(&wf_id);
                                 if this.selected == Some(Selected::Workflow { id: wf_id.clone() }) {
                                     this.set_selected(None, w, cx);
                                 }
