@@ -318,7 +318,7 @@ impl AmuxApp {
         R: serde::de::DeserializeOwned + 'static,
         T: 'static,
     {
-        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+        let Some((machine, id)) = self.open_session_target() else {
             return;
         };
         let Some(before) = self
