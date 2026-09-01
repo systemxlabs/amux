@@ -215,7 +215,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 | 工具 | 用途 |
 |---|---|
 | `list_agents` | 已注册机器及各机器的 agent 列表：机器状态、agent 状态等 |
-| `list_sessions` | 本工作流的关联普通会话列表（标题、状态、最近活跃、机器状态、agent 状态等）|
+| `list_sessions` | 本工作流的关联普通会话列表，会话包含标题、状态等尽可能多的信息 |
 | `create_session` | 创建关联普通会话 |
 | `prompt_session` | 向指定关联普通会话下发指令 |
 | `cancel_session` | 取消指定关联普通会话进行中的工作 |
