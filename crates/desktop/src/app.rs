@@ -650,10 +650,7 @@ impl AmuxApp {
         // 变化：选中会话刷新会话选项与斜杠命令（docs/DESIGN.md：均以 Agent 侧
         // 数据为权威）
         if idle {
-            let selected_matches = matches!(
-                &this.selected,
-                Some(Selected::Session { machine, id }) if *machine == idx && *id == sid
-            );
+            let selected_matches = this.is_selected_session(idx, &sid);
             if selected_matches {
                 this.refresh_config_options(cx, idx, sid.clone());
                 this.refresh_slash_commands(cx, idx, sid.clone());
