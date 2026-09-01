@@ -842,7 +842,7 @@ impl AmuxApp {
             .update(cx, |s, cx| s.set_value(&draft.text, window, cx));
         // 工作目录/文件改动/会话计划/终端仅普通会话展示（docs/PRD.md「右侧面板」）：
         // 切到工作流会话时关闭残留的普通会话专属面板
-        if !matches!(self.selected, Some(Selected::Session { .. }))
+        if self.open_session_target().is_none()
             && matches!(
                 self.panel,
                 Some(Panel::Workspace)
@@ -894,10 +894,9 @@ impl AmuxApp {
 
     /// 默认机器下标：有选中会话则用它，否则第一台。
     pub(crate) fn active_machine(&self) -> Option<usize> {
-        match &self.selected {
-            Some(Selected::Session { machine, .. }) => Some(*machine),
-            _ => (!self.machines.is_empty()).then_some(0),
-        }
+        self.open_session_target()
+            .map(|(machine, _)| machine)
+            .or_else(|| (!self.machines.is_empty()).then_some(0))
     }
 
     /// 当前选中会话的生效工作目录：启用 worktree 的会话 agent 实际工作在
