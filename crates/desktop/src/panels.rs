@@ -38,14 +38,11 @@ impl AmuxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let plan = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.views.get(id))
-                .map(|v| v.plan.clone())
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
+        let plan = self
+            .open_session_target()
+            .and_then(|(machine, id)| self.machine(machine).and_then(|m| m.views.get(&id)))
+            .map(|v| v.plan.clone())
+            .unwrap_or_default();
         v_flex()
             .w_full()
             .h_full()
