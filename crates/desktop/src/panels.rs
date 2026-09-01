@@ -301,13 +301,7 @@ impl AmuxApp {
                 .request::<_, WorkspaceListResult>(protocol::method::WORKSPACE_LIST, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
-                let selected_session_matches = matches!(
-                    &this.selected,
-                    Some(Selected::Session {
-                        machine: selected_machine,
-                        id
-                    }) if *selected_machine == machine && id == &session_id
-                );
+                let selected_session_matches = this.is_selected_session(machine, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
@@ -396,13 +390,7 @@ impl AmuxApp {
                 .request::<_, WorkspaceReadResult>(protocol::method::WORKSPACE_READ, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
-                let selected_session_matches = matches!(
-                    &this.selected,
-                    Some(Selected::Session {
-                        machine: selected_machine,
-                        id
-                    }) if *selected_machine == machine && id == &session_id
-                );
+                let selected_session_matches = this.is_selected_session(machine, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };

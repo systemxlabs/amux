@@ -55,16 +55,11 @@ impl AmuxApp {
                 .request::<_, WorkspaceDiffResult>(protocol::method::WORKSPACE_DIFF, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                let is_current = matches!(
-                    &this.selected,
-                    Some(Selected::Session {
-                        machine: selected_machine,
-                        id
-                    }) if *selected_machine == machine && id == &session_id
-                ) && this
-                    .machines
-                    .get(machine)
-                    .is_some_and(|m| m.diff.read(cx).request_id == request_id);
+                let is_current = this.is_selected_session(machine, &session_id)
+                    && this
+                        .machines
+                        .get(machine)
+                        .is_some_and(|m| m.diff.read(cx).request_id == request_id);
                 if !is_current {
                     return;
                 }
