@@ -43,6 +43,26 @@ pub fn append_jsonl<T: serde::Serialize>(path: &Path, entries: &[T]) -> io::Resu
     Ok(())
 }
 
+/// 原子替换 JSONL 文件：先将完整内容写入同目录临时文件，再 rename 覆盖目标。
+/// 临时文件名包含进程 ID 和单调计数器，避免并发写者复用同一路径。
+pub fn write_jsonl_atomic<T: serde::Serialize>(path: &Path, entries: &[T]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("jsonl.tmp.{}.{}", std::process::id(), counter));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        for entry in entries {
+            let line = serde_json::to_string(entry).map_err(io::Error::other)?;
+            writeln!(f, "{line}")?;
+        }
+        f.sync_all()?;
+    }
+    std::fs::rename(tmp, path)
+}
+
 /// 读取全部 JSONL 行；文件缺失视为空，损坏行带行号报错。
 pub fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
     let content = match std::fs::read_to_string(path) {
