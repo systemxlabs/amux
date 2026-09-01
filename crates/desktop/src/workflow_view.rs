@@ -217,14 +217,10 @@ impl AmuxApp {
                     .map(|m| (*machine, m.client.clone(), sid.clone()))
             })
             .collect();
-        let missing_machine = targets.len() != children.len();
         let remote_targets = targets.clone();
         let data_dir = self.data_dir.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = run_engine_on_tokio(async move {
-                if missing_machine {
-                    return Err("关联普通会话所属机器已移除，无法完成远端删除".to_string());
-                }
                 for (_, client, sid) in &remote_targets {
                     let params = SessionIdParams {
                         session_id: sid.clone(),
@@ -234,7 +230,7 @@ impl AmuxApp {
                         .await
                         .map_err(|error| format!("删除关联普通会话 {sid} 失败：{error}"))?;
                 }
-                Ok(())
+                Ok::<(), String>(())
             })
             .await;
             let _ = this.update_in(cx, |this, w, cx| {
