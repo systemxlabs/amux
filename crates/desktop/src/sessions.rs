@@ -1095,19 +1095,20 @@ impl AmuxApp {
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        let agent_label: SharedString = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
+        let agent_label: SharedString = if let Some((machine, id)) = self.open_session_target() {
+            self.machine(machine)
                 .and_then(|m| {
                     let machine_name = m.config.name.clone();
                     m.sessions
                         .iter()
-                        .find(|s| &s.id == id)
+                        .find(|s| s.id == id)
                         .map(|s| format!("{}@{machine_name}", s.agent).into())
                 })
-                .unwrap_or_else(|| "Agent".into()),
-            Some(Selected::Workflow { .. }) => "编排".into(),
-            None => "Agent".into(),
+                .unwrap_or_else(|| "Agent".into())
+        } else if matches!(self.selected, Some(Selected::Workflow { .. })) {
+            "编排".into()
+        } else {
+            "Agent".into()
         };
         let primary = cx.theme().primary;
         let primary_foreground = cx.theme().primary_foreground;
