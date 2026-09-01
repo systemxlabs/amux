@@ -74,12 +74,12 @@ impl AmuxApp {
                         Ok(r) => {
                             st.files = r.files.clone();
                             st.not_repo = r.not_repo;
-                            st.rebuild_rows();
+                            st.rebuild_rows(w.rem_size());
                         }
                         Err(error) => {
                             st.files.clear();
                             st.not_repo = false;
-                            st.rebuild_rows();
+                            st.rebuild_rows(w.rem_size());
                             error_message = Some(format!("加载改动失败：{error}"));
                         }
                     });
@@ -245,7 +245,7 @@ impl AmuxApp {
 
     pub(crate) fn render_diff_panel(
         &self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let machine = self.active_machine();
@@ -276,6 +276,16 @@ impl AmuxApp {
             .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).changes_collapsed)
             .unwrap_or(false);
+        let rem_size = window.rem_size();
+        if let Some(machine_idx) = machine {
+            let needs_rebuild =
+                self.machines[machine_idx].diff.read(cx).item_sizes_rem_size != Some(rem_size);
+            if needs_rebuild {
+                self.machines[machine_idx]
+                    .diff
+                    .update(cx, |st, _| st.rebuild_rows(rem_size));
+            }
+        }
         let (_rows, item_sizes, file_header_rows) = machine
             .and_then(|i| self.machine(i))
             .map(|m| {
@@ -350,12 +360,12 @@ impl AmuxApp {
                     } else {
                         "折叠改动"
                     })
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
                         if let Some(machine) = this.active_machine() {
                             if let Some(view) = this.machines.get_mut(machine) {
                                 view.diff.update(cx, |st, _| {
                                     st.changes_collapsed = !st.changes_collapsed;
-                                    st.rebuild_rows();
+                                    st.rebuild_rows(rem_size);
                                 });
                             }
                             cx.notify();
@@ -442,15 +452,13 @@ impl AmuxApp {
                 dir.clone()
             };
             let group_key = dir.clone();
-            // 分组头：点击单独展开/折叠
+            // 分组头使用 Button，展开状态也能通过键盘和辅助技术访问。
             tree_items.push(
-                h_flex()
-                    .id(ElementId::Name(format!("diff-group-{dir}").into()))
-                    .items_center()
-                    .gap_1()
-                    .py_0p5()
-                    .pl(px(4.0))
-                    .cursor_pointer()
+                Button::new(format!("diff-group-{dir}"))
+                    .xsmall()
+                    .ghost()
+                    .w_full()
+                    .toggled(!collapsed)
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         if let Some(m) = this.machines.get_mut(machine_idx) {
                             m.diff.update(cx, |st, _| {
@@ -462,16 +470,23 @@ impl AmuxApp {
                         cx.notify();
                     }))
                     .child(
-                        Label::new(if collapsed { "▸" } else { "▾" })
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        Label::new(group_label)
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .truncate()
-                            .text_color(cx.theme().muted_foreground),
+                        h_flex()
+                            .w_full()
+                            .justify_start()
+                            .gap_1()
+                            .pl_1()
+                            .child(
+                                Label::new(if collapsed { "▸" } else { "▾" })
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                Label::new(group_label)
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
                     )
                     .into_any_element(),
             );
@@ -490,18 +505,11 @@ impl AmuxApp {
                     continue;
                 };
                 tree_items.push(
-                    // 手搓 stateful 行 + on_click：组件 Button 在此滚动容器内
-                    // 点击不触发（分组头同款模式可点），且整行热区更好点
-                    h_flex()
-                        .id(ElementId::Name(format!("diff-tree-{path}").into()))
-                        .items_center()
-                        .pl(px(20.0))
-                        .pr_1()
-                        .py_0p5()
-                        .min_w_0()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .hover(|d| d.bg(cx.theme().list_hover))
+                    // Button 提供整行焦点与键盘激活；内部布局保留文件名和统计列的左对齐。
+                    Button::new(format!("diff-tree-{path}"))
+                        .xsmall()
+                        .ghost()
+                        .w_full()
                         .on_click(move |_ev, _window, cx| {
                             // scroll_to_item 是非严格模式，目标行已可见时不滚动；
                             // PRD 要求点击文件必达对应 diff 区域，直接按行高
@@ -516,23 +524,30 @@ impl AmuxApp {
                             app.update(cx, |_, cx| cx.notify());
                         })
                         .child(
-                            Label::new(file_name)
-                                .text_xs()
-                                .truncate()
+                            h_flex()
+                                .w_full()
+                                .justify_start()
+                                .gap_1()
                                 .min_w_0()
-                                .flex_1()
-                                .text_color(cx.theme().foreground),
-                        )
-                        .child(
-                            Label::new(format!("+{}", f.additions))
-                                .text_xs()
-                                .text_color(cx.theme().success),
-                        )
-                        .child(
-                            Label::new(format!("-{}", f.deletions))
-                                .ml_1()
-                                .text_xs()
-                                .text_color(cx.theme().danger),
+                                .child(
+                                    Label::new(file_name)
+                                        .text_xs()
+                                        .truncate()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_color(cx.theme().foreground),
+                                )
+                                .child(
+                                    Label::new(format!("+{}", f.additions))
+                                        .text_xs()
+                                        .text_color(cx.theme().success),
+                                )
+                                .child(
+                                    Label::new(format!("-{}", f.deletions))
+                                        .text_xs()
+                                        .ml_1()
+                                        .text_color(cx.theme().danger),
+                                ),
                         )
                         .into_any_element(),
                 );
@@ -550,7 +565,7 @@ impl AmuxApp {
         // 折叠时左侧区域整个不渲染，展开/折叠由工具栏按钮控制
         let tree = (!diff_tree_collapsed).then(|| {
             v_flex()
-                .w(px(190.0)) // diff 文件树固定宽度（压缩些给 diff 内容区让位）
+                .w_48() // diff 文件树宽度：随 rem 缩放并给 diff 内容区让位
                 .h_full()
                 .min_h_0()
                 .gap_1()
@@ -667,7 +682,7 @@ impl AmuxApp {
             .debug_selector(move || format!("dbg-diff-file-{dbg_path}"))
             .tooltip(move |window, cx| Tooltip::new(path_for_tooltip.clone()).build(window, cx))
             .w_full()
-            .h(px(40.0))
+            .h(rems(2.5))
             .px_2()
             .gap_2()
             .items_center()
@@ -770,7 +785,7 @@ impl AmuxApp {
         let hunk_patch = h.patch.clone();
         h_flex()
             .w_full()
-            .h(px(28.0))
+            .h(rems(1.75))
             .items_center()
             .gap_2()
             .px_2()
@@ -830,12 +845,12 @@ impl AmuxApp {
         };
         h_flex()
             .w_full()
-            .h(px(22.0))
+            .h(rems(1.375))
             .items_center()
             .bg(background)
             .child(
                 div()
-                    .w(px(48.))
+                    .w(rems(3.))
                     .h_full()
                     .px_2()
                     .justify_end()
@@ -854,7 +869,7 @@ impl AmuxApp {
             )
             .child(
                 div()
-                    .w(px(48.))
+                    .w(rems(3.))
                     .h_full()
                     .px_2()
                     .justify_end()
@@ -872,7 +887,7 @@ impl AmuxApp {
                     ),
             )
             .child(
-                div().w(px(24.)).h_full().justify_center().child(
+                div().w(rems(1.5)).h_full().justify_center().child(
                     Label::new(marker)
                         .text_xs()
                         .font_family(cx.theme().mono_font_family.clone())
@@ -920,11 +935,11 @@ pub(crate) enum DiffRowKind {
 impl DiffRowKind {
     /// 文档化几何：diff 行等宽字符 whitespace_nowrap 不换行，行高固定，
     /// 虚拟列表据此定位与渲染（超出行数不渲染）。
-    pub(crate) fn height(&self) -> Pixels {
+    pub(crate) fn height(&self, rem_size: Pixels) -> Pixels {
         match self {
-            DiffRowKind::FileHeader(_) => px(40.0),
-            DiffRowKind::HunkHeader(..) => px(28.0),
-            DiffRowKind::Line(..) => px(22.0),
+            DiffRowKind::FileHeader(_) => rems(2.5).to_pixels(rem_size),
+            DiffRowKind::HunkHeader(..) => rems(1.75).to_pixels(rem_size),
+            DiffRowKind::Line(..) => rems(1.375).to_pixels(rem_size),
         }
     }
 }
@@ -950,13 +965,15 @@ pub struct DiffReviewState {
     /// 每个 hunk 全量解析 diff_lines，大 diff 时是 O(n²)/帧。
     pub(crate) rows: std::rc::Rc<Vec<DiffRowKind>>,
     pub(crate) item_sizes: std::rc::Rc<Vec<gpui::Size<Pixels>>>,
+    /// `item_sizes` 使用的窗口 rem 基准；窗口缩放后需重建虚拟行尺寸。
+    pub(crate) item_sizes_rem_size: Option<Pixels>,
     /// 文件头所在虚拟行号（按文件下标索引），供文件树点击滚动定位
     pub(crate) file_header_rows: Vec<usize>,
 }
 
 impl DiffReviewState {
     /// 行模型重建（files / changes_collapsed 变更后调用）。
-    pub fn rebuild_rows(&mut self) {
+    pub fn rebuild_rows(&mut self, rem_size: Pixels) {
         let rows = build_diff_rows(&self.files, self.changes_collapsed);
         // 文件头行号：顺序扫描一次（rows 与 files 同序）
         let mut header_rows = Vec::with_capacity(self.files.len());
@@ -971,9 +988,10 @@ impl DiffReviewState {
         self.item_sizes = std::rc::Rc::new(
             self.rows
                 .iter()
-                .map(|k| gpui::size(px(100.), k.height()))
+                .map(|k| gpui::size(px(100.), k.height(rem_size)))
                 .collect(),
         );
+        self.item_sizes_rem_size = Some(rem_size);
         self.file_header_rows = header_rows;
     }
 }

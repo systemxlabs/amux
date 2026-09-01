@@ -466,21 +466,13 @@ impl AmuxApp {
             let expanded = is_dir && expanded_paths.contains(&entry_path);
             let selected = !is_dir && selected_file == Some(entry_path.as_str());
             let click_path = entry_path.clone();
-            // 手搓行而非 Button：库 Button 内容层硬编码 justify_center，全宽行的
-            // 「图标+名称」会被整体居中（第一层级缩进小、错位最明显），无法左对齐
-            let row = div()
-                .id(format!("workspace-entry-{entry_path}"))
+            // Button 保留了树节点的整行热区，同时提供焦点、Tab 和键盘激活语义。
+            // 通过全宽子布局抵消 Button 内容槽的居中默认值，让树仍沿层级脊柱左对齐。
+            let row = Button::new(format!("workspace-entry-{entry_path}"))
+                .small()
+                .ghost()
                 .w_full()
-                .h_6()
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .px_2()
-                .pl(px(8. + depth as f32 * 14.)) // 目录树缩进：随层级深度计算的运行时几何
-                .rounded_sm()
-                .cursor_pointer()
-                .when(selected, |d| d.bg(cx.theme().list_active))
-                .hover(|d| d.bg(cx.theme().list_hover))
+                .selected(selected)
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     let Some(machine) = this.active_machine() else {
                         return;
@@ -514,29 +506,36 @@ impl AmuxApp {
                     cx.notify();
                 }))
                 .child(
-                    Icon::new(if is_dir {
-                        if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        }
-                    } else {
-                        IconName::File
-                    })
-                    .xsmall()
-                    .flex_none()
-                    .text_color(if selected {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().muted_foreground
-                    }),
-                )
-                .child(
-                    Label::new(entry.name.clone())
-                        .text_sm()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate(),
+                    h_flex()
+                        .w_full()
+                        .justify_start()
+                        .gap_1p5()
+                        .pl(rems(0.5 + depth as f32 * 0.875))
+                        .child(
+                            Icon::new(if is_dir {
+                                if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                }
+                            } else {
+                                IconName::File
+                            })
+                            .xsmall()
+                            .flex_none()
+                            .text_color(if selected {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().muted_foreground
+                            }),
+                        )
+                        .child(
+                            Label::new(entry.name.clone())
+                                .text_sm()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate(),
+                        ),
                 );
             let mut node = v_flex().child(row);
             if expanded {
@@ -584,7 +583,7 @@ impl AmuxApp {
                     "（空目录）"
                 })
                 .px_2()
-                .pl(px(8. + depth as f32 * 14.)) // 目录树缩进：随层级深度计算的运行时几何
+                .pl(rems(0.5 + depth as f32 * 0.875)) // 目录树缩进：层级间距随 rem 缩放
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element(),
@@ -621,7 +620,7 @@ impl AmuxApp {
         let tree = (!machine.workspace_tree_collapsed).then(|| {
             v_flex()
                 .gap_0()
-                .w(px(220.0)) // 文件树面板固定宽度
+                .w_56() // 文件树面板宽度：随 rem 缩放
                 .p_1()
                 .bg(cx.theme().muted.opacity(0.35))
                 .rounded_md()

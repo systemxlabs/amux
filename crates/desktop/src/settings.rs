@@ -239,10 +239,11 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         title: &'static str,
         ok_label: &'static str,
-        width: Pixels,
+        width_rems: f32,
         build_fields: impl Fn(&Self, &mut Context<Self>) -> AnyElement + 'static,
         on_ok: impl Fn(&mut Self, &mut Window, &mut Context<Self>) -> bool + Clone + 'static,
     ) {
+        let width = rems(width_rems).to_pixels(window.rem_size());
         let app = cx.entity();
         let build_fields = std::rc::Rc::new(build_fields);
         let app_rc = std::rc::Rc::new(app);
@@ -341,7 +342,7 @@ impl AmuxApp {
             cx,
             "添加机器",
             "添加机器",
-            px(460.),
+            28.75,
             |this, cx| this.render_add_machine_fields(cx),
             |this, window, cx| {
                 let name = this
@@ -433,7 +434,7 @@ impl AmuxApp {
             cx,
             title,
             "保存",
-            px(520.),
+            32.5,
             |this, cx| {
                 this.render_two_field_form(
                     cx,
@@ -544,7 +545,7 @@ impl AmuxApp {
             cx,
             title,
             "保存",
-            px(520.),
+            32.5,
             |this, cx| {
                 this.render_two_field_form(
                     cx,
@@ -626,13 +627,14 @@ impl AmuxApp {
         let app = cx.entity();
         let title: SharedString = format!("{}技能", action.label()).into();
         let skill = std::rc::Rc::new(skill);
+        let width = rems(32.5).to_pixels(window.rem_size());
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let app = app.clone();
             let title = title.clone();
             let skill = skill.clone();
             dialog
                 .title(title)
-                .width(px(520.))
+                .width(width)
                 .footer(
                     Button::new("skill-action-cancel")
                         .small()
@@ -737,7 +739,7 @@ impl AmuxApp {
             cx,
             title,
             "保存",
-            px(560.),
+            35.0,
             |this, cx| {
                 this.render_two_field_form(
                     cx,
@@ -846,9 +848,9 @@ impl AmuxApp {
                         cx.notify();
                     }))
                     .w_full()
-                    .max_w(px(880.)) // 设置浮窗最大尺寸（固定容器）
+                    .max_w(rems(55.)) // 设置浮窗最大尺寸，随 rem 缩放
                     .h_full()
-                    .max_h(px(620.))
+                    .max_h(rems(38.75))
                     .overflow_hidden()
                     .bg(cx.theme().popover)
                     .rounded_lg()
@@ -863,7 +865,7 @@ impl AmuxApp {
     pub(crate) fn render_settings_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("settings-nav")
-            .w(px(190.)) // 设置导航面板固定宽度
+            .w(rems(11.875)) // 设置导航面板宽度：随 rem 缩放
             .h_full()
             .gap_1()
             .p_2()
