@@ -32,8 +32,9 @@ use serde::{Deserialize, Serialize};
 
 use protocol::{
     generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult, SessionIdParams,
-    SessionInfoParams, SessionInfoResult, SessionMeta, SessionNewParams, SessionPageParams,
-    SessionPromptParams, SessionResult, SessionState, StateChangeReason,
+    SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams, SessionInfoParams,
+    SessionInfoResult, SessionMeta, SessionNewParams, SessionPageParams, SessionPromptParams,
+    SessionResult, SessionState, StateChangeReason,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig};
@@ -1002,6 +1003,43 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "configure_session".into(),
+            description: "配置关联普通会话的标题或会话选项；至少提供 title 或 config".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "关联普通会话 id" },
+                    "title": { "type": "string", "description": "会话标题" },
+                    "config": {
+                        "type": "object",
+                        "description": "要设置的会话选项；type 为 value_id 时提供 value 字符串，type 为 boolean 时提供 value 布尔值",
+                        "properties": {
+                            "configId": { "type": "string", "description": "会话选项 id" },
+                            "type": { "type": "string", "enum": ["value_id", "boolean"] },
+                            "value": { "description": "选项值：字符串或布尔值" }
+                        },
+                        "required": ["configId", "type", "value"]
+                    }
+                },
+                "required": ["session"],
+                "anyOf": [
+                    { "required": ["title"] },
+                    { "required": ["config"] }
+                ]
+            }),
+        },
+        ToolDefinition {
+            name: "get_session_config_options".into(),
+            description: "获取关联普通会话当前由 agent 提供的完整会话选项集合".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "关联普通会话 id" }
+                },
+                "required": ["session"]
+            }),
+        },
+        ToolDefinition {
             name: "read_session_history".into(),
             description: "按窗口 / 游标读取关联普通会话对话内容".into(),
             parameters: serde_json::json!({
@@ -1261,7 +1299,8 @@ impl RigBackend {
          不进行任务拆解、任务执行和任务决策；可执行执行计划中明确写出的条件分支，但不创造计划之外的步骤、不自主变更目标。\n\
          未在工作流执行计划和用户指令中指定的事项交由用户决定。\n\
          使用工具：list_agents、list_sessions、create_session、prompt_session、cancel_session、\
-         read_session_history、read_session_activities。调度动作完成后用中文简述本轮动作并结束 turn。\
+         configure_session、get_session_config_options、read_session_history、read_session_activities。\
+         调度动作完成后用中文简述本轮动作并结束 turn。\
          当无需任何调度动作时（如全部步骤已完成、计划已无法继续、或需要人类判断），\
          不要调用工具，直接用中文输出说明并结束 turn 等待用户。"
             .to_string()
@@ -1460,6 +1499,10 @@ async fn dispatch_tool(
         "create_session" => create_session(live, parse_args(name, args)?).await,
         "prompt_session" => prompt_session(live, parse_args(name, args)?).await,
         "cancel_session" => cancel_session(live, parse_args(name, args)?).await,
+        "configure_session" => configure_session(live, parse_args(name, args)?).await,
+        "get_session_config_options" => {
+            get_session_config_options(live, parse_args(name, args)?).await
+        },
         "read_session_history" => {
             read_session_page(
                 live,
@@ -1678,6 +1721,74 @@ async fn cancel_session(live: &LiveRuntime, args: SessionRefArgs) -> Result<Stri
         format!("session={}", args.session),
     );
     Ok("已取消".into())
+}
+
+#[derive(serde::Deserialize)]
+struct ConfigureSessionArgs {
+    session: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    config: Option<SessionConfigSetting>,
+}
+
+async fn configure_session(
+    live: &LiveRuntime,
+    args: ConfigureSessionArgs,
+) -> Result<String, String> {
+    let child = live.child(&args.session)?;
+    if args.title.is_none() && args.config.is_none() {
+        return Err("configure_session 至少设置 title 或 config 之一".into());
+    }
+    let client = live
+        .clients
+        .get(child.machine_idx)
+        .cloned()
+        .ok_or_else(|| "机器连接已失效".to_string())?;
+    client
+        .request_ok(
+            protocol::method::SESSION_CONFIGURE,
+            Some(SessionConfigureParams {
+                session_id: args.session.clone(),
+                title: args.title,
+                config: args.config,
+            }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    live.record_tool(
+        "configure_session",
+        "配置关联普通会话",
+        format!("session={}", args.session),
+    );
+    Ok("已配置".into())
+}
+
+async fn get_session_config_options(
+    live: &LiveRuntime,
+    args: SessionRefArgs,
+) -> Result<String, String> {
+    let child = live.child(&args.session)?;
+    let client = live
+        .clients
+        .get(child.machine_idx)
+        .cloned()
+        .ok_or_else(|| "机器连接已失效".to_string())?;
+    let result = client
+        .request::<_, SessionConfigOptionsResult>(
+            protocol::method::SESSION_CONFIG_OPTIONS,
+            Some(SessionIdParams {
+                session_id: args.session.clone(),
+            }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    live.record_tool(
+        "get_session_config_options",
+        "获取关联普通会话选项",
+        format!("session={}", args.session),
+    );
+    serde_json::to_string(&result).map_err(|e| format!("序列化失败: {e}"))
 }
 
 #[derive(serde::Deserialize)]
@@ -2214,10 +2325,68 @@ mod tests {
                 "create_session",
                 "prompt_session",
                 "cancel_session",
+                "configure_session",
+                "get_session_config_options",
                 "read_session_history",
                 "read_session_activities",
             ]
         );
+    }
+
+    #[test]
+    fn configure_session_args_map_to_session_configure_wire_shape() {
+        let args: ConfigureSessionArgs = parse_args(
+            "configure_session",
+            serde_json::json!({
+                "session": "child-1",
+                "title": "实现配置",
+                "config": {
+                    "configId": "model",
+                    "type": "value_id",
+                    "value": "fast"
+                }
+            }),
+        )
+        .expect("configure_session 参数应能解析");
+        let wire = serde_json::to_value(SessionConfigureParams {
+            session_id: args.session,
+            title: args.title,
+            config: args.config,
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "sessionId": "child-1",
+                "title": "实现配置",
+                "config": {
+                    "configId": "model",
+                    "type": "value_id",
+                    "value": "fast"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_session_rejects_empty_configuration_before_rpc() {
+        let live = test_live();
+        live.children.lock().unwrap().push(ChildSession {
+            id: "child-1".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+        });
+        let err = configure_session(
+            &live,
+            ConfigureSessionArgs {
+                session: "child-1".into(),
+                title: None,
+                config: None,
+            },
+        )
+        .await
+        .expect_err("没有 title 或 config 时应拒绝调用");
+        assert!(err.contains("至少设置 title 或 config"));
     }
 
     #[test]
