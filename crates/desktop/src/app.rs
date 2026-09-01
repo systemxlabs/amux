@@ -903,20 +903,18 @@ impl AmuxApp {
     /// 当前选中会话的生效工作目录：启用 worktree 的会话 agent 实际工作在
     /// 工作树内，目录浏览/改动审查/还原都应对准工作树而非用户指定的主仓库。
     pub(crate) fn selected_workspace(&self) -> Option<(usize, String)> {
-        let Selected::Session { machine, id } = self.selected.as_ref()? else {
-            return None;
-        };
+        let (machine, id) = self.open_session_target()?;
         let session = self
-            .machine(*machine)?
+            .machine(machine)?
             .sessions
             .iter()
-            .find(|session| session.id == *id)?;
+            .find(|session| session.id == id)?;
         let cwd = if session.worktree_dir.is_empty() {
             session.cwd.clone()
         } else {
             session.worktree_dir.clone()
         };
-        Some((*machine, cwd))
+        Some((machine, cwd))
     }
 
     /// 通用危险/确认弹窗：统一 alert_dialog 结构（按钮文案、危险变体、

@@ -736,30 +736,29 @@ impl AmuxApp {
     }
 
     pub(crate) fn selected_meta(&self) -> Option<SessionMeta> {
-        match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
-                .cloned(),
-            Some(Selected::Workflow { id }) => {
-                // 工作流会话详情数据仅来自应用侧会话元数据；cwd/worktree/context
-                // 为普通会话字段，工作流会话不适用，置空占位（详情面板按类型过滤展示）
-                let wf = self.workflows.get(self.workflow_idx(id)?)?;
-                let sg = wf.snapshot();
-                Some(SessionMeta {
-                    id: sg.id.clone(),
-                    agent: "编排".into(),
-                    cwd: String::new(),
-                    state: sg.state,
-                    title: sg.title.clone(),
-                    created_at: sg.created_at,
-                    last_active_at: sg.updated_at,
-                    worktree_dir: String::new(),
-                    context_size: 0,
-                    context_window_size: 0,
-                })
-            }
-            None => None,
+        if let Some((machine, id)) = self.open_session_target() {
+            self.machine(machine)
+                .and_then(|m| m.sessions.iter().find(|s| s.id == id))
+                .cloned()
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            // 工作流会话详情数据仅来自应用侧会话元数据；cwd/worktree/context
+            // 为普通会话字段，工作流会话不适用，置空占位（详情面板按类型过滤展示）
+            let wf = self.workflows.get(self.workflow_idx(id)?)?;
+            let sg = wf.snapshot();
+            Some(SessionMeta {
+                id: sg.id.clone(),
+                agent: "编排".into(),
+                cwd: String::new(),
+                state: sg.state,
+                title: sg.title.clone(),
+                created_at: sg.created_at,
+                last_active_at: sg.updated_at,
+                worktree_dir: String::new(),
+                context_size: 0,
+                context_window_size: 0,
+            })
+        } else {
+            None
         }
     }
 
