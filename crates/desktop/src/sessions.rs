@@ -639,10 +639,8 @@ impl AmuxApp {
                             .machine(machine)
                             .map(|m| m.config.name.clone())
                             .unwrap_or_default();
-                        if let Some(Selected::Session { id, .. }) = this.selected.clone() {
-                            if id == sid {
-                                this.set_selected(None, w, cx);
-                            }
+                        if this.open_session_target().is_some_and(|(_, id)| id == sid) {
+                            this.set_selected(None, w, cx);
                         }
                         this.drafts.retain(|key, _| match key {
                             DraftKey::Session { id, machine } => {
