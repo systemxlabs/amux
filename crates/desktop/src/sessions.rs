@@ -1280,16 +1280,14 @@ impl AmuxApp {
                 .and_then(|m| m.views.get(id))
                 .and_then(|v| v.live.clone()),
             Some(Selected::Workflow { id }) => {
-                let busy = self
-                    .workflow(id)
-                    .is_some_and(|wf| wf.state() == SessionState::Busy);
-                if busy {
-                    Some(Activity::Thinking {
-                        timestamp: 0,
-                        content: "正在编排决策/推进…".into(),
-                    })
-                } else {
-                    None
+                // 实时活动展示真实编排活动（docs/PRD.md）：取最近一条引擎
+                // 记录的活动（Thinking/工具调用均实时落盘），无构造占位。
+                // 仅工作中显示：空闲即无实时活动。
+                match self.workflow(id) {
+                    Some(wf) if wf.state() == SessionState::Busy => {
+                        wf.snapshot().activities.into_iter().next_back()
+                    }
+                    _ => None,
                 }
             }
             _ => None,

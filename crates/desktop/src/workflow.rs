@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rig_core::client::CompletionClient;
-use rig_core::completion::message::{ToolCall, ToolResultContent, UserContent};
+use rig_core::completion::message::{ReasoningContent, ToolCall, ToolResultContent, UserContent};
 use rig_core::completion::{AssistantContent, CompletionModel, Message};
 
 use serde::{Deserialize, Serialize};
@@ -190,7 +190,7 @@ pub struct OrcContext {
     /// 子会话挂载后的即时落库钩子（create_session 工具挂载后立即调用；
     /// 整轮结束后的 persist 只兜底全量快照）
     pub persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// 编排工具调用活动钩子（dispatch_tool 每次调度动作实时记录并落盘）
+    /// 编排实时活动钩子：工具调用、模型 reasoning 等真实进展实时记录并落盘
     pub record_tool_activity: Option<Arc<dyn Fn(Activity) + Send + Sync>>,
     /// 编排进行中用户插话的实时通道：RigBackend 工具循环在每轮请求边界 drain，
     /// 注入为 user 消息。
@@ -832,8 +832,13 @@ impl LiveRuntime {
 // 退化为整轮结束后重跑。改为保留 rig provider 层（三种 ApiFormat 仍由 rig 处理），
 // 循环自己驱动：请求 → 解析工具调用 → 执行 → 结果回填 → drain steer 插话 → 再请求。
 
-/// 工具循环的模型调用上限（与原 rig default_max_turns(8) 对齐），防失控。
-const MAX_TOOL_TURNS: usize = 8;
+/// 工具循环的模型调用上限，防失控。编排一轮可能合理地做几十次调度
+/// （创建多个子会话、逐个下发指令、回读状态），rig 通用默认的 8 轮会被
+/// 合法长 turn 误杀，放宽到 32；真死循环由重复调用检测兜底。
+const MAX_TOOL_TURNS: usize = 32;
+
+/// 连续发出完全相同调用（工具 + 参数）超过该次数判定为死循环。
+const MAX_IDENTICAL_CALLS: usize = 3;
 
 /// 编排工具清单。
 fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
@@ -944,6 +949,9 @@ where
     M: CompletionModel + Clone + 'static,
 {
     let tool_defs = tool_definitions();
+    // 死循环检测：连续完全相同（工具 + 参数）的调用计数
+    let mut last_call: Option<String> = None;
+    let mut identical_runs = 0usize;
     for _ in 0..MAX_TOOL_TURNS {
         // 轮次边界：用户插话实时进入下一轮请求
         let steers = std::mem::take(
@@ -977,6 +985,29 @@ where
                 _ => None,
             })
             .collect();
+        // 模型真实 reasoning（provider 下发时）实时上报为活动
+        if let Some(record) = &live.record_tool_activity {
+            for c in &resp.choice {
+                if let AssistantContent::Reasoning(r) = c {
+                    let text = r
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ReasoningContent::Text { text, .. } => Some(text.as_str()),
+                            ReasoningContent::Summary(s) => Some(s.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !text.trim().is_empty() {
+                        record(Activity::Thinking {
+                            timestamp: now(),
+                            content: text,
+                        });
+                    }
+                }
+            }
+        }
         history.push(Message::Assistant {
             id: resp.message_id,
             content: resp.choice,
@@ -991,11 +1022,11 @@ where
             });
         }
         let mut results = Vec::with_capacity(calls.len());
-        for tc in calls {
+        for tc in &calls {
             // 0.42 起 provider 下发的 id 收敛到 tc.provider（call_id 必有，
             // 双标识 wire 另带 item_id）；无则回退 rig 关联句柄 tc.id
             let name = tc.function.name.clone();
-            let outcome = match dispatch_tool(live, &name, tc.function.arguments).await {
+            let outcome = match dispatch_tool(live, &name, tc.function.arguments.clone()).await {
                 Ok(s) => s,
                 Err(e) => format!("工具执行失败：{e}"),
             };
@@ -1013,13 +1044,36 @@ where
                         content,
                     ));
                 }
-                None => results.push(UserContent::tool_result(tc.id, &name, content)),
+                None => results.push(UserContent::tool_result(tc.id.clone(), &name, content)),
             }
         }
         history.push(Message::User { content: results });
+
+        // 死循环检测：连续 {MAX_IDENTICAL_CALLS} 次完全相同的调用即中止本轮
+        let sig = calls
+            .iter()
+            .map(|tc| format!("{} {}", tc.function.name, tc.function.arguments))
+            .collect::<Vec<_>>()
+            .join(";");
+        if last_call.as_deref() == Some(sig.as_str()) {
+            identical_runs += 1;
+        } else {
+            identical_runs = 1;
+        }
+        last_call = Some(sig);
+        if identical_runs >= MAX_IDENTICAL_CALLS {
+            log::warn!("编排 agent 连续重复相同调用，判定死循环，中止本轮推进");
+            return Ok(
+                "（本轮检测到编排智能体反复执行相同调度，已中止；请检查工作流计划或输入消息继续）"
+                    .to_string(),
+            );
+        }
     }
-    Err(format!(
-        "编排 agent 连续 {MAX_TOOL_TURNS} 轮未结束 turn（可能陷入循环），已中止本轮推进"
+    // 轮次上限：优雅收尾而非报错——已完成的调度保留在对话历史，下一轮
+    // （用户消息/子会话事件驱动）从断点继续；以错误呈现会让用户无从继续
+    log::warn!("编排 agent 连续 {MAX_TOOL_TURNS} 轮未结束 turn，本轮收尾");
+    Ok(format!(
+        "（本轮工具调度已达 {MAX_TOOL_TURNS} 次上限，已暂停；可输入消息继续推进）"
     ))
 }
 
@@ -2270,8 +2324,15 @@ mod tests {
 
     #[tokio::test]
     async fn tool_loop_caps_at_max_turns() {
+        // 参数各不相同，避开死循环检测，专测轮次上限
         let turns: Vec<MockTurn> = (0..MAX_TOOL_TURNS)
-            .map(|i| MockTurn::tool_call(format!("c{i}"), "list_agents", serde_json::json!({})))
+            .map(|i| {
+                MockTurn::tool_call(
+                    format!("c{i}"),
+                    "list_sessions",
+                    serde_json::json!({"machine": i}),
+                )
+            })
             .collect();
         let model = MockCompletionModel::from_turns(turns);
         let live = test_live();
@@ -2283,10 +2344,36 @@ mod tests {
             &inbox,
             &live,
         )
-        .await;
-        assert!(res.is_err());
-        assert!(res.unwrap_err().contains("未结束 turn"));
+        .await
+        .expect("达上限应优雅收尾而非报错");
+        assert!(res.contains("已达"), "收尾文案应提示已达上限: {res}");
         assert_eq!(model.request_count(), MAX_TOOL_TURNS);
+    }
+
+    /// 连续完全相同（工具 + 参数）的调用超过阈值判定死循环，立即收尾。
+    #[tokio::test]
+    async fn tool_loop_detects_identical_call_loop() {
+        let turns: Vec<MockTurn> = (0..MAX_IDENTICAL_CALLS)
+            .map(|_| MockTurn::tool_call("c", "list_agents", serde_json::json!({})))
+            .collect();
+        let model = MockCompletionModel::from_turns(turns);
+        let live = test_live();
+        let inbox = Mutex::new(Vec::new());
+        let res = run_tool_loop(
+            model.clone(),
+            "preamble",
+            vec![Message::user("计划")],
+            &inbox,
+            &live,
+        )
+        .await
+        .expect("死循环应优雅收尾");
+        assert!(
+            res.contains("反复执行相同调度"),
+            "收尾文案应说明死循环中止: {res}"
+        );
+        // 连续 3 次相同调用即中止，不再消耗后续轮次
+        assert_eq!(model.request_count(), MAX_IDENTICAL_CALLS);
     }
 
     /// wire 级回归：工具循环各轮请求转成 OpenAI wire 消息后，assistant
