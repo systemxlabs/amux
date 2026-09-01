@@ -25,18 +25,18 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         machine: usize,
     ) {
+        let Some((selected_machine, session_id)) = self.open_session_target() else {
+            return;
+        };
+        if selected_machine != machine {
+            return;
+        }
         let Some(m) = self.machine(machine) else {
             return;
         };
-        let session_id = match &self.selected {
-            Some(Selected::Session {
-                id,
-                machine: selected_machine,
-            }) if *selected_machine == machine && m.sessions.iter().any(|s| s.id == *id) => {
-                id.clone()
-            }
-            _ => return,
-        };
+        if !m.sessions.iter().any(|s| s.id == session_id) {
+            return;
+        }
         let client = m.client.clone();
         // 请求 id / loading / error 存于本机器的 DiffReviewState 实体
         let request_id = m.diff.update(cx, |st, _| {
