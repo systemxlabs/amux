@@ -571,7 +571,7 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+        let Some((machine, id)) = self.open_session_target() else {
             return;
         };
         let Some(m) = self.machine(machine) else {
