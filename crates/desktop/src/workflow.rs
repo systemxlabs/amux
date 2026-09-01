@@ -190,6 +190,8 @@ pub struct OrcContext {
     /// 子会话挂载后的即时落库钩子（create_session 工具挂载后立即调用；
     /// 整轮结束后的 persist 只兜底全量快照）
     pub persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// 编排工具调用活动钩子（dispatch_tool 每次调度动作实时记录并落盘）
+    pub record_tool_activity: Option<Arc<dyn Fn(Activity) + Send + Sync>>,
     /// 编排进行中用户插话的实时通道：RigBackend 工具循环在每轮请求边界 drain，
     /// 注入为 user 消息。
     /// 与 `WorkflowEngine.steer_inbox` 是同一个 Arc；advance 收尾的 absorb_steer 只兜底剩余项。
@@ -480,9 +482,11 @@ impl WorkflowEngine {
                 engine.persist_in_background(data_dir.clone());
             }));
         let s = self.session.read().expect("RwLock 中毒");
+        let record_engine = self.clone();
         OrcContext {
             plan: s.description.clone(),
             preamble: s.preamble.clone(),
+            record_tool_activity: Some(Arc::new(move |act| record_engine.record_activity(act))),
             transcript: s
                 .transcript
                 .iter()
@@ -761,6 +765,8 @@ struct LiveRuntime {
     hub: Arc<MachineHub>,
     /// 子会话挂载后的即时落库钩子（见 `OrcContext.persist_on_child_mounted`）
     persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// 编排工具调用活动钩子（见 `OrcContext.record_tool_activity`）
+    record_tool_activity: Option<Arc<dyn Fn(Activity) + Send + Sync>>,
     activities: Arc<Mutex<Vec<Activity>>>,
 }
 
@@ -1070,6 +1076,7 @@ impl OrcBackend for RigBackend {
                 session: ctx.session.clone(),
                 hub: ctx.hub.clone(),
                 persist_on_child_mounted: ctx.persist_on_child_mounted.clone(),
+                record_tool_activity: ctx.record_tool_activity.clone(),
                 activities: Arc::new(Mutex::new(Vec::new())),
             };
             preamble.push_str("\n\n【工作流执行计划】\n");
@@ -1220,11 +1227,31 @@ impl OrcBackend for FakeBackend {
 // 错误以 String 返回、由循环回传给模型纠正。
 
 /// 工具调用统一入口：按名称分派，参数从模型给出的 JSON 反序列化。
+/// 工具参数摘要（单行、120 字截断），供活动条目展示。
+fn one_line_summary(args: &serde_json::Value) -> String {
+    let text = args.to_string();
+    let line = text.lines().next().unwrap_or("").trim().to_string();
+    if line.chars().count() > 120 {
+        format!("{}…", line.chars().take(120).collect::<String>())
+    } else {
+        line
+    }
+}
+
 async fn dispatch_tool(
     live: &LiveRuntime,
     name: &str,
     args: serde_json::Value,
 ) -> Result<String, String> {
+    // 编排调度动作实时记录为活动并落盘（同普通会话的 tool_call 事件）
+    if let Some(record) = &live.record_tool_activity {
+        record(Activity::ToolCall {
+            timestamp: now(),
+            name: name.to_string(),
+            title: Some(one_line_summary(&args)),
+            content: None,
+        });
+    }
     match name {
         "list_agents" => list_agents(live).await,
         "list_sessions" => list_sessions(live).await,
@@ -1557,6 +1584,7 @@ mod tests {
             session,
             hub: Arc::new(MachineHub::default()),
             persist_on_child_mounted: None,
+            record_tool_activity: None,
             activities: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1615,6 +1643,7 @@ mod tests {
             persist_on_child_mounted: Some(Arc::new(move || {
                 let _ = persist_engine.persist(&persist_dir);
             })),
+            record_tool_activity: None,
             activities: Arc::new(Mutex::new(Vec::new())),
         };
         live.mount_child(ChildSession {

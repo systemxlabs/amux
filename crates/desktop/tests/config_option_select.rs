@@ -8,7 +8,6 @@
 //! 锁定不变量：选择菜单项后必须发起 `session.configure`。测试环境 WS 不可达，
 //! 请求失败会弹出错误通知——以「通知出现」作为请求已发起的可观察证据。
 
-use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
