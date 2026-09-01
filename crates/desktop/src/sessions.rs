@@ -2110,40 +2110,38 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_session_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, status) = match &self.selected {
-            Some(Selected::Session { machine, id }) => {
-                let Some(machine_view) = self.machine(*machine) else {
-                    return h_flex().into_any();
-                };
-                let Some(session) = machine_view.sessions.iter().find(|s| s.id == *id) else {
-                    return h_flex().into_any();
-                };
-                let available = machine_view.status.online()
-                    && machine_view
-                        .agents
-                        .iter()
-                        .any(|agent| agent.name == session.agent && agent.available);
-                (
-                    format!("{}@{}", session.agent, machine_view.config.name),
-                    if available { "可用" } else { "不可用" },
-                )
-            }
-            Some(Selected::Workflow { id }) => {
-                // header 仅标注 agent 名称与可用状态（docs/PRD.md）：工作状态
-                // 由会话列表转圈与对话区实时活动表达
-                let Some(_workflow) = self.workflow(id) else {
-                    return h_flex().into_any();
-                };
-                (
-                    "编排智能体".to_string(),
-                    if self.store.orchestrator().is_configured() {
-                        "可用"
-                    } else {
-                        "不可用"
-                    },
-                )
-            }
-            None => return h_flex().into_any(),
+        let (label, status) = if let Some((machine, id)) = self.open_session_target() {
+            let Some(machine_view) = self.machine(machine) else {
+                return h_flex().into_any();
+            };
+            let Some(session) = machine_view.sessions.iter().find(|s| s.id == id) else {
+                return h_flex().into_any();
+            };
+            let available = machine_view.status.online()
+                && machine_view
+                    .agents
+                    .iter()
+                    .any(|agent| agent.name == session.agent && agent.available);
+            (
+                format!("{}@{}", session.agent, machine_view.config.name),
+                if available { "可用" } else { "不可用" },
+            )
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            // header 仅标注 agent 名称与可用状态（docs/PRD.md）：工作状态
+            // 由会话列表转圈与对话区实时活动表达
+            let Some(_workflow) = self.workflow(id) else {
+                return h_flex().into_any();
+            };
+            (
+                "编排智能体".to_string(),
+                if self.store.orchestrator().is_configured() {
+                    "可用"
+                } else {
+                    "不可用"
+                },
+            )
+        } else {
+            return h_flex().into_any();
         };
         h_flex()
             .w_full()
