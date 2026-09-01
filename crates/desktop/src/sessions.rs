@@ -43,6 +43,30 @@ use crate::app::{
     SelectedSlashCommands, SessionListItem, SettingsCategory, PAGE_LIMIT,
 };
 
+async fn request_session_page<R, T>(
+    client: crate::ws::WsClient,
+    method: &'static str,
+    session_id: String,
+    before: Option<u64>,
+    decode: impl FnOnce(R) -> (Vec<T>, bool, Option<u64>),
+) -> Result<(Vec<T>, bool, Option<usize>), crate::ws::RpcError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let response = client
+        .request::<_, R>(
+            method,
+            Some(SessionPageParams {
+                session_id,
+                limit: Some(PAGE_LIMIT),
+                before,
+            }),
+        )
+        .await?;
+    let (items, has_more, next_before) = decode(response);
+    Ok((items, has_more, next_before.map(|value| value as usize)))
+}
+
 impl AmuxApp {
     pub(crate) fn refresh_sessions(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = self.machines.get(idx) else {
@@ -132,18 +156,15 @@ impl AmuxApp {
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionPageParams {
-                session_id: session_id.clone(),
-                limit: Some(PAGE_LIMIT),
-                before: None,
-            };
-            if let Ok(res) = client
-                .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
-                .await
+            if let Ok((items, has_more, next_before)) = request_session_page(
+                client,
+                protocol::method::SESSION_HISTORY,
+                session_id.clone(),
+                None,
+                |res: HistoryResult| (res.items, res.has_more, res.next_before),
+            )
+            .await
             {
-                let items = res.items;
-                let has_more = res.has_more;
-                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     // 新消息到达前若已在底部，追加内容后保持贴底，避免新消息被遮挡。
                     let was_at_bottom = this.dialog_at_bottom();
@@ -178,24 +199,21 @@ impl AmuxApp {
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionPageParams {
-                session_id: session_id.clone(),
-                limit: Some(PAGE_LIMIT),
-                before: None,
-            };
-            if let Ok(res) = client
-                .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
-                .await
+            if let Ok((activities, has_more, next_before)) = request_session_page(
+                client,
+                protocol::method::SESSION_ACTIVITIES,
+                session_id.clone(),
+                None,
+                |res: ActivitiesResult| (res.activities, res.has_more, res.next_before),
+            )
+            .await
             {
-                let acts = res.activities;
-                let has_more = res.has_more;
-                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     // 新活动到达前若已在底部，追加内容后保持贴底。
                     let was_at_bottom = this.activities_at_bottom();
                     if let Some(m) = this.machines.get_mut(machine) {
                         if let Some(v) = m.views.get_mut(&session_id) {
-                            v.set_activities_page(acts, has_more, next_before);
+                            v.set_activities_page(activities, has_more, next_before);
                         }
                     }
                     if was_at_bottom {
