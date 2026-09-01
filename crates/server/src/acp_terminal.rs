@@ -7,10 +7,11 @@
 //! 退出状态在「进程退出且两路管道读尽」后写回，保证 wait_for_exit 返回后
 //! 的 output 快照含完整尾部输出。
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
@@ -39,7 +40,7 @@ struct TerminalCore {
 
 impl TerminalCore {
     fn push(&self, chunk: &[u8]) {
-        let mut bytes = self.bytes.lock().unwrap();
+        let mut bytes = self.bytes.lock();
         bytes.extend_from_slice(chunk);
         if bytes.len() > self.limit {
             // 从头部丢弃超限部分并对齐 UTF-8 字符边界（跳过首字节即多字节续字节的
@@ -58,17 +59,17 @@ impl TerminalCore {
 
     /// 输出快照 + 是否发生截断 + 已知时的退出状态。
     fn snapshot(&self) -> (String, bool, Option<TerminalExitStatus>) {
-        let bytes = self.bytes.lock().unwrap();
+        let bytes = self.bytes.lock();
         let output = String::from_utf8_lossy(&bytes[..]).into_owned();
         (
             output,
             self.truncated.load(Ordering::SeqCst),
-            self.exit_status.lock().unwrap().clone(),
+            self.exit_status.lock().clone(),
         )
     }
 
     fn set_exit_status(&self, status: TerminalExitStatus) {
-        *self.exit_status.lock().unwrap() = Some(status);
+        *self.exit_status.lock() = Some(status);
     }
 }
 
@@ -173,7 +174,6 @@ impl TerminalRegistry {
 
         self.map
             .lock()
-            .unwrap()
             .insert(id.clone(), TerminalEntry { core, tx });
         Ok(CreateTerminalResponse::new(TerminalId::new(id)))
     }
@@ -214,10 +214,7 @@ impl TerminalRegistry {
     /// 释放终端：移除句柄（后续按未知 id 拒绝）并杀掉仍在运行的进程，由 actor 回收。
     pub fn release(&self, req: &ReleaseTerminalRequest) -> Result<ReleaseTerminalResponse, String> {
         let tx = self.entry(req.terminal_id.to_string())?.tx.clone();
-        self.map
-            .lock()
-            .unwrap()
-            .remove(req.terminal_id.to_string().as_str());
+        self.map.lock().remove(req.terminal_id.to_string().as_str());
         let _ = tx.send(Cmd::Kill);
         Ok(ReleaseTerminalResponse::new())
     }
@@ -225,7 +222,7 @@ impl TerminalRegistry {
     /// 连接终止路径：杀掉全部剩余终端并等待回收（超时兜底交给 kill_on_drop）。
     pub async fn terminate_all(&self) {
         let entries: Vec<TerminalEntry> = {
-            let mut map = self.map.lock().unwrap();
+            let mut map = self.map.lock();
             map.drain().map(|(_, e)| e).collect()
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -243,7 +240,6 @@ impl TerminalRegistry {
     fn entry(&self, id: String) -> Result<TerminalEntry, String> {
         self.map
             .lock()
-            .unwrap()
             .get(id.as_str())
             .cloned()
             .ok_or_else(|| format!("未知 terminal id: {id}"))
@@ -310,7 +306,7 @@ async fn run_actor(
         match cmd {
             Some(Cmd::Wait(ack)) => {
                 if resolved {
-                    let st = core.exit_status.lock().unwrap().clone();
+                    let st = core.exit_status.lock().clone();
                     let _ = ack.send(st.expect("终态时快照必已写回"));
                 } else {
                     pending.push(ack);

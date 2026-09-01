@@ -21,6 +21,7 @@ thiserror = "2"
 # ACP 官方 SDK（docs/DESIGN.md §9）：Client 角色 + schema v1 + AcpAgent stdio 传输
 agent-client-protocol = { workspace = true, features = ["unstable"] }
 uuid.workspace = true
+parking_lot.workspace = true
 # 会话注册表持久化（docs/DESIGN.md §3.3/§4.3：server 单写者，同步 API）
 rusqlite = { version = "0.40", features = ["bundled"] }
 # git 能力（workspace.diff/restore）用 gitoxide；只开用到的特性以精简依赖树

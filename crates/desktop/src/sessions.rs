@@ -30,8 +30,8 @@ use crate::config::QuickCommand;
 use crate::display::short_cwd;
 use crate::logic::{
     activity_kind_detail, compose_prompt, compose_workflow_text, external_path_attachment,
-    filter_slash_commands, image_attachment, merge_session_window, slash_command_prefix,
-    DialogMsg, InputAttachment,
+    filter_slash_commands, image_attachment, merge_session_window, slash_command_prefix, DialogMsg,
+    InputAttachment,
 };
 use crate::machine::MachineStatus;
 use crate::text::{block_text, format_local_time, one_line, TimePrecision};
@@ -76,7 +76,7 @@ impl AmuxApp {
                     .workflows
                     .iter()
                     .flat_map(|wf| {
-                        let children = wf.session.read().unwrap().children.clone();
+                        let children = wf.session.read().children.clone();
                         children.into_iter().map(|c| (c.machine_idx, c.id))
                     })
                     .collect();
@@ -828,7 +828,6 @@ impl AmuxApp {
             .flat_map(|wf| {
                 wf.session
                     .read()
-                    .unwrap()
                     .children
                     .iter()
                     .map(|c| c.id.clone())

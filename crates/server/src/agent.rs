@@ -14,8 +14,9 @@
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨 runtime
 //! 嵌套的 tokio 问题（调用方可能处于任意 tokio runtime 上下文）。
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub use crate::acp::{
     AcpAgentDriver, AgentDriver, AgentEvent, AgentSessionCaps, LaunchSummary, SharedDriver,
@@ -37,7 +38,7 @@ use protocol::AgentInfo;
 /// - 生产路径不提供内置 Stub；没有发现 agent 时 `agent.list` 为空，使用未知 agent 会报错。
 pub struct AgentRegistry {
     /// 仅测试使用的 Stub 驱动。
-    stub: std::sync::Mutex<Option<SharedDriver>>,
+    stub: Mutex<Option<SharedDriver>>,
     /// 测试强制 stub：跳过运行期发现（避免本机 PATH 干扰单测）
     force_stub: bool,
     /// 禁用运行期自动发现（`AMUX_NO_DISCOVERY=1`）：只使用 `--agent` 显式配置的 agent。
@@ -50,11 +51,11 @@ pub struct AgentRegistry {
     /// 显式配置 agent 最近一次重启后的驱动。
     configured_override: Mutex<Option<SharedDriver>>,
     /// 自动发现的 agent（不含已配置的；可运行期刷新）
-    discovered: std::sync::Mutex<Vec<DiscoveredAgent>>,
+    discovered: Mutex<Vec<DiscoveredAgent>>,
     /// 已拉起的发现驱动（启动拉起 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
-    spawned: std::sync::Mutex<HashMap<String, SharedDriver>>,
+    spawned: Mutex<HashMap<String, SharedDriver>>,
     /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 available=false、driver_for 报错）
-    unavailable: std::sync::Mutex<HashSet<String>>,
+    unavailable: Mutex<HashSet<String>>,
 }
 
 impl AgentRegistry {
@@ -65,15 +66,15 @@ impl AgentRegistry {
             .map(|v| v == "1")
             .unwrap_or(false);
         let registry = AgentRegistry {
-            stub: std::sync::Mutex::new(None),
+            stub: Mutex::new(None),
             force_stub: false,
             no_discovery,
             configured,
             configured_spec: Mutex::new(None),
             configured_override: Mutex::new(None),
-            discovered: std::sync::Mutex::new(Vec::new()),
-            spawned: std::sync::Mutex::new(HashMap::new()),
-            unavailable: std::sync::Mutex::new(HashSet::new()),
+            discovered: Mutex::new(Vec::new()),
+            spawned: Mutex::new(HashMap::new()),
+            unavailable: Mutex::new(HashSet::new()),
         };
         if !no_discovery {
             registry.refresh_discovery();
@@ -89,10 +90,7 @@ impl AgentRegistry {
         }
         if !self.no_discovery {
             let current = discover_acp_agents();
-            let mut disc = self
-                .discovered
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）");
+            let mut disc = self.discovered.lock();
             for d in current {
                 let dup = disc.iter().any(|x| x.name == d.name)
                     || self
@@ -111,29 +109,29 @@ impl AgentRegistry {
     #[cfg(test)]
     pub fn new_for_tests() -> Self {
         AgentRegistry {
-            stub: std::sync::Mutex::new(Some(Arc::new(StubAgentDriver::new()))),
+            stub: Mutex::new(Some(Arc::new(StubAgentDriver::new()))),
             force_stub: true,
             no_discovery: false,
             configured: None,
             configured_spec: Mutex::new(None),
             configured_override: Mutex::new(None),
-            discovered: std::sync::Mutex::new(Vec::new()),
-            spawned: std::sync::Mutex::new(HashMap::new()),
-            unavailable: std::sync::Mutex::new(HashSet::new()),
+            discovered: Mutex::new(Vec::new()),
+            spawned: Mutex::new(HashMap::new()),
+            unavailable: Mutex::new(HashSet::new()),
         }
     }
     #[cfg(test)]
     pub fn new_for_tests_with_driver(harness: &str, driver: SharedDriver) -> Self {
         AgentRegistry {
-            stub: std::sync::Mutex::new(None),
+            stub: Mutex::new(None),
             force_stub: false,
             no_discovery: true,
             configured: Some((harness.to_string(), driver)),
             configured_spec: Mutex::new(None),
             configured_override: Mutex::new(None),
-            discovered: std::sync::Mutex::new(Vec::new()),
-            spawned: std::sync::Mutex::new(HashMap::new()),
-            unavailable: std::sync::Mutex::new(HashSet::new()),
+            discovered: Mutex::new(Vec::new()),
+            spawned: Mutex::new(HashMap::new()),
+            unavailable: Mutex::new(HashSet::new()),
         }
     }
     pub fn set_configured_spec(
@@ -143,10 +141,7 @@ impl AgentRegistry {
         args: Vec<String>,
         env: Vec<(String, String)>,
     ) {
-        *self
-            .configured_spec
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）") = Some(DiscoveredAgent {
+        *self.configured_spec.lock() = Some(DiscoveredAgent {
             name,
             bin,
             args,
@@ -157,38 +152,23 @@ impl AgentRegistry {
         if self
             .configured_spec
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .as_ref()
             .is_some_and(|spec| spec.name == name)
         {
-            self.unavailable
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .insert(name.to_string());
+            self.unavailable.lock().insert(name.to_string());
         }
     }
     pub fn list_agents(&self) -> Vec<AgentInfo> {
         self.refresh_discovery();
-        let discovered = self
-            .discovered
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）");
-        let unavailable = self
-            .unavailable
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）");
+        let discovered = self.discovered.lock();
+        let unavailable = self.unavailable.lock();
         let mut out: Vec<AgentInfo> = Vec::new();
         if let Some((name, _)) = &self.configured {
             out.push(AgentInfo {
                 name: name.clone(),
                 available: !unavailable.contains(name),
             });
-        } else if let Some(spec) = self
-            .configured_spec
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .as_ref()
-        {
+        } else if let Some(spec) = self.configured_spec.lock().as_ref() {
             out.push(AgentInfo {
                 name: spec.name.clone(),
                 available: !unavailable.contains(&spec.name),
@@ -206,26 +186,15 @@ impl AgentRegistry {
         out
     }
     pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
-        if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）")
-        {
+        if let Some(stub) = &*self.stub.lock() {
             return Ok(stub.clone());
         }
-        if self
-            .unavailable
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .contains(harness)
-        {
+        if self.unavailable.lock().contains(harness) {
             return Err(format!("agent 不可用（启动时拉起失败）: {harness}"));
         }
         if let Some((name, _)) = &self.configured {
             if name == harness {
-                if let Some(driver) = self
-                    .configured_override
-                    .lock()
-                    .expect("Mutex 中毒（临界区内不应 panic）")
-                    .as_ref()
-                {
+                if let Some(driver) = self.configured_override.lock().as_ref() {
                     return Ok(driver.clone());
                 }
                 return Ok(self
@@ -239,7 +208,6 @@ impl AgentRegistry {
         if let Some(spec) = self
             .configured_spec
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .as_ref()
             .filter(|spec| spec.name == harness)
             .cloned()
@@ -250,7 +218,6 @@ impl AgentRegistry {
         let found = self
             .discovered
             .lock()
-            .unwrap()
             .iter()
             .find(|d| d.name == harness)
             .cloned();
@@ -260,23 +227,14 @@ impl AgentRegistry {
         Err(format!("本机未发现 agent: {harness}"))
     }
     fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<SharedDriver, String> {
-        if let Some(driver) = self
-            .spawned
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .get(&d.name)
-            .cloned()
-        {
+        if let Some(driver) = self.spawned.lock().get(&d.name).cloned() {
             return Ok(driver);
         }
         let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
         let driver = AcpAgentDriver::spawn(&d.bin, &args, &d.env)
             .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
         let driver: SharedDriver = Arc::new(driver);
-        let mut spawned = self
-            .spawned
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）");
+        let mut spawned = self.spawned.lock();
         match spawned.get(&d.name) {
             Some(existing) => {
                 let existing = existing.clone();
@@ -294,40 +252,28 @@ impl AgentRegistry {
         if self.force_stub || self.no_discovery {
             return LaunchSummary::default();
         }
-        if self
-            .stub
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_some()
-        {
+        if self.stub.lock().is_some() {
             return LaunchSummary::default();
         }
-        let discovered = self
-            .discovered
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .clone();
-        let summary = std::sync::Mutex::new(LaunchSummary::default());
+        let discovered = self.discovered.lock().clone();
+        let summary = Mutex::new(LaunchSummary::default());
         std::thread::scope(|s| {
             for d in discovered {
                 let summary = &summary;
                 s.spawn(move || match self.spawn_and_cache(&d) {
                     Ok(_) => {
-                        summary.lock().unwrap().started += 1;
+                        summary.lock().started += 1;
                         log::info!("已拉起 ACP server: {}（agent={}）", d.bin, d.name);
                     }
                     Err(e) => {
-                        summary.lock().unwrap().failed += 1;
-                        self.unavailable
-                            .lock()
-                            .expect("Mutex 中毒（临界区内不应 panic）")
-                            .insert(d.name.clone());
+                        summary.lock().failed += 1;
+                        self.unavailable.lock().insert(d.name.clone());
                         log::error!("ACP server 拉起失败（agent={}，已标记不可用）: {e}", d.name);
                     }
                 });
             }
         });
-        std::sync::Mutex::into_inner(summary).expect("LaunchSummary Mutex 中毒")
+        Mutex::into_inner(summary)
     }
     pub fn restart_agent(&self, harness: &str) -> Result<(), String> {
         let configured_name = self
@@ -338,7 +284,6 @@ impl AgentRegistry {
         let explicit_spec = self
             .configured_spec
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .as_ref()
             .filter(|spec| spec.name == harness)
             .cloned();
@@ -346,54 +291,37 @@ impl AgentRegistry {
             let spec = self
                 .configured_spec
                 .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
                 .clone()
                 .ok_or_else(|| format!("显式 agent 缺少重启配置: {harness}"))?;
             let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
             let driver = match AcpAgentDriver::spawn(&spec.bin, &args, &spec.env) {
                 Ok(driver) => driver,
                 Err(e) => {
-                    self.unavailable
-                        .lock()
-                        .expect("Mutex 中毒（临界区内不应 panic）")
-                        .insert(harness.to_string());
+                    self.unavailable.lock().insert(harness.to_string());
                     return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
                 }
             };
-            self.unavailable
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .remove(harness);
+            self.unavailable.lock().remove(harness);
             if configured_name {
-                let old = self
-                    .configured_override
-                    .lock()
-                    .expect("Mutex 中毒（临界区内不应 panic）")
-                    .take()
-                    .unwrap_or_else(|| self.configured.as_ref().expect("配置驱动不存在").1.clone());
+                let old =
+                    self.configured_override.lock().take().unwrap_or_else(|| {
+                        self.configured.as_ref().expect("配置驱动不存在").1.clone()
+                    });
                 old.shutdown();
-                *self
-                    .configured_override
-                    .lock()
-                    .expect("Mutex 中毒（临界区内不应 panic）") = Some(Arc::new(driver));
+                *self.configured_override.lock() = Some(Arc::new(driver));
             } else {
                 self.spawned
                     .lock()
-                    .expect("Mutex 中毒（临界区内不应 panic）")
                     .insert(harness.to_string(), Arc::new(driver));
             }
             log::info!("手动重启成功：{}（agent={}）", spec.bin, harness);
             return Ok(());
         }
-        self.unavailable
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .remove(harness);
+        self.unavailable.lock().remove(harness);
         self.refresh_discovery();
         let found = self
             .discovered
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .iter()
             .find(|d| d.name == harness)
             .cloned();
@@ -406,10 +334,7 @@ impl AgentRegistry {
                 Ok(())
             }
             Err(e) => {
-                self.unavailable
-                    .lock()
-                    .expect("Mutex 中毒（临界区内不应 panic）")
-                    .insert(harness.to_string());
+                self.unavailable.lock().insert(harness.to_string());
                 log::error!("手动重启失败（agent={}）: {e}", d.name);
                 Err(e)
             }
@@ -425,26 +350,16 @@ impl AgentRegistry {
 
     pub fn shutdown_all(&self) {
         if let Some((_, d)) = &self.configured {
-            if let Some(override_driver) = self
-                .configured_override
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .as_ref()
-            {
+            if let Some(override_driver) = self.configured_override.lock().as_ref() {
                 override_driver.shutdown_and_join();
             } else {
                 d.shutdown_and_join();
             }
         }
-        if let Some(stub) = &*self.stub.lock().expect("Mutex 中毒（临界区内不应 panic）")
-        {
+        if let Some(stub) = &*self.stub.lock() {
             stub.shutdown_and_join();
         }
-        let spawned = self
-            .spawned
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .clone();
+        let spawned = self.spawned.lock().clone();
         for (_, d) in spawned {
             d.shutdown_and_join();
         }
@@ -457,7 +372,7 @@ mod stub {
     use tokio::sync::mpsc;
 
     pub struct StubAgentDriver {
-        sessions: std::sync::Mutex<Vec<String>>,
+        sessions: Mutex<Vec<String>>,
         pub output_prefix: String,
     }
 
@@ -470,7 +385,7 @@ mod stub {
     impl Default for StubAgentDriver {
         fn default() -> Self {
             StubAgentDriver {
-                sessions: std::sync::Mutex::new(Vec::new()),
+                sessions: Mutex::new(Vec::new()),
                 output_prefix: "模拟输出：".into(),
             }
         }
@@ -482,10 +397,7 @@ mod stub {
             cwd: &str,
         ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
             let id = format!("agent_{}", cwd.replace('/', "_"));
-            self.sessions
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .push(id.clone());
+            self.sessions.lock().push(id.clone());
             Ok((id, Vec::new()))
         }
 
@@ -533,10 +445,7 @@ mod stub {
         }
 
         fn close(&self, agent_session_id: &str) -> Result<(), String> {
-            self.sessions
-                .lock()
-                .unwrap()
-                .retain(|s| s != agent_session_id);
+            self.sessions.lock().retain(|s| s != agent_session_id);
             Ok(())
         }
 
@@ -569,17 +478,9 @@ mod tests {
         reg.no_discovery = true;
         reg.force_stub = false;
         reg.refresh_discovery();
-        assert!(reg
-            .stub
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_some());
-        assert!(reg
-            .discovered
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_empty());
-        reg.stub = std::sync::Mutex::new(None);
+        assert!(reg.stub.lock().is_some());
+        assert!(reg.discovered.lock().is_empty());
+        reg.stub = Mutex::new(None);
         reg.configured = Some((
             "mock_acp".to_string(),
             Arc::new(StubAgentDriver::new()) as SharedDriver,
@@ -588,11 +489,7 @@ mod tests {
         let agents = reg.list_agents();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].name, "mock_acp");
-        assert!(reg
-            .discovered
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_empty());
+        assert!(reg.discovered.lock().is_empty());
     }
     #[cfg(test)]
     fn test_registry(
@@ -602,15 +499,15 @@ mod tests {
         stub: Option<SharedDriver>,
     ) -> AgentRegistry {
         AgentRegistry {
-            stub: std::sync::Mutex::new(stub),
+            stub: Mutex::new(stub),
             force_stub,
             no_discovery,
             configured: None,
             configured_spec: Mutex::new(None),
             configured_override: Mutex::new(None),
-            discovered: std::sync::Mutex::new(discovered),
-            spawned: std::sync::Mutex::new(HashMap::new()),
-            unavailable: std::sync::Mutex::new(HashSet::new()),
+            discovered: Mutex::new(discovered),
+            spawned: Mutex::new(HashMap::new()),
+            unavailable: Mutex::new(HashSet::new()),
         }
     }
     fn sibling_bin(name: &str) -> std::path::PathBuf {
@@ -655,10 +552,7 @@ mod tests {
             summary.failed, 1,
             "不存在的二进制应拉起失败并标记不可用: {summary:?}"
         );
-        let spawned = reg
-            .spawned
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）");
+        let spawned = reg.spawned.lock();
         assert_eq!(spawned.len(), 1, "spawned 缓存应恰好含注入的成功条目");
         assert!(spawned.contains_key("mock_acp"));
         assert!(!spawned.contains_key("broken"), "失败条目不应入缓存");
@@ -686,10 +580,7 @@ mod tests {
         };
         assert!(err.contains("不可用"), "不可用 agent 的错误应明确: {err}");
         assert!(
-            !reg.spawned
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .contains_key("broken"),
+            !reg.spawned.lock().contains_key("broken"),
             "不可用 agent 不应被再次拉起"
         );
     }
@@ -739,19 +630,11 @@ mod tests {
             0,
             "AMUX_NO_DISCOVERY=1 不应拉起: {summary:?}"
         );
-        assert!(reg
-            .spawned
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_empty());
+        assert!(reg.spawned.lock().is_empty());
         let reg = test_registry(vec![entry.clone()], true, false, None);
         let summary = reg.launch_discovered();
         assert_eq!(summary.started + summary.failed, 0);
-        assert!(reg
-            .spawned
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_empty());
+        assert!(reg.spawned.lock().is_empty());
         let reg = test_registry(
             vec![entry.clone()],
             false,
@@ -760,11 +643,7 @@ mod tests {
         );
         let summary = reg.launch_discovered();
         assert_eq!(summary.started + summary.failed, 0);
-        assert!(reg
-            .spawned
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .is_empty());
+        assert!(reg.spawned.lock().is_empty());
     }
 
     #[test]
@@ -793,11 +672,7 @@ mod tests {
                 0,
                 "受限模式 rediscover 不应拉起: {summary:?}"
             );
-            assert!(reg
-                .spawned
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .is_empty());
+            assert!(reg.spawned.lock().is_empty());
         }
     }
 }

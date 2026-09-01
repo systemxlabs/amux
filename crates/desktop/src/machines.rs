@@ -314,7 +314,6 @@ impl AmuxApp {
             workflow
                 .session
                 .read()
-                .unwrap()
                 .children
                 .iter()
                 .any(|child| child.machine_idx == idx)
@@ -343,7 +342,7 @@ impl AmuxApp {
         self.machines.remove(idx);
         self.sync_machine_hub();
         for wf in self.workflows.iter_mut() {
-            let mut children_guard = wf.session.write().unwrap();
+            let mut children_guard = wf.session.write();
             for c in children_guard.children.iter_mut() {
                 if c.machine_idx == idx {
                     // 保留机器名和远端会话关联，但标记为未绑定，避免下标

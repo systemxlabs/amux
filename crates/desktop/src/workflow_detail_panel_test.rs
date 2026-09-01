@@ -40,7 +40,6 @@ fn workflow_detail_shows_children_without_cwd_row(cx: &mut gpui::TestAppContext)
             app.workflows[0]
                 .session
                 .write()
-                .unwrap()
                 .children
                 .push(ChildSession {
                     id: "child-1".into(),

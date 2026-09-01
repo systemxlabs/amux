@@ -64,7 +64,6 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
             app.workflows[0]
                 .session
                 .write()
-                .unwrap()
                 .children
                 .push(ChildSession {
                     id: "child-1".into(),
@@ -94,7 +93,7 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let found = cx.update(|_, cx| {
-            app.read(cx).workflows[0].session.read().unwrap().transcript.iter().any(|m| {
+            app.read(cx).workflows[0].session.read().transcript.iter().any(|m| {
                 matches!(m, OrcMsg::User { text, .. } if text.contains("child-1@测试机 检测到状态变更"))
             })
         });

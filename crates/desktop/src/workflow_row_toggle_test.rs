@@ -40,7 +40,6 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
             app.workflows[0]
                 .session
                 .write()
-                .unwrap()
                 .children
                 .push(ChildSession {
                     id: "child-1".into(),

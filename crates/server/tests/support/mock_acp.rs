@@ -16,6 +16,7 @@
 //!   包括 open_session 不触发 `session/load`、resume 幂等只调一次及 close/delete）。
 //! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -39,30 +40,29 @@ use serde_json::{json, Value};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn history() -> &'static std::sync::Mutex<HashMap<String, Vec<Value>>> {
+fn history() -> &'static Mutex<HashMap<String, Vec<Value>>> {
     use std::sync::OnceLock;
-    static H: OnceLock<std::sync::Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
-    H.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    static H: OnceLock<Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
+    H.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn sessions() -> &'static std::sync::Mutex<HashMap<String, String>> {
+fn sessions() -> &'static Mutex<HashMap<String, String>> {
     use std::sync::OnceLock;
-    static S: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
-    S.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    static S: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 每个会话当前选中的 model 选项值（mock 的 config_options 状态）。
-fn session_models() -> &'static std::sync::Mutex<HashMap<String, String>> {
+fn session_models() -> &'static Mutex<HashMap<String, String>> {
     use std::sync::OnceLock;
-    static M: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
-    M.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    static M: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// mock 的会话配置选项：model select（gpt-4o / gpt-5）。
 fn config_options_for(sid: &str) -> Vec<SessionConfigOption> {
     let current = session_models()
         .lock()
-        .unwrap()
         .get(sid)
         .cloned()
         .unwrap_or_else(|| "gpt-4o".into());
@@ -78,12 +78,7 @@ fn config_options_for(sid: &str) -> Vec<SessionConfigOption> {
 }
 
 fn history_len(sid: &str) -> usize {
-    history()
-        .lock()
-        .unwrap()
-        .get(sid)
-        .map(|h| h.len())
-        .unwrap_or(0)
+    history().lock().get(sid).map(|h| h.len()).unwrap_or(0)
 }
 
 fn delay_ms() -> u64 {
@@ -164,8 +159,8 @@ async fn run(state_file: &str) -> Result<()> {
                 let n = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
                 let sid = format!("mock_s_{n}");
                 let cwd = request.cwd.to_string_lossy().into_owned();
-                sessions().lock().unwrap().insert(sid.clone(), cwd);
-                session_models().lock().unwrap().insert(sid.clone(), "gpt-4o".into());
+                sessions().lock().insert(sid.clone(), cwd);
+                session_models().lock().insert(sid.clone(), "gpt-4o".into());
                 let opts = config_options_for(&sid);
                 responder.respond(
                     NewSessionResponse::new(sid).config_options(opts),
@@ -185,7 +180,6 @@ async fn run(state_file: &str) -> Result<()> {
                 };
                 session_models()
                     .lock()
-                    .unwrap()
                     .insert(sid.clone(), value);
                 responder.respond(SetSessionConfigOptionResponse::new(
                     config_options_for(&sid),
@@ -198,7 +192,7 @@ async fn run(state_file: &str) -> Result<()> {
                 // 重放 mock 保存的历史后再响应 load。
                 record_call(&calls_load, "session/load");
                 let sid = request.session_id.to_string();
-                let hist = history().lock().unwrap().get(&sid).cloned().unwrap_or_else(|| {
+                let hist = history().lock().get(&sid).cloned().unwrap_or_else(|| {
                     vec![
                         json!({ "messageId": "u1", "kind": "user", "content": { "type": "text", "text": "你好" } }),
                         json!({ "messageId": "a1", "kind": "agent", "content": { "type": "text", "text": "历史回复" } }),
@@ -251,7 +245,6 @@ async fn run(state_file: &str) -> Result<()> {
                 let user_mid = format!("u{}", history_len(&sid));
                 history()
                     .lock()
-                    .unwrap()
                     .entry(sid.clone())
                     .or_default()
                     .push(json!({
@@ -410,7 +403,6 @@ async fn run(state_file: &str) -> Result<()> {
                     let agent_mid = format!("a{}", history_len(&request.session_id.to_string()));
                     history()
                         .lock()
-                        .unwrap()
                         .entry(sid)
                         .or_default()
                         .push(json!({
@@ -429,8 +421,8 @@ async fn run(state_file: &str) -> Result<()> {
             async move |request: CloseSessionRequest, responder, _cx| {
                 record_call(&calls_close, "session/close");
                 let sid = request.session_id.to_string();
-                sessions().lock().unwrap().remove(&sid);
-                history().lock().unwrap().remove(&sid);
+                sessions().lock().remove(&sid);
+                history().lock().remove(&sid);
                 responder.respond(CloseSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
@@ -439,8 +431,8 @@ async fn run(state_file: &str) -> Result<()> {
             async move |request: DeleteSessionRequest, responder, _cx| {
                 record_call(&calls_delete, "session/delete");
                 let sid = request.session_id.to_string();
-                sessions().lock().unwrap().remove(&sid);
-                history().lock().unwrap().remove(&sid);
+                sessions().lock().remove(&sid);
+                history().lock().remove(&sid);
                 responder.respond(DeleteSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
@@ -448,7 +440,7 @@ async fn run(state_file: &str) -> Result<()> {
         .on_receive_request(
             async move |_request: ListSessionsRequest, responder, _cx| {
                 record_call(&calls_list, "session/list");
-                let s = sessions().lock().unwrap();
+                let s = sessions().lock();
                 let infos = s
                     .iter()
                     .map(|(id, cwd)| SessionInfo::new(id.clone(), cwd.clone()))

@@ -5,8 +5,9 @@
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨
 //! runtime 嵌套的 tokio 问题（调用方可能处于任意 tokio runtime 上下文）。
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
     AvailableCommandInput, BlobResourceContents, BooleanConfigOptionCapabilities,
@@ -271,7 +272,6 @@ impl AcpAgentDriver {
     fn sender(&self) -> Result<std::sync::mpsc::SyncSender<ExecReq>, String> {
         self.exec_tx
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .clone()
             .ok_or_else(|| "agent 已关闭".to_string())
     }
@@ -300,7 +300,7 @@ impl AgentDriver for AcpAgentDriver {
             .ok_or_else(|| "session/new 未返回 sessionId".to_string())?
             .to_string();
         // 新会话 agent 已在内存中持有，无需 resume
-        self.resumed.lock().unwrap().insert(sid.clone());
+        self.resumed.lock().insert(sid.clone());
         let options = config_options_from_value(res.get("configOptions"));
         Ok((sid, options))
     }
@@ -314,7 +314,7 @@ impl AgentDriver for AcpAgentDriver {
         cwd: &str,
     ) -> Result<Vec<protocol::SessionConfigOption>, String> {
         {
-            let resumed = self.resumed.lock().unwrap();
+            let resumed = self.resumed.lock();
             if resumed.contains(agent_session_id) {
                 return Ok(Vec::new());
             }
@@ -324,10 +324,7 @@ impl AgentDriver for AcpAgentDriver {
             cwd: cwd.to_string(),
         });
         if result.is_ok() {
-            self.resumed
-                .lock()
-                .unwrap()
-                .insert(agent_session_id.to_string());
+            self.resumed.lock().insert(agent_session_id.to_string());
         }
         result.map(|res| config_options_from_value(res.get("configOptions")))
     }
@@ -341,7 +338,6 @@ impl AgentDriver for AcpAgentDriver {
         self.caches
             .routes
             .lock()
-            .unwrap()
             .insert(agent_session_id.to_string(), tx.clone());
         let req = ExecReq::Prompt {
             sid: agent_session_id.to_string(),
@@ -352,7 +348,7 @@ impl AgentDriver for AcpAgentDriver {
             .sender()
             .and_then(|sender| sender.send(req).map_err(|_| "agent 已关闭".to_string()));
         if let Err(error) = send_result {
-            self.caches.routes.lock().unwrap().remove(agent_session_id);
+            self.caches.routes.lock().remove(agent_session_id);
             let _ = tx.try_send(AgentEvent::Error(error));
             let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
         }
@@ -360,14 +356,14 @@ impl AgentDriver for AcpAgentDriver {
     }
 
     fn shutdown(&self) {
-        let _ = self.exec_tx.lock().unwrap().take();
+        let _ = self.exec_tx.lock().take();
     }
 
     /// 关闭并等待 exec 线程退出：通道关闭 → 服务循环结束 → SDK 连接 drop（子进程
     /// 随之回收）。server 退出路径调用，保证清理先于进程退出完成。
     fn shutdown_and_join(&self) {
         self.shutdown();
-        if let Some(handle) = self.thread.lock().unwrap().take() {
+        if let Some(handle) = self.thread.lock().take() {
             let _ = handle.join();
         }
     }
@@ -380,26 +376,11 @@ impl AgentDriver for AcpAgentDriver {
     }
 
     fn close(&self, agent_session_id: &str) -> Result<(), String> {
-        self.resumed
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .remove(agent_session_id);
+        self.resumed.lock().remove(agent_session_id);
         // agent 侧会话已关闭，缓存的斜杠命令、计划与能力档随之失效
-        self.caches
-            .commands
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .remove(agent_session_id);
-        self.caches
-            .plans
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .remove(agent_session_id);
-        self.caches
-            .caps
-            .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
-            .remove(agent_session_id);
+        self.caches.commands.lock().remove(agent_session_id);
+        self.caches.plans.lock().remove(agent_session_id);
+        self.caches.caps.lock().remove(agent_session_id);
         self.call(AcpCall::Close {
             sid: agent_session_id.to_string(),
         })
@@ -443,7 +424,6 @@ impl AgentDriver for AcpAgentDriver {
         self.caches
             .commands
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .get(agent_session_id)
             .cloned()
             .unwrap_or_default()
@@ -453,7 +433,6 @@ impl AgentDriver for AcpAgentDriver {
         self.caches
             .plans
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .get(agent_session_id)
             .cloned()
             .unwrap_or_default()
@@ -463,10 +442,9 @@ impl AgentDriver for AcpAgentDriver {
         self.caches
             .caps
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .get(agent_session_id)
             .copied()
-            .unwrap_or(*self.caches.default_caps.lock().unwrap())
+            .unwrap_or(*self.caches.default_caps.lock())
     }
 }
 
@@ -721,7 +699,7 @@ async fn connect_main(
                     core::result::Result::Ok(resp) => {
                         // 记录 agent 侧声明的连接默认能力（docs/DESIGN.md：
                         // server 在内存中记住 agent 侧能力）
-                        *caches.default_caps.lock().unwrap() =
+                        *caches.default_caps.lock() =
                             session_caps_from_agent_caps(&resp.agent_capabilities);
                         log::debug!("initialize 完成");
                         core::result::Result::Ok(())
@@ -762,24 +740,15 @@ async fn connect_main(
                                 // 会话建立成功：按 sessionId 落档建立时的 agent 侧能力
                                 if let Ok(value) = &result {
                                     let sid = value.get("sessionId").and_then(|v| v.as_str());
-                                    let caps = *caches.default_caps.lock().unwrap();
+                                    let caps = *caches.default_caps.lock();
                                     match call {
                                         AcpCall::NewSession { .. } => {
                                             if let Some(sid) = sid {
-                                                caches
-                                                    .caps
-                                                    .lock()
-                                                    .expect("Mutex 中毒（临界区内不应 panic）")
-                                                    .insert(sid.to_string(), caps);
+                                                caches.caps.lock().insert(sid.to_string(), caps);
                                             }
                                         }
                                         AcpCall::Resume { sid, .. } => {
-                                            caches
-                                                .caps
-                                                .lock()
-                                                .expect("Mutex 中毒（临界区内不应 panic）")
-                                                .entry(sid)
-                                                .or_insert(caps);
+                                            caches.caps.lock().entry(sid).or_insert(caps);
                                         }
                                         _ => {}
                                     }
@@ -805,10 +774,7 @@ async fn connect_main(
                                     .on_receiving_result(async move |result| {
                                         // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）。
                                         // 结束原因取自 ACP prompt 响应的 stopReason（权威归因）
-                                        let route = callback_routes
-                                            .lock()
-                                            .expect("Mutex 中毒（临界区内不应 panic）")
-                                            .remove(&callback_sid);
+                                        let route = callback_routes.lock().remove(&callback_sid);
                                         if let Some(tx) = route {
                                             let reason = match &result {
                                                 Ok(resp) => stop_reason_reason(resp.stop_reason),
@@ -827,10 +793,7 @@ async fn connect_main(
                                     });
                                 if let Err(e) = result {
                                     log::error!("prompt 调用失败 {sid}: {e}");
-                                    let route = routes
-                                        .lock()
-                                        .expect("Mutex 中毒（临界区内不应 panic）")
-                                        .remove(&sid);
+                                    let route = routes.lock().remove(&sid);
                                     if let Some(tx) = route {
                                         let _ = tx
                                             .send(AgentEvent::Error(format!(
@@ -1015,26 +978,20 @@ async fn route_update(
         //（docs/DESIGN.md「普通会话斜杠命令」：以 Agent 侧数据为权威）。
         // 不产生事件流——通知可能出现在无 prompt 路由的窗口，缓存于驱动层。
         SessionUpdate::AvailableCommandsUpdate(update) => {
-            commands
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .insert(
-                    notif.session_id.to_string(),
-                    acp_slash_commands(update.available_commands.clone()),
-                );
+            commands.lock().insert(
+                notif.session_id.to_string(),
+                acp_slash_commands(update.available_commands.clone()),
+            );
             None
         }
         // ACP `plan`：agent 计划全量覆盖驱动内存缓存
         //（docs/DESIGN.md「普通会话计划」：以 Agent 侧数据为权威）。
         // 不产生事件流，理由同上。
         SessionUpdate::Plan(update) => {
-            plans
-                .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
-                .insert(
-                    notif.session_id.to_string(),
-                    acp_plan(update.entries.clone()),
-                );
+            plans.lock().insert(
+                notif.session_id.to_string(),
+                acp_plan(update.entries.clone()),
+            );
             None
         }
         // SessionInfoUpdate（ACP v1 未携带状态字段）/ CurrentModeUpdate 等
@@ -1044,7 +1001,6 @@ async fn route_update(
     if let Some(ev) = ev {
         let tx = routes
             .lock()
-            .expect("Mutex 中毒（临界区内不应 panic）")
             .get(notif.session_id.to_string().as_str())
             .cloned();
         if let Some(tx) = tx {
@@ -1288,10 +1244,7 @@ mod tests {
             ]),
         )
         .await;
-        assert_eq!(
-            commands.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].len(),
-            1
-        );
+        assert_eq!(commands.lock()["s1"].len(), 1);
         // 新通知全量覆盖旧集合（docs/DESIGN.md「普通会话斜杠命令」）
         route_update(
             &routes,
@@ -1300,7 +1253,7 @@ mod tests {
             &notif(Vec::new()),
         )
         .await;
-        assert!(commands.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].is_empty());
+        assert!(commands.lock()["s1"].is_empty());
         // 无 prompt 路由时通知仍被缓存（不产生事件流）
     }
 
@@ -1332,7 +1285,7 @@ mod tests {
             ]),
         )
         .await;
-        let cached = plans.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].clone();
+        let cached = plans.lock()["s1"].clone();
         assert_eq!(
             cached,
             vec![
@@ -1356,7 +1309,7 @@ mod tests {
             &notif(Vec::new()),
         )
         .await;
-        assert!(plans.lock().expect("Mutex 中毒（临界区内不应 panic）")["s1"].is_empty());
+        assert!(plans.lock()["s1"].is_empty());
     }
 
     #[tokio::test]

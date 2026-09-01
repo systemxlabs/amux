@@ -6,11 +6,12 @@
 //! 在 gate 运行中到达；此前子会话要等整轮 decide 结束才挂载进 `children`，
 //! 事件到达时工作流查找失败、注入被丢弃。
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use amux_desktop::workflow::{
     AgentSlot, ChildSession, Decision, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,
@@ -44,7 +45,6 @@ impl OrcBackend for PausableBackend {
             permit.forget();
             self.decisions
                 .lock()
-                .expect("Mutex 中毒（临界区内不应 panic）")
                 .pop_front()
                 .ok_or_else(|| "决策用尽".to_string())
         })
@@ -98,7 +98,7 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
     });
     let backend_test = backend.clone();
     let engine = WorkflowEngine::new("计划", "", "", backend, hub_with_one_machine(), &dir);
-    engine.session.write().unwrap().children.push(ChildSession {
+    engine.session.write().children.push(ChildSession {
         id: "s_child".into(),
         machine_idx: 0,
         machine_name: "测试机".into(),
@@ -124,7 +124,6 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
         engine
             .session
             .read()
-            .unwrap()
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::User { text, .. }
@@ -141,7 +140,7 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
 
     // 第二轮（带注入消息的 rerun）的编排输出应出现在对话流
     assert!(
-        engine.session.read().unwrap().transcript.iter().any(
+        engine.session.read().transcript.iter().any(
             |m| matches!(m, OrcMsg::Orc { text, .. } if text == "收到子会话完成，继续下一阶段")
         ),
         "注入消息应触发编排补跑一轮处理"

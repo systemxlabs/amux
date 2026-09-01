@@ -8,9 +8,10 @@
 //! 背压链：连接出站 mpsc 满 → 输出泵停 → 读线程阻塞 → PTY 内核缓冲填满 →
 //! shell 的 write 阻塞。全程无丢弃，与终端语义一致。
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use base64::Engine as _;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -144,7 +145,7 @@ impl TerminalService {
             })
             .map_err(|e| RpcError::internal(format!("输出线程启动失败: {e}")))?;
 
-        self.terminals.lock().unwrap().insert(
+        self.terminals.lock().insert(
             terminal_id.clone(),
             TerminalHandle {
                 conn_id: conn.conn_id,
@@ -208,7 +209,6 @@ impl TerminalService {
         let handle = self
             .terminals
             .lock()
-            .unwrap()
             .get(&params.terminal_id)
             .cloned()
             .ok_or_else(not_found)?;
@@ -221,7 +221,6 @@ impl TerminalService {
         let handle = self
             .terminals
             .lock()
-            .unwrap()
             .get(&params.terminal_id)
             .cloned()
             .ok_or_else(not_found)?;
@@ -231,7 +230,6 @@ impl TerminalService {
         let resized = handle
             .master
             .lock()
-            .unwrap()
             .resize(PtySize {
                 rows: params.rows,
                 cols: params.cols,
@@ -246,7 +244,7 @@ impl TerminalService {
     /// 先校验归属再摘除：反向顺序会让越权请求把别人的终端从注册表里顺走。
     pub fn close(&self, params: TerminalIdParams, conn_id: u64) -> Result<(), RpcError> {
         {
-            let map = self.terminals.lock().unwrap();
+            let map = self.terminals.lock();
             let handle = map.get(&params.terminal_id).ok_or_else(not_found)?;
             if handle.conn_id != conn_id {
                 return Err(not_found());
@@ -255,10 +253,9 @@ impl TerminalService {
         let handle = self
             .terminals
             .lock()
-            .unwrap()
             .remove(&params.terminal_id)
             .ok_or_else(not_found)?;
-        handle.killer.lock().unwrap().kill().ok();
+        handle.killer.lock().kill().ok();
         log::info!("终端 {} 已关闭（连接 {}）", params.terminal_id, conn_id);
         Ok(())
     }
@@ -268,14 +265,13 @@ impl TerminalService {
         let victims: Vec<_> = self
             .terminals
             .lock()
-            .unwrap()
             .iter()
             .filter(|(_, h)| h.conn_id == conn_id)
             .map(|(id, _)| id.clone())
             .collect();
         for id in victims {
-            if let Some(h) = self.terminals.lock().unwrap().remove(&id) {
-                h.killer.lock().unwrap().kill().ok();
+            if let Some(h) = self.terminals.lock().remove(&id) {
+                h.killer.lock().kill().ok();
                 log::info!("终端 {id} 随连接 {conn_id} 断开释放");
             }
         }
@@ -283,7 +279,7 @@ impl TerminalService {
 
     /// 摘除终端条目（进程已退出路径；无连接校验——exit 通知已发给所属连接）。
     fn remove(&self, terminal_id: &str) {
-        self.terminals.lock().unwrap().remove(terminal_id);
+        self.terminals.lock().remove(terminal_id);
     }
 }
 

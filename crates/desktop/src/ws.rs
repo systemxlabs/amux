@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use parking_lot::Mutex;
+
 use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -22,16 +24,15 @@ use protocol::OpResult;
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 /// 全部活跃连接的关闭信号，应用退出时统一触发，确保连接确定性关闭。
-static CLOSE_SIGNALS: OnceLock<std::sync::Mutex<Vec<tokio::sync::watch::Sender<bool>>>> =
-    OnceLock::new();
+static CLOSE_SIGNALS: OnceLock<Mutex<Vec<tokio::sync::watch::Sender<bool>>>> = OnceLock::new();
 
-fn close_signals() -> &'static std::sync::Mutex<Vec<tokio::sync::watch::Sender<bool>>> {
-    CLOSE_SIGNALS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+fn close_signals() -> &'static Mutex<Vec<tokio::sync::watch::Sender<bool>>> {
+    CLOSE_SIGNALS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// 关闭全部 WS 连接（幂等；on_app_quit 钩子调用）。
 pub fn close_all() {
-    let mut signals = close_signals().lock().unwrap();
+    let mut signals = close_signals().lock();
     for tx in signals.drain(..) {
         let _ = tx.send(true);
     }
@@ -91,7 +92,7 @@ impl WsClient {
         let (req_tx, req_rx) = mpsc::channel::<ClientReq>(64);
         let (notify_tx, _) = broadcast::channel::<Notification>(256);
         let (close_tx, close_rx) = tokio::sync::watch::channel(false);
-        close_signals().lock().unwrap().push(close_tx);
+        close_signals().lock().push(close_tx);
         let notify_for_task = notify_tx.clone();
         rt().spawn(run_loop(url, token, req_rx, close_rx, notify_for_task));
         WsClient { req_tx, notify_tx }

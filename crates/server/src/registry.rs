@@ -5,8 +5,8 @@
 //! 会话仅能经 server 创建（session.new），注册表由构造完整；
 //! agent 侧存在但注册表未知的旧会话不出现（不列出、不打开、不回填）。
 
+use parking_lot::{Mutex, MutexGuard};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use protocol::{SessionMeta, SessionState};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
@@ -50,12 +50,8 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
 }
 
 impl SessionRegistry {
-    fn connection(&self) -> rusqlite::Result<MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|_| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                "session registry mutex poisoned",
-            )))
-        })
+    fn connection(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock()
     }
 
     /// 打开（或创建）注册表数据库；建表幂等。
@@ -94,7 +90,7 @@ impl SessionRegistry {
 
     /// 插入或更新会话元数据（create / 标题 / 状态 / 时间戳更新均走这里）。
     pub fn upsert(&self, meta: &SessionMeta, agent_session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         conn.execute(
             "INSERT INTO sessions
                 (id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size)
@@ -124,7 +120,7 @@ impl SessionRegistry {
 
     /// 按 server 会话 id 取条目（含 agent 侧会话 id）。
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<RegistryEntry>> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size
              FROM sessions WHERE id = ?1",
@@ -134,7 +130,7 @@ impl SessionRegistry {
 
     /// 全部条目，按最近活跃（last_active_at）降序——惰性分页的上游数据。
     pub fn list(&self) -> rusqlite::Result<Vec<RegistryEntry>> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size
              FROM sessions ORDER BY last_active_at DESC, id DESC",
@@ -145,7 +141,7 @@ impl SessionRegistry {
 
     /// 删除条目；返回是否存在。
     pub fn delete(&self, id: &str) -> rusqlite::Result<bool> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         let n = conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         Ok(n > 0)
     }
@@ -157,7 +153,7 @@ impl SessionRegistry {
         state: SessionState,
         last_active_at: u64,
     ) -> rusqlite::Result<()> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         conn.execute(
             "UPDATE sessions SET state = ?1, last_active_at = ?2 WHERE id = ?3",
             params![state.as_str(), last_active_at as i64, id],
@@ -167,7 +163,7 @@ impl SessionRegistry {
 
     /// 更新标题与最近活跃时间。
     pub fn set_title(&self, id: &str, title: &str, last_active_at: u64) -> rusqlite::Result<()> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         conn.execute(
             "UPDATE sessions SET title = ?1, last_active_at = ?2 WHERE id = ?3",
             params![title, last_active_at as i64, id],
@@ -178,7 +174,7 @@ impl SessionRegistry {
     /// 回填 agent 侧会话 id：创建会话时未与 ACP 交互（agent 侧会话延后到首次
     /// prompt 懒创建），首次 prompt 时经 `session/new` 拿到 id 后写入。
     pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         conn.execute(
             "UPDATE sessions SET agent_session_id = ?1 WHERE id = ?2",
             params![agent_session_id, id],
@@ -194,7 +190,7 @@ impl SessionRegistry {
         context_size: u64,
         context_window_size: u64,
     ) -> rusqlite::Result<()> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         conn.execute(
             "UPDATE sessions SET context_size = ?1, context_window_size = ?2 WHERE id = ?3",
             params![context_size as i64, context_window_size as i64, id],
@@ -205,7 +201,7 @@ impl SessionRegistry {
     /// 清空会话的 worktree 目录（worktree 被自动清理后回退为原始工作目录，
     /// 避免 workspace RPC / prompt 指向已不存在的目录）。
     pub fn clear_worktree_dir(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         conn.execute("UPDATE sessions SET worktree_dir = '' WHERE id = ?1", [id])?;
         Ok(())
     }
@@ -218,7 +214,7 @@ impl SessionRegistry {
         now: u64,
         idle_timeout_ms: u64,
     ) -> rusqlite::Result<Vec<(String, String, String)>> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, cwd, worktree_dir, last_active_at FROM sessions
              WHERE state = 'idle' AND worktree_dir != ''",
@@ -241,7 +237,7 @@ impl SessionRegistry {
 
     /// server 启动时把异常退出残留的 Busy 会话重置为 Idle（无对应运行中 agent）。
     pub fn reset_busy_to_idle(&self) -> rusqlite::Result<usize> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         let n = conn.execute(
             "UPDATE sessions SET state = 'idle' WHERE state = 'busy'",
             [],
@@ -255,7 +251,7 @@ impl SessionRegistry {
         now: u64,
         idle_timeout_ms: u64,
     ) -> rusqlite::Result<Vec<(String, u64)>> {
-        let conn = self.connection()?;
+        let conn = self.connection();
         let mut stmt =
             conn.prepare("SELECT id, last_active_at FROM sessions WHERE state = 'idle'")?;
         let rows = stmt.query_map([], |row| {

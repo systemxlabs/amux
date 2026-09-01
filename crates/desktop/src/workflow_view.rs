@@ -310,7 +310,7 @@ impl AmuxApp {
             .workflow_idx(wf_id)
             .and_then(|wi| self.workflows.get_mut(wi))
         {
-            wf.session.write().unwrap().title = title.trim().to_string();
+            wf.session.write().title = title.trim().to_string();
             wf.persist_in_background(self.data_dir.clone());
         }
         self.renaming_workflow = None;

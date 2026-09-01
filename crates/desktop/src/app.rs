@@ -654,14 +654,11 @@ impl AmuxApp {
             }
         }
 
-        let Some(wi) = this.workflows.iter().position(|wf| {
-            wf.session
-                .read()
-                .unwrap()
-                .children
-                .iter()
-                .any(|c| c.id == sid)
-        }) else {
+        let Some(wi) = this
+            .workflows
+            .iter()
+            .position(|wf| wf.session.read().children.iter().any(|c| c.id == sid))
+        else {
             return;
         };
         // 取消导致的状态变更不注入，避免编排者与用户的取消拉锯。

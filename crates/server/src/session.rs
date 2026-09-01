@@ -9,10 +9,11 @@
 //!   会话只经 `session/close` 关闭并保留 server 历史
 //! - 对话历史与活动历史落 `data_dir/sessions/<id>_history.jsonl` / `<id>_activities.jsonl`
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::broadcast;
@@ -173,7 +174,7 @@ impl SessionManager {
     }
 
     fn control(&self, session_id: &str) -> Arc<SessionControl> {
-        let mut controls = self.controls.lock().unwrap();
+        let mut controls = self.controls.lock();
         controls
             .entry(session_id.to_string())
             .or_insert_with(|| {
@@ -213,7 +214,6 @@ impl SessionManager {
     fn store_config_options(&self, session_id: &str, options: Vec<protocol::SessionConfigOption>) {
         self.config_options
             .lock()
-            .unwrap()
             .insert(session_id.to_string(), options);
     }
 
@@ -358,8 +358,8 @@ impl SessionManager {
 
         // 控制块出 map：进行中的 prompt 持有 Arc 克隆仍能看到 deleted 标志；
         // 新请求将得到全新（未删除）的控制块——但会话已不在注册表，NotFound 兜底。
-        self.controls.lock().unwrap().remove(session_id);
-        self.config_options.lock().unwrap().remove(session_id);
+        self.controls.lock().remove(session_id);
+        self.config_options.lock().remove(session_id);
         log::info!("删除会话 {session_id}");
         Ok(())
     }
@@ -430,7 +430,7 @@ impl SessionManager {
                     if let Ok(()) = self.registry.set_agent_session_id(&sid, "") {
                         // agent 侧会话已关闭，内存中的会话选项随之失效；
                         // 下次交互惰性重建时以 Agent 侧数据重新覆盖
-                        self.config_options.lock().unwrap().remove(&sid);
+                        self.config_options.lock().remove(&sid);
                         closed += 1;
                     }
                 }
@@ -528,7 +528,7 @@ impl SessionManager {
         err_ctx: &str,
     ) -> Result<Arc<Vec<T>>, SessionError> {
         let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let mut cache = cache.lock().unwrap();
+        let mut cache = cache.lock();
         if let Some(c) = cache.get(session_id) {
             if c.source_len == file_len {
                 return Ok(c.items.clone());
@@ -550,8 +550,8 @@ impl SessionManager {
 
     /// 追加后失效缓存（下次读取重新解析一次，之后恢复命中）。
     fn invalidate_log_caches(&self, session_id: &str) {
-        self.history_cache.lock().unwrap().remove(session_id);
-        self.activities_cache.lock().unwrap().remove(session_id);
+        self.history_cache.lock().remove(session_id);
+        self.activities_cache.lock().remove(session_id);
     }
 
     /// 查询正在进行中的活动；无则 None。
@@ -560,7 +560,7 @@ impl SessionManager {
         session_id: &str,
     ) -> Result<Option<Activity>, SessionError> {
         self.get_entry(session_id)?;
-        Ok(self.ongoing.lock().unwrap().get(session_id).cloned())
+        Ok(self.ongoing.lock().get(session_id).cloned())
     }
 
     /// 发送指令：busy 检查 → 首条生成标题 → 惰性创建
@@ -753,7 +753,7 @@ impl SessionManager {
                     // 最新一段，落盘的历史活动（merger 累积）反而更全，行为不一致。
                     let ts = now();
                     let (accumulated, first_ts) = {
-                        let mut buf = self.thinking_buf.lock().unwrap();
+                        let mut buf = self.thinking_buf.lock();
                         let entry = buf
                             .entry(session_id.to_string())
                             .or_insert_with(|| (String::new(), ts));
@@ -763,7 +763,7 @@ impl SessionManager {
                         entry.0.push_str(&text);
                         (entry.0.clone(), entry.1)
                     };
-                    self.ongoing.lock().unwrap().insert(
+                    self.ongoing.lock().insert(
                         session_id.to_string(),
                         Activity::Thinking {
                             timestamp: first_ts,
@@ -784,7 +784,7 @@ impl SessionManager {
                         content.clone(),
                         now(),
                     );
-                    self.ongoing.lock().unwrap().insert(
+                    self.ongoing.lock().insert(
                         session_id.to_string(),
                         Activity::ToolCall {
                             timestamp: now(),
@@ -870,7 +870,7 @@ impl SessionManager {
             log::error!("活动落盘失败 {session_id}: {e}");
             return Err(SessionError::Storage(format!("活动落盘失败: {e}")));
         }
-        self.activities_cache.lock().unwrap().remove(session_id);
+        self.activities_cache.lock().remove(session_id);
         Ok(())
     }
 
@@ -883,8 +883,8 @@ impl SessionManager {
         deleted: bool,
         reason: protocol::StateChangeReason,
     ) {
-        self.ongoing.lock().unwrap().remove(session_id);
-        self.thinking_buf.lock().unwrap().remove(session_id);
+        self.ongoing.lock().remove(session_id);
+        self.thinking_buf.lock().remove(session_id);
         control.busy.store(false, Ordering::SeqCst);
         if !deleted {
             if let Err(e) = self
@@ -950,7 +950,6 @@ impl SessionManager {
     fn current_config_options(&self, session_id: &str) -> Vec<protocol::SessionConfigOption> {
         self.config_options
             .lock()
-            .unwrap()
             .get(session_id)
             .cloned()
             .unwrap_or_default()
@@ -1456,7 +1455,7 @@ mod tests {
     /// 测试驱动：持有会话配置选项，`set_config_option` 按 config_id 更新并返回完整集合
     /// （验证会话选项查询/设置 → 内存记录的链路）。
     struct ConfigDriver {
-        options: std::sync::Mutex<Vec<protocol::SessionConfigOption>>,
+        options: Mutex<Vec<protocol::SessionConfigOption>>,
     }
 
     impl AgentDriver for ConfigDriver {
@@ -1464,7 +1463,7 @@ mod tests {
             &self,
             _cwd: &str,
         ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-            Ok(("agent_cfg".into(), self.options.lock().unwrap().clone()))
+            Ok(("agent_cfg".into(), self.options.lock().clone()))
         }
 
         fn resume_session(
@@ -1472,7 +1471,7 @@ mod tests {
             _agent_session_id: &str,
             _cwd: &str,
         ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(self.options.lock().unwrap().clone())
+            Ok(self.options.lock().clone())
         }
 
         fn prompt(
@@ -1509,7 +1508,7 @@ mod tests {
             config_id: &str,
             value: protocol::SessionConfigOptionValue,
         ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            let mut options = self.options.lock().unwrap();
+            let mut options = self.options.lock();
             for opt in options.iter_mut() {
                 if opt.id != config_id {
                     continue;
@@ -1558,7 +1557,7 @@ mod tests {
         let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
             "codex",
             Arc::new(ConfigDriver {
-                options: std::sync::Mutex::new(opts.clone()),
+                options: Mutex::new(opts.clone()),
             }),
         ));
         let dir = std::env::temp_dir().join(format!(
