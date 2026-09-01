@@ -2181,27 +2181,23 @@ impl AmuxApp {
     ) -> gpui::AnyElement {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut activities_has_more = false;
-        match &self.selected {
-            Some(Selected::Session { machine, id }) => {
-                let view = self.machine(*machine).and_then(|m| m.views.get(id));
-                let activities = view.map(|v| v.activities.clone()).unwrap_or_default();
-                activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
-                rows = activities
+        if let Some((machine, id)) = self.open_session_target() {
+            let view = self.machine(machine).and_then(|m| m.views.get(&id));
+            let activities = view.map(|v| v.activities.clone()).unwrap_or_default();
+            activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
+            rows = activities
+                .iter()
+                .map(|a| self.activity_row("act", a, cx))
+                .collect();
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            if let Some(wf) = self.workflow(id) {
+                let sg = wf.snapshot();
+                rows = sg
+                    .activities
                     .iter()
-                    .map(|a| self.activity_row("act", a, cx))
+                    .map(|a| self.activity_row("wf-act", a, cx))
                     .collect();
             }
-            Some(Selected::Workflow { id }) => {
-                if let Some(wf) = self.workflow(id) {
-                    let sg = wf.snapshot();
-                    rows = sg
-                        .activities
-                        .iter()
-                        .map(|a| self.activity_row("wf-act", a, cx))
-                        .collect();
-                }
-            }
-            _ => {}
         }
         let total = rows.len();
         let start = if activities_has_more {
