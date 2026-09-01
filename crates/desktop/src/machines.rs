@@ -118,6 +118,38 @@ impl AmuxApp {
         .detach();
     }
 
+    fn run_agent_action<P, F>(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine: usize,
+        method: &'static str,
+        params: Option<P>,
+        error_message: F,
+    ) where
+        P: serde::Serialize + 'static,
+        F: FnOnce(String) -> String + 'static,
+    {
+        let Some(m) = self.machine(machine) else {
+            return;
+        };
+        let client = m.client.clone();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let result = client.request_ok(method, params).await;
+            let notice = result.err().map(|error| error_message(error.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(notice) = notice {
+                    if let Some(m) = this.machines.get_mut(machine) {
+                        m.notice = Some(notice);
+                    }
+                }
+                this.fetch_agents(machine, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn restart_agent(
         &self,
         window: &mut Window,
@@ -125,27 +157,15 @@ impl AmuxApp {
         machine: usize,
         agent: String,
     ) {
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        let client = m.client.clone();
-        let params = AgentParams {
-            agent: agent.clone(),
-        };
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let res = client
-                .request_ok(protocol::method::AGENT_RESTART, Some(params))
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                // 重启失败要可见（机器卡片 notice），否则用户无从感知
-                if let (Err(e), Some(m)) = (&res, this.machines.get_mut(machine)) {
-                    m.notice = Some(format!("agent「{agent}」重启失败：{e}"));
-                }
-                this.fetch_agents(machine, window, cx);
-                cx.notify();
-            });
-        })
-        .detach();
+        let notice_agent = agent.clone();
+        self.run_agent_action(
+            window,
+            cx,
+            machine,
+            protocol::method::AGENT_RESTART,
+            Some(AgentParams { agent }),
+            move |error| format!("agent「{}」重启失败：{}", notice_agent, error),
+        );
     }
 
     /// 重新发现机器上的 agents（`agent.rediscover`）：server 重扫本机并拉起
@@ -156,24 +176,14 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         machine: usize,
     ) {
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let res = client
-                .request_ok::<()>(protocol::method::AGENT_REDISCOVER, None)
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                // 失败要可见（机器卡片 notice），否则用户无从感知
-                if let (Err(e), Some(m)) = (&res, this.machines.get_mut(machine)) {
-                    m.notice = Some(format!("重新发现 agents 失败：{e}"));
-                }
-                this.fetch_agents(machine, window, cx);
-                cx.notify();
-            });
-        })
-        .detach();
+        self.run_agent_action(
+            window,
+            cx,
+            machine,
+            protocol::method::AGENT_REDISCOVER,
+            None::<()>,
+            |error| format!("重新发现 agents 失败：{}", error),
+        );
     }
 
     pub(crate) fn confirm_rediscover_agents(
