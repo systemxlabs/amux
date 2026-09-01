@@ -168,7 +168,7 @@ fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
     }
 }
 
-fn write_typed<T: serde::Serialize>(path: &Path, value: &T) {
+fn write_atomic<T: serde::Serialize>(path: &Path, value: &T) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -203,7 +203,7 @@ impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollecti
         let mut items = self.list();
         items.retain(|x| (self.key)(x) != key);
         items.push(item);
-        write_typed(self.path.as_ref(), &items);
+        write_atomic(self.path.as_ref(), &items);
     }
 
     fn update(&self, key: &str, mutate: impl FnOnce(&mut T)) {
@@ -211,7 +211,7 @@ impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollecti
         if let Some(x) = items.iter_mut().find(|x| (self.key)(x) == key) {
             mutate(x);
         }
-        write_typed(self.path.as_ref(), &items);
+        write_atomic(self.path.as_ref(), &items);
     }
 
     fn remove(&self, key: &str) {
@@ -220,7 +220,7 @@ impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollecti
             .into_iter()
             .filter(|x| (self.key)(x) != key)
             .collect::<Vec<_>>();
-        write_typed(self.path.as_ref(), &items);
+        write_atomic(self.path.as_ref(), &items);
     }
 }
 
@@ -245,19 +245,6 @@ fn read_file_normalized<T: Clone>(
         }
     };
     parse(&value)
-}
-
-fn write_file(path: &Path, json: &serde_json::Value) {
-    let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(json).map_err(std::io::Error::other)?;
-        std::fs::write(path, content)
-    })();
-    if let Err(error) = result {
-        log::error!("写入配置文件失败 {}: {error}", path.display());
-    }
 }
 
 /// 配置仓库：按文件读写拆分的本地数据（数据目录可注入）。
@@ -288,10 +275,7 @@ impl ConfigStore {
             token: token.to_string(),
         };
         machines.push(m.clone());
-        write_file(
-            &self.path("machines.json"),
-            &serde_json::to_value(machines).unwrap(),
-        );
+        write_atomic(&self.path("machines.json"), &machines);
         m
     }
 
@@ -301,10 +285,7 @@ impl ConfigStore {
             .into_iter()
             .filter(|m| m.name != name)
             .collect();
-        write_file(
-            &self.path("machines.json"),
-            &serde_json::to_value(machines).unwrap(),
-        );
+        write_atomic(&self.path("machines.json"), &machines);
     }
 
     fn quick_commands(&self) -> JsonCollection<'_, QuickCommand> {
@@ -410,10 +391,7 @@ impl ConfigStore {
         let ws = self.recent_workspaces();
         // 直接写合并结果（不再读回，防止并发覆盖）
         let merged = merge_recent_workspace(&ws, machine, workspace, now, MAX_RECENT_WORKSPACES);
-        write_file(
-            &self.path("recent_workspaces.json"),
-            &serde_json::to_value(&merged).unwrap(),
-        );
+        write_atomic(&self.path("recent_workspaces.json"), &merged);
     }
 
     pub fn orchestrator(&self) -> OrchestratorConfig {
