@@ -438,10 +438,8 @@ impl WorkflowEngine {
     }
 
     async fn do_advance(&self) -> Result<(), String> {
-        self.record_activity(Activity::Thinking {
-            timestamp: now(),
-            content: "编排智能体正在分析工作流并规划本轮调度".into(),
-        });
+        // 不构造活动占位：实时活动只记录真实进展（模型 reasoning、
+        // 调度工具调用），由工具循环经 record_tool_activity 上报
         let ctx = self.build_context();
         let decision = match self.backend.decide(&ctx).await {
             Ok(d) => d,
