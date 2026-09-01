@@ -1078,22 +1078,22 @@ impl AmuxApp {
     }
 
     pub fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let dialog: Vec<DialogMsg> = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.views.get(id))
+        let dialog: Vec<DialogMsg> = if let Some((machine, id)) = self.open_session_target() {
+            self.machine(machine)
+                .and_then(|m| m.views.get(&id))
                 .map(|v| v.dialog.clone())
-                .unwrap_or_default(),
-            Some(Selected::Workflow { id }) => self
-                .workflow(id)
+                .unwrap_or_default()
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            self.workflow(id)
                 .map(|w| {
                     let sg = w.snapshot();
                     let all = sg.to_dialog();
                     let start = all.len().saturating_sub(self.workflow_dialog_limit);
                     all[start..].to_vec()
                 })
-                .unwrap_or_default(),
-            None => Vec::new(),
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
         let agent_label: SharedString = if let Some((machine, id)) = self.open_session_target() {
             self.machine(machine)
