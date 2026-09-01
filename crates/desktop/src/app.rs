@@ -748,11 +748,23 @@ impl AmuxApp {
                 .update_in(cx, |this, _w, _cx| this.open_session_target())
                 .ok()
                 .flatten();
-            if let Some((machine, id)) = target {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.refresh_ongoing(window, cx, machine, id);
-                    cx.notify();
-                });
+            match target {
+                Some((machine, id)) => {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.refresh_ongoing(window, cx, machine, id);
+                        cx.notify();
+                    });
+                }
+                None => {
+                    // 工作流实时活动条以引擎「进行中活动」槽为数据源（内存即
+                    // 数据），打开工作流会话时按实时活动刷新周期触发重渲染
+                    //（docs/DESIGN.md「实时活动刷新机制为每隔 2s 刷新一次」）
+                    let _ = this.update_in(cx, |this, _w, cx| {
+                        if matches!(this.selected, Some(Selected::Workflow { .. })) {
+                            cx.notify();
+                        }
+                    });
+                }
             }
             cx.background_executor().timer(Duration::from_secs(2)).await;
         });

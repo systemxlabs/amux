@@ -203,6 +203,9 @@ pub struct OrcContext {
     /// 编排输出草稿：流式文本实时进入对话流（docs/DESIGN.md「流式输出合并后写入」）；
     /// 引擎在整轮结束后据此判断 backend 是否已自行提交输出，避免重复推送。
     pub draft: Arc<OrcDraft>,
+    /// 进行中实时活动槽（见 `WorkflowEngine.current_activity`）：工具循环写入，
+    /// 动作结束即清除。
+    pub current: Arc<Mutex<Option<Activity>>>,
 }
 
 /// 编排输出草稿：turn 期间流式文本先以一条 evolving 的编排消息写入
@@ -341,6 +344,10 @@ pub struct WorkflowEngine {
     /// 活动实时落盘目录：活动产生即追加写 `<data_dir>/sessions/<id>_activities.jsonl`，
     /// 不等 `persist` 整文件快照。
     data_dir: PathBuf,
+    /// 编排智能体正在进行的实时活动（进行中才有）：流式思考增量、执行中的
+    /// 工具调用。动作结束即清除——历史活动不充当实时展示（修复工具执行
+    /// 完毕后实时活动条一直展示）。与 `OrcContext.current` 是同一个 Arc。
+    current_activity: Arc<Mutex<Option<Activity>>>,
 }
 
 impl WorkflowEngine {
@@ -384,6 +391,7 @@ impl WorkflowEngine {
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
             busy_children: Arc::new(Mutex::new(0)),
             data_dir: data_dir.to_path_buf(),
+            current_activity: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -411,6 +419,7 @@ impl WorkflowEngine {
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
             busy_children: Arc::new(Mutex::new(0)),
             data_dir: data_dir.to_path_buf(),
+            current_activity: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -453,6 +462,21 @@ impl WorkflowEngine {
     /// 会话快照（仅读字段的克隆；调用方需持有 RwLock 语义）。
     pub fn snapshot(&self) -> OrcSession {
         self.session.read().expect("RwLock 中毒").clone()
+    }
+
+    /// 编排智能体正在进行的实时活动（无进行中动作即 None）。
+    pub fn current_activity(&self) -> Option<Activity> {
+        self.current_activity
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .clone()
+    }
+
+    fn clear_current_activity(&self) {
+        *self
+            .current_activity
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）") = None;
     }
 
     /// 记录一条活动并实时追加落盘（不依赖 `persist` 的整文件快照）。
@@ -520,12 +544,15 @@ impl WorkflowEngine {
     }
 
     async fn do_advance(&self) -> Result<(), String> {
+        // 清残留：上一 turn 的进行中活动不应延续到新 turn
+        self.clear_current_activity();
         // 不构造活动占位：实时活动只记录真实进展（模型 reasoning、
         // 调度工具调用），由工具循环经 record_tool_activity 上报
         let ctx = self.build_context();
         let decision = match self.backend.decide(&ctx).await {
             Ok(d) => d,
             Err(e) => {
+                self.clear_current_activity();
                 self.record_activity(Activity::Error {
                     timestamp: now(),
                     detail: format!("编排 agent 调用失败：{e}"),
@@ -533,6 +560,8 @@ impl WorkflowEngine {
                 return Err(e);
             }
         };
+        // turn 结束即无进行中动作（关联会话仍工作时实时活动条为空）
+        self.clear_current_activity();
         // 编排输出直接进对话流：流式输出已由工具循环经草稿消息实时写入
         // （含静默/收尾兜底文案），这里只补推未经流式路径的后端输出
         // （如测试用 FakeBackend）；完成与否由编排智能体判断，而非引擎状态位
@@ -586,6 +615,7 @@ impl WorkflowEngine {
             persist_on_child_mounted,
             steer_inbox: Arc::clone(&self.steer_inbox),
             draft: Arc::new(OrcDraft::new(Arc::clone(&self.session))),
+            current: Arc::clone(&self.current_activity),
         }
     }
 
@@ -854,6 +884,8 @@ struct LiveRuntime {
     activities: Arc<Mutex<Vec<Activity>>>,
     /// 编排输出草稿（见 `OrcContext.draft`）：流式文本实时进 transcript
     draft: Arc<OrcDraft>,
+    /// 进行中实时活动槽（见 `OrcContext.current`）
+    current: Arc<Mutex<Option<Activity>>>,
 }
 
 impl LiveRuntime {
@@ -911,6 +943,44 @@ impl LiveRuntime {
                 title: Some(title.into()),
                 content: Some(content.into()),
             });
+    }
+
+    /// 进行中实时活动：思考中（流式增量即更新；非思考态则新建）。
+    fn set_thinking(&self, delta: &str) {
+        let mut cur = self
+            .current
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）");
+        match &mut *cur {
+            Some(Activity::Thinking { content, .. }) => content.push_str(delta),
+            _ => {
+                *cur = Some(Activity::Thinking {
+                    timestamp: now(),
+                    content: delta.to_string(),
+                });
+            }
+        }
+    }
+
+    /// 进行中实时活动：工具执行中（执行完毕由调用方清除）。
+    fn set_tool(&self, name: &str, args: &serde_json::Value) {
+        *self
+            .current
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）") = Some(Activity::ToolCall {
+            timestamp: now(),
+            name: name.to_string(),
+            title: Some(one_line_summary(args)),
+            content: None,
+        });
+    }
+
+    /// 进行中动作结束（成功或失败）。
+    fn clear_current(&self) {
+        *self
+            .current
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）") = None;
     }
 }
 //
@@ -1103,6 +1173,8 @@ where
             match resp.next().await {
                 Some(Ok(StreamedAssistantContent::Text(t))) => live.draft.append(&t.text),
                 Some(Ok(StreamedAssistantContent::ReasoningDelta { id, reasoning, .. })) => {
+                    // 实时活动：思考中，增量即更新
+                    live.set_thinking(&reasoning);
                     match reasoning_parts.iter_mut().find(|(i, _)| *i == id) {
                         Some((_, acc)) => acc.push_str(&reasoning),
                         None => reasoning_parts.push((id, reasoning)),
@@ -1112,6 +1184,7 @@ where
                     // 完整事件取代同 part 已累积的增量（rig 聚合语义）
                     reasoning_parts.retain(|(i, _)| *i != id);
                     record_reasoning(live, &reasoning);
+                    live.clear_current();
                 }
                 // 工具调用等聚合进 choice，流结束后统一处理
                 Some(Ok(_)) => {}
@@ -1133,6 +1206,7 @@ where
                 }
             }
         }
+        live.clear_current();
         let text = assistant_text(&resp.choice);
         let calls: Vec<ToolCall> = resp
             .choice
@@ -1277,6 +1351,7 @@ impl OrcBackend for RigBackend {
                 record_tool_activity: ctx.record_tool_activity.clone(),
                 activities: Arc::new(Mutex::new(Vec::new())),
                 draft: Arc::clone(&ctx.draft),
+                current: Arc::clone(&ctx.current),
             };
             preamble.push_str("\n\n【工作流执行计划】\n");
             preamble.push_str(ctx.plan.trim());
@@ -1451,7 +1526,10 @@ async fn dispatch_tool(
             content: None,
         });
     }
-    match name {
+    // 实时活动条只展示执行中的工具；执行完毕（成功或失败）即清除，
+    // 不让已完成的历史活动继续转圈
+    live.set_tool(name, &args);
+    let result = match name {
         "list_agents" => list_agents(live).await,
         "list_sessions" => list_sessions(live).await,
         "create_session" => create_session(live, parse_args(name, args)?).await,
@@ -1474,7 +1552,9 @@ async fn dispatch_tool(
             .await
         }
         other => Err(format!("未知工具: {other}")),
-    }
+    };
+    live.clear_current();
+    result
 }
 
 fn parse_args<T: serde::de::DeserializeOwned>(
@@ -1790,6 +1870,7 @@ mod tests {
             persist_on_child_mounted: None,
             record_tool_activity: None,
             activities: Arc::new(Mutex::new(Vec::new())),
+            current: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1850,6 +1931,7 @@ mod tests {
             })),
             record_tool_activity: None,
             activities: Arc::new(Mutex::new(Vec::new())),
+            current: Arc::new(Mutex::new(None)),
         };
         live.mount_child(ChildSession {
             id: "s_child".into(),
@@ -2645,6 +2727,125 @@ mod tests {
             *seen.lock().unwrap(),
             vec!["思考第一步".to_string()],
             "reasoning 增量应合并为一条 thinking 活动"
+        );
+        assert!(
+            live.current.lock().unwrap().is_none(),
+            "思考结束（流结束）后进行中活动应清除"
+        );
+    }
+
+    /// 思考增量实时更新进行中活动槽（part 结束由流处理清除）。
+    #[test]
+    fn thinking_deltas_update_current_activity() {
+        let live = test_live();
+        live.set_thinking("想");
+        live.set_thinking("法");
+        assert!(matches!(
+            &*live.current.lock().unwrap(),
+            Some(Activity::Thinking { content, .. }) if content == "想法"
+        ));
+        live.clear_current();
+        assert!(live.current.lock().unwrap().is_none());
+    }
+
+    /// 工具执行期间实时活动槽应展示执行中的工具，执行完毕（即使失败）即清除——
+    /// 历史活动不充当实时展示（回归：工具执行完毕后实时活动条一直转圈）。
+    /// 用假 WS server（auth 后不回包）使 prompt_session 悬在执行中，确定性观察。
+    #[tokio::test]
+    async fn tool_in_progress_shows_current_activity_then_clears() {
+        use futures_util::SinkExt as _;
+        // 与 rig Message 重名，改用别名
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // 第一帧 auth：回认证成功；之后的业务请求一律不回包，使请求悬在进行中
+            if let Some(Ok(WsMessage::Text(t))) = ws.next().await {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": v["id"].as_u64().unwrap(),
+                    "result": { "ok": true }
+                });
+                let _ = ws.send(WsMessage::text(resp.to_string())).await;
+            }
+            // 持续读取保持连接，不回包
+            while ws.next().await.is_some() {}
+        });
+
+        let mut live = test_live();
+        let client = WsClient::connect_with_token(format!("ws://{addr}"), "unused".into());
+        // 客户端认证完成前发出的业务请求会被立即拒绝（AUTH_FAILED），先等
+        // auth_ok 再触发工具调用，使请求真正悬在执行中
+        let mut auth_rx = client.subscribe();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), auth_rx.recv())
+                .await
+            {
+                Ok(Ok(n)) if n.method == "auth_ok" => break,
+                Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(_)) => panic!("客户端连接已关闭"),
+                Err(_) => assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "等待客户端认证超时"
+                ),
+            }
+        }
+        live.clients[0] = client;
+        live.mount_child(ChildSession {
+            id: "s_child".into(),
+            machine_idx: 0,
+            machine_name: "测试机".into(),
+        });
+        let model = MockCompletionModel::from_stream_turns([
+            vec![MockStreamEvent::tool_call(
+                "call_1",
+                "prompt_session",
+                serde_json::json!({ "session": "s_child", "prompt": "干" }),
+            )],
+            vec![MockStreamEvent::text("已下发")],
+        ]);
+        let inbox = Mutex::new(Vec::new());
+        let live_task = live.clone();
+        let task = tokio::spawn(async move {
+            run_tool_loop(
+                model,
+                "preamble",
+                vec![Message::user("计划")],
+                &inbox,
+                &live_task,
+            )
+            .await
+        });
+
+        // 工具悬在执行中：实时活动槽应展示执行中的 prompt_session
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let cur = live.current.lock().unwrap().clone();
+            if matches!(&cur, Some(Activity::ToolCall { name, .. }) if name == "prompt_session") {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "等待进行中实时活动超时"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // 断开连接：工具执行失败返回、循环继续；实时活动槽应清除
+        server.abort();
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, "已下发");
+        assert!(
+            live.current.lock().unwrap().is_none(),
+            "工具执行完毕实时活动应清除"
         );
     }
 

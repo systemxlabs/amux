@@ -1275,15 +1275,11 @@ impl AmuxApp {
                 .and_then(|m| m.views.get(id))
                 .and_then(|v| v.live.clone()),
             Some(Selected::Workflow { id }) => {
-                // 实时活动展示真实编排活动（docs/PRD.md）：取最近一条引擎
-                // 记录的活动（Thinking/工具调用均实时落盘），无构造占位。
-                // 仅工作中显示：空闲即无实时活动。
-                match self.workflow(id) {
-                    Some(wf) if wf.state() == SessionState::Busy => {
-                        wf.snapshot().activities.into_iter().next_back()
-                    }
-                    _ => None,
-                }
+                // 实时活动只展示编排智能体正在进行的动作（流式思考增量、
+                // 执行中的工具调用），动作结束即清除。历史活动不充当实时
+                // 展示（修复工具执行完毕后活动条一直转圈）；编排智能体
+                // 空闲而关联会话仍工作时，活动条为空。
+                self.workflow(id).and_then(|wf| wf.current_activity())
             }
             _ => None,
         };
