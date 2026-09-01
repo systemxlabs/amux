@@ -123,6 +123,24 @@ mod tests {
     }
 
     #[test]
+    fn atomic_write_replaces_existing_content_and_supports_empty_files() {
+        let dir = temp_dir();
+        let path = history_path(&dir, "s1");
+
+        write_jsonl_atomic(&path, &[1, 2]).unwrap();
+        assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![1, 2]);
+
+        write_jsonl_atomic(&path, &[3]).unwrap();
+        assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![3]);
+
+        write_jsonl_atomic::<u32>(&path, &[]).unwrap();
+        assert!(read_jsonl::<u32>(&path).unwrap().is_empty());
+        assert!(path.is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn corrupted_line_reports_line_number() {
         let dir = temp_dir();
         let path = activities_path(&dir, "s1");
