@@ -106,10 +106,7 @@ impl AmuxApp {
         let Some(m) = self.machine(machine) else {
             return;
         };
-        let Some(session_id) = self.selected.as_ref().and_then(|selected| match selected {
-            Selected::Session { id, .. } => Some(id.clone()),
-            Selected::Workflow { .. } => None,
-        }) else {
+        let Some(session_id) = self.open_session_target().map(|(_, id)| id) else {
             return;
         };
         let client = m.client.clone();
