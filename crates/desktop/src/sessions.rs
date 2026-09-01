@@ -943,11 +943,7 @@ impl AmuxApp {
         s: &SessionMeta,
     ) -> gpui::AnyElement {
         let sid = s.id.clone();
-        let sel = self.selected
-            == Some(Selected::Session {
-                machine,
-                id: sid.clone(),
-            });
+        let sel = self.is_selected_session(machine, &sid);
         let title = if s.title.is_empty() {
             format!("（未命名）{}", short_cwd(&s.cwd))
         } else {
