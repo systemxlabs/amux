@@ -3,8 +3,10 @@
 //!
 //! - `OrcSession`：工作流会话状态，可序列化持久化到 SQLite 和两份 JSONL 日志
 //! - `OrcBackend`：单 turn 决策器；真实实现 `RigBackend` 保留 rig provider 层，
-//!   循环自研（`run_tool_loop`）——请求 → 解析工具调用 → 执行 → 结果回填 →
-//!   drain steer 插话 → 再请求，使 steer 能在轮次边界真实注入
+//!   循环自研（`run_tool_loop`，参考 rig-agent 的流式运行时）——流式请求 →
+//!   文本增量实时进对话流、reasoning 增量合并为 thinking 活动 → 解析工具调用 →
+//!   执行 → 结果回填 → drain steer 插话 → 再流式请求，使 steer 能在轮次边界
+//!   真实注入，编排输出对用户实时可见
 //! - `WorkflowEngine`：状态机——首 turn 拆解计划并创建/复用关联普通会话下发指令；
 //!   关联普通会话 idle（`session.state_change` 通知驱动）触发自动推进
 //! - 会话操作统一经真实 WsClient（SESSION_NEW / SESSION_PROMPT / SESSION_CANCEL）
@@ -17,9 +19,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures_util::StreamExt;
 use rig_core::client::CompletionClient;
-use rig_core::completion::message::{ReasoningContent, ToolCall, ToolResultContent, UserContent};
+use rig_core::completion::message::{Reasoning, ReasoningContent, ToolCall, ToolResultContent, UserContent};
 use rig_core::completion::{AssistantContent, CompletionModel, Message};
+use rig_core::streaming::StreamedAssistantContent;
 
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +200,84 @@ pub struct OrcContext {
     /// 注入为 user 消息。
     /// 与 `WorkflowEngine.steer_inbox` 是同一个 Arc；advance 收尾的 absorb_steer 只兜底剩余项。
     pub steer_inbox: Arc<Mutex<Vec<String>>>,
+    /// 编排输出草稿：流式文本实时进入对话流（docs/DESIGN.md「流式输出合并后写入」）；
+    /// 引擎在整轮结束后据此判断 backend 是否已自行提交输出，避免重复推送。
+    pub draft: Arc<OrcDraft>,
+}
+
+/// 编排输出草稿：turn 期间流式文本先以一条 evolving 的编排消息写入
+/// transcript（GUI 定时刷新即可看到生成中的输出），整轮成功后原地保留
+/// （即最终输出），turn 失败则移除，不留半截文本。
+///
+/// transcript 在 turn 期间只增不删，草稿按下标定位自身消息；turn 期间
+/// 可能并发插入的只有用户消息（record_user/absorb_steer），不影响下标。
+pub struct OrcDraft {
+    session: Arc<RwLock<OrcSession>>,
+    slot: Mutex<Option<usize>>,
+}
+
+impl OrcDraft {
+    fn new(session: Arc<RwLock<OrcSession>>) -> Self {
+        OrcDraft {
+            session,
+            slot: Mutex::new(None),
+        }
+    }
+
+    /// 追加流式文本增量：首个增量创建草稿消息，后续追加到最后一条。
+    fn append(&self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let mut slot = self.slot.lock().expect("Mutex 中毒（临界区内不应 panic）");
+        let mut s = self.session.write().expect("RwLock 中毒");
+        match *slot {
+            Some(i) => {
+                if let Some(OrcMsg::Orc { text, .. }) = s.transcript.get_mut(i) {
+                    text.push_str(delta);
+                }
+            }
+            None => {
+                s.transcript.push(OrcMsg::Orc {
+                    text: delta.to_string(),
+                    timestamp: now(),
+                });
+                *slot = Some(s.transcript.len() - 1);
+            }
+        }
+    }
+
+    /// 提交一条完整的编排输出消息（无流式增量的收尾/兜底文案）。
+    fn push_message(&self, text: &str) {
+        let mut slot = self.slot.lock().expect("Mutex 中毒（临界区内不应 panic）");
+        let mut s = self.session.write().expect("RwLock 中毒");
+        s.transcript.push(OrcMsg::Orc {
+            text: text.to_string(),
+            timestamp: now(),
+        });
+        if slot.is_none() {
+            *slot = Some(s.transcript.len() - 1);
+        }
+    }
+
+    /// turn 失败时移除草稿消息（幂等）。
+    fn discard(&self) {
+        let mut slot = self.slot.lock().expect("Mutex 中毒（临界区内不应 panic）");
+        if let Some(i) = slot.take() {
+            let mut s = self.session.write().expect("RwLock 中毒");
+            if matches!(s.transcript.get(i), Some(OrcMsg::Orc { .. })) {
+                s.transcript.remove(i);
+            }
+        }
+    }
+
+    /// 本 turn 是否已有编排输出进入 transcript。
+    fn started(&self) -> bool {
+        self.slot
+            .lock()
+            .expect("Mutex 中毒（临界区内不应 panic）")
+            .is_some()
+    }
 }
 
 /// 单 turn 决策器（rig 单 turn 模式）。
@@ -451,15 +533,18 @@ impl WorkflowEngine {
                 return Err(e);
             }
         };
-        // 编排输出直接进对话流：静默（纯文本无动作）与推进（带动作）在引擎侧
-        // 不作区分，完成与否由编排智能体判断，而非引擎状态位
-        self.with_session(|s| {
-            s.transcript.push(OrcMsg::Orc {
-                text: decision.summary.clone(),
+        // 编排输出直接进对话流：流式输出已由工具循环经草稿消息实时写入
+        // （含静默/收尾兜底文案），这里只补推未经流式路径的后端输出
+        // （如测试用 FakeBackend）；完成与否由编排智能体判断，而非引擎状态位
+        if !ctx.draft.started() {
+            self.with_session(|s| {
+                s.transcript.push(OrcMsg::Orc {
+                    text: decision.summary.clone(),
 
-                timestamp: now(),
+                    timestamp: now(),
+                });
             });
-        });
+        }
         if let Some(kids) = self.backend.take_synced_children() {
             self.with_session(|s| s.children = kids);
         }
@@ -500,6 +585,7 @@ impl WorkflowEngine {
             hub: Arc::clone(&self.hub),
             persist_on_child_mounted,
             steer_inbox: Arc::clone(&self.steer_inbox),
+            draft: Arc::new(OrcDraft::new(Arc::clone(&self.session))),
         }
     }
 
@@ -766,6 +852,8 @@ struct LiveRuntime {
     /// 编排工具调用活动钩子（见 `OrcContext.record_tool_activity`）
     record_tool_activity: Option<Arc<dyn Fn(Activity) + Send + Sync>>,
     activities: Arc<Mutex<Vec<Activity>>>,
+    /// 编排输出草稿（见 `OrcContext.draft`）：流式文本实时进 transcript
+    draft: Arc<OrcDraft>,
 }
 
 impl LiveRuntime {
@@ -828,7 +916,9 @@ impl LiveRuntime {
 //
 // 不再用 rig `Agent::prompt` 的黑盒多 turn：它一旦发起无法中途插话，steer 只能
 // 退化为整轮结束后重跑。改为保留 rig provider 层（三种 ApiFormat 仍由 rig 处理），
-// 循环自己驱动：请求 → 解析工具调用 → 执行 → 结果回填 → drain steer 插话 → 再请求。
+// 循环自己驱动（参考 rig-agent 的流式运行时）：
+// 流式请求 → 文本增量实时进对话流 / reasoning 增量合并为 thinking 活动 →
+// 解析工具调用 → 执行 → 结果回填 → drain steer 插话 → 再流式请求。
 
 /// 工具循环的模型调用上限，防失控。编排一轮可能合理地做几十次调度
 /// （创建多个子会话、逐个下发指令、回读状态），rig 通用默认的 8 轮会被
@@ -929,9 +1019,35 @@ fn assistant_text(choice: &[AssistantContent]) -> String {
         .join("\n")
 }
 
+/// 完整 Reasoning part 上报为 thinking 活动（该 part 增量合并后的最终文本）。
+fn record_reasoning(live: &LiveRuntime, reasoning: &Reasoning) {
+    let Some(record) = &live.record_tool_activity else {
+        return;
+    };
+    let text = reasoning
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ReasoningContent::Text { text, .. } => Some(text.as_str()),
+            ReasoningContent::Summary(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !text.trim().is_empty() {
+        record(Activity::Thinking {
+            timestamp: now(),
+            content: text,
+        });
+    }
+}
+
 /// 薄工具循环：驱动模型直至输出纯文本（turn 结束）。
 ///
 /// - 每轮请求前 drain `steer_inbox`，把用户插话注入为 user 消息（真实 steer）
+/// - 流式消费模型输出：文本增量实时经 [`OrcDraft`] 写入对话流，reasoning 增量
+///   按 part 合并、part 结束即上报 thinking 活动（docs/DESIGN.md「流式输出
+///   合并后写入」）；turn 失败移除草稿，不留半截输出
 /// - assistant 响应整体保留（含 reasoning/image 与 message_id），provider 协议
 ///   要求后续请求原样回传（如 OpenAI Responses API 的 reasoning 配对）
 /// - 工具错误作为结果文本回传给模型自行纠正，不中断循环
@@ -965,15 +1081,58 @@ where
         // 后续轮次序列中消失，deepseek 等严格校验的 API 会报 400
         // "insufficient tool messages following tool_calls message"
         let prompt = history.pop().ok_or("编排对话历史为空")?;
-        let resp = model
+        let mut resp = match model
             .completion_request(prompt.clone())
             .preamble(preamble.to_string())
             .messages(history.iter().cloned())
             .tools(tool_defs.clone())
-            .send()
+            .stream()
             .await
-            .map_err(|e| format!("编排 agent 调用失败: {e}"))?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                live.draft.discard();
+                return Err(format!("编排 agent 调用失败: {e}"));
+            }
+        };
         history.push(prompt);
+        // 流式消费：文本增量实时进对话流草稿；reasoning 增量按 part 合并，
+        // part 结束（完整 Reasoning 事件或流结束）即上报 thinking 活动
+        let mut reasoning_parts: Vec<(String, String)> = Vec::new();
+        loop {
+            match resp.next().await {
+                Some(Ok(StreamedAssistantContent::Text(t))) => live.draft.append(&t.text),
+                Some(Ok(StreamedAssistantContent::ReasoningDelta { id, reasoning, .. })) => {
+                    match reasoning_parts.iter_mut().find(|(i, _)| *i == id) {
+                        Some((_, acc)) => acc.push_str(&reasoning),
+                        None => reasoning_parts.push((id, reasoning)),
+                    }
+                }
+                Some(Ok(StreamedAssistantContent::Reasoning { reasoning, id })) => {
+                    // 完整事件取代同 part 已累积的增量（rig 聚合语义）
+                    reasoning_parts.retain(|(i, _)| *i != id);
+                    record_reasoning(live, &reasoning);
+                }
+                // 工具调用等聚合进 choice，流结束后统一处理
+                Some(Ok(_)) => {}
+                Some(Err(e)) => {
+                    live.draft.discard();
+                    return Err(format!("编排 agent 调用失败: {e}"));
+                }
+                None => break,
+            }
+        }
+        // provider 未发完整 Reasoning 事件的 part：流结束时以累积增量兜底上报
+        if let Some(record) = &live.record_tool_activity {
+            for (_, text) in reasoning_parts {
+                if !text.trim().is_empty() {
+                    record(Activity::Thinking {
+                        timestamp: now(),
+                        content: text,
+                    });
+                }
+            }
+        }
         let text = assistant_text(&resp.choice);
         let calls: Vec<ToolCall> = resp
             .choice
@@ -983,41 +1142,25 @@ where
                 _ => None,
             })
             .collect();
-        // 模型真实 reasoning（provider 下发时）实时上报为活动
-        if let Some(record) = &live.record_tool_activity {
-            for c in &resp.choice {
-                if let AssistantContent::Reasoning(r) = c {
-                    let text = r
-                        .content
-                        .iter()
-                        .filter_map(|b| match b {
-                            ReasoningContent::Text { text, .. } => Some(text.as_str()),
-                            ReasoningContent::Summary(s) => Some(s.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if !text.trim().is_empty() {
-                        record(Activity::Thinking {
-                            timestamp: now(),
-                            content: text,
-                        });
-                    }
-                }
-            }
-        }
         history.push(Message::Assistant {
-            id: resp.message_id,
+            id: resp.message_id.clone(),
             content: resp.choice,
         });
         if calls.is_empty() {
             // 纯文本收尾 = 编排智能体选择静默（无动作可做）；是否「完成」由它
             // 自行判断，引擎不作状态标记（工作流会话没有 done 状态）
-            return Ok(if text.trim().is_empty() {
+            let out = if text.trim().is_empty() {
+                // 无有效输出：清掉纯空白草稿，以兜底文案收尾
+                live.draft.discard();
                 "（编排智能体未输出文字）".to_string()
             } else {
                 text
-            });
+            };
+            // 增量从未到达时补提交最终输出，保证「Ok 即已进对话流」的契约
+            if !live.draft.started() {
+                live.draft.push_message(&out);
+            }
+            return Ok(out);
         }
         let mut results = Vec::with_capacity(calls.len());
         for tc in &calls {
@@ -1061,18 +1204,21 @@ where
         last_call = Some(sig);
         if identical_runs >= MAX_IDENTICAL_CALLS {
             log::warn!("编排 agent 连续重复相同调用，判定死循环，中止本轮推进");
-            return Ok(
+            let out =
                 "（本轮检测到编排智能体反复执行相同调度，已中止；请检查工作流计划或输入消息继续）"
-                    .to_string(),
-            );
+                    .to_string();
+            live.draft.push_message(&out);
+            return Ok(out);
         }
     }
     // 轮次上限：优雅收尾而非报错——已完成的调度保留在对话历史，下一轮
     // （用户消息/子会话事件驱动）从断点继续；以错误呈现会让用户无从继续
     log::warn!("编排 agent 连续 {MAX_TOOL_TURNS} 轮未结束 turn，本轮收尾");
-    Ok(format!(
+    let out = format!(
         "（本轮工具调度已达 {MAX_TOOL_TURNS} 次上限，已暂停；可输入消息继续推进）"
-    ))
+    );
+    live.draft.push_message(&out);
+    Ok(out)
 }
 
 pub struct RigBackend {
@@ -1130,6 +1276,7 @@ impl OrcBackend for RigBackend {
                 persist_on_child_mounted: ctx.persist_on_child_mounted.clone(),
                 record_tool_activity: ctx.record_tool_activity.clone(),
                 activities: Arc::new(Mutex::new(Vec::new())),
+                draft: Arc::clone(&ctx.draft),
             };
             preamble.push_str("\n\n【工作流执行计划】\n");
             preamble.push_str(ctx.plan.trim());
@@ -1587,8 +1734,7 @@ async fn read_session_page(
 mod tests {
     use super::*;
     use rig_core::providers::openai as rig_openai;
-    use rig_core::test_utils::{MockCompletionModel, MockTurn};
-    use serde_json::json;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
     fn machines() -> Vec<MachineSummary> {
         vec![MachineSummary::named("测试机", &["mock_acp"])]
@@ -1638,6 +1784,7 @@ mod tests {
                 "unused".into(),
             )],
             children: Arc::new(Mutex::new(Vec::new())),
+            draft: Arc::new(OrcDraft::new(session.clone())),
             session,
             hub: Arc::new(MachineHub::default()),
             persist_on_child_mounted: None,
@@ -1697,6 +1844,7 @@ mod tests {
             children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
             session: ctx.session.clone(),
             hub: ctx.hub.clone(),
+            draft: Arc::new(OrcDraft::new(ctx.session.clone())),
             persist_on_child_mounted: Some(Arc::new(move || {
                 let _ = persist_engine.persist(&persist_dir);
             })),
@@ -2259,9 +2407,9 @@ mod tests {
 
     #[tokio::test]
     async fn tool_loop_runs_tools_then_returns_text() {
-        let model = MockCompletionModel::from_turns([
-            MockTurn::tool_call("call_1", "list_agents", serde_json::json!({})),
-            MockTurn::text("已查询可用 agent，本轮无调度动作"),
+        let model = MockCompletionModel::from_stream_turns([
+            vec![MockStreamEvent::tool_call("call_1", "list_agents", serde_json::json!({}))],
+            vec![MockStreamEvent::text("已查询可用 agent，本轮无调度动作")],
         ]);
         let live = test_live();
         let inbox = Mutex::new(Vec::new());
@@ -2275,6 +2423,13 @@ mod tests {
         .await
         .expect("循环应正常结束");
         assert_eq!(out, "已查询可用 agent，本轮无调度动作");
+        assert!(
+            matches!(
+                live.session.read().unwrap().transcript.last(),
+                Some(OrcMsg::Orc { text, .. }) if text == "已查询可用 agent，本轮无调度动作"
+            ),
+            "流式文本应实时进入对话流（草稿即最终输出）"
+        );
         assert_eq!(model.request_count(), 2);
         let second = &model.requests()[1];
         let has_tool_result = second.chat_history.iter().any(|m| {
@@ -2294,9 +2449,9 @@ mod tests {
 
     #[tokio::test]
     async fn tool_loop_drains_steers_into_next_request() {
-        let model = MockCompletionModel::from_turns([
-            MockTurn::tool_call("call_1", "list_agents", serde_json::json!({})),
-            MockTurn::text("收到插话，调整方向"),
+        let model = MockCompletionModel::from_stream_turns([
+            vec![MockStreamEvent::tool_call("call_1", "list_agents", serde_json::json!({}))],
+            vec![MockStreamEvent::text("收到插话，调整方向")],
         ]);
         let live = test_live();
         let inbox = Mutex::new(vec!["中途插话：换一个 agent".to_string()]);
@@ -2323,16 +2478,16 @@ mod tests {
     #[tokio::test]
     async fn tool_loop_caps_at_max_turns() {
         // 参数各不相同，避开死循环检测，专测轮次上限
-        let turns: Vec<MockTurn> = (0..MAX_TOOL_TURNS)
+        let turns: Vec<Vec<MockStreamEvent>> = (0..MAX_TOOL_TURNS)
             .map(|i| {
-                MockTurn::tool_call(
+                vec![MockStreamEvent::tool_call(
                     format!("c{i}"),
                     "list_sessions",
                     serde_json::json!({"machine": i}),
-                )
+                )]
             })
             .collect();
-        let model = MockCompletionModel::from_turns(turns);
+        let model = MockCompletionModel::from_stream_turns(turns);
         let live = test_live();
         let inbox = Mutex::new(Vec::new());
         let res = run_tool_loop(
@@ -2346,15 +2501,20 @@ mod tests {
         .expect("达上限应优雅收尾而非报错");
         assert!(res.contains("已达"), "收尾文案应提示已达上限: {res}");
         assert_eq!(model.request_count(), MAX_TOOL_TURNS);
+        // 收尾文案也应提交进对话流
+        assert!(matches!(
+            live.session.read().unwrap().transcript.last(),
+            Some(OrcMsg::Orc { text, .. }) if *text == res
+        ));
     }
 
     /// 连续完全相同（工具 + 参数）的调用超过阈值判定死循环，立即收尾。
     #[tokio::test]
     async fn tool_loop_detects_identical_call_loop() {
-        let turns: Vec<MockTurn> = (0..MAX_IDENTICAL_CALLS)
-            .map(|_| MockTurn::tool_call("c", "list_agents", serde_json::json!({})))
+        let turns: Vec<Vec<MockStreamEvent>> = (0..MAX_IDENTICAL_CALLS)
+            .map(|_| vec![MockStreamEvent::tool_call("c", "list_agents", serde_json::json!({}))])
             .collect();
-        let model = MockCompletionModel::from_turns(turns);
+        let model = MockCompletionModel::from_stream_turns(turns);
         let live = test_live();
         let inbox = Mutex::new(Vec::new());
         let res = run_tool_loop(
@@ -2380,10 +2540,10 @@ mod tests {
     /// 插话与多轮工具调用场景。
     #[tokio::test]
     async fn tool_loop_wire_sequence_keeps_tool_results_adjacent() {
-        let model = MockCompletionModel::from_turns([
-            MockTurn::tool_call("call_1", "list_agents", serde_json::json!({})),
-            MockTurn::tool_call("call_2", "list_sessions", serde_json::json!({})),
-            MockTurn::text("已完成本轮调度"),
+        let model = MockCompletionModel::from_stream_turns([
+            vec![MockStreamEvent::tool_call("call_1", "list_agents", serde_json::json!({}))],
+            vec![MockStreamEvent::tool_call("call_2", "list_sessions", serde_json::json!({}))],
+            vec![MockStreamEvent::text("已完成本轮调度")],
         ]);
         let inbox = Mutex::new(vec!["换一个 agent 重试".to_string()]);
         let live = test_live();
@@ -2425,5 +2585,90 @@ mod tests {
                 "第 {round} 轮请求中 tool 消息未覆盖全部 tool_call id: {awaiting:?}\n{wire:#?}"
             );
         }
+    }
+
+    /// 流式文本增量应实时合并为同一条草稿编排消息（GUI 定时刷新即可见
+    /// 生成中的输出；落库为合并后的完整输出）。
+    #[tokio::test]
+    async fn tool_loop_streams_text_deltas_into_transcript() {
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("你"),
+            MockStreamEvent::text("好，"),
+            MockStreamEvent::text("世界"),
+        ]]);
+        let live = test_live();
+        let inbox = Mutex::new(Vec::new());
+        let out = run_tool_loop(
+            model,
+            "preamble",
+            vec![Message::user("计划")],
+            &inbox,
+            &live,
+        )
+        .await
+        .expect("循环应正常结束");
+        assert_eq!(out, "你好，世界");
+        let s = live.session.read().unwrap();
+        assert_eq!(s.transcript.len(), 1, "多段增量应合并为同一条编排消息");
+        assert!(matches!(&s.transcript[0], OrcMsg::Orc { text, .. } if text == "你好，世界"));
+    }
+
+    /// reasoning 增量按 part 合并，流结束（provider 未发完整事件时）上报为
+    /// thinking 活动。
+    #[tokio::test]
+    async fn tool_loop_records_thinking_from_reasoning_stream() {
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::reasoning_delta("思考"),
+            MockStreamEvent::reasoning_delta("第一步"),
+            MockStreamEvent::text("结论"),
+        ]]);
+        let mut live = test_live();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        live.record_tool_activity = Some(Arc::new(move |act| {
+            if let Activity::Thinking { content, .. } = act {
+                sink.lock().unwrap().push(content);
+            }
+        }));
+        let inbox = Mutex::new(Vec::new());
+        let out = run_tool_loop(
+            model,
+            "preamble",
+            vec![Message::user("计划")],
+            &inbox,
+            &live,
+        )
+        .await
+        .expect("循环应正常结束");
+        assert_eq!(out, "结论");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["思考第一步".to_string()],
+            "reasoning 增量应合并为一条 thinking 活动"
+        );
+    }
+
+    /// 流式失败（turn 中途报错）不应残留半截编排输出。
+    #[tokio::test]
+    async fn tool_loop_discards_partial_output_on_stream_error() {
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("半截输出"),
+            MockStreamEvent::error("boom"),
+        ]]);
+        let live = test_live();
+        let inbox = Mutex::new(Vec::new());
+        let res = run_tool_loop(
+            model,
+            "preamble",
+            vec![Message::user("计划")],
+            &inbox,
+            &live,
+        )
+        .await;
+        assert!(res.is_err(), "流式错误应使本轮推进失败");
+        assert!(
+            live.session.read().unwrap().transcript.is_empty(),
+            "turn 失败应移除草稿消息"
+        );
     }
 }
