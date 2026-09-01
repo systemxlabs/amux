@@ -505,7 +505,7 @@ impl SessionManager {
         let items = self.cached_log(
             session_id,
             &self.history_cache,
-            SessionLog::history_path(&self.data_dir, session_id),
+            amux_common::session_log::history_path(&self.data_dir, session_id),
             |log| log.read_history(),
             "会话历史读取失败",
         )?;
@@ -523,7 +523,7 @@ impl SessionManager {
         let items = self.cached_log(
             session_id,
             &self.activities_cache,
-            SessionLog::activities_path(&self.data_dir, session_id),
+            amux_common::session_log::activities_path(&self.data_dir, session_id),
             |log| log.read_activities(),
             "会话活动读取失败",
         )?;
