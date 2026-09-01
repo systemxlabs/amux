@@ -656,7 +656,7 @@ impl AmuxApp {
             );
             if selected_matches {
                 this.refresh_config_options(cx, idx, sid.clone());
-                this.refresh_slash_commands(window, cx, idx, sid.clone());
+                this.refresh_slash_commands(cx, idx, sid.clone());
             }
         }
 

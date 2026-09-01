@@ -452,7 +452,7 @@ impl AmuxApp {
         self.refresh_activities(window, cx, machine, session_id.clone());
         self.refresh_ongoing(window, cx, machine, session_id.clone());
         self.refresh_config_options(cx, machine, session_id.clone());
-        self.refresh_slash_commands(window, cx, machine, session_id);
+        self.refresh_slash_commands(cx, machine, session_id);
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -2315,6 +2315,31 @@ impl AmuxApp {
         row
     }
 
+    fn request_session_data<P, R, F>(
+        &self,
+        cx: &mut Context<Self>,
+        machine: usize,
+        method: &'static str,
+        params: P,
+        apply: F,
+    ) where
+        P: serde::Serialize + 'static,
+        R: serde::de::DeserializeOwned + 'static,
+        F: FnOnce(&mut Self, Result<R, crate::ws::RpcError>) + 'static,
+    {
+        let Some(client) = self.machines.get(machine).map(|m| m.client.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = client.request::<_, R>(method, Some(params)).await;
+            let _ = this.update_in(cx, |this, _w, cx| {
+                apply(this, result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// 查询选中会话的会话选项（`session.config_options`；docs/DESIGN.md
     /// 「普通会话选项」：存储在 Server 内存，以 Agent 侧数据为权威）。
     /// 不依赖 window 上下文：供浮层菜单回调等窗口 update stack 内的场景调用。
@@ -2324,10 +2349,9 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else {
+        if self.machines.get(machine).is_none() {
             return;
-        };
-        let client = m.client.clone();
+        }
         // 同一会话刷新时保留既有选项展示，避免轮询期间整行闪烁
         let options = match &self.config_options {
             Some(cur) if cur.machine == machine && cur.session_id == session_id => {
@@ -2342,30 +2366,25 @@ impl AmuxApp {
             options,
         });
         cx.notify();
-        let params = SessionIdParams {
-            session_id: session_id.clone(),
-        };
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let res = client
-                .request::<_, SessionConfigOptionsResult>(
-                    protocol::method::SESSION_CONFIG_OPTIONS,
-                    Some(params),
-                )
-                .await;
-            let _ = this.update_in(cx, |this, _w, cx| {
+        self.request_session_data(
+            cx,
+            machine,
+            protocol::method::SESSION_CONFIG_OPTIONS,
+            SessionIdParams {
+                session_id: session_id.clone(),
+            },
+            move |this, result: Result<SessionConfigOptionsResult, crate::ws::RpcError>| {
                 if let Some(cur) = &mut this.config_options {
                     // 响应到达时选中会话已切换则丢弃陈旧结果
                     if cur.machine == machine && cur.session_id == session_id {
                         cur.loading = false;
-                        if let Ok(res) = res {
-                            cur.options = res.options;
+                        if let Ok(result) = result {
+                            cur.options = result.options;
                         }
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 查询选中会话的斜杠命令（`session.slash_commands`；docs/DESIGN.md
@@ -2374,43 +2393,36 @@ impl AmuxApp {
     /// 才惰性创建，命令集合由 turn 结束后的刷新补齐。
     pub(crate) fn refresh_slash_commands(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else {
+        if self.machines.get(machine).is_none() {
             return;
-        };
-        let client = m.client.clone();
+        }
         self.slash_commands = Some(SelectedSlashCommands {
             machine,
             session_id: session_id.clone(),
             commands: Vec::new(),
         });
-        let params = SessionIdParams {
-            session_id: session_id.clone(),
-        };
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let res = client
-                .request::<_, SessionSlashCommandsResult>(
-                    protocol::method::SESSION_SLASH_COMMANDS,
-                    Some(params),
-                )
-                .await;
-            let _ = this.update_in(cx, |this, _w, cx| {
+        self.request_session_data(
+            cx,
+            machine,
+            protocol::method::SESSION_SLASH_COMMANDS,
+            SessionIdParams {
+                session_id: session_id.clone(),
+            },
+            move |this, result: Result<SessionSlashCommandsResult, crate::ws::RpcError>| {
                 if let Some(cur) = &mut this.slash_commands {
                     // 响应到达时选中会话已切换则丢弃陈旧结果
                     if cur.machine == machine && cur.session_id == session_id {
-                        if let Ok(res) = res {
-                            cur.commands = res.commands;
+                        if let Ok(result) = result {
+                            cur.commands = result.commands;
                         }
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 斜杠命令上拉框（docs/PRD.md「会话交互视图」：输入 `/` 时根据前缀匹配
