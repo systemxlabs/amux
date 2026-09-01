@@ -219,6 +219,8 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 | `create_session` | 创建关联普通会话 |
 | `prompt_session` | 向指定关联普通会话下发指令 |
 | `cancel_session` | 取消指定关联普通会话进行中的工作 |
+| `configure_session` | 配置指定关联普通会话：会话标题，会话选项等 |
+| `get_session_config_options` | 获取指定关联普通会话的会话选项 |
 | `read_session_history` | 分页读取关联普通会话对话内容 |
 | `read_session_activities` | 分页读取关联普通会话活动内容 |
 
