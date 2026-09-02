@@ -21,14 +21,15 @@ use protocol::{SessionConfigKind, SessionConfigOption, SessionConfigSelectEntry}
 
 #[gpui::test]
 fn config_option_select_triggers_configure(cx: &mut gpui::TestAppContext) {
-    let data_dir = std::env::temp_dir().join(format!("amux-cfg-option-{}", std::process::id()));
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
     cx.update(gpui_component::init);
 
     // Root 必须是窗口根视图（push_notification 等组件层依赖 Root::update）
     let app = Rc::new(std::cell::RefCell::new(None));
     let app_for_window = app.clone();
     let (_root, cx) = cx.add_window_view(|window, cx| {
-        let store = Arc::new(ConfigStore::new(data_dir));
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
         let app = cx.new(|cx| AmuxApp::new(store, window, cx));
         *app_for_window.borrow_mut() = Some(app.clone());
         Root::new(app, window, cx)

@@ -57,13 +57,14 @@ fn drag(
 
 #[gpui::test]
 fn resize_handles_are_isolated(cx: &mut gpui::TestAppContext) {
-    let data_dir = std::env::temp_dir().join(format!("amux-resize-{}", std::process::id()));
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
 
     // AmuxApp 必须是窗口根视图：手柄 mouse_down 内部的 window.refresh()
     // 会触发测试平台按根视图重绘，根视图若为空则整个事件监听帧被清空。
     let (app, cx) = cx.add_window_view(|window, cx| {
         gpui_component::init(cx);
-        let store = Arc::new(ConfigStore::new(data_dir));
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
         AmuxApp::new(store, window, cx)
     });
 

@@ -15,12 +15,12 @@ use crate::workflow::ChildSession;
 #[gpui::test]
 fn workflow_detail_shows_children_without_cwd_row(cx: &mut gpui::TestAppContext) {
     let cx = cx.add_empty_window();
-    let data_dir = std::env::temp_dir().join(format!("amux-wf-detail-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
 
     let app = cx.update(|window, cx| {
         gpui_component::init(cx);
-        let store = Arc::new(ConfigStore::new(data_dir));
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
         let _ = store.save_orchestrator(&OrchestratorConfig {
             api_format: ApiFormat::ChatCompletions,
             base_url: "http://127.0.0.1:9/v1".into(),
@@ -74,12 +74,12 @@ fn workflow_detail_shows_children_without_cwd_row(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn session_detail_keeps_cwd_row(cx: &mut gpui::TestAppContext) {
     let cx = cx.add_empty_window();
-    let data_dir = std::env::temp_dir().join(format!("amux-session-detail-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
 
     let app = cx.update(|window, cx| {
         gpui_component::init(cx);
-        let store = Arc::new(ConfigStore::new(data_dir));
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
         cx.new(|cx| AmuxApp::new(store, window, cx))
     });
 

@@ -33,11 +33,12 @@ const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD
 #[gpui::test]
 fn dialog_renders_user_message_with_image(cx: &mut gpui::TestAppContext) {
     let cx = cx.add_empty_window();
-    let data_dir = std::env::temp_dir().join(format!("amux-dialog-img-{}", std::process::id()));
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
 
     let app = cx.update(|window, cx| {
         gpui_component::init(cx);
-        let store = Arc::new(ConfigStore::new(data_dir));
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
         cx.new(|cx| AmuxApp::new(store, window, cx))
     });
 

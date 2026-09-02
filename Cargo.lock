@@ -258,6 +258,7 @@ dependencies = [
  "logforth",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -280,6 +281,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "uuid",
@@ -309,6 +311,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",

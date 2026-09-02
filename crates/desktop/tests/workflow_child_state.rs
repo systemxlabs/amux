@@ -82,8 +82,7 @@ fn hub_with_one_machine() -> Arc<MachineHub> {
 
 #[tokio::test]
 async fn child_completion_mid_turn_injects_message_and_reruns() {
-    let dir = std::env::temp_dir().join(format!("amux-wf-midturn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(PausableBackend {
         started: AtomicUsize::new(0),
         release: tokio::sync::Semaphore::new(0),
@@ -97,7 +96,7 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
         ])),
     });
     let backend_test = backend.clone();
-    let engine = WorkflowEngine::new("计划", "", "", backend, hub_with_one_machine(), &dir);
+    let engine = WorkflowEngine::new("计划", "", "", backend, hub_with_one_machine(), dir.path());
     engine.session.write().children.push(ChildSession {
         id: "s_child".into(),
         machine_idx: 0,
@@ -146,5 +145,4 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
         ),
         "注入消息应触发编排补跑一轮处理"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

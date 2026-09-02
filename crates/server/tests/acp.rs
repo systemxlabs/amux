@@ -13,8 +13,8 @@ use amux_server::agent::{AcpAgentDriver, AgentDriver, AgentEvent};
 #[tokio::test]
 async fn acp_driver_terminal_flow() {
     // agent 经 terminal/* 反向请求在客户端执行命令（kimi acp 的 shell 执行路径）
-    let state_file = std::env::temp_dir().join(format!("mock_acp_term_{}", std::process::id()));
-    let _ = std::fs::remove_file(&state_file);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_file = temp_dir.path().join("mock_acp_term");
     let state_file_s = state_file.to_str().unwrap().to_string();
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");
@@ -52,10 +52,9 @@ async fn acp_driver_terminal_flow() {
 
 #[tokio::test]
 async fn acp_driver_full_flow() {
-    let state_file = std::env::temp_dir().join(format!("mock_acp_state_{}", std::process::id()));
-    let _ = std::fs::remove_file(&state_file);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_file = temp_dir.path().join("mock_acp_state");
     let calls_file = state_file.with_extension("calls");
-    let _ = std::fs::remove_file(&calls_file);
     let state_file_s = state_file.to_str().unwrap().to_string();
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");

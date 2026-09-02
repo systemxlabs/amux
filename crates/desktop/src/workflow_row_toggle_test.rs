@@ -14,12 +14,12 @@ use crate::workflow::ChildSession;
 
 #[gpui::test]
 fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppContext) {
-    let data_dir = std::env::temp_dir().join(format!("amux-wf-row-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
 
     let (app, cx) = cx.add_window_view(|window, cx| {
         gpui_component::init(cx);
-        let store = Arc::new(ConfigStore::new(data_dir));
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
         // 编排 agent 需已配置才能创建工作流（推进调用会失败，不影响本测试）
         let _ = store.save_orchestrator(&OrchestratorConfig {
             api_format: ApiFormat::ChatCompletions,

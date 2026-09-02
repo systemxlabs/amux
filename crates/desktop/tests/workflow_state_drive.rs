@@ -38,12 +38,12 @@ impl OrcBackend for BlockingBackend {
 
 #[gpui::test]
 fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppContext) {
-    let data_dir = std::env::temp_dir().join(format!("amux-wf-drive-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
 
     let (app, cx) = cx.add_window_view(|window, cx| {
         gpui_component::init(cx);
-        let store = Arc::new(ConfigStore::new(data_dir.clone()));
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
         AmuxApp::new(store, window, cx)
     });
 
@@ -58,7 +58,7 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
                 "",
                 Arc::new(BlockingBackend),
                 Arc::new(MachineHub::default()),
-                &data_dir,
+                &data_path,
             ));
             app.workflows[0]
                 .session
@@ -106,5 +106,4 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
         std::thread::sleep(std::time::Duration::from_millis(50));
         cx.run_until_parked();
     }
-    let _ = std::fs::remove_dir_all(&data_dir);
 }

@@ -24,6 +24,7 @@ tokio-tungstenite = "0.30"
 agent-client-protocol = "1"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "=0.12.5"
+tempfile = "=3.27.0"
 
 [profile.release]
 lto = "thin"

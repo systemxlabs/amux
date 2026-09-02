@@ -29,6 +29,9 @@ gix = { version = "0.87", default-features = false, features = ["basic", "status
 portable-pty = "0.9"
 base64 = "0.22"
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [[bin]]
 name = "mock_acp"
 path = "tests/support/mock_acp.rs"

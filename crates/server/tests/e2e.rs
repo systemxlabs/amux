@@ -136,6 +136,7 @@ static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
 
 struct ServerGuard {
     child: tokio::process::Child,
+    _data_dir: tempfile::TempDir,
 }
 impl Drop for ServerGuard {
     fn drop(&mut self) {
@@ -145,9 +146,10 @@ impl Drop for ServerGuard {
 
 async fn spawn_server_with_delay(
     port: u16,
-    data_dir: std::path::PathBuf,
+    data_dir: tempfile::TempDir,
     delay_ms: u32,
 ) -> ServerGuard {
+    let data_path = data_dir.path();
     let bin = env!("CARGO_BIN_EXE_test-server");
     let child = tokio::process::Command::new(bin)
         .args([
@@ -156,9 +158,9 @@ async fn spawn_server_with_delay(
             "--port",
             &port.to_string(),
             "--data-dir",
-            data_dir.to_str().unwrap(),
+            data_path.to_str().unwrap(),
         ])
-        .env("AMUX_MOCK_STATE", data_dir.join("mock.state"))
+        .env("AMUX_MOCK_STATE", data_path.join("mock.state"))
         .env("AMUX_NO_DISCOVERY", "1")
         .env("AMUX_MOCK_DELAY_MS", delay_ms.to_string())
         .stdout(std::process::Stdio::null())
@@ -166,7 +168,10 @@ async fn spawn_server_with_delay(
         .spawn()
         .expect("spawn test-server");
     wait_port(port).await;
-    ServerGuard { child }
+    ServerGuard {
+        child,
+        _data_dir: data_dir,
+    }
 }
 
 async fn start_server() -> (u16, ServerGuard) {
@@ -429,8 +434,6 @@ async fn config_options_query_lazy_and_configure() {
         cfg["result"]["options"][0]["current_value"], "gpt-5",
         "设置后的选项应以 Agent 侧数据为权威: {cfg}"
     );
-
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 #[tokio::test]
@@ -598,11 +601,11 @@ async fn workspace_diff_reflects_changes() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
     let dir = init_repo();
-    std::fs::write(dir.join("a.txt"), "line1\nCHANGED\n").unwrap();
+    std::fs::write(dir.path().join("a.txt"), "line1\nCHANGED\n").unwrap();
     let session = c
         .call(
             "session.new",
-            json!({"agent": "mock_acp", "cwd": dir.to_str().unwrap()}),
+            json!({"agent": "mock_acp", "cwd": dir.path().to_str().unwrap()}),
         )
         .await["result"]["session"]["id"]
         .as_str()
@@ -625,11 +628,9 @@ async fn workspace_diff_reflects_changes() {
         .await;
     assert_eq!(r["result"]["ok"], true, "restore 失败: {r}");
     assert_eq!(
-        std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
         "line1\nline2\n"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -637,13 +638,13 @@ async fn workspace_list_and_read_browse_session_directory() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
     let dir = init_repo();
-    std::fs::create_dir(dir.join("src")).unwrap();
-    std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
-    std::fs::write(dir.join("README.md"), "one\ntwo\nthree\n").unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.path().join("README.md"), "one\ntwo\nthree\n").unwrap();
     let session = c
         .call(
             "session.new",
-            json!({"agent": "mock_acp", "cwd": dir.to_str().unwrap()}),
+            json!({"agent": "mock_acp", "cwd": dir.path().to_str().unwrap()}),
         )
         .await["result"]["session"]["id"]
         .as_str()
@@ -690,8 +691,6 @@ async fn workspace_list_and_read_browse_session_directory() {
         .await;
     assert_eq!(second["result"]["content"], "three\n");
     assert_eq!(second["result"]["hasMore"], false);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -699,11 +698,11 @@ async fn workspace_read_rejects_invalid_and_binary_paths() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
     let dir = init_repo();
-    std::fs::write(dir.join("binary.dat"), [0xff, 0xfe, 0xfd]).unwrap();
+    std::fs::write(dir.path().join("binary.dat"), [0xff, 0xfe, 0xfd]).unwrap();
     let session = c
         .call(
             "session.new",
-            json!({"agent": "mock_acp", "cwd": dir.to_str().unwrap()}),
+            json!({"agent": "mock_acp", "cwd": dir.path().to_str().unwrap()}),
         )
         .await["result"]["session"]["id"]
         .as_str()
@@ -734,11 +733,9 @@ async fn workspace_read_rejects_invalid_and_binary_paths() {
 
     #[cfg(unix)]
     {
-        let outside =
-            std::env::temp_dir().join(format!("amux-e2e-workspace-outside-{}", std::process::id()));
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
-        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
         let symlink = c
             .call(
                 "workspace.read",
@@ -749,10 +746,7 @@ async fn workspace_read_rejects_invalid_and_binary_paths() {
             symlink.get("error").is_some(),
             "应拒绝越界 symlink: {symlink}"
         );
-        let _ = std::fs::remove_dir_all(&outside);
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 async fn mock_acp_name(c: &mut Client) -> String {
@@ -762,13 +756,13 @@ async fn mock_acp_name(c: &mut Client) -> String {
 
 async fn start_server_with_dir() -> (u16, std::path::PathBuf, ServerGuard) {
     let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-    let data_dir = std::env::temp_dir().join(format!(
-        "amux-e2e-{}",
-        std::process::id() as u64 * 1000 + NEXT_PORT.fetch_add(1, Ordering::SeqCst) as u64
-    ));
-    std::fs::create_dir_all(&data_dir).unwrap();
-    let guard = spawn_server_with_delay(port, data_dir.clone(), 150).await;
-    (port, data_dir, guard)
+    let data_dir = tempfile::Builder::new()
+        .prefix("amux-e2e-")
+        .tempdir()
+        .unwrap();
+    let data_path = data_dir.path().to_path_buf();
+    let guard = spawn_server_with_delay(port, data_dir, 150).await;
+    (port, data_path, guard)
 }
 
 use std::path::Path;
@@ -787,20 +781,17 @@ fn git(cwd: &Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
-fn init_repo() -> std::path::PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("amux-e2e-git-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    git(&dir, &["init", "-b", "main", "-q"]);
-    git(&dir, &["config", "user.email", "t@t"]);
-    git(&dir, &["config", "user.name", "t"]);
-    std::fs::write(dir.join("a.txt"), "line1\nline2\n").unwrap();
-    git(&dir, &["add", "."]);
-    git(&dir, &["commit", "-m", "init", "-q"]);
+fn init_repo() -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("amux-e2e-git-")
+        .tempdir()
+        .unwrap();
+    git(dir.path(), &["init", "-b", "main", "-q"]);
+    git(dir.path(), &["config", "user.email", "t@t"]);
+    git(dir.path(), &["config", "user.name", "t"]);
+    std::fs::write(dir.path().join("a.txt"), "line1\nline2\n").unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-m", "init", "-q"]);
     dir
 }
 
@@ -849,13 +840,11 @@ async fn agent_restart_keeps_agent_available() {
 #[tokio::test]
 async fn busy_prompt_rejected_and_cancel_works() {
     let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-    let data_dir = std::env::temp_dir().join(format!(
-        "amux-e2e-busy-{}-{}",
-        std::process::id(),
-        NEXT_PORT.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&data_dir).unwrap();
-    let _guard = spawn_server_with_delay(port, data_dir.clone(), 3000).await;
+    let data_dir = tempfile::Builder::new()
+        .prefix("amux-e2e-busy-")
+        .tempdir()
+        .unwrap();
+    let _guard = spawn_server_with_delay(port, data_dir, 3000).await;
     let mut c = Client::connect(port, "test-token").await;
     let agent = mock_acp_name(&mut c).await;
 
@@ -918,7 +907,6 @@ async fn busy_prompt_rejected_and_cancel_works() {
         json!(-32003),
         "空闲后不应再报 busy: {again}"
     );
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 use base64::Engine as _;
@@ -931,8 +919,8 @@ async fn terminal_open_input_output_and_connection_binding() {
     let mut c1 = Client::connect(port, "test-token").await;
     let mut c2 = Client::connect(port, "test-token").await;
 
-    // 打开终端（cwd 用临时目录，shell 可正常落位）
-    let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+    // 打开终端（cwd 用测试临时目录，shell 可正常落位）
+    let cwd = data_dir.to_string_lossy().into_owned();
     let opened = c1
         .call("terminal.open", json!({"cwd": cwd, "cols": 80, "rows": 24}))
         .await;
@@ -1018,5 +1006,4 @@ async fn terminal_open_input_output_and_connection_binding() {
         )
         .await;
     assert_eq!(after["error"]["code"], json!(-32006));
-    let _ = std::fs::remove_dir_all(&data_dir);
 }

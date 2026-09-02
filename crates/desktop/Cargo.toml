@@ -39,5 +39,6 @@ alacritty_terminal = "0.25"
 # 测试专用：rig-core MockCompletionModel/MockTurn（薄工具循环单测；不进 release 构建）
 [dev-dependencies]
 rig-core = { version = "0.42", default-features = false, features = ["test-utils"] }
+tempfile.workspace = true
 # gpui 测试平台：真实 taffy 布局 + 事件模拟（复现滚动/布局回归）
 gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }

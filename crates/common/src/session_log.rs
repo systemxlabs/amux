@@ -87,12 +87,8 @@ pub fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    fn temp_dir() -> PathBuf {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir().join(format!("amux-session-log-{}-{n}", std::process::id()))
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     #[test]
@@ -111,7 +107,7 @@ mod tests {
     #[test]
     fn append_then_read_roundtrip_and_missing_is_empty() {
         let dir = temp_dir();
-        let path = history_path(&dir, "s1");
+        let path = history_path(dir.path(), "s1");
         assert!(read_jsonl::<u32>(&path).unwrap().is_empty());
 
         append_jsonl(&path, &[1, 2, 3]).unwrap();
@@ -119,13 +115,12 @@ mod tests {
 
         append_jsonl(&path, &[4]).unwrap();
         assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![1, 2, 3, 4]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn atomic_write_replaces_existing_content_and_supports_empty_files() {
         let dir = temp_dir();
-        let path = history_path(&dir, "s1");
+        let path = history_path(dir.path(), "s1");
 
         write_jsonl_atomic(&path, &[1, 2]).unwrap();
         assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![1, 2]);
@@ -136,18 +131,15 @@ mod tests {
         write_jsonl_atomic::<u32>(&path, &[]).unwrap();
         assert!(read_jsonl::<u32>(&path).unwrap().is_empty());
         assert!(path.is_file());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn corrupted_line_reports_line_number() {
         let dir = temp_dir();
-        let path = activities_path(&dir, "s1");
+        let path = activities_path(dir.path(), "s1");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{\"ok\":true}\nnot-json\n").unwrap();
         let err = read_jsonl::<serde_json::Value>(&path).unwrap_err();
         assert!(err.to_string().contains(":2:"), "应报告第 2 行：{err}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

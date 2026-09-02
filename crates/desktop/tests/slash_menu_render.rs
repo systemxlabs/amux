@@ -35,11 +35,12 @@ impl Render for InputHostView {
 #[gpui::test]
 fn slash_menu_visibility_follows_input_prefix(cx: &mut gpui::TestAppContext) {
     let cx = cx.add_empty_window();
-    let data_dir = std::env::temp_dir().join(format!("amux-slash-{}", std::process::id()));
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
 
     let app = cx.update(|window, cx| {
         gpui_component::init(cx);
-        let store = Arc::new(ConfigStore::new(data_dir));
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
         cx.new(|cx| AmuxApp::new(store, window, cx))
     });
 
