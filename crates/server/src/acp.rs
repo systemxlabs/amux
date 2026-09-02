@@ -223,6 +223,29 @@ struct SessionCaches {
     caps: Arc<Mutex<HashMap<String, AgentSessionCaps>>>,
 }
 
+impl SessionCaches {
+    /// 清除已关闭会话的连接级缓存。`caps` 由调用方在
+    /// `session/delete` 判断能力后再清除。
+    fn remove_closed_session(&self, session_id: &str) {
+        self.routes.lock().remove(session_id);
+        self.commands.lock().remove(session_id);
+        self.plans.lock().remove(session_id);
+    }
+
+    /// ACP 连接结束时释放全部会话缓存，并唤醒仍等待 agent 事件的 turn。
+    fn clear_on_disconnect(&self) {
+        let routes = std::mem::take(&mut *self.routes.lock());
+        for (_, tx) in routes {
+            let _ = tx.try_send(AgentEvent::Error("ACP 连接已关闭".into()));
+            let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
+        }
+        self.commands.lock().clear();
+        self.plans.lock().clear();
+        self.caps.lock().clear();
+        *self.default_caps.lock() = AgentSessionCaps::default();
+    }
+}
+
 impl AcpAgentDriver {
     /// 启动 ACP agent 子进程（官方 SDK `AcpAgent` 管理 stdio 传输与进程生命周期）；
     /// `env` 为附加环境变量（经 from_args 的 `NAME=value` 前缀传入）；
@@ -357,6 +380,7 @@ impl AgentDriver for AcpAgentDriver {
 
     fn shutdown(&self) {
         let _ = self.exec_tx.lock().take();
+        self.caches.clear_on_disconnect();
     }
 
     /// 关闭并等待 exec 线程退出：通道关闭 → 服务循环结束 → SDK 连接 drop（子进程
@@ -379,8 +403,7 @@ impl AgentDriver for AcpAgentDriver {
         self.resumed.lock().remove(agent_session_id);
         // Keep the capability snapshot until delete_session() has checked it:
         // close is intentionally followed by session/delete on supported agents.
-        self.caches.commands.lock().remove(agent_session_id);
-        self.caches.plans.lock().remove(agent_session_id);
+        self.caches.remove_closed_session(agent_session_id);
         self.call(AcpCall::Close {
             sid: agent_session_id.to_string(),
         })
@@ -405,9 +428,9 @@ impl AgentDriver for AcpAgentDriver {
                 sid: agent_session_id.to_string(),
             })
             .map(|_| ());
-        if result.is_ok() {
-            self.caches.caps.lock().remove(agent_session_id);
-        }
+        // 本地会话已经删除，无论 agent 是否接受 delete，都不能继续保留
+        // 连接级缓存；否则每个失败的删除都会永久占用一份能力快照。
+        self.caches.caps.lock().remove(agent_session_id);
         result
     }
 
@@ -525,7 +548,17 @@ async fn exec_main(
         agent
     };
 
-    let result = connect_main(agent, &mut req_rx, caches, &ready_tx, ready_sent.clone()).await;
+    let result = connect_main(
+        agent,
+        &mut req_rx,
+        caches.clone(),
+        &ready_tx,
+        ready_sent.clone(),
+    )
+    .await;
+    // ACP 连接关闭后，通知路由和会话快照都失去权威性。释放它们并关闭路由
+    // sender，让 server 侧等待中的 turn 走连接中断收尾，而不是永久等待。
+    caches.clear_on_disconnect();
 
     // 连接异常结束：若就绪信号尚未发出（连接建立前传输层失败：二进制缺失 /
     // 进程立即退出 / npx 不可用 / 无网络），补报为 spawn 失败；若已报过就绪，

@@ -24,16 +24,27 @@ use protocol::OpResult;
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 /// 全部活跃连接的关闭信号，应用退出时统一触发，确保连接确定性关闭。
-static CLOSE_SIGNALS: OnceLock<Mutex<Vec<tokio::sync::watch::Sender<bool>>>> = OnceLock::new();
+///
+/// 连接结束后必须从这里移除发送端；否则每次重连都会把一个已经结束的
+/// `watch::Sender` 留在全局数组中，长时间运行的桌面端会持续增长。
+static CLOSE_SIGNALS: OnceLock<Mutex<Vec<(u64, tokio::sync::watch::Sender<bool>)>>> =
+    OnceLock::new();
+static NEXT_CLOSE_SIGNAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn close_signals() -> &'static Mutex<Vec<tokio::sync::watch::Sender<bool>>> {
+fn close_signals() -> &'static Mutex<Vec<(u64, tokio::sync::watch::Sender<bool>)>> {
     CLOSE_SIGNALS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn remove_close_signal(id: u64) {
+    close_signals()
+        .lock()
+        .retain(|(entry_id, _)| *entry_id != id);
 }
 
 /// 关闭全部 WS 连接（幂等；on_app_quit 钩子调用）。
 pub fn close_all() {
     let mut signals = close_signals().lock();
-    for tx in signals.drain(..) {
+    for (_, tx) in signals.drain(..) {
         let _ = tx.send(true);
     }
 }
@@ -102,9 +113,20 @@ impl WsClient {
         let (req_tx, req_rx) = mpsc::channel::<ClientReq>(64);
         let (notify_tx, _) = broadcast::channel::<Notification>(256);
         let (close_tx, close_rx) = tokio::sync::watch::channel(false);
-        close_signals().lock().push(close_tx.clone());
+        let close_signal_id =
+            NEXT_CLOSE_SIGNAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        close_signals()
+            .lock()
+            .push((close_signal_id, close_tx.clone()));
         let notify_for_task = notify_tx.clone();
-        rt().spawn(run_loop(url, token, req_rx, close_rx, notify_for_task));
+        rt().spawn(run_loop(
+            url,
+            token,
+            req_rx,
+            close_rx,
+            notify_for_task,
+            close_signal_id,
+        ));
         WsClient {
             req_tx,
             notify_tx,
@@ -165,13 +187,23 @@ impl WsClient {
 
 /// 单次连接尝试。失败（连不上 / 认证失败 / 已连接后断开）即终止，
 /// 不做自动重连：机器保持离线或认证失败状态，由用户手动触发重连。
+struct CloseSignalGuard(u64);
+
+impl Drop for CloseSignalGuard {
+    fn drop(&mut self) {
+        remove_close_signal(self.0);
+    }
+}
+
 async fn run_loop(
     url: String,
     token: String,
     mut req_rx: mpsc::Receiver<ClientReq>,
     close_rx: tokio::sync::watch::Receiver<bool>,
     notify_tx: broadcast::Sender<Notification>,
+    close_signal_id: u64,
 ) {
+    let _close_signal = CloseSignalGuard(close_signal_id);
     if *close_rx.borrow() {
         return;
     }

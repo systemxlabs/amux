@@ -154,22 +154,35 @@ impl SessionManager {
             context_window_size: 0,
         };
         self.registry.upsert(&meta, "")?;
-        self.control(&meta.id);
+        self.controls
+            .lock()
+            .insert(meta.id.clone(), Self::new_control());
         Ok(meta)
     }
 
-    fn control(&self, session_id: &str) -> Arc<SessionControl> {
+    fn new_control() -> Arc<SessionControl> {
+        Arc::new(SessionControl {
+            busy: AtomicBool::new(false),
+            deleted: AtomicBool::new(false),
+            lifecycle: Mutex::new(()),
+        })
+    }
+
+    fn control(&self, session_id: &str) -> Result<Arc<SessionControl>, SessionError> {
+        if let Some(control) = self.controls.lock().get(session_id).cloned() {
+            return Ok(control);
+        }
+        // Do not allocate a control block for arbitrary/nonexistent IDs. This method is
+        // reached by RPC paths before the operation-specific lookup; creating entries
+        // first would let repeated invalid requests grow the map without bound.
+        if self.registry.get(session_id)?.is_none() {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
         let mut controls = self.controls.lock();
-        controls
+        Ok(controls
             .entry(session_id.to_string())
-            .or_insert_with(|| {
-                Arc::new(SessionControl {
-                    busy: AtomicBool::new(false),
-                    deleted: AtomicBool::new(false),
-                    lifecycle: Mutex::new(()),
-                })
-            })
-            .clone()
+            .or_insert_with(Self::new_control)
+            .clone())
     }
 
     /// 仅移除仍由调用方持有的控制块。删除并发时，旧请求可能在首轮注册表
@@ -256,10 +269,7 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
-        // 先校验元数据，再创建控制块，避免随机 session id 请求不断扩张
-        // controls（该表的条目生命周期应与真实会话一致）。
-        self.get_entry(session_id)?;
-        let control = self.control(session_id);
+        let control = self.control(session_id)?;
         let _lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
@@ -342,11 +352,8 @@ impl SessionManager {
                 .remove()
                 .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
         }
-
-        let control = self.control(session_id);
+        let control = self.control(session_id)?;
         control.deleted.store(true, Ordering::SeqCst);
-        // setup_prompt 持有同一把锁直到 agent session id 与 Busy 元数据写回完成。
-        // 删除先标记 deleted，再等待临界区结束，保证不会在删除后复活会话。
         let _lifecycle = control.lifecycle.lock();
         let log = SessionLog::open(&self.data_dir, session_id);
         let Some((meta, agent_session_id)) = self.registry.get(session_id)? else {
@@ -452,7 +459,9 @@ impl SessionManager {
         let candidates = self.registry.idle_candidates(now_ms, timeout_ms)?;
         let mut closed = 0;
         for (sid, _) in candidates {
-            let control = self.control(&sid);
+            let Ok(control) = self.control(&sid) else {
+                continue;
+            };
             let _lifecycle = control.lifecycle.lock();
             if control.deleted.load(Ordering::SeqCst) {
                 continue;
@@ -489,7 +498,9 @@ impl SessionManager {
         let candidates = self.registry.idle_worktree_candidates(now_ms, timeout_ms)?;
         let mut cleaned = 0;
         for (sid, cwd, worktree_dir) in candidates {
-            let control = self.control(&sid);
+            let Ok(control) = self.control(&sid) else {
+                continue;
+            };
             let _lifecycle = control.lifecycle.lock();
             if control.deleted.load(Ordering::SeqCst) {
                 continue;
@@ -575,10 +586,7 @@ impl SessionManager {
         if input.is_empty() {
             return Err(SessionError::EmptyInput);
         }
-        // 先校验元数据，再创建控制块，避免随机 session id 请求不断扩张
-        // controls（该表的条目生命周期应与真实会话一致）。
-        self.get_entry(session_id)?;
-        let control = self.control(session_id);
+        let control = self.control(session_id)?;
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
@@ -935,9 +943,7 @@ impl SessionManager {
         config_id: &str,
         value: protocol::SessionConfigOptionValue,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
-        // 与 prompt/config_options 一样，随机 ID 不应进入控制块表。
-        self.get_entry(session_id)?;
-        let control = self.control(session_id);
+        let control = self.control(session_id)?;
         let _lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
@@ -1571,7 +1577,12 @@ mod tests {
         let delete_mgr = mgr.clone();
         let delete_id = session_id.clone();
         let delete_task = tokio::spawn(async move { delete_mgr.delete(&delete_id).await });
-        while !mgr.control(&session_id).deleted.load(Ordering::SeqCst) {
+        while !mgr
+            .control(&session_id)
+            .expect("测试会话仍应存在")
+            .deleted
+            .load(Ordering::SeqCst)
+        {
             tokio::task::yield_now().await;
         }
 
@@ -2361,6 +2372,7 @@ mod tests {
         assert!(mgr.prompt("nope", text("x")).await.is_err());
         assert!(mgr.history("nope", None, None).await.is_err());
         assert!(mgr.delete("nope").await.is_ok());
+        assert!(mgr.controls.lock().is_empty(), "未知会话请求不应创建控制块");
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
     }
 
