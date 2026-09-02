@@ -13,7 +13,7 @@ use amux_server::rpc::Handlers;
 use amux_server::session::SessionManager;
 use amux_server::transport::{Transport, TransportOptions};
 
-/// `--agent` 可执行路径对应注册表 agent 名（可执行文件名；路径不含文件名时回落为原始串）。
+/// `AMUX_AGENT_BIN` 可执行路径对应注册表 agent 名（可执行文件名；路径不含文件名时回落为原始串）。
 fn configured_agent_name(bin: &str) -> String {
     std::path::Path::new(bin)
         .file_name()
@@ -39,7 +39,7 @@ async fn main() {
         .unwrap_or_else(|| cfg.data_dir.join("server.log"));
     amux_common::log::init_file_output(&log_path);
 
-    // 依赖组装：ACP agent 驱动（--agent 显式指定 agent 可执行与子命令参数）；未指定时由
+    // 依赖组装：ACP agent 驱动（AMUX_AGENT_BIN 指定 agent 可执行与子命令参数）；未指定时由
     // AgentRegistry 自动发现本机 ACP agent。单个显式 agent 拉起失败不阻止
     // Server 监听，其他已发现 agent 仍可用。
     let configured: Option<(String, SharedDriver)> = cfg.agent_bin.clone().and_then(|bin| {

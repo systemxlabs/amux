@@ -3,7 +3,7 @@
 //! - `AcpAgentDriver`：真实 ACP v1 对接（官方 SDK `agent-client-protocol`，
 //!   `AcpAgent` stdio 传输 + typed 请求/通知，`grok agent`、`codex-acp` / `claude-acp` / `kimi acp`）
 //! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
-//! - `AgentRegistry`：按 agent 名解析驱动——`--agent` 配置的驱动 + PATH 自动发现的
+//! - `AgentRegistry`：按 agent 名解析驱动——`AMUX_AGENT_BIN` 配置的驱动 + PATH 自动发现的
 //!   agent（启动即拉起并复用；拉起失败标记不可用；
 //!   运行期新发现的惰性拉起）
 //!
@@ -26,8 +26,8 @@ use protocol::AgentInfo;
 
 /// agent 注册表（自动发现可执行路径，不要求手动指定）：
 ///
-/// - `--agent` 指定的驱动（agent 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
-/// - 自动发现（无需 `--agent`）：
+/// - `AMUX_AGENT_BIN` 指定的驱动（agent 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
+/// - 自动发现（无需显式配置）：
 ///   - 已知 CLI 的 `acp` 子命令探测（如 `kimi acp`，ACP 原生）
 ///   - 已知 CLI 的 `agent` 子命令探测（如 `grok agent --always-approve stdio`）
 ///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
@@ -41,7 +41,7 @@ pub struct AgentRegistry {
     stub: Mutex<Option<SharedDriver>>,
     /// 测试强制 stub：跳过运行期发现（避免本机 PATH 干扰单测）
     force_stub: bool,
-    /// 禁用运行期自动发现（`AMUX_NO_DISCOVERY=1`）：只使用 `--agent` 显式配置的 agent。
+    /// 禁用运行期自动发现（`AMUX_NO_DISCOVERY=1`）：只使用 `AMUX_AGENT_BIN` 显式配置的 agent。
     /// 供受限环境与测试隔离（避免拉起本机未配置的 agent 并恢复其会话）。
     no_discovery: bool,
     /// 配置驱动：agent 名 + 驱动
@@ -60,7 +60,7 @@ pub struct AgentRegistry {
 
 impl AgentRegistry {
     /// 构建注册表（生产路径：自动发现本机 ACP agent）。
-    /// - `configured`：`--agent` 显式指定的驱动，可为 None（由自动发现接管）
+    /// - `configured`：`AMUX_AGENT_BIN` 显式指定的驱动，可为 None（由自动发现接管）
     pub fn new(configured: Option<(String, SharedDriver)>) -> Self {
         let no_discovery = std::env::var("AMUX_NO_DISCOVERY")
             .map(|v| v == "1")

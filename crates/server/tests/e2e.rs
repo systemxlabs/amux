@@ -272,7 +272,7 @@ async fn agent_list() {
 async fn agent_rediscover_succeeds_and_keeps_agents_available() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
-    // 重新发现成功（测试环境为显式 --agent + no_discovery，重扫为 no-op，
+    // 重新发现成功（测试环境为显式 AMUX_AGENT_BIN + no_discovery，重扫为 no-op，
     // 已配置 agent 不受影响）
     let r = c.call("agent.rediscover", json!({})).await;
     assert!(r.get("error").is_none(), "rediscover 应成功: {r}");

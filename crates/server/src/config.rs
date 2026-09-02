@@ -30,12 +30,6 @@ struct CliArgs {
     /// WebSocket 认证 token
     #[arg(long, value_name = "TOKEN")]
     token: Option<String>,
-    /// Server 数据目录（主要用于测试和演示）
-    #[arg(long, value_name = "PATH")]
-    data_dir: Option<PathBuf>,
-    /// 显式指定 ACP agent，可写为 `kimi acp` 或可执行文件路径
-    #[arg(long, value_name = "COMMAND")]
-    agent: Option<String>,
 }
 
 fn parse_port(value: &str) -> Result<u16, String> {
@@ -68,12 +62,11 @@ fn resolve_config(env: &HashMap<String, String>, cli: CliArgs) -> Result<ServerC
             None => 34567,
         },
     };
-    let data_dir = cli
-        .data_dir
-        .or_else(|| get("AMUX_DATA_DIR").map(PathBuf::from))
+    let data_dir = get("AMUX_DATA_DIR")
+        .map(PathBuf::from)
         .unwrap_or_else(|| dirs_data_dir(env).join(".amux").join("server"));
 
-    let (agent_bin, agent_args) = match cli.agent.or_else(|| get("AMUX_AGENT_BIN")) {
+    let (agent_bin, agent_args) = match get("AMUX_AGENT_BIN") {
         Some(value) => parse_agent(&value)?,
         None => (None, Vec::new()),
     };
@@ -100,7 +93,7 @@ fn parse_agent(value: &str) -> Result<(Option<String>, Vec<String>), String> {
     let mut parts = value.split_whitespace();
     let bin = parts
         .next()
-        .ok_or_else(|| "--agent 参数不能为空".to_string())?;
+        .ok_or_else(|| "AMUX_AGENT_BIN 为空".to_string())?;
     Ok((Some(bin.to_string()), parts.map(str::to_string).collect()))
 }
 
@@ -179,15 +172,14 @@ mod tests {
     }
 
     #[test]
-    fn clap_parses_agent_command() {
+    fn agent_and_extra_config_from_env() {
         let cfg = parse_config(
-            &env_of(&[("AMUX_TOKEN", "t")]),
-            &[
-                "--agent".into(),
-                "kimi acp".into(),
-                "--host".into(),
-                "127.0.0.1".into(),
-            ],
+            &env_of(&[
+                ("AMUX_TOKEN", "t"),
+                ("AMUX_AGENT_BIN", "kimi acp"),
+                ("AMUX_HOST", "127.0.0.1"),
+            ]),
+            &[],
         )
         .unwrap();
         assert_eq!(cfg.agent_bin.as_deref(), Some("kimi"));
@@ -202,5 +194,8 @@ mod tests {
         assert!(err.contains("不是有效端口"), "错误信息应提示端口：{err}");
         assert!(parse_config(&env, &["--token".into()]).is_err());
         assert!(parse_config(&env, &["--unknown".into()]).is_err());
+        // 文档未规定的 CLI 参数应被拒绝，不再作为 server 参数接受。
+        let err = parse_config(&env, &["--data-dir".into(), "/tmp/x".into()]).unwrap_err();
+        assert!(err.contains("unexpected argument"), "未规定参数应被拒绝：{err}");
     }
 }
