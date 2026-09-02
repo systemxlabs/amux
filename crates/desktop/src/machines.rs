@@ -6,7 +6,7 @@ use protocol::{
 };
 
 use crate::config::{machine_ws_url, SkillEntry};
-use crate::machine::{MachineStatus, MachineView};
+use crate::machine::MachineView;
 use crate::ws::WsClient;
 
 use crate::app::{AmuxApp, DraftKey, Selected, SkillAction};
@@ -21,6 +21,8 @@ impl AmuxApp {
         let Some(m) = self.machines.get(idx) else {
             return;
         };
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| match client
             .request::<_, AgentListResult>(protocol::method::AGENT_LIST, None::<serde_json::Value>)
@@ -28,9 +30,16 @@ impl AmuxApp {
         {
             Ok(result) => {
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    if let Some(m) = this.machines.get_mut(idx) {
-                        m.agents = result.agents;
+                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                        return;
+                    };
+                    let Some(m) = this.machines.get_mut(idx) else {
+                        return;
+                    };
+                    if m.connection_generation != generation {
+                        return;
                     }
+                    m.agents = result.agents;
                     // agent 列表异步到达，晚于 auth_ok 时的 hub 快照；工作流
                     // 编排的 list_agents 读 hub，必须在此重同步
                     this.sync_machine_hub();
@@ -39,7 +48,13 @@ impl AmuxApp {
             }
             Err(e) => {
                 let _ = this.update_in(cx, |this, _w, cx| {
+                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                        return;
+                    };
                     if let Some(m) = this.machines.get_mut(idx) {
+                        if m.connection_generation != generation {
+                            return;
+                        }
                         // 连接状态机之外的操作级提示
                         m.notice = Some(format!("agent 列表获取失败：{e}"));
                     }
@@ -245,14 +260,15 @@ impl AmuxApp {
         let Some(idx) = self.machine_idx_by_name(name) else {
             return;
         };
+        let old_client = self.machines[idx].client.clone();
         let cfg = self.machines[idx].config.clone();
         let client = WsClient::connect_with_token(machine_ws_url(&cfg), cfg.token.clone());
+        old_client.close();
+        self.machines[idx].connection_generation =
+            self.machines[idx].connection_generation.saturating_add(1);
+        let generation = self.machines[idx].connection_generation;
         self.machines[idx].client = client.clone();
-        self.machines[idx].status = MachineStatus::Connecting;
-        self.machines[idx].notice = None;
-        self.machines[idx].views.clear();
-        self.sync_machine_hub();
-        let t = self.spawn_machine_tasks(window, cx, name.to_string(), client);
+        let t = self.spawn_machine_tasks(window, cx, name.to_string(), client, generation);
         self._tasks.push(t);
         // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
         // 提前发的 agent.list 必然失败并把 notice 染成「agent 列表获取失败」。
@@ -290,7 +306,8 @@ impl AmuxApp {
         let idx = self.machines.len();
         self.machines.push(view);
         let client = self.machines[idx].client.clone();
-        let t = self.spawn_machine_tasks(window, cx, name, client);
+        let generation = self.machines[idx].connection_generation;
+        let t = self.spawn_machine_tasks(window, cx, name, client, generation);
         self._tasks.push(t);
         self.sync_machine_hub();
         // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
@@ -335,6 +352,7 @@ impl AmuxApp {
         };
         self.set_selected(next, window, cx);
         self.store.remove_machine(&name);
+        self.machines[idx].client.close();
         self.drafts.retain(|key, _| match key {
             DraftKey::Session { machine, .. } => machine != &name,
             DraftKey::Workflow { .. } => true,

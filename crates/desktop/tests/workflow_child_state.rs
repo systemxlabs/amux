@@ -112,6 +112,7 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
     // 子会话完成事件在 turn 进行中到达：必须立即注入用户消息
     let injected = engine
         .on_child_state(
+            "测试机",
             "s_child",
             SessionState::Busy,
             SessionState::Idle,

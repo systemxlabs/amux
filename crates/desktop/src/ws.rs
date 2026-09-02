@@ -83,6 +83,7 @@ pub struct Notification {
 pub struct WsClient {
     req_tx: mpsc::Sender<ClientReq>,
     notify_tx: broadcast::Sender<Notification>,
+    close_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl WsClient {
@@ -92,10 +93,19 @@ impl WsClient {
         let (req_tx, req_rx) = mpsc::channel::<ClientReq>(64);
         let (notify_tx, _) = broadcast::channel::<Notification>(256);
         let (close_tx, close_rx) = tokio::sync::watch::channel(false);
-        close_signals().lock().push(close_tx);
+        close_signals().lock().push(close_tx.clone());
         let notify_for_task = notify_tx.clone();
         rt().spawn(run_loop(url, token, req_rx, close_rx, notify_for_task));
-        WsClient { req_tx, notify_tx }
+        WsClient {
+            req_tx,
+            notify_tx,
+            close_tx,
+        }
+    }
+
+    /// 关闭该连接；用于重连或移除机器，避免旧连接继续发送通知。
+    pub fn close(&self) {
+        let _ = self.close_tx.send(true);
     }
 
     /// 发送 JSON-RPC 请求并按强类型反序列化响应结果。

@@ -16,7 +16,6 @@ use gpui_component::{
 use protocol::{SessionIdParams, SessionState};
 
 use crate::workflow::{AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
-use crate::ws::WsClient;
 
 use crate::app::{run_engine_on_tokio, AmuxApp, DraftKey, Selected};
 
@@ -216,62 +215,81 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        let targets: Vec<(usize, WsClient, String)> = children
-            .iter()
-            .filter_map(|(machine, sid)| {
-                self.machine(*machine)
-                    .map(|m| (*machine, m.client.clone(), sid.clone()))
-            })
-            .collect();
+        let mut targets = Vec::new();
+        let mut unavailable = Vec::new();
+        for (machine, sid) in &children {
+            if let Some(m) = self.machine(*machine) {
+                targets.push((*machine, m.client.clone(), sid.clone()));
+            } else {
+                unavailable.push(format!("机器下标 {machine} 不可用，无法删除会话 {sid}"));
+            }
+        }
         let remote_targets = targets.clone();
         let data_dir = self.data_dir.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = run_engine_on_tokio(async move {
-                for (_, client, sid) in &remote_targets {
+                let mut deleted = Vec::new();
+                let mut failures = unavailable;
+                for (machine, client, sid) in &remote_targets {
                     let params = SessionIdParams {
                         session_id: sid.clone(),
                     };
-                    client
+                    match client
                         .request_ok(protocol::method::SESSION_DELETE, Some(params))
                         .await
-                        .map_err(|error| format!("删除关联普通会话 {sid} 失败：{error}"))?;
+                    {
+                        Ok(()) => deleted.push((*machine, sid.clone())),
+                        Err(error) if error.code == protocol::server_error::SESSION_NOT_FOUND => {
+                            deleted.push((*machine, sid.clone()));
+                        }
+                        Err(error) => {
+                            failures.push(format!("删除关联普通会话 {sid} 失败：{error}"))
+                        }
+                    }
                 }
-                Ok::<(), String>(())
+                Ok::<_, String>((deleted, failures))
             })
             .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 match result {
-                    Some(Ok(())) => {
-                        for (machine, _, sid) in &targets {
+                    Some(Ok((deleted, failures))) => {
+                        for (machine, sid) in &deleted {
                             if let Some(m) = this.machine_mut(*machine) {
                                 m.sessions.retain(|session| session.id != *sid);
                                 m.views.remove(sid);
                             }
                         }
-                        match WorkflowEngine::remove(&data_dir, &wf_id) {
-                            Ok(()) => {
-                                // 选中态以工作流会话 ID 为身份：删除后无需平移其他引用
-                                this.workflows.retain(|workflow| workflow.id() != wf_id);
-                                this.visible_workflows.remove(&wf_id);
-                                if this.selected == Some(Selected::Workflow { id: wf_id.clone() }) {
-                                    this.set_selected(None, w, cx);
-                                }
-                                this.drafts.retain(|key, _| match key {
-                                    DraftKey::Workflow { id } => id != &wf_id,
-                                    // 关联的普通会话已一并删除，草稿随之清理
-                                    DraftKey::Session { id, .. } => {
-                                        !children.iter().any(|(_, sid)| sid == id)
+                        if failures.is_empty() {
+                            match WorkflowEngine::remove(&data_dir, &wf_id) {
+                                Ok(()) => {
+                                    this.workflows.retain(|workflow| workflow.id() != wf_id);
+                                    this.visible_workflows.remove(&wf_id);
+                                    if this.selected
+                                        == Some(Selected::Workflow { id: wf_id.clone() })
+                                    {
+                                        this.set_selected(None, w, cx);
                                     }
-                                });
+                                    this.drafts.retain(|key, _| match key {
+                                        DraftKey::Workflow { id } => id != &wf_id,
+                                        DraftKey::Session { id, .. } => {
+                                            !children.iter().any(|(_, sid)| sid == id)
+                                        }
+                                    });
+                                }
+                                Err(error) => {
+                                    this.workflow_error =
+                                        Some(format!("删除工作流持久化记录失败：{error}"));
+                                }
                             }
-                            Err(error) => {
-                                this.workflow_error =
-                                    Some(format!("删除工作流持久化记录失败：{error}"));
-                            }
+                        } else {
+                            this.workflow_error = Some(format!(
+                                "工作流部分删除完成，剩余关联会话可重试：{}",
+                                failures.join("；")
+                            ));
                         }
                     }
                     Some(Err(error)) => {
-                        this.workflow_error = Some(format!("删除工作流失败：{error}"));
+                        this.workflow_error = Some(format!("删除工作流任务失败：{error}"));
                     }
                     None => {
                         this.workflow_error = Some("删除工作流任务未能执行".into());

@@ -48,6 +48,10 @@ pub struct MachineView {
     pub(crate) sessions_has_more: bool,
     /// 每机器独立的改动审查状态（含陈旧响应防乱的 request_id）
     pub diff: gpui::Entity<crate::diff_review::DiffReviewState>,
+    /// 本连接的代次；重连后递增，所有异步回调必须匹配该代次才能回写。
+    pub(crate) connection_generation: u64,
+    /// 会话列表请求序号，用于丢弃乱序响应。
+    pub(crate) sessions_request_id: u64,
     pub views: std::collections::HashMap<String, SessionView>,
     pub(crate) workspace_directories: HashMap<String, WorkspaceDirectory>,
     pub(crate) workspace_expanded: HashSet<String>,
@@ -85,6 +89,8 @@ impl MachineView {
             agents: Vec::new(),
             sessions: Vec::new(),
             sessions_has_more: false,
+            connection_generation: 0,
+            sessions_request_id: 0,
             views: std::collections::HashMap::new(),
             workspace_directories: HashMap::new(),
             workspace_expanded: HashSet::new(),

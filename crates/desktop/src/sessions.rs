@@ -44,15 +44,25 @@ use crate::app::{
 };
 
 impl AmuxApp {
-    pub(crate) fn refresh_sessions(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(m) = self.machines.get(idx) else {
+    pub(crate) fn refresh_sessions(
+        &mut self,
+        idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(m) = self.machines.get_mut(idx) else {
             return;
+        };
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
+        let request_id = {
+            m.sessions_request_id = m.sessions_request_id.saturating_add(1);
+            m.sessions_request_id
         };
         let count = self.list_pages * PAGE_LIMIT;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            // 滚动查询（docs/DESIGN.md「会话列表滚动查询」）：按数量查询前 N 页
-            //（N × 每页 PAGE_LIMIT 条）
+            // 滚动查询（docs/DESIGN.md「会话列表滚动查询」）：按数量查询前 N 页。
             let params = SessionListParams { limit: Some(count) };
             let (pages, has_more) = match client
                 .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
@@ -63,33 +73,38 @@ impl AmuxApp {
                 Err(_) => return,
             };
 
-            // 应用查询结果，并计算工作流关联会话中尚未出现在其中的 id
+            // 应用查询结果，并计算工作流关联会话中尚未出现在其中的 id。
+            // 机器名和连接代次均需匹配，防止删机重排或重连旧响应误写。
             let missing = match this.update_in(cx, |this, _w, _cx| {
-                let Some(m) = this.machines.get_mut(idx) else {
-                    return Vec::new();
+                let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                    return None;
                 };
-                // 当前请求代表整个前 N 页窗口；替换而不是追加，收起分页时
-                // 才不会把此前加载的更早会话继续留在列表中。
+                let Some(m) = this.machines.get_mut(idx) else {
+                    return None;
+                };
+                if m.connection_generation != generation || m.sessions_request_id != request_id {
+                    return None;
+                }
                 m.sessions = pages;
                 m.sessions_has_more = has_more;
                 crate::logic::sort_sessions_recent(&mut m.sessions);
-                let child_ids: Vec<(usize, String)> = this
+                let child_ids: Vec<String> = this
                     .workflows
                     .iter()
                     .filter(|wf| this.visible_workflows.contains(&wf.id()))
-                    .flat_map(|wf| {
-                        let children = wf.session.read().children.clone();
-                        children.into_iter().map(|c| (c.machine_idx, c.id))
-                    })
+                    .flat_map(|wf| wf.session.read().children.clone())
+                    .filter(|child| child.machine_name == machine_name)
+                    .map(|child| child.id)
                     .collect();
-                child_ids
-                    .iter()
-                    .filter(|(cmi, cid)| *cmi == idx && !m.sessions.iter().any(|s| s.id == *cid))
-                    .map(|(_, cid)| cid.clone())
-                    .collect::<Vec<_>>()
+                Some(
+                    child_ids
+                        .into_iter()
+                        .filter(|cid| !m.sessions.iter().any(|s| s.id == *cid))
+                        .collect::<Vec<_>>(),
+                )
             }) {
-                Ok(missing) => missing,
-                Err(_) => return,
+                Ok(Some(missing)) => missing,
+                Ok(None) | Err(_) => return,
             };
             if missing.is_empty() {
                 let _ = this.update_in(cx, |_, _, cx| cx.notify());
@@ -107,7 +122,15 @@ impl AmuxApp {
                 .await
             {
                 let _ = this.update_in(cx, |this, _w, cx| {
+                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                        return;
+                    };
                     if let Some(m) = this.machines.get_mut(idx) {
+                        if m.connection_generation != generation
+                            || m.sessions_request_id != request_id
+                        {
+                            return;
+                        }
                         let (list, _) =
                             merge_session_window(&m.sessions, res.sessions, m.sessions_has_more);
                         m.sessions = list;
@@ -121,15 +144,22 @@ impl AmuxApp {
     }
 
     pub(crate) fn refresh_dialog(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else {
+        let Some(m) = self.machines.get_mut(machine) else {
             return;
         };
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
+        let Some(view) = m.views.get_mut(&session_id) else {
+            return;
+        };
+        view.history_request_id = view.history_request_id.saturating_add(1);
+        let request_id = view.history_request_id;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionPageParams {
@@ -147,11 +177,22 @@ impl AmuxApp {
                 let _ = this.update_in(cx, |this, _w, cx| {
                     // 新消息到达前若已在底部，追加内容后保持贴底，避免新消息被遮挡。
                     let was_at_bottom = this.dialog_at_bottom();
-                    if let Some(m) = this.machines.get_mut(machine) {
-                        if let Some(v) = m.views.get_mut(&session_id) {
-                            v.set_history_page(&items, has_more, next_before);
-                        }
+                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                        return;
+                    };
+                    let Some(m) = this.machines.get_mut(idx) else {
+                        return;
+                    };
+                    if m.connection_generation != generation {
+                        return;
                     }
+                    let Some(v) = m.views.get_mut(&session_id) else {
+                        return;
+                    };
+                    if v.history_request_id != request_id {
+                        return;
+                    }
+                    v.set_history_page(&items, has_more, next_before);
                     if was_at_bottom {
                         this.dialog_scroll.scroll_to_bottom();
                     }
@@ -163,7 +204,7 @@ impl AmuxApp {
     }
 
     pub(crate) fn refresh_activities(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
@@ -173,9 +214,16 @@ impl AmuxApp {
         if self.panel != Some(Panel::Activities) {
             return;
         }
-        let Some(m) = self.machines.get(machine) else {
+        let Some(m) = self.machines.get_mut(machine) else {
             return;
         };
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
+        let Some(view) = m.views.get_mut(&session_id) else {
+            return;
+        };
+        view.activities_request_id = view.activities_request_id.saturating_add(1);
+        let request_id = view.activities_request_id;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionPageParams {
@@ -191,13 +239,23 @@ impl AmuxApp {
                 let has_more = res.has_more;
                 let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    // 新活动到达前若已在底部，追加内容后保持贴底。
                     let was_at_bottom = this.activities_at_bottom();
-                    if let Some(m) = this.machines.get_mut(machine) {
-                        if let Some(v) = m.views.get_mut(&session_id) {
-                            v.set_activities_page(acts, has_more, next_before);
-                        }
+                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                        return;
+                    };
+                    let Some(m) = this.machines.get_mut(idx) else {
+                        return;
+                    };
+                    if m.connection_generation != generation {
+                        return;
                     }
+                    let Some(v) = m.views.get_mut(&session_id) else {
+                        return;
+                    };
+                    if v.activities_request_id != request_id {
+                        return;
+                    }
+                    v.set_activities_page(acts, has_more, next_before);
                     if was_at_bottom {
                         this.activities_scroll.scroll_to_bottom();
                     }
@@ -209,15 +267,22 @@ impl AmuxApp {
     }
 
     pub(crate) fn refresh_ongoing(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else {
+        let Some(m) = self.machines.get_mut(machine) else {
             return;
         };
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
+        let Some(view) = m.views.get_mut(&session_id) else {
+            return;
+        };
+        view.ongoing_request_id = view.ongoing_request_id.saturating_add(1);
+        let request_id = view.ongoing_request_id;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionIdParams {
@@ -232,11 +297,22 @@ impl AmuxApp {
             {
                 let act = res.activity;
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    if let Some(m) = this.machines.get_mut(machine) {
-                        if let Some(v) = m.views.get_mut(&session_id) {
-                            v.set_live(act);
-                        }
+                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                        return;
+                    };
+                    let Some(m) = this.machines.get_mut(idx) else {
+                        return;
+                    };
+                    if m.connection_generation != generation {
+                        return;
                     }
+                    let Some(v) = m.views.get_mut(&session_id) else {
+                        return;
+                    };
+                    if v.ongoing_request_id != request_id {
+                        return;
+                    }
+                    v.set_live(act);
                     cx.notify();
                 });
             }
@@ -247,7 +323,7 @@ impl AmuxApp {
     /// 拉取当前会话的 agent 计划（docs/PRD.md「会话计划」面板）。
     /// 面板未打开时不主动刷新，与 refresh_activities 同策略。
     pub(crate) fn refresh_plan(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
@@ -256,9 +332,16 @@ impl AmuxApp {
         if self.panel != Some(Panel::Plan) {
             return;
         }
-        let Some(m) = self.machines.get(machine) else {
+        let Some(m) = self.machines.get_mut(machine) else {
             return;
         };
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
+        let Some(view) = m.views.get_mut(&session_id) else {
+            return;
+        };
+        view.plan_request_id = view.plan_request_id.saturating_add(1);
+        let request_id = view.plan_request_id;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionIdParams {
@@ -269,11 +352,22 @@ impl AmuxApp {
                 .await
             {
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    if let Some(m) = this.machines.get_mut(machine) {
-                        if let Some(v) = m.views.get_mut(&session_id) {
-                            v.set_plan(res.entries);
-                        }
+                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                        return;
+                    };
+                    let Some(m) = this.machines.get_mut(idx) else {
+                        return;
+                    };
+                    if m.connection_generation != generation {
+                        return;
                     }
+                    let Some(v) = m.views.get_mut(&session_id) else {
+                        return;
+                    };
+                    if v.plan_request_id != request_id {
+                        return;
+                    }
+                    v.set_plan(res.entries);
                     cx.notify();
                 });
             }
@@ -462,17 +556,22 @@ impl AmuxApp {
                     session_id: id.clone(),
                     input: blocks.clone(),
                 };
+                let optimistic_timestamp = now();
                 if let Some(m) = self.machine_mut(machine) {
                     // 本地仅缓存对话视图；会话状态由服务端权威维护，
                     // 经 state_change 推送 / 会话列表轮询同步，应用侧不做乐观改写
                     let v = m.views.entry(id.clone()).or_default();
                     v.dialog.push(DialogMsg::UserMessage {
                         content: blocks.clone(),
-                        timestamp: now(),
+                        timestamp: optimistic_timestamp,
                     });
                 }
                 self.dialog_scroll.scroll_to_bottom();
                 let prompt_params = params;
+                let original_text = text.clone();
+                let original_attachments = attachments.clone();
+                let optimistic_blocks = blocks.clone();
+                let optimistic_id = id.clone();
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
                         .request_ok(protocol::method::SESSION_PROMPT, Some(prompt_params))
@@ -480,6 +579,35 @@ impl AmuxApp {
                     let _ = this.update_in(cx, |this, w, cx| {
                         match &result {
                             Err(error) => {
+                                if let Some(m) = this.machine_mut(machine) {
+                                    if let Some(v) = m.views.get_mut(&optimistic_id) {
+                                        if let Some(pos) = v.dialog.iter().rposition(|msg| {
+                                            matches!(
+                                                msg,
+                                                DialogMsg::UserMessage {
+                                                    content,
+                                                    timestamp,
+                                                } if *timestamp == optimistic_timestamp
+                                                    && *content == optimistic_blocks
+                                            )
+                                        }) {
+                                            v.dialog.remove(pos);
+                                        }
+                                    }
+                                }
+                                if matches!(
+                                    this.selected,
+                                    Some(Selected::Session {
+                                        machine: selected_machine,
+                                        ref id,
+                                    }) if selected_machine == machine && id == &optimistic_id
+                                ) && this.input_state.read(cx).value().trim().is_empty()
+                                    && this.input_attachments.is_empty()
+                                {
+                                    this.input_state
+                                        .update(cx, |s, cx| s.set_value(&original_text, w, cx));
+                                    this.input_attachments = original_attachments.clone();
+                                }
                                 w.push_notification(
                                     UiNotification::error(format!("发送失败：{error}"))
                                         .title("消息未发送"),
@@ -491,7 +619,7 @@ impl AmuxApp {
                                 this.refresh_sessions(machine, w, cx);
                             }
                         }
-                        this.refresh_dialog(w, cx, machine, id);
+                        this.refresh_dialog(w, cx, machine, optimistic_id);
                         cx.notify();
                     });
                 })

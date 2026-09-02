@@ -19,6 +19,11 @@ pub struct SessionView {
     pub live: Option<Activity>,
     /// agent 计划（`session.plan` 查询结果，全量替换）。
     pub plan: Vec<SessionPlanEntry>,
+    /// 各类详情请求序号；轮询、切换会话和手动加载可能并发，旧响应不得覆盖新状态。
+    pub history_request_id: u64,
+    pub activities_request_id: u64,
+    pub ongoing_request_id: u64,
+    pub plan_request_id: u64,
 }
 
 impl SessionView {

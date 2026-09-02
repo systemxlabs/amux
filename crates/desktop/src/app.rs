@@ -353,7 +353,8 @@ impl AmuxApp {
         for i in 0..app.machines.len() {
             let name = app.machines[i].config.name.clone();
             let client = app.machines[i].client.clone();
-            let t = app.spawn_machine_tasks(window, cx, name, client);
+            let generation = app.machines[i].connection_generation;
+            let t = app.spawn_machine_tasks(window, cx, name, client, generation);
             app._tasks.push(t);
         }
         // 编排引擎事件订阅：create_session 挂载新子会话后即时刷新对应机器
@@ -639,6 +640,26 @@ impl AmuxApp {
             reason,
         } = change;
         let idle = new_state == SessionState::Idle;
+        let machine_name = this
+            .machines
+            .get(idx)
+            .map(|m| m.config.name.clone())
+            .or_else(|| {
+                // 测试/恢复阶段可能暂时没有机器视图；只有全局唯一的
+                // (workflow child id) 匹配才允许使用子会话持久化的机器名，
+                // 避免同 ID 跨机器时退化为错误路由。
+                let names: Vec<String> = this
+                    .workflows
+                    .iter()
+                    .flat_map(|wf| wf.session.read().children.clone())
+                    .filter(|child| child.id == sid)
+                    .map(|child| child.machine_name)
+                    .collect();
+                (names.len() == 1).then(|| names.into_iter().next().unwrap())
+            });
+        let Some(machine_name) = machine_name else {
+            return;
+        };
         if let Some(m) = this.machines.get_mut(idx) {
             if let Some(s) = m.sessions.iter_mut().find(|s| s.id == sid) {
                 s.state = new_state;
@@ -660,24 +681,26 @@ impl AmuxApp {
             }
         }
 
-        let Some(wi) = this
-            .workflows
-            .iter()
-            .position(|wf| wf.session.read().children.iter().any(|c| c.id == sid))
-        else {
+        let Some(wi) = this.workflows.iter().position(|wf| {
+            wf.session
+                .read()
+                .children
+                .iter()
+                .any(|c| c.machine_name == machine_name && c.id == sid)
+        }) else {
             return;
         };
         // 取消导致的状态变更不注入，避免编排者与用户的取消拉锯。
         if reason == StateChangeReason::Cancelled {
             // 不推进，但忙碌计数仍要记账，否则取消后计数会永久偏高。
             if let Some(wf) = this.workflows.get_mut(wi) {
-                wf.note_child_state(&sid, old_state, new_state);
+                wf.note_child_state(&machine_name, &sid, old_state, new_state);
             }
             return;
         }
         if !idle {
             if let Some(wf) = this.workflows.get_mut(wi) {
-                wf.note_child_state(&sid, old_state, new_state);
+                wf.note_child_state(&machine_name, &sid, old_state, new_state);
             }
             return;
         }
@@ -688,7 +711,10 @@ impl AmuxApp {
         let data_dir = this.data_dir.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             run_engine_on_tokio(async move {
-                if let Err(e) = wf.on_child_state(&sid, old_state, new_state, reason).await {
+                if let Err(e) = wf
+                    .on_child_state(&machine_name, &sid, old_state, new_state, reason)
+                    .await
+                {
                     log::error!("推进工作流失败：{e}");
                 }
                 if let Err(e) = wf.persist(&data_dir) {
@@ -779,24 +805,24 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
         name: String,
-        _client: WsClient,
+        client: WsClient,
+        generation: u64,
     ) -> Task<()> {
-        let mut notify_rx = self
-            .machine_idx_by_name(&name)
-            .and_then(|idx| self.machines.get(idx))
-            .expect("机器已存在")
-            .client
-            .subscribe();
+        let mut notify_rx = client.subscribe();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            // 以机器名（稳定域身份）为捕获，而非 Vec 下标——删机会使下标左移，
-            // 旧任务按旧 idx 写状态会串到另一台机器。机器移除后任务退出。
+            // 订阅绑定到具体连接；重连后旧连接即使尚未退出，也不能污染新连接状态。
             loop {
                 match notify_rx.recv().await {
                     Ok(n) => {
                         let mut gone = false;
                         let _ = this.update_in(cx, |this, window, cx| {
                             match this.machine_idx_by_name(&name) {
-                                Some(idx) => Self::on_notify(this, window, cx, idx, &n),
+                                Some(idx)
+                                    if this.machines[idx].connection_generation == generation =>
+                                {
+                                    Self::on_notify(this, window, cx, idx, &n)
+                                }
+                                Some(_) => gone = true,
                                 None => gone = true,
                             }
                         });

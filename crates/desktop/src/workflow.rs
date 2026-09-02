@@ -663,19 +663,22 @@ impl WorkflowEngine {
     /// 取消导致的不注入：编排者不应与用户的取消拉锯。
     pub async fn on_child_state(
         &self,
+        machine_name: &str,
         session_id: &str,
         old_state: SessionState,
         new_state: SessionState,
         reason: StateChangeReason,
     ) -> Result<bool, String> {
-        let machine = {
+        let mounted = {
             let s = self.session.read();
-            let Some(child) = s.children.iter().find(|c| c.id == session_id) else {
-                return Ok(false);
-            };
-            child.machine_name.clone()
+            s.children
+                .iter()
+                .any(|c| c.machine_name == machine_name && c.id == session_id)
         };
-        self.track_child_state(session_id, old_state, new_state);
+        if !mounted {
+            return Ok(false);
+        }
+        self.track_child_state(machine_name, session_id, old_state, new_state);
         self.sync_state();
         if new_state == SessionState::Idle {
             if reason == StateChangeReason::Cancelled {
@@ -684,7 +687,7 @@ impl WorkflowEngine {
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::User {
                     text: format!(
-                        "关联普通会话 {session_id}@{machine} 检测到状态变更：{old} -> {new}，\
+                        "关联普通会话 {session_id}@{machine_name} 检测到状态变更：{old} -> {new}，\
                          变更原因为{why}",
                         old = old_state.as_str(),
                         new = new_state.as_str(),
@@ -711,24 +714,28 @@ impl WorkflowEngine {
     /// 不可叠加（重复计数）。
     pub fn note_child_state(
         &self,
+        machine_name: &str,
         session_id: &str,
         old_state: SessionState,
         new_state: SessionState,
     ) {
-        self.track_child_state(session_id, old_state, new_state);
+        self.track_child_state(machine_name, session_id, old_state, new_state);
         self.sync_state();
     }
 
     /// 按状态变更事件增减忙碌子会话计数。
     fn track_child_state(
         &self,
+        machine_name: &str,
         session_id: &str,
         old_state: SessionState,
         new_state: SessionState,
     ) {
         let mounted = {
             let s = self.session.read();
-            s.children.iter().any(|c| c.id == session_id)
+            s.children
+                .iter()
+                .any(|c| c.machine_name == machine_name && c.id == session_id)
         };
         if !mounted || old_state == new_state {
             return;
@@ -2128,6 +2135,7 @@ mod tests {
         });
         let advanced = engine
             .on_child_state(
+                "测试机",
                 "s_child",
                 SessionState::Busy,
                 SessionState::Idle,
@@ -2178,6 +2186,7 @@ mod tests {
         });
         let advanced = engine
             .on_child_state(
+                "测试机",
                 "s_child",
                 SessionState::Busy,
                 SessionState::Idle,
@@ -2558,11 +2567,11 @@ mod tests {
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
-        engine.note_child_state("s_child", SessionState::Idle, SessionState::Busy);
+        engine.note_child_state("测试机", "s_child", SessionState::Idle, SessionState::Busy);
         assert_eq!(engine.session.read().state, SessionState::Busy);
-        engine.note_child_state("s_child", SessionState::Busy, SessionState::Idle);
+        engine.note_child_state("测试机", "s_child", SessionState::Busy, SessionState::Idle);
         assert_eq!(engine.session.read().state, SessionState::Idle);
-        engine.note_child_state("missing", SessionState::Idle, SessionState::Busy);
+        engine.note_child_state("测试机", "missing", SessionState::Idle, SessionState::Busy);
         assert_eq!(engine.session.read().state, SessionState::Idle);
     }
 
@@ -2581,7 +2590,7 @@ mod tests {
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
-        engine.note_child_state("s_child", SessionState::Idle, SessionState::Busy);
+        engine.note_child_state("测试机", "s_child", SessionState::Idle, SessionState::Busy);
 
         assert!(engine.record_user("继续处理"));
         assert!(engine.steer_inbox.lock().is_empty());
