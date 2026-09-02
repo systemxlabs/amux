@@ -100,12 +100,8 @@ impl AmuxApp {
             // 应用查询结果，并计算工作流关联会话中尚未出现在其中的 id。
             // 机器名和连接代次均需匹配，防止删机重排或重连旧响应误写。
             let missing = match this.update_in(cx, |this, _w, _cx| {
-                let Some(idx) = this.machine_idx_by_name(&machine_name) else {
-                    return None;
-                };
-                let Some(m) = this.machines.get_mut(idx) else {
-                    return None;
-                };
+                let idx = this.machine_idx_by_name(&machine_name)?;
+                let m = this.machines.get_mut(idx)?;
                 if m.connection_generation != generation || m.sessions_request_id != request_id {
                     return None;
                 }
