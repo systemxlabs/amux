@@ -239,18 +239,31 @@ async fn handle_connection(
     opts.log(format!("断开: {peer} (#{conn_id})"));
 }
 
-/// Parse error 响应（id 未知，恒为 Null）。
-fn parse_error_response() -> protocol::JsonRpcResponse {
+/// 构造 JSON-RPC 错误响应；所有错误响应共享同一协议 envelope。
+fn error_response(
+    id: protocol::JsonRpcId,
+    code: i32,
+    message: impl Into<String>,
+) -> protocol::JsonRpcResponse {
     protocol::JsonRpcResponse {
         jsonrpc: "2.0".into(),
-        id: protocol::JsonRpcId::Null,
+        id,
         result: None,
         error: Some(protocol::JsonRpcError {
-            code: protocol::rpc_error::PARSE_ERROR,
-            message: "Parse error".into(),
+            code,
+            message: message.into(),
             data: None,
         }),
     }
+}
+
+/// Parse error 响应（id 未知，恒为 Null）。
+fn parse_error_response() -> protocol::JsonRpcResponse {
+    error_response(
+        protocol::JsonRpcId::Null,
+        protocol::rpc_error::PARSE_ERROR,
+        "Parse error",
+    )
 }
 
 /// 分发一帧已解析的 JSON-RPC 请求，返回响应。
@@ -263,29 +276,19 @@ async fn dispatch(
     conn: &ConnScope,
 ) -> Option<protocol::JsonRpcResponse> {
     if req.jsonrpc != "2.0" {
-        return Some(protocol::JsonRpcResponse {
-            jsonrpc: "2.0".into(),
-            id: req.id,
-            result: None,
-            error: Some(protocol::JsonRpcError {
-                code: protocol::rpc_error::INVALID_REQUEST,
-                message: "jsonrpc 必须为 2.0".into(),
-                data: None,
-            }),
-        });
+        return Some(error_response(
+            req.id,
+            protocol::rpc_error::INVALID_REQUEST,
+            "jsonrpc 必须为 2.0",
+        ));
     }
     // 无 id 的帧视为非法请求（文档样例 auth 带 id=1；auth 缺 id 返回 INVALID_REQUEST）
     let Some(id) = req.id.else_null() else {
-        return Some(protocol::JsonRpcResponse {
-            jsonrpc: "2.0".into(),
-            id: protocol::JsonRpcId::Null,
-            result: None,
-            error: Some(protocol::JsonRpcError {
-                code: protocol::rpc_error::INVALID_REQUEST,
-                message: "请求缺少 id".into(),
-                data: None,
-            }),
-        });
+        return Some(error_response(
+            protocol::JsonRpcId::Null,
+            protocol::rpc_error::INVALID_REQUEST,
+            "请求缺少 id",
+        ));
     };
 
     if req.method == method::AUTH {
@@ -293,16 +296,11 @@ async fn dispatch(
     }
     if !authenticated.load(Ordering::SeqCst) {
         log::error!("未认证连接请求 {} → AUTH_FAILED", req.method);
-        return Some(protocol::JsonRpcResponse {
-            jsonrpc: "2.0".into(),
+        return Some(error_response(
             id,
-            result: None,
-            error: Some(protocol::JsonRpcError {
-                code: server_error::AUTH_FAILED,
-                message: "未认证：请先发送 auth 消息".into(),
-                data: None,
-            }),
-        });
+            server_error::AUTH_FAILED,
+            "未认证：请先发送 auth 消息",
+        ));
     }
 
     let summary = amux_common::log::params_summary(
