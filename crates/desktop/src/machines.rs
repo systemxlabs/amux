@@ -289,6 +289,7 @@ impl AmuxApp {
         self.machines[idx].connection_generation = next_connection_generation();
         let generation = self.machines[idx].connection_generation;
         self.machines[idx].client = client.clone();
+        self.sync_machine_hub();
         let t = self.spawn_machine_tasks(window, cx, name.to_string(), client, generation);
         self._tasks.push(t);
         // 不在此处立即拉取：连接任务在 auth 握手完成前会拒绝一切请求，
