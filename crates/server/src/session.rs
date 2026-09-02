@@ -185,6 +185,29 @@ impl SessionManager {
             .clone()
     }
 
+    /// 仅移除仍由调用方持有的控制块。删除并发时，旧请求可能在首轮注册表
+    /// 检查后才创建控制块；按 Arc 身份比较可避免它清掉后续请求已经接管的条目。
+    fn remove_control_if_current(&self, session_id: &str, control: &Arc<SessionControl>) {
+        let mut controls = self.controls.lock();
+        if controls
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, control))
+        {
+            controls.remove(session_id);
+        }
+    }
+
+    fn remove_control_if_not_found(
+        &self,
+        session_id: &str,
+        control: &Arc<SessionControl>,
+        error: &SessionError,
+    ) {
+        if matches!(error, SessionError::NotFound(_)) {
+            self.remove_control_if_current(session_id, control);
+        }
+    }
+
     /// 配置会话标题（用户可随时修改）。
     pub async fn configure(
         &self,
@@ -246,12 +269,21 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
+        // 先校验元数据，再创建控制块，避免随机 session id 请求不断扩张
+        // controls（该表的条目生命周期应与真实会话一致）。
+        self.get_entry(session_id)?;
         let control = self.control(session_id);
         let _lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        let (meta, agent_session_id) = match self.get_entry(session_id) {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.remove_control_if_not_found(session_id, &control, &error);
+                return Err(error);
+            }
+        };
         let (driver, agent_session_id) =
             self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
         // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
@@ -316,14 +348,23 @@ impl SessionManager {
     /// 联动清除注册表条目 + 历史日志 + 活动日志 + 进行中控制块。
     /// 幂等：会话已不存在时仅清理残留日志（部分工作流清理失败后可安全重试）。
     pub async fn delete(&self, session_id: &str) -> Result<(), SessionError> {
+        // 不存在的 ID 仍保持删除幂等，但不能为随机 ID 创建控制块。
+        let entry = self.registry.get(session_id)?;
+        if entry.is_none() {
+            return SessionLog::open(&self.data_dir, session_id)
+                .remove()
+                .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
+        }
+
         let control = self.control(session_id);
         control.deleted.store(true, Ordering::SeqCst);
         // setup_prompt 持有同一把锁直到 agent session id 与 Busy 元数据写回完成。
         // 删除先标记 deleted，再等待临界区结束，保证不会在删除后复活会话。
         let _lifecycle = control.lifecycle.lock();
         let log = SessionLog::open(&self.data_dir, session_id);
-        let entry = self.registry.get(session_id)?;
-        let Some((meta, agent_session_id)) = entry else {
+        let Some((meta, agent_session_id)) = self.registry.get(session_id)? else {
+            // 另一条删除请求可能已经完成本地删除；当前控制块仍需移除。
+            self.remove_control_if_current(session_id, &control);
             return log
                 .remove()
                 .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
@@ -594,6 +635,9 @@ impl SessionManager {
         if input.is_empty() {
             return Err(SessionError::EmptyInput);
         }
+        // 先校验元数据，再创建控制块，避免随机 session id 请求不断扩张
+        // controls（该表的条目生命周期应与真实会话一致）。
+        self.get_entry(session_id)?;
         let control = self.control(session_id);
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
@@ -613,8 +657,10 @@ impl SessionManager {
         let (driver, agent_session_id, cwd, old_state) = match setup {
             Ok(value) => value,
             Err(error) => {
-                // 尚未进入 Busy 广播，只需释放 busy 标志
+                // 尚未进入 Busy 广播，只需释放 busy 标志；若会话已被删除，
+                // 同时移除这次竞态中刚创建的孤儿控制块。
                 control.busy.store(false, Ordering::SeqCst);
+                self.remove_control_if_not_found(session_id, &control, &error);
                 return Err(error);
             }
         };
@@ -955,12 +1001,20 @@ impl SessionManager {
         config_id: &str,
         value: protocol::SessionConfigOptionValue,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
+        // 与 prompt/config_options 一样，随机 ID 不应进入控制块表。
+        self.get_entry(session_id)?;
         let control = self.control(session_id);
         let _lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        let (meta, agent_session_id) = match self.get_entry(session_id) {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.remove_control_if_not_found(session_id, &control, &error);
+                return Err(error);
+            }
+        };
         let (driver, agent_session_id) =
             self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
         log::info!(
@@ -1047,6 +1101,34 @@ mod tests {
         (Arc::new(mgr), rx)
     }
 
+    #[tokio::test]
+    async fn missing_session_requests_do_not_allocate_controls() {
+        let (manager, _rx) = stub_manager("stub");
+        assert!(manager.controls.lock().is_empty());
+
+        assert!(matches!(
+            manager.prompt("missing", text("hello")).await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            manager.config_options("missing").await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            manager
+                .set_config_option(
+                    "missing",
+                    "model",
+                    protocol::SessionConfigOptionValue::ValueId {
+                        value: "fast".into(),
+                    },
+                )
+                .await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(manager.delete("missing").await.is_ok());
+        assert!(manager.controls.lock().is_empty());
+    }
     /// 阻塞型驱动：prompt 后等待 release 才结束 turn（用于控制 turn 生命周期，
     /// 在 turn 进行中并发执行删除以验证删除语义）。
     struct BlockingDriver {

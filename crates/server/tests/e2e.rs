@@ -207,6 +207,51 @@ async fn auth_required_and_enforced() {
 }
 
 #[tokio::test]
+async fn auth_required_requests_are_not_released_after_later_auth() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect_raw(port).await;
+
+    c.write
+        .send(Message::Text(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "session.list",
+                "params": {}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    c.write
+        .send(Message::Text(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "auth",
+                "params": {"token": "test-token"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut responses = std::collections::HashMap::new();
+    while responses.len() < 2 {
+        let msg = c.read.next().await.unwrap().unwrap();
+        let Message::Text(text) = msg else { continue };
+        let response: Value = serde_json::from_str(&text).unwrap();
+        if let Some(id) = response["id"].as_u64() {
+            responses.insert(id, response);
+        }
+    }
+    assert_eq!(responses[&1]["error"]["code"], -32000);
+    assert!(responses[&2].get("error").is_none());
+}
+
+#[tokio::test]
 async fn agent_list() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;

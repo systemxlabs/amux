@@ -204,10 +204,10 @@ async fn handle_connection(
                         continue;
                     }
                 };
-                // 认证请求在连接任务内串行完成；因此紧随其后的业务请求只有在
-                // auth 响应已处理后才会被派发，不会与认证发生竞态。
-                let is_auth = req.method == method::AUTH;
-                if is_auth && !authenticated.load(Ordering::SeqCst) {
+                // 未认证阶段的请求必须在读取循环内同步处理。否则，业务请求会被
+                // spawn 后挂起，紧随其后的 auth 可能先把 authenticated 置为 true，
+                // 导致这条实际上先到达的请求绕过认证检查。
+                if !authenticated.load(Ordering::SeqCst) {
                     if let Some(resp) =
                         dispatch(&handlers, req, &token, &authenticated, &conn_scope).await
                     {
