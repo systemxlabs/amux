@@ -61,7 +61,7 @@ Server 主动推送通知
 ### 技术栈
 
 - 基础库：`tokio` / `serde` / `serde_json`
-- 传输协议：`tokio-tungstenite`（WebSocket） 和 `jsonrpsee`(JSONRPC)
+- WebSocket：`tokio-tungstenite`
 - SQLite：`rusqlite`
 - ACP：`agent-client-protocol` 官方 SDK
 - Git：`gitoxide` / git CLI
