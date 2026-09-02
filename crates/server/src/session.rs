@@ -416,11 +416,7 @@ impl SessionManager {
     /// 改动视图（diff/restore/list/read）应作用于 worktree 目录而非原始目录。
     pub fn workspace_cwd(&self, session_id: &str) -> Result<String, SessionError> {
         let meta = self.get_entry(session_id)?.0;
-        Ok(if meta.worktree_dir.is_empty() {
-            meta.cwd
-        } else {
-            meta.worktree_dir
-        })
+        Ok(Self::effective_cwd(&meta))
     }
 
     /// 关闭长时间无活动的 agent 侧会话（>timeout_ms）。候选选出后复核状态：
@@ -728,11 +724,7 @@ impl SessionManager {
         // worktree 在 session.new 已落盘（docs/DESIGN.md「工作树存储」），此处不再创建。
         // agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
         // create/resume 共用此值，GUI 的 workspace/diff RPC 也按它下发。
-        let cwd = if meta.worktree_dir.is_empty() {
-            meta.cwd.clone()
-        } else {
-            meta.worktree_dir.clone()
-        };
+        let cwd = Self::effective_cwd(&meta);
         let driver = self
             .agents
             .driver_for(&meta.agent)
