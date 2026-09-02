@@ -64,6 +64,15 @@ impl std::fmt::Display for RpcError {
     }
 }
 
+impl RpcError {
+    fn local(message: impl Into<String>) -> Self {
+        Self {
+            code: -1,
+            message: message.into(),
+        }
+    }
+}
+
 impl std::error::Error for RpcError {}
 
 struct ClientReq {
@@ -119,10 +128,7 @@ impl WsClient {
         let params_value = params
             .map(serde_json::to_value)
             .transpose()
-            .map_err(|e| RpcError {
-                code: -1,
-                message: format!("参数序列化失败: {e}"),
-            })?;
+            .map_err(|e| RpcError::local(format!("参数序列化失败: {e}")))?;
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(ClientReq {
@@ -131,18 +137,9 @@ impl WsClient {
                 resp: tx,
             })
             .await
-            .map_err(|_| RpcError {
-                code: -1,
-                message: "连接已关闭".into(),
-            })?;
-        let value = rx.await.map_err(|_| RpcError {
-            code: -1,
-            message: "连接中断".into(),
-        })??;
-        serde_json::from_value(value).map_err(|e| RpcError {
-            code: -1,
-            message: format!("响应反序列化失败: {e}"),
-        })
+            .map_err(|_| RpcError::local("连接已关闭"))?;
+        let value = rx.await.map_err(|_| RpcError::local("连接中断"))??;
+        serde_json::from_value(value).map_err(|e| RpcError::local(format!("响应反序列化失败: {e}")))
     }
 
     /// 无业务载荷的方法（cancel/delete/configure/restart/restore/prompt 等）：
@@ -154,10 +151,9 @@ impl WsClient {
     ) -> Result<(), RpcError> {
         let op: OpResult = self.request(method, params).await?;
         if !op.ok {
-            return Err(RpcError {
-                code: -1,
-                message: op.message.unwrap_or_else(|| "操作失败".into()),
-            });
+            return Err(RpcError::local(
+                op.message.unwrap_or_else(|| "操作失败".into()),
+            ));
         }
         Ok(())
     }
@@ -335,10 +331,7 @@ async fn serve_connection(
         params: Value::Null,
     });
     for (_, resp) in pending.drain() {
-        let _ = resp.send(Err(RpcError {
-            code: -1,
-            message: "连接断开".into(),
-        }));
+        let _ = resp.send(Err(RpcError::local("连接断开")));
     }
 }
 
