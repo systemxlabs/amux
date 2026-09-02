@@ -270,9 +270,12 @@ impl AmuxApp {
         if selected_machine != machine {
             return;
         }
-        let Some(client) = self.machine(machine).map(|m| m.client.clone()) else {
+        let Some(m) = self.machine(machine) else {
             return;
         };
+        let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let request_id = self
             .machines
             .get_mut(machine)
@@ -296,11 +299,16 @@ impl AmuxApp {
                 .request::<_, WorkspaceListResult>(protocol::method::WORKSPACE_LIST, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
+                let current_connection =
+                    this.is_current_machine_connection(machine, &machine_name, generation);
                 let selected_session_matches = this.is_selected_session(machine, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
-                if !selected_session_matches || m.workspace_list_request_id != request_id {
+                if !current_connection
+                    || !selected_session_matches
+                    || m.workspace_list_request_id != request_id
+                {
                     return;
                 }
                 m.workspace_loading.remove(&directory_path);
@@ -350,9 +358,12 @@ impl AmuxApp {
         if selected_machine != machine {
             return;
         }
-        let Some(client) = self.machine(machine).map(|m| m.client.clone()) else {
+        let Some(m) = self.machine(machine) else {
             return;
         };
+        let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let request_id = self
             .machines
             .get_mut(machine)
@@ -383,11 +394,16 @@ impl AmuxApp {
                 .request::<_, WorkspaceReadResult>(protocol::method::WORKSPACE_READ, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
+                let current_connection =
+                    this.is_current_machine_connection(machine, &machine_name, generation);
                 let selected_session_matches = this.is_selected_session(machine, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
-                if !selected_session_matches || m.workspace_read_request_id != request_id {
+                if !current_connection
+                    || !selected_session_matches
+                    || m.workspace_read_request_id != request_id
+                {
                     return;
                 }
                 m.workspace_read_loading = false;

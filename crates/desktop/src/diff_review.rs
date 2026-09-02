@@ -38,6 +38,8 @@ impl AmuxApp {
             return;
         }
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         // 请求 id / loading / error 存于本机器的 DiffReviewState 实体
         let request_id = m.diff.update(cx, |st, _| {
             st.request_id = st.request_id.saturating_add(1);
@@ -55,11 +57,13 @@ impl AmuxApp {
                 .request::<_, WorkspaceDiffResult>(protocol::method::WORKSPACE_DIFF, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                let is_current = this.is_selected_session(machine, &session_id)
-                    && this
-                        .machines
-                        .get(machine)
-                        .is_some_and(|m| m.diff.read(cx).request_id == request_id);
+                let is_current =
+                    this.is_current_machine_connection(machine, &machine_name, generation)
+                        && this.is_selected_session(machine, &session_id)
+                        && this
+                            .machines
+                            .get(machine)
+                            .is_some_and(|m| m.diff.read(cx).request_id == request_id);
                 if !is_current {
                     return;
                 }
@@ -110,6 +114,8 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = WorkspaceRestoreParams {
                 session_id: session_id.clone(),
@@ -120,6 +126,11 @@ impl AmuxApp {
                 .request::<_, OpResult>(protocol::method::WORKSPACE_RESTORE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
+                if !this.is_current_machine_connection(machine, &machine_name, generation)
+                    || !this.is_selected_session(machine, &session_id)
+                {
+                    return;
+                }
                 match res {
                     Ok(result) if result.ok => this.load_diff(w, cx, machine),
                     Ok(result) => {
@@ -189,6 +200,8 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let (selection, files) = {
             let st = m.diff.read(cx);
             (st.selection.clone(), st.files.clone())
@@ -226,8 +239,12 @@ impl AmuxApp {
                 .request_ok(protocol::method::SESSION_PROMPT, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                this.refresh_dialog(w, cx, machine, session_id);
-                cx.notify();
+                if this.is_current_machine_connection(machine, &machine_name, generation)
+                    && this.is_selected_session(machine, &session_id)
+                {
+                    this.refresh_dialog(w, cx, machine, session_id);
+                    cx.notify();
+                }
             });
         })
         .detach();

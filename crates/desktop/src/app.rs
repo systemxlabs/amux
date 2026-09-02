@@ -537,6 +537,8 @@ impl AmuxApp {
             return;
         }
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         // 面板宽 560（上下扣掉标题栏/输入区等约 320）：与打开后的实际网格接近，
         // 打开后的画布实测仍会触发一次 resize 精调
         let cols = 68u16;
@@ -559,6 +561,11 @@ impl AmuxApp {
                 )
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if !this.is_current_machine_connection(machine_idx, &machine_name, generation)
+                    || !this.is_selected_session(machine_idx, &session_id)
+                {
+                    return;
+                }
                 let Some(m) = this.machine_mut(machine_idx) else {
                     return;
                 };
@@ -900,6 +907,17 @@ impl AmuxApp {
 
     pub(crate) fn machine_mut(&mut self, i: usize) -> Option<&mut MachineView> {
         self.machines.get_mut(i)
+    }
+
+    pub(crate) fn is_current_machine_connection(
+        &self,
+        machine: usize,
+        name: &str,
+        generation: u64,
+    ) -> bool {
+        self.machines
+            .get(machine)
+            .is_some_and(|m| m.config.name == name && m.connection_generation == generation)
     }
 
     /// 工作流会话 ID → 引擎引用。

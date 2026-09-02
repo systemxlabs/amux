@@ -82,6 +82,8 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         // PRD：技能操作的临时会话固定在工作目录为系统临时目录的普通会话中执行
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let operation_prompt = action.prompt(&skill);
@@ -117,16 +119,21 @@ impl AmuxApp {
             }
             .await;
 
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(session_id) => {
-                    this.refresh_sessions(machine, window, cx);
-                    this.open_session(window, cx, machine, session_id);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                    return;
                 }
-                Err(error) => {
-                    if let Some(m) = this.machines.get_mut(machine) {
-                        m.notice = Some(format!("技能{}失败：{error}", action.label()));
+                match result {
+                    Ok(session_id) => {
+                        this.refresh_sessions(machine, window, cx);
+                        this.open_session(window, cx, machine, session_id);
                     }
-                    cx.notify();
+                    Err(error) => {
+                        if let Some(m) = this.machines.get_mut(machine) {
+                            m.notice = Some(format!("技能{}失败：{error}", action.label()));
+                        }
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -149,10 +156,15 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = client.request_ok(method, params).await;
             let notice = result.err().map(|error| error_message(error.to_string()));
             let _ = this.update_in(cx, |this, window, cx| {
+                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                    return;
+                }
                 if let Some(notice) = notice {
                     if let Some(m) = this.machines.get_mut(machine) {
                         m.notice = Some(notice);
