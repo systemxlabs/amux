@@ -60,12 +60,13 @@ Server 主动推送通知
 
 ### 技术栈
 
-- 异步运行时与网络：`tokio`、`tokio-tungstenite`（WebSocket）
-- 序列化：`serde` / `serde_json`（JSON-RPC）
-- 会话元数据持久化：`rusqlite`
+- 基础库：`tokio` / `serde` / `serde_json`
+- 传输协议：`tokio-tungstenite`（WebSocket） 和 `jsonrpsee`(JSONRPC)
+- SQLite：`rusqlite`
 - ACP：`agent-client-protocol` 官方 SDK
 - Git：`gitoxide` / git CLI
 - PTY：`portable-pty`
+- CLI: `clap`
 
 ### Server 启动
 
