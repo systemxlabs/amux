@@ -1,4 +1,4 @@
-//! 测试/演示用 server 入口（docs/DESIGN.md §9）：
+//! 测试/演示用 server 入口：
 //! 启动与 `amux-server` 相同的常驻进程，但把 ACP agent 固定为仓库自带的
 //! mock_acp（`tests/support/mock_acp.rs` 编译出的可执行），无需安装真实 agent。
 //! 用法与 amux-server 相同：`cargo run -p amux-server --bin test-server -- --token <值> [--port N]`。

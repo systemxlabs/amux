@@ -638,8 +638,8 @@ impl GitRunner {
         !in_index
     }
 
-    /// 在 `repo_cwd` 仓库内创建指向 `target` 路径的 git worktree（docs/DESIGN.md
-    /// 「工作树存储」）。分支名由 git 取目标目录 basename 自动生成。要求仓库已有
+    /// 在 `repo_cwd` 仓库内创建指向 `target` 路径的 git worktree。分支名由 git
+    /// 取目标目录 basename 自动生成。要求仓库已有
     /// 提交（unborn HEAD 无法建 worktree）。
     pub fn create_worktree(&self, repo_cwd: &str, target: &Path) -> Result<(), String> {
         run(

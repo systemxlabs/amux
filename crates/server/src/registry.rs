@@ -182,7 +182,7 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 记录会话上下文大小（docs/DESIGN.md「ACP 通信」：接收 `usage_update`
+    /// 记录会话上下文大小（接收 ACP `usage_update`
     /// 通知后写入当前上下文大小与窗口总大小，单位 token）。
     pub fn set_context_size(
         &self,
@@ -206,8 +206,7 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 有 worktree 且超过 `idle_timeout_ms` 不活跃的 idle 会话候选
-    /// （docs/DESIGN.md「工作树存储」：不活跃会话自动清理其 worktree）。
+    /// 有 worktree 且超过 `idle_timeout_ms` 不活跃的 idle 会话候选。
     /// 返回 (会话 id, 原始工作目录 cwd, worktree 目录)。
     pub fn idle_worktree_candidates(
         &self,

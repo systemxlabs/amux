@@ -4,7 +4,7 @@
 //! - 惰性会话：`session.new` 只写注册表，agent 侧会话延后到首条指令
 //!   （`session.prompt`）或查询/设置会话选项时懒创建（ACP `session/new`），
 //!   已有 agent 会话先经 `session/resume` 恢复
-//! - 会话选项存储在内存，以 Agent 侧数据为权威（docs/DESIGN.md「普通会话选项」）
+//! - 会话选项存储在内存，以 Agent 侧数据为权威
 //! - 删除会话先经 ACP `session/close` 释放资源，再尝试 `session/delete`；长时间无活动
 //!   会话只经 `session/close` 关闭并保留 server 历史
 //! - 对话历史与活动历史落 `data_dir/sessions/<id>_history.jsonl` / `<id>_activities.jsonl`
@@ -40,7 +40,7 @@ pub struct SessionManager {
     registry: Arc<SessionRegistry>,
     data_dir: PathBuf,
     tx: broadcast::Sender<ServerNotification>,
-    /// 会话选项（docs/DESIGN.md「普通会话选项」：存储在内存，以 Agent 侧数据为
+    /// 会话选项：存储在内存，以 Agent 侧数据为权威；new/resume 响应、
     /// 权威；new/resume 响应、`session/set_config_option` 响应与
     /// `config_option_update` 通知均全量覆盖）。
     config_options: Mutex<HashMap<String, Vec<protocol::SessionConfigOption>>>,
@@ -102,8 +102,7 @@ impl SessionManager {
 
     /// 新建普通会话（**agent 侧会话惰性**，**worktree 立即创建**）：只写注册表
     /// 立即返回，不触发 ACP；agent 侧会话延后到首条指令时经 `session/new`
-    /// 懒创建。`use_worktree` 时按 docs/DESIGN.md「工作树存储」在
-    /// `~/.amux/worktrees/`（data_dir 同级）下确定路径并立即执行
+    /// 懒创建。`use_worktree` 时在 `~/.amux/worktrees/`（data_dir 同级）下确定路径并立即执行
     /// `git worktree add`——失败时注册表尚未落盘，整体回滚返回错误。
     pub async fn create(
         &self,
@@ -133,7 +132,7 @@ impl SessionManager {
                 .unwrap_or(std::path::Path::new("/tmp"))
                 .join("worktrees")
                 .join(format!("{repo_name}-{rand}"));
-            // docs/DESIGN.md「工作树存储」：会话创建时即落盘，而非首条指令时
+            // Worktree 在创建会话时落盘，而非等到首条指令。
             GitRunner::new()
                 .create_worktree(cwd, &target)
                 .map_err(SessionError::Storage)?;
@@ -230,7 +229,7 @@ impl SessionManager {
         }
     }
 
-    /// 覆盖写入内存中的会话选项（docs/DESIGN.md「普通会话选项」：以 Agent 侧
+    /// 覆盖写入内存中的会话选项：以 Agent 侧数据为权威，new/resume 响应、
     /// 数据为权威，new/resume 响应、set_config_option 响应与
     /// config_option_update 通知均全量覆盖）。
     fn store_config_options(&self, session_id: &str, options: Vec<protocol::SessionConfigOption>) {
@@ -239,7 +238,7 @@ impl SessionManager {
             .insert(session_id.to_string(), options);
     }
 
-    /// 惰性创建 agent 侧会话（docs/DESIGN.md「ACP 通信」）：发送指令或查询会话
+    /// 惰性创建 agent 侧会话：发送指令或查询会话选项时才经 `session/new` 创建；
     /// 选项时才经 `session/new` 创建；new 响应携带的会话选项存入内存。已有
     /// agent 侧会话时原样返回。
     fn ensure_agent_session(
@@ -263,8 +262,7 @@ impl SessionManager {
         Ok((driver, sid))
     }
 
-    /// 查询会话选项（docs/DESIGN.md：查询会话选项同样触发惰性创建/恢复；
-    /// 返回内存存储的选项集合，Agent 侧数据为权威）。
+    /// 查询会话选项：触发惰性创建/恢复，并返回内存中以 Agent 侧数据为权威的集合。
     pub async fn config_options(
         &self,
         session_id: &str,
@@ -312,8 +310,8 @@ impl SessionManager {
         Ok(Some((driver, agent_session_id)))
     }
 
-    /// 查询会话斜杠命令（docs/DESIGN.md「普通会话斜杠命令」：存储在内存，
-    /// 以 Agent 侧数据为权威，由 ACP `available_commands_update` 通知驱动）。
+    /// 查询会话斜杠命令：内存缓存以 Agent 侧数据为权威，由 ACP
+    /// `available_commands_update` 通知驱动。
     /// 查询不触发惰性创建：尚无 agent 侧会话时返回空（agent 侧会话创建后
     /// agent 才会下发命令集合）。
     pub async fn slash_commands(
@@ -326,8 +324,8 @@ impl SessionManager {
         Ok(driver.available_commands(&agent_session_id))
     }
 
-    /// 查询会话计划（docs/DESIGN.md「普通会话计划」：存储在内存，以 Agent 侧
-    /// 数据为权威，由 ACP `plan` 通知驱动）。查询不触发惰性创建：尚无
+    /// 查询会话计划：内存缓存以 Agent 侧数据为权威，由 ACP `plan` 通知驱动。
+    /// 查询不触发惰性创建：尚无
     /// agent 侧会话时返回空。
     pub async fn plan(
         &self,
@@ -369,8 +367,8 @@ impl SessionManager {
         log.remove()
             .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")))?;
 
-        // 资源清理（docs/DESIGN.md「工作树存储」与 ACP 会话生命周期）：
-        // ACP close/delete 往返 + worktree 目录清理，均为尽力而为不阻断。
+        // 资源清理包括 ACP close/delete 往返和 worktree 目录清理，
+        // 均为尽力而为，不阻断本地删除。
         let agents = self.agents.clone();
         let data_dir = self.data_dir.clone();
         let session_id2 = session_id.to_string();
@@ -412,7 +410,7 @@ impl SessionManager {
     }
 
     /// 惰性分页会话列表：按最近活跃降序切窗。
-    /// 按数量查询最近活跃的普通会话（docs/DESIGN.md `session.list`）：
+    /// 按数量查询最近活跃的普通会话：
     /// 返回按最近活跃排序的前缀（至多 limit 条），has_more 表示是否还有更多。
     pub async fn list(
         &self,
@@ -446,7 +444,7 @@ impl SessionManager {
 
     /// 返回普通会话绑定的工作目录。workspace RPC 不接受调用方自带 cwd，
     /// 避免借助已知 session id 浏览或修改另一目录。
-    /// worktree 会话（docs/DESIGN.md「工作树存储」）：agent 实际工作在 worktree，
+    /// worktree 会话：agent 实际工作在 worktree，
     /// 改动视图（diff/restore/list/read）应作用于 worktree 目录而非原始目录。
     pub fn workspace_cwd(&self, session_id: &str) -> Result<String, SessionError> {
         let meta = self.get_entry(session_id)?.0;
@@ -486,8 +484,8 @@ impl SessionManager {
         Ok(closed)
     }
 
-    /// 清理超过 `timeout_ms` 不活跃会话的 worktree（docs/DESIGN.md「工作树
-    /// 存储」）。仅清理关联 worktree，会话本身保留；清理后清空元数据的
+    /// 清理超过 `timeout_ms` 不活跃会话的 worktree。仅清理关联 worktree，会话本身
+    /// 保留；清理后清空元数据的
     /// worktree_dir，使 agent 工作目录与 workspace RPC 回退到原始 cwd。
     /// 删除失败的 worktree 保留字段，等待下轮清理重试。返回清理数量。
     pub async fn cleanup_idle_worktrees(
@@ -713,7 +711,7 @@ impl SessionManager {
         }
         meta.state = SessionState::Busy;
         meta.last_active_at = now();
-        // worktree 在 session.new 已落盘（docs/DESIGN.md「工作树存储」），此处不再创建。
+        // worktree 在 session.new 已落盘，此处不再创建。
         // agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
         // create/resume 共用此值，GUI 的 workspace/diff RPC 也按它下发。
         let cwd = Self::effective_cwd(&meta);
@@ -723,14 +721,14 @@ impl SessionManager {
             .map_err(SessionError::AgentUnavailable)?;
         let (driver, agent_session_id) = if agent_session_id.is_empty() {
             // 惰性创建 agent 侧会话，响应中的会话选项存入内存
-            //（docs/DESIGN.md「普通会话选项」）
+            //（选项以 Agent 侧数据为权威）
             self.ensure_agent_session(session_id, &meta, "")?
         } else {
             (driver, agent_session_id)
         };
         // 创建与 resume 分支统一 upsert：busy、首条 prompt 生成的标题与活跃时间
-        // 立即落盘（docs/DESIGN.md「普通会话状态」：状态以元数据为权威，变更需
-        // 立即落盘；否则 turn 进行中列表读到陈旧空闲，且并发 prompt 会放行）。
+        // 立即落盘：状态以元数据为权威，避免 turn 进行中列表读到陈旧空闲，
+        // 或让并发 prompt 通过 Busy 检查。
         // resume 分支若只更新状态，先查过会话选项的会话（agent 侧会话已提前
         // 创建）首条 prompt 生成的标题将永远不落盘。
         if control.deleted.load(Ordering::SeqCst) {
@@ -822,7 +820,7 @@ impl SessionManager {
                     log::error!("agent turn 失败 {session_id}: {detail}");
                 }
                 AgentEvent::UsageUpdate { used, size } => {
-                    // 记录会话上下文大小（docs/DESIGN.md「ACP 通信」）。
+                    // 记录 ACP 提供的会话上下文大小。
                     if !control.deleted.load(Ordering::SeqCst) {
                         if let Err(e) = self.registry.set_context_size(session_id, used, size) {
                             log::error!("记录会话上下文大小失败 {session_id}: {e}");
@@ -934,7 +932,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// 设置会话配置选项（docs/DESIGN.md「ACP 通信」：Server 向 ACP Server
+    /// 设置会话配置选项：Server 向 ACP Server
     /// 发送 `session/set_config_option` 请求进行设置）。尚无 agent 侧会话时先
     /// 惰性创建；响应中的会话选项全量覆盖内存存储，返回更新后的完整选项集合。
     pub async fn set_config_option(
@@ -1316,7 +1314,7 @@ mod tests {
             Arc::new(SessionRegistry::open(&case.join("server").join("session.sqlite")).unwrap());
         let (mgr, _rx) = SessionManager::new(agents, registry, case.join("server"));
 
-        // session.new 即落盘工作树（docs/DESIGN.md「工作树存储」）
+        // session.new 即落盘工作树。
         let meta = mgr
             .create("codex", repo.to_str().unwrap(), true)
             .await
@@ -1705,8 +1703,7 @@ mod tests {
 
     #[tokio::test]
     async fn config_options_lazy_query_and_set() {
-        // docs/DESIGN.md「普通会话选项」：选项存储在内存，以 Agent 侧数据为权威；
-        // 查询会话选项同样触发惰性创建/恢复（docs/DESIGN.md「ACP 通信」）。
+        // 选项存储在内存，以 Agent 侧数据为权威；查询会话选项同样触发惰性创建/恢复。
         let opts = vec![protocol::SessionConfigOption {
             id: "model".into(),
             name: "模型".into(),
@@ -1773,7 +1770,7 @@ mod tests {
     #[tokio::test]
     async fn ongoing_thinking_accumulates_across_chunks() {
         // GUI 通过 session.ongoing_activity 看到「思考中」应当是整个 turn 的累积内容，
-        // 而不是最新一个流式 chunk（docs/PRD.md 实时活动展示期望）。
+        // 而不是最新一个流式 chunk。
         // prompt 由驱动在每个 chunk 后阻塞等待 release，测试用 wait_for_thinking
         // 串行观察三个中间态：单段 → 两段 → 三段。
         let release = Arc::new(tokio::sync::Notify::new());
@@ -2205,7 +2202,7 @@ mod tests {
 
     #[tokio::test]
     async fn busy_state_persisted_immediately_on_resume_path() {
-        // docs/DESIGN.md「普通会话状态」：发送 session/prompt 时置工作中并立即
+        // 发送 session/prompt 时置工作中并立即
         // 落盘。回归：resume 分支（已有 agent 侧会话）此前 busy 只改内存，
         // turn 进行中列表读到陈旧空闲，且 Busy 前置检查放行并发 prompt。
         let started = Arc::new(Notify::new());

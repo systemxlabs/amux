@@ -442,7 +442,7 @@ impl AmuxApp {
                 .into_any();
         };
         // 左侧文件树区域：按父目录路径分组展示，分组默认展开、可单独折叠，
-        // 仅含改动文件（docs/PRD.md「文件改动审查视图」）
+        // 文件列表只包含实际发生改动的文件。
         let groups = group_changed_files_by_parent(
             &files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
         );
@@ -520,7 +520,7 @@ impl AmuxApp {
                         .w_full()
                         .on_click(move |_ev, _window, cx| {
                             // scroll_to_item 是非严格模式，目标行已可见时不滚动；
-                            // PRD 要求点击文件必达对应 diff 区域，直接按行高
+                            // 点击文件必须定位到对应 diff 区域，直接按行高
                             // 累计设置滚动偏移（行高为文档化固定几何）。
                             // set_offset 不触发重绘，必须显式 notify
                             let y: f32 = item_sizes
@@ -952,7 +952,7 @@ impl DiffRowKind {
     }
 }
 
-/// 每机器的改动审查状态（docs/DESIGN.md「改动审查」）。
+/// 每机器的改动审查状态。
 /// 独立实体：diff 数据量与交互（选择/折叠/撤销）自成生命周期，
 /// 与机器连接状态、会话状态解耦。
 #[derive(Default)]
@@ -966,7 +966,7 @@ pub struct DiffReviewState {
     pub(crate) error: Option<String>,
     pub(crate) tree_collapsed: bool,
     pub(crate) changes_collapsed: bool,
-    /// 单独折叠的分组（父目录路径）；缺失即展开（docs/PRD.md：分组默认展开）
+    /// 单独折叠的分组（父目录路径）；缺失即展开。
     pub(crate) collapsed_groups: HashSet<String>,
     /// 扁平行模型缓存（含每行尺寸与文件头行号索引）：仅在 files /
     /// changes_collapsed 变更的写点重建一次。此前渲染路径每帧重建行模型并对

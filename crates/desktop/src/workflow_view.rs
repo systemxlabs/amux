@@ -404,7 +404,7 @@ impl AmuxApp {
                             .flex_1()
                             .min_w_0()
                             .truncate(),
-                    ), // 状态展示同普通会话行（docs/PRD.md：状态通过转圈表示
+                    ), // 状态展示同普通会话行，工作中显示转圈
                        // 工作中，涵盖编排调度中与关联普通会话工作中），空闲无指示
             )
             .child(
@@ -479,7 +479,7 @@ impl AmuxApp {
                 .flex_1()
                 .min_w_0()
                 .items_center()
-                // 会话列表每行只展示标题与状态（docs/PRD.md「左侧面板」）；
+                // 会话列表每行只展示标题与状态；
                 // agent@机器 属于对话视图 header，不在此处重复
                 .child(Label::new(step).text_sm().flex_1().min_w_0().truncate());
             if available {

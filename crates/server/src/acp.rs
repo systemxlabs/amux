@@ -107,16 +107,16 @@ pub trait AgentDriver: Send + Sync {
         value: protocol::SessionConfigOptionValue,
     ) -> Result<Vec<protocol::SessionConfigOption>, String>;
     /// 会话当前斜杠命令（最近一次 ACP `available_commands_update` 通知的全量集合；
-    /// 无通知则空，docs/DESIGN.md「普通会话斜杠命令」）。默认空（不支持命令的驱动）。
+    /// 无通知则空）。默认空（不支持命令的驱动）。
     fn available_commands(&self, _agent_session_id: &str) -> Vec<protocol::SlashCommand> {
         Vec::new()
     }
-    /// 会话当前计划（最近一次 ACP `plan` 通知的全量条目；无通知则空，
-    /// docs/DESIGN.md「普通会话计划」）。默认空（不支持计划的驱动）。
+    /// 会话当前计划（最近一次 ACP `plan` 通知的全量条目；无通知则空）。默认空
+    /// （不支持计划的驱动）。
     fn session_plan(&self, _agent_session_id: &str) -> Vec<protocol::SessionPlanEntry> {
         Vec::new()
     }
-    /// 会话建立时记录的 agent 侧能力（docs/DESIGN.md）。默认全不支持。
+    /// 会话建立时记录的 agent 侧能力。默认全不支持。
     fn session_caps(&self, _agent_session_id: &str) -> AgentSessionCaps {
         AgentSessionCaps::default()
     }
@@ -188,8 +188,7 @@ pub struct AcpAgentDriver {
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
-/// 会话建立时 agent 侧声明的能力快照（docs/DESIGN.md：server 在内存中记住
-/// 每个 session 建立时 agent 侧的能力）。能力由 initialize 握手的
+/// 会话建立时 agent 侧声明的能力快照。能力由 initialize 握手的
 /// agentCapabilities 声明，按 agent sessionId 存档于连接级缓存。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AgentSessionCaps {
@@ -720,8 +719,8 @@ async fn connect_main(
                 // - **传输层失败**（进程已退出 / 连接已死，如 npx 不可用、无网络）：拉起失败。
                 // 二者用短窗口探测连接活性区分：incoming_closed 在传输层关闭后很快完成，
                 // 超时则连接仍存活。
-                // 声明客户端能力：会话配置选项（docs/DESIGN.md「ACP 通信」——
-                // 会话选项由 ACP 会话提供，需客户端声明 configOptions 能力
+                // 声明客户端能力：会话配置选项由 ACP 会话提供，需客户端声明
+                // configOptions 能力
                 // agent 才会在 new/resume 响应中下发选项并接受 set_config_option）
                 // 与 terminal/*（kimi acp 等将 shell 执行委托给客户端）。
                 let init_request = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
@@ -736,8 +735,7 @@ async fn connect_main(
                 );
                 let init_result = match cx.send_request(init_request).block_task().await {
                     core::result::Result::Ok(resp) => {
-                        // 记录 agent 侧声明的连接默认能力（docs/DESIGN.md：
-                        // server 在内存中记住 agent 侧能力）
+                        // 记录 agent 侧声明的连接默认能力，供后续会话建立时复制。
                         *caches.default_caps.lock() =
                             session_caps_from_agent_caps(&resp.agent_capabilities);
                         log::debug!("initialize 完成");
@@ -1014,7 +1012,7 @@ async fn route_update(
             acp_config_options(Some(update.config_options.clone())),
         )),
         // ACP `available_commands_update`：斜杠命令全量覆盖驱动内存缓存
-        //（docs/DESIGN.md「普通会话斜杠命令」：以 Agent 侧数据为权威）。
+        // 以 Agent 侧数据为权威。
         // 不产生事件流——通知可能出现在无 prompt 路由的窗口，缓存于驱动层。
         SessionUpdate::AvailableCommandsUpdate(update) => {
             commands.lock().insert(
@@ -1024,7 +1022,7 @@ async fn route_update(
             None
         }
         // ACP `plan`：agent 计划全量覆盖驱动内存缓存
-        //（docs/DESIGN.md「普通会话计划」：以 Agent 侧数据为权威）。
+        // 以 Agent 侧数据为权威。
         // 不产生事件流，理由同上。
         SessionUpdate::Plan(update) => {
             plans.lock().insert(
@@ -1284,7 +1282,7 @@ mod tests {
         )
         .await;
         assert_eq!(commands.lock()["s1"].len(), 1);
-        // 新通知全量覆盖旧集合（docs/DESIGN.md「普通会话斜杠命令」）
+        // 新通知全量覆盖旧集合。
         route_update(
             &routes,
             &commands,
@@ -1340,7 +1338,7 @@ mod tests {
                 },
             ]
         );
-        // 新通知全量覆盖旧计划（docs/DESIGN.md「普通会话计划」）
+        // 新通知全量覆盖旧计划。
         route_update(
             &routes,
             &Mutex::new(HashMap::new()),

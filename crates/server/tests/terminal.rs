@@ -251,7 +251,7 @@ async fn release_conn_kills_terminals() {
     }
 }
 
-/// cwd 不存在 / 行列为零 → 参数错误（docs/DESIGN.md：open 指定 cwd 和 size）。
+/// cwd 不存在或行列为零时返回参数错误。
 #[tokio::test]
 async fn open_rejects_bad_params() {
     let service = std::sync::Arc::new(TerminalService::new());

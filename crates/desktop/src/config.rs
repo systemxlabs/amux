@@ -343,7 +343,7 @@ impl ConfigStore {
     }
 
     /// 应用数据根目录（~/.amux/app/）。工作流元数据 session.sqlite 与
-    /// sessions/ 子目录（对话/活动 JSONL）均以它为根（docs/DESIGN.md
+    /// sessions/ 子目录（对话/活动 JSONL）均以它为根；
     /// 「工作流会话存储」）。
     pub fn data_dir(&self) -> PathBuf {
         self.data_dir.clone()

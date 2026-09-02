@@ -207,7 +207,7 @@ pub struct OrcContext {
     /// 注入为 user 消息。
     /// 与 `WorkflowEngine.steer_inbox` 是同一个 Arc；advance 收尾的 absorb_steer 只兜底剩余项。
     pub steer_inbox: Arc<Mutex<Vec<String>>>,
-    /// 编排输出草稿：流式文本实时进入对话流（docs/DESIGN.md「流式输出合并后写入」）；
+    /// 编排输出草稿：流式文本实时进入对话流；
     /// 引擎在整轮结束后据此判断 backend 是否已自行提交输出，避免重复推送。
     pub draft: Arc<OrcDraft>,
     /// 进行中实时活动槽（见 `WorkflowEngine.current_activity`）：工具循环写入，
@@ -409,9 +409,8 @@ impl WorkflowEngine {
             format!("{description}\n\n[上下文]\n{context}")
         };
         let transcript = Vec::new();
-        // 执行计划不进对话消息历史：计划存元数据（plan/description 字段，
-        // docs/DESIGN.md「工作流会话存储」），用户在对话界面输入消息再驱动
-        // （输入消息经 record_user 进 transcript 并触发推进）。
+        // 执行计划不进对话消息历史：计划存元数据（plan/description 字段），
+        // 用户在对话界面输入消息，经 record_user 写入 transcript 并触发推进。
         let t = now();
         let session = OrcSession {
             id: format!("orc_{}", uuid::Uuid::new_v4()),
@@ -841,9 +840,8 @@ impl WorkflowEngine {
         added
     }
 
-    /// 用户点击取消按钮：以用户消息方式注入固定取消指令
-    /// （docs/DESIGN.md「工作流会话取消」），由编排智能体自行调用
-    /// cancel_session 停止调度。返回是否应立即启动推进（false = 已在工作）。
+    /// 用户点击取消按钮：以用户消息方式注入固定取消指令，由编排智能体调用
+    /// `cancel_session` 停止调度。返回是否应立即启动推进（false = 已在工作）。
     pub fn cancel(&self) -> bool {
         self.record_user(WORKFLOW_CANCEL_PROMPT)
     }
@@ -1176,8 +1174,7 @@ fn record_reasoning(live: &LiveRuntime, reasoning: &Reasoning) {
 ///
 /// - 每轮请求前 drain `steer_inbox`，把用户插话注入为 user 消息（真实 steer）
 /// - 流式消费模型输出：文本增量实时经 [`OrcDraft`] 写入对话流，reasoning 增量
-///   按 part 合并、part 结束即上报 thinking 活动（docs/DESIGN.md「流式输出
-///   合并后写入」）；turn 失败移除草稿，不留半截输出
+///   按 part 合并、part 结束即上报 thinking 活动）；turn 失败移除草稿，不留半截输出
 /// - assistant 响应整体保留（含 reasoning/image 与 message_id），provider 协议
 ///   要求后续请求原样回传（如 OpenAI Responses API 的 reasoning 配对）
 /// - 工具错误作为结果文本回传给模型自行纠正，不中断循环
@@ -2087,7 +2084,7 @@ mod tests {
         assert!(engine.session.read().description.contains("src/main.rs"));
     }
 
-    /// 取消按钮注入固定取消指令并推进（docs/DESIGN.md「工作流会话取消」）。
+    /// 取消按钮注入固定取消指令并推进。
     #[tokio::test]
     async fn cancel_injects_cancel_prompt_and_advances() {
         let (clients, m) = clients_with_machines();

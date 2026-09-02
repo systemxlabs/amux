@@ -216,7 +216,7 @@ async fn handle_connection(
             }
         }
     }
-    // 断连清理：释放该连接打开的终端（PTY 进程随连接生死，docs/DESIGN.md「终端」）
+    // 断连清理：PTY 进程与连接绑定，连接关闭时一并释放其终端。
     handlers.terminals.release_conn(conn_id);
     log::info!("断开: {peer} (#{conn_id})");
 }

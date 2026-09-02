@@ -364,8 +364,7 @@ async fn run(state_file: &str) -> Result<()> {
                         request.session_id.clone(),
                         SessionUpdate::UsageUpdate(UsageUpdate::new(53_000, 200_000)),
                     ))?;
-                    // 斜杠命令集合（docs/DESIGN.md「普通会话斜杠命令」）：turn 内
-                    // 全量下发，供 session.slash_commands 查询验证
+                    // turn 内全量下发斜杠命令集合，供查询验证。
                     cx_task.send_notification(SessionNotification::new(
                         request.session_id.clone(),
                         SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
@@ -377,8 +376,7 @@ async fn run(state_file: &str) -> Result<()> {
                             ),
                         ])),
                     ))?;
-                    // agent 计划（docs/DESIGN.md「普通会话计划」）：turn 内全量下发，
-                    // 供 session.plan 查询验证
+                    // turn 内全量下发 agent 计划，供查询验证。
                     cx_task.send_notification(SessionNotification::new(
                         request.session_id.clone(),
                         SessionUpdate::Plan(Plan::new(vec![

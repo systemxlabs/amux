@@ -30,7 +30,7 @@ impl IconNamed for FileDiffIcon {
 }
 
 impl AmuxApp {
-    /// 计划面板：展示会话计划（docs/PRD.md「会话计划」），若无则空白。
+    /// 计划面板：展示普通会话 agent 的计划；无计划时为空白。
     /// 仅普通会话持有计划（计划来自该会话 agent 的 ACP `plan` 通知）；
     /// 工作流为多子会话聚合，不展示。
     pub(crate) fn render_plan_panel(
@@ -85,7 +85,7 @@ impl AmuxApp {
             .into_any()
     }
 
-    /// 单条计划条目：状态符号 + 描述。完成置灰，进行中高亮（docs/PRD.md「会话计划」）。
+    /// 单条计划条目：状态符号 + 描述；完成置灰，进行中高亮。
     fn plan_entry_row(entry: &SessionPlanEntry, cx: &mut Context<AmuxApp>) -> gpui::AnyElement {
         let (glyph, color) = match entry.status {
             SessionPlanStatus::Completed => ("✓", cx.theme().muted_foreground),
@@ -834,7 +834,7 @@ impl AmuxApp {
                 self.open_session_target().is_some()
                     && context_usage_text(meta.context_size, meta.context_window_size).is_some(),
                 |view| {
-                    // 会话上下文占用（docs/DESIGN.md：usage_update 记录已用/窗口，token）
+                    // 会话上下文占用，单位为 token。
                     view.child(info_row(
                         "上下文",
                         &context_usage_text(meta.context_size, meta.context_window_size)
@@ -929,7 +929,7 @@ impl AmuxApp {
     }
 
     /// 右缘悬浮面板切换栏：图标 + 微标签的纵向导航条（活动栏样式）。
-    /// 面板入口按会话类型过滤（docs/PRD.md「右侧面板」）：工作目录/文件改动/
+    /// 面板入口按会话类型过滤：工作目录、文件改动、
     /// 会话计划/终端仅普通会话展示，工作流会话仅详情与活动。
     pub(crate) fn render_floating_buttons(
         &self,

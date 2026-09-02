@@ -83,7 +83,7 @@ pub fn sort_sessions_recent(meta: &mut [SessionMeta]) {
     meta.sort_by_key(|entry| std::cmp::Reverse(entry.last_active_at));
 }
 
-/// 斜杠命令前缀（docs/PRD.md「会话交互视图」：输入 `/` 时前缀匹配弹出上拉框）。
+/// 斜杠命令前缀：输入以 `/` 开头且命令名 token 尚未输入完时返回前缀。
 /// 仅当输入以 `/` 开头且命令名 token 尚未输入完（`/` 后无空白）时返回
 /// `/` 之后的已输入前缀；其余（非 `/` 开头、含空白、正文提及 `/`）返回 None。
 pub fn slash_command_prefix(text: &str) -> Option<&str> {
@@ -354,7 +354,7 @@ pub fn compose_workflow_text(text: &str, attachments: &[InputAttachment]) -> Str
     result
 }
 
-/// 改动审查视图左侧文件树：按文件所在父目录路径分组（docs/PRD.md「文件改动审查视图」）。
+/// 改动审查视图左侧文件树：按文件所在父目录路径分组。
 /// 键为父目录路径（根目录文件为空串），值为其下改动文件在 diff 列表中的下标；
 /// BTreeMap 保证分组按路径排序。
 pub type ChangedFileGroups = BTreeMap<String, Vec<usize>>;

@@ -660,7 +660,7 @@ mod tests {
             env: Vec::new(),
         };
         // no_discovery / force_stub / stub 三种受限模式均为 no-op：
-        // 重新发现不会拉起任何 agent（docs/DESIGN.md `agent.rediscover`）
+        // 受限模式下重新发现不会拉起任何 agent。
         for reg in [
             test_registry(vec![entry.clone()], false, true, None),
             test_registry(vec![entry.clone()], true, false, None),

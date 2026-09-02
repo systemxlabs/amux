@@ -69,7 +69,7 @@ pub struct SessionMeta {
     pub created_at: u64,
     /// 最近活跃时间（会话列表按它排序）
     pub last_active_at: u64,
-    /// git worktree 目录（docs/DESIGN.md「工作树存储」）：非空时 agent 实际工作在
+    /// git worktree 目录：非空时 agent 实际工作在
     /// 该目录，磁盘上的工作树由 `session.new` 立即创建（`use_worktree=true`）；
     /// 空串 = 未启用 worktree。
     #[serde(default)]
@@ -206,8 +206,7 @@ pub struct SessionResult {
     pub session: SessionMeta,
 }
 
-/// `session.config_options` 结果（docs/DESIGN.md「普通会话选项」：存储在内存，
-/// 以 Agent 侧数据为权威；会话未打开 agent 侧会话或 agent 不支持时为空）。
+/// `session.config_options` 结果。会话未打开 agent 侧会话或 agent 不支持时为空。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionConfigOptionsResult {
@@ -227,8 +226,7 @@ pub struct SlashCommand {
     pub hint: Option<String>,
 }
 
-/// `session.slash_commands` 结果（docs/DESIGN.md「普通会话斜杠命令」：存储在内存，
-/// 以 Agent 侧数据为权威；尚无 agent 侧会话或 agent 未下发时为空）。
+/// `session.slash_commands` 结果。尚无 agent 侧会话或 agent 未下发时为空。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSlashCommandsResult {
@@ -263,8 +261,7 @@ pub struct SessionPlanEntry {
     pub status: SessionPlanStatus,
 }
 
-/// `session.plan` 结果（docs/DESIGN.md「普通会话计划」：存储在内存，以 Agent 侧
-/// 数据为权威；尚无 agent 侧会话或 agent 未下发时为空）。
+/// `session.plan` 结果。尚无 agent 侧会话或 agent 未下发时为空。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionPlanResult {
@@ -549,8 +546,8 @@ fn workspace_read_limit() -> usize {
 }
 
 /// `terminal.open` 参数。
-/// docs/DESIGN.md「终端」：终端不跨应用共享、与连接绑定；cwd 由应用指定
-/// （普通会话场景为工作目录或 worktree 目录）。size 为初始行列——避免
+/// 终端不跨应用共享、与连接绑定；cwd 由应用指定（普通会话场景为工作目录或
+/// worktree 目录）。size 为初始行列——避免
 /// 「先 80×24 再 resize」竞态导致 vim/htop 等全屏程序初始渲染错乱。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

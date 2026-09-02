@@ -342,7 +342,7 @@ async fn session_lifecycle_state_change_and_delete() {
         !meta["title"].as_str().unwrap_or("").is_empty(),
         "首条 prompt 后标题非空: {meta}"
     );
-    // 回归：会话选项不在元数据里（docs/DESIGN.md「普通会话存储」），改经
+    // 回归：会话选项不在元数据里，改经
     // session.config_options 查询（以 Agent 侧数据为权威，存于 Server 内存）
     let cfg = c
         .call("session.config_options", json!({"sessionId": sid}))
@@ -442,7 +442,7 @@ async fn config_options_query_lazy_and_configure() {
         "未查询选项/未发指令前不应触发 ACP"
     );
 
-    // 查询会话选项触发惰性创建（docs/DESIGN.md「ACP 通信」）
+    // 查询会话选项触发惰性创建
     let cfg = c
         .call("session.config_options", json!({"sessionId": sid}))
         .await;
@@ -497,8 +497,7 @@ async fn slash_commands_notification_driven() {
         .unwrap()
         .to_string();
 
-    // 查询不触发惰性创建（docs/DESIGN.md「普通会话斜杠命令」：仅由
-    // available_commands_update 通知驱动），尚无 agent 侧会话时返回空
+    // 查询不触发惰性创建：仅由 available_commands_update 通知驱动，尚无 agent 侧会话时返回空
     let r = c
         .call("session.slash_commands", json!({"sessionId": sid}))
         .await;
@@ -559,8 +558,7 @@ async fn plan_notification_driven() {
         .unwrap()
         .to_string();
 
-    // 查询不触发惰性创建（docs/DESIGN.md「普通会话计划」：仅由 plan 通知驱动），
-    // 尚无 agent 侧会话时返回空
+    // 查询不触发惰性创建：仅由 plan 通知驱动，尚无 agent 侧会话时返回空
     let r = c.call("session.plan", json!({"sessionId": sid})).await;
     assert!(
         r["result"]["entries"].as_array().unwrap().is_empty(),

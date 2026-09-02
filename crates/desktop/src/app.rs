@@ -101,7 +101,7 @@ pub(crate) enum NewSessionMode {
 }
 
 /// 选中普通会话的会话选项状态（经 `session.config_options` 查询；
-/// docs/DESIGN.md「普通会话选项」：存储在 Server 内存，以 Agent 侧数据为权威）。
+/// Server 内存中的数据以 Agent 侧数据为权威。
 #[derive(Default)]
 pub struct SelectedConfigOptions {
     pub machine: usize,
@@ -111,7 +111,7 @@ pub struct SelectedConfigOptions {
 }
 
 /// 选中普通会话的斜杠命令（经 `session.slash_commands` 查询；
-/// docs/DESIGN.md「普通会话斜杠命令」：存储在 Server 内存，以 Agent 侧数据为权威）。
+/// Server 内存中的命令集合以 Agent 侧数据为权威。
 #[derive(Default)]
 pub struct SelectedSlashCommands {
     pub machine: usize,
@@ -193,7 +193,7 @@ pub struct AmuxApp {
     pub(crate) renaming_workflow: Option<String>,
     pub(crate) new_session_machine: Option<usize>,
     pub(crate) new_session_agent: Option<String>,
-    /// 新会话是否以 git worktree 方式工作（docs/PRD.md 新建会话「worktree 开关」）
+    /// 新会话是否以 git worktree 方式工作。
     pub(crate) new_session_worktree: bool,
     pub(crate) new_session_error: Option<String>,
     pub(crate) show_workspace_dropdown: bool,
@@ -205,7 +205,7 @@ pub struct AmuxApp {
     pub(crate) plan_scroll: ScrollHandle,
     pub diff_scroll: VirtualListScrollHandle,
     pub(crate) workflow_dialog_limit: usize,
-    /// 会话列表滚动查询的页数 N（docs/DESIGN.md「会话列表滚动查询」）：
+    /// 会话列表滚动查询的页数 N：
     /// 「加载更多」每点击一次 +1，所有在线机器统一查询前 N 页。
     pub(crate) list_pages: usize,
     /// 当前窗口之外仍有本地工作流会话（与普通会话的 `sessions_has_more` 对应）。
@@ -323,7 +323,7 @@ impl AmuxApp {
                         this.send_prompt(window, cx);
                     }
                     // 输入变化触发整窗重绘：斜杠命令上拉框按当前输入前缀派生
-                    //（docs/PRD.md「会话交互视图」）
+                    // 输入变化也会驱动命令候选列表重新计算。
                     InputEvent::Change => cx.notify(),
                     _ => {}
                 }
@@ -431,7 +431,7 @@ impl AmuxApp {
             "disconnected" => {
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = MachineStatus::Offline;
-                    // 终端随连接生死（docs/DESIGN.md「终端」），server 已释放，UI 同步清理
+                    // Server 已释放连接关联的终端，UI 同步清理本地视图。
                     m.terminals.clear();
                     m.active_terminal = None;
                 }
@@ -514,7 +514,7 @@ impl AmuxApp {
     }
 
     /// 在当前选中普通会话的上下文新建终端（cwd 取工作目录/worktree）。
-    /// docs/DESIGN.md「终端」：终端不归属会话、连接绑定；open 携带初始行列，
+    /// 终端不归属会话而绑定连接；open 携带初始行列，
     /// 避免先 80×24 再 resize 的全屏程序初始渲染错乱。
     pub(crate) fn spawn_terminal(
         &mut self,
@@ -675,8 +675,7 @@ impl AmuxApp {
         this.refresh_sessions(idx, window, cx);
 
         // turn 结束后选项可能经 config_option_update / available_commands_update
-        // 变化：选中会话刷新会话选项与斜杠命令（docs/DESIGN.md：均以 Agent 侧
-        // 数据为权威）
+        // turn 结束后 Agent 侧数据可能已更新，选中会话需要重新拉取选项与命令。
         if idle {
             let selected_matches = this.is_selected_session(idx, &sid);
             if selected_matches {
@@ -791,7 +790,7 @@ impl AmuxApp {
                 None => {
                     // 工作流实时活动条以引擎「进行中活动」槽为数据源（内存即
                     // 数据），打开工作流会话时按实时活动刷新周期触发重渲染
-                    //（docs/DESIGN.md「实时活动刷新机制为每隔 2s 刷新一次」）
+                    // 每 2 秒刷新一次工作流实时活动。
                     let _ = this.update_in(cx, |this, _w, cx| {
                         if matches!(this.selected, Some(Selected::Workflow { .. })) {
                             cx.notify();
@@ -873,7 +872,7 @@ impl AmuxApp {
         self.input_attachments = draft.attachments;
         self.input_state
             .update(cx, |s, cx| s.set_value(&draft.text, window, cx));
-        // 工作目录/文件改动/会话计划/终端仅普通会话展示（docs/PRD.md「右侧面板」）：
+        // 工作目录、文件改动、计划和终端仅属于普通会话：
         // 切到工作流会话时关闭残留的普通会话专属面板
         if self.open_session_target().is_none()
             && matches!(
@@ -1306,7 +1305,7 @@ impl Render for AmuxApp {
                     .child(self.render_main(window, cx))
                     .when(self.selected.is_some(), |wrapper| {
                         wrapper.child(
-                            // PRD「悬浮按钮——悬浮于右侧上方，竖向排列」：
+                            // 悬浮按钮贴在中间面板右上角，不占布局空间：
                             // 右上角贴边，不占布局空间
                             div()
                                 .absolute()

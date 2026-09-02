@@ -1,5 +1,4 @@
-//! 关联普通会话完成（busy→idle）必须触发系统向工作流会话注入用户消息
-//!（docs/DESIGN.md「工作流会话驱动」）。用真实 AmuxApp 验证完整链路：
+//! 关联普通会话完成（busy→idle）必须触发系统向工作流会话注入用户消息。
 //! `session.state_change` 通知 → `on_state_change` 路由 → `on_child_state` 注入。
 //!
 //! 注入发生在引擎后台任务（run_engine_on_tokio）中。后端阻塞在 `pending`

@@ -75,7 +75,7 @@ pub struct MachineView {
     pub(crate) workspace_read_loading: bool,
     pub(crate) workspace_read_has_more: bool,
     pub(crate) workspace_read_next_offset: usize,
-    /// 本连接打开的终端（docs/DESIGN.md「终端」：连接绑定、断连即死，UI 同步清理）
+    /// 本连接打开的终端；连接断开时一并清理。
     pub(crate) terminals: Vec<crate::terminal::TerminalEntry>,
     pub(crate) active_terminal: Option<String>,
 }

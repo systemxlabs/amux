@@ -84,7 +84,7 @@ impl AmuxApp {
         let client = m.client.clone();
         let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
-        // PRD：技能操作的临时会话固定在工作目录为系统临时目录的普通会话中执行
+        // 技能操作的临时会话固定在系统临时目录中执行。
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let operation_prompt = action.prompt(&skill);
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {

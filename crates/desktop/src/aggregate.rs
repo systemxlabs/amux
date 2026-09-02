@@ -144,7 +144,7 @@ impl SessionView {
         self.live = live;
     }
 
-    /// 设置 agent 计划（docs/DESIGN.md「普通会话计划」：Agent 侧数据为权威，全量覆盖）。
+    /// 设置 agent 计划；Agent 侧数据每次全量覆盖本地值。
     pub fn set_plan(&mut self, entries: Vec<SessionPlanEntry>) {
         self.plan = entries;
     }

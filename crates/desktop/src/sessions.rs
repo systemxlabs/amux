@@ -88,7 +88,7 @@ impl AmuxApp {
         let count = self.list_pages * PAGE_LIMIT;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            // 滚动查询（docs/DESIGN.md「会话列表滚动查询」）：按数量查询前 N 页。
+            // 滚动查询：按数量查询前 N 页。
             let params = SessionListParams { limit: Some(count) };
             let (pages, has_more) = match client
                 .request::<_, SessionListResult>(protocol::method::SESSION_LIST, Some(params))
@@ -373,7 +373,7 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 拉取当前会话的 agent 计划（docs/PRD.md「会话计划」面板）。
+    /// 拉取当前会话的 agent 计划。
     /// 面板未打开时不主动刷新，与 refresh_activities 同策略。
     pub(crate) fn refresh_plan(
         &mut self,
@@ -521,15 +521,15 @@ impl AmuxApp {
         );
     }
 
-    /// 「加载更早会话」：滚动查询页数 N +1，所有在线机器统一按前 N 页重新查询，
-    /// 随后各自补齐工作流关联会话（docs/DESIGN.md「会话列表滚动查询」）。
+    /// 「加载更早会话」：页数 N +1，所有在线机器重新查询前 N 页，
+    /// 随后补齐当前窗口缺失的工作流关联会话。
     pub(crate) fn load_more_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.list_pages += 1;
         self.restore_workflows(window, cx);
         self.refresh_all_online(window, cx);
     }
 
-    /// 「收起」：页数归 1（PRD「左侧面板」），重新按单页查询。
+    /// 「收起」：页数归 1，重新按单页查询。
     pub(crate) fn collapse_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.list_pages == 1 {
             return;
@@ -562,7 +562,7 @@ impl AmuxApp {
             window,
             cx,
         );
-        // 面板打开状态跨会话切换保持（docs/DESIGN.md：右侧上下文面板）。
+        // 面板打开状态跨会话切换保持。
         if let Some(m) = self.machines.get_mut(machine) {
             m.views.entry(session_id.clone()).or_default();
             m.diff.update(cx, |st, _| {
@@ -687,7 +687,7 @@ impl AmuxApp {
                                     cx,
                                 );
                             }
-                            // 发送用户消息即触发列表刷新（docs/DESIGN.md 会话列表刷新机制）
+                            // 发送用户消息后主动刷新会话列表。
                             Ok(()) => {
                                 this.refresh_sessions(machine, w, cx);
                             }
@@ -1814,15 +1814,14 @@ impl AmuxApp {
                                 })),
                         )
                     })
-                    // 斜杠命令上拉框（docs/PRD.md「会话交互视图」）
+                    // 斜杠命令候选框。
                     .children(self.render_slash_menu(cx)),
             )
-            // 会话选项（docs/PRD.md「会话交互视图」：位于输入框下方）
+            // 会话选项位于输入框下方。
             .children(self.render_config_options_row(cx))
     }
 
-    /// 会话选项行：select 类用下拉按钮、boolean 类用开关（docs/PRD.md
-    /// 「会话交互视图」：根据选项类型使用下拉框、开关等组件）。选项数据来自
+    /// 会话选项行：select 类用下拉按钮、boolean 类用开关。
     /// `session.config_options`，以 Agent 侧数据为权威。
     ///
     /// 菜单项/开关的回调运行在窗口事件分发栈内（`&mut App` 上下文），此时
@@ -2097,7 +2096,7 @@ impl AmuxApp {
                                 ),
                         )
                         .child(self.render_workspace_picker(cx))
-                        // worktree 开关（docs/PRD.md）：勾选后 agent 在独立工作树中
+                        // worktree 开关：勾选后 agent 在独立工作树中
                         // 工作，主仓库工作区不受影响；路径由 server 统一分配
                         .child(
                             Checkbox::new("ns-worktree-toggle")
@@ -2329,7 +2328,7 @@ impl AmuxApp {
                 if available { "可用" } else { "不可用" },
             )
         } else if let Some(Selected::Workflow { id }) = &self.selected {
-            // header 仅标注 agent 名称与可用状态（docs/PRD.md）：工作状态
+            // header 仅标注 agent 名称与可用状态；工作状态
             // 由会话列表转圈与对话区实时活动表达
             let Some(_workflow) = self.workflow(id) else {
                 return h_flex().into_any();
@@ -2533,8 +2532,7 @@ impl AmuxApp {
         .detach();
     }
 
-    /// 查询选中会话的会话选项（`session.config_options`；docs/DESIGN.md
-    /// 「普通会话选项」：存储在 Server 内存，以 Agent 侧数据为权威）。
+    /// 查询选中会话的会话选项（`session.config_options`，以 Agent 侧数据为权威）。
     /// 不依赖 window 上下文：供浮层菜单回调等窗口 update stack 内的场景调用。
     pub(crate) fn refresh_config_options(
         &mut self,
@@ -2580,8 +2578,7 @@ impl AmuxApp {
         );
     }
 
-    /// 查询选中会话的斜杠命令（`session.slash_commands`；docs/DESIGN.md
-    /// 「普通会话斜杠命令」：存储在 Server 内存，以 Agent 侧数据为权威）。
+    /// 查询选中会话的斜杠命令（`session.slash_commands`，以 Agent 侧数据为权威）。
     /// 尚无 agent 侧会话或 agent 未下发时为空；agent 侧会话在首条 prompt 时
     /// 才惰性创建，命令集合由 turn 结束后的刷新补齐。
     pub(crate) fn refresh_slash_commands(
@@ -2618,10 +2615,9 @@ impl AmuxApp {
         );
     }
 
-    /// 斜杠命令上拉框（docs/PRD.md「会话交互视图」：输入 `/` 时根据前缀匹配
-    /// 斜杠命令，弹出上拉框供用户选择）。可见性由当前输入文本派生：仅当选中
-    /// 普通会话、命令集合非空且输入正处于命令名输入中（`/` 开头、无空白）时
-    /// 展示前缀匹配项；点击项回填 `/name ` 后随前缀消失自动收起。
+    /// 斜杠命令上拉框：输入 `/` 时根据前缀匹配命令。
+    /// 可见性由当前输入文本派生：仅当选中普通会话、命令集合非空且输入正处于命令名输入中
+    ///（`/` 开头、无空白）时展示前缀匹配项；点击项回填 `/name ` 后随前缀消失自动收起。
     pub fn render_slash_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let selected = self.slash_commands.as_ref()?;
         let (machine, id) = self.open_session_target()?;

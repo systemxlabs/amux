@@ -123,7 +123,7 @@ async fn main() {
                 Ok(_) => {}
                 Err(e) => log::error!("{}", e),
             }
-            // docs/DESIGN.md「工作树存储」：超过 7 天不活跃的会话自动清理其 worktree
+            // 超过 7 天不活跃的会话自动清理其 worktree。
             match cleanup_manager
                 .cleanup_idle_worktrees(now_ms, 7 * 24 * 3_600_000)
                 .await

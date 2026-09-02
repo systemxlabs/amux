@@ -89,7 +89,7 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
             updated_at INTEGER NOT NULL
         );",
     )?;
-    // 执行计划列（docs/DESIGN.md「工作流会话存储」）：既有库缺列时补齐，
+    // 执行计划列缺失时补齐，
     // 免除用户手动清库
     let has_plan: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'plan'",
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(meta[0].id, "orc_1");
         assert_eq!(meta[0].title, "计划A");
         assert_eq!(meta[0].description, "做完再审查");
-        // 执行计划列（docs/DESIGN.md「工作流会话存储」）完整往返
+        // 执行计划列完整往返
         assert_eq!(meta[0].plan, "第一步：实现\n第二步：审查");
         assert_eq!(meta[0].preamble, "计划");
         assert_eq!(meta[0].state, SessionState::Idle);

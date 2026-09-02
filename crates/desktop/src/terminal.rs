@@ -1,4 +1,4 @@
-//! 终端视图：alacritty_terminal VT 状态机 + GPUI 网格渲染（docs/DESIGN.md「终端」）。
+//! 终端视图：alacritty_terminal VT 状态机 + GPUI 网格渲染。
 //!
 //! 服务端只送 PTY 原始字节流，本地 `ansi::Processor` 解析进 `Term` 网格（即
 //! 「终端历史由应用侧维护」）；渲染按行聚合格子为带背景色的文本 run。
@@ -25,7 +25,7 @@ const CELL_HEIGHT: f32 = FONT_SIZE * 1.3;
 /// 滚动缓冲行数（应用侧历史；Term 网格一次性按总行数分配内存，取值需克制）
 const SCROLLBACK_LINES: usize = 5_000;
 
-/// 终端渲染的主题样式：跟随应用明暗主题（docs/PRD 右侧面板与全局主题一致）。
+/// 终端渲染的主题样式：跟随应用明暗主题。
 struct TermThemeStyle {
     dark: bool,
     bg: Hsla,
@@ -300,7 +300,7 @@ impl TerminalState {
 
 impl Render for TerminalState {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 终端配色跟随应用主题（docs/DESIGN.md 未规定，取自 PRD 右侧面板观感一致性）
+        // 终端配色跟随应用主题，避免终端内容与周围面板形成不一致的明暗层级。
         let theme = cx.theme().clone();
         let style = TermThemeStyle {
             dark: theme.is_dark(),
