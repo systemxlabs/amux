@@ -1529,12 +1529,8 @@ impl OrcBackend for FakeBackend {
 /// 工具参数摘要（单行、120 字截断），供活动条目展示。
 fn one_line_summary(args: &serde_json::Value) -> String {
     let text = args.to_string();
-    let line = text.lines().next().unwrap_or("").trim().to_string();
-    if line.chars().count() > 120 {
-        format!("{}…", line.chars().take(120).collect::<String>())
-    } else {
-        line
-    }
+    let line = text.lines().next().unwrap_or("").trim();
+    amux_common::text::truncate(line, 120)
 }
 
 async fn dispatch_tool(

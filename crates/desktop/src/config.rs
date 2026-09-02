@@ -41,6 +41,7 @@ pub struct WorkflowTemplate {
 pub struct RecentWorkspace {
     pub machine: String,
     pub workspace: String,
+    #[serde(default)]
     pub last_used: u64,
 }
 
@@ -93,63 +94,27 @@ impl OrchestratorConfig {
 /// 每设备常用工作目录数量上限。
 pub const MAX_RECENT_WORKSPACES: usize = 20;
 
-fn is_string_field(v: &serde_json::Value, key: &str) -> bool {
-    v.get(key).and_then(|x| x.as_str()).is_some()
-}
-
 /// 机器目录归一化：缺 name/url/token 的条目丢弃。
 pub fn normalize_machines(raw: &serde_json::Value) -> Vec<MachineConfig> {
     raw.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|v| {
-                    is_string_field(v, "name")
-                        && is_string_field(v, "url")
-                        && is_string_field(v, "token")
-                })
-                .map(|v| MachineConfig {
-                    name: v["name"].as_str().unwrap_or("").to_string(),
-                    url: v["url"].as_str().unwrap_or("").to_string(),
-                    token: v["token"].as_str().unwrap_or("").to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| serde_json::from_value::<MachineConfig>(v.clone()).ok())
+        .collect()
 }
 
 /// 常用工作目录归一化：缺 machine/workspace 的条目丢弃。
 pub fn normalize_recent_workspaces(raw: &serde_json::Value) -> Vec<RecentWorkspace> {
     raw.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|v| is_string_field(v, "machine") && is_string_field(v, "workspace"))
-                .map(|v| RecentWorkspace {
-                    machine: v["machine"].as_str().unwrap_or("").to_string(),
-                    workspace: v["workspace"].as_str().unwrap_or("").to_string(),
-                    last_used: v.get("lastUsed").and_then(|x| x.as_u64()).unwrap_or(0),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| serde_json::from_value::<RecentWorkspace>(v.clone()).ok())
+        .collect()
 }
 
 /// 编排配置归一化：字段缺失或 api_format 非法 → 整体回退默认。
 pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
-    let has_req = ["apiFormat", "baseUrl", "apiKey", "model"]
-        .iter()
-        .all(|k| is_string_field(raw, k));
-    if !has_req {
-        return OrchestratorConfig::default();
-    }
-    let Ok(api_format) = serde_json::from_value::<ApiFormat>(raw["apiFormat"].clone()) else {
-        return OrchestratorConfig::default();
-    };
-    OrchestratorConfig {
-        api_format,
-        base_url: raw["baseUrl"].as_str().unwrap_or("").to_string(),
-        api_key: raw["apiKey"].as_str().unwrap_or("").to_string(),
-        model: raw["model"].as_str().unwrap_or("").to_string(),
-    }
+    serde_json::from_value(raw.clone()).unwrap_or_default()
 }
 
 fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
