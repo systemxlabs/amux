@@ -311,27 +311,20 @@ async fn dispatch(
     log::debug!("请求 {} {summary}", req.method);
     let started = std::time::Instant::now();
     let result = handlers.handle(&req.method, &req.params, conn).await;
-    let (result, error) = match result {
-        Ok(v) => (Some(v), None),
+    let response = match result {
+        Ok(result) => protocol::JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            id,
+            result: Some(result),
+            error: None,
+        },
         Err(RpcError { code, message }) => {
             log::error!("请求 {} 失败 [{code}]: {message}", req.method);
-            (
-                None,
-                Some(protocol::JsonRpcError {
-                    code,
-                    message,
-                    data: None,
-                }),
-            )
+            error_response(id, code, message)
         }
     };
     log::debug!("响应 {}（{}ms）", req.method, started.elapsed().as_millis());
-    Some(protocol::JsonRpcResponse {
-        jsonrpc: "2.0".into(),
-        id,
-        result,
-        error,
-    })
+    Some(response)
 }
 
 /// 常数时间字符串比较（token 校验）：避免逐字节短路泄漏前缀匹配长度。
@@ -378,16 +371,7 @@ fn handle_auth(
         }
         _ => {
             log::error!("认证失败：token 不匹配");
-            protocol::JsonRpcResponse {
-                jsonrpc: "2.0".into(),
-                id,
-                result: None,
-                error: Some(protocol::JsonRpcError {
-                    code: server_error::AUTH_FAILED,
-                    message: "认证失败".into(),
-                    data: None,
-                }),
-            }
+            error_response(id, server_error::AUTH_FAILED, "认证失败")
         }
     }
 }
