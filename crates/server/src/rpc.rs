@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::Value;
 
 use protocol::{
@@ -72,12 +73,15 @@ fn map_session_err(e: SessionError) -> RpcError {
     RpcError { code, message }
 }
 
+fn to_value<T: Serialize>(value: T) -> Result<Value, RpcError> {
+    serde_json::to_value(value).map_err(|e| RpcError::internal(e.to_string()))
+}
+
 fn ok_op() -> Result<Value, RpcError> {
-    serde_json::to_value(OpResult {
+    to_value(OpResult {
         ok: true,
         message: None,
     })
-    .map_err(|e| RpcError::internal(e.to_string()))
 }
 
 pub struct Handlers {
@@ -96,8 +100,7 @@ impl Handlers {
         match method {
             method::AGENT_LIST => {
                 let agents = self.manager.agents().list_agents();
-                serde_json::to_value(AgentListResult { agents })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(AgentListResult { agents })
             }
 
             method::AGENT_RESTART => {
@@ -124,8 +127,7 @@ impl Handlers {
                     .create(&p.agent, &p.cwd, p.use_worktree)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(SessionResult { session })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(SessionResult { session })
             }
 
             method::SESSION_PROMPT => {
@@ -191,8 +193,7 @@ impl Handlers {
                     .config_options(&p.session_id)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(SessionConfigOptionsResult { options })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(SessionConfigOptionsResult { options })
             }
 
             method::SESSION_SLASH_COMMANDS => {
@@ -202,8 +203,7 @@ impl Handlers {
                     .slash_commands(&p.session_id)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(SessionSlashCommandsResult { commands })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(SessionSlashCommandsResult { commands })
             }
 
             method::SESSION_PLAN => {
@@ -213,8 +213,7 @@ impl Handlers {
                     .plan(&p.session_id)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(SessionPlanResult { entries })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(SessionPlanResult { entries })
             }
 
             method::SESSION_HISTORY => {
@@ -224,12 +223,11 @@ impl Handlers {
                     .history(&p.session_id, p.limit, p.before)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(HistoryResult {
+                to_value(HistoryResult {
                     items,
                     has_more,
                     next_before,
                 })
-                .map_err(|e| RpcError::internal(e.to_string()))
             }
 
             method::SESSION_ACTIVITIES => {
@@ -239,12 +237,11 @@ impl Handlers {
                     .activities(&p.session_id, p.limit, p.before)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(ActivitiesResult {
+                to_value(ActivitiesResult {
                     activities,
                     has_more,
                     next_before,
                 })
-                .map_err(|e| RpcError::internal(e.to_string()))
             }
 
             method::SESSION_ONGOING_ACTIVITY => {
@@ -254,16 +251,14 @@ impl Handlers {
                     .ongoing_activity(&p.session_id)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(OngoingActivityResult { activity })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(OngoingActivityResult { activity })
             }
 
             method::SESSION_LIST => {
                 let p: SessionListParams = parse(params)?;
                 let (sessions, has_more) =
                     self.manager.list(p.limit).await.map_err(map_session_err)?;
-                serde_json::to_value(SessionListResult { sessions, has_more })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(SessionListResult { sessions, has_more })
             }
 
             method::SESSION_INFO => {
@@ -273,8 +268,7 @@ impl Handlers {
                     .info(&p.session_ids)
                     .await
                     .map_err(map_session_err)?;
-                serde_json::to_value(SessionInfoResult { sessions })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(SessionInfoResult { sessions })
             }
 
             method::WORKSPACE_DIFF => {
@@ -284,7 +278,7 @@ impl Handlers {
                     .workspace_cwd(&p.session_id)
                     .map_err(map_session_err)?;
                 let r: WorkspaceDiffResult = self.git.diff(&cwd, p.path.as_deref());
-                serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
+                to_value(r)
             }
 
             method::WORKSPACE_RESTORE => {
@@ -296,7 +290,7 @@ impl Handlers {
                 let r = self
                     .git
                     .restore(&cwd, p.path.as_deref(), p.patch.as_deref());
-                serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
+                to_value(r)
             }
 
             method::WORKSPACE_LIST => {
@@ -309,7 +303,7 @@ impl Handlers {
                     .git
                     .list_workspace(&cwd, p.path.as_deref(), p.limit, p.offset)
                     .map_err(RpcError::internal)?;
-                serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
+                to_value(r)
             }
 
             method::WORKSPACE_READ => {
@@ -322,14 +316,13 @@ impl Handlers {
                     .git
                     .read_workspace(&cwd, &p.path, p.offset, p.limit)
                     .map_err(RpcError::internal)?;
-                serde_json::to_value(r).map_err(|e| RpcError::internal(e.to_string()))
+                to_value(r)
             }
 
             method::TERMINAL_OPEN => {
                 let p: TerminalOpenParams = parse(params)?;
                 let terminal_id = self.terminals.open(p, conn)?;
-                serde_json::to_value(TerminalOpenResult { terminal_id })
-                    .map_err(|e| RpcError::internal(e.to_string()))
+                to_value(TerminalOpenResult { terminal_id })
             }
 
             method::TERMINAL_RESIZE => {
