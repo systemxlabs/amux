@@ -43,38 +43,29 @@ fn history_from_transcript(transcript: &[OrcMsg]) -> Vec<HistoryItem> {
         .collect()
 }
 
+fn content_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
     items
         .iter()
         .map(|h| match h {
-            HistoryItem::UserMessage { content, timestamp } => {
-                let text = content
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                OrcMsg::User {
-                    text,
-                    timestamp: *timestamp,
-                }
-            }
-            HistoryItem::AgentMessage { content, timestamp } => {
-                let text = content
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                OrcMsg::Orc {
-                    text,
-                    timestamp: *timestamp,
-                }
-            }
+            HistoryItem::UserMessage { content, timestamp } => OrcMsg::User {
+                text: content_text(content),
+                timestamp: *timestamp,
+            },
+            HistoryItem::AgentMessage { content, timestamp } => OrcMsg::Orc {
+                text: content_text(content),
+                timestamp: *timestamp,
+            },
         })
         .collect()
 }

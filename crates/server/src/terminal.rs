@@ -184,6 +184,9 @@ impl TerminalService {
                 }
             }
             if eof {
+                // 先摘除条目，再发送退出通知，保证收到 terminal.exit 后的下一次
+                // 操作不会因为输出泵尚未完成收尾而短暂成功。
+                this.remove(&pump_id);
                 let _ = frame_tx
                     .send(notification_frame(
                         notify::TERMINAL_EXIT,
@@ -193,7 +196,6 @@ impl TerminalService {
                     ))
                     .await;
                 log::info!("终端 {pump_id} 进程已退出（连接 {exit_conn_id}）");
-                this.remove(&pump_id);
             }
         });
 

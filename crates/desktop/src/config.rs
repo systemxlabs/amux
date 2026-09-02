@@ -117,20 +117,20 @@ pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
     serde_json::from_value(raw.clone()).unwrap_or_default()
 }
 
-fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             log::warn!("读取配置失败 {}: {e}", path.display());
-            return Vec::new();
+            return None;
         }
     };
     match serde_json::from_str(&raw) {
-        Ok(v) => v,
+        Ok(value) => Some(value),
         Err(e) => {
             log::warn!("配置解析失败（按空处理）{}: {e}", path.display());
-            Vec::new()
+            None
         }
     }
 }
@@ -151,7 +151,7 @@ struct JsonCollection<T> {
 
 impl<T: serde::de::DeserializeOwned + serde::Serialize> JsonCollection<T> {
     fn list(&self) -> Vec<T> {
-        read_file_typed(&self.path)
+        read_json(&self.path).unwrap_or_default()
     }
 
     fn upsert(&self, item: T) {
@@ -181,26 +181,8 @@ impl<T: serde::de::DeserializeOwned + serde::Serialize> JsonCollection<T> {
 }
 
 /// 从文件读取并归一化（不存在/损坏 → 空）。`normalize` 负责坏条目丢弃。
-fn read_file_normalized<T: Clone>(
-    path: &Path,
-    parse: impl Fn(&serde_json::Value) -> Vec<T>,
-) -> Vec<T> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(e) => {
-            log::error!("读取配置失败 {}: {e}", path.display());
-            return Vec::new();
-        }
-    };
-    let value = match serde_json::from_str::<serde_json::Value>(&raw) {
-        Ok(value) => value,
-        Err(e) => {
-            log::error!("解析配置失败 {}: {e}", path.display());
-            return Vec::new();
-        }
-    };
-    parse(&value)
+fn read_file_normalized<T>(path: &Path, parse: impl Fn(&serde_json::Value) -> Vec<T>) -> Vec<T> {
+    read_json(path).map_or_else(Vec::new, |value| parse(&value))
 }
 
 /// 配置仓库：按文件读写拆分的本地数据（数据目录可注入）。
@@ -351,24 +333,9 @@ impl ConfigStore {
     }
 
     pub fn orchestrator(&self) -> OrchestratorConfig {
-        let path = self.path("agent.json");
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return OrchestratorConfig::default();
-            }
-            Err(e) => {
-                log::error!("读取编排配置失败: {e}");
-                return OrchestratorConfig::default();
-            }
-        };
-        match serde_json::from_str::<serde_json::Value>(&raw) {
-            Ok(value) => normalize_orchestrator(&value),
-            Err(e) => {
-                log::error!("解析编排配置失败 {}: {e}", path.display());
-                OrchestratorConfig::default()
-            }
-        }
+        read_json(&self.path("agent.json"))
+            .map(|value| normalize_orchestrator(&value))
+            .unwrap_or_default()
     }
 
     pub fn save_orchestrator(&self, cfg: &OrchestratorConfig) -> std::io::Result<()> {
