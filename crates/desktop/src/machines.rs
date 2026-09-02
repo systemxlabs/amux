@@ -6,7 +6,7 @@ use protocol::{
 };
 
 use crate::config::{machine_ws_url, SkillEntry};
-use crate::machine::MachineView;
+use crate::machine::{next_connection_generation, MachineView};
 use crate::ws::WsClient;
 
 use crate::app::{AmuxApp, DraftKey, Selected, SkillAction};
@@ -274,8 +274,7 @@ impl AmuxApp {
         let cfg = self.machines[idx].config.clone();
         let client = WsClient::connect_with_token(machine_ws_url(&cfg), cfg.token.clone());
         old_client.close();
-        self.machines[idx].connection_generation =
-            self.machines[idx].connection_generation.saturating_add(1);
+        self.machines[idx].connection_generation = next_connection_generation();
         let generation = self.machines[idx].connection_generation;
         self.machines[idx].client = client.clone();
         let t = self.spawn_machine_tasks(window, cx, name.to_string(), client, generation);

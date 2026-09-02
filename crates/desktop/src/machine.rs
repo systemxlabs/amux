@@ -1,6 +1,7 @@
 //! 机器连接视图模型：MachineStatus 状态机与每机器的 UI 聚合状态（MachineView）。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::AppContext as _;
 use protocol::{AgentInfo, SessionMeta};
@@ -8,6 +9,12 @@ use protocol::{AgentInfo, SessionMeta};
 use crate::aggregate::SessionView;
 use crate::config::{machine_ws_url, MachineConfig};
 use crate::ws::WsClient;
+
+static NEXT_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_connection_generation() -> u64 {
+    NEXT_CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// 机器连接状态：强类型状态机。曾用中文字符串
 /// 前缀匹配充当状态机——任何文案改动都会静默破坏在线判断。
@@ -89,7 +96,7 @@ impl MachineView {
             agents: Vec::new(),
             sessions: Vec::new(),
             sessions_has_more: false,
-            connection_generation: 0,
+            connection_generation: next_connection_generation(),
             sessions_request_id: 0,
             views: std::collections::HashMap::new(),
             workspace_directories: HashMap::new(),

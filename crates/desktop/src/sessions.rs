@@ -2456,14 +2456,22 @@ impl AmuxApp {
         R: serde::de::DeserializeOwned + 'static,
         F: FnOnce(&mut Self, Result<R, crate::ws::RpcError>) + 'static,
     {
-        let Some(client) = self.machines.get(machine).map(|m| m.client.clone()) else {
+        let Some(machine_view) = self.machines.get(machine) else {
             return;
         };
+        let client = machine_view.client.clone();
+        let machine_name = machine_view.config.name.clone();
+        let generation = machine_view.connection_generation;
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let result = client.request::<_, R>(method, Some(params)).await;
             let _ = this.update_in(cx, |this, _w, cx| {
-                apply(this, result);
-                cx.notify();
+                let current_connection = this.machines.get(machine).is_some_and(|m| {
+                    m.config.name == machine_name && m.connection_generation == generation
+                });
+                if current_connection {
+                    apply(this, result);
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -2650,6 +2658,8 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let params = SessionConfigureParams {
             session_id: session_id.clone(),
             title: None,
@@ -2667,20 +2677,28 @@ impl AmuxApp {
             let res = client
                 .request::<_, OpResult>(protocol::method::SESSION_CONFIGURE, Some(params))
                 .await;
-            let _ = this.update_in(cx, |this, w, cx| match res {
-                Ok(_) => {
-                    log::info!(
+            let _ = this.update_in(cx, |this, w, cx| {
+                let current_connection = this.machines.get(machine).is_some_and(|m| {
+                    m.config.name == machine_name && m.connection_generation == generation
+                });
+                if !current_connection || !this.is_selected_session(machine, &session_id) {
+                    return;
+                }
+                match res {
+                    Ok(_) => {
+                        log::info!(
                         "会话选项设置成功，刷新选项：session={session_id} config_id={config_id}"
                     );
-                    this.refresh_config_options(cx, machine, session_id);
-                }
-                Err(error) => {
-                    log::error!("会话选项设置失败：{error}");
-                    w.push_notification(
-                        UiNotification::error(format!("会话选项设置失败：{error}"))
-                            .title("会话选项"),
-                        cx,
-                    );
+                        this.refresh_config_options(cx, machine, session_id);
+                    }
+                    Err(error) => {
+                        log::error!("会话选项设置失败：{error}");
+                        w.push_notification(
+                            UiNotification::error(format!("会话选项设置失败：{error}"))
+                                .title("会话选项"),
+                            cx,
+                        );
+                    }
                 }
             });
         })
