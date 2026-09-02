@@ -219,18 +219,28 @@ impl AmuxApp {
         let mut unavailable = Vec::new();
         for (machine, sid) in &children {
             if let Some(m) = self.machine(*machine) {
-                targets.push((*machine, m.client.clone(), sid.clone()));
+                targets.push((
+                    *machine,
+                    m.client.clone(),
+                    sid.clone(),
+                    m.config.name.clone(),
+                    m.connection_generation,
+                ));
             } else {
                 unavailable.push(format!("机器下标 {machine} 不可用，无法删除会话 {sid}"));
             }
         }
+        let target_connections: Vec<(usize, String, u64)> = targets
+            .iter()
+            .map(|(machine, _, _, name, generation)| (*machine, name.clone(), *generation))
+            .collect();
         let remote_targets = targets.clone();
         let data_dir = self.data_dir.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = run_engine_on_tokio(async move {
                 let mut deleted = Vec::new();
                 let mut failures = unavailable;
-                for (machine, client, sid) in &remote_targets {
+                for (machine, client, sid, _, _) in &remote_targets {
                     let params = SessionIdParams {
                         session_id: sid.clone(),
                     };
@@ -251,6 +261,15 @@ impl AmuxApp {
             })
             .await;
             let _ = this.update_in(cx, |this, w, cx| {
+                let targets_current =
+                    target_connections
+                        .iter()
+                        .all(|(machine, name, generation)| {
+                            this.is_current_machine_connection(*machine, name, *generation)
+                        });
+                if !targets_current {
+                    return;
+                }
                 match result {
                     Some(Ok((deleted, failures))) => {
                         for (machine, sid) in &deleted {

@@ -586,6 +586,8 @@ impl AmuxApp {
                     return;
                 };
                 let client = m.client.clone();
+                let machine_name = m.config.name.clone();
+                let generation = m.connection_generation;
                 let params = SessionPromptParams {
                     session_id: id.clone(),
                     input: blocks.clone(),
@@ -611,6 +613,9 @@ impl AmuxApp {
                         .request_ok(protocol::method::SESSION_PROMPT, Some(prompt_params))
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
+                        if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                            return;
+                        }
                         match &result {
                             Err(error) => {
                                 if let Some(m) = this.machine_mut(machine) {
@@ -731,6 +736,8 @@ impl AmuxApp {
             .find(|s| s.id == id)
             .is_some_and(|s| s.state == SessionState::Busy);
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let sid = id.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionIdParams {
@@ -740,6 +747,11 @@ impl AmuxApp {
                 .request_ok(protocol::method::SESSION_CANCEL, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
+                if !this.is_current_machine_connection(machine, &machine_name, generation)
+                    || !this.is_selected_session(machine, &sid)
+                {
+                    return;
+                }
                 if let Err(error) = &res {
                     if was_busy {
                         if let Some(m) = this.machines.get_mut(machine) {
@@ -766,6 +778,8 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let sid = session_id.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = SessionIdParams {
@@ -775,16 +789,15 @@ impl AmuxApp {
                 .request_ok(protocol::method::SESSION_DELETE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
+                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                    return;
+                }
                 match res {
                     Ok(_) => {
                         if let Some(m) = this.machines.get_mut(machine) {
                             m.sessions.retain(|s| s.id != sid);
                             m.views.remove(&sid);
                         }
-                        let machine_name = this
-                            .machine(machine)
-                            .map(|m| m.config.name.clone())
-                            .unwrap_or_default();
                         if this.open_session_target().is_some_and(|(_, id)| id == sid) {
                             this.set_selected(None, w, cx);
                         }
@@ -841,9 +854,11 @@ impl AmuxApp {
             return;
         };
         let client = m.client.clone();
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let title_trim = title.trim().to_string();
         let params = SessionConfigureParams {
-            session_id,
+            session_id: session_id.clone(),
             title: Some(title_trim),
             config: None,
         };
@@ -852,6 +867,9 @@ impl AmuxApp {
                 .request_ok(protocol::method::SESSION_CONFIGURE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
+                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                    return;
+                }
                 match res {
                     Err(error) => {
                         if let Some(m) = this.machines.get_mut(machine) {
@@ -912,6 +930,7 @@ impl AmuxApp {
             return;
         };
         let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
         let cwd = self.session_cwd_input.read(cx).value().trim().to_owned();
         if cwd.is_empty() {
             self.new_session_error = Some("请输入工作目录，或选择一个常用工作目录。".into());
@@ -943,6 +962,9 @@ impl AmuxApp {
                 .request::<_, SessionResult>(protocol::method::SESSION_NEW, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
+                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                    return;
+                }
                 match &res {
                     Ok(res) => {
                         let new_id = res.session.id.clone();
