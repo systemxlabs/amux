@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use amux_common::session_log::write_json_atomic;
+
 use crate::logic::{merge_recent_workspace, recent_workspaces_for_machine};
 /// 注册机器：name 唯一。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -169,19 +171,8 @@ fn read_file_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
 }
 
 fn write_atomic<T: serde::Serialize>(path: &Path, value: &T) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let tmp = path.with_extension("json.tmp");
-    match serde_json::to_string_pretty(value) {
-        Ok(body) => {
-            if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
-                log::warn!("写入配置失败 {}: {e}", path.display());
-            }
-        }
-        Err(e) => {
-            log::warn!("序列化失败 {}: {e}", path.display())
-        }
+    if let Err(e) = write_json_atomic(path, value) {
+        log::warn!("写入配置失败 {}: {e}", path.display());
     }
 }
 
@@ -416,12 +407,7 @@ impl ConfigStore {
     }
 
     pub fn save_orchestrator(&self, cfg: &OrchestratorConfig) -> std::io::Result<()> {
-        let path = self.path("agent.json");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?;
-        std::fs::write(path, json)
+        write_json_atomic(&self.path("agent.json"), cfg)
     }
 
     /// 应用数据根目录（~/.amux/app/）。工作流元数据 session.sqlite 与
