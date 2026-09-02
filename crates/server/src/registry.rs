@@ -235,16 +235,6 @@ impl SessionRegistry {
             .collect())
     }
 
-    /// server 启动时把异常退出残留的 Busy 会话重置为 Idle（无对应运行中 agent）。
-    pub fn reset_busy_to_idle(&self) -> rusqlite::Result<usize> {
-        let conn = self.connection();
-        let n = conn.execute(
-            "UPDATE sessions SET state = 'idle' WHERE state = 'busy'",
-            [],
-        )?;
-        Ok(n)
-    }
-
     /// 全部会话的会话 id 与最近活跃时间，用于无活动回收。
     pub fn idle_candidates(
         &self,

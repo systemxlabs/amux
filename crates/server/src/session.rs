@@ -87,10 +87,6 @@ impl SessionManager {
         data_dir: PathBuf,
     ) -> (Self, broadcast::Receiver<ServerNotification>) {
         let (tx, rx) = broadcast::channel(256);
-        // 异常退出后注册表中的 Busy 会话已没有对应的运行中 agent。
-        if let Err(e) = registry.reset_busy_to_idle() {
-            log::error!("重置残留忙会话失败：{e}");
-        }
         let manager = SessionManager {
             agents,
             registry,
