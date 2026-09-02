@@ -16,6 +16,13 @@ use rusqlite::{params, Connection};
 
 use crate::workflow::{ChildSession, OrcMsg, OrcSession};
 
+const META_SELECT_COLUMNS: &str =
+    "id, title, state, last_active_at, children, description, plan, preamble, created_at, updated_at";
+
+fn meta_select(suffix: &str) -> String {
+    format!("SELECT {META_SELECT_COLUMNS} FROM sessions {suffix}")
+}
+
 fn sqlite_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("session.sqlite")
 }
@@ -204,11 +211,9 @@ pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<OrcSes
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let query_limit = limit.saturating_add(1) as i64;
     let mut stmt = conn
-        .prepare(
-            "SELECT id, title, state, last_active_at, children, description, plan, preamble,
-                created_at, updated_at
-         FROM sessions ORDER BY last_active_at DESC, id DESC LIMIT ?1",
-        )
+        .prepare(&meta_select(
+            "ORDER BY last_active_at DESC, id DESC LIMIT ?1",
+        ))
         .map_err(io::Error::other)?;
     let rows = stmt
         .query_map([query_limit], read_meta_row)
@@ -222,11 +227,7 @@ pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<OrcSes
 pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let mut stmt = conn
-        .prepare(
-            "SELECT id, title, state, last_active_at, children, description, plan, preamble,
-                created_at, updated_at
-         FROM sessions ORDER BY last_active_at DESC, id DESC",
-        )
+        .prepare(&meta_select("ORDER BY last_active_at DESC, id DESC"))
         .map_err(io::Error::other)?;
     let rows = stmt
         .query_map([], read_meta_row)

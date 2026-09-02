@@ -19,6 +19,12 @@ pub struct SessionRegistry {
 /// 注册表条目：会话元数据 + agent 侧会话 id（驱动操作需要）。
 pub type RegistryEntry = (SessionMeta, String);
 
+const SESSION_SELECT_COLUMNS: &str = "id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size";
+
+fn session_select(suffix: &str) -> String {
+    format!("SELECT {SESSION_SELECT_COLUMNS} FROM sessions {suffix}")
+}
+
 fn state_from_str(s: &str) -> rusqlite::Result<SessionState> {
     protocol::parse_session_state(s).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -121,20 +127,14 @@ impl SessionRegistry {
     /// 按 server 会话 id 取条目（含 agent 侧会话 id）。
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<RegistryEntry>> {
         let conn = self.connection();
-        let mut stmt = conn.prepare(
-            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size
-             FROM sessions WHERE id = ?1",
-        )?;
+        let mut stmt = conn.prepare(&session_select("WHERE id = ?1"))?;
         stmt.query_row(params![id], row_to_entry).optional()
     }
 
     /// 全部条目，按最近活跃（last_active_at）降序——惰性分页的上游数据。
     pub fn list(&self) -> rusqlite::Result<Vec<RegistryEntry>> {
         let conn = self.connection();
-        let mut stmt = conn.prepare(
-            "SELECT id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size
-             FROM sessions ORDER BY last_active_at DESC, id DESC",
-        )?;
+        let mut stmt = conn.prepare(&session_select("ORDER BY last_active_at DESC, id DESC"))?;
         let rows = stmt.query_map([], row_to_entry)?;
         rows.collect()
     }
