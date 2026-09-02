@@ -13,6 +13,15 @@ use amux_server::rpc::Handlers;
 use amux_server::session::SessionManager;
 use amux_server::transport::{Transport, TransportOptions};
 
+/// `AMUX_AGENT_BIN` 可执行路径对应注册表 agent 名（可执行文件名；路径不含文件名时回落为原始串）。
+fn configured_agent_name(bin: &str) -> String {
+    std::path::Path::new(bin)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| bin.to_string())
+}
+
 #[tokio::main]
 async fn main() {
     let cfg = match load_config() {
@@ -30,18 +39,11 @@ async fn main() {
         .unwrap_or_else(|| cfg.data_dir.join("server.log"));
     amux_common::log::init_file_output(&log_path);
 
-    // 依赖组装：ACP agent 驱动（--agent 显式指定 agent 可执行与子命令参数）；未指定时由
+    // 依赖组装：ACP agent 驱动（AMUX_AGENT_BIN 指定 agent 可执行与子命令参数）；未指定时由
     // AgentRegistry 自动发现本机 ACP agent。单个显式 agent 拉起失败不阻止
     // Server 监听，其他已发现 agent 仍可用。
-    let configured_name = cfg.agent_bin.as_ref().map(|bin| {
-        std::path::Path::new(bin)
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or(bin)
-            .to_string()
-    });
     let configured: Option<(String, SharedDriver)> = cfg.agent_bin.clone().and_then(|bin| {
-        let name = configured_name.clone().expect("显式 agent 名称已计算");
+        let name = configured_agent_name(&bin);
         let args_ref: Vec<&str> = cfg.agent_args.iter().map(String::as_str).collect();
         match AcpAgentDriver::spawn(&bin, &args_ref, &[]) {
             Ok(driver) => Some((name, Arc::new(driver) as SharedDriver)),
@@ -58,7 +60,8 @@ async fn main() {
     }
     let configured_failed = cfg.agent_bin.is_some() && configured.is_none();
     let agents = Arc::new(AgentRegistry::new(configured));
-    if let (Some(name), Some(bin)) = (configured_name, cfg.agent_bin.clone()) {
+    if let Some(bin) = cfg.agent_bin.clone() {
+        let name = configured_agent_name(&bin);
         agents.set_configured_spec(name.clone(), bin, cfg.agent_args.clone(), Vec::new());
         if configured_failed {
             agents.mark_configured_unavailable(&name);
@@ -146,7 +149,6 @@ async fn main() {
         token: cfg.token.clone(),
         handlers: handlers.clone(),
         notifications,
-        logger: Some(Arc::new(|line| log::info!("{}", line))),
     });
 
     // 启动拉起：并行拉起已发现 agent。放在监听之后

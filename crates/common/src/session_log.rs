@@ -7,6 +7,8 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use atomic_write_file::AtomicWriteFile;
+
 /// 会话数据目录：`<data_dir>/sessions/`。
 pub fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("sessions")
@@ -43,24 +45,28 @@ pub fn append_jsonl<T: serde::Serialize>(path: &Path, entries: &[T]) -> io::Resu
     Ok(())
 }
 
-/// 原子替换 JSONL 文件：先将完整内容写入同目录临时文件，再 rename 覆盖目标。
-/// 临时文件名包含进程 ID 和单调计数器，避免并发写者复用同一路径。
+/// 原子写入格式化 JSON 文件。
+pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
+    let mut file = AtomicWriteFile::open(path)?;
+    file.write_all(body.as_bytes())?;
+    file.commit()
+}
+
+/// 原子替换 JSONL 文件。
 pub fn write_jsonl_atomic<T: serde::Serialize>(path: &Path, entries: &[T]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = path.with_extension(format!("jsonl.tmp.{}.{}", std::process::id(), counter));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        for entry in entries {
-            let line = serde_json::to_string(entry).map_err(io::Error::other)?;
-            writeln!(f, "{line}")?;
-        }
-        f.sync_all()?;
+    let mut file = AtomicWriteFile::open(path)?;
+    for entry in entries {
+        let line = serde_json::to_string(entry).map_err(io::Error::other)?;
+        writeln!(file, "{line}")?;
     }
-    std::fs::rename(tmp, path)
+    file.commit()
 }
 
 /// 读取全部 JSONL 行；文件缺失视为空，损坏行带行号报错。

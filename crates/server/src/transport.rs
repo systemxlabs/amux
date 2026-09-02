@@ -24,22 +24,12 @@ pub struct TransportOptions {
     pub handlers: Arc<Handlers>,
     /// 会话通知流（server 级独占消费；每连接只收序列化后的帧）
     pub notifications: broadcast::Receiver<ServerNotification>,
-    pub logger: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 /// 每连接共享的上下文（从 TransportOptions 派生；不含仅 server 级的 notifications）。
 struct ConnectionCtx {
     token: String,
     handlers: Arc<Handlers>,
-    logger: Option<Arc<dyn Fn(String) + Send + Sync>>,
-}
-
-impl ConnectionCtx {
-    fn log(&self, line: String) {
-        if let Some(l) = &self.logger {
-            l(line);
-        }
-    }
 }
 
 pub struct Transport {
@@ -58,7 +48,6 @@ impl Transport {
             token,
             handlers,
             notifications,
-            logger,
         } = self.opts;
         let addr: SocketAddr = format!("{host}:{port}")
             .parse()
@@ -66,9 +55,7 @@ impl Transport {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| format!("监听失败: {e}"))?;
-        if let Some(l) = &logger {
-            l(format!("amux server listening on ws://{addr}"));
-        }
+        log::info!("amux server listening on ws://{addr}");
 
         // 广播任务：把会话通知序列化为 JSON-RPC notification（仅 session.state_change）发给所有连接。
         // ServerNotification 接收端在此独占消费；每连接只订阅序列化后的帧通道。
@@ -94,24 +81,19 @@ impl Transport {
             }
         });
 
-        let ctx = ConnectionCtx {
-            token,
-            handlers,
-            logger,
-        };
+        let ctx = ConnectionCtx { token, handlers };
         let next_conn_id = AtomicU64::new(1);
         loop {
             let (stream, peer) = match listener.accept().await {
                 Ok(v) => v,
                 Err(e) => {
-                    ctx.log(format!("accept 失败: {e}"));
+                    log::info!("accept 失败: {e}");
                     continue;
                 }
             };
             let conn = ConnectionCtx {
                 token: ctx.token.clone(),
                 handlers: ctx.handlers.clone(),
-                logger: ctx.logger.clone(),
             };
             let notify_rx = tx.subscribe();
             let conn_id = next_conn_id.fetch_add(1, Ordering::SeqCst);
@@ -132,11 +114,11 @@ async fn handle_connection(
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
-            opts.log(format!("ws 握手失败 ({peer}): {e}"));
+            log::info!("ws 握手失败 ({peer}): {e}");
             return;
         }
     };
-    opts.log(format!("连接: {peer} (#{conn_id})"));
+    log::info!("连接: {peer} (#{conn_id})");
 
     let (mut sink, mut source) = ws.split();
     let handlers = opts.handlers.clone();
@@ -167,7 +149,7 @@ async fn handle_connection(
                     }
                     // Lagged：慢客户端积压超限，丢弃错过通知继续服务（断连代价更高）
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                        opts.log(format!("通知积压，跳过 {missed} 条"));
+                        log::info!("通知积压，跳过 {missed} 条");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -189,7 +171,7 @@ async fn handle_connection(
                 let msg = match msg {
                     Ok(m) => m,
                     Err(e) => {
-                        opts.log(format!("连接错误 ({peer}): {e}"));
+                        log::info!("连接错误 ({peer}): {e}");
                         break;
                     }
                 };
@@ -204,10 +186,10 @@ async fn handle_connection(
                         continue;
                     }
                 };
-                // 认证请求在连接任务内串行完成；因此紧随其后的业务请求只有在
-                // auth 响应已处理后才会被派发，不会与认证发生竞态。
-                let is_auth = req.method == method::AUTH;
-                if is_auth && !authenticated.load(Ordering::SeqCst) {
+                // 未认证阶段的请求必须在读取循环内同步处理。否则，业务请求会被
+                // spawn 后挂起，紧随其后的 auth 可能先把 authenticated 置为 true，
+                // 导致这条实际上先到达的请求绕过认证检查。
+                if !authenticated.load(Ordering::SeqCst) {
                     if let Some(resp) =
                         dispatch(&handlers, req, &token, &authenticated, &conn_scope).await
                     {
@@ -236,7 +218,7 @@ async fn handle_connection(
     }
     // 断连清理：释放该连接打开的终端（PTY 进程随连接生死，docs/DESIGN.md「终端」）
     handlers.terminals.release_conn(conn_id);
-    opts.log(format!("断开: {peer} (#{conn_id})"));
+    log::info!("断开: {peer} (#{conn_id})");
 }
 
 /// 构造 JSON-RPC 错误响应；所有错误响应共享同一协议 envelope。

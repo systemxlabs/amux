@@ -52,17 +52,6 @@ pub struct SessionManager {
     /// 与 `ongoing` 生命周期一致：turn 结束随 `ongoing` 一起清理。
     thinking_buf: Mutex<HashMap<String, (String, u64)>>,
     controls: Mutex<HashMap<String, Arc<SessionControl>>>,
-    /// 已解析历史缓存（GUI 每 10s 轮询打开的会话；文件未变时免全量 JSONL 重解析）
-    history_cache: Mutex<HashMap<String, LogCache<HistoryItem>>>,
-    /// 已解析活动缓存（同上）
-    activities_cache: Mutex<HashMap<String, LogCache<Activity>>>,
-}
-
-/// 日志解析缓存条目：以文件字节长度为新鲜度依据——日志 append-only 不截断，
-/// 长度不变即内容不变；任何追加后由写入方失效。
-struct LogCache<T> {
-    items: Arc<Vec<T>>,
-    source_len: u64,
 }
 
 struct SessionControl {
@@ -96,8 +85,6 @@ impl SessionManager {
             ongoing: Mutex::new(HashMap::new()),
             thinking_buf: Mutex::new(HashMap::new()),
             controls: Mutex::new(HashMap::new()),
-            history_cache: Mutex::new(HashMap::new()),
-            activities_cache: Mutex::new(HashMap::new()),
         };
         (manager, rx)
     }
@@ -185,6 +172,29 @@ impl SessionManager {
             .clone()
     }
 
+    /// 仅移除仍由调用方持有的控制块。删除并发时，旧请求可能在首轮注册表
+    /// 检查后才创建控制块；按 Arc 身份比较可避免它清掉后续请求已经接管的条目。
+    fn remove_control_if_current(&self, session_id: &str, control: &Arc<SessionControl>) {
+        let mut controls = self.controls.lock();
+        if controls
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, control))
+        {
+            controls.remove(session_id);
+        }
+    }
+
+    fn remove_control_if_not_found(
+        &self,
+        session_id: &str,
+        control: &Arc<SessionControl>,
+        error: &SessionError,
+    ) {
+        if matches!(error, SessionError::NotFound(_)) {
+            self.remove_control_if_current(session_id, control);
+        }
+    }
+
     /// 配置会话标题（用户可随时修改）。
     pub async fn configure(
         &self,
@@ -246,12 +256,21 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
+        // 先校验元数据，再创建控制块，避免随机 session id 请求不断扩张
+        // controls（该表的条目生命周期应与真实会话一致）。
+        self.get_entry(session_id)?;
         let control = self.control(session_id);
         let _lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        let (meta, agent_session_id) = match self.get_entry(session_id) {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.remove_control_if_not_found(session_id, &control, &error);
+                return Err(error);
+            }
+        };
         let (driver, agent_session_id) =
             self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
         // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
@@ -316,14 +335,23 @@ impl SessionManager {
     /// 联动清除注册表条目 + 历史日志 + 活动日志 + 进行中控制块。
     /// 幂等：会话已不存在时仅清理残留日志（部分工作流清理失败后可安全重试）。
     pub async fn delete(&self, session_id: &str) -> Result<(), SessionError> {
+        // 不存在的 ID 仍保持删除幂等，但不能为随机 ID 创建控制块。
+        let entry = self.registry.get(session_id)?;
+        if entry.is_none() {
+            return SessionLog::open(&self.data_dir, session_id)
+                .remove()
+                .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
+        }
+
         let control = self.control(session_id);
         control.deleted.store(true, Ordering::SeqCst);
         // setup_prompt 持有同一把锁直到 agent session id 与 Busy 元数据写回完成。
         // 删除先标记 deleted，再等待临界区结束，保证不会在删除后复活会话。
         let _lifecycle = control.lifecycle.lock();
         let log = SessionLog::open(&self.data_dir, session_id);
-        let entry = self.registry.get(session_id)?;
-        let Some((meta, agent_session_id)) = entry else {
+        let Some((meta, agent_session_id)) = self.registry.get(session_id)? else {
+            // 另一条删除请求可能已经完成本地删除；当前控制块仍需移除。
+            self.remove_control_if_current(session_id, &control);
             return log
                 .remove()
                 .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
@@ -333,7 +361,6 @@ impl SessionManager {
         self.registry.delete(session_id)?;
         log.remove()
             .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")))?;
-        self.invalidate_log_caches(session_id);
 
         // 资源清理（docs/DESIGN.md「工作树存储」与 ACP 会话生命周期）：
         // ACP close/delete 往返 + worktree 目录清理，均为尽力而为不阻断。
@@ -494,13 +521,9 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<(Vec<HistoryItem>, bool, Option<u64>), SessionError> {
         self.get_entry(session_id)?;
-        let items = self.cached_log(
-            session_id,
-            &self.history_cache,
-            amux_common::session_log::history_path(&self.data_dir, session_id),
-            |log| log.read_history(),
-            "会话历史读取失败",
-        )?;
+        let items = SessionLog::open(&self.data_dir, session_id)
+            .read_history()
+            .map_err(|e| SessionError::Storage(format!("会话历史读取失败: {e}")))?;
         Ok(Self::page(&items, limit, before))
     }
 
@@ -512,13 +535,9 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<(Vec<Activity>, bool, Option<u64>), SessionError> {
         self.get_entry(session_id)?;
-        let items = self.cached_log(
-            session_id,
-            &self.activities_cache,
-            amux_common::session_log::activities_path(&self.data_dir, session_id),
-            |log| log.read_activities(),
-            "会话活动读取失败",
-        )?;
+        let items = SessionLog::open(&self.data_dir, session_id)
+            .read_activities()
+            .map_err(|e| SessionError::Storage(format!("会话活动读取失败: {e}")))?;
         Ok(Self::page(&items, limit, before))
     }
 
@@ -533,44 +552,6 @@ impl SessionManager {
         let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
         let next_before = if has_more { Some(start as u64) } else { None };
         (items[start..end].to_vec(), has_more, next_before)
-    }
-
-    /// 带缓存的日志读取：文件长度未变时复用上次解析结果
-    /// （GUI 每 10s 轮询打开的会话；日志 append-only，长度不变即内容不变），
-    /// 追加后由写入方失效缓存。`history`/`activities` 共用同一逻辑。
-    fn cached_log<T>(
-        &self,
-        session_id: &str,
-        cache: &Mutex<HashMap<String, LogCache<T>>>,
-        path: PathBuf,
-        read: impl FnOnce(&SessionLog) -> std::io::Result<Vec<T>>,
-        err_ctx: &str,
-    ) -> Result<Arc<Vec<T>>, SessionError> {
-        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let mut cache = cache.lock();
-        if let Some(c) = cache.get(session_id) {
-            if c.source_len == file_len {
-                return Ok(c.items.clone());
-            }
-        }
-        let items = Arc::new(
-            read(&SessionLog::open(&self.data_dir, session_id))
-                .map_err(|e| SessionError::Storage(format!("{err_ctx}: {e}")))?,
-        );
-        cache.insert(
-            session_id.to_string(),
-            LogCache {
-                items: items.clone(),
-                source_len: file_len,
-            },
-        );
-        Ok(items)
-    }
-
-    /// 追加后失效缓存（下次读取重新解析一次，之后恢复命中）。
-    fn invalidate_log_caches(&self, session_id: &str) {
-        self.history_cache.lock().remove(session_id);
-        self.activities_cache.lock().remove(session_id);
     }
 
     /// 查询正在进行中的活动；无则 None。
@@ -594,6 +575,9 @@ impl SessionManager {
         if input.is_empty() {
             return Err(SessionError::EmptyInput);
         }
+        // 先校验元数据，再创建控制块，避免随机 session id 请求不断扩张
+        // controls（该表的条目生命周期应与真实会话一致）。
+        self.get_entry(session_id)?;
         let control = self.control(session_id);
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
@@ -613,8 +597,10 @@ impl SessionManager {
         let (driver, agent_session_id, cwd, old_state) = match setup {
             Ok(value) => value,
             Err(error) => {
-                // 尚未进入 Busy 广播，只需释放 busy 标志
+                // 尚未进入 Busy 广播，只需释放 busy 标志；若会话已被删除，
+                // 同时移除这次竞态中刚创建的孤儿控制块。
                 control.busy.store(false, Ordering::SeqCst);
+                self.remove_control_if_not_found(session_id, &control, &error);
                 return Err(error);
             }
         };
@@ -644,7 +630,6 @@ impl SessionManager {
             );
             return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
         }
-        self.invalidate_log_caches(session_id);
         // 从这里开始删除可以安全清理日志；后续 turn 只会追加活动/历史，且均受
         // deleted 标记保护，不会在删除后重新创建已删除会话。
         drop(lifecycle);
@@ -666,7 +651,6 @@ impl SessionManager {
                 if let Err(log_error) = log.append_activities(&[err]) {
                     log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
                 }
-                self.invalidate_log_caches(session_id);
                 self.finalize_turn(
                     session_id,
                     &control,
@@ -876,14 +860,11 @@ impl SessionManager {
                 storage_error = Some(SessionError::Storage(format!("活动落盘失败: {e}")));
             }
         }
-        if !deleted && (!history.is_empty() || !activities.is_empty()) {
-            self.invalidate_log_caches(session_id);
-        }
         (storage_error, turn_reason)
     }
 
-    /// 把已定稿的活动实时追加写盘并失效活动缓存。返回落盘错误（写盘后仍
-    /// 会继续跑 turn，仅收集错误供调用方上报）。
+    /// 把已定稿的活动实时追加写盘。返回落盘错误（写盘后仍会继续跑 turn，
+    /// 仅收集错误供调用方上报）。
     fn flush_ready_activities(
         &self,
         session_id: &str,
@@ -898,7 +879,6 @@ impl SessionManager {
             log::error!("活动落盘失败 {session_id}: {e}");
             return Err(SessionError::Storage(format!("活动落盘失败: {e}")));
         }
-        self.activities_cache.lock().remove(session_id);
         Ok(())
     }
 
@@ -955,12 +935,20 @@ impl SessionManager {
         config_id: &str,
         value: protocol::SessionConfigOptionValue,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
+        // 与 prompt/config_options 一样，随机 ID 不应进入控制块表。
+        self.get_entry(session_id)?;
         let control = self.control(session_id);
         let _lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        let (meta, agent_session_id) = match self.get_entry(session_id) {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.remove_control_if_not_found(session_id, &control, &error);
+                return Err(error);
+            }
+        };
         let (driver, agent_session_id) =
             self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
         log::info!(
@@ -1047,6 +1035,34 @@ mod tests {
         (Arc::new(mgr), rx)
     }
 
+    #[tokio::test]
+    async fn missing_session_requests_do_not_allocate_controls() {
+        let (manager, _rx) = stub_manager("stub");
+        assert!(manager.controls.lock().is_empty());
+
+        assert!(matches!(
+            manager.prompt("missing", text("hello")).await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            manager.config_options("missing").await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(matches!(
+            manager
+                .set_config_option(
+                    "missing",
+                    "model",
+                    protocol::SessionConfigOptionValue::ValueId {
+                        value: "fast".into(),
+                    },
+                )
+                .await,
+            Err(SessionError::NotFound(_))
+        ));
+        assert!(manager.delete("missing").await.is_ok());
+        assert!(manager.controls.lock().is_empty());
+    }
     /// 阻塞型驱动：prompt 后等待 release 才结束 turn（用于控制 turn 生命周期，
     /// 在 turn 进行中并发执行删除以验证删除语义）。
     struct BlockingDriver {

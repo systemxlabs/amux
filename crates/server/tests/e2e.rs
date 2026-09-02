@@ -212,6 +212,51 @@ async fn auth_required_and_enforced() {
 }
 
 #[tokio::test]
+async fn auth_required_requests_are_not_released_after_later_auth() {
+    let (port, _guard) = start_server().await;
+    let mut c = Client::connect_raw(port).await;
+
+    c.write
+        .send(Message::Text(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "session.list",
+                "params": {}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    c.write
+        .send(Message::Text(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "auth",
+                "params": {"token": "test-token"}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut responses = std::collections::HashMap::new();
+    while responses.len() < 2 {
+        let msg = c.read.next().await.unwrap().unwrap();
+        let Message::Text(text) = msg else { continue };
+        let response: Value = serde_json::from_str(&text).unwrap();
+        if let Some(id) = response["id"].as_u64() {
+            responses.insert(id, response);
+        }
+    }
+    assert_eq!(responses[&1]["error"]["code"], -32000);
+    assert!(responses[&2].get("error").is_none());
+}
+
+#[tokio::test]
 async fn agent_list() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
@@ -232,7 +277,7 @@ async fn agent_list() {
 async fn agent_rediscover_succeeds_and_keeps_agents_available() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
-    // 重新发现成功（测试环境为显式 --agent + no_discovery，重扫为 no-op，
+    // 重新发现成功（测试环境为显式 AMUX_AGENT_BIN + no_discovery，重扫为 no-op，
     // 已配置 agent 不受影响）
     let r = c.call("agent.rediscover", json!({})).await;
     assert!(r.get("error").is_none(), "rediscover 应成功: {r}");

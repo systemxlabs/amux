@@ -31,24 +31,14 @@ impl AssetSource for AmuxAssets {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut data_dir = std::env::var("AMUX_DATA_DIR")
+    // 数据目录仅通过环境变量配置（docs 未定义桌面应用 CLI 参数）。
+    let data_dir = std::env::var("AMUX_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             std::env::var("HOME")
                 .map(|h| PathBuf::from(h).join(".amux").join("app"))
                 .unwrap_or_else(|_| PathBuf::from(".amux/app"))
         });
-    let mut i = 0;
-    while i < args.len() {
-        if args[i].as_str() == "--data-dir" {
-            i += 1;
-            if let Some(v) = args.get(i) {
-                data_dir = PathBuf::from(v);
-            }
-        }
-        i += 1;
-    }
 
     let log_path = data_dir
         .parent()

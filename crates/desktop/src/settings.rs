@@ -867,7 +867,7 @@ impl AmuxApp {
             .id("settings-nav")
             .w(rems(11.875)) // 设置导航面板宽度：随 rem 缩放
             .h_full()
-            .gap_1()
+            .gap_2()
             .p_2()
             .bg(cx.theme().sidebar)
             .child(
@@ -950,17 +950,37 @@ impl AmuxApp {
     ) -> impl IntoElement {
         let id_owned = id.to_string();
         let label_owned = label.to_string();
-        // ghost + selected：选中态由组件以 secondary_active 底色呈现，弱于 primary 实心
+        // ghost + selected：选中态由组件以 secondary_active 底色呈现，弱于 primary 实心。
+        // 全宽子布局抵消 Button 内容槽的居中默认值，让类别行左对齐（同目录树行）。
+        let selected = self.settings.category == target;
         Button::new(id_owned)
-            .small()
+            .w_full()
             .ghost()
-            .icon(icon)
-            .label(label_owned)
-            .selected(self.settings.category == target)
+            .selected(selected)
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.settings.category = target;
                 cx.notify();
             }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_start()
+                    .gap_2()
+                    .items_center()
+                    .child(Icon::new(icon).small().text_color(if selected {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().muted_foreground
+                    }))
+                    .child(
+                        Label::new(label_owned)
+                            .text_base()
+                            .font_weight(FontWeight::MEDIUM)
+                            .flex_1()
+                            .min_w_0()
+                            .truncate(),
+                    ),
+            )
     }
 
     pub(crate) fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
