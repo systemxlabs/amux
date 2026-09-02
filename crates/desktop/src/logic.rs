@@ -60,6 +60,24 @@ pub fn merge_session_window(
     (out, has_more)
 }
 
+/// 从普通会话查询结果中移除所有已知工作流关联会话。
+/// 关联会话只允许挂在所属工作流下展示；即使该工作流不在当前分页窗口，
+/// 也不能错误地以顶层普通会话出现。
+pub fn filter_workflow_sessions(
+    sessions: Vec<SessionMeta>,
+    workflow_child_ids: &std::collections::HashSet<String>,
+) -> Vec<SessionMeta> {
+    sessions
+        .into_iter()
+        .filter(|session| !workflow_child_ids.contains(&session.id))
+        .collect()
+}
+
+/// 关联会话无法从所属机器获取时的固定展示标题。
+pub fn unavailable_workflow_session_title(session_id: &str, machine_name: &str) -> String {
+    format!("异常会话 {}@{}", session_id, machine_name)
+}
+
 /// 按最近活跃降序排序会话。
 pub fn sort_sessions_recent(meta: &mut [SessionMeta]) {
     meta.sort_by_key(|entry| std::cmp::Reverse(entry.last_active_at));
@@ -487,6 +505,25 @@ mod tests {
         assert_eq!(
             list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             ["s3", "s2", "s1", "s0"]
+        );
+    }
+
+    #[test]
+    fn filter_workflow_sessions_removes_children_from_top_level_results() {
+        let sessions = vec![smeta("ordinary", 300), smeta("child", 200)];
+        let child_ids = std::collections::HashSet::from(["child".to_string()]);
+        let filtered = filter_workflow_sessions(sessions, &child_ids);
+        assert_eq!(
+            filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["ordinary"]
+        );
+    }
+
+    #[test]
+    fn unavailable_workflow_session_title_includes_id_and_machine() {
+        assert_eq!(
+            unavailable_workflow_session_title("s-1", "dev-box"),
+            "异常会话 s-1@dev-box"
         );
     }
 

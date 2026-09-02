@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
@@ -97,27 +99,33 @@ impl AmuxApp {
                 Err(_) => return,
             };
 
-            // 应用查询结果，并计算工作流关联会话中尚未出现在其中的 id。
             // 机器名和连接代次均需匹配，防止删机重排或重连旧响应误写。
+            // 先过滤掉属于本次工作流窗口之外的普通会话，再计算当前窗口需要补查的关联会话。
             let missing = match this.update_in(cx, |this, _w, _cx| {
                 let idx = this.machine_idx_by_name(&machine_name)?;
+                let mut all_child_ids = HashSet::new();
+                let mut visible_child_ids = HashSet::new();
+                for wf in &this.workflows {
+                    for child in &wf.session.read().children {
+                        if child.machine_name != machine_name {
+                            continue;
+                        }
+                        all_child_ids.insert(child.id.clone());
+                        if this.visible_workflows.contains(&wf.id()) {
+                            visible_child_ids.insert(child.id.clone());
+                        }
+                    }
+                }
                 let m = this.machines.get_mut(idx)?;
                 if m.connection_generation != generation || m.sessions_request_id != request_id {
                     return None;
                 }
-                m.sessions = pages;
+                m.sessions = crate::logic::filter_workflow_sessions(pages, &all_child_ids);
                 m.sessions_has_more = has_more;
+                m.unavailable_workflow_sessions.clear();
                 crate::logic::sort_sessions_recent(&mut m.sessions);
-                let child_ids: Vec<String> = this
-                    .workflows
-                    .iter()
-                    .filter(|wf| this.visible_workflows.contains(&wf.id()))
-                    .flat_map(|wf| wf.session.read().children.clone())
-                    .filter(|child| child.machine_name == machine_name)
-                    .map(|child| child.id)
-                    .collect();
                 Some(
-                    child_ids
+                    visible_child_ids
                         .into_iter()
                         .filter(|cid| !m.sessions.iter().any(|s| s.id == *cid))
                         .collect::<Vec<_>>(),
@@ -131,8 +139,9 @@ impl AmuxApp {
                 return;
             }
 
-            // 第 2 步补齐：批量查询缺失的工作流关联会话
-            if let Ok(res) = client
+            // 第 3 步补齐：批量查询当前工作流窗口缺失的关联普通会话。
+            let missing_ids: HashSet<String> = missing.iter().cloned().collect();
+            match client
                 .request::<_, SessionInfoResult>(
                     protocol::method::SESSION_INFO,
                     Some(SessionInfoParams {
@@ -141,23 +150,48 @@ impl AmuxApp {
                 )
                 .await
             {
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
-                        return;
-                    };
-                    if let Some(m) = this.machines.get_mut(idx) {
-                        if m.connection_generation != generation
-                            || m.sessions_request_id != request_id
-                        {
+                Ok(res) => {
+                    let _ = this.update_in(cx, |this, _w, cx| {
+                        let Some(idx) = this.machine_idx_by_name(&machine_name) else {
                             return;
+                        };
+                        if let Some(m) = this.machines.get_mut(idx) {
+                            if m.connection_generation != generation
+                                || m.sessions_request_id != request_id
+                            {
+                                return;
+                            }
+                            let returned_ids: HashSet<String> =
+                                res.sessions.iter().map(|s| s.id.clone()).collect();
+                            m.unavailable_workflow_sessions =
+                                missing_ids.difference(&returned_ids).cloned().collect();
+                            let (list, _) = merge_session_window(
+                                &m.sessions,
+                                res.sessions,
+                                m.sessions_has_more,
+                            );
+                            m.sessions = list;
+                            crate::logic::sort_sessions_recent(&mut m.sessions);
                         }
-                        let (list, _) =
-                            merge_session_window(&m.sessions, res.sessions, m.sessions_has_more);
-                        m.sessions = list;
-                        crate::logic::sort_sessions_recent(&mut m.sessions);
-                    }
-                    cx.notify();
-                });
+                        cx.notify();
+                    });
+                }
+                Err(_) => {
+                    let _ = this.update_in(cx, |this, _w, cx| {
+                        let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                            return;
+                        };
+                        if let Some(m) = this.machines.get_mut(idx) {
+                            if m.connection_generation != generation
+                                || m.sessions_request_id != request_id
+                            {
+                                return;
+                            }
+                            m.unavailable_workflow_sessions = missing_ids.clone();
+                        }
+                        cx.notify();
+                    });
+                }
             }
         })
         .detach();

@@ -15,6 +15,7 @@ use gpui_component::{
 
 use protocol::{SessionIdParams, SessionState};
 
+use crate::machine::MachineStatus;
 use crate::workflow::{AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
 
 use crate::app::{run_engine_on_tokio, AmuxApp, DraftKey, Selected};
@@ -451,15 +452,46 @@ impl AmuxApp {
             .debug_selector(|| "wf-children-list".into());
         for c in &children {
             let cid = c.id.clone();
-            let cid_open = cid.clone();
-            let machine_click = c.machine_name.clone();
-            let meta = self
-                .machine(c.machine_idx)
-                .and_then(|machine| machine.sessions.iter().find(|s| s.id == c.id));
-            let step = meta
-                .map(|m| m.title.clone())
-                .unwrap_or_else(|| "（会话不存在）".into());
-            let busy = meta.is_some_and(|m| m.state == SessionState::Busy);
+            let machine_name = c.machine_name.clone();
+            let machine_idx = self.machine_idx_by_name(&machine_name);
+            let meta = machine_idx.and_then(|idx| {
+                self.machine(idx)
+                    .and_then(|machine| machine.sessions.iter().find(|s| s.id == cid))
+            });
+            let available = machine_idx.is_some_and(|idx| {
+                self.machine(idx)
+                    .is_some_and(|machine| machine.status == MachineStatus::Online)
+            }) && meta.is_some_and(|_| {
+                machine_idx.is_some_and(|idx| {
+                    !self.machines[idx]
+                        .unavailable_workflow_sessions
+                        .contains(&cid)
+                })
+            });
+            let step = if available {
+                meta.map(|m| m.title.clone()).unwrap_or_default()
+            } else {
+                crate::logic::unavailable_workflow_session_title(&cid, &machine_name)
+            };
+            let busy = available && meta.is_some_and(|m| m.state == SessionState::Busy);
+            let mut title = h_flex()
+                .id(format!("wf-child-title-{wf_id}-{cid}"))
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                // 会话列表每行只展示标题与状态（docs/PRD.md「左侧面板」）；
+                // agent@机器 属于对话视图 header，不在此处重复
+                .child(Label::new(step).text_sm().flex_1().min_w_0().truncate());
+            if available {
+                let cid_open = cid.clone();
+                let machine_name_open = machine_name.clone();
+                title = title.on_click(cx.listener(move |this, _ev, window, cx| {
+                    let Some(mi) = this.machine_idx_by_name(&machine_name_open) else {
+                        return;
+                    };
+                    this.open_session(window, cx, mi, cid_open.clone());
+                }));
+            }
             content = content.child(
                 h_flex()
                     .w_full()
@@ -467,24 +499,7 @@ impl AmuxApp {
                     .items_center()
                     .px_1()
                     .child(Label::new("↳").text_color(cx.theme().muted_foreground))
-                    .child(
-                        h_flex()
-                            .id(format!("wf-child-title-{wf_id}-{cid}"))
-                            .flex_1()
-                            .min_w_0()
-                            .items_center()
-                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                let mi = this
-                                    .machines
-                                    .iter()
-                                    .position(|mm| mm.config.name == machine_click)
-                                    .unwrap_or(0);
-                                this.open_session(window, cx, mi, cid_open.clone());
-                            }))
-                            // 会话列表每行只展示标题与状态（docs/PRD.md「左侧面板」）；
-                            // agent@机器 属于对话视图 header，不在此处重复
-                            .child(Label::new(step).text_sm().flex_1().min_w_0().truncate()),
-                    )
+                    .child(title)
                     .child(if busy {
                         Spinner::new()
                             .xsmall()

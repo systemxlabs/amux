@@ -53,6 +53,9 @@ pub struct MachineView {
     pub(crate) agents: Vec<AgentInfo>,
     pub sessions: Vec<SessionMeta>,
     pub(crate) sessions_has_more: bool,
+    /// 当前列表窗口内、批量 `session.info` 未返回的工作流关联会话。
+    /// 这些会话仍需在工作流下展示，但不能作为可操作的普通会话打开。
+    pub(crate) unavailable_workflow_sessions: HashSet<String>,
     /// 每机器独立的改动审查状态（含陈旧响应防乱的 request_id）
     pub diff: gpui::Entity<crate::diff_review::DiffReviewState>,
     /// 本连接的代次；重连后递增，所有异步回调必须匹配该代次才能回写。
@@ -96,6 +99,7 @@ impl MachineView {
             agents: Vec::new(),
             sessions: Vec::new(),
             sessions_has_more: false,
+            unavailable_workflow_sessions: HashSet::new(),
             connection_generation: next_connection_generation(),
             sessions_request_id: 0,
             views: std::collections::HashMap::new(),
