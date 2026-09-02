@@ -69,10 +69,9 @@ impl TerminalService {
             return Err(RpcError::invalid_params("终端行列必须为正"));
         }
         if !std::path::Path::new(&cwd).is_dir() {
-            return Err(RpcError {
-                code: server_error::INVALID_INPUT,
-                message: format!("终端 cwd 不存在或不是目录: {cwd}"),
-            });
+            return Err(RpcError::invalid_input(format!(
+                "终端 cwd 不存在或不是目录: {cwd}"
+            )));
         }
         let pty_size = PtySize {
             rows,

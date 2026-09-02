@@ -34,6 +34,12 @@ impl RpcError {
             message: msg.into(),
         }
     }
+    pub fn invalid_input(msg: impl Into<String>) -> Self {
+        RpcError {
+            code: server_error::INVALID_INPUT,
+            message: msg.into(),
+        }
+    }
     pub fn internal(msg: impl Into<String>) -> Self {
         RpcError {
             code: rpc_error::INTERNAL_ERROR,
@@ -133,10 +139,7 @@ impl Handlers {
             method::SESSION_PROMPT => {
                 let p: SessionPromptParams = parse(params)?;
                 if p.input.is_empty() {
-                    return Err(RpcError {
-                        code: server_error::INVALID_INPUT,
-                        message: "prompt 输入必须非空".into(),
-                    });
+                    return Err(RpcError::invalid_input("prompt 输入必须非空"));
                 }
                 self.manager
                     .prompt(&p.session_id, p.input)
@@ -166,10 +169,9 @@ impl Handlers {
             method::SESSION_CONFIGURE => {
                 let p: SessionConfigureParams = parse(params)?;
                 if p.title.is_none() && p.config.is_none() {
-                    return Err(RpcError {
-                        code: server_error::INVALID_INPUT,
-                        message: "session.configure 至少设置标题或会话选项之一".into(),
-                    });
+                    return Err(RpcError::invalid_input(
+                        "session.configure 至少设置标题或会话选项之一",
+                    ));
                 }
                 if let Some(title) = &p.title {
                     self.manager
