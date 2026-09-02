@@ -98,6 +98,32 @@ struct FilePatch {
     deletions: u32,
 }
 
+/// 读取工作区条目时不跟随符号链接。Git 将符号链接内容定义为其目标路径，
+/// 而不是目标文件内容；跟随链接会把工作区外的文件泄漏到 diff 响应中。
+fn worktree_bytes(path: &Path) -> Option<Vec<u8>> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() {
+        return std::fs::read_link(path)
+            .ok()
+            .map(|target| target.to_string_lossy().into_owned().into_bytes());
+    }
+    metadata
+        .is_file()
+        .then(|| std::fs::read(path).ok())
+        .flatten()
+}
+
+fn worktree_entry_kind(path: &Path) -> Option<gix::object::tree::EntryKind> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() {
+        Some(gix::object::tree::EntryKind::Link)
+    } else if metadata.is_file() {
+        Some(gix::object::tree::EntryKind::Blob)
+    } else {
+        None
+    }
+}
+
 /// 统一 diff 渲染收集器：UnifiedDiff 逐个 hunk 回调，收集行级数据用于自拼 patch 文本。
 type HunkLines = Vec<(DiffLineKind, Vec<u8>)>;
 
@@ -196,14 +222,15 @@ fn modified_patch(
     repo: &gix::Repository,
     cache: &mut gix::diff::blob::Platform,
     old_id: gix::hash::ObjectId,
-    old_mode: gix::object::tree::EntryMode,
+    old_mode: gix::object::tree::EntryKind,
+    new_mode: gix::object::tree::EntryKind,
     path: &BStr,
 ) -> Option<FilePatch> {
     let new_id = gix::hash::ObjectId::null(repo.object_hash());
     cache
         .set_resource(
             old_id,
-            old_mode.into(),
+            old_mode,
             path,
             ResourceKind::OldOrSource,
             &repo.objects,
@@ -212,7 +239,7 @@ fn modified_patch(
     cache
         .set_resource(
             new_id,
-            old_mode.into(),
+            new_mode,
             path,
             ResourceKind::NewOrDestination,
             &repo.objects,
@@ -464,10 +491,17 @@ impl GitRunner {
                 .flatten()
                 .map(|e| (e.object_id(), e.mode()));
             let abs = workdir.join(PathBuf::from(p_str.clone()));
-            let new_exists = abs.exists();
-            let fp = match (&old, new_exists) {
-                (Some((old_id, old_mode)), true) => {
-                    let fp = modified_patch(&repo, &mut cache, *old_id, *old_mode, p.as_ref());
+            let new_mode = worktree_entry_kind(&abs);
+            let fp = match (&old, new_mode) {
+                (Some((old_id, old_mode)), Some(new_mode)) => {
+                    let fp = modified_patch(
+                        &repo,
+                        &mut cache,
+                        *old_id,
+                        old_mode.kind(),
+                        new_mode,
+                        p.as_ref(),
+                    );
                     // blob diff 资源缓存只增不减，逐文件释放以免大 diff 时内存无界增长
                     cache.clear_resource_cache_keep_allocation();
                     match fp {
@@ -475,22 +509,24 @@ impl GitRunner {
                         None => continue,
                     }
                 }
-                (None, true) => {
-                    let bytes = std::fs::read(&abs).unwrap_or_default();
+                (None, Some(_)) => {
+                    let Some(bytes) = worktree_bytes(&abs) else {
+                        continue;
+                    };
                     whole_file_patch(&p_str, &bytes, true)
                 }
-                (Some((old_id, _)), false) => {
+                (Some((old_id, _)), None) => {
                     let bytes = repo
                         .find_blob(*old_id)
                         .map(|b| b.data.to_vec())
                         .unwrap_or_default();
                     whole_file_patch(&p_str, &bytes, false)
                 }
-                (None, false) => continue,
+                (None, None) => continue,
             };
-            let status = match (&old, new_exists) {
-                (None, true) => GitChangeStatus::Added,
-                (Some(_), false) => GitChangeStatus::Deleted,
+            let status = match (&old, new_mode) {
+                (None, Some(_)) => GitChangeStatus::Added,
+                (Some(_), None) => GitChangeStatus::Deleted,
                 _ => GitChangeStatus::Modified,
             };
             files.push(GitDiffFile {
@@ -780,6 +816,37 @@ mod tests {
             .expect("未跟踪文件应出现在 diff 中");
         assert!(matches!(file.status, GitChangeStatus::Added));
         assert!(file.patch.contains("not staged"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diff_reads_symlink_targets_as_link_contents_without_following_them() {
+        let dir = init_repo();
+        let outside = unique_dir("amux-diff-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "must not leak").unwrap();
+
+        std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("untracked-link")).unwrap();
+        let runner = GitRunner::new();
+        let diff = runner.diff(dir.to_str().unwrap(), None);
+        let untracked = diff
+            .files
+            .iter()
+            .find(|file| file.path == "untracked-link")
+            .expect("未跟踪符号链接应出现在 diff 中");
+        assert!(untracked.patch.contains("secret.txt"));
+        assert!(!untracked.patch.contains("must not leak"));
+
+        std::fs::remove_file(dir.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("a.txt")).unwrap();
+        let diff = runner.diff(dir.to_str().unwrap(), Some("a.txt"));
+        let replaced = diff
+            .files
+            .iter()
+            .find(|file| file.path == "a.txt")
+            .expect("被符号链接替换的 tracked 文件应出现在 diff 中");
+        assert!(replaced.patch.contains("secret.txt"));
+        assert!(!replaced.patch.contains("must not leak"));
     }
 
     #[test]
