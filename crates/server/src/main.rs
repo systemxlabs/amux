@@ -149,7 +149,6 @@ async fn main() {
         token: cfg.token.clone(),
         handlers: handlers.clone(),
         notifications,
-        logger: Some(Arc::new(|line| log::info!("{}", line))),
     });
 
     // 启动拉起：并行拉起已发现 agent。放在监听之后
