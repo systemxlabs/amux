@@ -180,7 +180,7 @@ impl TerminalRegistry {
 
     /// 输出快照（合流文本、截断标志、已知时的退出状态）。
     pub fn output(&self, req: &TerminalOutputRequest) -> Result<TerminalOutputResponse, String> {
-        let entry = self.entry(req.terminal_id.to_string())?;
+        let entry = self.entry(req.terminal_id.0.as_ref())?;
         let (output, truncated, exit_status) = entry.core.snapshot();
         let mut resp = TerminalOutputResponse::new(output, truncated);
         if let Some(status) = exit_status {
@@ -194,7 +194,7 @@ impl TerminalRegistry {
         &self,
         req: &WaitForTerminalExitRequest,
     ) -> Result<WaitForTerminalExitResponse, String> {
-        let tx = self.entry(req.terminal_id.to_string())?.tx.clone();
+        let tx = self.entry(req.terminal_id.0.as_ref())?.tx.clone();
         let (ack_tx, ack_rx) = oneshot::channel();
         tx.send(Cmd::Wait(ack_tx))
             .map_err(|_| "terminal 已释放".to_string())?;
@@ -206,15 +206,15 @@ impl TerminalRegistry {
 
     /// 强杀进程；实际退出状态由后续 `terminal/output` / `terminal/wait_for_exit` 报告。
     pub fn kill(&self, req: &KillTerminalRequest) -> Result<KillTerminalResponse, String> {
-        let tx = self.entry(req.terminal_id.to_string())?.tx.clone();
+        let tx = self.entry(req.terminal_id.0.as_ref())?.tx.clone();
         let _ = tx.send(Cmd::Kill);
         Ok(KillTerminalResponse::new())
     }
 
     /// 释放终端：移除句柄（后续按未知 id 拒绝）并杀掉仍在运行的进程，由 actor 回收。
     pub fn release(&self, req: &ReleaseTerminalRequest) -> Result<ReleaseTerminalResponse, String> {
-        let tx = self.entry(req.terminal_id.to_string())?.tx.clone();
-        self.map.lock().remove(req.terminal_id.to_string().as_str());
+        let tx = self.entry(req.terminal_id.0.as_ref())?.tx.clone();
+        self.map.lock().remove(req.terminal_id.0.as_ref());
         let _ = tx.send(Cmd::Kill);
         Ok(ReleaseTerminalResponse::new())
     }
@@ -237,10 +237,10 @@ impl TerminalRegistry {
         }
     }
 
-    fn entry(&self, id: String) -> Result<TerminalEntry, String> {
+    fn entry(&self, id: &str) -> Result<TerminalEntry, String> {
         self.map
             .lock()
-            .get(id.as_str())
+            .get(id)
             .cloned()
             .ok_or_else(|| format!("未知 terminal id: {id}"))
     }
