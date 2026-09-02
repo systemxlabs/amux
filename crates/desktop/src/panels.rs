@@ -38,14 +38,11 @@ impl AmuxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let plan = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.views.get(id))
-                .map(|v| v.plan.clone())
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
+        let plan = self
+            .open_session_target()
+            .and_then(|(machine, id)| self.machine(machine).and_then(|m| m.views.get(&id)))
+            .map(|v| v.plan.clone())
+            .unwrap_or_default();
         v_flex()
             .w_full()
             .h_full()
@@ -267,16 +264,14 @@ impl AmuxApp {
         path: String,
         offset: usize,
     ) {
-        let Some(m) = self.machine(machine) else {
+        let Some((selected_machine, session_id)) = self.open_session_target() else {
             return;
         };
-        let client = m.client.clone();
-        let session_id = match &self.selected {
-            Some(Selected::Session {
-                id,
-                machine: selected_machine,
-            }) if *selected_machine == machine => id.clone(),
-            _ => return,
+        if selected_machine != machine {
+            return;
+        }
+        let Some(client) = self.machine(machine).map(|m| m.client.clone()) else {
+            return;
         };
         let request_id = self
             .machines
@@ -301,13 +296,7 @@ impl AmuxApp {
                 .request::<_, WorkspaceListResult>(protocol::method::WORKSPACE_LIST, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
-                let selected_session_matches = matches!(
-                    &this.selected,
-                    Some(Selected::Session {
-                        machine: selected_machine,
-                        id
-                    }) if *selected_machine == machine && id == &session_id
-                );
+                let selected_session_matches = this.is_selected_session(machine, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
@@ -355,16 +344,14 @@ impl AmuxApp {
         path: String,
         offset: usize,
     ) {
-        let Some(m) = self.machine(machine) else {
+        let Some((selected_machine, session_id)) = self.open_session_target() else {
             return;
         };
-        let client = m.client.clone();
-        let session_id = match &self.selected {
-            Some(Selected::Session {
-                id,
-                machine: selected_machine,
-            }) if *selected_machine == machine => id.clone(),
-            _ => return,
+        if selected_machine != machine {
+            return;
+        }
+        let Some(client) = self.machine(machine).map(|m| m.client.clone()) else {
+            return;
         };
         let request_id = self
             .machines
@@ -396,13 +383,7 @@ impl AmuxApp {
                 .request::<_, WorkspaceReadResult>(protocol::method::WORKSPACE_READ, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
-                let selected_session_matches = matches!(
-                    &this.selected,
-                    Some(Selected::Session {
-                        machine: selected_machine,
-                        id
-                    }) if *selected_machine == machine && id == &session_id
-                );
+                let selected_session_matches = this.is_selected_session(machine, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
@@ -834,7 +815,7 @@ impl AmuxApp {
                 cx.theme().foreground,
             ))
             .when(
-                matches!(self.selected, Some(Selected::Session { .. }))
+                self.open_session_target().is_some()
                     && context_usage_text(meta.context_size, meta.context_window_size).is_some(),
                 |view| {
                     // 会话上下文占用（docs/DESIGN.md：usage_update 记录已用/窗口，token）
@@ -853,8 +834,8 @@ impl AmuxApp {
                 cx.theme().muted_foreground,
                 cx.theme().foreground,
             ));
-        if let Some(Selected::Session { machine, .. }) = &self.selected {
-            if let Some(machine_view) = self.machine(*machine) {
+        if let Some((machine, _)) = self.open_session_target() {
+            if let Some(machine_view) = self.machine(machine) {
                 body = body
                     .child(info_row(
                         "机器",
@@ -939,7 +920,7 @@ impl AmuxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_session = matches!(self.selected, Some(Selected::Session { .. }));
+        let is_session = self.open_session_target().is_some();
         v_flex()
             .gap_0p5()
             .p_1()
@@ -1064,7 +1045,7 @@ impl AmuxApp {
                     }
                 }
                 if next == Some(Panel::Diff) {
-                    if let Some(Selected::Session { machine, .. }) = this.selected.clone() {
+                    if let Some((machine, _)) = this.open_session_target() {
                         this.load_diff(window, cx, machine);
                     }
                 }

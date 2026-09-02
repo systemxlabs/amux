@@ -201,29 +201,19 @@ impl TerminalService {
         Ok(terminal_id)
     }
 
-    /// 向终端写入输入字节流。
-    pub fn input(&self, params: TerminalInputParams) -> Result<(), RpcError> {
+    /// 向终端写入输入字节流（仅允许所属连接操作）。
+    pub fn input(&self, params: TerminalInputParams, conn_id: u64) -> Result<(), RpcError> {
+        let handle = self.entry_for_connection(&params.terminal_id, conn_id)?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(params.data)
             .map_err(|e| RpcError::invalid_params(format!("输入不是合法 base64: {e}")))?;
-        let handle = self
-            .terminals
-            .lock()
-            .get(&params.terminal_id)
-            .cloned()
-            .ok_or_else(not_found)?;
         let _ = handle.input_tx.send(bytes);
         Ok(())
     }
 
-    /// 调整终端行列。
-    pub fn resize(&self, params: TerminalResizeParams) -> Result<(), RpcError> {
-        let handle = self
-            .terminals
-            .lock()
-            .get(&params.terminal_id)
-            .cloned()
-            .ok_or_else(not_found)?;
+    /// 调整终端行列（仅允许所属连接操作）。
+    pub fn resize(&self, params: TerminalResizeParams, conn_id: u64) -> Result<(), RpcError> {
+        let handle = self.entry_for_connection(&params.terminal_id, conn_id)?;
         if params.cols == 0 || params.rows == 0 {
             return Err(RpcError::invalid_params("终端行列必须为正"));
         }
@@ -243,13 +233,7 @@ impl TerminalService {
     /// 显式关闭终端（仅允许所属连接操作）。
     /// 先校验归属再摘除：反向顺序会让越权请求把别人的终端从注册表里顺走。
     pub fn close(&self, params: TerminalIdParams, conn_id: u64) -> Result<(), RpcError> {
-        {
-            let map = self.terminals.lock();
-            let handle = map.get(&params.terminal_id).ok_or_else(not_found)?;
-            if handle.conn_id != conn_id {
-                return Err(not_found());
-            }
-        }
+        self.entry_for_connection(&params.terminal_id, conn_id)?;
         let handle = self
             .terminals
             .lock()
@@ -258,6 +242,23 @@ impl TerminalService {
         handle.killer.lock().kill().ok();
         log::info!("终端 {} 已关闭（连接 {}）", params.terminal_id, conn_id);
         Ok(())
+    }
+
+    fn entry_for_connection(
+        &self,
+        terminal_id: &str,
+        conn_id: u64,
+    ) -> Result<TerminalHandle, RpcError> {
+        let handle = self
+            .terminals
+            .lock()
+            .get(terminal_id)
+            .cloned()
+            .ok_or_else(not_found)?;
+        if handle.conn_id != conn_id {
+            return Err(not_found());
+        }
+        Ok(handle)
     }
 
     /// 连接断开：释放该连接的全部终端（杀进程；输出泵随后经 EOF 自行摘除条目）。

@@ -43,6 +43,30 @@ use crate::app::{
     SelectedSlashCommands, SessionListItem, SettingsCategory, PAGE_LIMIT,
 };
 
+async fn request_session_page<R, T>(
+    client: crate::ws::WsClient,
+    method: &'static str,
+    session_id: String,
+    before: Option<u64>,
+    decode: impl FnOnce(R) -> (Vec<T>, bool, Option<u64>),
+) -> Result<(Vec<T>, bool, Option<usize>), crate::ws::RpcError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let response = client
+        .request::<_, R>(
+            method,
+            Some(SessionPageParams {
+                session_id,
+                limit: Some(PAGE_LIMIT),
+                before,
+            }),
+        )
+        .await?;
+    let (items, has_more, next_before) = decode(response);
+    Ok((items, has_more, next_before.map(|value| value as usize)))
+}
+
 impl AmuxApp {
     pub(crate) fn refresh_sessions(
         &mut self,
@@ -171,11 +195,7 @@ impl AmuxApp {
                 .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
                 .await
             {
-                let items = res.items;
-                let has_more = res.has_more;
-                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    // 新消息到达前若已在底部，追加内容后保持贴底，避免新消息被遮挡。
                     let was_at_bottom = this.dialog_at_bottom();
                     let Some(idx) = this.machine_idx_by_name(&machine_name) else {
                         return;
@@ -192,7 +212,11 @@ impl AmuxApp {
                     if v.history_request_id != request_id {
                         return;
                     }
-                    v.set_history_page(&items, has_more, next_before);
+                    v.set_history_page(
+                        &res.items,
+                        res.has_more,
+                        res.next_before.map(|value| value as usize),
+                    );
                     if was_at_bottom {
                         this.dialog_scroll.scroll_to_bottom();
                     }
@@ -210,7 +234,6 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        // 面板未打开时不主动刷新活动。
         if self.panel != Some(Panel::Activities) {
             return;
         }
@@ -235,9 +258,6 @@ impl AmuxApp {
                 .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
                 .await
             {
-                let acts = res.activities;
-                let has_more = res.has_more;
-                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
                     let was_at_bottom = this.activities_at_bottom();
                     let Some(idx) = this.machine_idx_by_name(&machine_name) else {
@@ -255,7 +275,11 @@ impl AmuxApp {
                     if v.activities_request_id != request_id {
                         return;
                     }
-                    v.set_activities_page(acts, has_more, next_before);
+                    v.set_activities_page(
+                        res.activities,
+                        res.has_more,
+                        res.next_before.map(|value| value as usize),
+                    );
                     if was_at_bottom {
                         this.activities_scroll.scroll_to_bottom();
                     }
@@ -295,7 +319,6 @@ impl AmuxApp {
                 )
                 .await
             {
-                let act = res.activity;
                 let _ = this.update_in(cx, |this, _w, cx| {
                     let Some(idx) = this.machine_idx_by_name(&machine_name) else {
                         return;
@@ -312,7 +335,7 @@ impl AmuxApp {
                     if v.ongoing_request_id != request_id {
                         return;
                     }
-                    v.set_live(act);
+                    v.set_live(res.activity);
                     cx.notify();
                 });
             }
@@ -375,38 +398,66 @@ impl AmuxApp {
         .detach();
     }
 
-    pub(crate) fn load_more_history(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+    fn load_more_selected_page<R, T>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        next_before: fn(&crate::aggregate::SessionView) -> Option<usize>,
+        method: &'static str,
+        decode: impl FnOnce(R) -> (Vec<T>, bool, Option<u64>) + 'static,
+        apply: impl FnOnce(&mut crate::aggregate::SessionView, Vec<T>, bool, Option<usize>) + 'static,
+    ) where
+        R: serde::de::DeserializeOwned + 'static,
+        T: 'static,
+    {
+        let Some((machine, id)) = self.open_session_target() else {
             return;
         };
-        let Some(view) = self.machines.get(machine).and_then(|m| m.views.get(&id)) else {
+        let Some(m) = self.machines.get_mut(machine) else {
             return;
         };
-        let Some(before) = view.history_next_before else {
+        let machine_name = m.config.name.clone();
+        let generation = m.connection_generation;
+        let Some(view) = m.views.get_mut(&id) else {
             return;
         };
-        let client = self.machines[machine].client.clone();
+        let Some(before) = next_before(view) else {
+            return;
+        };
+        let request_id = if method == protocol::method::SESSION_HISTORY {
+            view.history_request_id = view.history_request_id.saturating_add(1);
+            view.history_request_id
+        } else {
+            view.activities_request_id = view.activities_request_id.saturating_add(1);
+            view.activities_request_id
+        };
+        let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionPageParams {
-                session_id: id.clone(),
-                limit: Some(PAGE_LIMIT),
-                before: Some(before as u64),
-            };
-            if let Ok(res) = client
-                .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
-                .await
+            if let Ok((items, has_more, next_before)) =
+                request_session_page(client, method, id.clone(), Some(before as u64), decode).await
             {
-                let items = res.items;
-                let has_more = res.has_more;
-                let next_before = res.next_before.map(|v| v as usize);
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    if let Some(view) = this
-                        .machines
-                        .get_mut(machine)
-                        .and_then(|m| m.views.get_mut(&id))
-                    {
-                        view.prepend_history_page(&items, has_more, next_before);
+                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                        return;
+                    };
+                    let Some(m) = this.machines.get_mut(idx) else {
+                        return;
+                    };
+                    if m.connection_generation != generation {
+                        return;
                     }
+                    let Some(view) = m.views.get_mut(&id) else {
+                        return;
+                    };
+                    let current_request_id = if method == protocol::method::SESSION_HISTORY {
+                        view.history_request_id
+                    } else {
+                        view.activities_request_id
+                    };
+                    if current_request_id != request_id {
+                        return;
+                    }
+                    apply(view, items, has_more, next_before);
                     cx.notify();
                 });
             }
@@ -414,43 +465,30 @@ impl AmuxApp {
         .detach();
     }
 
-    pub(crate) fn load_more_activities(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
-            return;
-        };
-        let Some(view) = self.machines.get(machine).and_then(|m| m.views.get(&id)) else {
-            return;
-        };
-        let Some(before) = view.activities_next_before else {
-            return;
-        };
-        let client = self.machines[machine].client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionPageParams {
-                session_id: id.clone(),
-                limit: Some(PAGE_LIMIT),
-                before: Some(before as u64),
-            };
-            if let Ok(res) = client
-                .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
-                .await
-            {
-                let acts = res.activities;
-                let has_more = res.has_more;
-                let next_before = res.next_before.map(|v| v as usize);
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    if let Some(view) = this
-                        .machines
-                        .get_mut(machine)
-                        .and_then(|m| m.views.get_mut(&id))
-                    {
-                        view.prepend_activities_page(acts, has_more, next_before);
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+    pub(crate) fn load_more_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_more_selected_page(
+            window,
+            cx,
+            |view| view.history_next_before,
+            protocol::method::SESSION_HISTORY,
+            |res: HistoryResult| (res.items, res.has_more, res.next_before),
+            |view, items, has_more, next_before| {
+                view.prepend_history_page(&items, has_more, next_before)
+            },
+        );
+    }
+
+    pub(crate) fn load_more_activities(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_more_selected_page(
+            window,
+            cx,
+            |view| view.activities_next_before,
+            protocol::method::SESSION_ACTIVITIES,
+            |res: ActivitiesResult| (res.activities, res.has_more, res.next_before),
+            |view, activities, has_more, next_before| {
+                view.prepend_activities_page(activities, has_more, next_before)
+            },
+        );
     }
 
     /// 「加载更早会话」：滚动查询页数 N +1，所有在线机器统一按前 N 页重新查询，
@@ -530,7 +568,7 @@ impl AmuxApp {
         self.refresh_activities(window, cx, machine, session_id.clone());
         self.refresh_ongoing(window, cx, machine, session_id.clone());
         self.refresh_config_options(cx, machine, session_id.clone());
-        self.refresh_slash_commands(window, cx, machine, session_id);
+        self.refresh_slash_commands(cx, machine, session_id);
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -683,7 +721,7 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        let Some(Selected::Session { machine, id }) = self.selected.clone() else {
+        let Some((machine, id)) = self.open_session_target() else {
             return;
         };
         let Some(m) = self.machine(machine) else {
@@ -751,10 +789,8 @@ impl AmuxApp {
                             .machine(machine)
                             .map(|m| m.config.name.clone())
                             .unwrap_or_default();
-                        if let Some(Selected::Session { id, .. }) = this.selected.clone() {
-                            if id == sid {
-                                this.set_selected(None, w, cx);
-                            }
+                        if this.open_session_target().is_some_and(|(_, id)| id == sid) {
+                            this.set_selected(None, w, cx);
                         }
                         this.drafts.retain(|key, _| match key {
                             DraftKey::Session { id, machine } => {
@@ -848,30 +884,29 @@ impl AmuxApp {
     }
 
     pub(crate) fn selected_meta(&self) -> Option<SessionMeta> {
-        match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.sessions.iter().find(|s| s.id == *id))
-                .cloned(),
-            Some(Selected::Workflow { id }) => {
-                // 工作流会话详情数据仅来自应用侧会话元数据；cwd/worktree/context
-                // 为普通会话字段，工作流会话不适用，置空占位（详情面板按类型过滤展示）
-                let wf = self.workflows.get(self.workflow_idx(id)?)?;
-                let sg = wf.snapshot();
-                Some(SessionMeta {
-                    id: sg.id.clone(),
-                    agent: "编排".into(),
-                    cwd: String::new(),
-                    state: sg.state,
-                    title: sg.title.clone(),
-                    created_at: sg.created_at,
-                    last_active_at: sg.updated_at,
-                    worktree_dir: String::new(),
-                    context_size: 0,
-                    context_window_size: 0,
-                })
-            }
-            None => None,
+        if let Some((machine, id)) = self.open_session_target() {
+            self.machine(machine)
+                .and_then(|m| m.sessions.iter().find(|s| s.id == id))
+                .cloned()
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            // 工作流会话详情数据仅来自应用侧会话元数据；cwd/worktree/context
+            // 为普通会话字段，工作流会话不适用，置空占位（详情面板按类型过滤展示）
+            let wf = self.workflows.get(self.workflow_idx(id)?)?;
+            let sg = wf.snapshot();
+            Some(SessionMeta {
+                id: sg.id.clone(),
+                agent: "编排".into(),
+                cwd: String::new(),
+                state: sg.state,
+                title: sg.title.clone(),
+                created_at: sg.created_at,
+                last_active_at: sg.updated_at,
+                worktree_dir: String::new(),
+                context_size: 0,
+                context_window_size: 0,
+            })
+        } else {
+            None
         }
     }
 
@@ -943,12 +978,15 @@ impl AmuxApp {
     }
 
     pub(crate) fn selected_draft_key(&self) -> Option<DraftKey> {
-        match self.selected.as_ref()? {
-            Selected::Session { machine, id } => Some(DraftKey::Session {
-                machine: self.machines.get(*machine)?.config.name.clone(),
-                id: id.clone(),
-            }),
-            Selected::Workflow { id } => Some(DraftKey::Workflow { id: id.clone() }),
+        if let Some((machine, id)) = self.open_session_target() {
+            Some(DraftKey::Session {
+                machine: self.machines.get(machine)?.config.name.clone(),
+                id,
+            })
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            Some(DraftKey::Workflow { id: id.clone() })
+        } else {
+            None
         }
     }
 
@@ -1055,11 +1093,7 @@ impl AmuxApp {
         s: &SessionMeta,
     ) -> gpui::AnyElement {
         let sid = s.id.clone();
-        let sel = self.selected
-            == Some(Selected::Session {
-                machine,
-                id: sid.clone(),
-            });
+        let sel = self.is_selected_session(machine, &sid);
         let title = if s.title.is_empty() {
             format!("（未命名）{}", short_cwd(&s.cwd))
         } else {
@@ -1194,36 +1228,37 @@ impl AmuxApp {
     }
 
     pub fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let dialog: Vec<DialogMsg> = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.views.get(id))
+        let dialog: Vec<DialogMsg> = if let Some((machine, id)) = self.open_session_target() {
+            self.machine(machine)
+                .and_then(|m| m.views.get(&id))
                 .map(|v| v.dialog.clone())
-                .unwrap_or_default(),
-            Some(Selected::Workflow { id }) => self
-                .workflow(id)
+                .unwrap_or_default()
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            self.workflow(id)
                 .map(|w| {
                     let sg = w.snapshot();
                     let all = sg.to_dialog();
                     let start = all.len().saturating_sub(self.workflow_dialog_limit);
                     all[start..].to_vec()
                 })
-                .unwrap_or_default(),
-            None => Vec::new(),
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
-        let agent_label: SharedString = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
+        let agent_label: SharedString = if let Some((machine, id)) = self.open_session_target() {
+            self.machine(machine)
                 .and_then(|m| {
                     let machine_name = m.config.name.clone();
                     m.sessions
                         .iter()
-                        .find(|s| &s.id == id)
+                        .find(|s| s.id == id)
                         .map(|s| format!("{}@{machine_name}", s.agent).into())
                 })
-                .unwrap_or_else(|| "Agent".into()),
-            Some(Selected::Workflow { .. }) => "编排".into(),
-            None => "Agent".into(),
+                .unwrap_or_else(|| "Agent".into())
+        } else if matches!(self.selected, Some(Selected::Workflow { .. })) {
+            "编排".into()
+        } else {
+            "Agent".into()
         };
         let primary = cx.theme().primary;
         let primary_foreground = cx.theme().primary_foreground;
@@ -1326,14 +1361,11 @@ impl AmuxApp {
                 }
             })
             .collect::<Vec<_>>();
-        let history_has_more = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.views.get(id))
-                .map(|v| v.history_has_more)
-                .unwrap_or(false),
-            _ => false,
-        };
+        let history_has_more = self
+            .open_session_target()
+            .and_then(|(machine, id)| self.machine(machine).and_then(|m| m.views.get(&id)))
+            .map(|v| v.history_has_more)
+            .unwrap_or(false);
         let mut content = Vec::new();
         if let Some(Selected::Workflow { id }) = &self.selected {
             let total = self
@@ -1404,19 +1436,18 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current: Option<Activity> = match &self.selected {
-            Some(Selected::Session { machine, id }) => self
-                .machine(*machine)
-                .and_then(|m| m.views.get(id))
-                .and_then(|v| v.live.clone()),
-            Some(Selected::Workflow { id }) => {
-                // 实时活动只展示编排智能体正在进行的动作（流式思考增量、
-                // 执行中的工具调用），动作结束即清除。历史活动不充当实时
-                // 展示（修复工具执行完毕后活动条一直转圈）；编排智能体
-                // 空闲而关联会话仍工作时，活动条为空。
-                self.workflow(id).and_then(|wf| wf.current_activity())
-            }
-            _ => None,
+        let current: Option<Activity> = if let Some((machine, id)) = self.open_session_target() {
+            self.machine(machine)
+                .and_then(|m| m.views.get(&id))
+                .and_then(|v| v.live.clone())
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            // 实时活动只展示编排智能体正在进行的动作（流式思考增量、
+            // 执行中的工具调用），动作结束即清除。历史活动不充当实时
+            // 展示（修复工具执行完毕后活动条一直转圈）；编排智能体
+            // 空闲而关联会话仍工作时，活动条为空。
+            self.workflow(id).and_then(|wf| wf.current_activity())
+        } else {
+            None
         };
         let warning = cx.theme().warning;
         let warning_foreground = cx.theme().warning_foreground;
@@ -1747,14 +1778,10 @@ impl AmuxApp {
     /// `entity.update`（同会话右键菜单的可用模式），实体更新内再异步发起请求。
     fn render_config_options_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let opts = self.config_options.as_ref()?;
-        let Selected::Session { machine, id } = self.selected.as_ref()? else {
-            return None;
-        };
+        let (machine, session_id) = self.open_session_target()?;
         if opts.options.is_empty() {
             return None;
         }
-        let machine = *machine;
-        let session_id = id.clone();
         let app = cx.entity();
         let muted = cx.theme().muted_foreground;
         let mut row = h_flex().flex_wrap().gap_x_3().gap_y_1().items_center();
@@ -2233,40 +2260,38 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_session_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, status) = match &self.selected {
-            Some(Selected::Session { machine, id }) => {
-                let Some(machine_view) = self.machine(*machine) else {
-                    return h_flex().into_any();
-                };
-                let Some(session) = machine_view.sessions.iter().find(|s| s.id == *id) else {
-                    return h_flex().into_any();
-                };
-                let available = machine_view.status.online()
-                    && machine_view
-                        .agents
-                        .iter()
-                        .any(|agent| agent.name == session.agent && agent.available);
-                (
-                    format!("{}@{}", session.agent, machine_view.config.name),
-                    if available { "可用" } else { "不可用" },
-                )
-            }
-            Some(Selected::Workflow { id }) => {
-                // header 仅标注 agent 名称与可用状态（docs/PRD.md）：工作状态
-                // 由会话列表转圈与对话区实时活动表达
-                let Some(_workflow) = self.workflow(id) else {
-                    return h_flex().into_any();
-                };
-                (
-                    "编排智能体".to_string(),
-                    if self.store.orchestrator().is_configured() {
-                        "可用"
-                    } else {
-                        "不可用"
-                    },
-                )
-            }
-            None => return h_flex().into_any(),
+        let (label, status) = if let Some((machine, id)) = self.open_session_target() {
+            let Some(machine_view) = self.machine(machine) else {
+                return h_flex().into_any();
+            };
+            let Some(session) = machine_view.sessions.iter().find(|s| s.id == id) else {
+                return h_flex().into_any();
+            };
+            let available = machine_view.status.online()
+                && machine_view
+                    .agents
+                    .iter()
+                    .any(|agent| agent.name == session.agent && agent.available);
+            (
+                format!("{}@{}", session.agent, machine_view.config.name),
+                if available { "可用" } else { "不可用" },
+            )
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            // header 仅标注 agent 名称与可用状态（docs/PRD.md）：工作状态
+            // 由会话列表转圈与对话区实时活动表达
+            let Some(_workflow) = self.workflow(id) else {
+                return h_flex().into_any();
+            };
+            (
+                "编排智能体".to_string(),
+                if self.store.orchestrator().is_configured() {
+                    "可用"
+                } else {
+                    "不可用"
+                },
+            )
+        } else {
+            return h_flex().into_any();
         };
         h_flex()
             .w_full()
@@ -2304,27 +2329,23 @@ impl AmuxApp {
     ) -> gpui::AnyElement {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut activities_has_more = false;
-        match &self.selected {
-            Some(Selected::Session { machine, id }) => {
-                let view = self.machine(*machine).and_then(|m| m.views.get(id));
-                let activities = view.map(|v| v.activities.clone()).unwrap_or_default();
-                activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
-                rows = activities
+        if let Some((machine, id)) = self.open_session_target() {
+            let view = self.machine(machine).and_then(|m| m.views.get(&id));
+            let activities = view.map(|v| v.activities.clone()).unwrap_or_default();
+            activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
+            rows = activities
+                .iter()
+                .map(|a| self.activity_row("act", a, cx))
+                .collect();
+        } else if let Some(Selected::Workflow { id }) = &self.selected {
+            if let Some(wf) = self.workflow(id) {
+                let sg = wf.snapshot();
+                rows = sg
+                    .activities
                     .iter()
-                    .map(|a| self.activity_row("act", a, cx))
+                    .map(|a| self.activity_row("wf-act", a, cx))
                     .collect();
             }
-            Some(Selected::Workflow { id }) => {
-                if let Some(wf) = self.workflow(id) {
-                    let sg = wf.snapshot();
-                    rows = sg
-                        .activities
-                        .iter()
-                        .map(|a| self.activity_row("wf-act", a, cx))
-                        .collect();
-                }
-            }
-            _ => {}
         }
         let total = rows.len();
         let start = if activities_has_more {
@@ -2427,6 +2448,31 @@ impl AmuxApp {
         row
     }
 
+    fn request_session_data<P, R, F>(
+        &self,
+        cx: &mut Context<Self>,
+        machine: usize,
+        method: &'static str,
+        params: P,
+        apply: F,
+    ) where
+        P: serde::Serialize + 'static,
+        R: serde::de::DeserializeOwned + 'static,
+        F: FnOnce(&mut Self, Result<R, crate::ws::RpcError>) + 'static,
+    {
+        let Some(client) = self.machines.get(machine).map(|m| m.client.clone()) else {
+            return;
+        };
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = client.request::<_, R>(method, Some(params)).await;
+            let _ = this.update_in(cx, |this, _w, cx| {
+                apply(this, result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// 查询选中会话的会话选项（`session.config_options`；docs/DESIGN.md
     /// 「普通会话选项」：存储在 Server 内存，以 Agent 侧数据为权威）。
     /// 不依赖 window 上下文：供浮层菜单回调等窗口 update stack 内的场景调用。
@@ -2436,10 +2482,9 @@ impl AmuxApp {
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else {
+        if self.machines.get(machine).is_none() {
             return;
-        };
-        let client = m.client.clone();
+        }
         // 同一会话刷新时保留既有选项展示，避免轮询期间整行闪烁
         let options = match &self.config_options {
             Some(cur) if cur.machine == machine && cur.session_id == session_id => {
@@ -2454,30 +2499,25 @@ impl AmuxApp {
             options,
         });
         cx.notify();
-        let params = SessionIdParams {
-            session_id: session_id.clone(),
-        };
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let res = client
-                .request::<_, SessionConfigOptionsResult>(
-                    protocol::method::SESSION_CONFIG_OPTIONS,
-                    Some(params),
-                )
-                .await;
-            let _ = this.update_in(cx, |this, _w, cx| {
+        self.request_session_data(
+            cx,
+            machine,
+            protocol::method::SESSION_CONFIG_OPTIONS,
+            SessionIdParams {
+                session_id: session_id.clone(),
+            },
+            move |this, result: Result<SessionConfigOptionsResult, crate::ws::RpcError>| {
                 if let Some(cur) = &mut this.config_options {
                     // 响应到达时选中会话已切换则丢弃陈旧结果
                     if cur.machine == machine && cur.session_id == session_id {
                         cur.loading = false;
-                        if let Ok(res) = res {
-                            cur.options = res.options;
+                        if let Ok(result) = result {
+                            cur.options = result.options;
                         }
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 查询选中会话的斜杠命令（`session.slash_commands`；docs/DESIGN.md
@@ -2486,43 +2526,36 @@ impl AmuxApp {
     /// 才惰性创建，命令集合由 turn 结束后的刷新补齐。
     pub(crate) fn refresh_slash_commands(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
         machine: usize,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get(machine) else {
+        if self.machines.get(machine).is_none() {
             return;
-        };
-        let client = m.client.clone();
+        }
         self.slash_commands = Some(SelectedSlashCommands {
             machine,
             session_id: session_id.clone(),
             commands: Vec::new(),
         });
-        let params = SessionIdParams {
-            session_id: session_id.clone(),
-        };
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let res = client
-                .request::<_, SessionSlashCommandsResult>(
-                    protocol::method::SESSION_SLASH_COMMANDS,
-                    Some(params),
-                )
-                .await;
-            let _ = this.update_in(cx, |this, _w, cx| {
+        self.request_session_data(
+            cx,
+            machine,
+            protocol::method::SESSION_SLASH_COMMANDS,
+            SessionIdParams {
+                session_id: session_id.clone(),
+            },
+            move |this, result: Result<SessionSlashCommandsResult, crate::ws::RpcError>| {
                 if let Some(cur) = &mut this.slash_commands {
                     // 响应到达时选中会话已切换则丢弃陈旧结果
                     if cur.machine == machine && cur.session_id == session_id {
-                        if let Ok(res) = res {
-                            cur.commands = res.commands;
+                        if let Ok(result) = result {
+                            cur.commands = result.commands;
                         }
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// 斜杠命令上拉框（docs/PRD.md「会话交互视图」：输入 `/` 时根据前缀匹配
@@ -2531,10 +2564,8 @@ impl AmuxApp {
     /// 展示前缀匹配项；点击项回填 `/name ` 后随前缀消失自动收起。
     pub fn render_slash_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let selected = self.slash_commands.as_ref()?;
-        let Selected::Session { machine, id } = self.selected.as_ref()? else {
-            return None;
-        };
-        if selected.machine != *machine || selected.session_id != *id {
+        let (machine, id) = self.open_session_target()?;
+        if selected.machine != machine || selected.session_id != id {
             return None;
         }
         let text = self.input_state.read(cx).value().to_string();

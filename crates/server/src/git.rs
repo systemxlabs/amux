@@ -663,13 +663,25 @@ fn validate_restore_path(cwd: &str, target: &str) -> Result<String, OpResult> {
     {
         return Err(op_err("工作目录路径非法"));
     }
-    let candidate = root.join(relative);
-    if candidate.exists() {
-        let canonical = match candidate.canonicalize() {
-            Ok(path) => path,
+
+    // 逐个检查已存在的组件，而不是只 canonicalize 最终路径。最终目标可能是
+    // 尚不存在的 untracked 文件；此时若父目录是指向工作区外的 symlink，
+    // remove_file 会跟随它并误删工作区之外的文件。
+    let mut current = root.clone();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
             Err(error) => return Err(op_err(format!("工作目录路径不可访问: {error}"))),
         };
-        if !canonical.starts_with(&root) {
+        if metadata.file_type().is_symlink() {
+            return Err(op_err("工作目录路径包含符号链接"));
+        }
+        if !current.starts_with(&root) {
             return Err(op_err("工作目录路径超出工作目录范围"));
         }
     }
@@ -854,6 +866,13 @@ mod tests {
             assert!(runner
                 .read_workspace(cwd, "link/secret.txt", 0, 10)
                 .is_err());
+            std::fs::write(outside.join("to-delete.txt"), "must remain").unwrap();
+            let result = runner.restore(cwd, Some("link/to-delete.txt"), None);
+            assert!(!result.ok, "符号链接父目录下的路径必须被拒绝");
+            assert!(
+                outside.join("to-delete.txt").exists(),
+                "工作区外文件不得被删除"
+            );
         }
     }
 

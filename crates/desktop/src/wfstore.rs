@@ -5,7 +5,7 @@
 //!
 //! 历史/活动文件布局与读取复用 `amux-common::session_log`；写采用整文件原子替换。
 
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
 use protocol::{Activity, ContentBlock, HistoryItem};
@@ -13,40 +13,8 @@ use rusqlite::{params, Connection};
 
 use crate::workflow::{ChildSession, OrcMsg, OrcSession};
 
-fn history_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
-    amux_common::session_log::history_path(data_dir, id)
-}
-
-fn activities_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
-    amux_common::session_log::activities_path(data_dir, id)
-}
-
 fn sqlite_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("session.sqlite")
-}
-
-/// 原子写：先写同目录临时文件再 rename 覆盖。持久化中途崩溃不会留下截断文件
-/// （截断 jsonl 曾被读取端静默当空处理，等于无告警丢全部历史）。
-fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // 唯一临时名：persist 可能并发（后台任务 + 推进任务），固定 tmp 名会让
-    // 两个写者交错写同一文件、rename 后得到损坏 JSONL
-    let tmp = path.with_extension(format!("jsonl.tmp.{}", uuid::Uuid::new_v4().simple()));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        for item in items {
-            let line = serde_json::to_string(item).map_err(io::Error::other)?;
-            writeln!(f, "{line}")?;
-        }
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
-}
-
-fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
-    amux_common::session_log::read_jsonl(path)
 }
 
 fn history_from_transcript(transcript: &[OrcMsg]) -> Vec<HistoryItem> {
@@ -143,6 +111,53 @@ fn state_from(s: &str) -> io::Result<protocol::SessionState> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("未知工作流状态: {s}")))
 }
 
+struct MetaRow {
+    id: String,
+    title: String,
+    state: String,
+    last_active_at: u64,
+    children: String,
+    description: String,
+    plan: String,
+    preamble: String,
+    created_at: u64,
+    updated_at: u64,
+}
+
+fn read_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetaRow> {
+    Ok(MetaRow {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        state: row.get(2)?,
+        last_active_at: row.get::<_, i64>(3)? as u64,
+        children: row.get(4)?,
+        description: row.get(5)?,
+        plan: row.get(6)?,
+        preamble: row.get(7)?,
+        created_at: row.get::<_, i64>(8)? as u64,
+        updated_at: row.get::<_, i64>(9)? as u64,
+    })
+}
+
+fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession> {
+    let row = row.map_err(io::Error::other)?;
+    let children: Vec<ChildSession> =
+        serde_json::from_str(&row.children).map_err(io::Error::other)?;
+    Ok(OrcSession {
+        id: row.id,
+        title: row.title,
+        plan: row.plan,
+        description: row.description,
+        preamble: row.preamble,
+        state: state_from(&row.state)?,
+        transcript: Vec::new(),
+        children,
+        activities: Vec::new(),
+        created_at: row.created_at,
+        updated_at: row.last_active_at.max(row.updated_at),
+    })
+}
+
 pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     let children = serde_json::to_string(&session.children).map_err(io::Error::other)?;
     let conn = open_db(data_dir).map_err(io::Error::other)?;
@@ -171,8 +186,8 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
         ],
     )
     .map_err(io::Error::other)?;
-    write_jsonl(
-        &history_path(data_dir, &session.id),
+    amux_common::session_log::write_jsonl_atomic(
+        &amux_common::session_log::history_path(data_dir, &session.id),
         &history_from_transcript(&session.transcript),
     )?;
     // 活动由 WorkflowEngine 实时逐条追加写盘，save 不再整文件覆盖，
@@ -193,52 +208,9 @@ pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<OrcSes
         )
         .map_err(io::Error::other)?;
     let rows = stmt
-        .query_map([query_limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)? as u64,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, i64>(8)? as u64,
-                row.get::<_, i64>(9)? as u64,
-            ))
-        })
+        .query_map([query_limit], read_meta_row)
         .map_err(io::Error::other)?;
-    let mut sessions: Vec<OrcSession> = rows
-        .map(|row| -> io::Result<OrcSession> {
-            let (
-                id,
-                title,
-                state,
-                last_active_at,
-                children,
-                description,
-                plan,
-                preamble,
-                created_at,
-                updated_at,
-            ) = row.map_err(io::Error::other)?;
-            let children: Vec<ChildSession> =
-                serde_json::from_str(&children).map_err(io::Error::other)?;
-            Ok(OrcSession {
-                id,
-                title,
-                plan,
-                description,
-                preamble,
-                state: state_from(&state)?,
-                transcript: Vec::new(),
-                children,
-                activities: Vec::new(),
-                created_at,
-                updated_at: last_active_at.max(updated_at),
-            })
-        })
-        .collect::<io::Result<_>>()?;
+    let mut sessions: Vec<OrcSession> = rows.map(meta_row_to_session).collect::<io::Result<_>>()?;
     let has_more = sessions.len() > limit;
     sessions.truncate(limit);
     Ok((sessions, has_more))
@@ -254,59 +226,20 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
         )
         .map_err(io::Error::other)?;
     let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)? as u64,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, i64>(8)? as u64,
-                row.get::<_, i64>(9)? as u64,
-            ))
-        })
+        .query_map([], read_meta_row)
         .map_err(io::Error::other)?;
-    rows.map(|row| -> io::Result<OrcSession> {
-        let (
-            id,
-            title,
-            state,
-            last_active_at,
-            children,
-            description,
-            plan,
-            preamble,
-            created_at,
-            updated_at,
-        ) = row.map_err(io::Error::other)?;
-        let children: Vec<ChildSession> =
-            serde_json::from_str(&children).map_err(io::Error::other)?;
-        Ok(OrcSession {
-            id,
-            title,
-            plan,
-            description,
-            preamble,
-            state: state_from(&state)?,
-            transcript: Vec::new(),
-            children,
-            activities: Vec::new(),
-            created_at,
-            updated_at: last_active_at.max(updated_at),
-        })
-    })
-    .collect()
+    rows.map(meta_row_to_session).collect()
 }
 
 /// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
-/// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
 /// 调用方可先在锁外读盘、再短暂持锁合并——避免持写锁做 IO 阻塞渲染与后台推进。
 pub fn load_payload(data_dir: &Path, id: &str) -> io::Result<(Vec<OrcMsg>, Vec<Activity>)> {
-    let transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, id))?);
-    let activities = read_jsonl(&activities_path(data_dir, id))?;
+    let transcript = transcript_from_history(&amux_common::session_log::read_jsonl(
+        &amux_common::session_log::history_path(data_dir, id),
+    )?);
+    let activities = amux_common::session_log::read_jsonl(
+        &amux_common::session_log::activities_path(data_dir, id),
+    )?;
     Ok((transcript, activities))
 }
 
@@ -314,7 +247,10 @@ pub fn remove(data_dir: &Path, id: &str) -> io::Result<()> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
         .map_err(io::Error::other)?;
-    for path in [history_path(data_dir, id), activities_path(data_dir, id)] {
+    for path in [
+        amux_common::session_log::history_path(data_dir, id),
+        amux_common::session_log::activities_path(data_dir, id),
+    ] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}

@@ -44,7 +44,7 @@ impl SessionView {
             self.history_next_before = next_before;
             return;
         }
-        if let Some(kept_older) = merge_tail(&mut self.dialog, fresh) {
+        if let Some(kept_older) = merge_tail(&mut self.dialog, fresh, dialog_key) {
             if kept_older {
                 return;
             }
@@ -107,7 +107,8 @@ impl SessionView {
             return;
         }
         let mut fresh = activities;
-        if let Some(kept_older) = merge_activities_tail(&mut self.activities, mem::take(&mut fresh))
+        if let Some(kept_older) =
+            merge_tail(&mut self.activities, mem::take(&mut fresh), activity_key)
         {
             if kept_older {
                 return;
@@ -171,9 +172,13 @@ pub(crate) fn activity_key(a: &Activity) -> (&'static str, u64) {
 /// 其后的条目追加到 current。返回 Some(true) 表示 current 保留了
 /// 更早的前缀（调用方应保留旧分页游标）；Some(false)/None 表示
 /// current 未含更早内容（调用方采用新窗游标）。
-fn merge_tail(current: &mut Vec<DialogMsg>, fresh: Vec<DialogMsg>) -> Option<bool> {
-    let cur_keys: Vec<_> = current.iter().map(dialog_key).collect();
-    let fresh_keys: Vec<_> = fresh.iter().map(dialog_key).collect();
+fn merge_tail<T: Clone>(
+    current: &mut Vec<T>,
+    fresh: Vec<T>,
+    key: impl Fn(&T) -> (&'static str, u64),
+) -> Option<bool> {
+    let cur_keys: Vec<_> = current.iter().map(&key).collect();
+    let fresh_keys: Vec<_> = fresh.iter().map(&key).collect();
     let last = *cur_keys.last()?;
     // current 尾部键在 fresh 中最晚的出现位置（从后往前找第一处）
     let mut anchor = None;
@@ -189,33 +194,6 @@ fn merge_tail(current: &mut Vec<DialogMsg>, fresh: Vec<DialogMsg>) -> Option<boo
         return Some(false);
     };
     // 从 anchor 向前验证对齐长度
-    let mut matched = 0usize;
-    while matched < cur_keys.len()
-        && matched <= anchor
-        && cur_keys[cur_keys.len() - 1 - matched] == fresh_keys[anchor - matched]
-    {
-        matched += 1;
-    }
-    let kept_older = matched < cur_keys.len();
-    current.extend_from_slice(&fresh[anchor + 1..]);
-    Some(kept_older)
-}
-
-fn merge_activities_tail(current: &mut Vec<Activity>, fresh: Vec<Activity>) -> Option<bool> {
-    let cur_keys: Vec<_> = current.iter().map(activity_key).collect();
-    let fresh_keys: Vec<_> = fresh.iter().map(activity_key).collect();
-    let last = *cur_keys.last()?;
-    let mut anchor = None;
-    for (i, k) in fresh_keys.iter().enumerate().rev() {
-        if *k == last {
-            anchor = Some(i);
-            break;
-        }
-    }
-    let Some(anchor) = anchor else {
-        *current = fresh;
-        return Some(false);
-    };
     let mut matched = 0usize;
     while matched < cur_keys.len()
         && matched <= anchor

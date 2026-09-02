@@ -14,7 +14,7 @@ use protocol::{
     WorkspaceDiffResult, WorkspaceRestoreParams,
 };
 
-use crate::app::{AmuxApp, Selected};
+use crate::app::AmuxApp;
 use crate::diff::{diff_lines, DiffLine, DiffLineKind};
 use crate::logic::group_changed_files_by_parent;
 
@@ -25,18 +25,18 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         machine: usize,
     ) {
+        let Some((selected_machine, session_id)) = self.open_session_target() else {
+            return;
+        };
+        if selected_machine != machine {
+            return;
+        }
         let Some(m) = self.machine(machine) else {
             return;
         };
-        let session_id = match &self.selected {
-            Some(Selected::Session {
-                id,
-                machine: selected_machine,
-            }) if *selected_machine == machine && m.sessions.iter().any(|s| s.id == *id) => {
-                id.clone()
-            }
-            _ => return,
-        };
+        if !m.sessions.iter().any(|s| s.id == session_id) {
+            return;
+        }
         let client = m.client.clone();
         // 请求 id / loading / error 存于本机器的 DiffReviewState 实体
         let request_id = m.diff.update(cx, |st, _| {
@@ -55,16 +55,11 @@ impl AmuxApp {
                 .request::<_, WorkspaceDiffResult>(protocol::method::WORKSPACE_DIFF, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                let is_current = matches!(
-                    &this.selected,
-                    Some(Selected::Session {
-                        machine: selected_machine,
-                        id
-                    }) if *selected_machine == machine && id == &session_id
-                ) && this
-                    .machines
-                    .get(machine)
-                    .is_some_and(|m| m.diff.read(cx).request_id == request_id);
+                let is_current = this.is_selected_session(machine, &session_id)
+                    && this
+                        .machines
+                        .get(machine)
+                        .is_some_and(|m| m.diff.read(cx).request_id == request_id);
                 if !is_current {
                     return;
                 }
@@ -111,10 +106,7 @@ impl AmuxApp {
         let Some(m) = self.machine(machine) else {
             return;
         };
-        let Some(session_id) = self.selected.as_ref().and_then(|selected| match selected {
-            Selected::Session { id, .. } => Some(id.clone()),
-            Selected::Workflow { .. } => None,
-        }) else {
+        let Some(session_id) = self.open_session_target().map(|(_, id)| id) else {
             return;
         };
         let client = m.client.clone();
@@ -201,10 +193,9 @@ impl AmuxApp {
             let st = m.diff.read(cx);
             (st.selection.clone(), st.files.clone())
         };
-        let Some(Selected::Session { id, .. }) = self.selected.clone() else {
+        let Some(session_id) = self.open_session_target().map(|(_, id)| id) else {
             return;
         };
-        let session_id = id.clone();
 
         let mut patches: Vec<String> = Vec::new();
         for f in &files {
@@ -267,7 +258,7 @@ impl AmuxApp {
         let has_selection = machine
             .and_then(|i| self.machine(i))
             .is_some_and(|m| !m.diff.read(cx).selection.is_empty());
-        let can_send = matches!(&self.selected, Some(Selected::Session { .. }));
+        let can_send = self.open_session_target().is_some();
         let diff_tree_collapsed = machine
             .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).tree_collapsed)

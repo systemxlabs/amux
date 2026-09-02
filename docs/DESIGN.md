@@ -159,7 +159,7 @@ Server 作为 ACP client 与 ACP servers 通信
 
 Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 内。普通会话创建时若指定了 worktree 方式，则创建 worktree，普通会话被删除时，其关联的 worktree 也应一并删除。
 
-当普通会话超过 7 天不活跃时，自动清理其关联的 worktree，后续可按需重新创建。
+当普通会话超过 7 天不活跃时，自动清理其关联的 worktree，后续可按需重建，保持路径一致。
 
 ### 终端
 

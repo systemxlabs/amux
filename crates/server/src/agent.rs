@@ -328,6 +328,11 @@ impl AgentRegistry {
         let Some(d) = found else {
             return Err(format!("本机未发现 agent: {harness}"));
         };
+        // `spawn_and_cache` intentionally reuses an existing driver for normal
+        // lookups, but restart must evict and shut down that driver first.
+        if let Some(old) = self.spawned.lock().remove(harness) {
+            old.shutdown_and_join();
+        }
         match self.spawn_and_cache(&d) {
             Ok(_) => {
                 log::info!("手动重启成功：{}（agent={}）", d.bin, d.name);

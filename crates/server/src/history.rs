@@ -19,17 +19,10 @@ pub struct SessionLog {
 }
 
 impl SessionLog {
-    pub fn history_path(data_dir: &Path, session_id: &str) -> PathBuf {
-        history_path(data_dir, session_id)
-    }
-    pub fn activities_path(data_dir: &Path, session_id: &str) -> PathBuf {
-        activities_path(data_dir, session_id)
-    }
-
     pub fn open(data_dir: &Path, session_id: &str) -> Self {
         SessionLog {
-            history_path: Self::history_path(data_dir, session_id),
-            activities_path: Self::activities_path(data_dir, session_id),
+            history_path: history_path(data_dir, session_id),
+            activities_path: activities_path(data_dir, session_id),
         }
     }
 

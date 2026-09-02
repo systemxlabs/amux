@@ -68,6 +68,8 @@ struct LogCache<T> {
 struct SessionControl {
     busy: AtomicBool,
     deleted: AtomicBool,
+    /// 串行化删除与 agent 侧会话创建/元数据写回，避免删除竞态下会话复活。
+    lifecycle: Mutex<()>,
 }
 
 fn now() -> u64 {
@@ -181,6 +183,7 @@ impl SessionManager {
                 Arc::new(SessionControl {
                     busy: AtomicBool::new(false),
                     deleted: AtomicBool::new(false),
+                    lifecycle: Mutex::new(()),
                 })
             })
             .clone()
@@ -247,6 +250,11 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
+        let control = self.control(session_id);
+        let _lifecycle = control.lifecycle.lock();
+        if control.deleted.load(Ordering::SeqCst) {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
         let (meta, agent_session_id) = self.get_entry(session_id)?;
         let (driver, agent_session_id) =
             self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
@@ -263,6 +271,22 @@ impl SessionManager {
         Ok(self.current_config_options(session_id))
     }
 
+    /// 获取已存在的 agent 侧会话；不会触发惰性创建。
+    fn existing_agent_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(crate::agent::SharedDriver, String)>, SessionError> {
+        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        if agent_session_id.is_empty() {
+            return Ok(None);
+        }
+        let driver = self
+            .agents
+            .driver_for(&meta.agent)
+            .map_err(SessionError::AgentUnavailable)?;
+        Ok(Some((driver, agent_session_id)))
+    }
+
     /// 查询会话斜杠命令（docs/DESIGN.md「普通会话斜杠命令」：存储在内存，
     /// 以 Agent 侧数据为权威，由 ACP `available_commands_update` 通知驱动）。
     /// 查询不触发惰性创建：尚无 agent 侧会话时返回空（agent 侧会话创建后
@@ -271,14 +295,9 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SlashCommand>, SessionError> {
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
-        if agent_session_id.is_empty() {
+        let Some((driver, agent_session_id)) = self.existing_agent_session(session_id)? else {
             return Ok(Vec::new());
-        }
-        let driver = self
-            .agents
-            .driver_for(&meta.agent)
-            .map_err(SessionError::AgentUnavailable)?;
+        };
         Ok(driver.available_commands(&agent_session_id))
     }
 
@@ -289,14 +308,9 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SessionPlanEntry>, SessionError> {
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
-        if agent_session_id.is_empty() {
+        let Some((driver, agent_session_id)) = self.existing_agent_session(session_id)? else {
             return Ok(Vec::new());
-        }
-        let driver = self
-            .agents
-            .driver_for(&meta.agent)
-            .map_err(SessionError::AgentUnavailable)?;
+        };
         Ok(driver.session_plan(&agent_session_id))
     }
 
@@ -308,6 +322,9 @@ impl SessionManager {
     pub async fn delete(&self, session_id: &str) -> Result<(), SessionError> {
         let control = self.control(session_id);
         control.deleted.store(true, Ordering::SeqCst);
+        // setup_prompt 持有同一把锁直到 agent session id 与 Busy 元数据写回完成。
+        // 删除先标记 deleted，再等待临界区结束，保证不会在删除后复活会话。
+        let _lifecycle = control.lifecycle.lock();
         let log = SessionLog::open(&self.data_dir, session_id);
         let entry = self.registry.get(session_id)?;
         let Some((meta, agent_session_id)) = entry else {
@@ -413,12 +430,14 @@ impl SessionManager {
     /// 关闭长时间无活动的 agent 侧会话（>timeout_ms）。候选选出后复核状态：
     /// 已回到 Busy 的会话跳过本轮（避免关掉正在进行中的 turn 的 agent 侧会话）。
     pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> Result<usize, SessionError> {
-        let candidates = self
-            .registry
-            .idle_candidates(now_ms, timeout_ms)
-            .unwrap_or_default();
+        let candidates = self.registry.idle_candidates(now_ms, timeout_ms)?;
         let mut closed = 0;
         for (sid, _) in candidates {
+            let control = self.control(&sid);
+            let _lifecycle = control.lifecycle.lock();
+            if control.deleted.load(Ordering::SeqCst) {
+                continue;
+            }
             let Ok(Some((meta, aid))) = self.registry.get(&sid) else {
                 continue;
             };
@@ -448,12 +467,20 @@ impl SessionManager {
         now_ms: u64,
         timeout_ms: u64,
     ) -> Result<usize, SessionError> {
-        let candidates = self
-            .registry
-            .idle_worktree_candidates(now_ms, timeout_ms)
-            .unwrap_or_default();
+        let candidates = self.registry.idle_worktree_candidates(now_ms, timeout_ms)?;
         let mut cleaned = 0;
         for (sid, cwd, worktree_dir) in candidates {
+            let control = self.control(&sid);
+            let _lifecycle = control.lifecycle.lock();
+            if control.deleted.load(Ordering::SeqCst) {
+                continue;
+            }
+            let Ok(Some((meta, _))) = self.registry.get(&sid) else {
+                continue;
+            };
+            if meta.state != SessionState::Idle || meta.worktree_dir != worktree_dir {
+                continue;
+            }
             let wt = PathBuf::from(&worktree_dir);
             GitRunner::new().remove_worktree(&cwd, &wt);
             if !wt.exists() {
@@ -478,7 +505,7 @@ impl SessionManager {
         let items = self.cached_log(
             session_id,
             &self.history_cache,
-            SessionLog::history_path(&self.data_dir, session_id),
+            amux_common::session_log::history_path(&self.data_dir, session_id),
             |log| log.read_history(),
             "会话历史读取失败",
         )?;
@@ -496,7 +523,7 @@ impl SessionManager {
         let items = self.cached_log(
             session_id,
             &self.activities_cache,
-            SessionLog::activities_path(&self.data_dir, session_id),
+            amux_common::session_log::activities_path(&self.data_dir, session_id),
             |log| log.read_activities(),
             "会话活动读取失败",
         )?;
@@ -587,7 +614,10 @@ impl SessionManager {
             return Err(SessionError::Busy);
         }
 
-        let setup = self.setup_prompt(session_id, &input).await;
+        // 删除会先标记 deleted 并等待这把锁；持有期间完成 agent session 创建、
+        // Busy 元数据写回和用户消息首写，避免删除后旧 prompt 再创建日志。
+        let lifecycle = control.lifecycle.lock();
+        let setup = self.setup_prompt(session_id, &input, &control);
         let (driver, agent_session_id, cwd, old_state) = match setup {
             Ok(value) => value,
             Err(error) => {
@@ -623,6 +653,9 @@ impl SessionManager {
             return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
         }
         self.invalidate_log_caches(session_id);
+        // 从这里开始删除可以安全清理日志；后续 turn 只会追加活动/历史，且均受
+        // deleted 标记保护，不会在删除后重新创建已删除会话。
+        drop(lifecycle);
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
         // 恢复响应携带的最新配置选项（幂等 resume 返回空）全量覆盖内存存储。
@@ -677,11 +710,15 @@ impl SessionManager {
     }
 
     /// prompt 前置准备：读元数据、生成标题、置 Busy、惰性创建 agent 侧会话。
-    async fn setup_prompt(
+    fn setup_prompt(
         &self,
         session_id: &str,
         input: &[ContentBlock],
+        control: &SessionControl,
     ) -> Result<(crate::agent::SharedDriver, String, String, SessionState), SessionError> {
+        if control.deleted.load(Ordering::SeqCst) {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
         let (mut meta, agent_session_id) = self.get_entry(session_id)?;
         let old_state = meta.state;
         if meta.state == SessionState::Busy {
@@ -716,6 +753,9 @@ impl SessionManager {
         // 立即落盘；否则 turn 进行中列表读到陈旧空闲，且并发 prompt 会放行）。
         // resume 分支若只更新状态，先查过会话选项的会话（agent 侧会话已提前
         // 创建）首条 prompt 生成的标题将永远不落盘。
+        if control.deleted.load(Ordering::SeqCst) {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
         self.registry.upsert(&meta, &agent_session_id)?;
         Ok((driver, agent_session_id, cwd, old_state))
     }
@@ -927,6 +967,11 @@ impl SessionManager {
         config_id: &str,
         value: protocol::SessionConfigOptionValue,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
+        let control = self.control(session_id);
+        let _lifecycle = control.lifecycle.lock();
+        if control.deleted.load(Ordering::SeqCst) {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
         let (meta, agent_session_id) = self.get_entry(session_id)?;
         let (driver, agent_session_id) =
             self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
@@ -985,11 +1030,11 @@ fn first_text(input: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AgentDriver, AgentEvent, AgentRegistry};
+    use crate::agent::{AgentDriver, AgentEvent, AgentRegistry, StubAgentDriver};
     use crate::history::SessionLog;
     use crate::registry::SessionRegistry;
     use protocol::ContentBlock;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use tokio::sync::Notify;
 
     fn text(s: &str) -> Vec<ContentBlock> {
@@ -1422,6 +1467,118 @@ mod tests {
             "/tmp/lazy",
             "非 worktree 会话的 workspace_cwd 返回原始 cwd"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ACP session/new 与删除并发时，删除不能被 setup 的最终 upsert 绕过。
+    struct BlockingCreateDriver {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+        inner: StubAgentDriver,
+    }
+
+    impl AgentDriver for BlockingCreateDriver {
+        fn create_session(
+            &self,
+            cwd: &str,
+        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+            self.entered.wait();
+            self.release.wait();
+            self.inner.create_session(cwd)
+        }
+
+        fn resume_session(
+            &self,
+            agent_session_id: &str,
+            cwd: &str,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            self.inner.resume_session(agent_session_id, cwd)
+        }
+
+        fn prompt(
+            &self,
+            agent_session_id: &str,
+            input: Vec<ContentBlock>,
+        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+            self.inner.prompt(agent_session_id, input)
+        }
+
+        fn cancel(&self, agent_session_id: &str) -> Result<(), String> {
+            self.inner.cancel(agent_session_id)
+        }
+
+        fn close(&self, agent_session_id: &str) -> Result<(), String> {
+            self.inner.close(agent_session_id)
+        }
+
+        fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
+            self.inner.delete_session(agent_session_id)
+        }
+
+        fn set_config_option(
+            &self,
+            agent_session_id: &str,
+            config_id: &str,
+            value: protocol::SessionConfigOptionValue,
+        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+            self.inner
+                .set_config_option(agent_session_id, config_id, value)
+        }
+
+        fn shutdown(&self) {
+            self.inner.shutdown()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_during_lazy_create_does_not_resurrect_session() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "race",
+            Arc::new(BlockingCreateDriver {
+                entered: entered.clone(),
+                release: release.clone(),
+                inner: StubAgentDriver::new(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-delete-create-race-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+        let mgr = Arc::new(mgr);
+        let meta = mgr.create("race", "/tmp/race", false).await.unwrap();
+        let session_id = meta.id.clone();
+
+        let prompt_mgr = mgr.clone();
+        let prompt_id = session_id.clone();
+        let prompt_task =
+            tokio::spawn(async move { prompt_mgr.prompt(&prompt_id, text("hi")).await });
+
+        // Wait until setup is inside the synchronous ACP create call.
+        tokio::task::spawn_blocking(move || entered.wait())
+            .await
+            .unwrap();
+
+        let delete_mgr = mgr.clone();
+        let delete_id = session_id.clone();
+        let delete_task = tokio::spawn(async move { delete_mgr.delete(&delete_id).await });
+        while !mgr.control(&session_id).deleted.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+
+        // Let session/new return. setup must observe deleted and avoid upsert.
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .unwrap();
+        let prompt_result = prompt_task.await.unwrap();
+        assert!(matches!(prompt_result, Err(SessionError::NotFound(_))));
+        delete_task.await.unwrap().unwrap();
+        assert!(registry.get(&session_id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

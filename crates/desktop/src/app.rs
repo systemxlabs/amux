@@ -671,13 +671,10 @@ impl AmuxApp {
         // 变化：选中会话刷新会话选项与斜杠命令（docs/DESIGN.md：均以 Agent 侧
         // 数据为权威）
         if idle {
-            let selected_matches = matches!(
-                &this.selected,
-                Some(Selected::Session { machine, id }) if *machine == idx && *id == sid
-            );
+            let selected_matches = this.is_selected_session(idx, &sid);
             if selected_matches {
                 this.refresh_config_options(cx, idx, sid.clone());
-                this.refresh_slash_commands(window, cx, idx, sid.clone());
+                this.refresh_slash_commands(cx, idx, sid.clone());
             }
         }
 
@@ -871,7 +868,7 @@ impl AmuxApp {
             .update(cx, |s, cx| s.set_value(&draft.text, window, cx));
         // 工作目录/文件改动/会话计划/终端仅普通会话展示（docs/PRD.md「右侧面板」）：
         // 切到工作流会话时关闭残留的普通会话专属面板
-        if !matches!(self.selected, Some(Selected::Session { .. }))
+        if self.open_session_target().is_none()
             && matches!(
                 self.panel,
                 Some(Panel::Workspace)
@@ -890,6 +887,11 @@ impl AmuxApp {
             Some(Selected::Session { machine, id }) => Some((*machine, id.clone())),
             _ => None,
         }
+    }
+
+    pub(crate) fn is_selected_session(&self, machine: usize, session_id: &str) -> bool {
+        self.open_session_target()
+            .is_some_and(|(selected_machine, id)| selected_machine == machine && id == session_id)
     }
 
     pub(crate) fn machine(&self, i: usize) -> Option<&MachineView> {
@@ -913,29 +915,26 @@ impl AmuxApp {
 
     /// 默认机器下标：有选中会话则用它，否则第一台。
     pub(crate) fn active_machine(&self) -> Option<usize> {
-        match &self.selected {
-            Some(Selected::Session { machine, .. }) => Some(*machine),
-            _ => (!self.machines.is_empty()).then_some(0),
-        }
+        self.open_session_target()
+            .map(|(machine, _)| machine)
+            .or_else(|| (!self.machines.is_empty()).then_some(0))
     }
 
     /// 当前选中会话的生效工作目录：启用 worktree 的会话 agent 实际工作在
     /// 工作树内，目录浏览/改动审查/还原都应对准工作树而非用户指定的主仓库。
     pub(crate) fn selected_workspace(&self) -> Option<(usize, String)> {
-        let Selected::Session { machine, id } = self.selected.as_ref()? else {
-            return None;
-        };
+        let (machine, id) = self.open_session_target()?;
         let session = self
-            .machine(*machine)?
+            .machine(machine)?
             .sessions
             .iter()
-            .find(|session| session.id == *id)?;
+            .find(|session| session.id == id)?;
         let cwd = if session.worktree_dir.is_empty() {
             session.cwd.clone()
         } else {
             session.worktree_dir.clone()
         };
-        Some((*machine, cwd))
+        Some((machine, cwd))
     }
 
     /// 通用危险/确认弹窗：统一 alert_dialog 结构（按钮文案、危险变体、
