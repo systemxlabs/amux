@@ -52,17 +52,6 @@ pub struct SessionManager {
     /// 与 `ongoing` 生命周期一致：turn 结束随 `ongoing` 一起清理。
     thinking_buf: Mutex<HashMap<String, (String, u64)>>,
     controls: Mutex<HashMap<String, Arc<SessionControl>>>,
-    /// 已解析历史缓存（GUI 每 10s 轮询打开的会话；文件未变时免全量 JSONL 重解析）
-    history_cache: Mutex<HashMap<String, LogCache<HistoryItem>>>,
-    /// 已解析活动缓存（同上）
-    activities_cache: Mutex<HashMap<String, LogCache<Activity>>>,
-}
-
-/// 日志解析缓存条目：以文件字节长度为新鲜度依据——日志 append-only 不截断，
-/// 长度不变即内容不变；任何追加后由写入方失效。
-struct LogCache<T> {
-    items: Arc<Vec<T>>,
-    source_len: u64,
 }
 
 struct SessionControl {
@@ -96,8 +85,6 @@ impl SessionManager {
             ongoing: Mutex::new(HashMap::new()),
             thinking_buf: Mutex::new(HashMap::new()),
             controls: Mutex::new(HashMap::new()),
-            history_cache: Mutex::new(HashMap::new()),
-            activities_cache: Mutex::new(HashMap::new()),
         };
         (manager, rx)
     }
@@ -374,7 +361,6 @@ impl SessionManager {
         self.registry.delete(session_id)?;
         log.remove()
             .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")))?;
-        self.invalidate_log_caches(session_id);
 
         // 资源清理（docs/DESIGN.md「工作树存储」与 ACP 会话生命周期）：
         // ACP close/delete 往返 + worktree 目录清理，均为尽力而为不阻断。
@@ -535,13 +521,9 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<(Vec<HistoryItem>, bool, Option<u64>), SessionError> {
         self.get_entry(session_id)?;
-        let items = self.cached_log(
-            session_id,
-            &self.history_cache,
-            amux_common::session_log::history_path(&self.data_dir, session_id),
-            |log| log.read_history(),
-            "会话历史读取失败",
-        )?;
+        let items = SessionLog::open(&self.data_dir, session_id)
+            .read_history()
+            .map_err(|e| SessionError::Storage(format!("会话历史读取失败: {e}")))?;
         Ok(Self::page(&items, limit, before))
     }
 
@@ -553,13 +535,9 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<(Vec<Activity>, bool, Option<u64>), SessionError> {
         self.get_entry(session_id)?;
-        let items = self.cached_log(
-            session_id,
-            &self.activities_cache,
-            amux_common::session_log::activities_path(&self.data_dir, session_id),
-            |log| log.read_activities(),
-            "会话活动读取失败",
-        )?;
+        let items = SessionLog::open(&self.data_dir, session_id)
+            .read_activities()
+            .map_err(|e| SessionError::Storage(format!("会话活动读取失败: {e}")))?;
         Ok(Self::page(&items, limit, before))
     }
 
@@ -574,44 +552,6 @@ impl SessionManager {
         let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
         let next_before = if has_more { Some(start as u64) } else { None };
         (items[start..end].to_vec(), has_more, next_before)
-    }
-
-    /// 带缓存的日志读取：文件长度未变时复用上次解析结果
-    /// （GUI 每 10s 轮询打开的会话；日志 append-only，长度不变即内容不变），
-    /// 追加后由写入方失效缓存。`history`/`activities` 共用同一逻辑。
-    fn cached_log<T>(
-        &self,
-        session_id: &str,
-        cache: &Mutex<HashMap<String, LogCache<T>>>,
-        path: PathBuf,
-        read: impl FnOnce(&SessionLog) -> std::io::Result<Vec<T>>,
-        err_ctx: &str,
-    ) -> Result<Arc<Vec<T>>, SessionError> {
-        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let mut cache = cache.lock();
-        if let Some(c) = cache.get(session_id) {
-            if c.source_len == file_len {
-                return Ok(c.items.clone());
-            }
-        }
-        let items = Arc::new(
-            read(&SessionLog::open(&self.data_dir, session_id))
-                .map_err(|e| SessionError::Storage(format!("{err_ctx}: {e}")))?,
-        );
-        cache.insert(
-            session_id.to_string(),
-            LogCache {
-                items: items.clone(),
-                source_len: file_len,
-            },
-        );
-        Ok(items)
-    }
-
-    /// 追加后失效缓存（下次读取重新解析一次，之后恢复命中）。
-    fn invalidate_log_caches(&self, session_id: &str) {
-        self.history_cache.lock().remove(session_id);
-        self.activities_cache.lock().remove(session_id);
     }
 
     /// 查询正在进行中的活动；无则 None。
@@ -690,7 +630,6 @@ impl SessionManager {
             );
             return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
         }
-        self.invalidate_log_caches(session_id);
         // 从这里开始删除可以安全清理日志；后续 turn 只会追加活动/历史，且均受
         // deleted 标记保护，不会在删除后重新创建已删除会话。
         drop(lifecycle);
@@ -712,7 +651,6 @@ impl SessionManager {
                 if let Err(log_error) = log.append_activities(&[err]) {
                     log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
                 }
-                self.invalidate_log_caches(session_id);
                 self.finalize_turn(
                     session_id,
                     &control,
@@ -922,14 +860,11 @@ impl SessionManager {
                 storage_error = Some(SessionError::Storage(format!("活动落盘失败: {e}")));
             }
         }
-        if !deleted && (!history.is_empty() || !activities.is_empty()) {
-            self.invalidate_log_caches(session_id);
-        }
         (storage_error, turn_reason)
     }
 
-    /// 把已定稿的活动实时追加写盘并失效活动缓存。返回落盘错误（写盘后仍
-    /// 会继续跑 turn，仅收集错误供调用方上报）。
+    /// 把已定稿的活动实时追加写盘。返回落盘错误（写盘后仍会继续跑 turn，
+    /// 仅收集错误供调用方上报）。
     fn flush_ready_activities(
         &self,
         session_id: &str,
@@ -944,7 +879,6 @@ impl SessionManager {
             log::error!("活动落盘失败 {session_id}: {e}");
             return Err(SessionError::Storage(format!("活动落盘失败: {e}")));
         }
-        self.activities_cache.lock().remove(session_id);
         Ok(())
     }
 
