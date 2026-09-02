@@ -46,12 +46,6 @@ impl RpcError {
             message: msg.into(),
         }
     }
-    pub fn session_not_found(msg: impl Into<String>) -> Self {
-        RpcError {
-            code: server_error::SESSION_NOT_FOUND,
-            message: msg.into(),
-        }
-    }
 }
 
 fn parse<T: DeserializeOwned>(params: &Option<Value>) -> Result<T, RpcError> {
