@@ -196,6 +196,9 @@ mod tests {
         assert!(parse_config(&env, &["--unknown".into()]).is_err());
         // 文档未规定的 CLI 参数应被拒绝，不再作为 server 参数接受。
         let err = parse_config(&env, &["--data-dir".into(), "/tmp/x".into()]).unwrap_err();
-        assert!(err.contains("unexpected argument"), "未规定参数应被拒绝：{err}");
+        assert!(
+            err.contains("unexpected argument"),
+            "未规定参数应被拒绝：{err}"
+        );
     }
 }
