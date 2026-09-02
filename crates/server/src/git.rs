@@ -53,6 +53,13 @@ fn run(cwd: &str, args: &[&str]) -> Result<String, GitError> {
 }
 
 /// 构造失败的 `OpResult`（restore 的 CLI/文件操作错误路径共用）。
+fn op_ok() -> OpResult {
+    OpResult {
+        ok: true,
+        message: None,
+    }
+}
+
 fn op_err(message: impl Into<String>) -> OpResult {
     OpResult {
         ok: false,
@@ -530,10 +537,7 @@ impl GitRunner {
                 apply_dir.to_string_lossy().as_ref(),
                 &["apply", "--reverse", patch_file.to_string_lossy().as_ref()],
             ) {
-                Ok(_) => OpResult {
-                    ok: true,
-                    message: None,
-                },
+                Ok(_) => op_ok(),
                 Err(e) => op_err(e.stderr.trim()),
             };
             cleanup();
@@ -547,18 +551,12 @@ impl GitRunner {
             // untracked：从未提交，revert = 删除工作区文件
             if self.is_untracked(cwd, &target) {
                 return match std::fs::remove_file(std::path::Path::new(cwd).join(&target)) {
-                    Ok(_) => OpResult {
-                        ok: true,
-                        message: None,
-                    },
+                    Ok(_) => op_ok(),
                     Err(e) => op_err(format!("删除 untracked 文件失败: {e}")),
                 };
             }
             return match run(cwd, &["restore", "--staged", "--worktree", "--", &target]) {
-                Ok(_) => OpResult {
-                    ok: true,
-                    message: None,
-                },
+                Ok(_) => op_ok(),
                 Err(e) => op_err(e.stderr.trim()),
             };
         }
@@ -566,10 +564,7 @@ impl GitRunner {
             return op_err(e.stderr.trim());
         }
         match run(cwd, &["clean", "-fd"]) {
-            Ok(_) => OpResult {
-                ok: true,
-                message: None,
-            },
+            Ok(_) => op_ok(),
             Err(e) => OpResult {
                 ok: false,
                 message: Some(e.stderr.trim().to_string()),

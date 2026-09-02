@@ -187,15 +187,15 @@ fn write_atomic<T: serde::Serialize>(path: &Path, value: &T) {
 
 /// name 键控的 JSON 集合文件（quick_commands/skills/workflows 共用）：
 /// list/add(upsert)/update/remove 四组 CRUD 曾逐字重复三份，仅文件名与类型不同。
-struct JsonCollection<'a, T> {
-    path: std::borrow::Cow<'a, Path>,
+struct JsonCollection<T> {
+    path: PathBuf,
     /// 从存储值提取唯一键（name）
-    key: for<'x> fn(&'x T) -> &'x str,
+    key: fn(&T) -> &str,
 }
 
-impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollection<'a, T> {
+impl<T: serde::de::DeserializeOwned + serde::Serialize> JsonCollection<T> {
     fn list(&self) -> Vec<T> {
-        read_file_typed(self.path.as_ref())
+        read_file_typed(&self.path)
     }
 
     fn upsert(&self, item: T) {
@@ -203,7 +203,7 @@ impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollecti
         let mut items = self.list();
         items.retain(|x| (self.key)(x) != key);
         items.push(item);
-        write_atomic(self.path.as_ref(), &items);
+        write_atomic(&self.path, &items);
     }
 
     fn update(&self, key: &str, mutate: impl FnOnce(&mut T)) {
@@ -211,7 +211,7 @@ impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollecti
         if let Some(x) = items.iter_mut().find(|x| (self.key)(x) == key) {
             mutate(x);
         }
-        write_atomic(self.path.as_ref(), &items);
+        write_atomic(&self.path, &items);
     }
 
     fn remove(&self, key: &str) {
@@ -220,7 +220,7 @@ impl<'a, T: Clone + serde::de::DeserializeOwned + serde::Serialize> JsonCollecti
             .into_iter()
             .filter(|x| (self.key)(x) != key)
             .collect::<Vec<_>>();
-        write_atomic(self.path.as_ref(), &items);
+        write_atomic(&self.path, &items);
     }
 }
 
@@ -288,9 +288,9 @@ impl ConfigStore {
         write_atomic(&self.path("machines.json"), &machines);
     }
 
-    fn quick_commands(&self) -> JsonCollection<'_, QuickCommand> {
+    fn quick_commands(&self) -> JsonCollection<QuickCommand> {
         JsonCollection {
-            path: std::borrow::Cow::Owned(self.path("quick_commands.json")),
+            path: self.path("quick_commands.json"),
             key: |c| &c.name,
         }
     }
@@ -317,9 +317,9 @@ impl ConfigStore {
         self.quick_commands().remove(name);
     }
 
-    fn skills(&self) -> JsonCollection<'_, SkillEntry> {
+    fn skills(&self) -> JsonCollection<SkillEntry> {
         JsonCollection {
-            path: std::borrow::Cow::Owned(self.path("skills.json")),
+            path: self.path("skills.json"),
             key: |s| &s.name,
         }
     }
@@ -346,9 +346,9 @@ impl ConfigStore {
         self.skills().remove(name);
     }
 
-    fn templates(&self) -> JsonCollection<'_, WorkflowTemplate> {
+    fn templates(&self) -> JsonCollection<WorkflowTemplate> {
         JsonCollection {
-            path: std::borrow::Cow::Owned(self.path("workflows.json")),
+            path: self.path("workflows.json"),
             key: |t| &t.name,
         }
     }

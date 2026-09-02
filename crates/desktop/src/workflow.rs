@@ -11,6 +11,9 @@
 //!   关联普通会话 idle（`session.state_change` 通知驱动）触发自动推进
 //! - 会话操作统一经真实 WsClient（SESSION_NEW / SESSION_PROMPT / SESSION_CANCEL）
 
+#[cfg(test)]
+use amux_common::session_log::read_jsonl;
+use amux_common::session_log::{activities_path, append_jsonl};
 use parking_lot::{Mutex, RwLock};
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -534,8 +537,8 @@ impl WorkflowEngine {
     /// 追加写活动 JSONL；失败仅记日志，不阻断推进（活动落盘尽力而为）。
     fn append_activities(&self, acts: &[Activity]) {
         let id = self.session.read().id.clone();
-        let path = amux_common::session_log::activities_path(&self.data_dir, &id);
-        if let Err(e) = amux_common::session_log::append_jsonl(&path, acts) {
+        let path = activities_path(&self.data_dir, &id);
+        if let Err(e) = append_jsonl(&path, acts) {
             log::error!("工作流活动落盘失败 {id}: {e}");
         }
     }
@@ -2333,8 +2336,8 @@ mod tests {
         });
 
         // 活动实时追加写盘：无需 persist，磁盘即可读到。
-        let path = amux_common::session_log::activities_path(&dir, &id);
-        let acts = amux_common::session_log::read_jsonl::<Activity>(&path).unwrap();
+        let path = activities_path(&dir, &id);
+        let acts = read_jsonl::<Activity>(&path).unwrap();
         assert_eq!(acts.len(), 1, "活动应实时落盘");
         assert!(matches!(&acts[0], Activity::Thinking { content, .. } if content == "想"));
         let _ = std::fs::remove_dir_all(&dir);

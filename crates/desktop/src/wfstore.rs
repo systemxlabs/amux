@@ -8,6 +8,9 @@
 use std::io;
 use std::path::Path;
 
+#[cfg(test)]
+use amux_common::session_log::append_jsonl;
+use amux_common::session_log::{activities_path, history_path, read_jsonl, write_jsonl_atomic};
 use protocol::{Activity, ContentBlock, HistoryItem};
 use rusqlite::{params, Connection};
 
@@ -186,8 +189,8 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
         ],
     )
     .map_err(io::Error::other)?;
-    amux_common::session_log::write_jsonl_atomic(
-        &amux_common::session_log::history_path(data_dir, &session.id),
+    write_jsonl_atomic(
+        &history_path(data_dir, &session.id),
         &history_from_transcript(&session.transcript),
     )?;
     // 活动由 WorkflowEngine 实时逐条追加写盘，save 不再整文件覆盖，
@@ -234,12 +237,8 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
 /// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
 /// 调用方可先在锁外读盘、再短暂持锁合并——避免持写锁做 IO 阻塞渲染与后台推进。
 pub fn load_payload(data_dir: &Path, id: &str) -> io::Result<(Vec<OrcMsg>, Vec<Activity>)> {
-    let transcript = transcript_from_history(&amux_common::session_log::read_jsonl(
-        &amux_common::session_log::history_path(data_dir, id),
-    )?);
-    let activities = amux_common::session_log::read_jsonl(
-        &amux_common::session_log::activities_path(data_dir, id),
-    )?;
+    let transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, id))?);
+    let activities = read_jsonl(&activities_path(data_dir, id))?;
     Ok((transcript, activities))
 }
 
@@ -247,10 +246,7 @@ pub fn remove(data_dir: &Path, id: &str) -> io::Result<()> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
         .map_err(io::Error::other)?;
-    for path in [
-        amux_common::session_log::history_path(data_dir, id),
-        amux_common::session_log::activities_path(data_dir, id),
-    ] {
+    for path in [history_path(data_dir, id), activities_path(data_dir, id)] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -388,8 +384,8 @@ mod tests {
         };
         save(&dir, &session).unwrap();
         // 活动由引擎实时追加写盘；这里模拟已实时追加的活动，供 backfill 恢复。
-        let act_path = amux_common::session_log::activities_path(&dir, "orc_1");
-        amux_common::session_log::append_jsonl(
+        let act_path = activities_path(&dir, "orc_1");
+        append_jsonl(
             &act_path,
             &[Activity::Thinking {
                 timestamp: 1,
