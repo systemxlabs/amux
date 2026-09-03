@@ -40,9 +40,9 @@ pub struct SessionManager {
     registry: Arc<SessionRegistry>,
     data_dir: PathBuf,
     tx: broadcast::Sender<ServerNotification>,
-    /// 会话选项：存储在内存，以 Agent 侧数据为权威；new/resume 响应、
-    /// 权威；new/resume 响应、`session/set_config_option` 响应与
-    /// `config_option_update` 通知均全量覆盖）。
+    /// 会话选项：内存存储，以 Agent 侧数据为权威；`session/new` /
+    /// `session/resume` / `session/set_config_option` 响应以及
+    /// `config_option_update` 通知均全量覆盖内存。
     config_options: Mutex<HashMap<String, Vec<protocol::SessionConfigOption>>>,
     /// 进行中的活动（`session.ongoing_activity`；按会话 id 独立存储）
     ongoing: Mutex<HashMap<String, Activity>>,
