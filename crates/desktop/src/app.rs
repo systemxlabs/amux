@@ -357,14 +357,14 @@ impl AmuxApp {
             let t = app.spawn_machine_tasks(window, cx, name, client, generation);
             app._tasks.push(t);
         }
-        // 编排引擎事件订阅：create_session 挂载新子会话后即时刷新对应机器
+        // 编排引擎事件订阅：create_session 挂载新关联普通会话后即时刷新对应机器
         // 会话列表，让新会话立即以「关联普通会话」形式出现在工作流会话下
         //（否则下次轮询/状态变更前会以独立普通会话身份展示）
         let mut hub_events = app.machine_hub.subscribe();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             loop {
                 match hub_events.recv().await {
-                    Ok(HubEvent::ChildMounted { machine_name, .. }) => {
+                    Ok(HubEvent::LinkedSessionMounted { machine_name, .. }) => {
                         let _ = this.update_in(cx, |this, window, cx| {
                             if let Some(idx) = this
                                 .machines
@@ -653,14 +653,14 @@ impl AmuxApp {
             .map(|m| m.config.name.clone())
             .or_else(|| {
                 // 测试/恢复阶段可能暂时没有机器视图；只有全局唯一的
-                // (workflow child id) 匹配才允许使用子会话持久化的机器名，
+                // (workflow linked session id) 匹配才允许使用关联普通会话持久化的机器名，
                 // 避免同 ID 跨机器时退化为错误路由。
                 let names: Vec<String> = this
                     .workflows
                     .iter()
-                    .flat_map(|wf| wf.session.read().children.clone())
-                    .filter(|child| child.id == sid)
-                    .map(|child| child.machine_name)
+                    .flat_map(|wf| wf.session.read().linked_sessions.clone())
+                    .filter(|linked| linked.id == sid)
+                    .map(|linked| linked.machine_name)
                     .collect();
                 (names.len() == 1).then(|| names.into_iter().next().unwrap())
             });
@@ -687,7 +687,7 @@ impl AmuxApp {
         let Some(wi) = this.workflows.iter().position(|wf| {
             wf.session
                 .read()
-                .children
+                .linked_sessions
                 .iter()
                 .any(|c| c.machine_name == machine_name && c.id == sid)
         }) else {
@@ -697,13 +697,13 @@ impl AmuxApp {
         if reason == StateChangeReason::Cancelled {
             // 不推进，但忙碌计数仍要记账，否则取消后计数会永久偏高。
             if let Some(wf) = this.workflows.get_mut(wi) {
-                wf.note_child_state(&machine_name, &sid, old_state, new_state);
+                wf.note_linked_session_state(&machine_name, &sid, old_state, new_state);
             }
             return;
         }
         if !idle {
             if let Some(wf) = this.workflows.get_mut(wi) {
-                wf.note_child_state(&machine_name, &sid, old_state, new_state);
+                wf.note_linked_session_state(&machine_name, &sid, old_state, new_state);
             }
             return;
         }
@@ -715,7 +715,7 @@ impl AmuxApp {
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             run_engine_on_tokio(async move {
                 if let Err(e) = wf
-                    .on_child_state(&machine_name, &sid, old_state, new_state, reason)
+                    .on_linked_session_state(&machine_name, &sid, old_state, new_state, reason)
                     .await
                 {
                     log::error!("推进工作流失败：{e}");

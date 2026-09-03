@@ -58,9 +58,9 @@ impl AmuxApp {
             if self.workflow_idx(&session.id).is_some() {
                 continue;
             }
-            // 每个工作流独立 backend：RigBackend 的 synced_children/synced_activities
+            // 每个工作流独立 backend：RigBackend 的 synced_linked_sessions/synced_activities
             // 是单轮 decide 的回传槽位，共享实例会在并发推进时互相覆盖
-            // （A 可能取到 B 的子会话快照）
+            // （A 可能取到 B 的关联普通会话快照）
             self.workflows.push(WorkflowEngine::restore(
                 session,
                 self.orchestrator_backend(),
@@ -167,10 +167,10 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         wf_id: String,
     ) {
-        let child_count = self
+        let linked_session_count = self
             .workflow_idx(&wf_id)
             .and_then(|idx| self.workflows.get(idx))
-            .map(|w| w.child_count())
+            .map(|w| w.linked_session_count())
             .unwrap_or(0);
         self.confirm_dialog(
             window,
@@ -179,7 +179,7 @@ impl AmuxApp {
             true,
             "删除工作流会话",
             format!(
-                "确定删除该工作流会话吗？将同时删除其 {child_count} 个关联普通会话，不可恢复。"
+                "确定删除该工作流会话吗？将同时删除其 {linked_session_count} 个关联普通会话，不可恢复。"
             ),
             move |this, window, cx| {
                 let wf_id = wf_id.clone();
@@ -197,11 +197,11 @@ impl AmuxApp {
         let Some(idx) = self.workflow_idx(&wf_id) else {
             return;
         };
-        let children: Vec<(usize, String)> = self
+        let linked_sessions: Vec<(usize, String)> = self
             .workflows
             .get(idx)
             .map(|w| {
-                w.children()
+                w.linked_sessions()
                     .iter()
                     .map(|c| (c.machine_idx, c.id.clone()))
                     .collect()
@@ -218,7 +218,7 @@ impl AmuxApp {
         }
         let mut targets = Vec::new();
         let mut unavailable = Vec::new();
-        for (machine, sid) in &children {
+        for (machine, sid) in &linked_sessions {
             if let Some(m) = self.machine(*machine) {
                 targets.push((
                     *machine,
@@ -292,7 +292,7 @@ impl AmuxApp {
                                     this.drafts.retain(|key, _| match key {
                                         DraftKey::Workflow { id } => id != &wf_id,
                                         DraftKey::Session { id, .. } => {
-                                            !children.iter().any(|(_, sid)| sid == id)
+                                            !linked_sessions.iter().any(|(_, sid)| sid == id)
                                         }
                                     });
                                 }
@@ -432,16 +432,16 @@ impl AmuxApp {
                 div().size_2().into_any_element()
             });
 
-        // 子会话默认折叠、可展开下钻。标题/忙闲联表本机会话缓存（权威在 server）
-        let mut children = wf.children();
-        children.sort_by_key(|child| {
+        // 关联普通会话默认折叠、可展开下钻。标题/忙闲联表本机会话缓存（权威在 server）
+        let mut linked_sessions = wf.linked_sessions();
+        linked_sessions.sort_by_key(|linked| {
             std::cmp::Reverse(
-                self.machine(child.machine_idx)
+                self.machine(linked.machine_idx)
                     .and_then(|machine| {
                         machine
                             .sessions
                             .iter()
-                            .find(|session| session.id == child.id)
+                            .find(|session| session.id == linked.id)
                     })
                     .map(|session| session.last_active_at)
                     .unwrap_or(0),
@@ -449,8 +449,8 @@ impl AmuxApp {
         });
         let mut content = v_flex()
             .gap_1()
-            .debug_selector(|| "wf-children-list".into());
-        for c in &children {
+            .debug_selector(|| "wf-linked-sessions-list".into());
+        for c in &linked_sessions {
             let cid = c.id.clone();
             let machine_name = c.machine_name.clone();
             let machine_idx = self.machine_idx_by_name(&machine_name);
@@ -475,7 +475,7 @@ impl AmuxApp {
             };
             let busy = available && meta.is_some_and(|m| m.state == SessionState::Busy);
             let mut title = h_flex()
-                .id(format!("wf-child-title-{wf_id}-{cid}"))
+                .id(format!("wf-linked-session-title-{wf_id}-{cid}"))
                 .flex_1()
                 .min_w_0()
                 .items_center()

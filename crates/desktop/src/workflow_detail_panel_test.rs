@@ -1,5 +1,5 @@
 //! 工作流会话详情面板回归测试：详情数据仅来自应用侧会话元数据——
-//! 关联普通会话列表取自 OrcSession.children（不依赖机器/server 状态），
+//! 关联普通会话列表取自 OrcSession.linked_sessions（不依赖机器/server 状态），
 //! 且工作流会话不展示普通会话专属的工作目录项。
 
 use std::sync::Arc;
@@ -10,10 +10,10 @@ use protocol::{SessionMeta, SessionState};
 use crate::app::{AmuxApp, Panel, Selected};
 use crate::config::{ApiFormat, ConfigStore, MachineConfig, OrchestratorConfig};
 use crate::machine::{MachineStatus, MachineView};
-use crate::workflow::ChildSession;
+use crate::workflow::LinkedSession;
 
 #[gpui::test]
-fn workflow_detail_shows_children_without_cwd_row(cx: &mut gpui::TestAppContext) {
+fn workflow_detail_shows_linked_sessions_without_cwd_row(cx: &mut gpui::TestAppContext) {
     let cx = cx.add_empty_window();
     let data_dir = tempfile::tempdir().unwrap();
     let data_path = data_dir.path().to_path_buf();
@@ -35,13 +35,13 @@ fn workflow_detail_shows_children_without_cwd_row(cx: &mut gpui::TestAppContext)
             app.workflow_input
                 .update(cx, |s, cx| s.set_value("测试计划", window, cx));
             app.create_workflow(window, cx);
-            // 关联普通会话仅存在于应用侧元数据（OrcSession.children）；
+            // 关联普通会话仅存在于应用侧元数据（OrcSession.linked_sessions）；
             // 未注册任何机器，详情渲染不应依赖机器/server 状态
             app.workflows[0]
                 .session
                 .write()
-                .children
-                .push(ChildSession {
+                .linked_sessions
+                .push(LinkedSession {
                     id: "child-1".into(),
                     machine_idx: 0,
                     machine_name: "remote".into(),
@@ -58,11 +58,11 @@ fn workflow_detail_shows_children_without_cwd_row(cx: &mut gpui::TestAppContext)
     );
 
     let section = cx
-        .debug_bounds("wf-detail-children")
+        .debug_bounds("wf-detail-linked-sessions")
         .expect("工作流详情应渲染关联普通会话区块");
     assert!(section.size.height > px(0.));
     let row = cx
-        .debug_bounds("wf-detail-child")
+        .debug_bounds("wf-detail-linked-session")
         .expect("关联普通会话行应渲染");
     assert!(row.size.height > px(0.));
     assert!(
@@ -127,7 +127,7 @@ fn session_detail_keeps_cwd_row(cx: &mut gpui::TestAppContext) {
         .expect("普通会话详情应展示工作目录");
     assert!(row.size.height > px(0.));
     assert!(
-        cx.debug_bounds("wf-detail-children").is_none(),
+        cx.debug_bounds("wf-detail-linked-sessions").is_none(),
         "普通会话详情不应渲染关联普通会话区块"
     );
 }

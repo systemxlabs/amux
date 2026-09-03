@@ -32,7 +32,7 @@ impl IconNamed for FileDiffIcon {
 impl AmuxApp {
     /// 计划面板：展示普通会话 agent 的计划；无计划时为空白。
     /// 仅普通会话持有计划（计划来自该会话 agent 的 ACP `plan` 通知）；
-    /// 工作流为多子会话聚合，不展示。
+    /// 工作流为多个关联普通会话聚合，不展示。
     pub(crate) fn render_plan_panel(
         &self,
         _window: &mut Window,
@@ -880,14 +880,14 @@ impl AmuxApp {
         ));
         if let Some(Selected::Workflow { id }) = &self.selected {
             // 关联普通会话（仅工作流会话展示）：列表数据仅来自应用侧会话元数据
-            // （OrcSession.children，含会话 ID 与所属机器名），不查询各机器状态
+            // （OrcSession.linked_sessions，含会话 ID 与所属机器名），不查询各机器状态
             if let Some(wf) = self.workflow(id) {
-                let children = wf.children();
+                let linked_sessions = wf.linked_sessions();
                 body = body.child(
                     v_flex()
                         .w_full()
                         .gap_1()
-                        .debug_selector(|| "wf-detail-children".into())
+                        .debug_selector(|| "wf-detail-linked-sessions".into())
                         .child(
                             h_flex()
                                 .items_center()
@@ -898,17 +898,17 @@ impl AmuxApp {
                                         .text_color(cx.theme().foreground),
                                 )
                                 .child(
-                                    Label::new(children.len().to_string())
+                                    Label::new(linked_sessions.len().to_string())
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground),
                                 ),
                         )
-                        .children(children.into_iter().map(|c| {
+                        .children(linked_sessions.into_iter().map(|c| {
                             h_flex()
                                 .w_full()
                                 .gap_1p5()
                                 .items_center()
-                                .debug_selector(|| "wf-detail-child".into())
+                                .debug_selector(|| "wf-detail-linked-session".into())
                                 .child(
                                     Icon::new(IconName::SquareTerminal)
                                         .small()

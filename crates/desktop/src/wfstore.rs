@@ -14,7 +14,7 @@ use amux_common::session_log::{activities_path, history_path, read_jsonl};
 use protocol::{Activity, ContentBlock, HistoryItem};
 use rusqlite::{params, Connection};
 
-use crate::workflow::{ChildSession, OrcMsg, OrcSession};
+use crate::workflow::{LinkedSession, OrcMsg, OrcSession};
 
 const META_SELECT_COLUMNS: &str =
     "id, title, state, last_active_at, children, description, plan, preamble, created_at, updated_at";
@@ -61,6 +61,8 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
     // 多个写者可能并发持久化（各自独立连接）：等锁而非报 "database is locked"
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     conn.execute_batch(
+        // 列名 `children` 是既有存储布局：改名会让旧库缺列而写入失败，
+        // 故保留列名，仅代码层类型/字段用 LinkedSession/linked_sessions。
         "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -126,7 +128,7 @@ fn read_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetaRow> {
 
 fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession> {
     let row = row.map_err(io::Error::other)?;
-    let children: Vec<ChildSession> =
+    let children: Vec<LinkedSession> =
         serde_json::from_str(&row.children).map_err(io::Error::other)?;
     Ok(OrcSession {
         id: row.id,
@@ -136,7 +138,7 @@ fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession>
         preamble: row.preamble,
         state: state_from(&row.state)?,
         transcript: Vec::new(),
-        children,
+        linked_sessions: children,
         activities: Vec::new(),
         created_at: row.created_at,
         updated_at: row.last_active_at.max(row.updated_at),
@@ -144,7 +146,7 @@ fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession>
 }
 
 pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
-    let children = serde_json::to_string(&session.children).map_err(io::Error::other)?;
+    let children = serde_json::to_string(&session.linked_sessions).map_err(io::Error::other)?;
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     conn.execute(
         "INSERT INTO sessions
@@ -283,7 +285,7 @@ mod tests {
                     timestamp: 2,
                 },
             ],
-            children: vec![],
+            linked_sessions: vec![],
             activities: vec![Activity::Thinking {
                 timestamp: 1,
                 content: "想".into(),
@@ -316,7 +318,7 @@ mod tests {
             preamble: String::new(),
             state: SessionState::Idle,
             transcript: Vec::new(),
-            children: Vec::new(),
+            linked_sessions: Vec::new(),
             activities: Vec::new(),
             created_at: 1,
             updated_at: 10,
@@ -371,7 +373,7 @@ mod tests {
                     timestamp: 2,
                 },
             ],
-            children: vec![],
+            linked_sessions: vec![],
             activities: vec![Activity::Thinking {
                 timestamp: 1,
                 content: "想".into(),

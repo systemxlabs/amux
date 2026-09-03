@@ -2,8 +2,8 @@
 //! 系统必须立即向工作流会话注入用户消息，并在当前 turn 结束后补跑一轮
 //! 处理该消息。用真实 AmuxApp 验证完整链路：
 //!
-//! 真实流程中 `prompt_session` 工具阻塞等待子会话结束，busy→idle 事件必然
-//! 在 gate 运行中到达；此前子会话要等整轮 decide 结束才挂载进 `children`，
+//! 真实流程中 `prompt_session` 工具阻塞等待关联普通会话结束，busy→idle 事件必然
+//! 在 gate 运行中到达；此前关联普通会话要等整轮 decide 结束才挂载进 `linked_sessions`，
 //! 事件到达时工作流查找失败、注入被丢弃。
 
 use parking_lot::Mutex;
@@ -14,15 +14,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use amux_desktop::workflow::{
-    AgentSlot, ChildSession, Decision, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,
+    AgentSlot, Decision, LinkedSession, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,
     WorkflowEngine,
 };
 use amux_desktop::ws::WsClient;
 use protocol::{SessionState, StateChangeReason};
 
 /// 可暂停的编排后端：decide 阻塞在信号量上直到测试放行。
-/// 用于复现「子会话完成发生在编排 turn 进行中」——prompt_session 工具
-/// 阻塞等待子会话结束，busy→idle 事件必然在 gate 运行中到达。
+/// 用于复现「关联普通会话完成发生在编排 turn 进行中」——prompt_session 工具
+/// 阻塞等待关联普通会话结束，busy→idle 事件必然在 gate 运行中到达。
 struct PausableBackend {
     started: AtomicUsize,
     release: tokio::sync::Semaphore,
@@ -81,7 +81,7 @@ fn hub_with_one_machine() -> Arc<MachineHub> {
 }
 
 #[tokio::test]
-async fn child_completion_mid_turn_injects_message_and_reruns() {
+async fn linked_session_completion_mid_turn_injects_message_and_reruns() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(PausableBackend {
         started: AtomicUsize::new(0),
@@ -91,13 +91,13 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
                 summary: "第一轮调度".into(),
             },
             Decision {
-                summary: "收到子会话完成，继续下一阶段".into(),
+                summary: "收到关联普通会话完成，继续下一阶段".into(),
             },
         ])),
     });
     let backend_test = backend.clone();
     let engine = WorkflowEngine::new("计划", "", "", backend, hub_with_one_machine(), dir.path());
-    engine.session.write().children.push(ChildSession {
+    engine.session.write().linked_sessions.push(LinkedSession {
         id: "s_child".into(),
         machine_idx: 0,
         machine_name: "测试机".into(),
@@ -108,9 +108,9 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
     let ta = tokio::spawn(async move { engine_task.advance().await });
     wait_until(|| backend_test.started.load(Ordering::SeqCst) >= 1).await;
 
-    // 子会话完成事件在 turn 进行中到达：必须立即注入用户消息
+    // 关联普通会话完成事件在 turn 进行中到达：必须立即注入用户消息
     let injected = engine
-        .on_child_state(
+        .on_linked_session_state(
             "测试机",
             "s_child",
             SessionState::Busy,
@@ -128,7 +128,7 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
             .iter()
             .any(|m| matches!(m, OrcMsg::User { text, .. }
                 if text.contains("s_child@测试机 检测到状态变更"))),
-        "子会话完成（turn 进行中）应立即注入用户消息"
+        "关联普通会话完成（turn 进行中）应立即注入用户消息"
     );
 
     // 放行第一轮 decide → 当前 turn 结束 → 因 requested 补跑第二轮
@@ -141,7 +141,7 @@ async fn child_completion_mid_turn_injects_message_and_reruns() {
     // 第二轮（带注入消息的 rerun）的编排输出应出现在对话流
     assert!(
         engine.session.read().transcript.iter().any(
-            |m| matches!(m, OrcMsg::Orc { text, .. } if text == "收到子会话完成，继续下一阶段")
+            |m| matches!(m, OrcMsg::Orc { text, .. } if text == "收到关联普通会话完成，继续下一阶段")
         ),
         "注入消息应触发编排补跑一轮处理"
     );

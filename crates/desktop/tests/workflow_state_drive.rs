@@ -1,5 +1,5 @@
 //! 关联普通会话完成（busy→idle）必须触发系统向工作流会话注入用户消息。
-//! `session.state_change` 通知 → `on_state_change` 路由 → `on_child_state` 注入。
+//! `session.state_change` 通知 → `on_state_change` 路由 → `on_linked_session_state` 注入。
 //!
 //! 注入发生在引擎后台任务（run_engine_on_tokio）中。后端阻塞在 `pending`
 //! 上永不返回，保证 tokio 侧任务不会在测试期间完成并跨线程唤醒 GPUI 任务
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use amux_desktop::app::AmuxApp;
 use amux_desktop::config::ConfigStore;
 use amux_desktop::workflow::{
-    ChildSession, Decision, MachineHub, OrcBackend, OrcContext, OrcMsg, WorkflowEngine,
+    Decision, LinkedSession, MachineHub, OrcBackend, OrcContext, OrcMsg, WorkflowEngine,
 };
 use amux_desktop::ws::Notification as WsNotification;
 use serde_json::json;
@@ -62,8 +62,8 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
             app.workflows[0]
                 .session
                 .write()
-                .children
-                .push(ChildSession {
+                .linked_sessions
+                .push(LinkedSession {
                     id: "child-1".into(),
                     machine_idx: 0,
                     machine_name: "测试机".into(),

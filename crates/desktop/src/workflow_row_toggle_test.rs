@@ -10,7 +10,7 @@ use gpui::{point, px};
 
 use crate::app::AmuxApp;
 use crate::config::{ApiFormat, ConfigStore, OrchestratorConfig};
-use crate::workflow::ChildSession;
+use crate::workflow::LinkedSession;
 
 #[gpui::test]
 fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppContext) {
@@ -35,12 +35,12 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
             app.workflow_input
                 .update(cx, |s, cx| s.set_value("测试计划", window, cx));
             app.create_workflow(window, cx);
-            // 注入一个已关联的普通子会话（模拟编排调度后的形态）
+            // 注入一个已关联的普通会话（模拟编排调度后的形态）
             app.workflows[0]
                 .session
                 .write()
-                .children
-                .push(ChildSession {
+                .linked_sessions
+                .push(LinkedSession {
                     id: "child-1".into(),
                     machine_idx: 0,
                     machine_name: "test".into(),
@@ -61,16 +61,19 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
     // 强制一帧重绘（点击无副作用的标题栏），使 rendered_frame 反映展开状态
     cx.simulate_click(point(px(600.), px(15.)), gpui::Modifiers::default());
 
-    // 展开后：子会话列表容器渲染（含关联普通会话行）
-    cx.debug_bounds("wf-children-list")
-        .expect("点击展开箭头后子会话列表应渲染");
+    // 展开后：关联普通会话列表容器渲染（含关联普通会话行）
+    cx.debug_bounds("wf-linked-sessions-list")
+        .expect("点击展开箭头后关联普通会话列表应渲染");
 
-    // 再次点击：折叠后子会话列表消失
+    // 再次点击：折叠后关联普通会话列表消失
     cx.simulate_click(
         point(row.right() - px(30.), row.top() + px(18.)),
         gpui::Modifiers::default(),
     );
     cx.simulate_click(point(px(600.), px(15.)), gpui::Modifiers::default());
-    let list = cx.debug_bounds("wf-children-list");
-    assert!(list.is_none(), "再次点击箭头后子会话列表应隐藏: {list:?}");
+    let list = cx.debug_bounds("wf-linked-sessions-list");
+    assert!(
+        list.is_none(),
+        "再次点击箭头后关联普通会话列表应隐藏: {list:?}"
+    );
 }

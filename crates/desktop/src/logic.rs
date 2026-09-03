@@ -65,11 +65,11 @@ pub fn merge_session_window(
 /// 也不能错误地以顶层普通会话出现。
 pub fn filter_workflow_sessions(
     sessions: Vec<SessionMeta>,
-    workflow_child_ids: &std::collections::HashSet<String>,
+    workflow_linked_session_ids: &std::collections::HashSet<String>,
 ) -> Vec<SessionMeta> {
     sessions
         .into_iter()
-        .filter(|session| !workflow_child_ids.contains(&session.id))
+        .filter(|session| !workflow_linked_session_ids.contains(&session.id))
         .collect()
 }
 
@@ -509,10 +509,10 @@ mod tests {
     }
 
     #[test]
-    fn filter_workflow_sessions_removes_children_from_top_level_results() {
-        let sessions = vec![smeta("ordinary", 300), smeta("child", 200)];
-        let child_ids = std::collections::HashSet::from(["child".to_string()]);
-        let filtered = filter_workflow_sessions(sessions, &child_ids);
+    fn filter_workflow_sessions_removes_linked_sessions_from_top_level_results() {
+        let sessions = vec![smeta("ordinary", 300), smeta("linked", 200)];
+        let linked_session_ids = std::collections::HashSet::from(["linked".to_string()]);
+        let filtered = filter_workflow_sessions(sessions, &linked_session_ids);
         assert_eq!(
             filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             ["ordinary"]

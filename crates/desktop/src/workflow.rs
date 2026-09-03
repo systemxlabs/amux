@@ -57,7 +57,7 @@ pub enum OrcMsg {
 /// （编排者经 list_sessions 现查 session.info；GUI 渲染时与本机会话缓存联表）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChildSession {
+pub struct LinkedSession {
     pub id: String,
     pub machine_idx: usize,
     pub machine_name: String,
@@ -77,7 +77,7 @@ pub struct OrcSession {
     pub preamble: String,
     pub state: SessionState,
     pub transcript: Vec<OrcMsg>,
-    pub children: Vec<ChildSession>,
+    pub linked_sessions: Vec<LinkedSession>,
     pub activities: Vec<Activity>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -111,7 +111,7 @@ pub struct MachineSummary {
 #[derive(Debug, Clone)]
 pub enum HubEvent {
     /// 编排智能体已挂载新的关联普通会话（create_session 工具执行成功）。
-    ChildMounted {
+    LinkedSessionMounted {
         machine_name: String,
         session_id: String,
     },
@@ -120,8 +120,8 @@ pub enum HubEvent {
 /// 机器运行时注册表：应用侧在机器增删/重连/状态变化时整体同步，
 /// 工作流引擎每次推进前快照最新连接与摘要。引擎不再持有冻结的
 /// WsClient 列表——否则重连后旧连接的接收端已关闭，工作流从此
-/// 无法下发/取消任何子会话，新增机器也对编排 LLM 不可见。
-/// 同时充当引擎 → 应用的轻量事件通道（子会话挂载后通知应用即时刷新）。
+/// 无法下发/取消任何关联普通会话，新增机器也对编排 LLM 不可见。
+/// 同时充当引擎 → 应用的轻量事件通道（关联普通会话挂载后通知应用即时刷新）。
 #[derive(Debug)]
 pub struct MachineHub {
     entries: Mutex<Vec<(MachineSummary, WsClient)>>,
@@ -140,7 +140,7 @@ impl Default for MachineHub {
 
 impl MachineHub {
     /// 应用侧机器视图整体替换（顺序与 app.machines 一致，
-    /// 保住 ChildSession.machine_idx 的下标语义）。clients 可短于
+    /// 保住 LinkedSession.machine_idx 的下标语义）。clients 可短于
     /// machines（缺客户端即该机不可达，zip 截断）。
     pub fn sync(&self, machines: Vec<MachineSummary>, clients: Vec<WsClient>) {
         *self.entries.lock() = machines.into_iter().zip(clients).collect();
@@ -154,8 +154,8 @@ impl MachineHub {
 
     /// 通知应用：编排智能体已挂载新的关联普通会话（create_session 工具）。
     /// 事件丢失只影响刷新时机（应用侧 10s 轮询兜底），不阻塞编排。
-    pub fn child_mounted(&self, machine_name: &str, session_id: &str) {
-        let _ = self.events.send(HubEvent::ChildMounted {
+    pub fn linked_session_mounted(&self, machine_name: &str, session_id: &str) {
+        let _ = self.events.send(HubEvent::LinkedSessionMounted {
             machine_name: machine_name.to_string(),
             session_id: session_id.to_string(),
         });
@@ -190,17 +190,17 @@ pub struct OrcContext {
     pub plan: String,
     pub preamble: String,
     pub transcript: Vec<String>,
-    pub child_sessions: Vec<ChildSession>,
-    /// 引擎共享会话：create_session 工具即时挂载子会话，
+    pub linked_sessions: Vec<LinkedSession>,
+    /// 引擎共享会话：create_session 工具即时挂载关联普通会话，
     /// 不等整轮 decide 结束就让 GUI 看到关联关系
     pub session: Arc<RwLock<OrcSession>>,
     pub clients: Vec<WsClient>,
     pub machines: Vec<MachineSummary>,
-    /// 引擎 → 应用事件通道：挂载新子会话后通知应用即时刷新会话列表
+    /// 引擎 → 应用事件通道：挂载新关联普通会话后通知应用即时刷新会话列表
     pub hub: Arc<MachineHub>,
-    /// 子会话挂载后的即时落库钩子（create_session 工具挂载后立即调用；
+    /// 关联普通会话挂载后的即时落库钩子（create_session 工具挂载后立即调用；
     /// 整轮结束后的 persist 只兜底全量快照）
-    pub persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub persist_on_linked_session_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
     /// 编排实时活动钩子：工具调用、模型 reasoning 等真实进展实时记录并落盘
     pub record_tool_activity: Option<Arc<dyn Fn(Activity) + Send + Sync>>,
     /// 编排进行中用户插话的实时通道：RigBackend 工具循环在每轮请求边界 drain，
@@ -303,7 +303,7 @@ pub trait OrcBackend: Send + Sync {
         &'a self,
         ctx: &'a OrcContext,
     ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>>;
-    fn take_synced_children(&self) -> Option<Vec<ChildSession>> {
+    fn take_synced_linked_sessions(&self) -> Option<Vec<LinkedSession>> {
         None
     }
 }
@@ -321,11 +321,11 @@ struct AdvanceGate {
 }
 
 /// running 标志的 drop 兜底：turn 中途 panic/早退也不会把引擎永久卡在「推进中」。
-/// 释放门闩后同步工作流状态，避免最后一个子会话在编排 turn 结束前完成时
+/// 释放门闩后同步工作流状态，避免最后一个关联普通会话在编排 turn 结束前完成时
 /// 把状态错误地改成空闲，或 turn 异常退出后永远保持工作中。
 struct GateGuard {
     gate: Arc<Mutex<AdvanceGate>>,
-    busy_children: Arc<Mutex<usize>>,
+    busy_linked_sessions: Arc<Mutex<usize>>,
     session: Arc<RwLock<OrcSession>>,
     active: bool,
 }
@@ -334,7 +334,7 @@ impl GateGuard {
     /// 在已持有 gate 时正常结束推进。
     fn finish_locked(
         active: &mut bool,
-        busy_children: &Arc<Mutex<usize>>,
+        busy_linked_sessions: &Arc<Mutex<usize>>,
         session: &Arc<RwLock<OrcSession>>,
         gate: &mut AdvanceGate,
     ) {
@@ -342,7 +342,7 @@ impl GateGuard {
             return;
         }
         gate.running = false;
-        let busy = *busy_children.lock() > 0;
+        let busy = *busy_linked_sessions.lock() > 0;
         let mut session = session.write();
         session.state = if busy {
             SessionState::Busy
@@ -361,10 +361,10 @@ impl GateGuard {
             return;
         }
         let gate_arc = Arc::clone(&self.gate);
-        let busy_children = Arc::clone(&self.busy_children);
+        let busy_linked_sessions = Arc::clone(&self.busy_linked_sessions);
         let session = Arc::clone(&self.session);
         let mut gate = gate_arc.lock();
-        Self::finish_locked(&mut self.active, &busy_children, &session, &mut gate);
+        Self::finish_locked(&mut self.active, &busy_linked_sessions, &session, &mut gate);
     }
 }
 
@@ -385,9 +385,9 @@ pub struct WorkflowEngine {
     gate: Arc<Mutex<AdvanceGate>>,
     /// 工作中收到的用户消息（steer 注入；当前轮结束后合并）。
     steer_inbox: Arc<Mutex<Vec<String>>>,
-    /// 忙碌子会话计数：子会话状态不落盘（权威在机器 server），仅按状态变更
+    /// 关联普通会话忙碌计数：其状态不落盘（权威在机器 server），仅按状态变更
     /// 事件增减；驱动工作流级忙闲显示与 steer 路由。重启归零。
-    busy_children: Arc<Mutex<usize>>,
+    busy_linked_sessions: Arc<Mutex<usize>>,
     /// 活动实时落盘目录：活动产生即追加写 `<data_dir>/sessions/<id>_activities.jsonl`，
     /// 不等 `persist` 整文件快照。
     data_dir: PathBuf,
@@ -426,7 +426,7 @@ impl WorkflowEngine {
             preamble: preamble.to_string(),
             state: SessionState::Idle,
             transcript,
-            children: Vec::new(),
+            linked_sessions: Vec::new(),
             activities: Vec::new(),
             created_at: t,
             updated_at: t,
@@ -437,7 +437,7 @@ impl WorkflowEngine {
             hub,
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
-            busy_children: Arc::new(Mutex::new(0)),
+            busy_linked_sessions: Arc::new(Mutex::new(0)),
             data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
             persist_lock: Arc::new(Mutex::new(())),
@@ -452,12 +452,12 @@ impl WorkflowEngine {
     ) -> Self {
         // 应用重开后工作流会话回到空闲，重新启动需用户手动触发。
         session.state = SessionState::Idle;
-        // 子会话只持久化机器名和旧下标；应用重启或机器列表变化后按机器名重新绑定。
+        // 关联普通会话只持久化机器名和旧下标；应用重启或机器列表变化后按机器名重新绑定。
         let (machines, _) = hub.snapshot();
-        for child in &mut session.children {
-            child.machine_idx = machines
+        for linked in &mut session.linked_sessions {
+            linked.machine_idx = machines
                 .iter()
-                .position(|machine| machine.name == child.machine_name)
+                .position(|machine| machine.name == linked.machine_name)
                 .unwrap_or(usize::MAX);
         }
         WorkflowEngine {
@@ -466,7 +466,7 @@ impl WorkflowEngine {
             hub,
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
-            busy_children: Arc::new(Mutex::new(0)),
+            busy_linked_sessions: Arc::new(Mutex::new(0)),
             data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
             persist_lock: Arc::new(Mutex::new(())),
@@ -500,13 +500,13 @@ impl WorkflowEngine {
     }
 
     /// 关联普通会话列表的克隆（短临界区读取）。
-    pub fn children(&self) -> Vec<ChildSession> {
-        self.session.read().children.clone()
+    pub fn linked_sessions(&self) -> Vec<LinkedSession> {
+        self.session.read().linked_sessions.clone()
     }
 
     /// 关联普通会话数量。
-    pub fn child_count(&self) -> usize {
-        self.session.read().children.len()
+    pub fn linked_session_count(&self) -> usize {
+        self.session.read().linked_sessions.len()
     }
 
     /// 会话快照（仅读字段的克隆；调用方需持有 RwLock 语义）。
@@ -563,7 +563,7 @@ impl WorkflowEngine {
     }
 
     pub async fn advance(&self) -> Result<(), String> {
-        // 单飞 + 合并：running 期间的触发（子会话事件/用户消息/steer）只置 requested，
+        // 单飞 + 合并：running 期间的触发（关联普通会话事件/用户消息/steer）只置 requested，
         // 由持有者在本轮结束后补跑一轮，避免并发双 turn 分叉 transcript。
         {
             let mut g = self.gate.lock();
@@ -575,7 +575,7 @@ impl WorkflowEngine {
         }
         let mut guard = GateGuard {
             gate: self.gate.clone(),
-            busy_children: self.busy_children.clone(),
+            busy_linked_sessions: self.busy_linked_sessions.clone(),
             session: self.session.clone(),
             active: true,
         };
@@ -593,9 +593,14 @@ impl WorkflowEngine {
                 let rerun = g.requested || steer_added;
                 g.requested = false;
                 if !rerun {
-                    let busy_children = Arc::clone(&guard.busy_children);
+                    let busy_linked_sessions = Arc::clone(&guard.busy_linked_sessions);
                     let session = Arc::clone(&guard.session);
-                    GateGuard::finish_locked(&mut guard.active, &busy_children, &session, &mut g);
+                    GateGuard::finish_locked(
+                        &mut guard.active,
+                        &busy_linked_sessions,
+                        &session,
+                        &mut g,
+                    );
                 }
                 rerun
             };
@@ -658,8 +663,8 @@ impl WorkflowEngine {
                 timestamp: ts,
             }]);
         }
-        if let Some(kids) = self.backend.take_synced_children() {
-            self.with_session(|s| s.children = kids);
+        if let Some(linked_sessions) = self.backend.take_synced_linked_sessions() {
+            self.with_session(|s| s.linked_sessions = linked_sessions);
         }
         Ok(())
     }
@@ -667,10 +672,10 @@ impl WorkflowEngine {
     fn build_context(&self) -> OrcContext {
         // 每次推进前快照：连接与摘要取自 hub 最新状态（重连/加机后即时生效）
         let (machines, clients) = self.hub.snapshot();
-        // 子会话挂载后立即落库（后台任务写盘），不依赖整轮结束后的 persist 快照
+        // 关联普通会话挂载后立即落库（后台任务写盘），不依赖整轮结束后的 persist 快照
         let engine = self.clone();
         let data_dir = self.data_dir.clone();
-        let persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>> =
+        let persist_on_linked_session_mounted: Option<Arc<dyn Fn() + Send + Sync>> =
             Some(Arc::new(move || {
                 engine.persist_in_background(data_dir.clone());
             }));
@@ -688,12 +693,12 @@ impl WorkflowEngine {
                     OrcMsg::Orc { text, .. } => format!("编排：{text}"),
                 })
                 .collect(),
-            child_sessions: s.children.clone(),
+            linked_sessions: s.linked_sessions.clone(),
             session: Arc::clone(&self.session),
             clients,
             machines,
             hub: Arc::clone(&self.hub),
-            persist_on_child_mounted,
+            persist_on_linked_session_mounted,
             steer_inbox: Arc::clone(&self.steer_inbox),
             draft: Arc::new(OrcDraft::new(Arc::clone(&self.session))),
             current: Arc::clone(&self.current_activity),
@@ -703,7 +708,7 @@ impl WorkflowEngine {
     /// 关联普通会话状态变更（GUI 收到 `session.state_change` 通知时调用）。
     /// 变 idle 且变更原因非取消 → 注入变更信息并推进。
     /// 取消导致的不注入：编排者不应与用户的取消拉锯。
-    pub async fn on_child_state(
+    pub async fn on_linked_session_state(
         &self,
         machine_name: &str,
         session_id: &str,
@@ -713,14 +718,14 @@ impl WorkflowEngine {
     ) -> Result<bool, String> {
         let mounted = {
             let s = self.session.read();
-            s.children
+            s.linked_sessions
                 .iter()
                 .any(|c| c.machine_name == machine_name && c.id == session_id)
         };
         if !mounted {
             return Ok(false);
         }
-        self.track_child_state(machine_name, session_id, old_state, new_state);
+        self.track_linked_session_state(machine_name, session_id, old_state, new_state);
         self.sync_state();
         if new_state == SessionState::Idle {
             if reason == StateChangeReason::Cancelled {
@@ -758,21 +763,21 @@ impl WorkflowEngine {
     }
 
     /// 仅更新忙碌计数（不推进）。被过滤不推进的变更事件也须经此记账，
-    /// 否则取消场景下计数永久偏高。与 [`Self::on_child_state`] 二选一调用，
+    /// 否则取消场景下计数永久偏高。与 [`Self::on_linked_session_state`] 二选一调用，
     /// 不可叠加（重复计数）。
-    pub fn note_child_state(
+    pub fn note_linked_session_state(
         &self,
         machine_name: &str,
         session_id: &str,
         old_state: SessionState,
         new_state: SessionState,
     ) {
-        self.track_child_state(machine_name, session_id, old_state, new_state);
+        self.track_linked_session_state(machine_name, session_id, old_state, new_state);
         self.sync_state();
     }
 
-    /// 按状态变更事件增减忙碌子会话计数。
-    fn track_child_state(
+    /// 按状态变更事件增减忙碌关联普通会话计数。
+    fn track_linked_session_state(
         &self,
         machine_name: &str,
         session_id: &str,
@@ -781,14 +786,14 @@ impl WorkflowEngine {
     ) {
         let mounted = {
             let s = self.session.read();
-            s.children
+            s.linked_sessions
                 .iter()
                 .any(|c| c.machine_name == machine_name && c.id == session_id)
         };
         if !mounted || old_state == new_state {
             return;
         }
-        let mut busy = self.busy_children.lock();
+        let mut busy = self.busy_linked_sessions.lock();
         match (old_state, new_state) {
             (SessionState::Idle, SessionState::Busy) => *busy += 1,
             (SessionState::Busy, SessionState::Idle) => *busy = busy.saturating_sub(1),
@@ -798,9 +803,9 @@ impl WorkflowEngine {
 
     fn sync_state(&self) {
         let orchestrating = self.gate.lock().running;
-        let child_busy = *self.busy_children.lock() > 0;
+        let linked_session_busy = *self.busy_linked_sessions.lock() > 0;
         self.with_session(|s| {
-            s.state = if orchestrating || child_busy {
+            s.state = if orchestrating || linked_session_busy {
                 SessionState::Busy
             } else {
                 SessionState::Idle
@@ -817,7 +822,7 @@ impl WorkflowEngine {
     }
 
     /// 返回是否应立即启动推进（false = 编排 turn 已在工作，消息走 steer）。
-    /// 子会话忙但编排空闲时仍应启动新的编排 turn，不能把用户消息留在 steer 队列。
+    /// 关联普通会话忙但编排空闲时仍应启动新的编排 turn，不能把用户消息留在 steer 队列。
     pub fn record_user(&self, text: &str) -> bool {
         // gate 同时保护「turn 是否运行」与 steer 入队：不能先读 running、释放锁，
         // 再入队，否则恰好撞上 turn 收尾时可能既没被本轮吸收，也没触发新 turn。
@@ -973,13 +978,13 @@ impl OrcSession {
 struct LiveRuntime {
     machines: Vec<MachineSummary>,
     clients: Vec<WsClient>,
-    children: Arc<Mutex<Vec<ChildSession>>>,
-    /// 引擎共享会话：create_session 工具即时挂载子会话（不等整轮 decide 结束）
+    linked_sessions: Arc<Mutex<Vec<LinkedSession>>>,
+    /// 引擎共享会话：create_session 工具即时挂载关联普通会话（不等整轮 decide 结束）
     session: Arc<RwLock<OrcSession>>,
-    /// 引擎 → 应用事件通道：挂载新子会话后通知应用即时刷新会话列表
+    /// 引擎 → 应用事件通道：挂载新关联普通会话后通知应用即时刷新会话列表
     hub: Arc<MachineHub>,
-    /// 子会话挂载后的即时落库钩子（见 `OrcContext.persist_on_child_mounted`）
-    persist_on_child_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// 关联普通会话挂载后的即时落库钩子（见 `OrcContext.persist_on_linked_session_mounted`）
+    persist_on_linked_session_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
     /// 编排工具调用活动钩子（见 `OrcContext.record_tool_activity`）
     record_tool_activity: Option<Arc<dyn Fn(Activity) + Send + Sync>>,
     /// 编排输出草稿（见 `OrcContext.draft`）：流式文本实时进 transcript
@@ -1004,8 +1009,8 @@ impl LiveRuntime {
             .ok_or_else(|| format!("机器未连接: {name}"))
     }
 
-    fn child(&self, session_id: &str) -> Result<ChildSession, String> {
-        self.children
+    fn linked_session(&self, session_id: &str) -> Result<LinkedSession, String> {
+        self.linked_sessions
             .lock()
             .iter()
             .find(|c| c.id == session_id)
@@ -1013,14 +1018,14 @@ impl LiveRuntime {
             .ok_or_else(|| format!("关联普通会话不存在: {session_id}"))
     }
 
-    /// 挂载子会话：同时写入工具循环列表、引擎共享会话并立即落库。
+    /// 挂载关联普通会话：同时写入工具循环列表、引擎共享会话并立即落库。
     /// 引擎会话即时更新让 GUI 立即把新会话视为工作流关联会话；
     /// 工具循环列表供本 turn 内 list_sessions 立即可见；立即落库保证
     /// 应用崩溃/退出时关联关系不丢（不等整轮结束后的 persist 快照）。
-    fn mount_child(&self, child: ChildSession) {
-        self.children.lock().push(child.clone());
-        self.session.write().children.push(child);
-        if let Some(persist) = &self.persist_on_child_mounted {
+    fn mount_linked_session(&self, linked: LinkedSession) {
+        self.linked_sessions.lock().push(linked.clone());
+        self.session.write().linked_sessions.push(linked);
+        if let Some(persist) = &self.persist_on_linked_session_mounted {
             persist();
         }
     }
@@ -1062,7 +1067,7 @@ impl LiveRuntime {
 // 解析工具调用 → 执行 → 结果回填 → drain steer 插话 → 再流式请求。
 
 /// 工具循环的模型调用上限，防失控。编排一轮可能合理地做几十次调度
-/// （创建多个子会话、逐个下发指令、回读状态），rig 通用默认的 8 轮会被
+/// （创建多个关联普通会话、逐个下发指令、回读状态），rig 通用默认的 8 轮会被
 /// 合法长 turn 误杀，放宽到 32；真死循环由重复调用检测兜底。
 const MAX_TOOL_TURNS: usize = 32;
 
@@ -1389,7 +1394,7 @@ where
         }
     }
     // 轮次上限：优雅收尾而非报错——已完成的调度保留在对话历史，下一轮
-    // （用户消息/子会话事件驱动）从断点继续；以错误呈现会让用户无从继续
+    // （用户消息/关联普通会话事件驱动）从断点继续；以错误呈现会让用户无从继续
     log::warn!("编排 agent 连续 {MAX_TOOL_TURNS} 轮未结束 turn，本轮收尾");
     let out = format!("（本轮工具调度已达 {MAX_TOOL_TURNS} 次上限，已暂停；可输入消息继续推进）");
     live.draft.push_message(&out);
@@ -1398,14 +1403,14 @@ where
 
 pub struct RigBackend {
     cfg: OrchestratorConfig,
-    synced_children: Mutex<Option<Vec<ChildSession>>>,
+    synced_linked_sessions: Mutex<Option<Vec<LinkedSession>>>,
 }
 
 impl RigBackend {
     pub fn new(cfg: OrchestratorConfig) -> Self {
         RigBackend {
             cfg,
-            synced_children: Mutex::new(None),
+            synced_linked_sessions: Mutex::new(None),
         }
     }
 
@@ -1444,10 +1449,10 @@ impl OrcBackend for RigBackend {
             let live = LiveRuntime {
                 machines: ctx.machines.clone(),
                 clients: ctx.clients.clone(),
-                children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
+                linked_sessions: Arc::new(Mutex::new(ctx.linked_sessions.clone())),
                 session: ctx.session.clone(),
                 hub: ctx.hub.clone(),
-                persist_on_child_mounted: ctx.persist_on_child_mounted.clone(),
+                persist_on_linked_session_mounted: ctx.persist_on_linked_session_mounted.clone(),
                 record_tool_activity: ctx.record_tool_activity.clone(),
                 draft: Arc::clone(&ctx.draft),
                 current: Arc::clone(&ctx.current),
@@ -1510,14 +1515,14 @@ impl OrcBackend for RigBackend {
                     .await?
                 }
             };
-            let kids = live.children.lock().clone();
-            *self.synced_children.lock() = Some(kids);
+            let linked_sessions = live.linked_sessions.lock().clone();
+            *self.synced_linked_sessions.lock() = Some(linked_sessions);
             Ok(Decision { summary: text })
         })
     }
 
-    fn take_synced_children(&self) -> Option<Vec<ChildSession>> {
-        self.synced_children.lock().take()
+    fn take_synced_linked_sessions(&self) -> Option<Vec<LinkedSession>> {
+        self.synced_linked_sessions.lock().take()
     }
 }
 
@@ -1664,9 +1669,9 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
     use std::collections::{BTreeMap, HashMap};
     // 标题/忙闲/agent 以机器 server 为权威：按机器分组批量现查 session.info，
     // 本地不缓存这些易漂移的字段
-    let children = live.children.lock().clone();
+    let linked_sessions = live.linked_sessions.lock().clone();
     let mut ids_by_machine: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    for c in &children {
+    for c in &linked_sessions {
         ids_by_machine
             .entry(c.machine_idx)
             .or_default()
@@ -1689,14 +1694,14 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
             }
         }
     }
-    let online_of = |c: &ChildSession| {
+    let online_of = |c: &LinkedSession| {
         live.machines
             .iter()
             .find(|m| m.name == c.machine_name)
             .map(|m| m.online)
             .unwrap_or(false)
     };
-    let v: Vec<serde_json::Value> = children
+    let v: Vec<serde_json::Value> = linked_sessions
         .iter()
         .map(|c| match metas.get(&c.id) {
             Some(m) => serde_json::json!({
@@ -1755,15 +1760,15 @@ async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<S
         return Err("创建会话未返回 id".to_string());
     }
     let machine_name = args.machine.clone();
-    // 即时挂载：子会话立即进入工作流会话关联列表（不等整轮 decide 结束），
+    // 即时挂载：关联普通会话立即进入工作流会话关联列表（不等整轮 decide 结束），
     // 并通知应用刷新会话列表——否则在下次轮询/状态变更前，新会话会以
     // 独立普通会话身份出现在侧栏，而非挂在工作流会话之下
-    live.mount_child(ChildSession {
+    live.mount_linked_session(LinkedSession {
         id: sid.clone(),
         machine_idx: idx,
         machine_name: machine_name.clone(),
     });
-    live.hub.child_mounted(&machine_name, &sid);
+    live.hub.linked_session_mounted(&machine_name, &sid);
     Ok(sid)
 }
 
@@ -1774,10 +1779,10 @@ struct PromptSessionArgs {
 }
 
 async fn prompt_session(live: &LiveRuntime, args: PromptSessionArgs) -> Result<String, String> {
-    let child = live.child(&args.session)?;
+    let linked_session = live.linked_session(&args.session)?;
     let client = live
         .clients
-        .get(child.machine_idx)
+        .get(linked_session.machine_idx)
         .cloned()
         .ok_or_else(|| "机器连接已失效".to_string())?;
     let input = SessionPromptParams {
@@ -1797,10 +1802,10 @@ struct SessionRefArgs {
 }
 
 async fn cancel_session(live: &LiveRuntime, args: SessionRefArgs) -> Result<String, String> {
-    let child = live.child(&args.session)?;
+    let linked_session = live.linked_session(&args.session)?;
     let client = live
         .clients
-        .get(child.machine_idx)
+        .get(linked_session.machine_idx)
         .cloned()
         .ok_or_else(|| "机器连接已失效".to_string())?;
     client
@@ -1828,13 +1833,13 @@ async fn configure_session(
     live: &LiveRuntime,
     args: ConfigureSessionArgs,
 ) -> Result<String, String> {
-    let child = live.child(&args.session)?;
+    let linked_session = live.linked_session(&args.session)?;
     if args.title.is_none() && args.config.is_none() {
         return Err("configure_session 至少设置 title 或 config 之一".into());
     }
     let client = live
         .clients
-        .get(child.machine_idx)
+        .get(linked_session.machine_idx)
         .cloned()
         .ok_or_else(|| "机器连接已失效".to_string())?;
     client
@@ -1855,10 +1860,10 @@ async fn get_session_config_options(
     live: &LiveRuntime,
     args: SessionRefArgs,
 ) -> Result<String, String> {
-    let child = live.child(&args.session)?;
+    let linked_session = live.linked_session(&args.session)?;
     let client = live
         .clients
-        .get(child.machine_idx)
+        .get(linked_session.machine_idx)
         .cloned()
         .ok_or_else(|| "机器连接已失效".to_string())?;
     let result = client
@@ -1887,10 +1892,10 @@ async fn read_session_page(
     args: SessionPageArgs,
     method: &'static str,
 ) -> Result<String, String> {
-    let child = live.child(&args.session)?;
+    let linked_session = live.linked_session(&args.session)?;
     let client = live
         .clients
-        .get(child.machine_idx)
+        .get(linked_session.machine_idx)
         .cloned()
         .ok_or_else(|| "机器连接已失效".to_string())?;
     let params = SessionPageParams {
@@ -1956,7 +1961,7 @@ mod tests {
             preamble: String::new(),
             state: SessionState::Idle,
             transcript: Vec::new(),
-            children: Vec::new(),
+            linked_sessions: Vec::new(),
             activities: Vec::new(),
             created_at: 0,
             updated_at: 0,
@@ -1967,39 +1972,39 @@ mod tests {
                 "ws://127.0.0.1:1".into(),
                 "unused".into(),
             )],
-            children: Arc::new(Mutex::new(Vec::new())),
+            linked_sessions: Arc::new(Mutex::new(Vec::new())),
             draft: Arc::new(OrcDraft::new(session.clone())),
             session,
             hub: Arc::new(MachineHub::default()),
-            persist_on_child_mounted: None,
+            persist_on_linked_session_mounted: None,
             record_tool_activity: None,
             current: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// 回归：create_session 挂载子会话必须同时写入引擎共享会话（GUI 即时可见），
+    /// 回归：create_session 挂载关联普通会话必须同时写入引擎共享会话（GUI 即时可见），
     /// 否则整轮 decide 结束前，新会话会以独立普通会话身份出现在会话列表。
     #[test]
-    fn mount_child_registers_into_tool_list_and_engine_session() {
+    fn mount_linked_session_registers_into_tool_list_and_engine_session() {
         let live = test_live();
-        live.mount_child(ChildSession {
+        live.mount_linked_session(LinkedSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
         assert_eq!(
-            live.children.lock().len(),
+            live.linked_sessions.lock().len(),
             1,
-            "工具循环内 list_sessions 应立即看到新子会话"
+            "工具循环内 list_sessions 应立即看到新关联普通会话"
         );
         assert_eq!(
-            live.session.read().children.len(),
+            live.session.read().linked_sessions.len(),
             1,
-            "引擎共享会话应立即挂载子会话（关联关系即时生效）"
+            "引擎共享会话应立即挂载关联普通会话（关联关系即时生效）"
         );
     }
 
-    /// 回归：create_session 挂载子会话后应立即写入元数据库（sqlite），
+    /// 回归：create_session 挂载关联普通会话后应立即写入元数据库（sqlite），
     /// 不等整轮 decide 结束——否则应用中途退出会丢失关联关系。
     #[test]
     fn mounted_child_is_persisted_immediately() {
@@ -2025,43 +2030,43 @@ mod tests {
         let live = LiveRuntime {
             machines: ctx.machines.clone(),
             clients: ctx.clients.clone(),
-            children: Arc::new(Mutex::new(ctx.child_sessions.clone())),
+            linked_sessions: Arc::new(Mutex::new(ctx.linked_sessions.clone())),
             session: ctx.session.clone(),
             hub: ctx.hub.clone(),
             draft: Arc::new(OrcDraft::new(ctx.session.clone())),
-            persist_on_child_mounted: Some(Arc::new(move || {
+            persist_on_linked_session_mounted: Some(Arc::new(move || {
                 let _ = persist_engine.persist(&persist_dir);
             })),
             record_tool_activity: None,
             current: Arc::new(Mutex::new(None)),
         };
-        live.mount_child(ChildSession {
+        live.mount_linked_session(LinkedSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
-        // 未等整轮 decide 结束：元数据库应立即包含刚挂载的子会话
+        // 未等整轮 decide 结束：元数据库应立即包含刚挂载的关联普通会话
         let sessions = WorkflowEngine::load_all(&dir).unwrap();
-        assert_eq!(sessions[0].children.len(), 1);
-        assert_eq!(sessions[0].children[0].id, "s_child");
+        assert_eq!(sessions[0].linked_sessions.len(), 1);
+        assert_eq!(sessions[0].linked_sessions[0].id, "s_child");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 子会话挂载事件可被应用侧订阅到（驱动即时刷新）。
+    /// 关联普通会话挂载事件可被应用侧订阅到（驱动即时刷新）。
     #[test]
-    fn child_mounted_event_reaches_subscriber() {
+    fn linked_session_mounted_event_reaches_subscriber() {
         let hub = MachineHub::default();
         let mut rx = hub.subscribe();
-        hub.child_mounted("测试机", "s_child");
+        hub.linked_session_mounted("测试机", "s_child");
         match rx.try_recv() {
-            Ok(HubEvent::ChildMounted {
+            Ok(HubEvent::LinkedSessionMounted {
                 machine_name,
                 session_id,
             }) => {
                 assert_eq!(machine_name, "测试机");
                 assert_eq!(session_id, "s_child");
             }
-            other => panic!("应收到 ChildMounted 事件，实际 {other:?}"),
+            other => panic!("应收到 LinkedSessionMounted 事件，实际 {other:?}"),
         }
     }
 
@@ -2166,7 +2171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_child_state_idle_always_triggers_advance() {
+    async fn on_linked_session_state_idle_always_triggers_advance() {
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![Decision {
             summary: "本轮静默".into(),
@@ -2179,13 +2184,13 @@ mod tests {
             test_hub(vec![m], clients),
             &temp_data_dir(),
         );
-        engine.session.write().children.push(ChildSession {
+        engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
         let advanced = engine
-            .on_child_state(
+            .on_linked_session_state(
                 "测试机",
                 "s_child",
                 SessionState::Busy,
@@ -2230,13 +2235,13 @@ mod tests {
             test_hub(vec![m], clients),
             &temp_data_dir(),
         );
-        engine.session.write().children.push(ChildSession {
+        engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
         let advanced = engine
-            .on_child_state(
+            .on_linked_session_state(
                 "测试机",
                 "s_child",
                 SessionState::Busy,
@@ -2443,7 +2448,7 @@ mod tests {
     #[tokio::test]
     async fn configure_session_rejects_empty_configuration_before_rpc() {
         let live = test_live();
-        live.children.lock().push(ChildSession {
+        live.linked_sessions.lock().push(LinkedSession {
             id: "child-1".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
@@ -2602,7 +2607,7 @@ mod tests {
     }
 
     #[test]
-    fn note_child_state_tracks_busy_count() {
+    fn note_linked_session_state_tracks_busy_count() {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "计划",
@@ -2613,16 +2618,31 @@ mod tests {
             &temp_data_dir(),
         );
         let engine = engine;
-        engine.session.write().children.push(ChildSession {
+        engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
-        engine.note_child_state("测试机", "s_child", SessionState::Idle, SessionState::Busy);
+        engine.note_linked_session_state(
+            "测试机",
+            "s_child",
+            SessionState::Idle,
+            SessionState::Busy,
+        );
         assert_eq!(engine.session.read().state, SessionState::Busy);
-        engine.note_child_state("测试机", "s_child", SessionState::Busy, SessionState::Idle);
+        engine.note_linked_session_state(
+            "测试机",
+            "s_child",
+            SessionState::Busy,
+            SessionState::Idle,
+        );
         assert_eq!(engine.session.read().state, SessionState::Idle);
-        engine.note_child_state("测试机", "missing", SessionState::Idle, SessionState::Busy);
+        engine.note_linked_session_state(
+            "测试机",
+            "missing",
+            SessionState::Idle,
+            SessionState::Busy,
+        );
         assert_eq!(engine.session.read().state, SessionState::Idle);
     }
 
@@ -2636,12 +2656,17 @@ mod tests {
             test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
             &temp_data_dir(),
         );
-        engine.session.write().children.push(ChildSession {
+        engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),
         });
-        engine.note_child_state("测试机", "s_child", SessionState::Idle, SessionState::Busy);
+        engine.note_linked_session_state(
+            "测试机",
+            "s_child",
+            SessionState::Idle,
+            SessionState::Busy,
+        );
 
         assert!(engine.record_user("继续处理"));
         assert!(engine.steer_inbox.lock().is_empty());
@@ -3011,7 +3036,7 @@ mod tests {
             }
         }
         live.clients[0] = client;
-        live.mount_child(ChildSession {
+        live.mount_linked_session(LinkedSession {
             id: "s_child".into(),
             machine_idx: 0,
             machine_name: "测试机".into(),

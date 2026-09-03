@@ -103,16 +103,16 @@ impl AmuxApp {
             // 先过滤掉属于本次工作流窗口之外的普通会话，再计算当前窗口需要补查的关联会话。
             let missing = match this.update_in(cx, |this, _w, _cx| {
                 let idx = this.machine_idx_by_name(&machine_name)?;
-                let mut all_child_ids = HashSet::new();
-                let mut visible_child_ids = HashSet::new();
+                let mut all_linked_session_ids = HashSet::new();
+                let mut visible_linked_session_ids = HashSet::new();
                 for wf in &this.workflows {
-                    for child in &wf.session.read().children {
-                        if child.machine_name != machine_name {
+                    for linked in &wf.session.read().linked_sessions {
+                        if linked.machine_name != machine_name {
                             continue;
                         }
-                        all_child_ids.insert(child.id.clone());
+                        all_linked_session_ids.insert(linked.id.clone());
                         if this.visible_workflows.contains(&wf.id()) {
-                            visible_child_ids.insert(child.id.clone());
+                            visible_linked_session_ids.insert(linked.id.clone());
                         }
                     }
                 }
@@ -120,12 +120,12 @@ impl AmuxApp {
                 if m.connection_generation != generation || m.sessions_request_id != request_id {
                     return None;
                 }
-                m.sessions = crate::logic::filter_workflow_sessions(pages, &all_child_ids);
+                m.sessions = crate::logic::filter_workflow_sessions(pages, &all_linked_session_ids);
                 m.sessions_has_more = has_more;
                 m.unavailable_workflow_sessions.clear();
                 crate::logic::sort_sessions_recent(&mut m.sessions);
                 Some(
-                    visible_child_ids
+                    visible_linked_session_ids
                         .into_iter()
                         .filter(|cid| !m.sessions.iter().any(|s| s.id == *cid))
                         .collect::<Vec<_>>(),
@@ -1043,15 +1043,15 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        // 子会话只挂在工作流会话下，顶层列表跳过
-        let child_ids: std::collections::HashSet<String> = self
+        // 关联普通会话只挂在工作流会话下，顶层列表跳过
+        let linked_session_ids: std::collections::HashSet<String> = self
             .workflows
             .iter()
             .filter(|wf| self.visible_workflows.contains(&wf.id()))
             .flat_map(|wf| {
                 wf.session
                     .read()
-                    .children
+                    .linked_sessions
                     .iter()
                     .map(|c| c.id.clone())
                     .collect::<Vec<_>>()
@@ -1065,7 +1065,7 @@ impl AmuxApp {
                 continue;
             }
             for s in &m.sessions {
-                if child_ids.contains(s.id.as_str()) {
+                if linked_session_ids.contains(s.id.as_str()) {
                     continue;
                 }
                 items.push((
@@ -1083,7 +1083,7 @@ impl AmuxApp {
             }
             let s_guard = wf.snapshot();
             let mut recency = s_guard.updated_at;
-            for c in &s_guard.children {
+            for c in &s_guard.linked_sessions {
                 if let Some(mm) = self.machines.get(c.machine_idx) {
                     if let Some(s) = mm.sessions.iter().find(|s| s.id == c.id) {
                         recency = recency.max(s.last_active_at);

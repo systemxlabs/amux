@@ -389,9 +389,9 @@ impl AmuxApp {
             workflow
                 .session
                 .read()
-                .children
+                .linked_sessions
                 .iter()
-                .any(|child| child.machine_idx == idx)
+                .any(|linked| linked.machine_idx == idx)
         }) {
             self.settings.machine_form_error =
                 Some("请先删除关联工作流会话，再移除该机器。".into());
@@ -418,8 +418,8 @@ impl AmuxApp {
         self.machines.remove(idx);
         self.sync_machine_hub();
         for wf in self.workflows.iter_mut() {
-            let mut children_guard = wf.session.write();
-            for c in children_guard.children.iter_mut() {
+            let mut session_guard = wf.session.write();
+            for c in session_guard.linked_sessions.iter_mut() {
                 if c.machine_idx == idx {
                     // 保留机器名和远端会话关联，但标记为未绑定，避免下标
                     // 左移后误操作另一台机器。
