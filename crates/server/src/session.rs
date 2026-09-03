@@ -50,7 +50,7 @@ pub struct SessionManager {
     /// `ongoing` 中的 `Activity::Thinking.content` 写入时引用这里，保证 GUI 看到
     /// 的是「整个思考的前一部分」而不是最新一个流式片段。
     /// 与 `ongoing` 生命周期一致：turn 结束随 `ongoing` 一起清理。
-    thinking_buf: Mutex<HashMap<String, (String, u64)>>,
+    thinking_buf: Mutex<HashMap<String, ThinkingBuffer>>,
     controls: Mutex<HashMap<String, Arc<SessionControl>>>,
 }
 
@@ -59,6 +59,12 @@ struct SessionControl {
     deleted: AtomicBool,
     /// 串行化删除与 agent 侧会话创建/元数据写回，避免删除竞态下会话复活。
     lifecycle: Mutex<()>,
+}
+
+#[derive(Debug, Clone)]
+struct ThinkingBuffer {
+    content: String,
+    first_timestamp: u64,
 }
 
 fn now() -> u64 {
@@ -272,7 +278,7 @@ impl SessionManager {
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
-        let (meta, agent_session_id) = match self.get_entry(session_id) {
+        let entry = match self.get_entry(session_id) {
             Ok(entry) => entry,
             Err(error) => {
                 self.remove_control_if_not_found(session_id, &control, &error);
@@ -280,7 +286,8 @@ impl SessionManager {
             }
         };
         let (driver, agent_session_id) =
-            self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
+            self.ensure_agent_session(session_id, &entry.meta, &entry.agent_session_id)?;
+        let meta = entry.meta;
         // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
         // 最新选项全量覆盖内存存储；幂等 resume 返回空集合时保持既有选项。
         match driver.resume_session(&agent_session_id, &Self::effective_cwd(&meta)) {
@@ -299,15 +306,15 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Option<(crate::agent::SharedDriver, String)>, SessionError> {
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
-        if agent_session_id.is_empty() {
+        let entry = self.get_entry(session_id)?;
+        if entry.agent_session_id.is_empty() {
             return Ok(None);
         }
         let driver = self
             .agents
-            .driver_for(&meta.agent)
+            .driver_for(&entry.meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        Ok(Some((driver, agent_session_id)))
+        Ok(Some((driver, entry.agent_session_id)))
     }
 
     /// 查询会话斜杠命令：内存缓存以 Agent 侧数据为权威，由 ACP
@@ -354,14 +361,15 @@ impl SessionManager {
         control.deleted.store(true, Ordering::SeqCst);
         let _lifecycle = control.lifecycle.lock();
         let log = SessionLog::open(&self.data_dir, session_id);
-        let Some((meta, agent_session_id)) = self.registry.get(session_id)? else {
+        let Some(entry) = self.registry.get(session_id)? else {
             // 另一条删除请求可能已经完成本地删除；当前控制块仍需移除。
             self.remove_control_if_current(session_id, &control);
             return log
                 .remove()
                 .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
         };
-        // 元数据先行删除：删除 RPC 立即返回，会话列表随桌面端删除后的主动刷新
+        let meta = entry.meta;
+        let agent_session_id = entry.agent_session_id;
         // 即刻生效；agent 往返与 worktree 清理较慢，交由后台任务异步完成。
         self.registry.delete(session_id)?;
         log.remove()
@@ -419,7 +427,11 @@ impl SessionManager {
         let all = self.registry.list()?;
         let limit = limit.unwrap_or(50).max(1);
         let has_more = all.len() > limit;
-        let metas = all.into_iter().take(limit).map(|(m, _)| m).collect();
+        let metas = all
+            .into_iter()
+            .take(limit)
+            .map(|entry| entry.meta)
+            .collect();
         Ok((metas, has_more))
     }
 
@@ -428,15 +440,15 @@ impl SessionManager {
         let mut metas = Vec::new();
         for id in session_ids {
             // 单次查询同时完成「是否存在」与「取元数据」，避免重复读注册表
-            if let Some((meta, _)) = self.registry.get(id)? {
-                metas.push(meta);
+            if let Some(entry) = self.registry.get(id)? {
+                metas.push(entry.meta);
             }
         }
         Ok(metas)
     }
 
     /// 注册表单条读取：不存在 → NotFound，存储故障 → Storage。
-    fn get_entry(&self, session_id: &str) -> Result<(SessionMeta, String), SessionError> {
+    fn get_entry(&self, session_id: &str) -> Result<crate::registry::RegistryEntry, SessionError> {
         self.registry
             .get(session_id)?
             .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
@@ -447,7 +459,7 @@ impl SessionManager {
     /// worktree 会话：agent 实际工作在 worktree，
     /// 改动视图（diff/restore/list/read）应作用于 worktree 目录而非原始目录。
     pub fn workspace_cwd(&self, session_id: &str) -> Result<String, SessionError> {
-        let meta = self.get_entry(session_id)?.0;
+        let meta = self.get_entry(session_id)?.meta;
         Ok(Self::effective_cwd(&meta))
     }
 
@@ -456,7 +468,8 @@ impl SessionManager {
     pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> Result<usize, SessionError> {
         let candidates = self.registry.idle_candidates(now_ms, timeout_ms)?;
         let mut closed = 0;
-        for (sid, _) in candidates {
+        for candidate in candidates {
+            let sid = candidate.session_id;
             let Ok(control) = self.control(&sid) else {
                 continue;
             };
@@ -464,9 +477,11 @@ impl SessionManager {
             if control.deleted.load(Ordering::SeqCst) {
                 continue;
             }
-            let Ok(Some((meta, aid))) = self.registry.get(&sid) else {
+            let Ok(Some(entry)) = self.registry.get(&sid) else {
                 continue;
             };
+            let meta = entry.meta;
+            let aid = entry.agent_session_id;
             if aid.is_empty() || meta.state == SessionState::Busy {
                 continue;
             }
@@ -495,7 +510,8 @@ impl SessionManager {
     ) -> Result<usize, SessionError> {
         let candidates = self.registry.idle_worktree_candidates(now_ms, timeout_ms)?;
         let mut cleaned = 0;
-        for (sid, cwd, worktree_dir) in candidates {
+        for candidate in candidates {
+            let sid = candidate.session_id;
             let Ok(control) = self.control(&sid) else {
                 continue;
             };
@@ -503,14 +519,15 @@ impl SessionManager {
             if control.deleted.load(Ordering::SeqCst) {
                 continue;
             }
-            let Ok(Some((meta, _))) = self.registry.get(&sid) else {
+            let Ok(Some(entry)) = self.registry.get(&sid) else {
                 continue;
             };
-            if meta.state != SessionState::Idle || meta.worktree_dir != worktree_dir {
+            let meta = entry.meta;
+            if meta.state != SessionState::Idle || meta.worktree_dir != candidate.worktree_dir {
                 continue;
             }
-            let wt = PathBuf::from(&worktree_dir);
-            GitRunner::new().remove_worktree(&cwd, &wt);
+            let wt = PathBuf::from(&candidate.worktree_dir);
+            GitRunner::new().remove_worktree(&candidate.cwd, &wt);
             if !wt.exists() {
                 if let Err(e) = self.registry.clear_worktree_dir(&sid) {
                     log::error!("清空会话 worktree 目录失败 {sid}: {e}");
@@ -701,7 +718,9 @@ impl SessionManager {
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
-        let (mut meta, agent_session_id) = self.get_entry(session_id)?;
+        let entry = self.get_entry(session_id)?;
+        let mut meta = entry.meta;
+        let agent_session_id = entry.agent_session_id;
         let old_state = meta.state;
         if meta.state == SessionState::Busy {
             return Err(SessionError::Busy);
@@ -772,14 +791,17 @@ impl SessionManager {
                     let ts = now();
                     let (accumulated, first_ts) = {
                         let mut buf = self.thinking_buf.lock();
-                        let entry = buf
-                            .entry(session_id.to_string())
-                            .or_insert_with(|| (String::new(), ts));
-                        if entry.1 == 0 {
-                            entry.1 = ts;
+                        let entry =
+                            buf.entry(session_id.to_string())
+                                .or_insert_with(|| ThinkingBuffer {
+                                    content: String::new(),
+                                    first_timestamp: ts,
+                                });
+                        if entry.first_timestamp == 0 {
+                            entry.first_timestamp = ts;
                         }
-                        entry.0.push_str(&text);
-                        (entry.0.clone(), entry.1)
+                        entry.content.push_str(&text);
+                        (entry.content.clone(), entry.first_timestamp)
                     };
                     self.ongoing.lock().insert(
                         session_id.to_string(),
@@ -913,7 +935,9 @@ impl SessionManager {
 
     /// 取消指定普通会话正在进行的工作。
     pub async fn cancel(&self, session_id: &str) -> Result<(), SessionError> {
-        let (meta, agent_session_id) = self.get_entry(session_id)?;
+        let entry = self.get_entry(session_id)?;
+        let meta = entry.meta;
+        let agent_session_id = entry.agent_session_id;
         // 空闲会话（或尚无 agent 侧会话）无可取消：ACP agent 对未知 turn
         // 会报错，这里幂等返回成功、不透传——GUI 的取消按钮是常驻的，
         // 调用方无需自行区分忙闲。
@@ -946,7 +970,7 @@ impl SessionManager {
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
-        let (meta, agent_session_id) = match self.get_entry(session_id) {
+        let entry = match self.get_entry(session_id) {
             Ok(entry) => entry,
             Err(error) => {
                 self.remove_control_if_not_found(session_id, &control, &error);
@@ -954,7 +978,7 @@ impl SessionManager {
             }
         };
         let (driver, agent_session_id) =
-            self.ensure_agent_session(session_id, &meta, &agent_session_id)?;
+            self.ensure_agent_session(session_id, &entry.meta, &entry.agent_session_id)?;
         log::info!(
             "会话选项设置请求：session={session_id} agent_session={agent_session_id} config_id={config_id} value={value:?}"
         );
@@ -1414,8 +1438,8 @@ mod tests {
         assert_eq!(cleaned, 1, "仅超期会话的 worktree 被清理");
         assert!(!stale_wt.exists(), "超期 worktree 应被删除");
         assert!(recent_wt.is_dir(), "近期 worktree 应保留");
-        let (stored, _) = registry.get(&stale.id).unwrap().unwrap();
-        assert_eq!(stored.worktree_dir, "", "清理后 worktree_dir 应清空");
+        let stored = registry.get(&stale.id).unwrap().unwrap();
+        assert_eq!(stored.meta.worktree_dir, "", "清理后 worktree_dir 应清空");
         assert_eq!(
             mgr.workspace_cwd(&stale.id).unwrap(),
             repo.to_str().unwrap(),
@@ -1466,8 +1490,11 @@ mod tests {
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
 
         let meta = mgr.create("codex", "/tmp/lazy", false).await.unwrap();
-        let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
-        assert!(aid.is_empty(), "创建会话不应触发 ACP session/new");
+        let entry = registry.get(&meta.id).unwrap().unwrap();
+        assert!(
+            entry.agent_session_id.is_empty(),
+            "创建会话不应触发 ACP session/new"
+        );
 
         assert_eq!(meta.state, SessionState::Idle);
         assert_eq!(
@@ -1616,9 +1643,9 @@ mod tests {
         let meta = mgr.create("codex", "/tmp/usage", false).await.unwrap();
         mgr.prompt(&meta.id, text("hi")).await.unwrap();
 
-        let (stored, _) = registry.get(&meta.id).unwrap().unwrap();
-        assert_eq!(stored.context_size, 53_000);
-        assert_eq!(stored.context_window_size, 200_000);
+        let stored = registry.get(&meta.id).unwrap().unwrap();
+        assert_eq!(stored.meta.context_size, 53_000);
+        assert_eq!(stored.meta.context_window_size, 200_000);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1742,8 +1769,11 @@ mod tests {
         // 查询触发惰性创建：agent 侧会话建立，初始选项来自 new 响应
         let stored = mgr.config_options(&meta.id).await.unwrap();
         assert_eq!(stored, opts, "查询应惰性创建并返回 Agent 侧初始选项");
-        let (_, aid) = registry.get(&meta.id).unwrap().unwrap();
-        assert!(!aid.is_empty(), "查询会话选项应已创建 agent 侧会话");
+        let entry = registry.get(&meta.id).unwrap().unwrap();
+        assert!(
+            !entry.agent_session_id.is_empty(),
+            "查询会话选项应已创建 agent 侧会话"
+        );
 
         // 设置选项：set_config_option 响应全量覆盖内存存储
         let updated = mgr
@@ -2236,17 +2266,24 @@ mod tests {
         started.notified().await;
         release.notify_one();
         first.await.unwrap().unwrap();
-        let (m, aid) = registry.get(&session_id).unwrap().unwrap();
-        assert!(!aid.is_empty(), "首轮后应有 agent 侧会话 id");
-        assert_eq!(m.state, SessionState::Idle);
+        let entry = registry.get(&session_id).unwrap().unwrap();
+        assert!(
+            !entry.agent_session_id.is_empty(),
+            "首轮后应有 agent 侧会话 id"
+        );
+        assert_eq!(entry.meta.state, SessionState::Idle);
 
         // 第二轮：走 resume 分支——turn 进行中元数据必须是工作中
         let pm = manager.clone();
         let sid2 = session_id.clone();
         let second = tokio::spawn(async move { pm.prompt(&sid2, text("第二轮")).await });
         started.notified().await;
-        let (m, _) = registry.get(&session_id).unwrap().unwrap();
-        assert_eq!(m.state, SessionState::Busy, "resume 分支的 busy 应立即落盘");
+        let entry = registry.get(&session_id).unwrap().unwrap();
+        assert_eq!(
+            entry.meta.state,
+            SessionState::Busy,
+            "resume 分支的 busy 应立即落盘"
+        );
         // 元数据为权威：并发 prompt 被拒绝
         assert!(matches!(
             manager.prompt(&session_id, text("并发")).await,
@@ -2255,8 +2292,8 @@ mod tests {
 
         release.notify_one();
         second.await.unwrap().unwrap();
-        let (m, _) = registry.get(&session_id).unwrap().unwrap();
-        assert_eq!(m.state, SessionState::Idle, "响应接收后回到空闲");
+        let entry = registry.get(&session_id).unwrap().unwrap();
+        assert_eq!(entry.meta.state, SessionState::Idle, "响应接收后回到空闲");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2456,7 +2493,7 @@ mod tests {
         );
         // 状态不被取消操作扰动
         assert_eq!(
-            registry.get(&meta.id).unwrap().unwrap().0.state,
+            registry.get(&meta.id).unwrap().unwrap().meta.state,
             protocol::SessionState::Idle
         );
         let _ = std::fs::remove_dir_all(&dir);
