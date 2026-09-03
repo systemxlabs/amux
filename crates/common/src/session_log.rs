@@ -7,8 +7,6 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use atomic_write_file::AtomicWriteFile;
-
 /// 会话数据目录：`<data_dir>/sessions/`。
 pub fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("sessions")
@@ -43,30 +41,6 @@ pub fn append_jsonl<T: serde::Serialize>(path: &Path, entries: &[T]) -> io::Resu
         f.write_all(b"\n")?;
     }
     Ok(())
-}
-
-/// 原子写入格式化 JSON 文件。
-pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let body = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
-    let mut file = AtomicWriteFile::open(path)?;
-    file.write_all(body.as_bytes())?;
-    file.commit()
-}
-
-/// 原子替换 JSONL 文件。
-pub fn write_jsonl_atomic<T: serde::Serialize>(path: &Path, entries: &[T]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = AtomicWriteFile::open(path)?;
-    for entry in entries {
-        let line = serde_json::to_string(entry).map_err(io::Error::other)?;
-        writeln!(file, "{line}")?;
-    }
-    file.commit()
 }
 
 /// 读取全部 JSONL 行；文件缺失视为空，损坏行带行号报错。
@@ -121,22 +95,6 @@ mod tests {
 
         append_jsonl(&path, &[4]).unwrap();
         assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn atomic_write_replaces_existing_content_and_supports_empty_files() {
-        let dir = temp_dir();
-        let path = history_path(dir.path(), "s1");
-
-        write_jsonl_atomic(&path, &[1, 2]).unwrap();
-        assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![1, 2]);
-
-        write_jsonl_atomic(&path, &[3]).unwrap();
-        assert_eq!(read_jsonl::<u32>(&path).unwrap(), vec![3]);
-
-        write_jsonl_atomic::<u32>(&path, &[]).unwrap();
-        assert!(read_jsonl::<u32>(&path).unwrap().is_empty());
-        assert!(path.is_file());
     }
 
     #[test]
