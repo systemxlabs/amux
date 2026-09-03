@@ -10,7 +10,7 @@ use std::path::Path;
 
 #[cfg(test)]
 use amux_common::session_log::append_jsonl;
-use amux_common::session_log::{activities_path, history_path, read_jsonl, write_jsonl_atomic};
+use amux_common::session_log::{activities_path, history_path, read_jsonl};
 use protocol::{Activity, ContentBlock, HistoryItem};
 use rusqlite::{params, Connection};
 
@@ -25,22 +25,6 @@ fn meta_select(suffix: &str) -> String {
 
 fn sqlite_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("session.sqlite")
-}
-
-fn history_from_transcript(transcript: &[OrcMsg]) -> Vec<HistoryItem> {
-    transcript
-        .iter()
-        .map(|m| match m {
-            OrcMsg::User { text, timestamp } => HistoryItem::UserMessage {
-                content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: *timestamp,
-            },
-            OrcMsg::Orc { text, timestamp } => HistoryItem::AgentMessage {
-                content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: *timestamp,
-            },
-        })
-        .collect()
 }
 
 fn content_text(content: &[ContentBlock]) -> String {
@@ -187,12 +171,9 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
         ],
     )
     .map_err(io::Error::other)?;
-    write_jsonl_atomic(
-        &history_path(data_dir, &session.id),
-        &history_from_transcript(&session.transcript),
-    )?;
-    // 活动由 WorkflowEngine 实时逐条追加写盘，save 不再整文件覆盖，
-    // 避免与实时追加竞争同一活动文件。
+    // 对话历史由 WorkflowEngine 在条目完整后实时追加写盘（见 DESIGN：
+    // 流式输出合并成完整条目后立即追加写入磁盘），save 只持久化元数据。
+    // 同理活动也由引擎实时追加，不回写快照。
     Ok(())
 }
 
@@ -259,6 +240,28 @@ mod tests {
         std::env::temp_dir().join(format!("amux-wfstore-{}-{n}", std::process::id()))
     }
 
+    /// 模拟引擎侧行为：用户输入与编排输出在条目完整后逐条追加写 history JSONL。
+    fn append_history_transcript(dir: &Path, session_id: &str) {
+        append_jsonl(
+            &history_path(dir, session_id),
+            &[
+                HistoryItem::UserMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "开始".into(),
+                    }],
+                    timestamp: 1,
+                },
+                HistoryItem::AgentMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "已转发".into(),
+                    }],
+                    timestamp: 2,
+                },
+            ],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn save_remove_matches_design_layout() {
         let dir = temp();
@@ -288,10 +291,12 @@ mod tests {
             created_at: 10,
             updated_at: 20,
         };
-        save(&dir, &session).unwrap();
+        save(&dir, &session).unwrap(); // save 只写元数据
+                                       // 对话历史由引擎在条目完整后实时追加写盘；这里模拟引擎追加。
+        append_history_transcript(&dir, "orc_1");
         assert!(dir.join("session.sqlite").is_file());
         assert!(dir.join("sessions/orc_1_history.jsonl").is_file());
-        // 活动由引擎实时追加写盘，save 不再生成活动文件。
+        // 活动由引擎实时追加写盘，save 不生成活动文件。
         assert!(!dir.join("sessions/orc_1_activities.jsonl").exists());
 
         remove(&dir, "orc_1").unwrap();
@@ -375,6 +380,8 @@ mod tests {
             updated_at: 20,
         };
         save(&dir, &session).unwrap();
+        // 对话历史由引擎在条目完整后实时追加写盘；这里模拟引擎追加。
+        append_history_transcript(&dir, "orc_1");
         // 活动由引擎实时追加写盘；这里模拟已实时追加的活动，供 backfill 恢复。
         let act_path = activities_path(&dir, "orc_1");
         append_jsonl(

@@ -13,7 +13,7 @@
 
 #[cfg(test)]
 use amux_common::session_log::read_jsonl;
-use amux_common::session_log::{activities_path, append_jsonl};
+use amux_common::session_log::{activities_path, append_jsonl, history_path};
 use parking_lot::{Mutex, RwLock};
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -34,7 +34,7 @@ use rig_core::streaming::StreamedAssistantContent;
 use serde::{Deserialize, Serialize};
 
 use protocol::{
-    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult,
+    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryItem, HistoryResult,
     SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams, SessionIdParams,
     SessionInfoParams, SessionInfoResult, SessionMeta, SessionNewParams, SessionPageParams,
     SessionPromptParams, SessionResult, SessionState, StateChangeReason,
@@ -284,6 +284,11 @@ impl OrcDraft {
     /// 本 turn 是否已有编排输出进入 transcript。
     fn started(&self) -> bool {
         self.slot.lock().is_some()
+    }
+
+    /// 草稿消息在 transcript 中的下标（尚未起草时 None）。
+    fn slot(&self) -> Option<usize> {
+        *self.slot.lock()
     }
 }
 
@@ -542,6 +547,16 @@ impl WorkflowEngine {
         }
     }
 
+    /// 追加写对话历史 JSONL：条目在内存中合并完整后立即落盘（见 DESIGN
+    /// 「流式输出合并后写入」）。失败仅记日志，不阻断推进。
+    fn append_history(&self, items: &[HistoryItem]) {
+        let id = self.session.read().id.clone();
+        let path = history_path(&self.data_dir, &id);
+        if let Err(e) = append_jsonl(&path, items) {
+            log::error!("工作流对话历史落盘失败 {id}: {e}");
+        }
+    }
+
     #[cfg(test)]
     pub async fn start(&self) -> Result<(), String> {
         self.advance().await
@@ -613,14 +628,35 @@ impl WorkflowEngine {
         // 编排输出直接进对话流：流式输出已由工具循环经草稿消息实时写入
         // （含静默/收尾兜底文案），这里只补推未经流式路径的后端输出
         // （如测试用 FakeBackend）；完成与否由编排智能体判断，而非引擎状态位
-        if !ctx.draft.started() {
+        if let Some(i) = ctx.draft.slot() {
+            // 流式路径：最终输出已合并进草稿消息，整轮成功时把这条完整消息追加落盘。
+            let item = {
+                let s = self.session.read();
+                match s.transcript.get(i) {
+                    Some(OrcMsg::Orc { text, timestamp }) => Some(HistoryItem::AgentMessage {
+                        content: vec![ContentBlock::Text { text: text.clone() }],
+                        timestamp: *timestamp,
+                    }),
+                    _ => None,
+                }
+            };
+            if let Some(item) = item {
+                self.append_history(&[item]);
+            }
+        } else {
+            // 非流式后端（如测试 FakeBackend）：推入完整输出后立即追加落盘。
+            let output = decision.summary.clone();
+            let ts = now();
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::Orc {
-                    text: decision.summary.clone(),
-
-                    timestamp: now(),
+                    text: output.clone(),
+                    timestamp: ts,
                 });
             });
+            self.append_history(&[HistoryItem::AgentMessage {
+                content: vec![ContentBlock::Text { text: output }],
+                timestamp: ts,
+            }]);
         }
         if let Some(kids) = self.backend.take_synced_children() {
             self.with_session(|s| s.children = kids);
@@ -690,19 +726,25 @@ impl WorkflowEngine {
             if reason == StateChangeReason::Cancelled {
                 return Ok(false);
             }
+            let msg = format!(
+                "关联普通会话 {session_id}@{machine_name} 检测到状态变更：{old} -> {new}，\
+                 变更原因为{why}",
+                old = old_state.as_str(),
+                new = new_state.as_str(),
+                why = reason_label(reason),
+            );
+            let ts = now();
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::User {
-                    text: format!(
-                        "关联普通会话 {session_id}@{machine_name} 检测到状态变更：{old} -> {new}，\
-                         变更原因为{why}",
-                        old = old_state.as_str(),
-                        new = new_state.as_str(),
-                        why = reason_label(reason),
-                    ),
-
-                    timestamp: now(),
+                    text: msg.clone(),
+                    timestamp: ts,
                 });
             });
+            // 系统注入的用户消息同样即时追加落盘。
+            self.append_history(&[HistoryItem::UserMessage {
+                content: vec![ContentBlock::Text { text: msg }],
+                timestamp: ts,
+            }]);
             if let Err(e) = self.advance().await {
                 self.record_activity(Activity::Error {
                     timestamp: now(),
@@ -792,6 +834,7 @@ impl WorkflowEngine {
             // gate 保护下设置 requested，与收尾检查原子配对。
             gate.requested = true;
         }
+        let ts = now();
         self.with_session(|s| {
             if s.description.trim().is_empty() {
                 s.description = text.trim().to_string();
@@ -801,10 +844,17 @@ impl WorkflowEngine {
             }
             s.transcript.push(OrcMsg::User {
                 text: text.to_string(),
-                timestamp: now(),
+                timestamp: ts,
             });
-            s.updated_at = now();
+            s.updated_at = ts;
         });
+        // 用户消息一产生即为完整条目，立即追加落盘。
+        self.append_history(&[HistoryItem::UserMessage {
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            timestamp: ts,
+        }]);
         drop(steer);
         drop(gate);
         !orchestrating
@@ -852,8 +902,8 @@ impl WorkflowEngine {
         crate::wfstore::save(data_dir, &snapshot)
     }
 
-    /// 后台持久化：UI 线程只克隆引擎句柄（session 为 Arc<RwLock>），读盘写在
-    /// tokio 后台完成。并发写以「整文件原子替换 + 唯一临时名」保证不损坏。
+    /// 后台持久化：UI 线程只克隆引擎句柄（session 为 Arc<RwLock>），元数据落在
+    /// tokio 后台写 sqlite；对话历史/活动已由引擎在条目完整时实时追加落盘。
     pub fn persist_in_background(&self, data_dir: PathBuf) {
         let engine = self.clone();
         crate::ws::runtime().spawn(async move {

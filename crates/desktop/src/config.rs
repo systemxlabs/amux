@@ -10,8 +10,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use amux_common::session_log::write_json_atomic;
-
 use crate::logic::{merge_recent_workspace, recent_workspaces_for_machine};
 /// 注册机器：name 唯一。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -135,9 +133,19 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     }
 }
 
-fn write_atomic<T: serde::Serialize>(path: &Path, value: &T) {
-    if let Err(e) = write_json_atomic(path, value) {
-        log::warn!("写入配置失败 {}: {e}", path.display());
+/// 配置写盘：低频单写者操作，无需并发与原子写入（见 DESIGN 存储一节），
+/// 直接用普通覆盖写，去掉原子重命名带来的复杂度。
+fn write_config<T: serde::Serialize>(path: &Path, value: &T) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(value) {
+        Ok(body) => {
+            if let Err(e) = std::fs::write(path, body) {
+                log::warn!("写入配置失败 {}: {e}", path.display());
+            }
+        }
+        Err(e) => log::warn!("序列化配置失败 {}: {e}", path.display()),
     }
 }
 
@@ -159,7 +167,7 @@ impl<T: serde::de::DeserializeOwned + serde::Serialize> JsonCollection<T> {
         let mut items = self.list();
         items.retain(|x| (self.key)(x) != key);
         items.push(item);
-        write_atomic(&self.path, &items);
+        write_config(&self.path, &items);
     }
 
     fn update(&self, key: &str, mutate: impl FnOnce(&mut T)) {
@@ -167,7 +175,7 @@ impl<T: serde::de::DeserializeOwned + serde::Serialize> JsonCollection<T> {
         if let Some(x) = items.iter_mut().find(|x| (self.key)(x) == key) {
             mutate(x);
         }
-        write_atomic(&self.path, &items);
+        write_config(&self.path, &items);
     }
 
     fn remove(&self, key: &str) {
@@ -176,7 +184,7 @@ impl<T: serde::de::DeserializeOwned + serde::Serialize> JsonCollection<T> {
             .into_iter()
             .filter(|x| (self.key)(x) != key)
             .collect::<Vec<_>>();
-        write_atomic(&self.path, &items);
+        write_config(&self.path, &items);
     }
 }
 
@@ -213,7 +221,7 @@ impl ConfigStore {
             token: token.to_string(),
         };
         machines.push(m.clone());
-        write_atomic(&self.path("machines.json"), &machines);
+        write_config(&self.path("machines.json"), &machines);
         m
     }
 
@@ -228,7 +236,7 @@ impl ConfigStore {
             .into_iter()
             .filter(|m| m.name != name)
             .collect();
-        write_atomic(&self.path("machines.json"), &machines);
+        write_config(&self.path("machines.json"), &machines);
     }
 
     fn quick_commands(&self) -> JsonCollection<QuickCommand> {
@@ -334,7 +342,7 @@ impl ConfigStore {
         let ws = self.recent_workspaces();
         // 直接写合并结果（不再读回，防止并发覆盖）
         let merged = merge_recent_workspace(&ws, machine, workspace, now, MAX_RECENT_WORKSPACES);
-        write_atomic(&self.path("recent_workspaces.json"), &merged);
+        write_config(&self.path("recent_workspaces.json"), &merged);
     }
 
     pub fn orchestrator(&self) -> OrchestratorConfig {
@@ -344,7 +352,11 @@ impl ConfigStore {
     }
 
     pub fn save_orchestrator(&self, cfg: &OrchestratorConfig) -> std::io::Result<()> {
-        write_json_atomic(&self.path("agent.json"), cfg)
+        if let Some(parent) = self.path("agent.json").parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?;
+        std::fs::write(self.path("agent.json"), body)
     }
 
     /// 应用数据根目录（~/.amux/app/）。工作流元数据 session.sqlite 与
