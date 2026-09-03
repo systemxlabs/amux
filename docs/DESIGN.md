@@ -88,7 +88,7 @@ Server 在启动阶段会自动从本机发现当前已安装的 Agent。
 
 ### ACP Server 启动
 
-Server 在启动阶段会同时通过子进程方式启动已发现的 ACP Server，通过 stdio 来与 ACP Server 通信。
+Server 在启动阶段会同时通过子进程方式并行启动已发现的 ACP Server，通过 stdio 来与 ACP Server 通信。
 
 | agent | 启动方式 |
 |---|---|
