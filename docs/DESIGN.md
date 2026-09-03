@@ -301,10 +301,6 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   {
     "name": "Commit & Push",
     "prompt": "提交并推送当前工作区的更改：为改动写一条简洁的 commit message，commit 后 push。"
-  },
-  {
-    "name": "Submit PR",
-    "prompt": "提交一个 Pull Request：stage → commit → push → 创建 PR。"
   }
 ]
 ```
@@ -345,10 +341,3 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 日志存储
 - 桌面应用：存放在 `~/.amux/logs/desktop.log`
 - Server：存放在 `~/.amux/logs/server.log`
-
-## 参考
-
-- [Agent Client Protocol (ACP) v1](https://agentclientprotocol.com/)：server 与 agent 之间的通信协议
-- [GPUI](https://gpui.rs/)：Zed 的 GPU 加速 GUI 应用框架
-- [gpui-component](https://github.com/longbridge/gpui-component)：GPUI 组件库
-- [raft.build](https://raft.build)：Client-Server + WebSocket 的桌面应用架构参考
