@@ -1,6 +1,6 @@
 //! ACP agent 自动发现：PATH 探测已知 CLI，kimi 使用原生 `acp` 子命令，
 //! grok 使用原生 `agent` 子命令，claude/codex 使用 npx 官方包装器。
-//! 发现结果由 `AgentRegistry::launch_discovered` 在 server 启动时并行拉起。
+//! 发现结果由 `AgentRegistry::launch_discovered` 在 server 启动时顺序拉起。
 
 /// 自动发现的 ACP agent（含 ACP 子命令参数 / npx 包装器参数与附加环境变量）。
 #[derive(Debug, Clone)]
