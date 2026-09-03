@@ -14,10 +14,9 @@ use gix::diff::blob::platform::prepare_diff::Operation;
 use gix::diff::blob::unified_diff::{ConsumeHunk, ContextSize, DiffLineKind, HunkHeader};
 use gix::diff::blob::{ResourceKind, UnifiedDiff};
 
-use protocol::{
-    GitChangeStatus, GitDiffFile, GitDiffHunk, OpResult, WorkspaceDiffResult, WorkspaceEntry,
-    WorkspaceListResult, WorkspaceReadResult,
-};
+use protocol::{GitChangeStatus, GitDiffFile, GitDiffHunk, OpResult, WorkspaceDiffResult};
+
+use crate::workspace::canonical_workspace_root;
 
 #[derive(Default)]
 pub struct GitRunner;
@@ -295,91 +294,6 @@ fn modified_patch(
 impl GitRunner {
     pub fn new() -> Self {
         GitRunner
-    }
-
-    /// 分页列出 cwd 下的目录项。所有路径都限制在 cwd 内，避免工作目录浏览
-    /// 被用作任意文件系统读取入口。
-    pub fn list_workspace(
-        &self,
-        cwd: &str,
-        path: Option<&str>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<WorkspaceListResult, String> {
-        let root = canonical_workspace_root(cwd)?;
-        let dir = resolve_workspace_path(&root, path.unwrap_or(""))?;
-        if !dir.is_dir() {
-            return Err(format!("工作目录不是文件夹: {}", dir.display()));
-        }
-
-        let mut entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("读取工作目录失败: {e}"))?
-            .map(|entry| {
-                let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
-                let metadata = entry
-                    .metadata()
-                    .map_err(|e| format!("读取目录项元数据失败: {e}"))?;
-                let entry_path = entry.path();
-                let relative = entry_path
-                    .strip_prefix(&root)
-                    .map_err(|_| "目录项不在工作目录内".to_string())?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                Ok(WorkspaceEntry {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    path: relative,
-                    is_dir: metadata.is_dir(),
-                    size: metadata.len(),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        entries.sort_by(|a, b| {
-            a.is_dir
-                .cmp(&b.is_dir)
-                .reverse()
-                .then_with(|| a.name.cmp(&b.name))
-        });
-
-        let limit = limit.clamp(1, 500);
-        let start = offset.min(entries.len());
-        let end = (start + limit).min(entries.len());
-        Ok(WorkspaceListResult {
-            path: path.unwrap_or("").to_string(),
-            entries: entries[start..end].to_vec(),
-            has_more: end < entries.len(),
-            next_offset: end,
-        })
-    }
-
-    /// 以 UTF-8 文本行分页读取工作目录内的文件。
-    pub fn read_workspace(
-        &self,
-        cwd: &str,
-        path: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<WorkspaceReadResult, String> {
-        let root = canonical_workspace_root(cwd)?;
-        let file = resolve_workspace_path(&root, path)?;
-        if !file.is_file() {
-            return Err(format!("工作目录文件不存在: {path}"));
-        }
-        let bytes = std::fs::read(&file).map_err(|e| format!("读取文件失败: {e}"))?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| "文件不是 UTF-8 文本".to_string())?;
-        let lines: Vec<&str> = text.lines().collect();
-        let limit = limit.clamp(1, 1_000);
-        let start = offset.min(lines.len());
-        let end = (start + limit).min(lines.len());
-        let mut content = lines[start..end].join("\n");
-        if end > start && (end < lines.len() || text.ends_with('\n')) {
-            content.push('\n');
-        }
-        Ok(WorkspaceReadResult {
-            path: path.to_string(),
-            content,
-            has_more: end < lines.len(),
-            next_offset: end,
-        })
     }
 
     /// 结构化 diff：gitoxide 实现。
@@ -719,35 +633,6 @@ fn validate_restore_path(cwd: &str, target: &str) -> Result<String, OpResult> {
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
-fn canonical_workspace_root(cwd: &str) -> Result<PathBuf, String> {
-    let root = Path::new(cwd)
-        .canonicalize()
-        .map_err(|e| format!("工作目录不可访问: {e}"))?;
-    if !root.is_dir() {
-        return Err(format!("工作目录不是文件夹: {}", root.display()));
-    }
-    Ok(root)
-}
-
-fn resolve_workspace_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let relative_path = Path::new(relative);
-    if relative_path.is_absolute()
-        || relative_path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err("工作目录路径非法".to_string());
-    }
-    let path = root.join(relative_path);
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("工作目录路径不可访问: {e}"))?;
-    if !canonical.starts_with(root) {
-        return Err("工作目录路径超出工作目录范围".to_string());
-    }
-    Ok(canonical)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,85 +742,25 @@ mod tests {
         assert!(st);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn workspace_list_sorts_directories_and_paginates() {
-        let dir = unique_dir("amux-workspace-list");
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("z.txt"), "z").unwrap();
-        std::fs::write(dir.join("a.txt"), "a").unwrap();
+    fn restore_rejects_symlink_parent() {
+        // 目标父目录是指向工作区外的 symlink 时，restore 必须拒绝，
+        // 否则 remove_file 会跟随链接误删工作区之外的文件。
+        let dir = unique_dir("amux-restore-symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = unique_dir("amux-restore-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("to-delete.txt"), "must remain").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
 
-        let result = GitRunner::new()
-            .list_workspace(dir.to_str().unwrap(), None, 2, 0)
-            .unwrap();
-        assert_eq!(result.path, "");
-        assert_eq!(result.entries.len(), 2);
-        assert_eq!(result.entries[0].name, "src");
-        assert_eq!(result.entries[1].name, "a.txt");
-        assert!(result.has_more);
-        assert_eq!(result.next_offset, 2);
-
-        let next = GitRunner::new()
-            .list_workspace(dir.to_str().unwrap(), None, 2, result.next_offset)
-            .unwrap();
-        assert_eq!(
-            next.entries
-                .iter()
-                .map(|e| e.name.as_str())
-                .collect::<Vec<_>>(),
-            ["z.txt"]
+        let result =
+            GitRunner::new().restore(dir.to_str().unwrap(), Some("link/to-delete.txt"), None);
+        assert!(!result.ok, "符号链接父目录下的路径必须被拒绝");
+        assert!(
+            outside.join("to-delete.txt").exists(),
+            "工作区外文件不得被删除"
         );
-        assert!(!next.has_more);
-    }
-
-    #[test]
-    fn workspace_read_returns_line_pages() {
-        let dir = unique_dir("amux-workspace-read");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
-        let runner = GitRunner::new();
-
-        let first = runner
-            .read_workspace(dir.to_str().unwrap(), "notes.txt", 0, 2)
-            .unwrap();
-        assert_eq!(first.content, "one\ntwo\n");
-        assert!(first.has_more);
-        assert_eq!(first.next_offset, 2);
-
-        let second = runner
-            .read_workspace(dir.to_str().unwrap(), "notes.txt", first.next_offset, 2)
-            .unwrap();
-        assert_eq!(second.content, "three\n");
-        assert!(!second.has_more);
-    }
-
-    #[test]
-    fn workspace_paths_cannot_escape_root() {
-        let dir = unique_dir("amux-workspace-safe");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("inside.txt"), "inside").unwrap();
-        let runner = GitRunner::new();
-        let cwd = dir.to_str().unwrap();
-
-        assert!(runner.list_workspace(cwd, Some("../"), 10, 0).is_err());
-        assert!(runner.read_workspace(cwd, "/etc/passwd", 0, 10).is_err());
-
-        #[cfg(unix)]
-        {
-            let outside = unique_dir("amux-workspace-outside");
-            std::fs::create_dir_all(&outside).unwrap();
-            std::fs::write(outside.join("secret.txt"), "secret").unwrap();
-            std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
-            assert!(runner
-                .read_workspace(cwd, "link/secret.txt", 0, 10)
-                .is_err());
-            std::fs::write(outside.join("to-delete.txt"), "must remain").unwrap();
-            let result = runner.restore(cwd, Some("link/to-delete.txt"), None);
-            assert!(!result.ok, "符号链接父目录下的路径必须被拒绝");
-            assert!(
-                outside.join("to-delete.txt").exists(),
-                "工作区外文件不得被删除"
-            );
-        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod rpc;
 pub mod session;
 pub mod terminal;
 pub mod transport;
+pub mod workspace;
 
 pub use crate::rpc::{Handlers, RpcError};
 pub use crate::session::SessionManager;

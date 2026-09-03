@@ -20,6 +20,7 @@ use crate::error::SessionError;
 use crate::git::GitRunner;
 use crate::session::SessionManager;
 use crate::terminal::{ConnScope, TerminalService};
+use crate::workspace::WorkspaceBrowser;
 
 #[derive(Debug)]
 pub struct RpcError {
@@ -87,6 +88,7 @@ fn ok_op() -> Result<Value, RpcError> {
 pub struct Handlers {
     pub manager: Arc<SessionManager>,
     pub git: GitRunner,
+    pub workspace: WorkspaceBrowser,
     pub terminals: Arc<TerminalService>,
 }
 
@@ -296,7 +298,7 @@ impl Handlers {
                     .workspace_cwd(&p.session_id)
                     .map_err(map_session_err)?;
                 let r = self
-                    .git
+                    .workspace
                     .list_workspace(&cwd, p.path.as_deref(), p.limit, p.offset)
                     .map_err(RpcError::internal)?;
                 to_value(r)
@@ -309,7 +311,7 @@ impl Handlers {
                     .workspace_cwd(&p.session_id)
                     .map_err(map_session_err)?;
                 let r = self
-                    .git
+                    .workspace
                     .read_workspace(&cwd, &p.path, p.offset, p.limit)
                     .map_err(RpcError::internal)?;
                 to_value(r)
