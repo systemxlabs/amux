@@ -156,6 +156,8 @@ Server 作为 ACP client 与 ACP servers 通信
 - 对话历史：存储在 `~/.amux/server/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和 agent 输出（agent 流式输出合并后写入）
 - 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
 
+流式输出合并后写入：agent 输出、thinking、工具调用等等流式传输均在内存中进行合并，合并成完整条目后立即进行追加写入磁盘。
+
 ### 工作树存储
 
 Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 内。普通会话创建时若指定了 worktree 方式，则创建 worktree，普通会话被删除时，其关联的 worktree 也应一并删除。
@@ -246,8 +248,10 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 
 工作流会话数据包含三部分
 - 元数据：存储在 `~/.amux/app/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、执行计划、最近活跃时间、关联普通会话等
-- 对话历史：存储在 `~/.amux/app/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出（流式输出合并后写入）
-- 活动历史：存储在 `~/.amux/app/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
+- 对话历史：存储在 `~/.amux/app/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出
+- 活动历史：存储在 `~/.amux/app/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等
+
+流式输出合并后写入：编排智能体输出、thinking、工具调用等等流式传输均在内存中进行合并，合并成完整条目后立即进行追加写入磁盘。
 
 ### 工作流计划存储
 
@@ -257,7 +261,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   { "name": "amux开发工作流", "plan": "xxx" }
 ]
 ```
-注意 name 必须唯一。
+注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 ### 注册机器存储
 
@@ -267,7 +271,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   { "name": "localpc", "url": "ws://127.0.0.1:3457", "token": "xxx" }
 ]
 ```
-注意 name 必须唯一。
+注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 ### 技能存储
 
@@ -277,7 +281,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   { "name": "opencli", "description": "位于 https://github.com/jackwener/OpenCLI/tree/main/skills，包含多个 skills" }
 ]
 ```
-注意 name 必须唯一。
+注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 ### 常用工作目录存储
 
@@ -287,7 +291,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   { "machine": "localpc", "workspace": "/home/linwei/workspace/amux", "lastUsed": 1729000000000 }
 ]
 ```
-注意 (machine, workspace) 组合必须唯一。
+注意 (machine, workspace) 组合必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 ### 快捷指令存储
 
@@ -304,7 +308,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   }
 ]
 ```
-注意 name 必须唯一。
+注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 ### 编排智能体配置存储
 
@@ -317,6 +321,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   "model": "deepseek-v4-flash"
 }
 ```
+读写为低频操作，无需考虑并发和原子写入问题。
 
 ### 桌面应用
 
