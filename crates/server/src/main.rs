@@ -151,7 +151,7 @@ async fn main() {
         notifications,
     });
 
-    // 启动拉起：顺序拉起已发现 agent。放在监听之后
+    // 启动拉起：并行拉起已发现 agent。放在监听之后
     // 后台执行——bind 失败路径不再遗留子进程，agent 握手（最坏 30s/个）不阻塞
     // server 就绪；可用性经 agent.list 反映。
     let launch_agents = agents.clone();

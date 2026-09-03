@@ -255,23 +255,25 @@ impl AgentRegistry {
         if self.stub.lock().is_some() {
             return LaunchSummary::default();
         }
-        // 启动/重扫是低频一次性操作且同一时刻只有一个调用方：顺序拉起即可，
-        // 牺牲并发启动带来的少量时长，避免跨线程聚合统计的复杂度。
-        let mut summary = LaunchSummary::default();
-        for d in self.discovered.lock().clone() {
-            match self.spawn_and_cache(&d) {
-                Ok(_) => {
-                    summary.started += 1;
-                    log::info!("已拉起 ACP server: {}（agent={}）", d.bin, d.name);
-                }
-                Err(e) => {
-                    summary.failed += 1;
-                    self.unavailable.lock().insert(d.name.clone());
-                    log::error!("ACP server 拉起失败（agent={}，已标记不可用）: {e}", d.name);
-                }
+        let discovered = self.discovered.lock().clone();
+        let summary = Mutex::new(LaunchSummary::default());
+        std::thread::scope(|s| {
+            for d in discovered {
+                let summary = &summary;
+                s.spawn(move || match self.spawn_and_cache(&d) {
+                    Ok(_) => {
+                        summary.lock().started += 1;
+                        log::info!("已拉起 ACP server: {}（agent={}）", d.bin, d.name);
+                    }
+                    Err(e) => {
+                        summary.lock().failed += 1;
+                        self.unavailable.lock().insert(d.name.clone());
+                        log::error!("ACP server 拉起失败（agent={}，已标记不可用）: {e}", d.name);
+                    }
+                });
             }
-        }
-        summary
+        });
+        Mutex::into_inner(summary)
     }
     pub fn restart_agent(&self, harness: &str) -> Result<(), String> {
         let configured_name = self
