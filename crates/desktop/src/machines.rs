@@ -340,6 +340,42 @@ impl AmuxApp {
         true
     }
 
+    /// 编辑机器连接信息：机器名不可编辑，仅更新地址/token 后按新连接重连。
+    /// 校验失败返回 false 保持编辑对话框打开。
+    pub(crate) fn update_machine(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        name: &str,
+        url: String,
+        token: String,
+    ) -> bool {
+        let validation_error = if !url.trim().starts_with("ws://") {
+            Some("连接地址必须以 ws:// 开头。")
+        } else if token.trim().is_empty() {
+            Some("请输入连接 Token。")
+        } else {
+            None
+        };
+        if let Some(error) = validation_error {
+            self.settings.machine_form_error = Some(error.into());
+            cx.notify();
+            return false;
+        }
+        let Some(idx) = self.machine_idx_by_name(name) else {
+            return false;
+        };
+        let url = url.trim().to_string();
+        let token = token.trim().to_string();
+        self.store.update_machine(name, &url, &token);
+        self.machines[idx].config.url = url;
+        self.machines[idx].config.token = token;
+        self.settings.machine_form_error = None;
+        self.reconnect_machine(window, cx, name);
+        cx.notify();
+        true
+    }
+
     pub(crate) fn remove_machine(
         &mut self,
         window: &mut Window,

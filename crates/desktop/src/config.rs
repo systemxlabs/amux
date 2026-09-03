@@ -217,6 +217,11 @@ impl ConfigStore {
         m
     }
 
+    /// 编辑机器连接信息：机器名不可编辑，仅更新地址与 token（沿用 name 键控的 upsert 语义）。
+    pub fn update_machine(&self, name: &str, url: &str, token: &str) -> MachineConfig {
+        self.add_machine(name, url, token)
+    }
+
     pub fn remove_machine(&self, name: &str) {
         let machines: Vec<MachineConfig> = self
             .list_machines()
@@ -418,6 +423,18 @@ mod tests {
             "apiFormat": "graphql", "baseUrl": "http://x", "apiKey": "k", "model": "m"
         });
         assert_eq!(normalize_orchestrator(&bad), OrchestratorConfig::default());
+    }
+
+    #[test]
+    fn update_machine_edits_url_and_token_keeps_name() {
+        let s = store();
+        s.add_machine("本机", "ws://127.0.0.1:34567", "t");
+        s.update_machine("本机", "ws://10.0.0.9:4000", "t2");
+        let machines = s.list_machines();
+        assert_eq!(machines.len(), 1, "编辑不改变机器数量");
+        assert_eq!(machines[0].name, "本机", "机器名不可编辑");
+        assert_eq!(machines[0].url, "ws://10.0.0.9:4000");
+        assert_eq!(machines[0].token, "t2");
     }
 
     #[test]

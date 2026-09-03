@@ -399,6 +399,84 @@ impl AmuxApp {
         fields.into_any_element()
     }
 
+    pub(crate) fn open_edit_machine_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        name: String,
+    ) {
+        let Some(config) = self
+            .machines
+            .iter()
+            .find(|m| m.config.name == name)
+            .map(|m| m.config.clone())
+        else {
+            return;
+        };
+        self.settings
+            .machine_url_input
+            .update(cx, |state, cx| state.set_value(&config.url, window, cx));
+        self.settings
+            .machine_token_input
+            .update(cx, |state, cx| state.set_value(&config.token, window, cx));
+        self.settings.machine_form_error = None;
+        let fields_name = config.name.clone();
+        let submit_name = config.name.clone();
+        self.open_form_dialog(
+            window,
+            cx,
+            "编辑机器",
+            "保存",
+            28.75,
+            move |this, cx| this.render_edit_machine_fields(cx, &fields_name),
+            move |this, window, cx| {
+                let url = this.settings.machine_url_input.read(cx).value().to_string();
+                let token = this.settings.machine_token_input.read(cx).value().to_string();
+                this.update_machine(window, cx, &submit_name, url, token)
+            },
+        );
+    }
+
+    fn render_edit_machine_fields(&self, cx: &mut Context<Self>, machine_name: &str) -> AnyElement {
+        let mut fields = v_flex()
+            .gap_2()
+            .child(
+                Label::new("编辑连接信息，保存后立即重连该机器。")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                Label::new("名称")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                Label::new(machine_name.to_string())
+                    .text_sm()
+                    .text_color(cx.theme().foreground),
+            )
+            .child(
+                Label::new("连接地址")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.settings.machine_url_input))
+            .child(
+                Label::new("Token")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.settings.machine_token_input));
+        if let Some(error) = &self.settings.machine_form_error {
+            fields = fields.child(
+                Label::new(error.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger),
+            );
+        }
+        fields.into_any_element()
+    }
+
     pub(crate) fn open_quick_command_form(
         &mut self,
         window: &mut Window,
@@ -1009,6 +1087,7 @@ impl AmuxApp {
                 .map(|(i, m)| {
                     // 域标识：按钮 id 与回调捕获均用机器名而非下标（机器顺序变化不影响身份）
                     let machine_name = m.config.name.clone();
+                    let edit_name = machine_name.clone();
                     let reconnect_name = machine_name.clone();
                     let remove_name = machine_name.clone();
                     let mut item = v_flex()
@@ -1034,6 +1113,28 @@ impl AmuxApp {
                                 .child(div().flex_1())
                                 .child(
                                     Button::new(SharedString::from(format!(
+                                        "edit-m-{machine_name}"
+                                    )))
+                                    .small()
+                                    .label("编辑")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        let name = edit_name.clone();
+                                        this.open_edit_machine_form(window, cx, name);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "remove-m-{machine_name}"
+                                    )))
+                                    .small()
+                                    .label("移除")
+                                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                                        let name = remove_name.clone();
+                                        this.confirm_remove_machine(window, cx, name);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
                                         "reconnect-m-{machine_name}"
                                     )))
                                     .small()
@@ -1051,17 +1152,6 @@ impl AmuxApp {
                                     .label("重新发现")
                                     .on_click(cx.listener(move |this, _ev, window, cx| {
                                         this.confirm_rediscover_agents(window, cx, i);
-                                    })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "remove-m-{machine_name}"
-                                    )))
-                                    .small()
-                                    .label("移除")
-                                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                                        let name = remove_name.clone();
-                                        this.confirm_remove_machine(window, cx, name);
                                     })),
                                 ),
                         )
