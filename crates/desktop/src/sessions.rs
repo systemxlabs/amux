@@ -692,56 +692,63 @@ impl AmuxApp {
                         .request_ok(protocol::method::SESSION_PROMPT, Some(prompt_params))
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
-                        if !this.is_current_machine_connection(&machine, generation) {
-                            return;
-                        }
-                        let Some(view_idx) = this.machine_idx_by_name(&machine) else {
-                            return;
-                        };
-                        match &result {
+                        let current_connection =
+                            this.is_current_machine_connection(&machine, generation);
+                        let selected_session = matches!(
+                            this.selected,
+                            Some(Selected::Session {
+                                machine: ref selected_machine,
+                                ref id,
+                            }) if *selected_machine == machine && id == &optimistic_id
+                        );
+                        match result {
                             Err(error) => {
-                                if let Some(m) = this.machine_mut(view_idx) {
-                                    if let Some(v) = m.views.get_mut(&optimistic_id) {
-                                        if let Some(pos) = v.dialog.iter().rposition(|msg| {
-                                            matches!(
-                                                msg,
-                                                DialogMsg::UserMessage {
-                                                    content,
-                                                    timestamp,
-                                                } if *timestamp == optimistic_timestamp
-                                                    && *content == optimistic_blocks
-                                            )
-                                        }) {
-                                            v.dialog.remove(pos);
+                                // 断连通知先于 pending RPC 的失败结果到达；即使旧代次
+                                // 已失效，也必须回收本次乐观消息，否则它会永久留在对话中。
+                                if let Some(view_idx) = this.machine_idx_by_name(&machine) {
+                                    if let Some(m) = this.machine_mut(view_idx) {
+                                        if let Some(v) = m.views.get_mut(&optimistic_id) {
+                                            if let Some(pos) = v.dialog.iter().rposition(|msg| {
+                                                matches!(
+                                                    msg,
+                                                    DialogMsg::UserMessage {
+                                                        content,
+                                                        timestamp,
+                                                    } if *timestamp == optimistic_timestamp
+                                                        && *content == optimistic_blocks
+                                                )
+                                            }) {
+                                                v.dialog.remove(pos);
+                                            }
                                         }
                                     }
                                 }
-                                if matches!(
-                                    this.selected,
-                                    Some(Selected::Session {
-                                        machine: ref selected_machine,
-                                        ref id,
-                                    }) if *selected_machine == machine && id == &optimistic_id
-                                ) && this.input_state.read(cx).value().trim().is_empty()
+                                if selected_session
+                                    && this.input_state.read(cx).value().trim().is_empty()
                                     && this.input_attachments.is_empty()
                                 {
                                     this.input_state
                                         .update(cx, |s, cx| s.set_value(&original_text, w, cx));
                                     this.input_attachments = original_attachments.clone();
                                 }
-                                w.push_notification(
-                                    UiNotification::error(format!("发送失败：{error}"))
-                                        .title("消息未发送"),
-                                    cx,
-                                );
+                                if current_connection {
+                                    w.push_notification(
+                                        UiNotification::error(format!("发送失败：{error}"))
+                                            .title("消息未发送"),
+                                        cx,
+                                    );
+                                }
                             }
                             // 发送用户消息后主动刷新会话列表。
-                            Ok(()) => {
+                            Ok(()) if current_connection => {
                                 this.refresh_sessions(&machine, w, cx);
                             }
+                            Ok(()) => return,
                         }
-                        this.refresh_dialog(w, cx, &machine, optimistic_id);
-                        cx.notify();
+                        if current_connection {
+                            this.refresh_dialog(w, cx, &machine, optimistic_id);
+                            cx.notify();
+                        }
                     });
                 })
                 .detach();
