@@ -10,8 +10,8 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use amux_desktop::workflow::{
     AgentSlot, Decision, LinkedSession, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,
@@ -25,6 +25,7 @@ use protocol::{SessionState, StateChangeReason};
 /// 阻塞等待关联普通会话结束，busy→idle 事件必然在 gate 运行中到达。
 struct PausableBackend {
     started: AtomicUsize,
+    started_notify: tokio::sync::Notify,
     release: tokio::sync::Semaphore,
     decisions: Mutex<VecDeque<Decision>>,
 }
@@ -36,6 +37,7 @@ impl OrcBackend for PausableBackend {
     ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>> {
         Box::pin(async move {
             self.started.fetch_add(1, Ordering::SeqCst);
+            self.started_notify.notify_waiters();
             // 信号量语义：许可会保留给后续 acquire，无 Notify 的丢唤醒竞态
             let permit = self
                 .release
@@ -51,14 +53,14 @@ impl OrcBackend for PausableBackend {
     }
 }
 
-async fn wait_until(mut cond: impl FnMut() -> bool) {
-    for _ in 0..2000 {
-        if cond() {
+async fn wait_started(backend: &PausableBackend, expected: usize) {
+    loop {
+        let notified = backend.started_notify.notified();
+        if backend.started.load(Ordering::SeqCst) >= expected {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        notified.await;
     }
-    panic!("等待超时");
 }
 
 fn hub_with_one_machine() -> Arc<MachineHub> {
@@ -85,6 +87,7 @@ async fn linked_session_completion_mid_turn_injects_message_and_reruns() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(PausableBackend {
         started: AtomicUsize::new(0),
+        started_notify: tokio::sync::Notify::new(),
         release: tokio::sync::Semaphore::new(0),
         decisions: Mutex::new(VecDeque::from(vec![
             Decision {
@@ -105,7 +108,7 @@ async fn linked_session_completion_mid_turn_injects_message_and_reruns() {
     // 编排 turn 启动并阻塞在第一轮 decide（gate 运行中）
     let engine_task = engine.clone();
     let ta = tokio::spawn(async move { engine_task.advance().await });
-    wait_until(|| backend_test.started.load(Ordering::SeqCst) >= 1).await;
+    wait_started(&backend_test, 1).await;
 
     // 关联普通会话完成事件在 turn 进行中到达：必须立即注入用户消息
     let injected = engine
@@ -132,7 +135,7 @@ async fn linked_session_completion_mid_turn_injects_message_and_reruns() {
 
     // 放行第一轮 decide → 当前 turn 结束 → 因 requested 补跑第二轮
     backend_test.release.add_permits(1);
-    wait_until(|| backend_test.started.load(Ordering::SeqCst) >= 2).await;
+    wait_started(&backend_test, 2).await;
     backend_test.release.add_permits(1);
     let res = ta.await.unwrap();
     assert!(res.is_ok());

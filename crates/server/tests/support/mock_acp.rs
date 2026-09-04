@@ -6,9 +6,9 @@
 //! - `session/new` 返回自增的唯一 sessionId（mock_s_1、mock_s_2、…），支持多会话
 //! - `session/prompt` 记录该会话的用户指令与 agent 输出（内存），`session/load`
 //!   全量重放记录的历史；`session/resume` 恢复会话（no-op 响应）
-//! - `session/prompt` 先请求权限（期望 server yolo 自动批准），随后 sleep
-//!   `AMUX_MOCK_DELAY_MS`（默认 300ms）再发事件流与响应——保证忙时 prompt
-//!   （-32006）测试有确定性的 busy 窗口
+//! - `session/prompt` 先请求权限（期望 server yolo 自动批准）；设置
+//!   `AMUX_MOCK_WAIT_FOR_CANCEL=1` 时，等待收到 cancel 通知再结束 turn，
+//!   为忙时 prompt 测试提供确定性的协调点
 //! - `session/prompt` 指令为 `/terminal` 时，经 `terminal/create`、
 //!   `terminal/wait_for_exit`、`terminal/output`、`terminal/release` 全链路在
 //!   客户端执行 shell 并把结果作为 agent 输出回传（模拟 kimi acp 的行为）。
@@ -17,9 +17,8 @@
 //! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
 
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
@@ -36,7 +35,7 @@ use agent_client_protocol::schema::v1::{
     UsageUpdate, WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{Agent, Result, Stdio};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -81,11 +80,31 @@ fn history_len(sid: &str) -> usize {
     history().lock().get(sid).map(|h| h.len()).unwrap_or(0)
 }
 
-fn delay_ms() -> u64 {
-    std::env::var("AMUX_MOCK_DELAY_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300)
+fn cancelled_sessions() -> &'static Mutex<HashSet<String>> {
+    use std::sync::OnceLock;
+    static C: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn waited_sessions() -> &'static Mutex<HashSet<String>> {
+    use std::sync::OnceLock;
+    static W: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    W.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn cancel_notify() -> &'static tokio::sync::Notify {
+    use std::sync::OnceLock;
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+
+async fn wait_for_cancel(session_id: &str) {
+    loop {
+        if cancelled_sessions().lock().remove(session_id) {
+            return;
+        }
+        cancel_notify().notified().await;
+    }
 }
 
 fn record_call(calls_file: &str, method: &str) {
@@ -282,9 +301,10 @@ async fn run(state_file: &str) -> Result<()> {
                         append_approved(&state_file);
                     }
 
-                    let ms = delay_ms();
-                    if ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(ms)).await;
+                    if std::env::var_os("AMUX_MOCK_WAIT_FOR_CANCEL").is_some()
+                        && waited_sessions().lock().insert(request.session_id.to_string())
+                    {
+                        wait_for_cancel(&request.session_id.to_string()).await;
                     }
 
                     // 模拟 kimi acp 等把 shell 执行委托给客户端的 agent：指令为
@@ -448,7 +468,13 @@ async fn run(state_file: &str) -> Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_notification(
-            async move |_cancel: CancelNotification, _cx| Ok(()),
+            async move |cancel: CancelNotification, _cx| {
+                cancelled_sessions()
+                    .lock()
+                    .insert(cancel.session_id.to_string());
+                cancel_notify().notify_waiters();
+                Ok(())
+            },
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_to(Stdio::new())

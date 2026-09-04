@@ -6,7 +6,6 @@ use std::time::Duration;
 use protocol::notify;
 use protocol::{TerminalInputParams, TerminalOpenParams};
 
-use amux_server::rpc::RpcError;
 use amux_server::terminal::{ConnScope, TerminalService};
 use base64::Engine as _;
 
@@ -230,25 +229,18 @@ async fn release_conn_kills_terminals() {
         .expect("打开终端应成功");
     service.release_conn(42);
 
-    // 杀进程是异步生效（输出泵经 EOF 摘除条目），轮询直到不可用
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(tokio::time::Instant::now() < deadline, "终端未被释放");
-        match service.resize(
+    // release_conn 同步摘除注册表条目；异步部分只负责结束被杀掉的 PTY。
+    let err = service
+        .resize(
             protocol::TerminalResizeParams {
-                terminal_id: id.clone(),
+                terminal_id: id,
                 cols: 20,
                 rows: 5,
             },
             42,
-        ) {
-            Ok(()) => tokio::time::sleep(Duration::from_millis(50)).await,
-            Err(RpcError { code, .. }) => {
-                assert_eq!(code, protocol::server_error::TERMINAL_NOT_FOUND);
-                break;
-            }
-        }
-    }
+        )
+        .unwrap_err();
+    assert_eq!(err.code, protocol::server_error::TERMINAL_NOT_FOUND);
 }
 
 /// cwd 不存在或行列为零时返回参数错误。

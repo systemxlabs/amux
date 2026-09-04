@@ -6,7 +6,7 @@
 //! workspace.diff/restore。
 
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
 struct Client {
@@ -118,14 +118,14 @@ impl Client {
 }
 
 async fn wait_port(port: u16) -> u16 {
-    for _ in 0..200 {
+    for _ in 0..2000 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
         {
             return port;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
     panic!("server 未就绪");
 }
@@ -147,22 +147,25 @@ impl Drop for ServerGuard {
 async fn spawn_server_with_delay(
     port: u16,
     data_dir: tempfile::TempDir,
-    delay_ms: u32,
+    wait_for_cancel: bool,
 ) -> ServerGuard {
     let data_path = data_dir.path();
     let bin = env!("CARGO_BIN_EXE_test-server");
-    let child = tokio::process::Command::new(bin)
-        .args([
-            "--token",
-            "test-token",
-            "--port",
-            &port.to_string(),
-            "--data-dir",
-            data_path.to_str().unwrap(),
-        ])
-        .env("AMUX_MOCK_STATE", data_path.join("mock.state"))
-        .env("AMUX_NO_DISCOVERY", "1")
-        .env("AMUX_MOCK_DELAY_MS", delay_ms.to_string())
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args([
+        "--token",
+        "test-token",
+        "--port",
+        &port.to_string(),
+        "--data-dir",
+        data_path.to_str().unwrap(),
+    ])
+    .env("AMUX_MOCK_STATE", data_path.join("mock.state"))
+    .env("AMUX_NO_DISCOVERY", "1");
+    if wait_for_cancel {
+        cmd.env("AMUX_MOCK_WAIT_FOR_CANCEL", "1");
+    }
+    let child = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -409,14 +412,16 @@ async fn session_lifecycle_state_change_and_delete() {
     let r = c.call("session.delete", json!({"sessionId": sid})).await;
     assert!(r.get("error").is_none(), "删除失败: {r}");
     // 资源清理异步化：close/delete 帧在删除 RPC 返回后于后台完成，轮询等待
-    let mut closed = false;
-    for _ in 0..50 {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let closed = loop {
         if mock_calls(&data_dir).contains("session/close") {
-            closed = true;
-            break;
+            break true;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::task::yield_now().await;
+    };
     assert!(closed, "后台清理应触发 ACP session/close");
     let list = c.call("session.list", json!({})).await;
     assert!(list["result"]["sessions"].as_array().unwrap().is_empty());
@@ -699,11 +704,13 @@ async fn workspace_list_and_read_browse_session_directory() {
         .await;
     assert!(root.get("error").is_none(), "list 失败: {root}");
     assert_eq!(root["result"]["path"], "");
-    assert!(root["result"]["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == "src" && entry["isDir"] == true));
+    assert!(
+        root["result"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "src" && entry["isDir"] == true)
+    );
 
     let nested = c
         .call(
@@ -804,7 +811,7 @@ async fn start_server_with_dir() -> (u16, std::path::PathBuf, ServerGuard) {
         .tempdir()
         .unwrap();
     let data_path = data_dir.path().to_path_buf();
-    let guard = spawn_server_with_delay(port, data_dir, 150).await;
+    let guard = spawn_server_with_delay(port, data_dir, false).await;
     (port, data_path, guard)
 }
 
@@ -887,7 +894,7 @@ async fn busy_prompt_rejected_and_cancel_works() {
         .prefix("amux-e2e-busy-")
         .tempdir()
         .unwrap();
-    let _guard = spawn_server_with_delay(port, data_dir, 3000).await;
+    let _guard = spawn_server_with_delay(port, data_dir, true).await;
     let mut c = Client::connect(port, "test-token").await;
     let agent = mock_acp_name(&mut c).await;
 

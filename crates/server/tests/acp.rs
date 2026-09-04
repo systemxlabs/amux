@@ -142,7 +142,7 @@ async fn acp_driver_full_flow() {
         "update 的 kind 缺失时 name 为 None（合并器沿用同 id 名称）"
     );
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // TurnEnded 表示权限请求及其后续事件已经完成，权限批准记录此时可直接读取。
     let approved = std::fs::read_to_string(&state_file).unwrap_or_default();
     assert!(
         approved.contains("approved"),

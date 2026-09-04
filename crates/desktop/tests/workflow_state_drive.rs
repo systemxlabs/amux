@@ -101,7 +101,7 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
             std::time::Instant::now() < deadline,
             "关联普通会话完成未触发系统向工作流会话注入用户消息"
         );
-        std::thread::sleep(std::time::Duration::from_millis(50));
         cx.run_until_parked();
+        std::thread::yield_now();
     }
 }
