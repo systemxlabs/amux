@@ -11,6 +11,7 @@
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -30,6 +31,25 @@ use crate::rpc::RpcError;
 pub struct ConnScope {
     pub conn_id: u64,
     pub frame_tx: mpsc::Sender<String>,
+    closed: Arc<AtomicBool>,
+}
+
+impl ConnScope {
+    pub fn new(conn_id: u64, frame_tx: mpsc::Sender<String>) -> Self {
+        Self {
+            conn_id,
+            frame_tx,
+            closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone)]
@@ -144,15 +164,23 @@ impl TerminalService {
             })
             .map_err(|e| RpcError::internal(format!("输出线程启动失败: {e}")))?;
 
-        self.terminals.lock().insert(
-            terminal_id.clone(),
-            TerminalHandle {
-                conn_id: conn.conn_id,
-                input_tx,
-                master: Arc::new(Mutex::new(pty.master)),
-                killer: Arc::new(Mutex::new(killer)),
-            },
-        );
+        let handle = TerminalHandle {
+            conn_id: conn.conn_id,
+            input_tx,
+            master: Arc::new(Mutex::new(pty.master)),
+            killer: Arc::new(Mutex::new(killer)),
+        };
+        let mut terminals = self.terminals.lock();
+        if conn.is_closed() {
+            handle
+                .killer
+                .lock()
+                .kill()
+                .map_err(|e| RpcError::internal(format!("关闭终端失败: {e}")))?;
+            return Err(RpcError::internal("连接已关闭"));
+        }
+        terminals.insert(terminal_id.clone(), handle);
+        drop(terminals);
         log::info!(
             "终端 {terminal_id} 已打开（连接 {}，{cols}x{rows}，cwd {cwd}）",
             conn.conn_id
@@ -265,19 +293,20 @@ impl TerminalService {
         Ok(handle)
     }
 
-    /// 连接断开：释放该连接的全部终端（杀进程；输出泵随后经 EOF 自行摘除条目）。
-    pub fn release_conn(&self, conn_id: u64) {
-        let victims: Vec<_> = self
-            .terminals
-            .lock()
+    /// 连接断开：先标记连接关闭，再释放该连接的全部终端。
+    /// 标记与摘除在同一表锁临界区内完成，防止并发 terminal.open 注册出孤儿 PTY。
+    pub fn release_conn(&self, conn: &ConnScope) {
+        let mut terminals = self.terminals.lock();
+        conn.close();
+        let victims: Vec<_> = terminals
             .iter()
-            .filter(|(_, h)| h.conn_id == conn_id)
+            .filter(|(_, h)| h.conn_id == conn.conn_id)
             .map(|(id, _)| id.clone())
             .collect();
         for id in victims {
-            if let Some(h) = self.terminals.lock().remove(&id) {
+            if let Some(h) = terminals.remove(&id) {
                 h.killer.lock().kill().ok();
-                log::info!("终端 {id} 随连接 {conn_id} 断开释放");
+                log::info!("终端 {id} 随连接 {} 断开释放", conn.conn_id);
             }
         }
     }

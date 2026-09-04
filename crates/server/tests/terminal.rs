@@ -63,10 +63,7 @@ fn decoded(params: &serde_json::Value) -> String {
 async fn open_echo_exit_roundtrip() {
     let service = std::sync::Arc::new(TerminalService::new());
     let conn = test_conn(1);
-    let scope = ConnScope {
-        conn_id: conn.conn_id,
-        frame_tx: conn.tx.clone(),
-    };
+    let scope = ConnScope::new(conn.conn_id, conn.tx.clone());
     let mut rx = conn.rx;
     let tmp = std::env::temp_dir();
     let terminal_id = service
@@ -134,10 +131,7 @@ async fn open_echo_exit_roundtrip() {
 async fn close_and_conn_binding() {
     let service = std::sync::Arc::new(TerminalService::new());
     let conn = test_conn(7);
-    let scope = ConnScope {
-        conn_id: conn.conn_id,
-        frame_tx: conn.tx,
-    };
+    let scope = ConnScope::new(conn.conn_id, conn.tx);
     let _ = conn;
 
     let tmp = std::env::temp_dir();
@@ -211,10 +205,7 @@ async fn close_and_conn_binding() {
 async fn release_conn_kills_terminals() {
     let service = std::sync::Arc::new(TerminalService::new());
     let conn = test_conn(42);
-    let scope = ConnScope {
-        conn_id: conn.conn_id,
-        frame_tx: conn.tx,
-    };
+    let scope = ConnScope::new(conn.conn_id, conn.tx);
     let _ = conn;
     let tmp = std::env::temp_dir();
     let id = service
@@ -227,7 +218,7 @@ async fn release_conn_kills_terminals() {
             &scope,
         )
         .expect("打开终端应成功");
-    service.release_conn(42);
+    service.release_conn(&scope);
 
     // release_conn 同步摘除注册表条目；异步部分只负责结束被杀掉的 PTY。
     let err = service
@@ -248,10 +239,7 @@ async fn release_conn_kills_terminals() {
 async fn open_rejects_bad_params() {
     let service = std::sync::Arc::new(TerminalService::new());
     let (tx, _rx) = tokio::sync::mpsc::channel(4);
-    let scope = ConnScope {
-        conn_id: 1,
-        frame_tx: tx,
-    };
+    let scope = ConnScope::new(1, tx);
     let err = service
         .open(
             TerminalOpenParams {
@@ -274,4 +262,22 @@ async fn open_rejects_bad_params() {
         )
         .unwrap_err();
     assert_eq!(err.code, protocol::rpc_error::INVALID_PARAMS);
+
+    // 连接已关闭时不能把新建的 PTY 注册到连接表中。
+    drop(scope.frame_tx.clone());
+    let (closed_tx, closed_rx) = tokio::sync::mpsc::channel(1);
+    drop(closed_rx);
+    let closed_scope = ConnScope::new(2, closed_tx);
+    closed_scope.close();
+    let err = service
+        .open(
+            TerminalOpenParams {
+                cwd: std::env::temp_dir().to_string_lossy().into(),
+                cols: 80,
+                rows: 24,
+            },
+            &closed_scope,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, protocol::rpc_error::INTERNAL_ERROR);
 }

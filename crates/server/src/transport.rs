@@ -129,10 +129,7 @@ async fn handle_connection(
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<String>(64);
     // 终端输出帧专属通道：满时施加背压而非丢弃（与终端语义一致）
     let (term_tx, mut term_rx) = tokio::sync::mpsc::channel::<String>(256);
-    let conn_scope = ConnScope {
-        conn_id,
-        frame_tx: term_tx.clone(),
-    };
+    let conn_scope = ConnScope::new(conn_id, term_tx.clone());
 
     loop {
         tokio::select! {
@@ -217,7 +214,7 @@ async fn handle_connection(
         }
     }
     // 断连清理：PTY 进程与连接绑定，连接关闭时一并释放其终端。
-    handlers.terminals.release_conn(conn_id);
+    handlers.terminals.release_conn(&conn_scope);
     log::info!("断开: {peer} (#{conn_id})");
 }
 
