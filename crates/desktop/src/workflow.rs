@@ -395,6 +395,8 @@ pub struct WorkflowEngine {
     current_activity: Arc<Mutex<Option<Activity>>>,
     /// 串行化同一工作流的后台持久化，避免旧快照在新快照之后落盘。
     persist_lock: Arc<Mutex<()>>,
+    /// 串行化同一工作流的历史/活动 JSONL 追加，避免并发写者交错行内容。
+    log_lock: Arc<Mutex<()>>,
 }
 
 impl WorkflowEngine {
@@ -439,6 +441,7 @@ impl WorkflowEngine {
             data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
             persist_lock: Arc::new(Mutex::new(())),
+            log_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -460,6 +463,7 @@ impl WorkflowEngine {
             data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
             persist_lock: Arc::new(Mutex::new(())),
+            log_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -530,6 +534,7 @@ impl WorkflowEngine {
 
     /// 追加写活动 JSONL；失败仅记日志，不阻断推进（活动落盘尽力而为）。
     fn append_activities(&self, acts: &[Activity]) {
+        let _log = self.log_lock.lock();
         let id = self.session.read().id.clone();
         let path = activities_path(&self.data_dir, &id);
         if let Err(e) = append_jsonl(&path, acts) {
@@ -540,6 +545,7 @@ impl WorkflowEngine {
     /// 追加写对话历史 JSONL：条目在内存中合并完整后立即落盘（见 DESIGN
     /// 「流式输出合并后写入」）。失败仅记日志，不阻断推进。
     fn append_history(&self, items: &[HistoryItem]) {
+        let _log = self.log_lock.lock();
         let id = self.session.read().id.clone();
         let path = history_path(&self.data_dir, &id);
         if let Err(e) = append_jsonl(&path, items) {
@@ -2359,6 +2365,44 @@ mod tests {
         let acts = read_jsonl::<Activity>(&path).unwrap();
         assert_eq!(acts.len(), 1, "活动应实时落盘");
         assert!(matches!(&acts[0], Activity::Thinking { content, .. } if content == "想"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_activity_appends_remain_valid_jsonl() {
+        let dir = temp_data_dir();
+        let (clients, m) = clients_with_machines();
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            FakeBackend::new(vec![]),
+            test_hub(vec![m], clients),
+            &dir,
+        );
+        let workers = 4;
+        let per_worker = 25;
+        std::thread::scope(|scope| {
+            for worker in 0..workers {
+                let engine = engine.clone();
+                scope.spawn(move || {
+                    for item in 0..per_worker {
+                        engine.record_activity(Activity::Thinking {
+                            timestamp: (worker * per_worker + item) as u64,
+                            content: format!("worker-{worker}-item-{item}"),
+                        });
+                    }
+                });
+            }
+        });
+
+        let id = engine.id();
+        let activities = read_jsonl::<Activity>(&activities_path(&dir, &id)).unwrap();
+        assert_eq!(activities.len(), workers * per_worker);
+        assert!(activities.iter().all(|activity| matches!(
+            activity,
+            Activity::Thinking { content, .. } if content.starts_with("worker-")
+        )));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
