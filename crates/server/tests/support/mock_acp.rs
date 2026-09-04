@@ -35,7 +35,7 @@ use agent_client_protocol::schema::v1::{
     UsageUpdate, WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{Agent, Result, Stdio};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 

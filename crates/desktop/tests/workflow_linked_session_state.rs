@@ -10,8 +10,8 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use amux_desktop::workflow::{
     AgentSlot, Decision, LinkedSession, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,

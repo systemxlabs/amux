@@ -1095,13 +1095,7 @@ impl AmuxApp {
             h_flex()
                 .h_full()
                 .child(handle)
-                .child(
-                    div()
-                        .w(px(panel_width))
-                        .h_full()
-                        .min_w_0()
-                        .child(panel),
-                )
+                .child(div().w(px(panel_width)).h_full().min_w_0().child(panel))
                 .into_any(),
         )
     }
