@@ -7,6 +7,7 @@
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
@@ -176,8 +177,8 @@ enum ExecReq {
 
 /// ACP v1 客户端（官方 SDK stdio 传输）。
 pub struct AcpAgentDriver {
-    /// 主线程 → exec 线程的请求发送端；shutdown 时置 None 以优雅结束 exec 线程
-    exec_tx: Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>,
+    /// 主线程 → exec 线程的请求发送端；连接结束或 shutdown 时置 None
+    exec_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>>,
     /// 连接级缓存与事件路由（与 exec 线程的通知处理器共享）
     caches: SessionCaches,
     /// 本进程内已 resume 过的会话（server 重启后从注册表恢复的会话首次交互前
@@ -206,7 +207,7 @@ fn session_caps_from_agent_caps(
 }
 
 /// `session/update` 通知处理器共享的连接级状态（驱动与 exec 线程各持一份克隆）。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct SessionCaches {
     /// 会话事件路由：agent sessionId -> prompt 的事件接收端
     routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
@@ -216,10 +217,25 @@ struct SessionCaches {
     commands: Arc<Mutex<HashMap<String, Vec<protocol::SlashCommand>>>>,
     /// 会话计划：agent sessionId -> 最近一次 `plan` 通知的全量条目（缓存理由同上）。
     plans: Arc<Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>>>,
+    /// ACP 连接是否仍可接受新的调用；断连时先标记失效，再清理事件路由。
+    alive: Arc<AtomicBool>,
     /// initialize 握手声明的连接默认能力（会话建立时按 sessionId 落档）
     default_caps: Arc<Mutex<AgentSessionCaps>>,
     /// 会话能力：agent sessionId -> 建立时 agent 侧声明的快照
     caps: Arc<Mutex<HashMap<String, AgentSessionCaps>>>,
+}
+
+impl Default for SessionCaches {
+    fn default() -> Self {
+        Self {
+            routes: Arc::new(Mutex::new(HashMap::new())),
+            commands: Arc::new(Mutex::new(HashMap::new())),
+            plans: Arc::new(Mutex::new(HashMap::new())),
+            alive: Arc::new(AtomicBool::new(true)),
+            default_caps: Arc::new(Mutex::new(AgentSessionCaps::default())),
+            caps: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 impl SessionCaches {
@@ -233,6 +249,7 @@ impl SessionCaches {
 
     /// ACP 连接结束时释放全部会话缓存，并唤醒仍等待 agent 事件的 turn。
     fn clear_on_disconnect(&self) {
+        self.alive.store(false, Ordering::SeqCst);
         let routes = std::mem::take(&mut *self.routes.lock());
         for (_, tx) in routes {
             send_disconnect_events(tx);
@@ -278,7 +295,9 @@ impl AcpAgentDriver {
     /// `AMUX_ACP_SPAWN_TIMEOUT_MS` 限制（默认 30s；npx 首次按需下载可能较慢，
     /// 超时按失败处理，`driver_for` 兜底会重试）。
     pub fn spawn(bin: &str, args: &[&str], env: &[(String, String)]) -> Result<Self, String> {
-        let (exec_tx, exec_rx) = std::sync::mpsc::sync_channel::<ExecReq>(32);
+        let (exec_sender, exec_rx) = std::sync::mpsc::sync_channel::<ExecReq>(32);
+        let exec_tx = Arc::new(Mutex::new(Some(exec_sender)));
+        let exec_tx2 = exec_tx.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let caches = SessionCaches::default();
         let caches2 = caches.clone();
@@ -290,7 +309,9 @@ impl AcpAgentDriver {
                 .enable_all()
                 .build()
                 .expect("构建 tokio runtime 失败");
-            rt.block_on(exec_main(&bin, &args, &env, exec_rx, caches2, ready_tx));
+            rt.block_on(exec_main(
+                &bin, &args, &env, exec_rx, exec_tx2, caches2, ready_tx,
+            ));
         });
         let timeout_ms = std::env::var("AMUX_ACP_SPAWN_TIMEOUT_MS")
             .ok()
@@ -306,7 +327,7 @@ impl AcpAgentDriver {
             }
         }
         Ok(AcpAgentDriver {
-            exec_tx: Mutex::new(Some(exec_tx)),
+            exec_tx,
             caches,
             resumed: Arc::new(Mutex::new(HashSet::new())),
             thread: Mutex::new(Some(thread)),
@@ -314,6 +335,9 @@ impl AcpAgentDriver {
     }
 
     fn sender(&self) -> Result<std::sync::mpsc::SyncSender<ExecReq>, String> {
+        if !self.caches.alive.load(Ordering::SeqCst) {
+            return Err("agent 已关闭".to_string());
+        }
         self.exec_tx
             .lock()
             .clone()
@@ -326,7 +350,19 @@ impl AcpAgentDriver {
         self.sender()?
             .send(ExecReq::Call { call, resp: tx })
             .map_err(|_| "agent 已关闭".to_string())?;
-        rx.recv().map_err(|_| "ACP 调用执行失败".to_string())?
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if !self.caches.alive.load(Ordering::SeqCst) {
+                        return Err("agent 已关闭".to_string());
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("ACP 调用执行失败".to_string());
+                }
+            }
+        }
     }
 }
 
@@ -379,27 +415,40 @@ impl AgentDriver for AcpAgentDriver {
         input: Vec<ContentBlock>,
     ) -> mpsc::Receiver<AgentEvent> {
         let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-        self.caches
-            .routes
-            .lock()
-            .insert(agent_session_id.to_string(), tx.clone());
+        let registered = {
+            let mut routes = self.caches.routes.lock();
+            if self.caches.alive.load(Ordering::SeqCst) {
+                routes.insert(agent_session_id.to_string(), tx.clone());
+                true
+            } else {
+                false
+            }
+        };
+        if !registered {
+            let _ = tx.try_send(AgentEvent::Error("agent 已关闭".into()));
+            let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
+            return rx;
+        }
         let req = ExecReq::Prompt {
             sid: agent_session_id.to_string(),
             prompt: input,
             routes: self.caches.routes.clone(),
         };
-        let send_result = self
+        if let Err(error) = self
             .sender()
-            .and_then(|sender| sender.send(req).map_err(|_| "agent 已关闭".to_string()));
-        if let Err(error) = send_result {
-            self.caches.routes.lock().remove(agent_session_id);
-            let _ = tx.try_send(AgentEvent::Error(error));
-            let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
+            .and_then(|sender| sender.send(req).map_err(|_| "agent 已关闭".to_string()))
+        {
+            let removed = self.caches.routes.lock().remove(agent_session_id);
+            if removed.is_some() {
+                let _ = tx.try_send(AgentEvent::Error(error));
+                let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
+            }
         }
         rx
     }
 
     fn shutdown(&self) {
+        self.caches.alive.store(false, Ordering::SeqCst);
         let _ = self.exec_tx.lock().take();
         self.caches.clear_on_disconnect();
     }
@@ -530,6 +579,7 @@ async fn exec_main(
     args: &[String],
     env: &[(String, String)],
     exec_rx: std::sync::mpsc::Receiver<ExecReq>,
+    exec_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>>,
     caches: SessionCaches,
     ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
@@ -577,8 +627,9 @@ async fn exec_main(
         ready_sent.clone(),
     )
     .await;
-    // ACP 连接关闭后，通知路由和会话快照都失去权威性。释放它们并关闭路由
-    // sender，让 server 侧等待中的 turn 走连接中断收尾，而不是永久等待。
+    // ACP 连接关闭后，先阻止新的调用进入队列，再唤醒已有 turn。
+    caches.alive.store(false, Ordering::SeqCst);
+    exec_tx.lock().take();
     caches.clear_on_disconnect();
 
     // 连接异常结束：若就绪信号尚未发出（连接建立前传输层失败：二进制缺失 /
@@ -1292,6 +1343,27 @@ mod tests {
             Some(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted))
         ));
         assert!(caches.routes.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prompt_after_disconnect_finishes_immediately() {
+        let caches = SessionCaches::default();
+        caches.clear_on_disconnect();
+        let driver = AcpAgentDriver {
+            exec_tx: Arc::new(Mutex::new(None)),
+            caches,
+            resumed: Arc::new(Mutex::new(HashSet::new())),
+            thread: Mutex::new(None),
+        };
+        let mut rx = driver.prompt("s1", Vec::new());
+        assert!(matches!(
+            rx.recv().await,
+            Some(AgentEvent::Error(message)) if message == "agent 已关闭"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted))
+        ));
     }
 
     #[test]
