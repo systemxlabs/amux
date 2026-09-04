@@ -113,7 +113,6 @@ impl AmuxApp {
             // 先把关联普通会话全部从顶层结果剔除（仅挂在工作流下展示，
             // 避免与嵌套展示重复），再计算当前窗口需要补查的关联会话。
             let missing = match this.update_in(cx, |this, _w, _cx| {
-                let idx = this.machine_idx_by_name(&machine_name)?;
                 let mut all_linked_session_ids = HashSet::new();
                 let mut visible_linked_session_ids = HashSet::new();
                 for wf in &this.workflows {
@@ -127,7 +126,7 @@ impl AmuxApp {
                         }
                     }
                 }
-                let m = this.machines.get_mut(idx)?;
+                let m = this.machine_mut_by_name(&machine_name)?;
                 if m.connection_generation != generation || m.sessions_request_id != request_id {
                     return None;
                 }
