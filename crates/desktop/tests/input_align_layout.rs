@@ -39,7 +39,7 @@ fn input_buttons_align_with_input_bottom(cx: &mut gpui::TestAppContext) {
             machine.status = MachineStatus::Online;
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
-                machine: 0,
+                machine: "test".into(),
                 id: "session-1".into(),
             });
         });

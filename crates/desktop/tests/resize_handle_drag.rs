@@ -81,7 +81,7 @@ fn resize_handles_are_isolated(cx: &mut gpui::TestAppContext) {
             machine.status = MachineStatus::Online;
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
-                machine: 0,
+                machine: "test".into(),
                 id: "session-1".into(),
             });
             // 直接展开右侧面板（同 tests/diff_scroll_layout.rs）

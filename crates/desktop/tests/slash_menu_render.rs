@@ -57,11 +57,11 @@ fn slash_menu_visibility_follows_input_prefix(cx: &mut gpui::TestAppContext) {
             machine.status = MachineStatus::Online;
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
-                machine: 0,
+                machine: "test".into(),
                 id: "session-1".into(),
             });
             app.slash_commands = Some(SelectedSlashCommands {
-                machine: 0,
+                machine: "test".into(),
                 session_id: "session-1".into(),
                 commands: vec![command("goal"), command("review")],
             });
@@ -95,7 +95,7 @@ fn slash_menu_visibility_follows_input_prefix(cx: &mut gpui::TestAppContext) {
             app.input_state
                 .update(cx, |s, cx| s.set_value("/", window, cx));
             app.slash_commands = Some(SelectedSlashCommands {
-                machine: 0,
+                machine: "test".into(),
                 session_id: "session-other".into(),
                 commands: vec![command("goal")],
             });
@@ -110,7 +110,7 @@ fn slash_menu_visibility_follows_input_prefix(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.slash_commands = Some(SelectedSlashCommands {
-                machine: 0,
+                machine: "test".into(),
                 session_id: "session-1".into(),
                 commands: vec![command("goal"), command("review")],
             });

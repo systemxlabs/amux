@@ -88,7 +88,7 @@ fn dialog_renders_user_message_with_image(cx: &mut gpui::TestAppContext) {
                 });
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
-                machine: 0,
+                machine: "test".into(),
                 id: "session-1".into(),
             });
             cx.notify();

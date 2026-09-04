@@ -38,9 +38,11 @@ impl AmuxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let plan = self
-            .open_session_target()
-            .and_then(|(machine, id)| self.machine(machine).and_then(|m| m.views.get(&id)))
+        let plan = self.open_session_target().and_then(|(machine_name, id)| {
+            self.machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
+                .and_then(|m| m.views.get(&id))
+        })
             .map(|v| v.plan.clone())
             .unwrap_or_default();
         v_flex()
@@ -113,7 +115,16 @@ impl AmuxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Some((machine_idx, session_id)) = self.open_session_target() else {
+        let Some((machine_name, session_id)) = self.open_session_target() else {
+            return v_flex()
+                .w_full()
+                .h_full()
+                .p_3()
+                .bg(cx.theme().popover)
+                .child(Label::new("未选择会话"))
+                .into_any();
+        };
+        let Some(machine_idx) = self.machine_idx_by_name(&machine_name) else {
             return v_flex()
                 .w_full()
                 .h_full()
@@ -143,6 +154,8 @@ impl AmuxApp {
             let entry_id = entry.id.clone();
             let entry_close = entry.id.clone();
             let tab_id = entry.id.clone();
+            let tab_machine = machine_name.clone();
+            let close_machine = machine_name.clone();
             let active = active_terminal.as_deref() == Some(entry.id.as_str());
             tabs = tabs.child(
                 h_flex()
@@ -156,11 +169,11 @@ impl AmuxApp {
                     .when(!active, |d| d.bg(cx.theme().muted.opacity(0.35)))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                        if let Some(m) = this.machine_mut(machine_idx) {
+                        if let Some(m) = this.machine_mut_by_name(&tab_machine) {
                             m.active_terminal = Some(entry_id.clone());
                         }
                         let focus = this
-                            .machine(machine_idx)
+                            .machine_by_name(&tab_machine)
                             .and_then(|m| m.terminals.iter().find(|t| t.id == entry_id))
                             .map(|t| t.view.read(cx).focus.clone());
                         if let Some(focus) = focus {
@@ -180,7 +193,7 @@ impl AmuxApp {
                             .ghost()
                             .icon(IconName::Close)
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                this.close_terminal(cx, machine_idx, entry_close.clone());
+                                this.close_terminal(cx, &close_machine, entry_close.clone());
                             })),
                     ),
             );
@@ -193,10 +206,9 @@ impl AmuxApp {
                 .tooltip("新建终端")
                 .disabled(!online)
                 .on_click(cx.listener(move |this, _ev, window, cx| {
-                    this.spawn_terminal(window, cx, machine_idx);
+                    this.spawn_terminal(window, cx, &machine_name);
                 })),
         );
-
         let active_view = terminals
             .iter()
             .find(|t| active_terminal.as_deref() == Some(t.id.as_str()))
@@ -260,16 +272,19 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         path: String,
         offset: usize,
     ) {
         let Some((selected_machine, session_id)) = self.open_session_target() else {
             return;
         };
-        if selected_machine != machine {
+        if selected_machine != machine_name {
             return;
         }
+        let Some(machine) = self.machine_idx_by_name(machine_name) else {
+            return;
+        };
         let Some(m) = self.machine(machine) else {
             return;
         };
@@ -300,8 +315,9 @@ impl AmuxApp {
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
                 let current_connection =
-                    this.is_current_machine_connection(machine, &machine_name, generation);
-                let selected_session_matches = this.is_selected_session(machine, &session_id);
+                    this.is_current_machine_connection(&machine_name, generation);
+                let selected_session_matches =
+                    this.is_selected_session(&machine_name, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
@@ -348,16 +364,19 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         path: String,
         offset: usize,
     ) {
         let Some((selected_machine, session_id)) = self.open_session_target() else {
             return;
         };
-        if selected_machine != machine {
+        if selected_machine != machine_name {
             return;
         }
+        let Some(machine) = self.machine_idx_by_name(machine_name) else {
+            return;
+        };
         let Some(m) = self.machine(machine) else {
             return;
         };
@@ -395,8 +414,9 @@ impl AmuxApp {
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
                 let current_connection =
-                    this.is_current_machine_connection(machine, &machine_name, generation);
-                let selected_session_matches = this.is_selected_session(machine, &session_id);
+                    this.is_current_machine_connection(&machine_name, generation);
+                let selected_session_matches =
+                    this.is_selected_session(&machine_name, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
@@ -431,12 +451,15 @@ impl AmuxApp {
 
     pub(crate) fn render_workspace_tree(
         &self,
-        machine_idx: usize,
+        machine_name: &str,
         path: &str,
         depth: usize,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let Some(machine) = self.machine(machine_idx) else {
+        let Some(machine) = self
+            .machine_idx_by_name(machine_name)
+            .and_then(|idx| self.machine(idx))
+        else {
             return Vec::new();
         };
         let Some(directory) = machine.workspace_directories.get(path) else {
@@ -471,7 +494,10 @@ impl AmuxApp {
                 .w_full()
                 .selected(selected)
                 .on_click(cx.listener(move |this, _ev, window, cx| {
-                    let Some(machine) = this.active_machine() else {
+                    let Some(machine_name) = this.active_machine() else {
+                        return;
+                    };
+                    let Some(machine) = this.machine_idx_by_name(&machine_name) else {
                         return;
                     };
                     if is_dir {
@@ -491,14 +517,14 @@ impl AmuxApp {
                                 this.load_workspace_list(
                                     window,
                                     cx,
-                                    machine,
+                                    &machine_name,
                                     click_path.clone(),
                                     0,
                                 );
                             }
                         }
                     } else {
-                        this.load_workspace_file(window, cx, machine, click_path.clone(), 0);
+                        this.load_workspace_file(window, cx, &machine_name, click_path.clone(), 0);
                     }
                     cx.notify();
                 }))
@@ -537,7 +563,7 @@ impl AmuxApp {
             let mut node = v_flex().child(row);
             if expanded {
                 node = node.children(self.render_workspace_tree(
-                    machine_idx,
+                    machine_name,
                     &entry_path,
                     depth + 1,
                     cx,
@@ -559,11 +585,11 @@ impl AmuxApp {
                     })
                     .disabled(loading)
                     .on_click(cx.listener(move |this, _ev, window, cx| {
-                        if let Some(machine) = this.active_machine() {
+                        if let Some(machine_name) = this.active_machine() {
                             this.load_workspace_list(
                                 window,
                                 cx,
-                                machine,
+                                &machine_name,
                                 path_for_click.clone(),
                                 next_offset,
                             );
@@ -594,7 +620,7 @@ impl AmuxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Some(machine_idx) = self.active_machine() else {
+        let Some(machine_name) = self.active_machine() else {
             return v_flex()
                 .w_full()
                 .h_full()
@@ -602,6 +628,9 @@ impl AmuxApp {
                 .bg(cx.theme().popover)
                 .child(Label::new("未选择会话"))
                 .into_any();
+        };
+        let Some(machine_idx) = self.machine_idx_by_name(&machine_name) else {
+            return div().into_any();
         };
         let Some(machine) = self.machine(machine_idx) else {
             return div().into_any();
@@ -622,7 +651,7 @@ impl AmuxApp {
                 .bg(cx.theme().muted.opacity(0.35))
                 .rounded_md()
                 .overflow_y_scrollbar()
-                .children(self.render_workspace_tree(machine_idx, "", 0, cx))
+                .children(self.render_workspace_tree(&machine_name, "", 0, cx))
         });
 
         let mut content = v_flex().flex_1().min_w_0().h_full().gap_2().child(
@@ -669,11 +698,11 @@ impl AmuxApp {
                         })
                         .disabled(workspace_read_loading)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
-                            if let Some(machine) = this.active_machine() {
+                            if let Some(machine_name) = this.active_machine() {
                                 this.load_workspace_file(
                                     window,
                                     cx,
-                                    machine,
+                                    &machine_name,
                                     path.clone(),
                                     read_next_offset,
                                 );
@@ -718,7 +747,7 @@ impl AmuxApp {
                             })
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 if let Some(machine) = this.active_machine() {
-                                    if let Some(m) = this.machines.get_mut(machine) {
+                                    if let Some(m) = this.machine_mut_by_name(&machine) {
                                         m.workspace_tree_collapsed = !m.workspace_tree_collapsed;
                                     }
                                     cx.notify();
@@ -850,8 +879,11 @@ impl AmuxApp {
                 cx.theme().muted_foreground,
                 cx.theme().foreground,
             ));
-        if let Some((machine, _)) = self.open_session_target() {
-            if let Some(machine_view) = self.machine(machine) {
+        if let Some((machine_name, _)) = self.open_session_target() {
+            if let Some(machine_view) = self
+                .machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
+            {
                 body = body
                     .child(info_row(
                         "机器",
@@ -1056,25 +1088,25 @@ impl AmuxApp {
                 };
                 this.set_panel(window, cx, next);
                 if next == Some(Panel::Workspace) {
-                    if let Some(machine) = this.active_machine() {
-                        this.load_workspace_list(window, cx, machine, String::new(), 0);
+                    if let Some(machine_name) = this.active_machine() {
+                        this.load_workspace_list(window, cx, &machine_name, String::new(), 0);
                     }
                 }
                 if next == Some(Panel::Diff) {
-                    if let Some((machine, _)) = this.open_session_target() {
-                        this.load_diff(window, cx, machine);
+                    if let Some((machine_name, _)) = this.open_session_target() {
+                        this.load_diff(window, cx, &machine_name);
                     }
                 }
                 // 打开即拉取：refresh_activities 有「面板已打开」守卫，周期轮询
                 // 不会补上首次打开前的数据；set_panel 已置位，此处守卫可通过
                 if next == Some(Panel::Activities) {
-                    if let Some((machine, id)) = this.open_session_target() {
-                        this.refresh_activities(window, cx, machine, id);
+                    if let Some((machine_name, id)) = this.open_session_target() {
+                        this.refresh_activities(window, cx, &machine_name, id);
                     }
                 }
                 if next == Some(Panel::Plan) {
-                    if let Some((machine, id)) = this.open_session_target() {
-                        this.refresh_plan(window, cx, machine, id);
+                    if let Some((machine_name, id)) = this.open_session_target() {
+                        this.refresh_plan(window, cx, &machine_name, id);
                     }
                 }
             }))

@@ -104,7 +104,7 @@ pub(crate) enum NewSessionMode {
 /// Server 内存中的数据以 Agent 侧数据为权威。
 #[derive(Default)]
 pub struct SelectedConfigOptions {
-    pub machine: usize,
+    pub machine: String,
     pub session_id: String,
     pub loading: bool,
     pub options: Vec<SessionConfigOption>,
@@ -114,7 +114,7 @@ pub struct SelectedConfigOptions {
 /// Server 内存中的命令集合以 Agent 侧数据为权威。
 #[derive(Default)]
 pub struct SelectedSlashCommands {
-    pub machine: usize,
+    pub machine: String,
     pub session_id: String,
     pub commands: Vec<SlashCommand>,
 }
@@ -122,7 +122,7 @@ pub struct SelectedSlashCommands {
 #[derive(Clone, PartialEq)]
 pub enum Selected {
     Session {
-        machine: usize,
+        machine: String,
         id: String,
     },
     /// 以工作流会话 ID（而非 Vec 下标）为身份：列表按活跃度重排、删除会移位下标，
@@ -188,10 +188,10 @@ pub struct AmuxApp {
     pub(crate) title_input: Entity<InputState>,
     /// 设置域状态（浮窗开关/导航与全部表单）：所有权与逻辑归 settings.rs
     pub(crate) settings: crate::settings::SettingsState,
-    pub(crate) renaming_session: Option<(usize, String)>,
+    pub(crate) renaming_session: Option<(String, String)>,
     /// 同 Selected：以工作流会话 ID 为身份
     pub(crate) renaming_workflow: Option<String>,
-    pub(crate) new_session_machine: Option<usize>,
+    pub(crate) new_session_machine: Option<String>,
     pub(crate) new_session_agent: Option<String>,
     /// 新会话是否以 git worktree 方式工作。
     pub(crate) new_session_worktree: bool,
@@ -338,7 +338,7 @@ impl AmuxApp {
                 if let InputEvent::PressEnter { shift: false, .. } = event {
                     if let Some((machine, sid)) = this.renaming_session.clone() {
                         let title = this.title_input.read(cx).value().to_string();
-                        this.rename_session(window, cx, machine, sid, title);
+                        this.rename_session(window, cx, &machine, sid, title);
                     } else if let Some(wf) = this.renaming_workflow.clone() {
                         let title = this.title_input.read(cx).value().to_string();
                         this.rename_workflow(cx, &wf, title);
@@ -366,13 +366,7 @@ impl AmuxApp {
                 match hub_events.recv().await {
                     Ok(HubEvent::LinkedSessionMounted { machine_name, .. }) => {
                         let _ = this.update_in(cx, |this, window, cx| {
-                            if let Some(idx) = this
-                                .machines
-                                .iter()
-                                .position(|m| m.config.name == machine_name)
-                            {
-                                this.refresh_sessions(idx, window, cx);
-                            }
+                            this.refresh_sessions(&machine_name, window, cx);
                             cx.notify();
                         });
                     }
@@ -408,8 +402,9 @@ impl AmuxApp {
                 }
                 // 认证通过后再拉取初始数据（此前启动即发请求会被未认证拒绝，
                 // 产生「连接失败」误报闪烁）
-                this.fetch_agents(idx, window, cx);
-                this.refresh_sessions(idx, window, cx);
+                let machine_name = this.machines[idx].config.name.clone();
+                this.fetch_agents(&machine_name, window, cx);
+                this.refresh_sessions(&machine_name, window, cx);
             }
             "auth_failed" => {
                 if let Some(m) = this.machines.get_mut(idx) {
@@ -520,7 +515,7 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine_idx: usize,
+        machine_name: &str,
     ) {
         let Some((_, cwd)) = self.selected_workspace() else {
             return;
@@ -528,7 +523,7 @@ impl AmuxApp {
         let Some(session_id) = self.open_session_target().map(|(_, id)| id) else {
             return;
         };
-        let Some(m) = self.machine_mut(machine_idx) else {
+        let Some(m) = self.machine_mut_by_name(machine_name) else {
             return;
         };
         if !m.status.online() {
@@ -537,7 +532,7 @@ impl AmuxApp {
             return;
         }
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         // 面板宽 560（上下扣掉标题栏/输入区等约 320）：与打开后的实际网格接近，
         // 打开后的画布实测仍会触发一次 resize 精调
@@ -561,12 +556,12 @@ impl AmuxApp {
                 )
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if !this.is_current_machine_connection(machine_idx, &machine_name, generation)
-                    || !this.is_selected_session(machine_idx, &session_id)
+                if !this.is_current_machine_connection(&machine_name, generation)
+                    || !this.is_selected_session(&machine_name, &session_id)
                 {
                     return;
                 }
-                let Some(m) = this.machine_mut(machine_idx) else {
+                let Some(m) = this.machine_mut_by_name(&machine_name) else {
                     return;
                 };
                 match opened {
@@ -604,10 +599,10 @@ impl AmuxApp {
     pub(crate) fn close_terminal(
         &mut self,
         cx: &mut Context<Self>,
-        machine_idx: usize,
+        machine_name: &str,
         id: String,
     ) {
-        let Some(m) = self.machine_mut(machine_idx) else {
+        let Some(m) = self.machine_mut_by_name(machine_name) else {
             return;
         };
         m.terminals.retain(|t| t.id != id);
@@ -672,15 +667,15 @@ impl AmuxApp {
                 s.state = new_state;
             }
         }
-        this.refresh_sessions(idx, window, cx);
+        this.refresh_sessions(&machine_name, window, cx);
 
         // turn 结束后选项可能经 config_option_update / available_commands_update
         // turn 结束后 Agent 侧数据可能已更新，选中会话需要重新拉取选项与命令。
         if idle {
-            let selected_matches = this.is_selected_session(idx, &sid);
+            let selected_matches = this.is_selected_session(&machine_name, &sid);
             if selected_matches {
-                this.refresh_config_options(cx, idx, sid.clone());
-                this.refresh_slash_commands(cx, idx, sid.clone());
+                this.refresh_config_options(cx, &machine_name, sid.clone());
+                this.refresh_slash_commands(cx, &machine_name, sid.clone());
             }
         }
 
@@ -743,13 +738,7 @@ impl AmuxApp {
                     // 定时刷新统一走 refresh_sessions（含滚动查询 N 页与工作流
                     // 关联会话补齐）；按机器名定位 idx，重连后 idx 仍有效
                     let _ = this.update_in(cx, |this, window, cx| {
-                        if let Some(idx) = this
-                            .machines
-                            .iter()
-                            .position(|m| m.config.name == machine_name)
-                        {
-                            this.refresh_sessions(idx, window, cx);
-                        }
+                        this.refresh_sessions(&machine_name, window, cx);
                     });
                 }
             });
@@ -763,9 +752,9 @@ impl AmuxApp {
                 .flatten();
             if let Some((machine, id)) = target {
                 let _ = this.update_in(cx, |this, window, cx| {
-                    this.refresh_dialog(window, cx, machine, id.clone());
-                    this.refresh_activities(window, cx, machine, id.clone());
-                    this.refresh_plan(window, cx, machine, id);
+                    this.refresh_dialog(window, cx, &machine, id.clone());
+                    this.refresh_activities(window, cx, &machine, id.clone());
+                    this.refresh_plan(window, cx, &machine, id);
                     cx.notify();
                 });
             }
@@ -783,7 +772,7 @@ impl AmuxApp {
             match target {
                 Some((machine, id)) => {
                     let _ = this.update_in(cx, |this, window, cx| {
-                        this.refresh_ongoing(window, cx, machine, id);
+                        this.refresh_ongoing(window, cx, &machine, id);
                         cx.notify();
                     });
                 }
@@ -887,15 +876,16 @@ impl AmuxApp {
         }
     }
 
-    /// 当前被选中的普通会话（machine 下标 + id）。
-    pub(crate) fn open_session_target(&self) -> Option<(usize, String)> {
+    /// 当前被选中的普通会话（机器名 + 会话 ID；机器名是稳定身份，
+    /// 下标会随机器增删重排，跨帧/跨任务一律以名字解析）。
+    pub(crate) fn open_session_target(&self) -> Option<(String, String)> {
         match &self.selected {
-            Some(Selected::Session { machine, id }) => Some((*machine, id.clone())),
+            Some(Selected::Session { machine, id }) => Some((machine.clone(), id.clone())),
             _ => None,
         }
     }
 
-    pub(crate) fn is_selected_session(&self, machine: usize, session_id: &str) -> bool {
+    pub(crate) fn is_selected_session(&self, machine: &str, session_id: &str) -> bool {
         self.open_session_target()
             .is_some_and(|(selected_machine, id)| selected_machine == machine && id == session_id)
     }
@@ -908,15 +898,20 @@ impl AmuxApp {
         self.machines.get_mut(i)
     }
 
-    pub(crate) fn is_current_machine_connection(
-        &self,
-        machine: usize,
-        name: &str,
-        generation: u64,
-    ) -> bool {
-        self.machines
-            .get(machine)
-            .is_some_and(|m| m.config.name == name && m.connection_generation == generation)
+    pub(crate) fn machine_mut_by_name(&mut self, name: &str) -> Option<&mut MachineView> {
+        self.machine_idx_by_name(name)
+            .and_then(|idx| self.machines.get_mut(idx))
+    }
+
+    pub(crate) fn machine_by_name(&self, name: &str) -> Option<&MachineView> {
+        self.machine_idx_by_name(name)
+            .and_then(|idx| self.machines.get(idx))
+    }
+
+    pub(crate) fn is_current_machine_connection(&self, machine_name: &str, generation: u64) -> bool {
+        self.machine_idx_by_name(machine_name)
+            .and_then(|idx| self.machines.get(idx))
+            .is_some_and(|m| m.connection_generation == generation)
     }
 
     /// 工作流会话 ID → 引擎引用。
@@ -930,19 +925,24 @@ impl AmuxApp {
         self.workflows.iter().position(|wf| wf.id() == wf_id)
     }
 
-    /// 默认机器下标：有选中会话则用它，否则第一台。
-    pub(crate) fn active_machine(&self) -> Option<usize> {
+    /// 默认机器名：有选中会话则用它，否则第一台。
+    pub(crate) fn active_machine(&self) -> Option<String> {
         self.open_session_target()
             .map(|(machine, _)| machine)
-            .or_else(|| (!self.machines.is_empty()).then_some(0))
+            .or_else(|| {
+                self.machines
+                    .first()
+                    .map(|m| m.config.name.clone())
+            })
     }
 
     /// 当前选中会话的生效工作目录：启用 worktree 的会话 agent 实际工作在
     /// 工作树内，目录浏览/改动审查/还原都应对准工作树而非用户指定的主仓库。
-    pub(crate) fn selected_workspace(&self) -> Option<(usize, String)> {
+    pub(crate) fn selected_workspace(&self) -> Option<(String, String)> {
         let (machine, id) = self.open_session_target()?;
         let session = self
-            .machine(machine)?
+            .machine_idx_by_name(&machine)
+            .and_then(|idx| self.machine(idx))?
             .sessions
             .iter()
             .find(|session| session.id == id)?;
@@ -1192,8 +1192,8 @@ impl AmuxApp {
                         .label("设置")
                         .on_click(cx.listener(|this, _ev, window, cx| {
                             this.open_settings(window, cx, None);
-                            if let Some(i) = this.active_machine() {
-                                this.refresh_sessions(i, window, cx);
+                            if let Some(machine_name) = this.active_machine() {
+                                this.refresh_sessions(&machine_name, window, cx);
                             }
                         })),
                 ),
@@ -1263,7 +1263,7 @@ impl AmuxApp {
 }
 
 pub(crate) enum SessionListItem {
-    Session { machine: usize, meta: SessionMeta },
+    Session { machine: String, meta: SessionMeta },
     Workflow { idx: usize },
 }
 

@@ -72,10 +72,13 @@ where
 impl AmuxApp {
     pub(crate) fn refresh_sessions(
         &mut self,
-        idx: usize,
+        machine_name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(idx) = self.machine_idx_by_name(machine_name) else {
+            return;
+        };
         let Some(m) = self.machines.get_mut(idx) else {
             return;
         };
@@ -210,13 +213,16 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get_mut(machine) else {
+        let Some(idx) = self.machine_idx_by_name(machine_name) else {
             return;
         };
-        let machine_name = m.config.name.clone();
+        let Some(m) = self.machines.get_mut(idx) else {
+            return;
+        };
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         let Some(view) = m.views.get_mut(&session_id) else {
             return;
@@ -270,16 +276,19 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
         if self.panel != Some(Panel::Activities) {
             return;
         }
-        let Some(m) = self.machines.get_mut(machine) else {
+        let Some(idx) = self.machine_idx_by_name(machine_name) else {
             return;
         };
-        let machine_name = m.config.name.clone();
+        let Some(m) = self.machines.get_mut(idx) else {
+            return;
+        };
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         let Some(view) = m.views.get_mut(&session_id) else {
             return;
@@ -333,13 +342,16 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
-        let Some(m) = self.machines.get_mut(machine) else {
+        let Some(idx) = self.machine_idx_by_name(machine_name) else {
             return;
         };
-        let machine_name = m.config.name.clone();
+        let Some(m) = self.machines.get_mut(idx) else {
+            return;
+        };
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         let Some(view) = m.views.get_mut(&session_id) else {
             return;
@@ -388,16 +400,19 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
         if self.panel != Some(Panel::Plan) {
             return;
         }
-        let Some(m) = self.machines.get_mut(machine) else {
+        let Some(idx) = self.machine_idx_by_name(machine_name) else {
             return;
         };
-        let machine_name = m.config.name.clone();
+        let Some(m) = self.machines.get_mut(idx) else {
+            return;
+        };
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         let Some(view) = m.views.get_mut(&session_id) else {
             return;
@@ -449,13 +464,15 @@ impl AmuxApp {
         R: serde::de::DeserializeOwned + 'static,
         T: 'static,
     {
-        let Some((machine, id)) = self.open_session_target() else {
+        let Some((machine_name, id)) = self.open_session_target() else {
             return;
         };
-        let Some(m) = self.machines.get_mut(machine) else {
+        let Some(idx) = self.machine_idx_by_name(&machine_name) else {
             return;
         };
-        let machine_name = m.config.name.clone();
+        let Some(m) = self.machines.get_mut(idx) else {
+            return;
+        };
         let generation = m.connection_generation;
         let Some(view) = m.views.get_mut(&id) else {
             return;
@@ -549,10 +566,14 @@ impl AmuxApp {
     }
 
     fn refresh_all_online(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for i in 0..self.machines.len() {
-            if matches!(self.machines[i].status, MachineStatus::Online) {
-                self.refresh_sessions(i, window, cx);
-            }
+        let names: Vec<String> = self
+            .machines
+            .iter()
+            .filter(|m| matches!(m.status, MachineStatus::Online))
+            .map(|m| m.config.name.clone())
+            .collect();
+        for name in &names {
+            self.refresh_sessions(name, window, cx);
         }
     }
 
@@ -560,19 +581,22 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
         self.set_selected(
             Some(Selected::Session {
-                machine,
+                machine: machine_name.to_string(),
                 id: session_id.clone(),
             }),
             window,
             cx,
         );
         // 面板打开状态跨会话切换保持。
-        if let Some(m) = self.machines.get_mut(machine) {
+        let Some(idx) = self.machine_idx_by_name(machine_name) else {
+            return;
+        };
+        if let Some(m) = self.machines.get_mut(idx) {
             m.views.entry(session_id.clone()).or_default();
             m.diff.update(cx, |st, _| {
                 st.files.clear();
@@ -598,16 +622,16 @@ impl AmuxApp {
         // 必须在清除状态之后调用，否则会打乱 diff_request_id/loading 守卫。
         match self.panel {
             Some(Panel::Workspace) => {
-                self.load_workspace_list(window, cx, machine, String::new(), 0);
+                self.load_workspace_list(window, cx, machine_name, String::new(), 0);
             }
-            Some(Panel::Diff) => self.load_diff(window, cx, machine),
+            Some(Panel::Diff) => self.load_diff(window, cx, machine_name),
             _ => {}
         }
-        self.refresh_dialog(window, cx, machine, session_id.clone());
-        self.refresh_activities(window, cx, machine, session_id.clone());
-        self.refresh_ongoing(window, cx, machine, session_id.clone());
-        self.refresh_config_options(cx, machine, session_id.clone());
-        self.refresh_slash_commands(cx, machine, session_id);
+        self.refresh_dialog(window, cx, machine_name, session_id.clone());
+        self.refresh_activities(window, cx, machine_name, session_id.clone());
+        self.refresh_ongoing(window, cx, machine_name, session_id.clone());
+        self.refresh_config_options(cx, machine_name, session_id.clone());
+        self.refresh_slash_commands(cx, machine_name, session_id);
         self.dialog_scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -625,18 +649,20 @@ impl AmuxApp {
         };
         match target {
             Selected::Session { machine, id } => {
-                let Some(m) = self.machine(machine) else {
+                let Some(idx) = self.machine_idx_by_name(&machine) else {
+                    return;
+                };
+                let Some(m) = self.machine(idx) else {
                     return;
                 };
                 let client = m.client.clone();
-                let machine_name = m.config.name.clone();
                 let generation = m.connection_generation;
                 let params = SessionPromptParams {
                     session_id: id.clone(),
                     input: blocks.clone(),
                 };
                 let optimistic_timestamp = now();
-                if let Some(m) = self.machine_mut(machine) {
+                if let Some(m) = self.machine_mut(idx) {
                     // 本地仅缓存对话视图；会话状态由服务端权威维护，
                     // 经 state_change 推送 / 会话列表轮询同步，应用侧不做乐观改写
                     let v = m.views.entry(id.clone()).or_default();
@@ -656,12 +682,15 @@ impl AmuxApp {
                         .request_ok(protocol::method::SESSION_PROMPT, Some(prompt_params))
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
-                        if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                        if !this.is_current_machine_connection(&machine, generation) {
                             return;
                         }
+                        let Some(view_idx) = this.machine_idx_by_name(&machine) else {
+                            return;
+                        };
                         match &result {
                             Err(error) => {
-                                if let Some(m) = this.machine_mut(machine) {
+                                if let Some(m) = this.machine_mut(view_idx) {
                                     if let Some(v) = m.views.get_mut(&optimistic_id) {
                                         if let Some(pos) = v.dialog.iter().rposition(|msg| {
                                             matches!(
@@ -680,9 +709,9 @@ impl AmuxApp {
                                 if matches!(
                                     this.selected,
                                     Some(Selected::Session {
-                                        machine: selected_machine,
+                                        machine: ref selected_machine,
                                         ref id,
-                                    }) if selected_machine == machine && id == &optimistic_id
+                                    }) if *selected_machine == machine && id == &optimistic_id
                                 ) && this.input_state.read(cx).value().trim().is_empty()
                                     && this.input_attachments.is_empty()
                                 {
@@ -698,10 +727,10 @@ impl AmuxApp {
                             }
                             // 发送用户消息后主动刷新会话列表。
                             Ok(()) => {
-                                this.refresh_sessions(machine, w, cx);
+                                this.refresh_sessions(&machine, w, cx);
                             }
                         }
-                        this.refresh_dialog(w, cx, machine, optimistic_id);
+                        this.refresh_dialog(w, cx, &machine, optimistic_id);
                         cx.notify();
                     });
                 })
@@ -765,10 +794,10 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        let Some((machine, id)) = self.open_session_target() else {
+        let Some((machine_name, id)) = self.open_session_target() else {
             return;
         };
-        let Some(m) = self.machine(machine) else {
+        let Some(m) = self.machine_by_name(&machine_name) else {
             return;
         };
         // 空闲会话本就无可取消：ACP 侧报错属预期，静默忽略以免污染状态徽章；
@@ -779,7 +808,6 @@ impl AmuxApp {
             .find(|s| s.id == id)
             .is_some_and(|s| s.state == SessionState::Busy);
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
         let sid = id.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -790,19 +818,19 @@ impl AmuxApp {
                 .request_ok(protocol::method::SESSION_CANCEL, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if !this.is_current_machine_connection(machine, &machine_name, generation)
-                    || !this.is_selected_session(machine, &sid)
+                if !this.is_current_machine_connection(&machine_name, generation)
+                    || !this.is_selected_session(&machine_name, &sid)
                 {
                     return;
                 }
                 if let Err(error) = &res {
                     if was_busy {
-                        if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(m) = this.machine_mut_by_name(&machine_name) {
                             m.notice = Some(format!("取消失败（{error}）"));
                         }
                     }
                 }
-                this.refresh_dialog(w, cx, machine, sid);
+                this.refresh_dialog(w, cx, &machine_name, sid);
                 cx.notify();
             });
         })
@@ -814,14 +842,14 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
-        let Some(m) = self.machine(machine) else {
+        let Some(m) = self.machine_by_name(machine_name) else {
             return;
         };
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         let sid = session_id.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -832,12 +860,12 @@ impl AmuxApp {
                 .request_ok(protocol::method::SESSION_DELETE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                if !this.is_current_machine_connection(&machine_name, generation) {
                     return;
                 }
                 match res {
                     Ok(_) => {
-                        if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(m) = this.machine_mut_by_name(&machine_name) {
                             m.sessions.retain(|s| s.id != sid);
                             m.views.remove(&sid);
                         }
@@ -850,10 +878,10 @@ impl AmuxApp {
                             }
                             DraftKey::Workflow { .. } => true,
                         });
-                        this.refresh_sessions(machine, w, cx);
+                        this.refresh_sessions(&machine_name, w, cx);
                     }
                     Err(error) => {
-                        if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(m) = this.machine_mut_by_name(&machine_name) {
                             m.notice = Some(format!("删除会话失败（{error}）"));
                         }
                     }
@@ -868,9 +896,10 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
+        let machine_name = machine_name.to_string();
         self.confirm_dialog(
             window,
             cx,
@@ -880,7 +909,7 @@ impl AmuxApp {
             format!("确定删除会话 {session_id} 吗？删除后历史一并移除，不可恢复。"),
             move |this, window, cx| {
                 let sid = session_id.clone();
-                this.delete_session(window, cx, machine, sid);
+                this.delete_session(window, cx, &machine_name, sid);
             },
         );
     }
@@ -889,15 +918,15 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
         title: String,
     ) {
-        let Some(m) = self.machine(machine) else {
+        let Some(m) = self.machine_by_name(machine_name) else {
             return;
         };
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         let title_trim = title.trim().to_string();
         let params = SessionConfigureParams {
@@ -910,19 +939,19 @@ impl AmuxApp {
                 .request_ok(protocol::method::SESSION_CONFIGURE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                if !this.is_current_machine_connection(&machine_name, generation) {
                     return;
                 }
                 match res {
                     Err(error) => {
-                        if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(m) = this.machine_mut_by_name(&machine_name) {
                             m.notice = Some(format!("重命名失败（{error}）"));
                         }
                     }
                     Ok(()) => {
                         this.renaming_session = None;
                         // 主动刷新会话列表以体现新标题（修复 M1：重命名后不主动刷新）
-                        this.refresh_sessions(machine, w, cx);
+                        this.refresh_sessions(&machine_name, w, cx);
                     }
                 }
                 cx.notify();
@@ -931,8 +960,10 @@ impl AmuxApp {
         .detach();
     }
 
-    pub(crate) fn available_agent(&self, idx: usize) -> Option<String> {
-        self.machine(idx).and_then(|m| {
+    pub(crate) fn available_agent(&self, machine_name: &str) -> Option<String> {
+        self.machine_idx_by_name(machine_name)
+            .and_then(|idx| self.machine(idx))
+            .and_then(|m| {
             m.agents
                 .iter()
                 .find(|a| a.available)
@@ -941,8 +972,9 @@ impl AmuxApp {
     }
 
     pub(crate) fn selected_meta(&self) -> Option<SessionMeta> {
-        if let Some((machine, id)) = self.open_session_target() {
-            self.machine(machine)
+        if let Some((machine_name, id)) = self.open_session_target() {
+            self.machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
                 .and_then(|m| m.sessions.iter().find(|s| s.id == id))
                 .cloned()
         } else if let Some(Selected::Workflow { id }) = &self.selected {
@@ -968,11 +1000,20 @@ impl AmuxApp {
     }
 
     pub(crate) fn create_session_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let machine = self.new_session_machine.unwrap_or(0);
-        let Some(m) = self.machine(machine) else {
+        let Some(machine) = self
+            .new_session_machine
+            .clone()
+            .or_else(|| self.machines.first().map(|m| m.config.name.clone()))
+        else {
             return;
         };
-        let machine_name = m.config.name.clone();
+        let Some(idx) = self.machine_idx_by_name(&machine) else {
+            return;
+        };
+        let Some(m) = self.machine(idx) else {
+            return;
+        };
+        let machine_name = machine.clone();
         let generation = m.connection_generation;
         let cwd = self.session_cwd_input.read(cx).value().trim().to_owned();
         if cwd.is_empty() {
@@ -983,10 +1024,10 @@ impl AmuxApp {
         self.new_session_error = None;
         let agent = match self.new_session_agent.clone() {
             Some(a) => a,
-            None => match self.available_agent(machine) {
+            None => match self.available_agent(&machine) {
                 Some(a) => a,
                 None => {
-                    if let Some(m) = self.machine_mut(machine) {
+                    if let Some(m) = self.machine_mut(idx) {
                         m.notice = Some("无可用 agent".into());
                     }
                     cx.notify();
@@ -999,13 +1040,19 @@ impl AmuxApp {
             cwd: cwd.clone(),
             use_worktree: self.new_session_worktree,
         };
-        let client = self.machines[machine].client.clone();
+        let Some(client) = self
+            .machine_idx_by_name(&machine_name)
+            .and_then(|idx| self.machine(idx))
+            .map(|m| m.client.clone())
+        else {
+            return;
+        };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client
                 .request::<_, SessionResult>(protocol::method::SESSION_NEW, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                if !this.is_current_machine_connection(&machine_name, generation) {
                     return;
                 }
                 match &res {
@@ -1014,8 +1061,8 @@ impl AmuxApp {
                         if !new_id.is_empty() {
                             this.store
                                 .record_recent_workspace(&machine_name, &cwd, now());
-                            this.refresh_sessions(machine, w, cx);
-                            this.open_session(w, cx, machine, new_id);
+                            this.refresh_sessions(&machine_name, w, cx);
+                            this.open_session(w, cx, &machine_name, new_id);
                         } else {
                             w.push_notification(
                                 UiNotification::error("服务器返回了无效的会话信息")
@@ -1040,10 +1087,7 @@ impl AmuxApp {
 
     pub(crate) fn selected_draft_key(&self) -> Option<DraftKey> {
         if let Some((machine, id)) = self.open_session_target() {
-            Some(DraftKey::Session {
-                machine: self.machines.get(machine)?.config.name.clone(),
-                id,
-            })
+            Some(DraftKey::Session { machine, id })
         } else if let Some(Selected::Workflow { id }) = &self.selected {
             Some(DraftKey::Workflow { id: id.clone() })
         } else {
@@ -1067,12 +1111,13 @@ impl AmuxApp {
             })
             .collect();
         let mut items: Vec<(u64, SessionListItem)> = Vec::new();
-        for (mi, m) in self.machines.iter().enumerate() {
+        for m in &self.machines {
             // 离线/认证失败/连接中的机器不展示其会话：数据是上次刷新的陈旧缓存
             // 且不可操作；机器恢复在线后随 10s 定时刷新自动重现
             if !matches!(m.status, MachineStatus::Online) {
                 continue;
             }
+            let machine = m.config.name.clone();
             for s in &m.sessions {
                 if linked_session_ids.contains(s.id.as_str()) {
                     continue;
@@ -1080,7 +1125,7 @@ impl AmuxApp {
                 items.push((
                     s.last_active_at,
                     SessionListItem::Session {
-                        machine: mi,
+                        machine: machine.clone(),
                         meta: s.clone(),
                     },
                 ));
@@ -1111,7 +1156,7 @@ impl AmuxApp {
             .into_iter()
             .map(|(_, item)| match item {
                 SessionListItem::Session { machine, meta } => {
-                    self.render_session_row(cx, machine, &meta)
+                    self.render_session_row(cx, &machine, &meta)
                 }
                 SessionListItem::Workflow { idx } => self.render_workflow_row(cx, idx),
             })
@@ -1154,11 +1199,12 @@ impl AmuxApp {
     pub(crate) fn render_session_row(
         &self,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         s: &SessionMeta,
     ) -> gpui::AnyElement {
+        let machine_name = machine_name.to_string();
         let sid = s.id.clone();
-        let sel = self.is_selected_session(machine, &sid);
+        let sel = self.is_selected_session(&machine_name, &sid);
         let title = if s.title.is_empty() {
             format!("（未命名）{}", short_cwd(&s.cwd))
         } else {
@@ -1171,7 +1217,7 @@ impl AmuxApp {
         let active = cx.theme().list_active;
         let border = cx.theme().list_active_border;
 
-        if self.renaming_session.as_ref() == Some(&(machine, sid.clone())) {
+        if self.renaming_session.as_ref() == Some(&(machine_name.clone(), sid.clone())) {
             let sid2 = sid.clone();
             return v_flex()
                 .gap_1()
@@ -1185,7 +1231,7 @@ impl AmuxApp {
                             .label("保存")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
                                 let title = this.title_input.read(cx).value().to_string();
-                                this.rename_session(window, cx, machine, sid2.clone(), title);
+                                this.rename_session(window, cx, &machine_name, sid2.clone(), title);
                             })),
                     ),
                 )
@@ -1209,43 +1255,56 @@ impl AmuxApp {
         let app = cx.entity();
         let sid_menu = sid.clone();
         div()
-            .id(format!("sess-row-{machine}-{sid}"))
+            .id(format!("sess-row-{machine_name}-{sid}"))
             .relative()
             .w_full()
             .rounded_md()
             .bg(active.opacity(if sel { 1.0 } else { 0.0 }))
             .when(sel, |d| d.border_1().border_color(border))
             .hover(|d| d.bg(cx.theme().list_hover))
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                this.open_session(window, cx, machine, sid_open.clone());
+            .on_click(cx.listener({
+                let machine_name = machine_name.clone();
+                move |this, _ev, window, cx| {
+                    this.open_session(window, cx, &machine_name, sid_open.clone());
+                }
             }))
-            .context_menu(move |menu, _window, _cx| {
-                menu.item(PopupMenuItem::new("重命名").on_click({
-                    let app = app.clone();
-                    let sid = sid_menu.clone();
-                    let raw_title = raw_title.clone();
-                    move |_, window, cx| {
-                        app.update(cx, |this, cx| {
-                            this.selected = Some(Selected::Session {
-                                machine,
-                                id: sid.clone(),
+            .context_menu({
+                let machine_name = machine_name.clone();
+                move |menu, _window, _cx| {
+                    menu.item(PopupMenuItem::new("重命名").on_click({
+                        let machine_name = machine_name.clone();
+                        let app = app.clone();
+                        let sid = sid_menu.clone();
+                        let raw_title = raw_title.clone();
+                        move |_, window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.selected = Some(Selected::Session {
+                                    machine: machine_name.clone(),
+                                    id: sid.clone(),
+                                });
+                                this.renaming_session = Some((machine_name.clone(), sid.clone()));
+                                this.title_input
+                                    .update(cx, |s, cx| s.set_value(&raw_title, window, cx));
+                                cx.notify();
                             });
-                            this.renaming_session = Some((machine, sid.clone()));
-                            this.title_input
-                                .update(cx, |s, cx| s.set_value(&raw_title, window, cx));
-                            cx.notify();
-                        });
-                    }
-                }))
-                .item(PopupMenuItem::new("删除会话").on_click({
-                    let app = app.clone();
-                    let sid = sid_menu.clone();
-                    move |_, window, cx| {
-                        app.update(cx, |this, cx| {
-                            this.confirm_delete_session(window, cx, machine, sid.clone());
-                        });
-                    }
-                }))
+                        }
+                    }))
+                    .item(PopupMenuItem::new("删除会话").on_click({
+                        let machine_name = machine_name.clone();
+                        let app = app.clone();
+                        let sid = sid_menu.clone();
+                        move |_, window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.confirm_delete_session(
+                                    window,
+                                    cx,
+                                    &machine_name,
+                                    sid.clone(),
+                                );
+                            });
+                        }
+                    }))
+                }
             })
             .child(
                 h_flex()
@@ -1265,7 +1324,7 @@ impl AmuxApp {
                     )
                     .child(
                         h_flex()
-                            .id(format!("sess-title-{machine}-{sid}"))
+                            .id(format!("sess-title-{machine_name}-{sid}"))
                             .flex_1()
                             .min_w_0()
                             .gap_1()
@@ -1293,8 +1352,9 @@ impl AmuxApp {
     }
 
     pub fn render_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let dialog: Vec<DialogMsg> = if let Some((machine, id)) = self.open_session_target() {
-            self.machine(machine)
+        let dialog: Vec<DialogMsg> = if let Some((machine_name, id)) = self.open_session_target() {
+            self.machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
                 .and_then(|m| m.views.get(&id))
                 .map(|v| v.dialog.clone())
                 .unwrap_or_default()
@@ -1310,10 +1370,10 @@ impl AmuxApp {
         } else {
             Vec::new()
         };
-        let agent_label: SharedString = if let Some((machine, id)) = self.open_session_target() {
-            self.machine(machine)
+        let agent_label: SharedString = if let Some((machine_name, id)) = self.open_session_target() {
+            self.machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
                 .and_then(|m| {
-                    let machine_name = m.config.name.clone();
                     m.sessions
                         .iter()
                         .find(|s| s.id == id)
@@ -1426,9 +1486,11 @@ impl AmuxApp {
                 }
             })
             .collect::<Vec<_>>();
-        let history_has_more = self
-            .open_session_target()
-            .and_then(|(machine, id)| self.machine(machine).and_then(|m| m.views.get(&id)))
+        let history_has_more = self.open_session_target().and_then(|(machine_name, id)| {
+            self.machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
+                .and_then(|m| m.views.get(&id))
+        })
             .map(|v| v.history_has_more)
             .unwrap_or(false);
         let mut content = Vec::new();
@@ -1501,8 +1563,9 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current: Option<Activity> = if let Some((machine, id)) = self.open_session_target() {
-            self.machine(machine)
+        let current: Option<Activity> = if let Some((machine_name, id)) = self.open_session_target() {
+            self.machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
                 .and_then(|m| m.views.get(&id))
                 .and_then(|v| v.live.clone())
         } else if let Some(Selected::Workflow { id }) = &self.selected {
@@ -1851,6 +1914,7 @@ impl AmuxApp {
         let mut row = h_flex().flex_wrap().gap_x_3().gap_y_1().items_center();
         for opt in &opts.options {
             let opt_id = opt.id.clone();
+            let machine = machine.clone();
             match &opt.kind {
                 SessionConfigKind::Select {
                     current_value,
@@ -1871,11 +1935,14 @@ impl AmuxApp {
                     let oid = opt_id.clone();
                     let app = app.clone();
                     let dbg_id = opt_id.clone();
+                    let machine_dbg = machine.clone();
                     row = row.child(
                         h_flex()
                             .gap_1()
                             .items_center()
-                            .debug_selector(move || format!("cfg-row-{machine}-{dbg_id}"))
+                            .debug_selector(move || {
+                                format!("cfg-row-{machine_dbg}-{dbg_id}")
+                            })
                             .child(Label::new(opt.name.clone()).text_sm().text_color(muted))
                             .child(
                                 Button::new(SharedString::from(format!(
@@ -1893,6 +1960,7 @@ impl AmuxApp {
                                             let sid = sid.clone();
                                             let oid = oid.clone();
                                             let value = value.clone();
+                                            let machine = machine.clone();
                                             menu = menu.item(
                                                 PopupMenuItem::new(name.clone())
                                                     .checked(checked)
@@ -1900,7 +1968,7 @@ impl AmuxApp {
                                                         app.update(cx, |this, cx| {
                                                             this.set_session_config_option(
                                                                 cx,
-                                                                machine,
+                                                                &machine,
                                                                 sid.clone(),
                                                                 oid.clone(),
                                                                 SessionConfigOptionValue::ValueId {
@@ -1938,7 +2006,7 @@ impl AmuxApp {
                                         app.update(cx, |this, cx| {
                                             this.set_session_config_option(
                                                 cx,
-                                                machine,
+                                                &machine,
                                                 sid.clone(),
                                                 oid.clone(),
                                                 SessionConfigOptionValue::Boolean {
@@ -2200,8 +2268,17 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_workspace_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let machine = self.new_session_machine.unwrap_or(0);
-        let Some(m) = self.machine(machine) else {
+        let Some(machine_name) = self
+            .new_session_machine
+            .clone()
+            .or_else(|| self.machines.first().map(|m| m.config.name.clone()))
+        else {
+            return v_flex().into_any();
+        };
+        let Some(m) = self
+            .machine_idx_by_name(&machine_name)
+            .and_then(|idx| self.machine(idx))
+        else {
             return v_flex().into_any();
         };
         let dirs = self.store.recent_workspaces_for_machine(&m.config.name);
@@ -2297,25 +2374,27 @@ impl AmuxApp {
     pub(crate) fn render_machine_selector(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let selected_machine = self
             .new_session_machine
-            .filter(|i| *i < self.machines.len())
-            .or_else(|| (!self.machines.is_empty()).then_some(0));
+            .clone()
+            .filter(|name| self.machines.iter().any(|m| &m.config.name == name))
+            .or_else(|| self.machines.first().map(|m| m.config.name.clone()));
         if self.machines.is_empty() {
             return Label::new("（请先在设置中添加机器）").into_any_element();
         }
-        // ButtonGroup 单选组：子按钮 on_click 由组统一接管（按下索引回传）
+        // ButtonGroup 单选组：子按钮 on_click 由组统一接管（按下索引回传），
+        // 选中身份仍以机器名存储
         ButtonGroup::new("ns-machine-group")
             .small()
             .flex_wrap()
             .children(self.machines.iter().enumerate().map(|(i, m)| {
                 Button::new(format!("ns-machine-{i}"))
                     .label(m.config.name.clone())
-                    .selected(selected_machine == Some(i))
+                    .selected(selected_machine == Some(m.config.name.clone()))
             }))
             .on_click(cx.listener(move |this, clicks: &Vec<usize>, _window, cx| {
                 let Some(&ix) = clicks.first() else {
                     return;
                 };
-                this.new_session_machine = Some(ix);
+                this.new_session_machine = Some(this.machines[ix].config.name.clone());
                 this.new_session_agent = None;
                 this.new_session_error = None;
                 cx.notify();
@@ -2324,8 +2403,11 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_session_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, status) = if let Some((machine, id)) = self.open_session_target() {
-            let Some(machine_view) = self.machine(machine) else {
+        let (label, status) = if let Some((machine_name, id)) = self.open_session_target() {
+            let Some(machine_view) = self
+                .machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
+            else {
                 return h_flex().into_any();
             };
             let Some(session) = machine_view.sessions.iter().find(|s| s.id == id) else {
@@ -2393,8 +2475,11 @@ impl AmuxApp {
     ) -> gpui::AnyElement {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut activities_has_more = false;
-        if let Some((machine, id)) = self.open_session_target() {
-            let view = self.machine(machine).and_then(|m| m.views.get(&id));
+        if let Some((machine_name, id)) = self.open_session_target() {
+            let view = self
+                .machine_idx_by_name(&machine_name)
+                .and_then(|idx| self.machine(idx))
+                .and_then(|m| m.views.get(&id));
             let activities = view.map(|v| v.activities.clone()).unwrap_or_default();
             activities_has_more = view.map(|v| v.activities_has_more).unwrap_or(false);
             rows = activities
@@ -2477,14 +2562,16 @@ impl AmuxApp {
     pub(crate) fn render_harness_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let machine = self
             .new_session_machine
-            .filter(|i| *i < self.machines.len())
-            .or_else(|| (!self.machines.is_empty()).then_some(0));
+            .clone()
+            .filter(|name| self.machines.iter().any(|m| &m.config.name == name))
+            .or_else(|| self.machines.first().map(|m| m.config.name.clone()));
         let mut row = h_flex().gap_1().flex_wrap();
-        let Some(mi) = machine else {
+        let Some(machine_name) = machine else {
             return row.child(Label::new("（无机器）"));
         };
         let agents = self
-            .machine(mi)
+            .machine_idx_by_name(&machine_name)
+            .and_then(|idx| self.machine(idx))
             .map(|m| m.agents.clone())
             .unwrap_or_default();
         if agents.is_empty() {
@@ -2515,7 +2602,7 @@ impl AmuxApp {
     fn request_session_data<P, R, F>(
         &self,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         method: &'static str,
         params: P,
         apply: F,
@@ -2524,7 +2611,7 @@ impl AmuxApp {
         R: serde::de::DeserializeOwned + 'static,
         F: FnOnce(&mut Self, Result<R, crate::ws::RpcError>) + 'static,
     {
-        let Some(machine_view) = self.machines.get(machine) else {
+        let Some(machine_view) = self.machine_idx_by_name(machine_name).and_then(|idx| self.machines.get(idx)) else {
             return;
         };
         let client = machine_view.client.clone();
@@ -2533,9 +2620,8 @@ impl AmuxApp {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let result = client.request::<_, R>(method, Some(params)).await;
             let _ = this.update_in(cx, |this, _w, cx| {
-                let current_connection = this.machines.get(machine).is_some_and(|m| {
-                    m.config.name == machine_name && m.connection_generation == generation
-                });
+                let current_connection = this
+                    .is_current_machine_connection(&machine_name, generation);
                 if current_connection {
                     apply(this, result);
                     cx.notify();
@@ -2550,21 +2636,22 @@ impl AmuxApp {
     pub(crate) fn refresh_config_options(
         &mut self,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
-        if self.machines.get(machine).is_none() {
+        let machine_name = machine_name.to_string();
+        if self.machine_idx_by_name(&machine_name).is_none() {
             return;
         }
         // 同一会话刷新时保留既有选项展示，避免轮询期间整行闪烁
         let options = match &self.config_options {
-            Some(cur) if cur.machine == machine && cur.session_id == session_id => {
+            Some(cur) if cur.machine == machine_name && cur.session_id == session_id => {
                 cur.options.clone()
             }
             _ => Vec::new(),
         };
         self.config_options = Some(SelectedConfigOptions {
-            machine,
+            machine: machine_name.clone(),
             session_id: session_id.clone(),
             loading: true,
             options,
@@ -2572,7 +2659,7 @@ impl AmuxApp {
         cx.notify();
         self.request_session_data(
             cx,
-            machine,
+            machine_name.clone().as_str(),
             protocol::method::SESSION_CONFIG_OPTIONS,
             SessionIdParams {
                 session_id: session_id.clone(),
@@ -2580,7 +2667,7 @@ impl AmuxApp {
             move |this, result: Result<SessionConfigOptionsResult, crate::ws::RpcError>| {
                 if let Some(cur) = &mut this.config_options {
                     // 响应到达时选中会话已切换则丢弃陈旧结果
-                    if cur.machine == machine && cur.session_id == session_id {
+                    if cur.machine == machine_name && cur.session_id == session_id {
                         cur.loading = false;
                         if let Ok(result) = result {
                             cur.options = result.options;
@@ -2597,20 +2684,21 @@ impl AmuxApp {
     pub(crate) fn refresh_slash_commands(
         &mut self,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
     ) {
-        if self.machines.get(machine).is_none() {
+        let machine_name = machine_name.to_string();
+        if self.machine_idx_by_name(&machine_name).is_none() {
             return;
         }
         self.slash_commands = Some(SelectedSlashCommands {
-            machine,
+            machine: machine_name.clone(),
             session_id: session_id.clone(),
             commands: Vec::new(),
         });
         self.request_session_data(
             cx,
-            machine,
+            machine_name.clone().as_str(),
             protocol::method::SESSION_SLASH_COMMANDS,
             SessionIdParams {
                 session_id: session_id.clone(),
@@ -2618,7 +2706,7 @@ impl AmuxApp {
             move |this, result: Result<SessionSlashCommandsResult, crate::ws::RpcError>| {
                 if let Some(cur) = &mut this.slash_commands {
                     // 响应到达时选中会话已切换则丢弃陈旧结果
-                    if cur.machine == machine && cur.session_id == session_id {
+                    if cur.machine == machine_name && cur.session_id == session_id {
                         if let Ok(result) = result {
                             cur.commands = result.commands;
                         }
@@ -2714,16 +2802,19 @@ impl AmuxApp {
     pub(crate) fn set_session_config_option(
         &mut self,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         session_id: String,
         config_id: String,
         value: SessionConfigOptionValue,
     ) {
+        let machine_name = machine_name.to_string();
+        let Some(machine) = self.machine_idx_by_name(&machine_name) else {
+            return;
+        };
         let Some(m) = self.machines.get(machine) else {
             return;
         };
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
         let params = SessionConfigureParams {
             session_id: session_id.clone(),
@@ -2743,10 +2834,9 @@ impl AmuxApp {
                 .request::<_, OpResult>(protocol::method::SESSION_CONFIGURE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                let current_connection = this.machines.get(machine).is_some_and(|m| {
-                    m.config.name == machine_name && m.connection_generation == generation
-                });
-                if !current_connection || !this.is_selected_session(machine, &session_id) {
+                let current_connection = this
+                    .is_current_machine_connection(&machine_name, generation);
+                if !current_connection || !this.is_selected_session(&machine_name, &session_id) {
                     return;
                 }
                 match res {
@@ -2754,7 +2844,7 @@ impl AmuxApp {
                         log::info!(
                         "会话选项设置成功，刷新选项：session={session_id} config_id={config_id}"
                     );
-                        this.refresh_config_options(cx, machine, session_id);
+                        this.refresh_config_options(cx, &machine_name, session_id);
                     }
                     Err(error) => {
                         log::error!("会话选项设置失败：{error}");

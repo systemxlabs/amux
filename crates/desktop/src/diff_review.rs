@@ -23,22 +23,22 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
     ) {
         let Some((selected_machine, session_id)) = self.open_session_target() else {
             return;
         };
-        if selected_machine != machine {
+        if selected_machine != machine_name {
             return;
         }
-        let Some(m) = self.machine(machine) else {
+        let Some(m) = self.machine_by_name(machine_name) else {
             return;
         };
         if !m.sessions.iter().any(|s| s.id == session_id) {
             return;
         }
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         // 请求 id / loading / error 存于本机器的 DiffReviewState 实体
         let request_id = m.diff.update(cx, |st, _| {
@@ -58,17 +58,16 @@ impl AmuxApp {
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
                 let is_current =
-                    this.is_current_machine_connection(machine, &machine_name, generation)
-                        && this.is_selected_session(machine, &session_id)
+                    this.is_current_machine_connection(&machine_name, generation)
+                        && this.is_selected_session(&machine_name, &session_id)
                         && this
-                            .machines
-                            .get(machine)
+                            .machine_by_name(&machine_name)
                             .is_some_and(|m| m.diff.read(cx).request_id == request_id);
                 if !is_current {
                     return;
                 }
                 let mut error_message = None;
-                if let Some(m) = this.machines.get_mut(machine) {
+                if let Some(m) = this.machine_mut_by_name(&machine_name) {
                     m.diff.update(cx, |st, _| match &res {
                         Ok(r) => {
                             st.files = r.files.clone();
@@ -103,18 +102,18 @@ impl AmuxApp {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         path: Option<String>,
         patch: Option<String>,
     ) {
-        let Some(m) = self.machine(machine) else {
+        let Some(m) = self.machine_by_name(machine_name) else {
             return;
         };
         let Some(session_id) = self.open_session_target().map(|(_, id)| id) else {
             return;
         };
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let params = WorkspaceRestoreParams {
@@ -126,21 +125,21 @@ impl AmuxApp {
                 .request::<_, OpResult>(protocol::method::WORKSPACE_RESTORE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if !this.is_current_machine_connection(machine, &machine_name, generation)
-                    || !this.is_selected_session(machine, &session_id)
+                if !this.is_current_machine_connection(&machine_name, generation)
+                    || !this.is_selected_session(&machine_name, &session_id)
                 {
                     return;
                 }
                 match res {
-                    Ok(result) if result.ok => this.load_diff(w, cx, machine),
+                    Ok(result) if result.ok => this.load_diff(w, cx, &machine_name),
                     Ok(result) => {
-                        if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(m) = this.machine_mut_by_name(&machine_name) {
                             m.workspace_error =
                                 Some(result.message.unwrap_or_else(|| "恢复改动失败".into()));
                         }
                     }
                     Err(error) => {
-                        if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(m) = this.machine_mut_by_name(&machine_name) {
                             m.workspace_error = Some(format!("恢复改动失败：{error}"));
                         }
                     }
@@ -153,12 +152,12 @@ impl AmuxApp {
 
     pub(crate) fn toggle_diff_selection(
         &mut self,
-        machine: usize,
+        machine_name: &str,
         path: String,
         hunk: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let Some(m) = self.machines.get_mut(machine) else {
+        let Some(m) = self.machine_mut_by_name(machine_name) else {
             return;
         };
         let key = (path, hunk);
@@ -171,12 +170,12 @@ impl AmuxApp {
 
     pub(crate) fn is_diff_selected(
         &self,
-        machine: usize,
+        machine_name: &str,
         path: &str,
         hunk: Option<usize>,
         cx: &Context<Self>,
     ) -> bool {
-        self.machine(machine).is_some_and(|m| {
+        self.machine_by_name(machine_name).is_some_and(|m| {
             m.diff
                 .read(cx)
                 .selection
@@ -184,7 +183,10 @@ impl AmuxApp {
         })
     }
 
-    pub(crate) fn clear_diff_selection(&mut self, machine: usize, cx: &mut Context<Self>) {
+    pub(crate) fn clear_diff_selection(&mut self, machine_name: &str, cx: &mut Context<Self>) {
+        let Some(machine) = self.machine_idx_by_name(machine_name) else {
+            return;
+        };
         if let Some(m) = self.machines.get_mut(machine) {
             m.diff.update(cx, |st, _| st.selection.clear());
         }
@@ -194,8 +196,11 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
     ) {
+        let Some(machine) = self.machine_idx_by_name(machine_name) else {
+            return;
+        };
         let Some(m) = self.machine(machine) else {
             return;
         };
@@ -239,10 +244,10 @@ impl AmuxApp {
                 .request_ok(protocol::method::SESSION_PROMPT, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if this.is_current_machine_connection(machine, &machine_name, generation)
-                    && this.is_selected_session(machine, &session_id)
+                if this.is_current_machine_connection(&machine_name, generation)
+                    && this.is_selected_session(&machine_name, &session_id)
                 {
-                    this.refresh_dialog(w, cx, machine, session_id);
+                    this.refresh_dialog(w, cx, &machine_name, session_id);
                     cx.notify();
                 }
             });
@@ -256,46 +261,37 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let machine = self.active_machine();
+        let machine_name = self.active_machine();
+        let machine = machine_name
+            .as_deref()
+            .and_then(|name| self.machine_by_name(name));
         let files = machine
-            .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).files.clone())
             .unwrap_or_default();
         let not_repo = machine
-            .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).not_repo)
             .unwrap_or(false);
         let diff_loading = machine
-            .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).loading)
             .unwrap_or(false);
-        let diff_error = machine
-            .and_then(|i| self.machine(i))
-            .and_then(|m| m.diff.read(cx).error.clone());
+        let diff_error = machine.and_then(|m| m.diff.read(cx).error.clone());
         let has_selection = machine
-            .and_then(|i| self.machine(i))
             .is_some_and(|m| !m.diff.read(cx).selection.is_empty());
         let can_send = self.open_session_target().is_some();
         let diff_tree_collapsed = machine
-            .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).tree_collapsed)
             .unwrap_or(false);
         let diff_changes_collapsed = machine
-            .and_then(|i| self.machine(i))
             .map(|m| m.diff.read(cx).changes_collapsed)
             .unwrap_or(false);
         let rem_size = window.rem_size();
-        if let Some(machine_idx) = machine {
-            let needs_rebuild =
-                self.machines[machine_idx].diff.read(cx).item_sizes_rem_size != Some(rem_size);
+        if let Some(m) = machine {
+            let needs_rebuild = m.diff.read(cx).item_sizes_rem_size != Some(rem_size);
             if needs_rebuild {
-                self.machines[machine_idx]
-                    .diff
-                    .update(cx, |st, _| st.rebuild_rows(rem_size));
+                m.diff.update(cx, |st, _| st.rebuild_rows(rem_size));
             }
         }
         let (_rows, item_sizes, file_header_rows) = machine
-            .and_then(|i| self.machine(i))
             .map(|m| {
                 let st = m.diff.read(cx);
                 (
@@ -323,7 +319,7 @@ impl AmuxApp {
                         .label("发送选中到会话")
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             if let Some(machine) = this.active_machine() {
-                                this.send_selected_diff(window, cx, machine);
+                                this.send_selected_diff(window, cx, &machine);
                             }
                         })),
                 )
@@ -333,7 +329,7 @@ impl AmuxApp {
                         .label("清空选择")
                         .on_click(cx.listener(move |this, _ev, _window, cx| {
                             if let Some(machine) = this.active_machine() {
-                                this.clear_diff_selection(machine, cx);
+                                this.clear_diff_selection(&machine, cx);
                                 cx.notify();
                             }
                         })),
@@ -350,7 +346,7 @@ impl AmuxApp {
                     })
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         if let Some(machine) = this.active_machine() {
-                            if let Some(view) = this.machines.get_mut(machine) {
+                            if let Some(view) = this.machine_mut_by_name(&machine) {
                                 view.diff.update(cx, |st, _| {
                                     st.tree_collapsed = !st.tree_collapsed;
                                 });
@@ -370,7 +366,7 @@ impl AmuxApp {
                     })
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         if let Some(machine) = this.active_machine() {
-                            if let Some(view) = this.machines.get_mut(machine) {
+                            if let Some(view) = this.machine_mut_by_name(&machine) {
                                 view.diff.update(cx, |st, _| {
                                     st.changes_collapsed = !st.changes_collapsed;
                                     st.rebuild_rows(rem_size);
@@ -429,7 +425,7 @@ impl AmuxApp {
                     .into_any_element(),
             );
         }
-        let Some(machine_idx) = machine else {
+        let Some(machine_name) = machine_name else {
             return v_flex()
                 .w_full()
                 .h_full()
@@ -446,11 +442,9 @@ impl AmuxApp {
         let groups = group_changed_files_by_parent(
             &files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
         );
-        let collapsed_groups = self.machines[machine_idx]
-            .diff
-            .read(cx)
-            .collapsed_groups
-            .clone();
+        let collapsed_groups = machine
+            .map(|m| m.diff.read(cx).collapsed_groups.clone())
+            .unwrap_or_default();
         let mut tree_items: Vec<gpui::AnyElement> = Vec::new();
         for (dir, indices) in &groups {
             let collapsed = collapsed_groups.contains(dir);
@@ -460,6 +454,7 @@ impl AmuxApp {
                 dir.clone()
             };
             let group_key = dir.clone();
+            let tree_machine = machine_name.clone();
             // 分组头使用 Button，展开状态也能通过键盘和辅助技术访问。
             tree_items.push(
                 Button::new(format!("diff-group-{dir}"))
@@ -468,7 +463,7 @@ impl AmuxApp {
                     .w_full()
                     .toggled(!collapsed)
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        if let Some(m) = this.machines.get_mut(machine_idx) {
+                        if let Some(m) = this.machine_mut_by_name(&tree_machine) {
                             m.diff.update(cx, |st, _| {
                                 if !st.collapsed_groups.remove(&group_key) {
                                     st.collapsed_groups.insert(group_key.clone());
@@ -567,7 +562,12 @@ impl AmuxApp {
             cx.entity(),
             "diff-panel",
             item_sizes,
-            move |this, range, window, cx| this.render_diff_rows(machine_idx, range, window, cx),
+            move |this, range, window, cx| {
+                let Some(machine_name) = this.active_machine() else {
+                    return Vec::new();
+                };
+                this.render_diff_rows(&machine_name, range, window, cx)
+            },
         )
         .track_scroll(&self.diff_scroll);
         // 折叠时左侧区域整个不渲染，展开/折叠由工具栏按钮控制
@@ -622,12 +622,12 @@ impl AmuxApp {
     /// 渲染 [range) 内的行（虚拟列表回调）。
     pub(crate) fn render_diff_rows(
         &self,
-        machine_idx: usize,
+        machine_name: &str,
         range: std::ops::Range<usize>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let Some(m) = self.machines.get(machine_idx) else {
+        let Some(m) = self.machine_by_name(machine_name) else {
             return Vec::new();
         };
         let files = m.diff.read(cx).files.clone();
@@ -644,13 +644,13 @@ impl AmuxApp {
             match *kind {
                 DiffRowKind::FileHeader(fi) => {
                     if let Some(f) = files.get(fi) {
-                        out.push(self.render_diff_file_header_row(machine_idx, fi, f, cx));
+                        out.push(self.render_diff_file_header_row(machine_name, fi, f, cx));
                     }
                 }
                 DiffRowKind::HunkHeader(fi, hi) => {
                     if let Some(f) = files.get(fi) {
                         if let Some(h) = f.hunks.get(hi) {
-                            out.push(self.render_diff_hunk_header_row(machine_idx, fi, hi, h, cx));
+                            out.push(self.render_diff_hunk_header_row(machine_name, fi, hi, h, cx));
                         }
                     }
                 }
@@ -674,7 +674,7 @@ impl AmuxApp {
 
     fn render_diff_file_header_row(
         &self,
-        machine_idx: usize,
+        machine_name: &str,
         _fi: usize,
         f: &GitDiffFile,
         cx: &mut Context<Self>,
@@ -683,8 +683,9 @@ impl AmuxApp {
         let path_for_restore = path.clone();
         let patch_for_restore = f.patch.clone();
         let dbg_path = path.clone();
-        let selected = self.is_diff_selected(machine_idx, &path, None, cx);
+        let selected = self.is_diff_selected(machine_name, &path, None, cx);
         let path_for_tooltip = path.clone();
+        let select_machine = machine_name.to_string();
         h_flex()
             .id(ElementId::Name(format!("dbg-diff-file-{path}").into()))
             .debug_selector(move || format!("dbg-diff-file-{dbg_path}"))
@@ -703,9 +704,10 @@ impl AmuxApp {
                     .on_click({
                         let app = cx.entity();
                         let path = path.clone();
+                        let machine_name = select_machine.clone();
                         move |_, _window, cx| {
                             app.update(cx, |this, cx| {
-                                this.toggle_diff_selection(machine_idx, path.clone(), None, cx);
+                                this.toggle_diff_selection(&machine_name, path.clone(), None, cx);
                                 cx.notify();
                             });
                         }
@@ -767,7 +769,7 @@ impl AmuxApp {
                             this.restore_workspace(
                                 window,
                                 cx,
-                                machine,
+                                &machine,
                                 Some(path_for_restore.clone()),
                                 Some(patch_for_restore.clone()),
                             );
@@ -779,18 +781,22 @@ impl AmuxApp {
 
     fn render_diff_hunk_header_row(
         &self,
-        machine_idx: usize,
+        machine_name: &str,
         fi: usize,
         hi: usize,
         h: &protocol::GitDiffHunk,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let path = self.machines[machine_idx].diff.read(cx).files[fi]
-            .path
-            .clone();
-        let hunk_selected = self.is_diff_selected(machine_idx, &path, Some(hi), cx);
+        let Some(path) = self
+            .machine_by_name(machine_name)
+            .and_then(|m| m.diff.read(cx).files.get(fi).map(|f| f.path.clone()))
+        else {
+            return div().into_any_element();
+        };
+        let hunk_selected = self.is_diff_selected(machine_name, &path, Some(hi), cx);
         let hunk_path = path;
         let hunk_patch = h.patch.clone();
+        let select_machine = machine_name.to_string();
         h_flex()
             .w_full()
             .h(rems(1.75))
@@ -804,10 +810,11 @@ impl AmuxApp {
                     .on_click({
                         let app = cx.entity();
                         let hunk_path = hunk_path.clone();
+                        let machine_name = select_machine.clone();
                         move |_, _window, cx| {
                             app.update(cx, |this, cx| {
                                 this.toggle_diff_selection(
-                                    machine_idx,
+                                    &machine_name,
                                     hunk_path.clone(),
                                     Some(hi),
                                     cx,
@@ -835,7 +842,7 @@ impl AmuxApp {
                             this.restore_workspace(
                                 window,
                                 cx,
-                                machine,
+                                &machine,
                                 Some(hunk_path.clone()),
                                 Some(hunk_patch.clone()),
                             );

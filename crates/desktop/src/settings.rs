@@ -1088,8 +1088,7 @@ impl AmuxApp {
         let machines = self
             .machines
             .iter()
-            .enumerate()
-            .map(|(i, m)| {
+            .map(|m| {
                 // 域标识：按钮 id 与回调捕获均用机器名而非下标（机器顺序变化不影响身份）
                 let machine_name = m.config.name.clone();
                 let edit_name = machine_name.clone();
@@ -1154,8 +1153,15 @@ impl AmuxApp {
                                 .small()
                                 .label("重新发现")
                                 .on_click(cx.listener(
-                                    move |this, _ev, window, cx| {
-                                        this.confirm_rediscover_agents(window, cx, i);
+                                    {
+                                        let machine_name = machine_name.clone();
+                                        move |this, _ev, window, cx| {
+                                            this.confirm_rediscover_agents(
+                                                window,
+                                                cx,
+                                                &machine_name,
+                                            );
+                                        }
                                     },
                                 )),
                             ),
@@ -1170,6 +1176,7 @@ impl AmuxApp {
                     let available = a.available;
                     let agent = a.name.clone();
                     let agent_restart = agent.clone();
+                    let agent_machine = machine_name.clone();
                     item = item.child(
                         h_flex()
                             .gap_2()
@@ -1189,7 +1196,12 @@ impl AmuxApp {
                                     .label("重启")
                                     .on_click(cx.listener(move |this, _ev, window, cx| {
                                         let agent = agent_restart.clone();
-                                        this.confirm_restart_agent(window, cx, i, agent);
+                                        this.confirm_restart_agent(
+                                            window,
+                                            cx,
+                                            &agent_machine,
+                                            agent,
+                                        );
                                     })),
                             ),
                     );

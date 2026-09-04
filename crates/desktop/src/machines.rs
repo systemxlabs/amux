@@ -17,11 +17,16 @@ impl AmuxApp {
         self.machines.iter().position(|m| m.config.name == name)
     }
 
-    pub(crate) fn fetch_agents(&self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(m) = self.machines.get(idx) else {
+    pub(crate) fn fetch_agents(
+        &self,
+        machine_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(m) = self.machine_by_name(machine_name) else {
             return;
         };
-        let machine_name = m.config.name.clone();
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| match client
@@ -75,14 +80,11 @@ impl AmuxApp {
         skill: SkillEntry,
         action: SkillAction,
     ) {
-        let Some(machine) = self.machine_idx_by_name(machine_name) else {
-            return;
-        };
-        let Some(m) = self.machine(machine) else {
+        let Some(m) = self.machine_by_name(machine_name) else {
             return;
         };
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         // 技能操作的临时会话固定在系统临时目录中执行。
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
@@ -120,16 +122,16 @@ impl AmuxApp {
             .await;
 
             let _ = this.update_in(cx, |this, window, cx| {
-                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                if !this.is_current_machine_connection(&machine_name, generation) {
                     return;
                 }
                 match result {
                     Ok(session_id) => {
-                        this.refresh_sessions(machine, window, cx);
-                        this.open_session(window, cx, machine, session_id);
+                        this.refresh_sessions(&machine_name, window, cx);
+                        this.open_session(window, cx, &machine_name, session_id);
                     }
                     Err(error) => {
-                        if let Some(m) = this.machines.get_mut(machine) {
+                        if let Some(m) = this.machine_mut_by_name(&machine_name) {
                             m.notice = Some(format!("技能{}失败：{error}", action.label()));
                         }
                         cx.notify();
@@ -144,7 +146,7 @@ impl AmuxApp {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         method: &'static str,
         params: Option<P>,
         error_message: F,
@@ -152,25 +154,25 @@ impl AmuxApp {
         P: serde::Serialize + 'static,
         F: FnOnce(String) -> String + 'static,
     {
-        let Some(m) = self.machine(machine) else {
+        let Some(m) = self.machine_by_name(machine_name) else {
             return;
         };
         let client = m.client.clone();
-        let machine_name = m.config.name.clone();
+        let machine_name = machine_name.to_string();
         let generation = m.connection_generation;
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let result = client.request_ok(method, params).await;
             let notice = result.err().map(|error| error_message(error.to_string()));
             let _ = this.update_in(cx, |this, window, cx| {
-                if !this.is_current_machine_connection(machine, &machine_name, generation) {
+                if !this.is_current_machine_connection(&machine_name, generation) {
                     return;
                 }
                 if let Some(notice) = notice {
-                    if let Some(m) = this.machines.get_mut(machine) {
+                    if let Some(m) = this.machine_mut_by_name(&machine_name) {
                         m.notice = Some(notice);
                     }
                 }
-                this.fetch_agents(machine, window, cx);
+                this.fetch_agents(&machine_name, window, cx);
                 cx.notify();
             });
         })
@@ -181,14 +183,14 @@ impl AmuxApp {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         agent: String,
     ) {
         let notice_agent = agent.clone();
         self.run_agent_action(
             window,
             cx,
-            machine,
+            machine_name,
             protocol::method::AGENT_RESTART,
             Some(AgentParams { agent }),
             move |error| format!("agent「{}」重启失败：{}", notice_agent, error),
@@ -201,12 +203,12 @@ impl AmuxApp {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
     ) {
         self.run_agent_action(
             window,
             cx,
-            machine,
+            machine_name,
             protocol::method::AGENT_REDISCOVER,
             None::<()>,
             |error| format!("重新发现 agents 失败：{}", error),
@@ -217,8 +219,9 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
     ) {
+        let machine_name = machine_name.to_string();
         self.confirm_dialog(
             window,
             cx,
@@ -227,7 +230,7 @@ impl AmuxApp {
             "重新发现 agents",
             "确定重新扫描本机 agents 吗？".to_string(),
             move |this, window, cx| {
-                this.rediscover_agents(window, cx, machine);
+                this.rediscover_agents(window, cx, &machine_name);
             },
         );
     }
@@ -236,9 +239,10 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        machine: usize,
+        machine_name: &str,
         agent: String,
     ) {
+        let machine_name = machine_name.to_string();
         self.confirm_dialog(
             window,
             cx,
@@ -248,7 +252,7 @@ impl AmuxApp {
             format!("确定重启 agent「{agent}」吗？"),
             move |this, window, cx| {
                 let agent = agent.clone();
-                this.restart_agent(window, cx, machine, agent);
+                this.restart_agent(window, cx, &machine_name, agent);
             },
         );
     }
@@ -399,13 +403,10 @@ impl AmuxApp {
             return;
         }
         let name = self.machines[idx].config.name.clone();
-        // 草稿键以机器名定位，须在下标重排/机器移除前完成旧草稿保存与新草稿换入
+        // 选中态以机器名（稳定身份）定位：被移除机器上的选中会话直接取消选中，
+        // 其余机器的选中会话不受机器列表变化影响。
         let next = match self.selected.clone() {
-            Some(Selected::Session { machine, .. }) if machine == idx => None,
-            Some(Selected::Session { machine, id }) if machine > idx => Some(Selected::Session {
-                machine: machine - 1,
-                id,
-            }),
+            Some(Selected::Session { machine, .. }) if machine == name => None,
             other => other,
         };
         self.set_selected(next, window, cx);

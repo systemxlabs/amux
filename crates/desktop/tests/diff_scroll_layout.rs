@@ -84,7 +84,7 @@ fn diff_panel_scroll_has_viewport_constraint(cx: &mut gpui::TestAppContext) {
             });
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
-                machine: 0,
+                machine: "test".into(),
                 id: "session-1".into(),
             });
             app.panel = Some(Panel::Diff);

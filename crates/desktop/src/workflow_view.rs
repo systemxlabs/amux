@@ -267,8 +267,8 @@ impl AmuxApp {
                 let targets_current =
                     target_connections
                         .iter()
-                        .all(|(machine, name, generation)| {
-                            this.is_current_machine_connection(*machine, name, *generation)
+                        .all(|(_, name, generation)| {
+                            this.is_current_machine_connection(name, *generation)
                         });
                 if !targets_current {
                     return;
@@ -489,10 +489,8 @@ impl AmuxApp {
                 let cid_open = cid.clone();
                 let machine_name_open = machine_name.clone();
                 title = title.on_click(cx.listener(move |this, _ev, window, cx| {
-                    let Some(mi) = this.machine_idx_by_name(&machine_name_open) else {
-                        return;
-                    };
-                    this.open_session(window, cx, mi, cid_open.clone());
+                    // 机器已移除时 open_session 按名字解析不到即静默返回
+                    this.open_session(window, cx, &machine_name_open, cid_open.clone());
                 }));
             }
             content = content.child(

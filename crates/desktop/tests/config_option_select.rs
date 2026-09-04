@@ -49,12 +49,12 @@ fn config_option_select_triggers_configure(cx: &mut gpui::TestAppContext) {
             machine.status = MachineStatus::Online;
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
-                machine: 0,
+                machine: "test".into(),
                 id: "session-1".into(),
             });
             // select 类选项：当前值 B，候选 A/B（菜单点击目标为第一项 A）
             app.config_options = Some(SelectedConfigOptions {
-                machine: 0,
+                machine: "test".into(),
                 session_id: "session-1".into(),
                 loading: false,
                 options: vec![SessionConfigOption {
@@ -85,7 +85,7 @@ fn config_option_select_triggers_configure(cx: &mut gpui::TestAppContext) {
 
     // 点击下拉按钮：弹出菜单并夺取焦点（菜单打开的证据）
     let row = cx
-        .debug_bounds("cfg-row-0-model")
+        .debug_bounds("cfg-row-test-model")
         .expect("会话选项行应参与布局");
     cx.simulate_click(
         point(row.right() - px(20.), row.center().y),

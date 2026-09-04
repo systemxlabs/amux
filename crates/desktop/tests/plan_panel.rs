@@ -62,7 +62,7 @@ fn plan_panel_renders_entries_and_blank_state(cx: &mut gpui::TestAppContext) {
             );
             app.machines.push(machine);
             app.selected = Some(Selected::Session {
-                machine: 0,
+                machine: "test".into(),
                 id: "session-1".into(),
             });
             // 面板宽度由 panel_delta_px 驱动（render_panel 中换算为逻辑宽度；
