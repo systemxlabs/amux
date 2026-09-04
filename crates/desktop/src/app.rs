@@ -445,12 +445,14 @@ impl AmuxApp {
                         .to_string();
                     m.status = MachineStatus::AuthFailed(msg);
                 }
+                this.clear_connection_state(idx, window, cx);
             }
             "connect_failed" => {
                 // 连接失败（server 不可达）即离线；不自动重连，由用户手动触发
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = MachineStatus::Offline;
                 }
+                this.clear_connection_state(idx, window, cx);
             }
             "disconnected" => {
                 if let Some(m) = this.machines.get_mut(idx) {
