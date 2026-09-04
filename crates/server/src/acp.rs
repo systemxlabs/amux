@@ -28,7 +28,7 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::AcpAgent;
 use agent_client_protocol::ConnectionTo;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use protocol::ContentBlock;
 
@@ -184,6 +184,8 @@ pub struct AcpAgentDriver {
     /// 本进程内已 resume 过的会话（server 重启后从注册表恢复的会话首次交互前
     /// 经 ACP `session/resume` 恢复 agent 上下文。
     resumed: Arc<Mutex<HashSet<String>>>,
+    /// 请求 exec 线程取消 ACP 连接并回收子进程
+    stop_tx: watch::Sender<bool>,
     /// exec 线程句柄（Mutex 包装以便 `shutdown_and_join` 从 &self 取出并 join；
     /// 连接由 SDK 管理，线程结束即子进程清理）
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -299,6 +301,7 @@ impl AcpAgentDriver {
         let exec_tx = Arc::new(Mutex::new(Some(exec_sender)));
         let exec_tx2 = exec_tx.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (stop_tx, stop_rx) = watch::channel(false);
         let caches = SessionCaches::default();
         let caches2 = caches.clone();
         let bin = bin.to_string();
@@ -310,17 +313,35 @@ impl AcpAgentDriver {
                 .build()
                 .expect("构建 tokio runtime 失败");
             rt.block_on(exec_main(
-                &bin, &args, &env, exec_rx, exec_tx2, caches2, ready_tx,
+                &bin,
+                &args,
+                &env,
+                ExecControl {
+                    exec_rx,
+                    exec_tx: exec_tx2,
+                    stop_rx,
+                    ready_tx,
+                },
+                caches2,
             ));
         });
         let timeout_ms = std::env::var("AMUX_ACP_SPAWN_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30_000);
-        match ready_rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+        let ready = ready_rx.recv_timeout(std::time::Duration::from_millis(timeout_ms));
+        match ready {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
+            Ok(Err(e)) => {
+                let _ = exec_tx.lock().take();
+                let _ = stop_tx.send(true);
+                let _ = thread.join();
+                return Err(e);
+            }
             Err(_) => {
+                let _ = exec_tx.lock().take();
+                let _ = stop_tx.send(true);
+                let _ = thread.join();
                 return Err(format!(
                     "ACP server 启动超时（{timeout_ms}ms 内未完成连接/initialize 握手）"
                 ));
@@ -330,6 +351,7 @@ impl AcpAgentDriver {
             exec_tx,
             caches,
             resumed: Arc::new(Mutex::new(HashSet::new())),
+            stop_tx,
             thread: Mutex::new(Some(thread)),
         })
     }
@@ -449,6 +471,7 @@ impl AgentDriver for AcpAgentDriver {
 
     fn shutdown(&self) {
         self.caches.alive.store(false, Ordering::SeqCst);
+        let _ = self.stop_tx.send(true);
         let _ = self.exec_tx.lock().take();
         self.caches.clear_on_disconnect();
     }
@@ -570,6 +593,13 @@ fn pick_approve_option(options: &[PermissionOption]) -> Option<PermissionOptionI
         .map(|o| o.option_id.clone())
 }
 
+struct ExecControl {
+    exec_rx: std::sync::mpsc::Receiver<ExecReq>,
+    exec_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>>,
+    stop_rx: watch::Receiver<bool>,
+    ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
+}
+
 /// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
 /// `ready_tx`：就绪握手——连接建立（子进程拉起）且 initialize 握手完成后发送结果；
 /// 若连接在握手前就失败（二进制缺失 / 进程立即退出），在此补发 `Err` 供
@@ -578,11 +608,15 @@ async fn exec_main(
     bin: &str,
     args: &[String],
     env: &[(String, String)],
-    exec_rx: std::sync::mpsc::Receiver<ExecReq>,
-    exec_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>>,
+    control: ExecControl,
     caches: SessionCaches,
-    ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
+    let ExecControl {
+        exec_rx,
+        exec_tx,
+        mut stop_rx,
+        ready_tx,
+    } = control;
     // std exec_rx → tokio 通道（阻塞转发，供 select 使用）
     let (req_tx, mut req_rx) = mpsc::channel::<ExecReq>(32);
     tokio::task::spawn_blocking(move || {
@@ -619,14 +653,21 @@ async fn exec_main(
         agent
     };
 
-    let result = connect_main(
-        agent,
-        &mut req_rx,
-        caches.clone(),
-        &ready_tx,
-        ready_sent.clone(),
-    )
-    .await;
+    let result = tokio::select! {
+        result = connect_main(
+            agent,
+            &mut req_rx,
+            caches.clone(),
+            &ready_tx,
+            ready_sent.clone(),
+        ) => result,
+        changed = stop_rx.changed() => {
+            let _ = changed;
+            Err(agent_client_protocol::util::internal_error(
+                "ACP 连接已停止",
+            ))
+        }
+    };
     // ACP 连接关闭后，先阻止新的调用进入队列，再唤醒已有 turn。
     caches.alive.store(false, Ordering::SeqCst);
     exec_tx.lock().take();
@@ -833,8 +874,11 @@ async fn connect_main(
                 };
                 let _ = ready_tx.send({
                     ready_sent.store(true, std::sync::atomic::Ordering::SeqCst);
-                    init_result
+                    init_result.clone()
                 });
+                if let Err(e) = init_result {
+                    return Err(agent_client_protocol::util::internal_error(e));
+                }
 
                 // 服务循环：每个请求独立 spawn，支持并发（cancel 不必等 prompt 完成）
                 loop {
@@ -1349,10 +1393,12 @@ mod tests {
     async fn prompt_after_disconnect_finishes_immediately() {
         let caches = SessionCaches::default();
         caches.clear_on_disconnect();
+        let (stop_tx, _stop_rx) = watch::channel(false);
         let driver = AcpAgentDriver {
             exec_tx: Arc::new(Mutex::new(None)),
             caches,
             resumed: Arc::new(Mutex::new(HashSet::new())),
+            stop_tx,
             thread: Mutex::new(None),
         };
         let mut rx = driver.prompt("s1", Vec::new());
