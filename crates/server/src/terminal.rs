@@ -59,6 +59,7 @@ struct TerminalHandle {
     input_tx: std::sync::mpsc::Sender<Vec<u8>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    wait_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 pub struct TerminalService {
@@ -70,6 +71,20 @@ pub struct TerminalService {
 fn reap_child(mut child: Box<dyn Child + Send + Sync>) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn join_wait_thread(wait_thread: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>) {
+    if let Some(handle) = wait_thread.lock().take() {
+        let _ = handle.join();
+    }
+}
+
+fn stop_terminal(
+    killer: &Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    wait_thread: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+) {
+    killer.lock().kill().ok();
+    join_wait_thread(wait_thread);
 }
 
 impl Default for TerminalService {
@@ -135,7 +150,7 @@ impl TerminalService {
             Arc::new(Mutex::new(child.clone_killer()));
         let child_slot = Arc::new(Mutex::new(Some(child)));
         let wait_slot = child_slot.clone();
-        if let Err(e) = std::thread::Builder::new()
+        let wait_thread = match std::thread::Builder::new()
             .name("terminal-wait".into())
             .spawn(move || {
                 if let Some(mut child) = wait_slot.lock().take() {
@@ -143,13 +158,15 @@ impl TerminalService {
                         log::warn!("PTY 子进程回收失败: {e}");
                     }
                 }
-            })
-        {
-            if let Some(child) = child_slot.lock().take() {
-                reap_child(child);
+            }) {
+            Ok(handle) => Arc::new(Mutex::new(Some(handle))),
+            Err(e) => {
+                if let Some(child) = child_slot.lock().take() {
+                    reap_child(child);
+                }
+                return Err(RpcError::internal(format!("等待线程启动失败: {e}")));
             }
-            return Err(RpcError::internal(format!("等待线程启动失败: {e}")));
-        }
+        };
         let terminal_id = uuid::Uuid::new_v4().to_string();
 
         let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -165,7 +182,7 @@ impl TerminalService {
                 }
             })
         {
-            let _ = killer.lock().kill();
+            stop_terminal(&killer, &wait_thread);
             return Err(RpcError::internal(format!("输入线程启动失败: {e}")));
         }
 
@@ -197,7 +214,7 @@ impl TerminalService {
                 }
             })
         {
-            let _ = killer.lock().kill();
+            stop_terminal(&killer, &wait_thread);
             return Err(RpcError::internal(format!("输出线程启动失败: {e}")));
         }
 
@@ -206,14 +223,11 @@ impl TerminalService {
             input_tx,
             master: Arc::new(Mutex::new(pty.master)),
             killer,
+            wait_thread,
         };
         let mut terminals = self.terminals.lock();
         if conn.is_closed() {
-            handle
-                .killer
-                .lock()
-                .kill()
-                .map_err(|e| RpcError::internal(format!("关闭终端失败: {e}")))?;
+            stop_terminal(&handle.killer, &handle.wait_thread);
             return Err(RpcError::internal("连接已关闭"));
         }
         terminals.insert(terminal_id.clone(), handle);
@@ -308,7 +322,7 @@ impl TerminalService {
             .lock()
             .remove(&params.terminal_id)
             .ok_or_else(not_found)?;
-        handle.killer.lock().kill().ok();
+        stop_terminal(&handle.killer, &handle.wait_thread);
         log::info!("终端 {} 已关闭（连接 {}）", params.terminal_id, conn_id);
         Ok(())
     }
@@ -333,18 +347,30 @@ impl TerminalService {
     /// 连接断开：先标记连接关闭，再释放该连接的全部终端。
     /// 标记与摘除在同一表锁临界区内完成，防止并发 terminal.open 注册出孤儿 PTY。
     pub fn release_conn(&self, conn: &ConnScope) {
-        let mut terminals = self.terminals.lock();
-        conn.close();
-        let victims: Vec<_> = terminals
-            .iter()
-            .filter(|(_, h)| h.conn_id == conn.conn_id)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in victims {
-            if let Some(h) = terminals.remove(&id) {
-                h.killer.lock().kill().ok();
-                log::info!("终端 {id} 随连接 {} 断开释放", conn.conn_id);
-            }
+        let victims: Vec<_> = {
+            let mut terminals = self.terminals.lock();
+            conn.close();
+            let ids: Vec<_> = terminals
+                .iter()
+                .filter(|(_, h)| h.conn_id == conn.conn_id)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| terminals.remove(&id))
+                .collect()
+        };
+        for terminal in victims {
+            stop_terminal(&terminal.killer, &terminal.wait_thread);
+            log::info!("终端随连接 {} 断开释放", conn.conn_id);
+        }
+    }
+
+    /// server 退出时释放所有仍注册的 PTY。每个子进程由 open() 创建的 wait
+    /// 线程负责最终 reap；这里摘除句柄并发出终止信号，避免 process::exit 前遗留 shell。
+    pub fn shutdown_all(&self) {
+        let terminals: Vec<_> = self.terminals.lock().drain().map(|(_, h)| h).collect();
+        for terminal in terminals {
+            stop_terminal(&terminal.killer, &terminal.wait_thread);
         }
     }
 

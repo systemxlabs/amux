@@ -57,6 +57,9 @@ async fn main() {
 
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
         log::error!("创建数据目录失败: {e}");
+        if let Some((_, driver)) = &configured {
+            driver.shutdown_and_join();
+        }
         std::process::exit(1);
     }
     let configured_failed = cfg.agent_bin.is_some() && configured.is_none();
@@ -73,6 +76,7 @@ async fn main() {
         Ok(r) => Arc::new(r),
         Err(e) => {
             log::error!("打开会话注册表失败: {e}");
+            agents.shutdown_all();
             std::process::exit(1);
         }
     };
@@ -83,9 +87,12 @@ async fn main() {
     let (manager, notifications) =
         SessionManager::new(agents.clone(), registry, cfg.data_dir.clone());
     let manager = Arc::new(manager);
+    let terminals = Arc::new(amux_server::terminal::TerminalService::new());
 
-    // 退出信号（Ctrl+C 与 SIGTERM）：优雅关闭 ACP 子进程资源。
+    // 退出信号（Ctrl+C 与 SIGTERM）：优雅关闭 PTY 与 ACP 子进程资源。
     // 看门狗：个别 agent 挂死时 join 可能不返回，5s 后强制退出兜底。
+    let signal_agents = shutdown_agents.clone();
+    let signal_terminals = terminals.clone();
     tokio::spawn(async move {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("注册 SIGTERM 处理失败");
@@ -93,14 +100,15 @@ async fn main() {
             _ = tokio::signal::ctrl_c() => {},
             _ = sigterm.recv() => {},
         }
-        log::info!("收到退出信号，正在关闭 ACP 子进程…");
+        log::info!("收到退出信号，正在关闭 PTY 与 ACP 子进程…");
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(5));
             log::error!("关闭超时，强制退出");
             std::process::exit(0);
         });
-        shutdown_agents.shutdown_all();
-        log::info!("ACP 子进程已全部关闭");
+        signal_terminals.shutdown_all();
+        signal_agents.shutdown_all();
+        log::info!("PTY 与 ACP 子进程已全部关闭");
         std::process::exit(0);
     });
 
@@ -142,7 +150,7 @@ async fn main() {
         manager: manager.clone(),
         git: GitRunner::new(),
         workspace: WorkspaceBrowser::new(),
-        terminals: Arc::new(amux_server::terminal::TerminalService::new()),
+        terminals: terminals.clone(),
     });
 
     let transport = Transport::new(TransportOptions {
@@ -168,6 +176,8 @@ async fn main() {
 
     if let Err(e) = transport.run().await {
         log::error!("server 出错: {e}");
+        terminals.shutdown_all();
+        shutdown_agents.shutdown_all();
         std::process::exit(1);
     }
 }
