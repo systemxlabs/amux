@@ -1,10 +1,14 @@
 //! 工作流会话存储：
 //! - 元数据：`~/.amux/app/session.sqlite`
+//!   - 工作流会话表：标题/状态/执行计划等
+//!   - 关联普通会话表：工作流会话 ↔ 关联普通会话（会话 ID + 机器名称）
 //! - 对话历史：`~/.amux/app/sessions/<session_id>_history.jsonl`
 //! - 活动历史：`~/.amux/app/sessions/<session_id>_activities.jsonl`
 //!
-//! 历史/活动文件布局与读取复用 `amux-common::session_log`；写采用整文件原子替换。
+//! 历史/活动文件布局与读取复用 `amux-common::session_log`，由引擎在条目
+//! 完整后逐条追加写盘。
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 
@@ -17,7 +21,7 @@ use rusqlite::{params, Connection};
 use crate::workflow::{LinkedSession, OrcMsg, OrcSession};
 
 const META_SELECT_COLUMNS: &str =
-    "id, title, state, last_active_at, children, description, plan, preamble, created_at, updated_at";
+    "id, title, state, last_active_at, description, plan, preamble, created_at, updated_at";
 
 fn meta_select(suffix: &str) -> String {
     format!("SELECT {META_SELECT_COLUMNS} FROM sessions {suffix}")
@@ -61,18 +65,21 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
     // 多个写者可能并发持久化（各自独立连接）：等锁而非报 "database is locked"
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     conn.execute_batch(
-        // 列名 `children` 是既有存储布局：改名会让旧库缺列而写入失败，
-        // 故保留列名，仅代码层类型/字段用 LinkedSession/linked_sessions。
         "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             state TEXT NOT NULL,
             last_active_at INTEGER NOT NULL,
-            children TEXT NOT NULL,
             description TEXT NOT NULL,
             preamble TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workflow_linked_sessions (
+            workflow_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            machine_name TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, machine_name, session_id)
         );",
     )?;
     // 执行计划列缺失时补齐，
@@ -103,7 +110,6 @@ struct MetaRow {
     title: String,
     state: String,
     last_active_at: u64,
-    children: String,
     description: String,
     plan: String,
     preamble: String,
@@ -117,19 +123,16 @@ fn read_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetaRow> {
         title: row.get(1)?,
         state: row.get(2)?,
         last_active_at: row.get::<_, i64>(3)? as u64,
-        children: row.get(4)?,
-        description: row.get(5)?,
-        plan: row.get(6)?,
-        preamble: row.get(7)?,
-        created_at: row.get::<_, i64>(8)? as u64,
-        updated_at: row.get::<_, i64>(9)? as u64,
+        description: row.get(4)?,
+        plan: row.get(5)?,
+        preamble: row.get(6)?,
+        created_at: row.get::<_, i64>(7)? as u64,
+        updated_at: row.get::<_, i64>(8)? as u64,
     })
 }
 
 fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession> {
     let row = row.map_err(io::Error::other)?;
-    let children: Vec<LinkedSession> =
-        serde_json::from_str(&row.children).map_err(io::Error::other)?;
     Ok(OrcSession {
         id: row.id,
         title: row.title,
@@ -138,24 +141,64 @@ fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession>
         preamble: row.preamble,
         state: state_from(&row.state)?,
         transcript: Vec::new(),
-        linked_sessions: children,
+        linked_sessions: Vec::new(),
         activities: Vec::new(),
         created_at: row.created_at,
         updated_at: row.last_active_at.max(row.updated_at),
     })
 }
 
+/// 读取全部关联关系并按工作流分组（关联行很小，一次性读取足够）。
+/// `machine_idx` 是运行时字段（应用侧机器列表下标），加载时置为未绑定，
+/// 由 `WorkflowEngine::restore` 按机器名重绑。
+fn load_linked_sessions(
+    conn: &Connection,
+) -> rusqlite::Result<HashMap<String, Vec<LinkedSession>>> {
+    let mut stmt = conn.prepare(
+        "SELECT workflow_id, machine_name, session_id
+         FROM workflow_linked_sessions
+         ORDER BY rowid",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            LinkedSession {
+                machine_idx: usize::MAX,
+                machine_name: row.get(1)?,
+                id: row.get(2)?,
+            },
+        ))
+    })?;
+    let mut grouped: HashMap<String, Vec<LinkedSession>> = HashMap::new();
+    for row in rows {
+        let (workflow_id, linked) = row?;
+        grouped.entry(workflow_id).or_default().push(linked);
+    }
+    Ok(grouped)
+}
+
+fn attach_linked_sessions(
+    sessions: &mut [OrcSession],
+    linked: HashMap<String, Vec<LinkedSession>>,
+) {
+    for session in sessions {
+        if let Some(list) = linked.get(&session.id) {
+            session.linked_sessions = list.clone();
+        }
+    }
+}
+
 pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
-    let children = serde_json::to_string(&session.linked_sessions).map_err(io::Error::other)?;
-    let conn = open_db(data_dir).map_err(io::Error::other)?;
-    conn.execute(
+    let mut conn = open_db(data_dir).map_err(io::Error::other)?;
+    let tx = conn.transaction().map_err(io::Error::other)?;
+    tx.execute(
         "INSERT INTO sessions
-            (id, title, state, last_active_at, children, description, plan, preamble,
+            (id, title, state, last_active_at, description, plan, preamble,
              created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
             title=excluded.title, state=excluded.state,
-            last_active_at=excluded.last_active_at, children=excluded.children,
+            last_active_at=excluded.last_active_at,
             description=excluded.description, plan=excluded.plan,
             preamble=excluded.preamble,
             created_at=excluded.created_at, updated_at=excluded.updated_at",
@@ -164,7 +207,6 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
             session.title,
             session.state.as_str(),
             session.updated_at as i64,
-            children,
             session.description,
             session.plan,
             session.preamble,
@@ -173,6 +215,22 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
         ],
     )
     .map_err(io::Error::other)?;
+    // 关联关系整组替换：以引擎内存为权威
+    tx.execute(
+        "DELETE FROM workflow_linked_sessions WHERE workflow_id = ?1",
+        params![session.id],
+    )
+    .map_err(io::Error::other)?;
+    for linked in &session.linked_sessions {
+        tx.execute(
+            "INSERT OR IGNORE INTO workflow_linked_sessions
+                (workflow_id, session_id, machine_name)
+             VALUES (?1, ?2, ?3)",
+            params![session.id, linked.id, linked.machine_name],
+        )
+        .map_err(io::Error::other)?;
+    }
+    tx.commit().map_err(io::Error::other)?;
     // 对话历史由 WorkflowEngine 在条目完整后实时追加写盘（见 DESIGN：
     // 流式输出合并成完整条目后立即追加写入磁盘），save 只持久化元数据。
     // 同理活动也由引擎实时追加，不回写快照。
@@ -195,7 +253,26 @@ pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<OrcSes
     let mut sessions: Vec<OrcSession> = rows.map(meta_row_to_session).collect::<io::Result<_>>()?;
     let has_more = sessions.len() > limit;
     sessions.truncate(limit);
+    let linked = load_linked_sessions(&conn).map_err(io::Error::other)?;
+    attach_linked_sessions(&mut sessions, linked);
     Ok((sessions, has_more))
+}
+
+/// 全库工作流的关联普通会话 id 集合。工作流可能未加载进内存（分页窗口外），
+/// 顶层普通会话过滤必须覆盖全库，否则窗口外工作流的关联会话会漏出。
+pub fn load_all_linked_session_ids(data_dir: &Path) -> io::Result<HashSet<String>> {
+    let conn = open_db(data_dir).map_err(io::Error::other)?;
+    let mut stmt = conn
+        .prepare("SELECT session_id FROM workflow_linked_sessions")
+        .map_err(io::Error::other)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(io::Error::other)?;
+    let mut ids = HashSet::new();
+    for row in rows {
+        ids.insert(row.map_err(io::Error::other)?);
+    }
+    Ok(ids)
 }
 
 pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
@@ -206,7 +283,10 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let rows = stmt
         .query_map([], read_meta_row)
         .map_err(io::Error::other)?;
-    rows.map(meta_row_to_session).collect()
+    let mut sessions: Vec<OrcSession> = rows.map(meta_row_to_session).collect::<io::Result<_>>()?;
+    let linked = load_linked_sessions(&conn).map_err(io::Error::other)?;
+    attach_linked_sessions(&mut sessions, linked);
+    Ok(sessions)
 }
 
 /// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
@@ -221,6 +301,11 @@ pub fn remove(data_dir: &Path, id: &str) -> io::Result<()> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
         .map_err(io::Error::other)?;
+    conn.execute(
+        "DELETE FROM workflow_linked_sessions WHERE workflow_id = ?1",
+        params![id],
+    )
+    .map_err(io::Error::other)?;
     for path in [history_path(data_dir, id), activities_path(data_dir, id)] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
@@ -303,6 +388,81 @@ mod tests {
 
         remove(&dir, "orc_1").unwrap();
         assert!(load_all_meta(&dir).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn linked_sessions_persist_in_dedicated_table() {
+        let dir = temp();
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut base = OrcSession {
+            id: "orc_1".into(),
+            title: String::new(),
+            plan: String::new(),
+            description: String::new(),
+            preamble: String::new(),
+            state: SessionState::Idle,
+            transcript: Vec::new(),
+            linked_sessions: vec![
+                LinkedSession {
+                    id: "s1".into(),
+                    machine_idx: 7,
+                    machine_name: "m1".into(),
+                },
+                LinkedSession {
+                    id: "s1".into(),
+                    machine_idx: 7,
+                    machine_name: "m1".into(),
+                },
+            ],
+            activities: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let mut second = base.clone();
+        second.id = "orc_2".into();
+        second.linked_sessions = vec![LinkedSession {
+            id: "s2".into(),
+            machine_idx: 0,
+            machine_name: "m1".into(),
+        }];
+        save(&dir, &base).unwrap();
+        save(&dir, &second).unwrap();
+
+        // 全库收集（供顶层普通会话过滤）：跨工作流去重
+        let ids = load_all_linked_session_ids(&dir).unwrap();
+        assert_eq!(
+            ids,
+            HashSet::from(["s1".to_string(), "s2".to_string()]),
+            "重复挂载去重"
+        );
+
+        // 加载回读：machine_idx 不持久化（运行时字段），机器名保留
+        let meta = load_all_meta(&dir).unwrap();
+        let orc_1 = meta.iter().find(|m| m.id == "orc_1").unwrap();
+        assert_eq!(orc_1.linked_sessions.len(), 1, "重复挂载去重");
+        assert_eq!(orc_1.linked_sessions[0].machine_idx, usize::MAX);
+        assert_eq!(orc_1.linked_sessions[0].machine_name, "m1");
+
+        // save 以内存为权威整组替换关联
+        base.linked_sessions = vec![LinkedSession {
+            id: "s3".into(),
+            machine_idx: 0,
+            machine_name: "m2".into(),
+        }];
+        save(&dir, &base).unwrap();
+        let ids = load_all_linked_session_ids(&dir).unwrap();
+        assert_eq!(
+            ids,
+            HashSet::from(["s2".to_string(), "s3".to_string()]),
+            "旧关联应被整组替换"
+        );
+
+        // 删除工作流级联删除其关联
+        remove(&dir, "orc_2").unwrap();
+        let ids = load_all_linked_session_ids(&dir).unwrap();
+        assert_eq!(ids, HashSet::from(["s3".to_string()]));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -55,8 +55,8 @@ pub enum OrcMsg {
 /// 关联普通会话的挂载关系（工作流 ↔ 普通会话）。只存路由信息：
 /// 标题、忙闲、agent 等一律以机器 server 的会话元数据为权威
 /// （编排者经 list_sessions 现查 session.info；GUI 渲染时与本机会话缓存联表）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// `machine_idx` 是运行时字段（应用侧机器列表下标），不持久化。
+#[derive(Debug, Clone)]
 pub struct LinkedSession {
     pub id: String,
     pub machine_idx: usize,
@@ -64,8 +64,7 @@ pub struct LinkedSession {
 }
 
 /// 工作流会话（GUI 本地状态）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct OrcSession {
     pub id: String,
     pub title: String,
@@ -921,6 +920,13 @@ impl WorkflowEngine {
     pub fn load_window(data_dir: &Path, limit: usize) -> std::io::Result<(Vec<OrcSession>, bool)> {
         // 惰性元数据加载：只读 sqlite，不读取 transcript/activities 两份 JSONL。
         crate::wfstore::load_meta_window(data_dir, limit)
+    }
+
+    /// 全库工作流的关联普通会话 id（含未加载进内存的窗口外工作流）。
+    pub fn load_all_linked_session_ids(
+        data_dir: &Path,
+    ) -> std::io::Result<std::collections::HashSet<String>> {
+        crate::wfstore::load_all_linked_session_ids(data_dir)
     }
 
     pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {

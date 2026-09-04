@@ -37,7 +37,7 @@ use crate::logic::{
 };
 use crate::machine::MachineStatus;
 use crate::text::{block_text, format_local_time, one_line, TimePrecision};
-use crate::workflow::now;
+use crate::workflow::{now, WorkflowEngine};
 use protocol::Activity;
 
 use crate::app::{
@@ -87,6 +87,7 @@ impl AmuxApp {
         };
         let count = self.list_pages * PAGE_LIMIT;
         let client = m.client.clone();
+        let data_dir = self.data_dir.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             // 滚动查询：按数量查询前 N 页。
             let params = SessionListParams { limit: Some(count) };
@@ -99,8 +100,15 @@ impl AmuxApp {
                 Err(_) => return,
             };
 
+            // 关联会话可能属于未加载进内存的工作流（分页窗口外）：
+            // 过滤集以全库为准，内存集合并入覆盖刚挂载、尚未落盘的会话。
+            let db_linked_session_ids = WorkflowEngine::load_all_linked_session_ids(&data_dir)
+                .map_err(|e| log::error!("读取全量工作流关联会话失败: {e}"))
+                .unwrap_or_default();
+
             // 机器名和连接代次均需匹配，防止删机重排或重连旧响应误写。
-            // 先过滤掉属于本次工作流窗口之外的普通会话，再计算当前窗口需要补查的关联会话。
+            // 先把关联普通会话全部从顶层结果剔除（仅挂在工作流下展示，
+            // 避免与嵌套展示重复），再计算当前窗口需要补查的关联会话。
             let missing = match this.update_in(cx, |this, _w, _cx| {
                 let idx = this.machine_idx_by_name(&machine_name)?;
                 let mut all_linked_session_ids = HashSet::new();
@@ -120,6 +128,7 @@ impl AmuxApp {
                 if m.connection_generation != generation || m.sessions_request_id != request_id {
                     return None;
                 }
+                all_linked_session_ids.extend(db_linked_session_ids);
                 m.sessions = crate::logic::filter_workflow_sessions(pages, &all_linked_session_ids);
                 m.sessions_has_more = has_more;
                 m.unavailable_workflow_sessions.clear();
