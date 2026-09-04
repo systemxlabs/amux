@@ -236,8 +236,7 @@ impl SessionManager {
     }
 
     /// 覆盖写入内存中的会话选项：以 Agent 侧数据为权威，new/resume 响应、
-    /// 数据为权威，new/resume 响应、set_config_option 响应与
-    /// config_option_update 通知均全量覆盖）。
+    /// set_config_option 响应与 config_option_update 通知均全量覆盖。
     fn store_config_options(&self, session_id: &str, options: Vec<protocol::SessionConfigOption>) {
         self.config_options
             .lock()
@@ -245,8 +244,7 @@ impl SessionManager {
     }
 
     /// 惰性创建 agent 侧会话：发送指令或查询会话选项时才经 `session/new` 创建；
-    /// 选项时才经 `session/new` 创建；new 响应携带的会话选项存入内存。已有
-    /// agent 侧会话时原样返回。
+    /// new 响应携带的会话选项存入内存。已有 agent 侧会话时原样返回。
     fn ensure_agent_session(
         &self,
         session_id: &str,
@@ -957,7 +955,7 @@ impl SessionManager {
     }
 
     /// 设置会话配置选项：Server 向 ACP Server
-    /// 发送 `session/set_config_option` 请求进行设置）。尚无 agent 侧会话时先
+    /// 发送 `session/set_config_option` 请求进行设置。尚无 agent 侧会话时先
     /// 惰性创建；响应中的会话选项全量覆盖内存存储，返回更新后的完整选项集合。
     pub async fn set_config_option(
         &self,

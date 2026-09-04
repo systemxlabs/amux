@@ -597,7 +597,7 @@ pub struct TerminalOutputNotification {
     pub data: String,
 }
 
-/// `terminal.exit` 通知负载（docs 未单列该通知；用于客户端感知 shell 退出并清理）。
+/// `terminal.exit` 通知负载（用于客户端感知 shell 退出并清理）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalExitNotification {

@@ -121,12 +121,12 @@ impl AgentRegistry {
         }
     }
     #[cfg(test)]
-    pub fn new_for_tests_with_driver(harness: &str, driver: SharedDriver) -> Self {
+    pub fn new_for_tests_with_driver(agent: &str, driver: SharedDriver) -> Self {
         AgentRegistry {
             stub: Mutex::new(None),
             force_stub: false,
             no_discovery: true,
-            configured: Some((harness.to_string(), driver)),
+            configured: Some((agent.to_string(), driver)),
             configured_spec: Mutex::new(None),
             configured_override: Mutex::new(None),
             discovered: Mutex::new(Vec::new()),
@@ -185,15 +185,15 @@ impl AgentRegistry {
         }
         out
     }
-    pub fn driver_for(&self, harness: &str) -> Result<SharedDriver, String> {
+    pub fn driver_for(&self, agent: &str) -> Result<SharedDriver, String> {
         if let Some(stub) = &*self.stub.lock() {
             return Ok(stub.clone());
         }
-        if self.unavailable.lock().contains(harness) {
-            return Err(format!("agent 不可用（启动时拉起失败）: {harness}"));
+        if self.unavailable.lock().contains(agent) {
+            return Err(format!("agent 不可用（启动时拉起失败）: {agent}"));
         }
         if let Some((name, _)) = &self.configured {
-            if name == harness {
+            if name == agent {
                 if let Some(driver) = self.configured_override.lock().as_ref() {
                     return Ok(driver.clone());
                 }
@@ -209,7 +209,7 @@ impl AgentRegistry {
             .configured_spec
             .lock()
             .as_ref()
-            .filter(|spec| spec.name == harness)
+            .filter(|spec| spec.name == agent)
             .cloned()
         {
             return self.spawn_and_cache(&spec);
@@ -219,12 +219,12 @@ impl AgentRegistry {
             .discovered
             .lock()
             .iter()
-            .find(|d| d.name == harness)
+            .find(|d| d.name == agent)
             .cloned();
         if let Some(d) = found {
             return self.spawn_and_cache(&d);
         }
-        Err(format!("本机未发现 agent: {harness}"))
+        Err(format!("本机未发现 agent: {agent}"))
     }
     fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<SharedDriver, String> {
         if let Some(driver) = self.spawned.lock().get(&d.name).cloned() {
@@ -275,33 +275,33 @@ impl AgentRegistry {
         });
         Mutex::into_inner(summary)
     }
-    pub fn restart_agent(&self, harness: &str) -> Result<(), String> {
+    pub fn restart_agent(&self, agent: &str) -> Result<(), String> {
         let configured_name = self
             .configured
             .as_ref()
-            .map(|(name, _)| name == harness)
+            .map(|(name, _)| name == agent)
             .unwrap_or(false);
         let explicit_spec = self
             .configured_spec
             .lock()
             .as_ref()
-            .filter(|spec| spec.name == harness)
+            .filter(|spec| spec.name == agent)
             .cloned();
         if configured_name || explicit_spec.is_some() {
             let spec = self
                 .configured_spec
                 .lock()
                 .clone()
-                .ok_or_else(|| format!("显式 agent 缺少重启配置: {harness}"))?;
+                .ok_or_else(|| format!("显式 agent 缺少重启配置: {agent}"))?;
             let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
             let driver = match AcpAgentDriver::spawn(&spec.bin, &args, &spec.env) {
                 Ok(driver) => driver,
                 Err(e) => {
-                    self.unavailable.lock().insert(harness.to_string());
+                    self.unavailable.lock().insert(agent.to_string());
                     return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
                 }
             };
-            self.unavailable.lock().remove(harness);
+            self.unavailable.lock().remove(agent);
             if configured_name {
                 let old =
                     self.configured_override.lock().take().unwrap_or_else(|| {
@@ -312,25 +312,25 @@ impl AgentRegistry {
             } else {
                 self.spawned
                     .lock()
-                    .insert(harness.to_string(), Arc::new(driver));
+                    .insert(agent.to_string(), Arc::new(driver));
             }
-            log::info!("手动重启成功：{}（agent={}）", spec.bin, harness);
+            log::info!("手动重启成功：{}（agent={}）", spec.bin, agent);
             return Ok(());
         }
-        self.unavailable.lock().remove(harness);
+        self.unavailable.lock().remove(agent);
         self.refresh_discovery();
         let found = self
             .discovered
             .lock()
             .iter()
-            .find(|d| d.name == harness)
+            .find(|d| d.name == agent)
             .cloned();
         let Some(d) = found else {
-            return Err(format!("本机未发现 agent: {harness}"));
+            return Err(format!("本机未发现 agent: {agent}"));
         };
         // `spawn_and_cache` intentionally reuses an existing driver for normal
         // lookups, but restart must evict and shut down that driver first.
-        if let Some(old) = self.spawned.lock().remove(harness) {
+        if let Some(old) = self.spawned.lock().remove(agent) {
             old.shutdown_and_join();
         }
         match self.spawn_and_cache(&d) {
@@ -339,7 +339,7 @@ impl AgentRegistry {
                 Ok(())
             }
             Err(e) => {
-                self.unavailable.lock().insert(harness.to_string());
+                self.unavailable.lock().insert(agent.to_string());
                 log::error!("手动重启失败（agent={}）: {e}", d.name);
                 Err(e)
             }

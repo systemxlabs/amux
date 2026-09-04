@@ -2173,7 +2173,7 @@ impl AmuxApp {
                                                 .text_sm()
                                                 .text_color(muted_foreground),
                                         )
-                                        .child(self.render_harness_selector(cx)),
+                                        .child(self.render_agent_selector(cx)),
                                 ),
                         )
                         .child(self.render_workspace_picker(cx))
@@ -2559,7 +2559,7 @@ impl AmuxApp {
             .into_any()
     }
 
-    pub(crate) fn render_harness_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_agent_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let machine = self
             .new_session_machine
             .clone()

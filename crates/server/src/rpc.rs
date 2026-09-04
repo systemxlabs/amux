@@ -67,7 +67,7 @@ fn map_session_err(e: SessionError) -> RpcError {
     let code = match &e {
         SessionError::NotFound(_) => server_error::SESSION_NOT_FOUND,
         SessionError::Busy => server_error::SESSION_BUSY,
-        SessionError::AgentUnavailable(_) => server_error::HARNESS_UNAVAILABLE,
+        SessionError::AgentUnavailable(_) => server_error::AGENT_UNAVAILABLE,
         SessionError::EmptyInput => server_error::INVALID_INPUT,
         SessionError::Storage(_) => rpc_error::INTERNAL_ERROR,
     };
@@ -111,7 +111,7 @@ impl Handlers {
                     .agents()
                     .restart_agent(&p.agent)
                     .map_err(|e| RpcError {
-                        code: server_error::HARNESS_UNAVAILABLE,
+                        code: server_error::AGENT_UNAVAILABLE,
                         message: e,
                     })?;
                 ok_op()
@@ -374,7 +374,7 @@ mod tests {
         let e = map_session_err(SessionError::Busy);
         assert_eq!(e.code, server_error::SESSION_BUSY);
         let e = map_session_err(SessionError::AgentUnavailable("x".into()));
-        assert_eq!(e.code, server_error::HARNESS_UNAVAILABLE);
+        assert_eq!(e.code, server_error::AGENT_UNAVAILABLE);
         let e = map_session_err(SessionError::EmptyInput);
         assert_eq!(e.code, server_error::INVALID_INPUT);
         let e = map_session_err(SessionError::Storage("db".into()));

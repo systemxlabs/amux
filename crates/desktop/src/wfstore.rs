@@ -71,6 +71,7 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
             state TEXT NOT NULL,
             last_active_at INTEGER NOT NULL,
             description TEXT NOT NULL,
+            plan TEXT NOT NULL,
             preamble TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
@@ -82,19 +83,6 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
             PRIMARY KEY (workflow_id, machine_name, session_id)
         );",
     )?;
-    // 执行计划列缺失时补齐，
-    // 免除用户手动清库
-    let has_plan: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'plan'",
-        [],
-        |r| r.get(0),
-    )?;
-    if has_plan == 0 {
-        conn.execute(
-            "ALTER TABLE sessions ADD COLUMN plan TEXT NOT NULL DEFAULT ''",
-            [],
-        )?;
-    }
     Ok(conn)
 }
 
@@ -431,7 +419,7 @@ mod tests {
             "重复挂载去重"
         );
 
-        // 加载回读：机器名保留（machine_idx 已不在持久化字段中）
+        // 加载回读：机器名保留
         let meta = load_all_meta(&dir).unwrap();
         let orc_1 = meta.iter().find(|m| m.id == "orc_1").unwrap();
         assert_eq!(orc_1.linked_sessions.len(), 1, "重复挂载去重");
