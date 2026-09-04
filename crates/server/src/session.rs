@@ -616,6 +616,9 @@ impl SessionManager {
             return Err(SessionError::EmptyInput);
         }
         let control = self.control(session_id)?;
+        // 先取得生命周期锁再设置 busy，使 prompt 与 cancel/delete 有明确的
+        // 线性化顺序；否则 cancel 可能在 setup_prompt 写回 Busy 前读到旧的 Idle。
+        let lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
@@ -629,7 +632,6 @@ impl SessionManager {
 
         // 删除会先标记 deleted 并等待这把锁；持有期间完成 agent session 创建、
         // Busy 元数据写回和用户消息首写，避免删除后旧 prompt 再创建日志。
-        let lifecycle = control.lifecycle.lock();
         let setup = self.setup_prompt(session_id, &input, &control);
         let (driver, agent_session_id, cwd, old_state) = match setup {
             Ok(value) => value,
@@ -946,13 +948,19 @@ impl SessionManager {
 
     /// 取消指定普通会话正在进行的工作。
     pub async fn cancel(&self, session_id: &str) -> Result<(), SessionError> {
+        let control = self.control(session_id)?;
+        let _lifecycle = control.lifecycle.lock();
+        if control.deleted.load(Ordering::SeqCst) {
+            return Err(SessionError::NotFound(session_id.to_string()));
+        }
         let entry = self.get_entry(session_id)?;
         let meta = entry.meta;
         let agent_session_id = entry.agent_session_id;
         // 空闲会话（或尚无 agent 侧会话）无可取消：ACP agent 对未知 turn
         // 会报错，这里幂等返回成功、不透传——GUI 的取消按钮是常驻的，
-        // 调用方无需自行区分忙闲。
-        if meta.state != SessionState::Busy || agent_session_id.is_empty() {
+        // 调用方无需自行区分忙闲。控制块是并发状态权威，注册表可能仍在
+        // prompt 初始化的写回窗口内保持 Idle。
+        if !control.busy.load(Ordering::SeqCst) || agent_session_id.is_empty() {
             return Ok(());
         }
         let driver = self
@@ -2448,6 +2456,144 @@ mod tests {
         assert!(mgr.delete("nope").await.is_ok());
         assert!(mgr.controls.lock().is_empty(), "未知会话请求不应创建控制块");
         let _ = std::fs::remove_dir_all(&mgr.data_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_during_prompt_setup_is_not_dropped() {
+        struct SetupGate {
+            started: Arc<Notify>,
+            release_setup: Arc<std::sync::Barrier>,
+            prompt_started: Arc<Notify>,
+            release_turn: Arc<Notify>,
+            cancels: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl AgentDriver for SetupGate {
+            fn create_session(
+                &self,
+                _cwd: &str,
+            ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
+                self.started.notify_one();
+                self.release_setup.wait();
+                Ok(("agent_setup_gate".into(), Vec::new()))
+            }
+
+            fn resume_session(
+                &self,
+                _agent_session_id: &str,
+                _cwd: &str,
+            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+                Ok(Vec::new())
+            }
+
+            fn prompt(
+                &self,
+                _agent_session_id: &str,
+                _input: Vec<ContentBlock>,
+            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                let prompt_started = self.prompt_started.clone();
+                let release_turn = self.release_turn.clone();
+                tokio::spawn(async move {
+                    prompt_started.notify_one();
+                    release_turn.notified().await;
+                    let _ = tx
+                        .send(AgentEvent::TurnEnded(
+                            protocol::StateChangeReason::Completed,
+                        ))
+                        .await;
+                });
+                rx
+            }
+
+            fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
+                self.cancels
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn close(&self, _agent_session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn set_config_option(
+                &self,
+                _agent_session_id: &str,
+                _config_id: &str,
+                _value: protocol::SessionConfigOptionValue,
+            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
+                Ok(Vec::new())
+            }
+
+            fn shutdown(&self) {}
+        }
+
+        let started = Arc::new(Notify::new());
+        let release_setup = Arc::new(std::sync::Barrier::new(2));
+        let prompt_started = Arc::new(Notify::new());
+        let release_turn = Arc::new(Notify::new());
+        let cancels = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "setup_gate",
+            Arc::new(SetupGate {
+                started: started.clone(),
+                release_setup: release_setup.clone(),
+                prompt_started: prompt_started.clone(),
+                release_turn: release_turn.clone(),
+                cancels: cancels.clone(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-cancel-setup-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (manager, _rx) = SessionManager::new(agents, registry, dir.clone());
+        let manager = Arc::new(manager);
+        let meta = manager
+            .create("setup_gate", "/tmp/setup-gate", false)
+            .await
+            .unwrap();
+
+        let prompt_manager = manager.clone();
+        let prompt_id = meta.id.clone();
+        let prompt_task =
+            tokio::spawn(async move { prompt_manager.prompt(&prompt_id, text("开始")).await });
+        started.notified().await;
+
+        let cancel_manager = manager.clone();
+        let cancel_id = meta.id.clone();
+        let cancel_task = tokio::spawn(async move { cancel_manager.cancel(&cancel_id).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !cancel_task.is_finished(),
+            "取消不应在 prompt 初始化期间提前返回"
+        );
+        assert_eq!(
+            cancels.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "初始化尚未完成时不应提前调用 agent cancel"
+        );
+
+        let release_setup_task = tokio::task::spawn_blocking(move || release_setup.wait());
+        release_setup_task.await.unwrap();
+        prompt_started.notified().await;
+        cancel_task.await.unwrap().unwrap();
+        assert_eq!(
+            cancels.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "初始化完成后取消必须透传给 agent"
+        );
+
+        release_turn.notify_one();
+        prompt_task.await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
