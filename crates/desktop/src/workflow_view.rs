@@ -197,45 +197,36 @@ impl AmuxApp {
         let Some(idx) = self.workflow_idx(&wf_id) else {
             return;
         };
-        let linked_sessions: Vec<(String, String)> = self
-            .workflows
-            .get(idx)
-            .map(|w| {
-                w.linked_sessions()
-                    .iter()
-                    .map(|c| (c.machine_name.clone(), c.id.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if self
-            .workflows
-            .get(idx)
-            .is_some_and(|workflow| workflow.state() == SessionState::Busy)
-        {
+        let workflow = self.workflows[idx].clone();
+        let linked_sessions: Vec<(String, String)> = workflow
+            .linked_sessions()
+            .iter()
+            .map(|c| (c.machine_name.clone(), c.id.clone()))
+            .collect();
+        if workflow.state() == SessionState::Busy {
             self.workflow_error = Some("请先取消正在执行的工作流，再删除工作流会话。".into());
             cx.notify();
             return;
         }
+        workflow.mark_deleted();
         let mut targets = Vec::new();
         let mut unavailable = Vec::new();
         for (machine_name, sid) in &linked_sessions {
-            match self
-                .machine_idx_by_name(machine_name)
-                .and_then(|idx| self.machine(idx).map(|m| (idx, m)))
-            {
-                Some((idx, m)) => targets.push((
-                    idx,
+            match self.machine_by_name(machine_name) {
+                Some(m) => targets.push((
+                    m.config.name.clone(),
                     m.client.clone(),
                     sid.clone(),
-                    m.config.name.clone(),
                     m.connection_generation,
                 )),
                 None => unavailable.push(format!("机器 {machine_name} 不可用，无法删除会话 {sid}")),
             }
         }
-        let target_connections: Vec<(usize, String, u64)> = targets
+        // 异步删除期间其它机器可能被移除，导致 machines Vec 重排；只携带稳定机器名，
+        // 完成回调按名称重新解析，禁止把旧下标误当成另一台机器。
+        let target_connections: Vec<(String, u64)> = targets
             .iter()
-            .map(|(machine, _, _, name, generation)| (*machine, name.clone(), *generation))
+            .map(|(name, _, _, generation)| (name.clone(), *generation))
             .collect();
         let remote_targets = targets.clone();
         let data_dir = self.data_dir.clone();
@@ -243,7 +234,7 @@ impl AmuxApp {
             let result = run_engine_on_tokio(async move {
                 let mut deleted = Vec::new();
                 let mut failures = unavailable;
-                for (machine, client, sid, _, _) in &remote_targets {
+                for (machine_name, client, sid, _) in &remote_targets {
                     let params = SessionIdParams {
                         session_id: sid.clone(),
                     };
@@ -251,9 +242,9 @@ impl AmuxApp {
                         .request_ok(protocol::method::SESSION_DELETE, Some(params))
                         .await
                     {
-                        Ok(()) => deleted.push((*machine, sid.clone())),
+                        Ok(()) => deleted.push((machine_name.clone(), sid.clone())),
                         Err(error) if error.code == protocol::server_error::SESSION_NOT_FOUND => {
-                            deleted.push((*machine, sid.clone()));
+                            deleted.push((machine_name.clone(), sid.clone()));
                         }
                         Err(error) => {
                             failures.push(format!("删除关联普通会话 {sid} 失败：{error}"))
@@ -264,22 +255,23 @@ impl AmuxApp {
             })
             .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                let targets_current = target_connections.iter().all(|(_, name, generation)| {
+                let targets_current = target_connections.iter().all(|(name, generation)| {
                     this.is_current_machine_connection(name, *generation)
                 });
                 if !targets_current {
+                    workflow.unmark_deleted();
                     return;
                 }
                 match result {
                     Some(Ok((deleted, failures))) => {
-                        for (machine, sid) in &deleted {
-                            if let Some(m) = this.machine_mut(*machine) {
+                        for (machine_name, sid) in &deleted {
+                            if let Some(m) = this.machine_mut_by_name(machine_name) {
                                 m.sessions.retain(|session| session.id != *sid);
                                 m.views.remove(sid);
                             }
                         }
                         if failures.is_empty() {
-                            match WorkflowEngine::remove(&data_dir, &wf_id) {
+                            match workflow.remove_deleted(&data_dir) {
                                 Ok(()) => {
                                     this.workflows.retain(|workflow| workflow.id() != wf_id);
                                     this.visible_workflows.remove(&wf_id);
@@ -296,11 +288,13 @@ impl AmuxApp {
                                     });
                                 }
                                 Err(error) => {
+                                    workflow.unmark_deleted();
                                     this.workflow_error =
                                         Some(format!("删除工作流持久化记录失败：{error}"));
                                 }
                             }
                         } else {
+                            workflow.unmark_deleted();
                             this.workflow_error = Some(format!(
                                 "工作流部分删除完成，剩余关联会话可重试：{}",
                                 failures.join("；")
@@ -308,9 +302,11 @@ impl AmuxApp {
                         }
                     }
                     Some(Err(error)) => {
+                        workflow.unmark_deleted();
                         this.workflow_error = Some(format!("删除工作流任务失败：{error}"));
                     }
                     None => {
+                        workflow.unmark_deleted();
                         this.workflow_error = Some("删除工作流任务未能执行".into());
                     }
                 }

@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -395,6 +396,8 @@ pub struct WorkflowEngine {
     current_activity: Arc<Mutex<Option<Activity>>>,
     /// 串行化同一工作流的后台持久化，避免旧快照在新快照之后落盘。
     persist_lock: Arc<Mutex<()>>,
+    /// 标记为删除中的工作流；墓碑保留在所有引擎克隆之间，阻止排队的旧持久化复活记录。
+    deleted: Arc<AtomicBool>,
     /// 串行化同一工作流的历史/活动 JSONL 追加，避免并发写者交错行内容。
     log_lock: Arc<Mutex<()>>,
 }
@@ -441,6 +444,7 @@ impl WorkflowEngine {
             data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
             persist_lock: Arc::new(Mutex::new(())),
+            deleted: Arc::new(AtomicBool::new(false)),
             log_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -463,6 +467,7 @@ impl WorkflowEngine {
             data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
             persist_lock: Arc::new(Mutex::new(())),
+            deleted: Arc::new(AtomicBool::new(false)),
             log_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -899,8 +904,30 @@ impl WorkflowEngine {
 
     pub fn persist(&self, data_dir: &Path) -> std::io::Result<()> {
         let _persist = self.persist_lock.lock();
+        if self.deleted.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let snapshot = self.session.read().clone();
         crate::wfstore::save(data_dir, &snapshot)
+    }
+
+    /// 标记工作流进入删除流程；所有引擎克隆共享该墓碑。
+    pub fn mark_deleted(&self) {
+        self.deleted.store(true, Ordering::Release);
+    }
+
+    /// 远端删除失败或连接发生变化时撤销删除墓碑。
+    pub fn unmark_deleted(&self) {
+        self.deleted.store(false, Ordering::Release);
+    }
+
+    /// 在持久化锁内删除工作流，确保已排队的旧快照不能在删除之后回写。
+    pub fn remove_deleted(&self, data_dir: &Path) -> std::io::Result<()> {
+        let _persist = self.persist_lock.lock();
+        if !self.deleted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        crate::wfstore::remove(data_dir, &self.id())
     }
 
     /// 后台持久化：UI 线程只克隆引擎句柄（session 为 Arc<RwLock>），元数据落在
@@ -2234,6 +2261,32 @@ mod tests {
             .transcript
             .iter()
             .any(|m| matches!(m, OrcMsg::User { text, .. } if text.contains("状态变更"))));
+    }
+
+    #[test]
+    fn deleted_workflow_cannot_be_resurrected_by_stale_persist() {
+        let dir = temp_data_dir();
+        let (clients, machine) = clients_with_machines();
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            FakeBackend::new(vec![]),
+            test_hub(vec![machine], clients),
+            &dir,
+        );
+        engine.persist(&dir).unwrap();
+        let stale_clone = engine.clone();
+
+        engine.mark_deleted();
+        engine.remove_deleted(&dir).unwrap();
+        assert!(WorkflowEngine::load_all(&dir).unwrap().is_empty());
+
+        // 模拟删除完成前已排队的后台持久化任务：共享删除墓碑后必须跳过写回。
+        stale_clone.persist(&dir).unwrap();
+        assert!(WorkflowEngine::load_all(&dir).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
