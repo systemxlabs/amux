@@ -868,7 +868,7 @@ impl AmuxApp {
                             m.sessions.retain(|s| s.id != sid);
                             m.views.remove(&sid);
                         }
-                        if this.open_session_target().is_some_and(|(_, id)| id == sid) {
+                        if this.is_selected_session(&machine_name, &sid) {
                             this.set_selected(None, w, cx);
                         }
                         this.drafts.retain(|key, _| match key {

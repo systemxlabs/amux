@@ -132,6 +132,15 @@ pub enum Selected {
     },
 }
 
+fn session_identity_matches(
+    selected_machine: &str,
+    selected_id: &str,
+    machine: &str,
+    session_id: &str,
+) -> bool {
+    selected_machine == machine && selected_id == session_id
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum SkillAction {
     Install,
@@ -890,7 +899,9 @@ impl AmuxApp {
 
     pub(crate) fn is_selected_session(&self, machine: &str, session_id: &str) -> bool {
         self.open_session_target()
-            .is_some_and(|(selected_machine, id)| selected_machine == machine && id == session_id)
+            .is_some_and(|(selected_machine, id)| {
+                session_identity_matches(&selected_machine, &id, machine, session_id)
+            })
     }
 
     pub(crate) fn machine(&self, i: usize) -> Option<&MachineView> {
@@ -1347,4 +1358,31 @@ pub(crate) async fn run_engine_on_tokio<T: Send + 'static>(
         let _ = tx.send(fut.await);
     });
     rx.await.ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_identity_matches;
+
+    #[test]
+    fn session_identity_requires_machine_and_id() {
+        assert!(session_identity_matches(
+            "machine-a",
+            "same-id",
+            "machine-a",
+            "same-id"
+        ));
+        assert!(!session_identity_matches(
+            "machine-a",
+            "same-id",
+            "machine-b",
+            "same-id"
+        ));
+        assert!(!session_identity_matches(
+            "machine-a",
+            "same-id",
+            "machine-a",
+            "other-id"
+        ));
+    }
 }
