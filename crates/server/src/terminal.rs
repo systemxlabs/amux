@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::Engine as _;
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
@@ -58,11 +58,18 @@ struct TerminalHandle {
     /// 输入字节流送专职写线程：PTY master write 可能阻塞，不能占用 dispatcher
     input_tx: std::sync::mpsc::Sender<Vec<u8>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    killer: Arc<Mutex<Box<dyn ChildKiller + Send>>>,
+    killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
 }
 
 pub struct TerminalService {
     terminals: Mutex<HashMap<String, TerminalHandle>>,
+}
+
+/// 启动后尚未交给终端 actor 的 PTY 子进程失败时必须显式终止并 reap；
+/// portable-pty 的 `Child` drop 本身不会替我们回收外部进程。
+fn reap_child(mut child: Box<dyn Child + Send + Sync>) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 impl Default for TerminalService {
@@ -110,19 +117,43 @@ impl TerminalService {
             .map_err(|e| RpcError::internal(format!("shell 启动失败: {e}")))?;
         // slave 描述符在 spawn 后立即释放：任何一端持有 slave 都会阻止 EOF
         drop(pty.slave);
-        let writer = pty
-            .master
-            .take_writer()
-            .map_err(|e| RpcError::internal(format!("PTY writer 获取失败: {e}")))?;
-        let reader = pty
-            .master
-            .try_clone_reader()
-            .map_err(|e| RpcError::internal(format!("PTY reader 获取失败: {e}")))?;
-        let killer = child.clone_killer();
+        let writer = match pty.master.take_writer() {
+            Ok(writer) => writer,
+            Err(e) => {
+                reap_child(child);
+                return Err(RpcError::internal(format!("PTY writer 获取失败: {e}")));
+            }
+        };
+        let reader = match pty.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(e) => {
+                reap_child(child);
+                return Err(RpcError::internal(format!("PTY reader 获取失败: {e}")));
+            }
+        };
+        let killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>> =
+            Arc::new(Mutex::new(child.clone_killer()));
+        let child_slot = Arc::new(Mutex::new(Some(child)));
+        let wait_slot = child_slot.clone();
+        if let Err(e) = std::thread::Builder::new()
+            .name("terminal-wait".into())
+            .spawn(move || {
+                if let Some(mut child) = wait_slot.lock().take() {
+                    if let Err(e) = child.wait() {
+                        log::warn!("PTY 子进程回收失败: {e}");
+                    }
+                }
+            })
+        {
+            if let Some(child) = child_slot.lock().take() {
+                reap_child(child);
+            }
+            return Err(RpcError::internal(format!("等待线程启动失败: {e}")));
+        }
         let terminal_id = uuid::Uuid::new_v4().to_string();
 
         let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name(format!("terminal-input-{terminal_id}"))
             .spawn(move || {
                 let mut writer = writer;
@@ -133,12 +164,15 @@ impl TerminalService {
                     let _ = writer.flush();
                 }
             })
-            .map_err(|e| RpcError::internal(format!("输入线程启动失败: {e}")))?;
+        {
+            let _ = killer.lock().kill();
+            return Err(RpcError::internal(format!("输入线程启动失败: {e}")));
+        }
 
         // 读线程：阻塞读 PTY → 通道转发给异步输出泵。EOF 以空 Vec 标记。
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         let read_tx = out_tx.clone();
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name(format!("terminal-read-{terminal_id}"))
             .spawn(move || {
                 let mut reader = reader;
@@ -162,13 +196,16 @@ impl TerminalService {
                     }
                 }
             })
-            .map_err(|e| RpcError::internal(format!("输出线程启动失败: {e}")))?;
+        {
+            let _ = killer.lock().kill();
+            return Err(RpcError::internal(format!("输出线程启动失败: {e}")));
+        }
 
         let handle = TerminalHandle {
             conn_id: conn.conn_id,
             input_tx,
             master: Arc::new(Mutex::new(pty.master)),
-            killer: Arc::new(Mutex::new(killer)),
+            killer,
         };
         let mut terminals = self.terminals.lock();
         if conn.is_closed() {
