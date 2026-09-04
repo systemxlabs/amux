@@ -239,7 +239,7 @@ impl AgentRegistry {
             Some(existing) => {
                 let existing = existing.clone();
                 drop(spawned);
-                driver.shutdown();
+                driver.shutdown_and_join();
                 Ok(existing)
             }
             None => {
@@ -307,12 +307,16 @@ impl AgentRegistry {
                     self.configured_override.lock().take().unwrap_or_else(|| {
                         self.configured.as_ref().expect("配置驱动不存在").1.clone()
                     });
-                old.shutdown();
+                old.shutdown_and_join();
                 *self.configured_override.lock() = Some(Arc::new(driver));
             } else {
-                self.spawned
+                let old = self
+                    .spawned
                     .lock()
                     .insert(agent.to_string(), Arc::new(driver));
+                if let Some(old) = old {
+                    old.shutdown_and_join();
+                }
             }
             log::info!("手动重启成功：{}（agent={}）", spec.bin, agent);
             return Ok(());
