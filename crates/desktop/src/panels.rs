@@ -318,7 +318,7 @@ impl AmuxApp {
                 let current_connection =
                     this.is_current_machine_connection(&machine_name, generation);
                 let selected_session_matches = this.is_selected_session(&machine_name, &session_id);
-                let Some(m) = this.machines.get_mut(machine) else {
+                let Some(m) = this.machine_mut_by_name(&machine_name) else {
                     return;
                 };
                 if !current_connection
@@ -416,7 +416,7 @@ impl AmuxApp {
                 let current_connection =
                     this.is_current_machine_connection(&machine_name, generation);
                 let selected_session_matches = this.is_selected_session(&machine_name, &session_id);
-                let Some(m) = this.machines.get_mut(machine) else {
+                let Some(m) = this.machine_mut_by_name(&machine_name) else {
                     return;
                 };
                 if !current_connection
