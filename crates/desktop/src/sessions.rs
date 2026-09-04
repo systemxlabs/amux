@@ -964,11 +964,11 @@ impl AmuxApp {
         self.machine_idx_by_name(machine_name)
             .and_then(|idx| self.machine(idx))
             .and_then(|m| {
-            m.agents
-                .iter()
-                .find(|a| a.available)
-                .map(|a| a.name.clone())
-        })
+                m.agents
+                    .iter()
+                    .find(|a| a.available)
+                    .map(|a| a.name.clone())
+            })
     }
 
     pub(crate) fn selected_meta(&self) -> Option<SessionMeta> {
@@ -1295,12 +1295,7 @@ impl AmuxApp {
                         let sid = sid_menu.clone();
                         move |_, window, cx| {
                             app.update(cx, |this, cx| {
-                                this.confirm_delete_session(
-                                    window,
-                                    cx,
-                                    &machine_name,
-                                    sid.clone(),
-                                );
+                                this.confirm_delete_session(window, cx, &machine_name, sid.clone());
                             });
                         }
                     }))
@@ -1370,7 +1365,8 @@ impl AmuxApp {
         } else {
             Vec::new()
         };
-        let agent_label: SharedString = if let Some((machine_name, id)) = self.open_session_target() {
+        let agent_label: SharedString = if let Some((machine_name, id)) = self.open_session_target()
+        {
             self.machine_idx_by_name(&machine_name)
                 .and_then(|idx| self.machine(idx))
                 .and_then(|m| {
@@ -1486,11 +1482,13 @@ impl AmuxApp {
                 }
             })
             .collect::<Vec<_>>();
-        let history_has_more = self.open_session_target().and_then(|(machine_name, id)| {
-            self.machine_idx_by_name(&machine_name)
-                .and_then(|idx| self.machine(idx))
-                .and_then(|m| m.views.get(&id))
-        })
+        let history_has_more = self
+            .open_session_target()
+            .and_then(|(machine_name, id)| {
+                self.machine_idx_by_name(&machine_name)
+                    .and_then(|idx| self.machine(idx))
+                    .and_then(|m| m.views.get(&id))
+            })
             .map(|v| v.history_has_more)
             .unwrap_or(false);
         let mut content = Vec::new();
@@ -1563,7 +1561,8 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_activity_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current: Option<Activity> = if let Some((machine_name, id)) = self.open_session_target() {
+        let current: Option<Activity> = if let Some((machine_name, id)) = self.open_session_target()
+        {
             self.machine_idx_by_name(&machine_name)
                 .and_then(|idx| self.machine(idx))
                 .and_then(|m| m.views.get(&id))
@@ -1940,9 +1939,7 @@ impl AmuxApp {
                         h_flex()
                             .gap_1()
                             .items_center()
-                            .debug_selector(move || {
-                                format!("cfg-row-{machine_dbg}-{dbg_id}")
-                            })
+                            .debug_selector(move || format!("cfg-row-{machine_dbg}-{dbg_id}"))
                             .child(Label::new(opt.name.clone()).text_sm().text_color(muted))
                             .child(
                                 Button::new(SharedString::from(format!(
@@ -2611,7 +2608,10 @@ impl AmuxApp {
         R: serde::de::DeserializeOwned + 'static,
         F: FnOnce(&mut Self, Result<R, crate::ws::RpcError>) + 'static,
     {
-        let Some(machine_view) = self.machine_idx_by_name(machine_name).and_then(|idx| self.machines.get(idx)) else {
+        let Some(machine_view) = self
+            .machine_idx_by_name(machine_name)
+            .and_then(|idx| self.machines.get(idx))
+        else {
             return;
         };
         let client = machine_view.client.clone();
@@ -2620,8 +2620,8 @@ impl AmuxApp {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let result = client.request::<_, R>(method, Some(params)).await;
             let _ = this.update_in(cx, |this, _w, cx| {
-                let current_connection = this
-                    .is_current_machine_connection(&machine_name, generation);
+                let current_connection =
+                    this.is_current_machine_connection(&machine_name, generation);
                 if current_connection {
                     apply(this, result);
                     cx.notify();
@@ -2834,8 +2834,8 @@ impl AmuxApp {
                 .request::<_, OpResult>(protocol::method::SESSION_CONFIGURE, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                let current_connection = this
-                    .is_current_machine_connection(&machine_name, generation);
+                let current_connection =
+                    this.is_current_machine_connection(&machine_name, generation);
                 if !current_connection || !this.is_selected_session(&machine_name, &session_id) {
                     return;
                 }

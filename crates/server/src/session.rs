@@ -237,12 +237,13 @@ impl SessionManager {
         if !wt.exists() {
             GitRunner::new()
                 .rebuild_worktree(&meta.cwd, &wt)
-                .map_err(|e| SessionError::Storage(format!("重建 worktree 失败 {}: {e}", wt.display())))?;
+                .map_err(|e| {
+                    SessionError::Storage(format!("重建 worktree 失败 {}: {e}", wt.display()))
+                })?;
             log::info!("已按原路径重建过期清理的 worktree: {}", wt.display());
             // 重建由用户访问（发指令/查看目录）触发，即视为会话活跃，
             // 否则刚重建的 worktree 会在下一轮清理被立即回收
-            self.registry
-                .update_state(session_id, meta.state.clone(), now())?;
+            self.registry.update_state(session_id, meta.state, now())?;
         }
         Ok(meta.worktree_dir.clone())
     }
@@ -1453,8 +1454,7 @@ mod tests {
         assert!(recent_wt.is_dir(), "近期 worktree 应保留");
         let stored = registry.get(&stale.id).unwrap().unwrap();
         assert_eq!(
-            stored.meta.worktree_dir,
-            stale.worktree_dir,
+            stored.meta.worktree_dir, stale.worktree_dir,
             "清理保留 worktree 元数据"
         );
         let list = git(&repo, &["worktree", "list", "--porcelain"]);
@@ -1470,10 +1470,7 @@ mod tests {
             "访问工作目录触发按原路径重建"
         );
         assert!(stale_wt.is_dir(), "重建的 worktree 落在同一目录");
-        let branch = git(
-            &stale_wt,
-            &["branch", "--show-current"],
-        );
+        let branch = git(&stale_wt, &["branch", "--show-current"]);
         assert_eq!(
             branch.trim(),
             stale_wt.file_name().unwrap().to_str().unwrap(),

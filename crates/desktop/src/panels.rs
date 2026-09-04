@@ -38,11 +38,13 @@ impl AmuxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let plan = self.open_session_target().and_then(|(machine_name, id)| {
-            self.machine_idx_by_name(&machine_name)
-                .and_then(|idx| self.machine(idx))
-                .and_then(|m| m.views.get(&id))
-        })
+        let plan = self
+            .open_session_target()
+            .and_then(|(machine_name, id)| {
+                self.machine_idx_by_name(&machine_name)
+                    .and_then(|idx| self.machine(idx))
+                    .and_then(|m| m.views.get(&id))
+            })
             .map(|v| v.plan.clone())
             .unwrap_or_default();
         v_flex()
@@ -316,8 +318,7 @@ impl AmuxApp {
             let _ = this.update_in(cx, |this, _window, cx| {
                 let current_connection =
                     this.is_current_machine_connection(&machine_name, generation);
-                let selected_session_matches =
-                    this.is_selected_session(&machine_name, &session_id);
+                let selected_session_matches = this.is_selected_session(&machine_name, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };
@@ -415,8 +416,7 @@ impl AmuxApp {
             let _ = this.update_in(cx, |this, _window, cx| {
                 let current_connection =
                     this.is_current_machine_connection(&machine_name, generation);
-                let selected_session_matches =
-                    this.is_selected_session(&machine_name, &session_id);
+                let selected_session_matches = this.is_selected_session(&machine_name, &session_id);
                 let Some(m) = this.machines.get_mut(machine) else {
                     return;
                 };

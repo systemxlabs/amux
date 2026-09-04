@@ -908,7 +908,11 @@ impl AmuxApp {
             .and_then(|idx| self.machines.get(idx))
     }
 
-    pub(crate) fn is_current_machine_connection(&self, machine_name: &str, generation: u64) -> bool {
+    pub(crate) fn is_current_machine_connection(
+        &self,
+        machine_name: &str,
+        generation: u64,
+    ) -> bool {
         self.machine_idx_by_name(machine_name)
             .and_then(|idx| self.machines.get(idx))
             .is_some_and(|m| m.connection_generation == generation)
@@ -929,11 +933,7 @@ impl AmuxApp {
     pub(crate) fn active_machine(&self) -> Option<String> {
         self.open_session_target()
             .map(|(machine, _)| machine)
-            .or_else(|| {
-                self.machines
-                    .first()
-                    .map(|m| m.config.name.clone())
-            })
+            .or_else(|| self.machines.first().map(|m| m.config.name.clone()))
     }
 
     /// 当前选中会话的生效工作目录：启用 worktree 的会话 agent 实际工作在
