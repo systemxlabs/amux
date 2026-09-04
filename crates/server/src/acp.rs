@@ -235,13 +235,35 @@ impl SessionCaches {
     fn clear_on_disconnect(&self) {
         let routes = std::mem::take(&mut *self.routes.lock());
         for (_, tx) in routes {
-            let _ = tx.try_send(AgentEvent::Error("ACP 连接已关闭".into()));
-            let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
+            send_disconnect_events(tx);
         }
         self.commands.lock().clear();
         self.plans.lock().clear();
         self.caps.lock().clear();
         *self.default_caps.lock() = AgentSessionCaps::default();
+    }
+}
+
+fn send_disconnect_events(tx: mpsc::Sender<AgentEvent>) {
+    let error = AgentEvent::Error("ACP 连接已关闭".into());
+    match tx.try_send(error) {
+        Ok(()) => match tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted)) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                std::thread::spawn(move || {
+                    let _ = tx.blocking_send(event);
+                });
+            }
+        },
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(error)) => {
+            std::thread::spawn(move || {
+                if tx.blocking_send(error).is_ok() {
+                    let _ = tx
+                        .blocking_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
+                }
+            });
+        }
     }
 }
 
@@ -1244,6 +1266,32 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let routes = Mutex::new(HashMap::from([("s1".to_string(), tx)]));
         (routes, rx)
+    }
+
+    #[tokio::test]
+    async fn disconnect_wakes_turn_when_event_channel_is_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(AgentEvent::OutputChunk("尚未处理".into()))
+            .unwrap();
+        let caches = SessionCaches {
+            routes: Arc::new(Mutex::new(HashMap::from([("s1".into(), tx)]))),
+            ..SessionCaches::default()
+        };
+
+        caches.clear_on_disconnect();
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(AgentEvent::OutputChunk(text)) if text == "尚未处理"
+        ));
+        assert!(
+            matches!(rx.recv().await, Some(AgentEvent::Error(message)) if message == "ACP 连接已关闭")
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted))
+        ));
+        assert!(caches.routes.lock().is_empty());
     }
 
     #[test]
