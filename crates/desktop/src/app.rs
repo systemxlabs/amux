@@ -1058,7 +1058,7 @@ impl AmuxApp {
         let handle = div()
             .id("panel-resize-handle")
             .debug_selector(|| "panel-resize-handle".into())
-            .w(px(Self::PANEL_RESIZE_HANDLE_WIDTH)) // 拖拽手柄宽度：物理命中区域
+            .w(px(Self::PANEL_RESIZE_HANDLE_WIDTH))
             .h_full()
             .bg(cx.theme().border.opacity(0.35))
             .hover(|d| d.bg(cx.theme().primary))
@@ -1097,7 +1097,7 @@ impl AmuxApp {
                 .child(handle)
                 .child(
                     div()
-                        .w(px(panel_width)) // 拖拽解析出的运行时宽度（随 pointer 事件更新）
+                        .w(px(panel_width))
                         .h_full()
                         .min_w_0()
                         .child(panel),
@@ -1201,7 +1201,7 @@ impl AmuxApp {
         let resize_handle = div()
             .id("sidebar-resize-handle")
             .debug_selector(|| "sidebar-resize-handle".into())
-            .w(px(5.0)) // 拖拽手柄宽度：物理命中区域
+            .w(px(5.0))
             .h_full()
             .bg(sidebar_border.opacity(0.6))
             .hover(|d| d.bg(cx.theme().primary))
@@ -1226,7 +1226,7 @@ impl AmuxApp {
                 },
             ));
         h_flex()
-            .w(px(sidebar_width)) // 拖拽解析出的运行时宽度（随 pointer 事件更新）
+            .w(px(sidebar_width))
             .h_full()
             .child(sidebar_content)
             .child(resize_handle)

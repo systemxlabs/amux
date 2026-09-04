@@ -4,54 +4,35 @@
 pub mod method {
     /// 认证（建连后首个消息）。
     pub const AUTH: &str = "auth";
-    /// 查询当前机器的 agents（名称与可用性）
     pub const AGENT_LIST: &str = "agent.list";
-    /// 重启指定 agent
     pub const AGENT_RESTART: &str = "agent.restart";
-    /// 重新发现 agents（重扫本机 ACP agent 并拉起未运行的）
+    /// 重扫本机 ACP agent 并拉起未运行的实例。
     pub const AGENT_REDISCOVER: &str = "agent.rediscover";
-    /// 新建一个普通会话（惰性：仅 server 侧写入，不触发 ACP）
+    /// 只写入 Server 侧注册表，不立即创建 agent 侧会话。
     pub const SESSION_NEW: &str = "session.new";
-    /// 往指定普通会话发送指令
     pub const SESSION_PROMPT: &str = "session.prompt";
-    /// 取消指定普通会话正在进行的工作
     pub const SESSION_CANCEL: &str = "session.cancel";
-    /// 删除指定普通会话
     pub const SESSION_DELETE: &str = "session.delete";
-    /// 配置指定普通会话：会话标题、会话选项等
     pub const SESSION_CONFIGURE: &str = "session.configure";
-    /// 获取指定普通会话的会话选项（选项由 ACP 会话提供，查询触发惰性创建/恢复）
+    /// 查询会话选项会触发 agent 侧会话的惰性创建或恢复。
     pub const SESSION_CONFIG_OPTIONS: &str = "session.config_options";
-    /// 获取指定普通会话的斜杠命令（由 ACP `available_commands_update` 通知驱动，
-    /// 查询不触发惰性创建）
+    /// 结果来自 ACP `available_commands_update` 缓存，查询本身不创建会话。
     pub const SESSION_SLASH_COMMANDS: &str = "session.slash_commands";
-    /// 获取指定普通会话的 agent 计划（由 ACP `plan` 通知驱动，查询不触发惰性创建）
+    /// 结果来自 ACP `plan` 通知缓存，查询本身不创建会话。
     pub const SESSION_PLAN: &str = "session.plan";
-    /// 分页查询指定普通会话的对话历史
     pub const SESSION_HISTORY: &str = "session.history";
-    /// 分页查询指定普通会话的活动历史
     pub const SESSION_ACTIVITIES: &str = "session.activities";
-    /// 查询指定普通会话正在进行中的活动
     pub const SESSION_ONGOING_ACTIVITY: &str = "session.ongoing_activity";
-    /// 分页查询普通会话列表
     pub const SESSION_LIST: &str = "session.list";
-    /// 批量查询指定的普通会话列表
     pub const SESSION_INFO: &str = "session.info";
-    /// 查询普通会话工作目录改动 diff
     pub const WORKSPACE_DIFF: &str = "workspace.diff";
-    /// 按文件或代码块撤销普通会话工作目录的改动
     pub const WORKSPACE_RESTORE: &str = "workspace.restore";
-    /// 分页查看工作目录指定文件夹内容
     pub const WORKSPACE_LIST: &str = "workspace.list";
-    /// 分页读取工作目录文本文件内容
     pub const WORKSPACE_READ: &str = "workspace.read";
-    /// 打开一个终端（指定 cwd 与初始行列），返回终端 ID
+    /// 指定初始行列打开终端，避免全屏程序先以默认尺寸渲染。
     pub const TERMINAL_OPEN: &str = "terminal.open";
-    /// 调整指定终端的行列尺寸
     pub const TERMINAL_RESIZE: &str = "terminal.resize";
-    /// 向指定终端写入输入字节流（base64）
     pub const TERMINAL_INPUT: &str = "terminal.input";
-    /// 关闭指定终端
     pub const TERMINAL_CLOSE: &str = "terminal.close";
 }
 

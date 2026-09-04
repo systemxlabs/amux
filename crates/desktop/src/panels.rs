@@ -150,7 +150,6 @@ impl AmuxApp {
             })
             .unwrap_or_default();
 
-        // 终端标签行：点击切换 + 关闭；末尾“新建终端”
         let mut tabs = h_flex().flex_wrap().gap_1();
         for entry in &terminals {
             let entry_id = entry.id.clone();
