@@ -30,6 +30,17 @@ fn is_linked_session_draft(
         .any(|(linked_machine, linked_id)| linked_machine == machine && linked_id == session_id)
 }
 
+fn is_deleted_selected_session(
+    selected: Option<(String, String)>,
+    deleted_sessions: &[(String, String)],
+) -> bool {
+    selected.is_some_and(|(machine, id)| {
+        deleted_sessions
+            .iter()
+            .any(|(deleted_machine, deleted_id)| deleted_machine == &machine && deleted_id == &id)
+    })
+}
+
 impl AmuxApp {
     pub(crate) fn open_workflow(
         &mut self,
@@ -279,6 +290,11 @@ impl AmuxApp {
                                 m.sessions.retain(|session| session.id != *sid);
                                 m.views.remove(sid);
                             }
+                        }
+                        let deleted_selected_session =
+                            is_deleted_selected_session(this.open_session_target(), &deleted);
+                        if deleted_selected_session {
+                            this.set_selected(None, w, cx);
                         }
                         if failures.is_empty() {
                             match workflow.remove_deleted(&data_dir) {
@@ -702,7 +718,7 @@ impl AmuxApp {
 
 #[cfg(test)]
 mod tests {
-    use super::is_linked_session_draft;
+    use super::{is_deleted_selected_session, is_linked_session_draft};
 
     #[test]
     fn linked_session_draft_requires_machine_and_id() {
@@ -711,5 +727,24 @@ mod tests {
         assert!(is_linked_session_draft("machine-a", "same-id", &linked));
         assert!(!is_linked_session_draft("machine-b", "same-id", &linked));
         assert!(!is_linked_session_draft("machine-a", "other-id", &linked));
+    }
+
+    #[test]
+    fn deleted_selected_session_requires_machine_and_id() {
+        let deleted = vec![("machine-a".to_string(), "same-id".to_string())];
+
+        assert!(is_deleted_selected_session(
+            Some(("machine-a".into(), "same-id".into())),
+            &deleted
+        ));
+        assert!(!is_deleted_selected_session(
+            Some(("machine-b".into(), "same-id".into())),
+            &deleted
+        ));
+        assert!(!is_deleted_selected_session(
+            Some(("machine-a".into(), "other-id".into())),
+            &deleted
+        ));
+        assert!(!is_deleted_selected_session(None, &deleted));
     }
 }
