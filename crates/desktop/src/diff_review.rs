@@ -203,6 +203,13 @@ impl AmuxApp {
         let Some(m) = self.machine(machine) else {
             return;
         };
+        if !m.status.online() {
+            if let Some(m) = self.machine_mut(machine) {
+                m.notice = Some("机器离线，无法发送选中的改动".into());
+            }
+            cx.notify();
+            return;
+        }
         let client = m.client.clone();
         let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
@@ -239,16 +246,24 @@ impl AmuxApp {
                 session_id: session_id.clone(),
                 input: vec![ContentBlock::Text { text: prompt }],
             };
-            let _ = client
+            let result = client
                 .request_ok(protocol::method::SESSION_PROMPT, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                if this.is_current_machine_connection(&machine_name, generation)
-                    && this.is_selected_session(&machine_name, &session_id)
+                if !this.is_current_machine_connection(&machine_name, generation)
+                    || !this.is_selected_session(&machine_name, &session_id)
                 {
-                    this.refresh_dialog(w, cx, &machine_name, session_id);
-                    cx.notify();
+                    return;
                 }
+                match result {
+                    Ok(()) => this.refresh_dialog(w, cx, &machine_name, session_id),
+                    Err(error) => {
+                        if let Some(m) = this.machine_mut_by_name(&machine_name) {
+                            m.notice = Some(format!("发送选中改动失败：{error}"));
+                        }
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
