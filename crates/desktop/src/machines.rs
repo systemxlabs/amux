@@ -285,6 +285,13 @@ impl AmuxApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(machine_name) = self
+            .machines
+            .get(idx)
+            .map(|machine| machine.config.name.clone())
+        else {
+            return;
+        };
         let Some(machine) = self.machines.get_mut(idx) else {
             return;
         };
@@ -312,6 +319,20 @@ impl AmuxApp {
         machine.workspace_read_loading = false;
         machine.workspace_read_has_more = false;
         machine.workspace_read_next_offset = 0;
+        if self
+            .config_options
+            .as_ref()
+            .is_some_and(|options| options.machine == machine_name)
+        {
+            self.config_options = None;
+        }
+        if self
+            .slash_commands
+            .as_ref()
+            .is_some_and(|commands| commands.machine == machine_name)
+        {
+            self.slash_commands = None;
+        }
     }
 
     /// 重连机器：重建其 WS 连接视图（按稳定机器名定位，删机重排不影响身份）。
