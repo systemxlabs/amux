@@ -1281,10 +1281,14 @@ impl AmuxApp {
                         let raw_title = raw_title.clone();
                         move |_, window, cx| {
                             app.update(cx, |this, cx| {
-                                this.selected = Some(Selected::Session {
-                                    machine: machine_name.clone(),
-                                    id: sid.clone(),
-                                });
+                                this.set_selected(
+                                    Some(Selected::Session {
+                                        machine: machine_name.clone(),
+                                        id: sid.clone(),
+                                    }),
+                                    window,
+                                    cx,
+                                );
                                 this.renaming_session = Some((machine_name.clone(), sid.clone()));
                                 this.title_input
                                     .update(cx, |s, cx| s.set_value(&raw_title, window, cx));

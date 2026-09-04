@@ -1178,7 +1178,7 @@ impl AmuxApp {
                             .icon(IconName::Plus)
                             .tooltip("新会话 / 工作流")
                             .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.selected = None;
+                                this.set_selected(None, window, cx);
                                 this.set_panel(window, cx, None);
                                 cx.notify();
                             })),

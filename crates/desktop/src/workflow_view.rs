@@ -583,7 +583,11 @@ impl AmuxApp {
                     let title = title_menu.clone();
                     move |_, window, cx| {
                         app.update(cx, |this, cx| {
-                            this.selected = Some(Selected::Workflow { id: wf_id.clone() });
+                            this.set_selected(
+                                Some(Selected::Workflow { id: wf_id.clone() }),
+                                window,
+                                cx,
+                            );
                             this.renaming_workflow = Some(wf_id.clone());
                             this.title_input
                                 .update(cx, |s, cx| s.set_value(&title, window, cx));
