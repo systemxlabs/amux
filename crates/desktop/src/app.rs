@@ -739,23 +739,26 @@ impl AmuxApp {
     }
 
     pub(crate) fn spawn_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.machines.len();
-        for i in 0..n {
-            let machine_name = self.machines[i].config.name.clone();
-            let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_secs(10))
-                        .await;
-                    // 定时刷新统一走 refresh_sessions（含滚动查询 N 页与工作流
-                    // 关联会话补齐）；按机器名定位 idx，重连后 idx 仍有效
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.refresh_sessions(&machine_name, window, cx);
-                    });
+        // 使用单个任务按当前机器列表轮询：机器可动态增删，不能为启动时的机器
+        // 各自创建永不退出的任务，否则删机后任务仍会周期性唤醒，而新机器又没有轮询任务。
+        let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(10))
+                .await;
+            // 定时刷新统一走 refresh_sessions（含滚动查询 N 页与工作流
+            // 关联会话补齐）；按机器名定位，重连和机器列表变化均安全。
+            let _ = this.update_in(cx, |this, window, cx| {
+                let machine_names: Vec<String> = this
+                    .machines
+                    .iter()
+                    .map(|machine| machine.config.name.clone())
+                    .collect();
+                for machine_name in machine_names {
+                    this.refresh_sessions(&machine_name, window, cx);
                 }
             });
-            self._tasks.push(t);
-        }
+        });
+        self._tasks.push(t);
 
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
             let target = this
