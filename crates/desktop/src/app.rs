@@ -842,6 +842,10 @@ impl AmuxApp {
             loop {
                 match notify_rx.recv().await {
                     Ok(n) => {
+                        let terminal = matches!(
+                            n.method.as_str(),
+                            "auth_failed" | "connect_failed" | "disconnected"
+                        );
                         let mut gone = false;
                         let _ = this.update_in(cx, |this, window, cx| {
                             match this.machine_idx_by_name(&name) {
@@ -854,7 +858,7 @@ impl AmuxApp {
                                 None => gone = true,
                             }
                         });
-                        if gone {
+                        if terminal || gone {
                             return;
                         }
                     }
