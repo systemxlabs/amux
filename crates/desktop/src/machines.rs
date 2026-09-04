@@ -288,6 +288,7 @@ impl AmuxApp {
         let Some(machine) = self.machines.get_mut(idx) else {
             return;
         };
+        machine.connection_generation = next_connection_generation();
         machine.terminals.clear();
         machine.active_terminal = None;
         let rem_size = window.rem_size();
@@ -327,7 +328,6 @@ impl AmuxApp {
         let cfg = self.machines[idx].config.clone();
         let client = WsClient::connect_with_token(machine_ws_url(&cfg), cfg.token.clone());
         old_client.close();
-        self.machines[idx].connection_generation = next_connection_generation();
         self.machines[idx].status = crate::machine::MachineStatus::Connecting;
         // 终端、工作目录和 diff 都绑定旧 WS 连接；旧连接的通知会因 generation
         // 不匹配被丢弃，因此必须在切换连接时主动释放本地连接态。
