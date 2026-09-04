@@ -414,6 +414,26 @@ impl AmuxApp {
                 let machine_name = this.machines[idx].config.name.clone();
                 this.fetch_agents(&machine_name, window, cx);
                 this.refresh_sessions(&machine_name, window, cx);
+                if let Some((_, session_id)) = this
+                    .open_session_target()
+                    .filter(|(selected_machine, _)| selected_machine == &machine_name)
+                {
+                    // 重连时连接绑定的缓存已失效；认证成功后立即恢复当前会话，
+                    // 不等待后台轮询或用户切换会话。
+                    this.refresh_dialog(window, cx, &machine_name, session_id.clone());
+                    this.refresh_activities(window, cx, &machine_name, session_id.clone());
+                    this.refresh_ongoing(window, cx, &machine_name, session_id.clone());
+                    this.refresh_plan(window, cx, &machine_name, session_id.clone());
+                    this.refresh_config_options(cx, &machine_name, session_id.clone());
+                    this.refresh_slash_commands(cx, &machine_name, session_id);
+                    match this.panel {
+                        Some(Panel::Workspace) => {
+                            this.load_workspace_list(window, cx, &machine_name, String::new(), 0);
+                        }
+                        Some(Panel::Diff) => this.load_diff(window, cx, &machine_name),
+                        _ => {}
+                    }
+                }
             }
             "auth_failed" => {
                 if let Some(m) = this.machines.get_mut(idx) {
