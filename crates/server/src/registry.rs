@@ -220,14 +220,6 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 清空会话的 worktree 目录（worktree 被自动清理后回退为原始工作目录，
-    /// 避免 workspace RPC / prompt 指向已不存在的目录）。
-    pub fn clear_worktree_dir(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.connection();
-        conn.execute("UPDATE sessions SET worktree_dir = '' WHERE id = ?1", [id])?;
-        Ok(())
-    }
-
     /// 有 worktree 且超过 `idle_timeout_ms` 不活跃的 idle 会话候选。
     /// 返回 (会话 id, 原始工作目录 cwd, worktree 目录)。
     pub fn idle_worktree_candidates(
@@ -394,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_worktree_candidates_and_clear() {
+    fn idle_worktree_candidates() {
         let db = tmp_db("wtcand");
         let reg = SessionRegistry::open(&db).unwrap();
 
@@ -422,12 +414,6 @@ mod tests {
                 worktree_dir: "/tmp/wt1".into(),
             }
         );
-
-        // 清空字段后不再入候选
-        reg.clear_worktree_dir("s1").unwrap();
-        let got = reg.get("s1").unwrap().unwrap();
-        assert_eq!(got.meta.worktree_dir, "");
-        assert!(reg.idle_worktree_candidates(now, 500).unwrap().is_empty());
         let _ = std::fs::remove_file(&db);
     }
 

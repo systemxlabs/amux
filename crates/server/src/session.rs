@@ -226,13 +226,25 @@ impl SessionManager {
         Ok(())
     }
 
-    /// agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
-    fn effective_cwd(meta: &SessionMeta) -> String {
+    /// 会话生效工作目录：启用 worktree 时为工作树，否则用户指定目录。
+    /// worktree 被过期清理时按记录路径原地重建（清理不删元数据，路径一致），
+    /// 重建失败视为存储类错误向上传播。
+    fn resolve_cwd(&self, session_id: &str, meta: &SessionMeta) -> Result<String, SessionError> {
         if meta.worktree_dir.is_empty() {
-            meta.cwd.clone()
-        } else {
-            meta.worktree_dir.clone()
+            return Ok(meta.cwd.clone());
         }
+        let wt = PathBuf::from(&meta.worktree_dir);
+        if !wt.exists() {
+            GitRunner::new()
+                .rebuild_worktree(&meta.cwd, &wt)
+                .map_err(|e| SessionError::Storage(format!("重建 worktree 失败 {}: {e}", wt.display())))?;
+            log::info!("已按原路径重建过期清理的 worktree: {}", wt.display());
+            // 重建由用户访问（发指令/查看目录）触发，即视为会话活跃，
+            // 否则刚重建的 worktree 会在下一轮清理被立即回收
+            self.registry
+                .update_state(session_id, meta.state.clone(), now())?;
+        }
+        Ok(meta.worktree_dir.clone())
     }
 
     /// 覆盖写入内存中的会话选项：以 Agent 侧数据为权威，new/resume 响应、
@@ -258,8 +270,9 @@ impl SessionManager {
         if !agent_session_id.is_empty() {
             return Ok((driver, agent_session_id.to_string()));
         }
+        let cwd = self.resolve_cwd(session_id, meta)?;
         let (sid, options) = driver
-            .create_session(&Self::effective_cwd(meta))
+            .create_session(&cwd)
             .map_err(SessionError::AgentUnavailable)?;
         self.registry.set_agent_session_id(session_id, &sid)?;
         self.store_config_options(session_id, options);
@@ -288,7 +301,8 @@ impl SessionManager {
         let meta = entry.meta;
         // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
         // 最新选项全量覆盖内存存储；幂等 resume 返回空集合时保持既有选项。
-        match driver.resume_session(&agent_session_id, &Self::effective_cwd(&meta)) {
+        let cwd = self.resolve_cwd(session_id, &meta)?;
+        match driver.resume_session(&agent_session_id, &cwd) {
             Ok(options) => {
                 if !options.is_empty() {
                     self.store_config_options(session_id, options);
@@ -455,10 +469,11 @@ impl SessionManager {
     /// 返回普通会话绑定的工作目录。workspace RPC 不接受调用方自带 cwd，
     /// 避免借助已知 session id 浏览或修改另一目录。
     /// worktree 会话：agent 实际工作在 worktree，
-    /// 改动视图（diff/restore/list/read）应作用于 worktree 目录而非原始目录。
+    /// 改动视图（diff/restore/list/read）应作用于 worktree 目录而非原始目录；
+    /// worktree 已被过期清理时按原路径重建。
     pub fn workspace_cwd(&self, session_id: &str) -> Result<String, SessionError> {
         let meta = self.get_entry(session_id)?.meta;
-        Ok(Self::effective_cwd(&meta))
+        self.resolve_cwd(session_id, &meta)
     }
 
     /// 关闭长时间无活动的 agent 侧会话（>timeout_ms）。候选选出后复核状态：
@@ -498,9 +513,9 @@ impl SessionManager {
     }
 
     /// 清理超过 `timeout_ms` 不活跃会话的 worktree。仅清理关联 worktree，会话本身
-    /// 保留；清理后清空元数据的
-    /// worktree_dir，使 agent 工作目录与 workspace RPC 回退到原始 cwd。
-    /// 删除失败的 worktree 保留字段，等待下轮清理重试。返回清理数量。
+    /// 保留；元数据中的 worktree_dir 一并保留，agent 工作目录与 workspace RPC
+    /// 后续访问时按原路径惰性重建。删除失败的 worktree 等待下轮清理重试。
+    /// 返回清理数量。
     pub async fn cleanup_idle_worktrees(
         &self,
         now_ms: u64,
@@ -525,12 +540,12 @@ impl SessionManager {
                 continue;
             }
             let wt = PathBuf::from(&candidate.worktree_dir);
+            if !wt.exists() {
+                // 上轮已清理（元数据保留）：目录不存在即无需再清理
+                continue;
+            }
             GitRunner::new().remove_worktree(&candidate.cwd, &wt);
             if !wt.exists() {
-                if let Err(e) = self.registry.clear_worktree_dir(&sid) {
-                    log::error!("清空会话 worktree 目录失败 {sid}: {e}");
-                    continue;
-                }
                 cleaned += 1;
             }
         }
@@ -728,10 +743,10 @@ impl SessionManager {
         }
         meta.state = SessionState::Busy;
         meta.last_active_at = now();
-        // worktree 在 session.new 已落盘，此处不再创建。
+        // worktree 在 session.new 已落盘；被过期清理后此处按原路径惰性重建。
         // agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
         // create/resume 共用此值，GUI 的 workspace/diff RPC 也按它下发。
-        let cwd = Self::effective_cwd(&meta);
+        let cwd = self.resolve_cwd(session_id, &meta)?;
         let driver = self
             .agents
             .driver_for(&meta.agent)
@@ -1404,7 +1419,7 @@ mod tests {
             Arc::new(SessionRegistry::open(&case.join("server").join("session.sqlite")).unwrap());
         let (mgr, _rx) = SessionManager::new(agents, registry.clone(), case.join("server"));
 
-        // 超时会话：worktree 应被清理，字段清空，工作目录回退原始 cwd
+        // 超时会话：worktree 应被清理，元数据保留，后续访问按原路径重建
         let stale = mgr
             .create("codex", repo.to_str().unwrap(), true)
             .await
@@ -1437,17 +1452,45 @@ mod tests {
         assert!(!stale_wt.exists(), "超期 worktree 应被删除");
         assert!(recent_wt.is_dir(), "近期 worktree 应保留");
         let stored = registry.get(&stale.id).unwrap().unwrap();
-        assert_eq!(stored.meta.worktree_dir, "", "清理后 worktree_dir 应清空");
         assert_eq!(
-            mgr.workspace_cwd(&stale.id).unwrap(),
-            repo.to_str().unwrap(),
-            "清理后工作目录回退原始 cwd"
+            stored.meta.worktree_dir,
+            stale.worktree_dir,
+            "清理保留 worktree 元数据"
         );
         let list = git(&repo, &["worktree", "list", "--porcelain"]);
         assert!(
             !list.contains(stale.worktree_dir.trim()),
             "主仓库不应再登记已清理 worktree"
         );
+
+        // 后续访问按原路径重建，并检回原分支（分支名 = 目录 basename）
+        assert_eq!(
+            mgr.workspace_cwd(&stale.id).unwrap(),
+            stale.worktree_dir,
+            "访问工作目录触发按原路径重建"
+        );
+        assert!(stale_wt.is_dir(), "重建的 worktree 落在同一目录");
+        let branch = git(
+            &stale_wt,
+            &["branch", "--show-current"],
+        );
+        assert_eq!(
+            branch.trim(),
+            stale_wt.file_name().unwrap().to_str().unwrap(),
+            "重建 worktree 应检回原工作分支"
+        );
+        let list = git(&repo, &["worktree", "list", "--porcelain"]);
+        assert!(
+            list.contains(stale.worktree_dir.trim()),
+            "重建后主仓库重新登记 worktree"
+        );
+
+        // 再次清理：重建已视为会话活跃（last_active_at 刷新），不再入候选
+        let cleaned = mgr
+            .cleanup_idle_worktrees(now_ms, 7 * 24 * 3_600_000)
+            .await
+            .unwrap();
+        assert_eq!(cleaned, 0, "刚重建的 worktree 不应被下一轮清理立即回收");
 
         let _ = std::fs::remove_dir_all(&case);
     }

@@ -564,6 +564,14 @@ impl GitRunner {
         .map_err(|e| format!("{}: {}", e.message, e.stderr.trim()))
     }
 
+    /// 过期清理后按原路径重建 worktree。目录已删但主仓库残留的 worktree 管理
+    /// 条目会令同路径 add 被拒（"丢失但已注册"），先 prune 再 add；分支名仍取
+    /// 目录 basename，若该分支已存在则检出现有分支，延续会话原工作分支。
+    pub fn rebuild_worktree(&self, repo_cwd: &str, target: &Path) -> Result<(), String> {
+        let _ = run(repo_cwd, &["worktree", "prune"]);
+        self.create_worktree(repo_cwd, target)
+    }
+
     /// 移除 worktree（强制：会话删除级联清理不因未提交改动而失败），并 prune
     /// 主仓库的残留管理信息。repo 已不存在时退化为直接删目录。
     pub fn remove_worktree(&self, repo_cwd: &str, target: &Path) {
