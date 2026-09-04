@@ -17,9 +17,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "syn
 tokio-tungstenite.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
-futures-util = "0.3"
-base64 = "0.22"
-rusqlite = { version = "0.40", features = ["bundled"] }
+futures-util.workspace = true
+base64.workspace = true
+rusqlite.workspace = true
 
 # GPUI（Zed 主线 git）+ gpui-component（longbridge）
 # 注意：跟踪 Zed 主线，API 可能随上游变化。
@@ -28,17 +28,17 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 gpui_component = { package = "gpui-component", git = "https://github.com/longbridge/gpui-component" }
 gpui_component_assets = { package = "gpui-component-assets", git = "https://github.com/longbridge/gpui-component" }
 # 本地时区时间戳格式化（消息/活动跨天时显示日期）
-jiff = "0.2"
+jiff.workspace = true
 # rig-core：编排 agent 的 LLM provider 层（completion/providers/streaming/test-utils）。
 # 直接依赖 rig-core 而非 rig facade，避免拉入 rig-agent / rig-derive
 #（steer/取消语义由引擎自研工具循环驱动，不使用 agent 运行时；
 #  流式输出参考 rig-agent 的流式运行时自行消费，文本增量实时进对话流）
-rig-core = { version = "0.42", default-features = false, features = ["reqwest", "rustls"] }
-alacritty_terminal = "0.25"
+rig-core.workspace = true
+alacritty_terminal.workspace = true
 
 # 测试专用：rig-core MockCompletionModel/MockTurn（薄工具循环单测；不进 release 构建）
 [dev-dependencies]
-rig-core = { version = "0.42", default-features = false, features = ["test-utils"] }
+rig-core = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 # gpui 测试平台：真实 taffy 布局 + 事件模拟（复现滚动/布局回归）
 gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }

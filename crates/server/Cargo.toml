@@ -16,19 +16,19 @@ serde_json.workspace = true
 # 按需声明特性：macros(select!/main/test)、rt-multi-thread、net、process、io-util、signal、sync、time
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "process", "io-util", "signal", "sync", "time"] }
 tokio-tungstenite.workspace = true
-futures-util = "0.3"
+futures-util.workspace = true
 # 强类型错误（rpc 边界一次映射 JSON-RPC 错误码）
-thiserror = "2"
+thiserror.workspace = true
 # ACP 官方 SDK：Client 角色 + schema v1 + AcpAgent stdio 传输
 agent-client-protocol = { workspace = true, features = ["unstable"] }
 uuid.workspace = true
 parking_lot.workspace = true
 # 会话注册表持久化（server 单写者，同步 API）
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite.workspace = true
 # git 能力（workspace.diff/restore）用 gitoxide；只开用到的特性以精简依赖树
-gix = { version = "0.87", default-features = false, features = ["basic", "status", "sha1"] }
-portable-pty = "0.9"
-base64 = "0.22"
+gix.workspace = true
+portable-pty.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
