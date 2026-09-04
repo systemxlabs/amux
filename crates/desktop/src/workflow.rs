@@ -954,10 +954,10 @@ impl WorkflowEngine {
         crate::wfstore::load_meta_window(data_dir, limit)
     }
 
-    /// 全库工作流的关联普通会话 id（含未加载进内存的窗口外工作流）。
+    /// 全库工作流的关联普通会话身份（含未加载进内存的窗口外工作流）。
     pub fn load_all_linked_session_ids(
         data_dir: &Path,
-    ) -> std::io::Result<std::collections::HashSet<String>> {
+    ) -> std::io::Result<std::collections::HashSet<(String, String)>> {
         crate::wfstore::load_all_linked_session_ids(data_dir)
     }
 

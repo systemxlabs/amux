@@ -60,16 +60,19 @@ pub fn merge_session_window(
     (out, has_more)
 }
 
-/// 从普通会话查询结果中移除所有已知工作流关联会话。
-/// 关联会话只允许挂在所属工作流下展示；即使该工作流不在当前分页窗口，
-/// 也不能错误地以顶层普通会话出现。
+/// 从指定机器的普通会话查询结果中移除所有已知工作流关联会话。
+/// 关联会话只允许挂在所属工作流下展示；机器名是会话身份的一部分，
+/// 因此不能只按 session ID 过滤。
 pub fn filter_workflow_sessions(
     sessions: Vec<SessionMeta>,
-    workflow_linked_session_ids: &std::collections::HashSet<String>,
+    machine_name: &str,
+    workflow_linked_sessions: &std::collections::HashSet<(String, String)>,
 ) -> Vec<SessionMeta> {
     sessions
         .into_iter()
-        .filter(|session| !workflow_linked_session_ids.contains(&session.id))
+        .filter(|session| {
+            !workflow_linked_sessions.contains(&(machine_name.to_string(), session.id.clone()))
+        })
         .collect()
 }
 
@@ -510,12 +513,22 @@ mod tests {
     #[test]
     fn filter_workflow_sessions_removes_linked_sessions_from_top_level_results() {
         let sessions = vec![smeta("ordinary", 300), smeta("linked", 200)];
-        let linked_session_ids = std::collections::HashSet::from(["linked".to_string()]);
-        let filtered = filter_workflow_sessions(sessions, &linked_session_ids);
+        let linked_sessions =
+            std::collections::HashSet::from([("machine-a".to_string(), "linked".to_string())]);
+        let filtered = filter_workflow_sessions(sessions, "machine-a", &linked_sessions);
         assert_eq!(
             filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             ["ordinary"]
         );
+    }
+
+    #[test]
+    fn filter_workflow_sessions_keeps_same_id_on_another_machine() {
+        let sessions = vec![smeta("same-id", 200)];
+        let linked_sessions =
+            std::collections::HashSet::from([("machine-a".to_string(), "same-id".to_string())]);
+        let filtered = filter_workflow_sessions(sessions, "machine-b", &linked_sessions);
+        assert_eq!(filtered.len(), 1);
     }
 
     #[test]

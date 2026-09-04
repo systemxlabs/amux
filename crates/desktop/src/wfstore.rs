@@ -243,15 +243,17 @@ pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<OrcSes
     Ok((sessions, has_more))
 }
 
-/// 全库工作流的关联普通会话 id 集合。工作流可能未加载进内存（分页窗口外），
-/// 顶层普通会话过滤必须覆盖全库，否则窗口外工作流的关联会话会漏出。
-pub fn load_all_linked_session_ids(data_dir: &Path) -> io::Result<HashSet<String>> {
+/// 全库工作流的关联普通会话身份集合。工作流可能未加载进内存（分页窗口外），
+/// 顶层普通会话过滤必须覆盖全库；机器名是会话身份的一部分，不能只按 ID。
+pub fn load_all_linked_session_ids(data_dir: &Path) -> io::Result<HashSet<(String, String)>> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let mut stmt = conn
-        .prepare("SELECT session_id FROM workflow_linked_sessions")
+        .prepare("SELECT machine_name, session_id FROM workflow_linked_sessions")
         .map_err(io::Error::other)?;
     let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(io::Error::other)?;
     let mut ids = HashSet::new();
     for row in rows {
@@ -411,11 +413,14 @@ mod tests {
         save(&dir, &base).unwrap();
         save(&dir, &second).unwrap();
 
-        // 全库收集（供顶层普通会话过滤）：跨工作流去重
+        // 全库收集（供顶层普通会话过滤）：按机器名 + 会话 ID 去重
         let ids = load_all_linked_session_ids(&dir).unwrap();
         assert_eq!(
             ids,
-            HashSet::from(["s1".to_string(), "s2".to_string()]),
+            HashSet::from([
+                ("m1".to_string(), "s1".to_string()),
+                ("m1".to_string(), "s2".to_string()),
+            ]),
             "重复挂载去重"
         );
 
@@ -434,14 +439,17 @@ mod tests {
         let ids = load_all_linked_session_ids(&dir).unwrap();
         assert_eq!(
             ids,
-            HashSet::from(["s2".to_string(), "s3".to_string()]),
+            HashSet::from([
+                ("m1".to_string(), "s2".to_string()),
+                ("m2".to_string(), "s3".to_string()),
+            ]),
             "旧关联应被整组替换"
         );
 
         // 删除工作流级联删除其关联
         remove(&dir, "orc_2").unwrap();
         let ids = load_all_linked_session_ids(&dir).unwrap();
-        assert_eq!(ids, HashSet::from(["s3".to_string()]));
+        assert_eq!(ids, HashSet::from([("m2".to_string(), "s3".to_string())]));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

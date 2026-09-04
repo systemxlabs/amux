@@ -105,7 +105,7 @@ impl AmuxApp {
 
             // 关联会话可能属于未加载进内存的工作流（分页窗口外）：
             // 过滤集以全库为准，内存集合并入覆盖刚挂载、尚未落盘的会话。
-            let db_linked_session_ids = WorkflowEngine::load_all_linked_session_ids(&data_dir)
+            let db_linked_sessions = WorkflowEngine::load_all_linked_session_ids(&data_dir)
                 .map_err(|e| log::error!("读取全量工作流关联会话失败: {e}"))
                 .unwrap_or_default();
 
@@ -113,14 +113,14 @@ impl AmuxApp {
             // 先把关联普通会话全部从顶层结果剔除（仅挂在工作流下展示，
             // 避免与嵌套展示重复），再计算当前窗口需要补查的关联会话。
             let missing = match this.update_in(cx, |this, _w, _cx| {
-                let mut all_linked_session_ids = HashSet::new();
+                let mut all_linked_sessions = HashSet::new();
                 let mut visible_linked_session_ids = HashSet::new();
                 for wf in &this.workflows {
                     for linked in &wf.session.read().linked_sessions {
                         if linked.machine_name != machine_name {
                             continue;
                         }
-                        all_linked_session_ids.insert(linked.id.clone());
+                        all_linked_sessions.insert((machine_name.clone(), linked.id.clone()));
                         if this.visible_workflows.contains(&wf.id()) {
                             visible_linked_session_ids.insert(linked.id.clone());
                         }
@@ -130,8 +130,12 @@ impl AmuxApp {
                 if m.connection_generation != generation || m.sessions_request_id != request_id {
                     return None;
                 }
-                all_linked_session_ids.extend(db_linked_session_ids);
-                m.sessions = crate::logic::filter_workflow_sessions(pages, &all_linked_session_ids);
+                all_linked_sessions.extend(db_linked_sessions);
+                m.sessions = crate::logic::filter_workflow_sessions(
+                    pages,
+                    &machine_name,
+                    &all_linked_sessions,
+                );
                 m.sessions_has_more = has_more;
                 m.unavailable_workflow_sessions.clear();
                 crate::logic::sort_sessions_recent(&mut m.sessions);
@@ -1095,8 +1099,8 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_session_list(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        // 关联普通会话只挂在工作流会话下，顶层列表跳过
-        let linked_session_ids: std::collections::HashSet<String> = self
+        // 关联普通会话只挂在工作流会话下，顶层列表跳过；机器名是身份的一部分。
+        let linked_sessions: std::collections::HashSet<(String, String)> = self
             .workflows
             .iter()
             .filter(|wf| self.visible_workflows.contains(&wf.id()))
@@ -1105,7 +1109,7 @@ impl AmuxApp {
                     .read()
                     .linked_sessions
                     .iter()
-                    .map(|c| c.id.clone())
+                    .map(|c| (c.machine_name.clone(), c.id.clone()))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -1118,7 +1122,7 @@ impl AmuxApp {
             }
             let machine = m.config.name.clone();
             for s in &m.sessions {
-                if linked_session_ids.contains(s.id.as_str()) {
+                if linked_sessions.contains(&(machine.clone(), s.id.clone())) {
                     continue;
                 }
                 items.push((
