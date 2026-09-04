@@ -822,6 +822,14 @@ impl WorkflowEngine {
         });
     }
 
+    /// 标记后台推进已排队但尚未进入 `advance`；不修改 gate，避免吞掉并发 turn 的重跑请求。
+    pub fn mark_busy_pending(&self) {
+        self.with_session(|s| {
+            s.state = SessionState::Busy;
+            s.updated_at = now();
+        });
+    }
+
     /// 返回是否应立即启动推进（false = 编排 turn 已在工作，消息走 steer）。
     /// 关联普通会话忙但编排空闲时仍应启动新的编排 turn，不能把用户消息留在 steer 队列。
     pub fn record_user(&self, text: &str) -> bool {
@@ -2754,6 +2762,24 @@ mod tests {
         assert!(gate.requested, "中途消息必须请求下一轮推进");
         drop(gate);
         assert_eq!(engine.steer_inbox.lock().as_slice(), ["中途补充"]);
+    }
+
+    #[test]
+    fn pending_busy_marker_preserves_requested_rerun() {
+        let engine = WorkflowEngine::new(
+            "计划",
+            "",
+            "",
+            FakeBackend::new_for_tests(),
+            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            &temp_data_dir(),
+        );
+        engine.gate.lock().requested = true;
+
+        engine.mark_busy_pending();
+
+        assert_eq!(engine.state(), SessionState::Busy);
+        assert!(engine.gate.lock().requested);
     }
 
     #[test]

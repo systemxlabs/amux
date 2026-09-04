@@ -706,6 +706,9 @@ impl AmuxApp {
             Some(wf) => wf.clone(),
             None => return,
         };
+        // advance() 在后台任务中才会把工作流置为 Busy；这里先同步占位，
+        // 防止任务启动前的窗口被删除流程误判为空闲。
+        wf.mark_busy_pending();
         let data_dir = this.data_dir.clone();
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             run_engine_on_tokio(async move {
