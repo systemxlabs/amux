@@ -16,6 +16,7 @@
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub use crate::acp::{
@@ -56,12 +57,24 @@ pub struct AgentRegistry {
     spawned: Mutex<HashMap<String, SharedDriver>>,
     /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 available=false、driver_for 报错）
     unavailable: Mutex<HashSet<String>>,
+    /// server 退出后阻止新的 ACP driver 启动或进入缓存。
+    shutting_down: Arc<AtomicBool>,
+    /// 线性化显式 driver 的替换与 server 关闭，避免新 driver 发布在关闭快照之后。
+    lifecycle: Mutex<()>,
 }
 
 impl AgentRegistry {
     /// 构建注册表（生产路径：自动发现本机 ACP agent）。
     /// - `configured`：`AMUX_AGENT_BIN` 显式指定的驱动，可为 None（由自动发现接管）
     pub fn new(configured: Option<(String, SharedDriver)>) -> Self {
+        Self::with_shutdown(configured, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// 使用 server 统一的关闭标志构建注册表，使启动中的 ACP 握手也能响应退出信号。
+    pub fn with_shutdown(
+        configured: Option<(String, SharedDriver)>,
+        shutting_down: Arc<AtomicBool>,
+    ) -> Self {
         let no_discovery = std::env::var("AMUX_NO_DISCOVERY")
             .map(|v| v == "1")
             .unwrap_or(false);
@@ -75,6 +88,8 @@ impl AgentRegistry {
             discovered: Mutex::new(Vec::new()),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
+            shutting_down,
+            lifecycle: Mutex::new(()),
         };
         if !no_discovery {
             registry.refresh_discovery();
@@ -118,6 +133,8 @@ impl AgentRegistry {
             discovered: Mutex::new(Vec::new()),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            lifecycle: Mutex::new(()),
         }
     }
     #[cfg(test)]
@@ -132,6 +149,8 @@ impl AgentRegistry {
             discovered: Mutex::new(Vec::new()),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            lifecycle: Mutex::new(()),
         }
     }
     pub fn set_configured_spec(
@@ -186,6 +205,9 @@ impl AgentRegistry {
         out
     }
     pub fn driver_for(&self, agent: &str) -> Result<SharedDriver, String> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("agent registry 正在关闭".into());
+        }
         if let Some(stub) = &*self.stub.lock() {
             return Ok(stub.clone());
         }
@@ -227,14 +249,27 @@ impl AgentRegistry {
         Err(format!("本机未发现 agent: {agent}"))
     }
     fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<SharedDriver, String> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("agent registry 正在关闭".into());
+        }
         if let Some(driver) = self.spawned.lock().get(&d.name).cloned() {
             return Ok(driver);
         }
         let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
-        let driver = AcpAgentDriver::spawn(&d.bin, &args, &d.env)
-            .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
+        let driver = AcpAgentDriver::spawn_with_shutdown(
+            &d.bin,
+            &args,
+            &d.env,
+            Some(self.shutting_down.clone()),
+        )
+        .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
         let driver: SharedDriver = Arc::new(driver);
         let mut spawned = self.spawned.lock();
+        if self.shutting_down.load(Ordering::Acquire) {
+            drop(spawned);
+            driver.shutdown_and_join();
+            return Err("agent registry 正在关闭".into());
+        }
         match spawned.get(&d.name) {
             Some(existing) => {
                 let existing = existing.clone();
@@ -276,6 +311,9 @@ impl AgentRegistry {
         Mutex::into_inner(summary)
     }
     pub fn restart_agent(&self, agent: &str) -> Result<(), String> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("agent registry 正在关闭".into());
+        }
         let configured_name = self
             .configured
             .as_ref()
@@ -294,30 +332,47 @@ impl AgentRegistry {
                 .clone()
                 .ok_or_else(|| format!("显式 agent 缺少重启配置: {agent}"))?;
             let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
-            let driver = match AcpAgentDriver::spawn(&spec.bin, &args, &spec.env) {
+            let driver = match AcpAgentDriver::spawn_with_shutdown(
+                &spec.bin,
+                &args,
+                &spec.env,
+                Some(self.shutting_down.clone()),
+            ) {
                 Ok(driver) => driver,
                 Err(e) => {
                     self.unavailable.lock().insert(agent.to_string());
                     return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
                 }
             };
-            self.unavailable.lock().remove(agent);
+            let new_driver: SharedDriver = Arc::new(driver);
             if configured_name {
+                let _lifecycle = self.lifecycle.lock();
+                if self.shutting_down.load(Ordering::Acquire) {
+                    drop(_lifecycle);
+                    new_driver.shutdown_and_join();
+                    return Err("agent registry 正在关闭".into());
+                }
                 let old =
                     self.configured_override.lock().take().unwrap_or_else(|| {
                         self.configured.as_ref().expect("配置驱动不存在").1.clone()
                     });
+                *self.configured_override.lock() = Some(new_driver);
+                drop(_lifecycle);
                 old.shutdown_and_join();
-                *self.configured_override.lock() = Some(Arc::new(driver));
             } else {
-                let old = self
-                    .spawned
-                    .lock()
-                    .insert(agent.to_string(), Arc::new(driver));
+                let mut spawned = self.spawned.lock();
+                if self.shutting_down.load(Ordering::Acquire) {
+                    drop(spawned);
+                    new_driver.shutdown_and_join();
+                    return Err("agent registry 正在关闭".into());
+                }
+                let old = spawned.insert(agent.to_string(), new_driver);
+                drop(spawned);
                 if let Some(old) = old {
                     old.shutdown_and_join();
                 }
             }
+            self.unavailable.lock().remove(agent);
             log::info!("手动重启成功：{}（agent={}）", spec.bin, agent);
             return Ok(());
         }
@@ -358,17 +413,25 @@ impl AgentRegistry {
     }
 
     pub fn shutdown_all(&self) {
-        if let Some((_, d)) = &self.configured {
-            if let Some(override_driver) = self.configured_override.lock().as_ref() {
-                override_driver.shutdown_and_join();
-            } else {
-                d.shutdown_and_join();
-            }
+        // Close the admission gate before detaching cached drivers. A concurrent
+        // spawn either observes this gate before starting or observes it while
+        // publishing and reclaims the newly-created driver itself.
+        self.shutting_down.store(true, Ordering::Release);
+
+        let configured_driver = {
+            let _lifecycle = self.lifecycle.lock();
+            self.configured_override
+                .lock()
+                .take()
+                .or_else(|| self.configured.as_ref().map(|(_, driver)| driver.clone()))
+        };
+        if let Some(driver) = configured_driver {
+            driver.shutdown_and_join();
         }
         if let Some(stub) = &*self.stub.lock() {
             stub.shutdown_and_join();
         }
-        let spawned = self.spawned.lock().clone();
+        let spawned = std::mem::take(&mut *self.spawned.lock());
         for (_, d) in spawned {
             d.shutdown_and_join();
         }
@@ -517,6 +580,8 @@ mod tests {
             discovered: Mutex::new(discovered),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            lifecycle: Mutex::new(()),
         }
     }
     fn sibling_bin(name: &str) -> std::path::PathBuf {

@@ -297,6 +297,16 @@ impl AcpAgentDriver {
     /// `AMUX_ACP_SPAWN_TIMEOUT_MS` 限制（默认 30s；npx 首次按需下载可能较慢，
     /// 超时按失败处理，`driver_for` 兜底会重试）。
     pub fn spawn(bin: &str, args: &[&str], env: &[(String, String)]) -> Result<Self, String> {
+        Self::spawn_with_shutdown(bin, args, env, None)
+    }
+
+    /// 启动 ACP agent，并在 registry 关闭时中断尚未完成的 initialize 握手。
+    pub fn spawn_with_shutdown(
+        bin: &str,
+        args: &[&str],
+        env: &[(String, String)],
+        shutdown: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, String> {
         let (exec_sender, exec_rx) = std::sync::mpsc::sync_channel::<ExecReq>(32);
         let exec_tx = Arc::new(Mutex::new(Some(exec_sender)));
         let exec_tx2 = exec_tx.clone();
@@ -329,23 +339,36 @@ impl AcpAgentDriver {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30_000);
-        let ready = ready_rx.recv_timeout(std::time::Duration::from_millis(timeout_ms));
-        match ready {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                let _ = exec_tx.lock().take();
-                let _ = stop_tx.send(true);
-                let _ = thread.join();
-                return Err(e);
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(timeout_ms))
+            .unwrap_or_else(std::time::Instant::now);
+        let startup_error = loop {
+            if shutdown
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                break Some("ACP server 启动已取消：agent registry 正在关闭".to_string());
             }
-            Err(_) => {
-                let _ = exec_tx.lock().take();
-                let _ = stop_tx.send(true);
-                let _ = thread.join();
-                return Err(format!(
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break Some(format!(
                     "ACP server 启动超时（{timeout_ms}ms 内未完成连接/initialize 握手）"
                 ));
             }
+            match ready_rx.recv_timeout(remaining.min(std::time::Duration::from_millis(100))) {
+                Ok(Ok(())) => break None,
+                Ok(Err(e)) => break Some(e),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    break Some("ACP 启动线程提前退出".to_string())
+                }
+            }
+        };
+        if let Some(error) = startup_error {
+            let _ = exec_tx.lock().take();
+            let _ = stop_tx.send(true);
+            let _ = thread.join();
+            return Err(error);
         }
         Ok(AcpAgentDriver {
             exec_tx,
@@ -1387,6 +1410,36 @@ mod tests {
             Some(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted))
         ));
         assert!(caches.routes.lock().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn startup_cancellation_interrupts_initialize_wait() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let child_shutdown = shutdown.clone();
+        let started = std::time::Instant::now();
+        let task = std::thread::spawn(move || {
+            AcpAgentDriver::spawn_with_shutdown(
+                "/bin/sh",
+                &["-c", "sleep 30"],
+                &[],
+                Some(child_shutdown),
+            )
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        shutdown.store(true, Ordering::SeqCst);
+        let result = task.join().expect("ACP 启动线程不应 panic");
+
+        let error = match result {
+            Ok(_) => panic!("关闭闸门应取消未完成的 ACP 启动"),
+            Err(error) => error,
+        };
+        assert!(error.contains("启动已取消"), "应返回启动取消错误: {error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "启动取消不应等待完整握手超时"
+        );
     }
 
     #[tokio::test]
