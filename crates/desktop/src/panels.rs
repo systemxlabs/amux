@@ -301,7 +301,7 @@ impl AmuxApp {
             })
             .unwrap_or_default();
         if let Some(m) = self.machines.get_mut(machine) {
-            m.workspace_loading.insert(path.clone());
+            m.workspace_loading.insert(path.clone(), request_id);
         }
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let directory_path = path.clone();
@@ -321,10 +321,14 @@ impl AmuxApp {
                 let Some(m) = this.machine_mut_by_name(&machine_name) else {
                     return;
                 };
+                let owns_loading = m.workspace_loading.get(&directory_path) == Some(&request_id);
                 if !current_connection
                     || !selected_session_matches
                     || m.workspace_list_request_id != request_id
                 {
+                    if owns_loading {
+                        m.workspace_loading.remove(&directory_path);
+                    }
                     return;
                 }
                 m.workspace_loading.remove(&directory_path);
@@ -462,7 +466,7 @@ impl AmuxApp {
             return Vec::new();
         };
         let Some(directory) = machine.workspace_directories.get(path) else {
-            return if machine.workspace_loading.contains(path) {
+            return if machine.workspace_loading.contains_key(path) {
                 vec![Label::new("加载中…")
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
@@ -474,7 +478,7 @@ impl AmuxApp {
         let entries = directory.entries.clone();
         let has_more = directory.has_more;
         let next_offset = directory.next_offset;
-        let loading = machine.workspace_loading.contains(path);
+        let loading = machine.workspace_loading.contains_key(path);
         let expanded_paths = machine.workspace_expanded.clone();
         let selected_file = machine.workspace_file.as_deref();
         let mut children = Vec::new();
