@@ -658,6 +658,13 @@ impl AmuxApp {
                 let Some(m) = self.machine(idx) else {
                     return;
                 };
+                if !m.status.online() {
+                    if let Some(m) = self.machine_mut(idx) {
+                        m.notice = Some("机器离线，无法发送消息".into());
+                    }
+                    cx.notify();
+                    return;
+                }
                 let client = m.client.clone();
                 let generation = m.connection_generation;
                 let params = SessionPromptParams {
