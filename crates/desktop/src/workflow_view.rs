@@ -20,6 +20,16 @@ use crate::workflow::{AgentSlot, MachineSummary, OrcBackend, RigBackend, Workflo
 
 use crate::app::{run_engine_on_tokio, AmuxApp, DraftKey, Selected};
 
+fn is_linked_session_draft(
+    machine: &str,
+    session_id: &str,
+    linked_sessions: &[(String, String)],
+) -> bool {
+    linked_sessions
+        .iter()
+        .any(|(linked_machine, linked_id)| linked_machine == machine && linked_id == session_id)
+}
+
 impl AmuxApp {
     pub(crate) fn open_workflow(
         &mut self,
@@ -282,8 +292,8 @@ impl AmuxApp {
                                     }
                                     this.drafts.retain(|key, _| match key {
                                         DraftKey::Workflow { id } => id != &wf_id,
-                                        DraftKey::Session { id, .. } => {
-                                            !linked_sessions.iter().any(|(_, sid)| sid == id)
+                                        DraftKey::Session { machine, id } => {
+                                            !is_linked_session_draft(machine, id, &linked_sessions)
                                         }
                                     });
                                 }
@@ -683,5 +693,19 @@ impl AmuxApp {
                 .into_any_element()
         };
         v_flex().gap_1().child(content).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_linked_session_draft;
+
+    #[test]
+    fn linked_session_draft_requires_machine_and_id() {
+        let linked = vec![("machine-a".to_string(), "same-id".to_string())];
+
+        assert!(is_linked_session_draft("machine-a", "same-id", &linked));
+        assert!(!is_linked_session_draft("machine-b", "same-id", &linked));
+        assert!(!is_linked_session_draft("machine-a", "other-id", &linked));
     }
 }
