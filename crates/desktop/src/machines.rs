@@ -277,6 +277,42 @@ impl AmuxApp {
         );
     }
 
+    /// 清理绑定当前 WS 连接的本地资源和请求状态。
+    /// 连接断开后旧回调必须失效，不能继续写回 workspace/diff 缓存。
+    pub(crate) fn clear_connection_state(
+        &mut self,
+        idx: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(machine) = self.machines.get_mut(idx) else {
+            return;
+        };
+        machine.terminals.clear();
+        machine.active_terminal = None;
+        let rem_size = window.rem_size();
+        machine.diff.update(cx, |st, _| {
+            st.request_id = st.request_id.saturating_add(1);
+            st.files.clear();
+            st.not_repo = false;
+            st.selection.clear();
+            st.loading = false;
+            st.error = None;
+            st.rebuild_rows(rem_size);
+        });
+        machine.workspace_directories.clear();
+        machine.workspace_expanded.clear();
+        machine.workspace_loading.clear();
+        machine.workspace_list_request_id = machine.workspace_list_request_id.saturating_add(1);
+        machine.workspace_read_request_id = machine.workspace_read_request_id.saturating_add(1);
+        machine.workspace_file = None;
+        machine.workspace_content.clear();
+        machine.workspace_error = None;
+        machine.workspace_read_loading = false;
+        machine.workspace_read_has_more = false;
+        machine.workspace_read_next_offset = 0;
+    }
+
     /// 重连机器：重建其 WS 连接视图（按稳定机器名定位，删机重排不影响身份）。
     pub(crate) fn reconnect_machine(
         &mut self,
@@ -293,35 +329,9 @@ impl AmuxApp {
         old_client.close();
         self.machines[idx].connection_generation = next_connection_generation();
         self.machines[idx].status = crate::machine::MachineStatus::Connecting;
-        // 终端、工作目录和 diff 都绑定旧 WS 连接；旧连接的 disconnected 通知会因
-        // generation 不匹配被丢弃，因此必须在切换连接时主动释放本地连接态。
-        self.machines[idx].terminals.clear();
-        self.machines[idx].active_terminal = None;
-        let rem_size = window.rem_size();
-        self.machines[idx].diff.update(cx, |st, _| {
-            st.request_id = st.request_id.saturating_add(1);
-            st.files.clear();
-            st.not_repo = false;
-            st.selection.clear();
-            st.loading = false;
-            st.error = None;
-            st.rebuild_rows(rem_size);
-        });
-        self.machines[idx].workspace_directories.clear();
-        self.machines[idx].workspace_expanded.clear();
-        self.machines[idx].workspace_loading.clear();
-        self.machines[idx].workspace_list_request_id = self.machines[idx]
-            .workspace_list_request_id
-            .saturating_add(1);
-        self.machines[idx].workspace_read_request_id = self.machines[idx]
-            .workspace_read_request_id
-            .saturating_add(1);
-        self.machines[idx].workspace_file = None;
-        self.machines[idx].workspace_content.clear();
-        self.machines[idx].workspace_error = None;
-        self.machines[idx].workspace_read_loading = false;
-        self.machines[idx].workspace_read_has_more = false;
-        self.machines[idx].workspace_read_next_offset = 0;
+        // 终端、工作目录和 diff 都绑定旧 WS 连接；旧连接的通知会因 generation
+        // 不匹配被丢弃，因此必须在切换连接时主动释放本地连接态。
+        self.clear_connection_state(idx, window, cx);
         let generation = self.machines[idx].connection_generation;
         self.machines[idx].client = client.clone();
         self.sync_machine_hub();

@@ -455,10 +455,9 @@ impl AmuxApp {
             "disconnected" => {
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = MachineStatus::Offline;
-                    // Server 已释放连接关联的终端，UI 同步清理本地视图。
-                    m.terminals.clear();
-                    m.active_terminal = None;
                 }
+                // 连接绑定的终端、工作目录和 diff 均已失效；同时使旧请求回调失效。
+                this.clear_connection_state(idx, window, cx);
             }
             // 唯一主动推送 `session.state_change`：
             // 1) 更新普通会话本地状态；2) 若属于某工作流的关联普通会话则驱动工作流。
