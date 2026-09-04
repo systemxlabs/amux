@@ -293,10 +293,35 @@ impl AmuxApp {
         old_client.close();
         self.machines[idx].connection_generation = next_connection_generation();
         self.machines[idx].status = crate::machine::MachineStatus::Connecting;
-        // 终端绑定旧 WS 连接；旧连接的 disconnected 通知会因 generation
-        // 不匹配被丢弃，因此必须在切换连接时主动释放本地终端视图。
+        // 终端、工作目录和 diff 都绑定旧 WS 连接；旧连接的 disconnected 通知会因
+        // generation 不匹配被丢弃，因此必须在切换连接时主动释放本地连接态。
         self.machines[idx].terminals.clear();
         self.machines[idx].active_terminal = None;
+        let rem_size = window.rem_size();
+        self.machines[idx].diff.update(cx, |st, _| {
+            st.request_id = st.request_id.saturating_add(1);
+            st.files.clear();
+            st.not_repo = false;
+            st.selection.clear();
+            st.loading = false;
+            st.error = None;
+            st.rebuild_rows(rem_size);
+        });
+        self.machines[idx].workspace_directories.clear();
+        self.machines[idx].workspace_expanded.clear();
+        self.machines[idx].workspace_loading.clear();
+        self.machines[idx].workspace_list_request_id = self.machines[idx]
+            .workspace_list_request_id
+            .saturating_add(1);
+        self.machines[idx].workspace_read_request_id = self.machines[idx]
+            .workspace_read_request_id
+            .saturating_add(1);
+        self.machines[idx].workspace_file = None;
+        self.machines[idx].workspace_content.clear();
+        self.machines[idx].workspace_error = None;
+        self.machines[idx].workspace_read_loading = false;
+        self.machines[idx].workspace_read_has_more = false;
+        self.machines[idx].workspace_read_next_offset = 0;
         let generation = self.machines[idx].connection_generation;
         self.machines[idx].client = client.clone();
         self.sync_machine_hub();
