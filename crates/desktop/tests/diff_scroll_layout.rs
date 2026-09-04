@@ -88,7 +88,6 @@ fn diff_panel_scroll_has_viewport_constraint(cx: &mut gpui::TestAppContext) {
                 id: "session-1".into(),
             });
             app.panel = Some(Panel::Diff);
-            // set_panel 打开面板时会写入的运行时宽度（物理像素）；不设则面板宽为 0
             app.panel_delta_px = 420.0 * window.scale_factor();
             cx.notify();
             let _ = window;

@@ -208,7 +208,10 @@ impl TerminalService {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(params.data)
             .map_err(|e| RpcError::invalid_params(format!("输入不是合法 base64: {e}")))?;
-        let _ = handle.input_tx.send(bytes);
+        handle
+            .input_tx
+            .send(bytes)
+            .map_err(|_| RpcError::internal("终端输入通道已关闭"))?;
         Ok(())
     }
 

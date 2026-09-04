@@ -264,12 +264,9 @@ impl AmuxApp {
             })
             .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                let targets_current =
-                    target_connections
-                        .iter()
-                        .all(|(_, name, generation)| {
-                            this.is_current_machine_connection(name, *generation)
-                        });
+                let targets_current = target_connections.iter().all(|(_, name, generation)| {
+                    this.is_current_machine_connection(name, *generation)
+                });
                 if !targets_current {
                     return;
                 }

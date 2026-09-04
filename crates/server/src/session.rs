@@ -237,12 +237,13 @@ impl SessionManager {
         if !wt.exists() {
             GitRunner::new()
                 .rebuild_worktree(&meta.cwd, &wt)
-                .map_err(|e| SessionError::Storage(format!("重建 worktree 失败 {}: {e}", wt.display())))?;
+                .map_err(|e| {
+                    SessionError::Storage(format!("重建 worktree 失败 {}: {e}", wt.display()))
+                })?;
             log::info!("已按原路径重建过期清理的 worktree: {}", wt.display());
             // 重建由用户访问（发指令/查看目录）触发，即视为会话活跃，
             // 否则刚重建的 worktree 会在下一轮清理被立即回收
-            self.registry
-                .update_state(session_id, meta.state.clone(), now())?;
+            self.registry.update_state(session_id, meta.state, now())?;
         }
         Ok(meta.worktree_dir.clone())
     }
@@ -658,12 +659,8 @@ impl SessionManager {
         };
         if let Err(e) = log.append_history(std::slice::from_ref(&user_message)) {
             log::error!("用户消息落盘失败 {session_id}: {e}");
-            self.finalize_turn(
-                session_id,
-                &control,
-                control.deleted.load(Ordering::SeqCst),
-                protocol::StateChangeReason::Aborted,
-            );
+            drop(lifecycle);
+            self.finalize_turn(session_id, &control, protocol::StateChangeReason::Aborted);
             return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
         }
         // 从这里开始删除可以安全清理日志；后续 turn 只会追加活动/历史，且均受
@@ -684,15 +681,14 @@ impl SessionManager {
                     timestamp: now(),
                     detail: format!("恢复 agent 上下文失败: {e}"),
                 };
-                if let Err(log_error) = log.append_activities(&[err]) {
-                    log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
+                let _lifecycle = control.lifecycle.lock();
+                if !control.deleted.load(Ordering::SeqCst) {
+                    if let Err(log_error) = log.append_activities(&[err]) {
+                        log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
+                    }
                 }
-                self.finalize_turn(
-                    session_id,
-                    &control,
-                    control.deleted.load(Ordering::SeqCst),
-                    protocol::StateChangeReason::Aborted,
-                );
+                drop(_lifecycle);
+                self.finalize_turn(session_id, &control, protocol::StateChangeReason::Aborted);
                 return Err(SessionError::AgentUnavailable(format!(
                     "恢复 agent 上下文失败: {e}"
                 )));
@@ -704,12 +700,7 @@ impl SessionManager {
             .run_turn(session_id, &driver, &agent_session_id, input, &control)
             .await;
 
-        self.finalize_turn(
-            session_id,
-            &control,
-            control.deleted.load(Ordering::SeqCst),
-            turn_reason,
-        );
+        self.finalize_turn(session_id, &control, turn_reason);
         log::info!(
             "prompt 完成 {session_id}（{}ms）",
             started.elapsed().as_millis()
@@ -871,11 +862,9 @@ impl SessionManager {
             }
             // 活动实时逐条落盘：thinking 累积到 tool_call/error 才定稿，
             // 定稿即写，不等 turn 结束。删除与 prompt 并发时旧 turn 不得
-            // 重新创建活动文件，故 deleted 时不写。
-            if !control.deleted.load(Ordering::SeqCst) {
-                if let Err(e) = self.flush_ready_activities(session_id, &log, &mut merger) {
-                    storage_error = Some(e);
-                }
+            // 重新创建活动文件，故由 flush_ready_activities 与删除共用生命周期锁。
+            if let Err(e) = self.flush_ready_activities(session_id, &log, &mut merger, control) {
+                storage_error = Some(e);
             }
         }
         // 连接中断或异常终止的 turn 也要留下可见错误活动。
@@ -887,18 +876,20 @@ impl SessionManager {
             merger.push_error(err);
         }
 
-        let deleted = control.deleted.load(Ordering::SeqCst);
         let (history, activities) = merger.finish();
-        if !deleted && !history.is_empty() {
-            if let Err(e) = log.append_history(&history) {
-                log::error!("历史落盘失败 {session_id}: {e}");
-                storage_error = Some(SessionError::Storage(format!("历史落盘失败: {e}")));
+        let _lifecycle = control.lifecycle.lock();
+        if !control.deleted.load(Ordering::SeqCst) {
+            if !history.is_empty() {
+                if let Err(e) = log.append_history(&history) {
+                    log::error!("历史落盘失败 {session_id}: {e}");
+                    storage_error = Some(SessionError::Storage(format!("历史落盘失败: {e}")));
+                }
             }
-        }
-        if !deleted && !activities.is_empty() {
-            if let Err(e) = log.append_activities(&activities) {
-                log::error!("活动落盘失败 {session_id}: {e}");
-                storage_error = Some(SessionError::Storage(format!("活动落盘失败: {e}")));
+            if !activities.is_empty() {
+                if let Err(e) = log.append_activities(&activities) {
+                    log::error!("活动落盘失败 {session_id}: {e}");
+                    storage_error = Some(SessionError::Storage(format!("活动落盘失败: {e}")));
+                }
             }
         }
         (storage_error, turn_reason)
@@ -911,7 +902,13 @@ impl SessionManager {
         session_id: &str,
         log: &SessionLog,
         merger: &mut TurnMerger,
+        control: &SessionControl,
     ) -> Result<(), SessionError> {
+        let _lifecycle = control.lifecycle.lock();
+        if control.deleted.load(Ordering::SeqCst) {
+            merger.take_ready();
+            return Ok(());
+        }
         let ready = merger.take_ready();
         if ready.is_empty() {
             return Ok(());
@@ -929,9 +926,10 @@ impl SessionManager {
         &self,
         session_id: &str,
         control: &SessionControl,
-        deleted: bool,
         reason: protocol::StateChangeReason,
     ) {
+        let _lifecycle = control.lifecycle.lock();
+        let deleted = control.deleted.load(Ordering::SeqCst);
         self.ongoing.lock().remove(session_id);
         self.thinking_buf.lock().remove(session_id);
         control.busy.store(false, Ordering::SeqCst);
@@ -1453,8 +1451,7 @@ mod tests {
         assert!(recent_wt.is_dir(), "近期 worktree 应保留");
         let stored = registry.get(&stale.id).unwrap().unwrap();
         assert_eq!(
-            stored.meta.worktree_dir,
-            stale.worktree_dir,
+            stored.meta.worktree_dir, stale.worktree_dir,
             "清理保留 worktree 元数据"
         );
         let list = git(&repo, &["worktree", "list", "--porcelain"]);
@@ -1470,10 +1467,7 @@ mod tests {
             "访问工作目录触发按原路径重建"
         );
         assert!(stale_wt.is_dir(), "重建的 worktree 落在同一目录");
-        let branch = git(
-            &stale_wt,
-            &["branch", "--show-current"],
-        );
+        let branch = git(&stale_wt, &["branch", "--show-current"]);
         assert_eq!(
             branch.trim(),
             stale_wt.file_name().unwrap().to_str().unwrap(),
@@ -2076,6 +2070,11 @@ mod tests {
         assert!(
             registry.get(&session_id).unwrap().is_none(),
             "删除的会话不应在注册表中复活"
+        );
+
+        assert!(
+            !SessionLog::open(&dir, &session_id).exists_any(),
+            "删除后旧 turn 不得重新创建历史或活动日志"
         );
 
         // 已删除会话不应再广播任何状态变更（删除期间收到的 Busy 广播除外）。

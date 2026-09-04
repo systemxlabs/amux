@@ -83,7 +83,6 @@ pub fn sort_sessions_recent(meta: &mut [SessionMeta]) {
     meta.sort_by_key(|entry| std::cmp::Reverse(entry.last_active_at));
 }
 
-/// 斜杠命令前缀：输入以 `/` 开头且命令名 token 尚未输入完时返回前缀。
 /// 仅当输入以 `/` 开头且命令名 token 尚未输入完（`/` 后无空白）时返回
 /// `/` 之后的已输入前缀；其余（非 `/` 开头、含空白、正文提及 `/`）返回 None。
 pub fn slash_command_prefix(text: &str) -> Option<&str> {

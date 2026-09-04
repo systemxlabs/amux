@@ -27,11 +27,13 @@ static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 ///
 /// 连接结束后必须从这里移除发送端；否则每次重连都会把一个已经结束的
 /// `watch::Sender` 留在全局数组中，长时间运行的桌面端会持续增长。
-static CLOSE_SIGNALS: OnceLock<Mutex<Vec<(u64, tokio::sync::watch::Sender<bool>)>>> =
-    OnceLock::new();
+type CloseSignal = (u64, tokio::sync::watch::Sender<bool>);
+type CloseSignalStore = Mutex<Vec<CloseSignal>>;
+
+static CLOSE_SIGNALS: OnceLock<CloseSignalStore> = OnceLock::new();
 static NEXT_CLOSE_SIGNAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn close_signals() -> &'static Mutex<Vec<(u64, tokio::sync::watch::Sender<bool>)>> {
+fn close_signals() -> &'static CloseSignalStore {
     CLOSE_SIGNALS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
@@ -270,12 +272,12 @@ async fn serve_connection(
             _ = close_rx.changed() => {
                 if *close_rx.borrow() {
                     log::info!("收到关闭信号");
-                    return;
+                    break;
                 }
             }
             req = req_rx.recv() => {
                 let Some(req) = req else {
-                    return;
+                    break;
                 };
                 if !authed {
                     let _ = req.resp.send(Err(RpcError {

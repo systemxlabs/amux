@@ -57,12 +57,11 @@ impl AmuxApp {
                 .request::<_, WorkspaceDiffResult>(protocol::method::WORKSPACE_DIFF, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, w, cx| {
-                let is_current =
-                    this.is_current_machine_connection(&machine_name, generation)
-                        && this.is_selected_session(&machine_name, &session_id)
-                        && this
-                            .machine_by_name(&machine_name)
-                            .is_some_and(|m| m.diff.read(cx).request_id == request_id);
+                let is_current = this.is_current_machine_connection(&machine_name, generation)
+                    && this.is_selected_session(&machine_name, &session_id)
+                    && this
+                        .machine_by_name(&machine_name)
+                        .is_some_and(|m| m.diff.read(cx).request_id == request_id);
                 if !is_current {
                     return;
                 }
@@ -268,15 +267,10 @@ impl AmuxApp {
         let files = machine
             .map(|m| m.diff.read(cx).files.clone())
             .unwrap_or_default();
-        let not_repo = machine
-            .map(|m| m.diff.read(cx).not_repo)
-            .unwrap_or(false);
-        let diff_loading = machine
-            .map(|m| m.diff.read(cx).loading)
-            .unwrap_or(false);
+        let not_repo = machine.map(|m| m.diff.read(cx).not_repo).unwrap_or(false);
+        let diff_loading = machine.map(|m| m.diff.read(cx).loading).unwrap_or(false);
         let diff_error = machine.and_then(|m| m.diff.read(cx).error.clone());
-        let has_selection = machine
-            .is_some_and(|m| !m.diff.read(cx).selection.is_empty());
+        let has_selection = machine.is_some_and(|m| !m.diff.read(cx).selection.is_empty());
         let can_send = self.open_session_target().is_some();
         let diff_tree_collapsed = machine
             .map(|m| m.diff.read(cx).tree_collapsed)

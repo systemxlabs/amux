@@ -1152,18 +1152,12 @@ impl AmuxApp {
                                 )))
                                 .small()
                                 .label("重新发现")
-                                .on_click(cx.listener(
-                                    {
-                                        let machine_name = machine_name.clone();
-                                        move |this, _ev, window, cx| {
-                                            this.confirm_rediscover_agents(
-                                                window,
-                                                cx,
-                                                &machine_name,
-                                            );
-                                        }
-                                    },
-                                )),
+                                .on_click(cx.listener({
+                                    let machine_name = machine_name.clone();
+                                    move |this, _ev, window, cx| {
+                                        this.confirm_rediscover_agents(window, cx, &machine_name);
+                                    }
+                                })),
                             ),
                     )
                     .child(
