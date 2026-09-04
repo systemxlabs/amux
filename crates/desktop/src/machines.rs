@@ -7,6 +7,7 @@ use protocol::{
 
 use crate::config::{machine_ws_url, SkillEntry};
 use crate::machine::{next_connection_generation, MachineView};
+use crate::workflow::WorkflowEngine;
 use crate::ws::WsClient;
 
 use crate::app::{AmuxApp, DraftKey, Selected, SkillAction};
@@ -389,14 +390,25 @@ impl AmuxApp {
         let Some(idx) = self.machine_idx_by_name(name) else {
             return;
         };
-        if self.workflows.iter().any(|workflow| {
+        let linked_in_memory = self.workflows.iter().any(|workflow| {
             workflow
                 .session
                 .read()
                 .linked_sessions
                 .iter()
                 .any(|linked| linked.machine_name == name)
-        }) {
+        });
+        let linked_in_storage =
+            match WorkflowEngine::has_linked_sessions_on_machine(&self.data_dir, name) {
+                Ok(linked) => linked,
+                Err(error) => {
+                    self.settings.machine_form_error =
+                        Some(format!("无法确认机器是否有关联工作流，请稍后重试：{error}"));
+                    cx.notify();
+                    return;
+                }
+            };
+        if linked_in_memory || linked_in_storage {
             self.settings.machine_form_error =
                 Some("请先删除关联工作流会话，再移除该机器。".into());
             cx.notify();

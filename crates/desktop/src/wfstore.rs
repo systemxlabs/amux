@@ -262,6 +262,19 @@ pub fn load_all_linked_session_ids(data_dir: &Path) -> io::Result<HashSet<(Strin
     Ok(ids)
 }
 
+/// 判断持久化关联表中是否仍有指定机器的关联普通会话。
+pub fn has_linked_sessions_on_machine(data_dir: &Path, machine_name: &str) -> io::Result<bool> {
+    let conn = open_db(data_dir).map_err(io::Error::other)?;
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM workflow_linked_sessions WHERE machine_name = ?1
+        )",
+        [machine_name],
+        |row| row.get(0),
+    )
+    .map_err(io::Error::other)
+}
+
 pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let mut stmt = conn
@@ -423,6 +436,8 @@ mod tests {
             ]),
             "重复挂载去重"
         );
+        assert!(has_linked_sessions_on_machine(&dir, "m1").unwrap());
+        assert!(!has_linked_sessions_on_machine(&dir, "other").unwrap());
 
         // 加载回读：机器名保留
         let meta = load_all_meta(&dir).unwrap();

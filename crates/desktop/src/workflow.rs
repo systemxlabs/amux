@@ -961,6 +961,13 @@ impl WorkflowEngine {
         crate::wfstore::load_all_linked_session_ids(data_dir)
     }
 
+    pub fn has_linked_sessions_on_machine(
+        data_dir: &Path,
+        machine_name: &str,
+    ) -> std::io::Result<bool> {
+        crate::wfstore::has_linked_sessions_on_machine(data_dir, machine_name)
+    }
+
     pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
         // 保留全量读取入口供存储测试和需要完整数据的调用方使用。
         crate::wfstore::load_all_meta(data_dir)
