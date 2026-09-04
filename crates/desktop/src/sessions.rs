@@ -1093,7 +1093,11 @@ impl AmuxApp {
             let s_guard = wf.snapshot();
             let mut recency = s_guard.updated_at;
             for c in &s_guard.linked_sessions {
-                if let Some(mm) = self.machines.get(c.machine_idx) {
+                if let Some(mm) = self
+                    .machines
+                    .iter()
+                    .find(|m| m.config.name == c.machine_name)
+                {
                     if let Some(s) = mm.sessions.iter().find(|s| s.id == c.id) {
                         recency = recency.max(s.last_active_at);
                     }

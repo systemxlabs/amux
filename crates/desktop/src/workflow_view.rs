@@ -197,13 +197,13 @@ impl AmuxApp {
         let Some(idx) = self.workflow_idx(&wf_id) else {
             return;
         };
-        let linked_sessions: Vec<(usize, String)> = self
+        let linked_sessions: Vec<(String, String)> = self
             .workflows
             .get(idx)
             .map(|w| {
                 w.linked_sessions()
                     .iter()
-                    .map(|c| (c.machine_idx, c.id.clone()))
+                    .map(|c| (c.machine_name.clone(), c.id.clone()))
                     .collect()
             })
             .unwrap_or_default();
@@ -218,17 +218,19 @@ impl AmuxApp {
         }
         let mut targets = Vec::new();
         let mut unavailable = Vec::new();
-        for (machine, sid) in &linked_sessions {
-            if let Some(m) = self.machine(*machine) {
-                targets.push((
-                    *machine,
+        for (machine_name, sid) in &linked_sessions {
+            match self
+                .machine_idx_by_name(machine_name)
+                .and_then(|idx| self.machine(idx).map(|m| (idx, m)))
+            {
+                Some((idx, m)) => targets.push((
+                    idx,
                     m.client.clone(),
                     sid.clone(),
                     m.config.name.clone(),
                     m.connection_generation,
-                ));
-            } else {
-                unavailable.push(format!("机器下标 {machine} 不可用，无法删除会话 {sid}"));
+                )),
+                None => unavailable.push(format!("机器 {machine_name} 不可用，无法删除会话 {sid}")),
             }
         }
         let target_connections: Vec<(usize, String, u64)> = targets
@@ -436,7 +438,8 @@ impl AmuxApp {
         let mut linked_sessions = wf.linked_sessions();
         linked_sessions.sort_by_key(|linked| {
             std::cmp::Reverse(
-                self.machine(linked.machine_idx)
+                self.machine_idx_by_name(&linked.machine_name)
+                    .and_then(|idx| self.machine(idx))
                     .and_then(|machine| {
                         machine
                             .sessions

@@ -149,8 +149,6 @@ fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession>
 }
 
 /// 读取全部关联关系并按工作流分组（关联行很小，一次性读取足够）。
-/// `machine_idx` 是运行时字段（应用侧机器列表下标），加载时置为未绑定，
-/// 由 `WorkflowEngine::restore` 按机器名重绑。
 fn load_linked_sessions(
     conn: &Connection,
 ) -> rusqlite::Result<HashMap<String, Vec<LinkedSession>>> {
@@ -163,7 +161,6 @@ fn load_linked_sessions(
         Ok((
             row.get::<_, String>(0)?,
             LinkedSession {
-                machine_idx: usize::MAX,
                 machine_name: row.get(1)?,
                 id: row.get(2)?,
             },
@@ -406,12 +403,10 @@ mod tests {
             linked_sessions: vec![
                 LinkedSession {
                     id: "s1".into(),
-                    machine_idx: 7,
                     machine_name: "m1".into(),
                 },
                 LinkedSession {
                     id: "s1".into(),
-                    machine_idx: 7,
                     machine_name: "m1".into(),
                 },
             ],
@@ -423,7 +418,6 @@ mod tests {
         second.id = "orc_2".into();
         second.linked_sessions = vec![LinkedSession {
             id: "s2".into(),
-            machine_idx: 0,
             machine_name: "m1".into(),
         }];
         save(&dir, &base).unwrap();
@@ -437,17 +431,15 @@ mod tests {
             "重复挂载去重"
         );
 
-        // 加载回读：machine_idx 不持久化（运行时字段），机器名保留
+        // 加载回读：机器名保留（machine_idx 已不在持久化字段中）
         let meta = load_all_meta(&dir).unwrap();
         let orc_1 = meta.iter().find(|m| m.id == "orc_1").unwrap();
         assert_eq!(orc_1.linked_sessions.len(), 1, "重复挂载去重");
-        assert_eq!(orc_1.linked_sessions[0].machine_idx, usize::MAX);
         assert_eq!(orc_1.linked_sessions[0].machine_name, "m1");
 
         // save 以内存为权威整组替换关联
         base.linked_sessions = vec![LinkedSession {
             id: "s3".into(),
-            machine_idx: 0,
             machine_name: "m2".into(),
         }];
         save(&dir, &base).unwrap();

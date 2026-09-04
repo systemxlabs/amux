@@ -43,7 +43,6 @@ fn workflow_detail_shows_linked_sessions_without_cwd_row(cx: &mut gpui::TestAppC
                 .linked_sessions
                 .push(LinkedSession {
                     id: "child-1".into(),
-                    machine_idx: 0,
                     machine_name: "remote".into(),
                 });
             app.panel = Some(Panel::Detail);

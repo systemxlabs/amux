@@ -65,7 +65,6 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
                 .linked_sessions
                 .push(LinkedSession {
                     id: "child-1".into(),
-                    machine_idx: 0,
                     machine_name: "测试机".into(),
                 });
         });

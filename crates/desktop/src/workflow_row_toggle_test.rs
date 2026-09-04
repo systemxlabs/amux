@@ -42,7 +42,6 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
                 .linked_sessions
                 .push(LinkedSession {
                     id: "child-1".into(),
-                    machine_idx: 0,
                     machine_name: "test".into(),
                 });
         });

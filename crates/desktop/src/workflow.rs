@@ -55,11 +55,11 @@ pub enum OrcMsg {
 /// 关联普通会话的挂载关系（工作流 ↔ 普通会话）。只存路由信息：
 /// 标题、忙闲、agent 等一律以机器 server 的会话元数据为权威
 /// （编排者经 list_sessions 现查 session.info；GUI 渲染时与本机会话缓存联表）。
-/// `machine_idx` 是运行时字段（应用侧机器列表下标），不持久化。
+/// 机器一律按 `machine_name` 解析：它是唯一稳定身份，下标会随机器列表
+/// 增删重排而失效。
 #[derive(Debug, Clone)]
 pub struct LinkedSession {
     pub id: String,
-    pub machine_idx: usize,
     pub machine_name: String,
 }
 
@@ -138,8 +138,7 @@ impl Default for MachineHub {
 }
 
 impl MachineHub {
-    /// 应用侧机器视图整体替换（顺序与 app.machines 一致，
-    /// 保住 LinkedSession.machine_idx 的下标语义）。clients 可短于
+    /// 应用侧机器视图整体替换（顺序与 app.machines 一致）。clients 可短于
     /// machines（缺客户端即该机不可达，zip 截断）。
     pub fn sync(&self, machines: Vec<MachineSummary>, clients: Vec<WsClient>) {
         *self.entries.lock() = machines.into_iter().zip(clients).collect();
@@ -451,14 +450,6 @@ impl WorkflowEngine {
     ) -> Self {
         // 应用重开后工作流会话回到空闲，重新启动需用户手动触发。
         session.state = SessionState::Idle;
-        // 关联普通会话只持久化机器名和旧下标；应用重启或机器列表变化后按机器名重新绑定。
-        let (machines, _) = hub.snapshot();
-        for linked in &mut session.linked_sessions {
-            linked.machine_idx = machines
-                .iter()
-                .position(|machine| machine.name == linked.machine_name)
-                .unwrap_or(usize::MAX);
-        }
         WorkflowEngine {
             session: Arc::new(RwLock::new(session)),
             backend,
@@ -1676,16 +1667,16 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
     // 标题/忙闲/agent 以机器 server 为权威：按机器分组批量现查 session.info，
     // 本地不缓存这些易漂移的字段
     let linked_sessions = live.linked_sessions.lock().clone();
-    let mut ids_by_machine: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    let mut ids_by_machine: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for c in &linked_sessions {
         ids_by_machine
-            .entry(c.machine_idx)
+            .entry(c.machine_name.clone())
             .or_default()
             .push(c.id.clone());
     }
     let mut metas: HashMap<String, SessionMeta> = HashMap::new();
-    for (idx, ids) in ids_by_machine {
-        let Some(client) = live.clients.get(idx) else {
+    for (machine_name, ids) in ids_by_machine {
+        let Ok(client) = live.client(&machine_name) else {
             continue;
         };
         if let Ok(r) = client
@@ -1748,7 +1739,6 @@ struct CreateSessionArgs {
 }
 
 async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<String, String> {
-    let idx = live.machine_index(&args.machine)?;
     let client = live.client(&args.machine)?;
     let res = client
         .request::<_, SessionResult>(
@@ -1771,7 +1761,6 @@ async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<S
     // 独立普通会话身份出现在侧栏，而非挂在工作流会话之下
     live.mount_linked_session(LinkedSession {
         id: sid.clone(),
-        machine_idx: idx,
         machine_name: machine_name.clone(),
     });
     live.hub.linked_session_mounted(&machine_name, &sid);
@@ -1786,11 +1775,7 @@ struct PromptSessionArgs {
 
 async fn prompt_session(live: &LiveRuntime, args: PromptSessionArgs) -> Result<String, String> {
     let linked_session = live.linked_session(&args.session)?;
-    let client = live
-        .clients
-        .get(linked_session.machine_idx)
-        .cloned()
-        .ok_or_else(|| "机器连接已失效".to_string())?;
+    let client = live.client(&linked_session.machine_name)?;
     let input = SessionPromptParams {
         session_id: args.session.clone(),
         input: vec![ContentBlock::Text { text: args.prompt }],
@@ -1809,11 +1794,7 @@ struct SessionRefArgs {
 
 async fn cancel_session(live: &LiveRuntime, args: SessionRefArgs) -> Result<String, String> {
     let linked_session = live.linked_session(&args.session)?;
-    let client = live
-        .clients
-        .get(linked_session.machine_idx)
-        .cloned()
-        .ok_or_else(|| "机器连接已失效".to_string())?;
+    let client = live.client(&linked_session.machine_name)?;
     client
         .request_ok(
             protocol::method::SESSION_CANCEL,
@@ -1843,11 +1824,7 @@ async fn configure_session(
     if args.title.is_none() && args.config.is_none() {
         return Err("configure_session 至少设置 title 或 config 之一".into());
     }
-    let client = live
-        .clients
-        .get(linked_session.machine_idx)
-        .cloned()
-        .ok_or_else(|| "机器连接已失效".to_string())?;
+    let client = live.client(&linked_session.machine_name)?;
     client
         .request_ok(
             protocol::method::SESSION_CONFIGURE,
@@ -1867,11 +1844,7 @@ async fn get_session_config_options(
     args: SessionRefArgs,
 ) -> Result<String, String> {
     let linked_session = live.linked_session(&args.session)?;
-    let client = live
-        .clients
-        .get(linked_session.machine_idx)
-        .cloned()
-        .ok_or_else(|| "机器连接已失效".to_string())?;
+    let client = live.client(&linked_session.machine_name)?;
     let result = client
         .request::<_, SessionConfigOptionsResult>(
             protocol::method::SESSION_CONFIG_OPTIONS,
@@ -1899,11 +1872,7 @@ async fn read_session_page(
     method: &'static str,
 ) -> Result<String, String> {
     let linked_session = live.linked_session(&args.session)?;
-    let client = live
-        .clients
-        .get(linked_session.machine_idx)
-        .cloned()
-        .ok_or_else(|| "机器连接已失效".to_string())?;
+    let client = live.client(&linked_session.machine_name)?;
     let params = SessionPageParams {
         session_id: args.session.clone(),
         limit: args.limit.map(|l| l as usize),
@@ -1995,7 +1964,6 @@ mod tests {
         let live = test_live();
         live.mount_linked_session(LinkedSession {
             id: "s_child".into(),
-            machine_idx: 0,
             machine_name: "测试机".into(),
         });
         assert_eq!(
@@ -2048,7 +2016,6 @@ mod tests {
         };
         live.mount_linked_session(LinkedSession {
             id: "s_child".into(),
-            machine_idx: 0,
             machine_name: "测试机".into(),
         });
         // 未等整轮 decide 结束：元数据库应立即包含刚挂载的关联普通会话
@@ -2192,7 +2159,6 @@ mod tests {
         );
         engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
-            machine_idx: 0,
             machine_name: "测试机".into(),
         });
         let advanced = engine
@@ -2243,7 +2209,6 @@ mod tests {
         );
         engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
-            machine_idx: 0,
             machine_name: "测试机".into(),
         });
         let advanced = engine
@@ -2456,7 +2421,6 @@ mod tests {
         let live = test_live();
         live.linked_sessions.lock().push(LinkedSession {
             id: "child-1".into(),
-            machine_idx: 0,
             machine_name: "测试机".into(),
         });
         let err = configure_session(
@@ -2626,7 +2590,6 @@ mod tests {
         let engine = engine;
         engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
-            machine_idx: 0,
             machine_name: "测试机".into(),
         });
         engine.note_linked_session_state(
@@ -2664,7 +2627,6 @@ mod tests {
         );
         engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
-            machine_idx: 0,
             machine_name: "测试机".into(),
         });
         engine.note_linked_session_state(
@@ -3044,7 +3006,6 @@ mod tests {
         live.clients[0] = client;
         live.mount_linked_session(LinkedSession {
             id: "s_child".into(),
-            machine_idx: 0,
             machine_name: "测试机".into(),
         });
         let model = MockCompletionModel::from_stream_turns([
