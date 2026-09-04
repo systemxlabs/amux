@@ -292,6 +292,11 @@ impl AmuxApp {
         let client = WsClient::connect_with_token(machine_ws_url(&cfg), cfg.token.clone());
         old_client.close();
         self.machines[idx].connection_generation = next_connection_generation();
+        self.machines[idx].status = crate::machine::MachineStatus::Connecting;
+        // 终端绑定旧 WS 连接；旧连接的 disconnected 通知会因 generation
+        // 不匹配被丢弃，因此必须在切换连接时主动释放本地终端视图。
+        self.machines[idx].terminals.clear();
+        self.machines[idx].active_terminal = None;
         let generation = self.machines[idx].connection_generation;
         self.machines[idx].client = client.clone();
         self.sync_machine_hub();
