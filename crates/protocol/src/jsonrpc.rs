@@ -18,25 +18,7 @@ impl From<u64> for JsonRpcId {
     }
 }
 
-impl std::fmt::Display for JsonRpcId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            JsonRpcId::Number(n) => write!(f, "{n}"),
-            JsonRpcId::String(s) => write!(f, "{s}"),
-            JsonRpcId::Null => write!(f, "null"),
-        }
-    }
-}
 
-impl JsonRpcId {
-    /// 若为 Null 变体则返回 None，否则返回 Some(self)。用于检查请求是否缺 id。
-    pub fn else_null(self) -> Option<JsonRpcId> {
-        match self {
-            JsonRpcId::Null => None,
-            other => Some(other),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {

@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// 会话数据目录：`<data_dir>/sessions/`。
-pub fn sessions_dir(data_dir: &Path) -> PathBuf {
+fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("sessions")
 }
 

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use amux_desktop::app::AmuxApp;
 use amux_desktop::config::ConfigStore;
 use amux_desktop::workflow::{
-    Decision, LinkedSession, MachineHub, OrcBackend, OrcContext, OrcMsg, WorkflowEngine,
+    LinkedSession, MachineHub, OrcBackend, OrcContext, OrcMsg, WorkflowEngine,
 };
 use amux_desktop::ws::Notification as WsNotification;
 use serde_json::json;
@@ -25,12 +25,10 @@ impl OrcBackend for BlockingBackend {
     fn decide<'a>(
         &'a self,
         _ctx: &'a OrcContext,
-    ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
             std::future::pending::<()>().await;
-            Ok(Decision {
-                summary: String::new(),
-            })
+            Ok(String::new())
         })
     }
 }

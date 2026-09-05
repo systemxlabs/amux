@@ -475,21 +475,15 @@ impl AmuxApp {
         for c in &linked_sessions {
             let cid = c.id.clone();
             let machine_name = c.machine_name.clone();
-            let machine_idx = self.machine_idx_by_name(&machine_name);
-            let meta = machine_idx.and_then(|idx| {
-                self.machine(idx)
-                    .and_then(|machine| machine.sessions.iter().find(|s| s.id == cid))
-            });
-            let available = machine_idx.is_some_and(|idx| {
-                self.machine(idx)
-                    .is_some_and(|machine| machine.status == MachineStatus::Online)
-            }) && meta.is_some_and(|_| {
-                machine_idx.is_some_and(|idx| {
-                    !self.machines[idx]
-                        .unavailable_workflow_sessions
-                        .contains(&cid)
-                })
-            });
+            let machine = self
+                .machine_idx_by_name(&machine_name)
+                .map(|idx| &self.machines[idx]);
+            let meta =
+                machine.and_then(|machine| machine.sessions.iter().find(|s| s.id == cid));
+            let available = machine.is_some_and(|machine| {
+                machine.status == MachineStatus::Online
+                    && !machine.unavailable_workflow_sessions.contains(&cid)
+            }) && meta.is_some();
             let step = if available {
                 meta.map(|m| m.title.clone()).unwrap_or_default()
             } else {

@@ -107,26 +107,23 @@ async fn wait_for_cancel(session_id: &str) {
     }
 }
 
-fn record_call(calls_file: &str, method: &str) {
+fn append_line(path: &str, line: &str) {
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(calls_file)
+        .open(path)
         .map(|mut f| {
             use std::io::Write;
-            let _ = writeln!(f, "{method}");
+            let _ = writeln!(f, "{line}");
         });
 }
 
+fn record_call(calls_file: &str, method: &str) {
+    append_line(calls_file, method);
+}
+
 fn append_approved(state_file: &str) {
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(state_file)
-        .map(|mut f| {
-            use std::io::Write;
-            let _ = writeln!(f, "approved");
-        });
+    append_line(state_file, "approved");
 }
 
 fn main() -> Result<()> {

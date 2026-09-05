@@ -42,13 +42,7 @@ pub fn recent_workspaces_for_machine(entries: &[RecentWorkspace], machine: &str)
 /// - 首次加载：`existing` 为空 → 窗口即为当前列表
 /// - 追加：更早一窗按序并入（保持最近活跃在前）
 /// - 按 id 去重（并发刷新可能重复）
-///
-/// 返回（合并后的列表, 是否还有更早, 下次 before 游标）。
-pub fn merge_session_window(
-    existing: &[SessionMeta],
-    window: Vec<SessionMeta>,
-    has_more: bool,
-) -> (Vec<SessionMeta>, bool) {
+pub fn merge_session_window(existing: &[SessionMeta], window: Vec<SessionMeta>) -> Vec<SessionMeta> {
     let mut out = existing.to_vec();
     for m in window {
         if let Some(existing) = out.iter_mut().find(|s| s.id == m.id) {
@@ -57,7 +51,7 @@ pub fn merge_session_window(
             out.push(m);
         }
     }
-    (out, has_more)
+    out
 }
 
 /// 从指定机器的普通会话查询结果中移除所有已知工作流关联会话。
@@ -489,21 +483,19 @@ mod tests {
     #[test]
     fn merge_session_window_first_append_dedup() {
         let window1 = vec![smeta("s3", 300), smeta("s2", 200)];
-        let (list, has_more) = merge_session_window(&[], window1, true);
+        let list = merge_session_window(&[], window1);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "s3");
-        assert!(has_more);
 
         let window2 = vec![smeta("s1", 100)];
-        let (list, has_more) = merge_session_window(&list, window2, false);
+        let list = merge_session_window(&list, window2);
         assert_eq!(
             list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             ["s3", "s2", "s1"]
         );
-        assert!(!has_more);
 
         let window3 = vec![smeta("s2", 200), smeta("s0", 50)];
-        let (list, _) = merge_session_window(&list, window3, false);
+        let list = merge_session_window(&list, window3);
         assert_eq!(
             list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             ["s3", "s2", "s1", "s0"]
@@ -619,7 +611,7 @@ mod tests {
         assert_eq!(blocks.len(), 1);
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn slash_prefix_only_while_typing_command_token() {
         assert_eq!(slash_command_prefix("/"), Some(""));
         assert_eq!(slash_command_prefix("/go"), Some("go"));
@@ -634,7 +626,7 @@ mod tests {
         assert_eq!(slash_command_prefix("path/is/here"), None);
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn filter_slash_commands_matches_prefix_case_insensitively() {
         let commands = vec![
             protocol::SlashCommand {

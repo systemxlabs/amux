@@ -291,20 +291,11 @@ impl OrcDraft {
     }
 }
 
-/// 单 turn 决策器（rig 单 turn 模式）。
-#[derive(Debug, Clone)]
-pub struct Decision {
-    pub summary: String,
-}
-
 pub trait OrcBackend: Send + Sync {
     fn decide<'a>(
         &'a self,
         ctx: &'a OrcContext,
-    ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>>;
-    fn take_synced_linked_sessions(&self) -> Option<Vec<LinkedSession>> {
-        None
-    }
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 }
 
 /// 取消按钮注入的固定用户消息：
@@ -434,19 +425,7 @@ impl WorkflowEngine {
             created_at: t,
             updated_at: t,
         };
-        WorkflowEngine {
-            session: Arc::new(RwLock::new(session)),
-            backend,
-            hub,
-            gate: Arc::new(Mutex::new(AdvanceGate::default())),
-            steer_inbox: Arc::new(Mutex::new(Vec::new())),
-            busy_linked_sessions: Arc::new(Mutex::new(0)),
-            data_dir: data_dir.to_path_buf(),
-            current_activity: Arc::new(Mutex::new(None)),
-            persist_lock: Arc::new(Mutex::new(())),
-            deleted: Arc::new(AtomicBool::new(false)),
-            log_lock: Arc::new(Mutex::new(())),
-        }
+        WorkflowEngine::with_parts(session, backend, hub, data_dir)
     }
 
     pub fn restore(
@@ -457,14 +436,24 @@ impl WorkflowEngine {
     ) -> Self {
         // 应用重开后工作流会话回到空闲，重新启动需用户手动触发。
         session.state = SessionState::Idle;
+        WorkflowEngine::with_parts(session, backend, hub, data_dir)
+    }
+
+    /// 两个构造函数的共享主体：并发状态（gate/inbox/锁）一律全新空态。
+    fn with_parts(
+        session: OrcSession,
+        backend: Arc<dyn OrcBackend>,
+        hub: Arc<MachineHub>,
+        data_dir: &Path,
+    ) -> Self {
         WorkflowEngine {
             session: Arc::new(RwLock::new(session)),
             backend,
             hub,
+            data_dir: data_dir.to_path_buf(),
             gate: Arc::new(Mutex::new(AdvanceGate::default())),
             steer_inbox: Arc::new(Mutex::new(Vec::new())),
             busy_linked_sessions: Arc::new(Mutex::new(0)),
-            data_dir: data_dir.to_path_buf(),
             current_activity: Arc::new(Mutex::new(None)),
             persist_lock: Arc::new(Mutex::new(())),
             deleted: Arc::new(AtomicBool::new(false)),
@@ -526,15 +515,6 @@ impl WorkflowEngine {
     pub fn record_activity(&self, act: Activity) {
         self.with_session(|s| s.activities.push(act.clone()));
         self.append_activities(&[act]);
-    }
-
-    /// 记录一批活动并实时追加落盘。
-    pub fn record_activities(&self, acts: Vec<Activity>) {
-        if acts.is_empty() {
-            return;
-        }
-        self.with_session(|s| s.activities.extend(acts.iter().cloned()));
-        self.append_activities(&acts);
     }
 
     /// 追加写活动 JSONL；失败仅记日志，不阻断推进（活动落盘尽力而为）。
@@ -619,7 +599,7 @@ impl WorkflowEngine {
         // 调度工具调用），由工具循环经 record_tool_activity 上报
         let ctx = self.build_context();
         let decision = match self.backend.decide(&ctx).await {
-            Ok(d) => d,
+            Ok(text) => text,
             Err(e) => {
                 self.clear_current_activity();
                 self.record_activity(Activity::Error {
@@ -651,7 +631,7 @@ impl WorkflowEngine {
             }
         } else {
             // 非流式后端（如测试 FakeBackend）：推入完整输出后立即追加落盘。
-            let output = decision.summary.clone();
+            let output = decision;
             let ts = now();
             self.with_session(|s| {
                 s.transcript.push(OrcMsg::Orc {
@@ -663,9 +643,6 @@ impl WorkflowEngine {
                 content: vec![ContentBlock::Text { text: output }],
                 timestamp: ts,
             }]);
-        }
-        if let Some(linked_sessions) = self.backend.take_synced_linked_sessions() {
-            self.with_session(|s| s.linked_sessions = linked_sessions);
         }
         Ok(())
     }
@@ -875,12 +852,7 @@ impl WorkflowEngine {
     }
 
     /// 把 inbox 中尚未出现在 transcript 的 steer 消息合并进来。
-    pub fn absorb_steer(&self) -> bool {
-        let _gate = self.gate.lock();
-        self.absorb_steer_locked()
-    }
-
-    /// 调用方已持有 gate 时消费 steer，避免推进收尾重复获取 gate。
+    /// 调用方已持有 gate（advance 收尾），避免重复获取 gate。
     fn absorb_steer_locked(&self) -> bool {
         let msgs = std::mem::take(&mut *self.steer_inbox.lock());
         let mut added = false;
@@ -968,8 +940,9 @@ impl WorkflowEngine {
         crate::wfstore::has_linked_sessions_on_machine(data_dir, machine_name)
     }
 
+    /// 全量读取入口：仅存储测试使用。
+    #[cfg(test)]
     pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
-        // 保留全量读取入口供存储测试和需要完整数据的调用方使用。
         crate::wfstore::load_all_meta(data_dir)
     }
 
@@ -1038,6 +1011,24 @@ struct LiveRuntime {
     current: Arc<Mutex<Option<Activity>>>,
 }
 
+impl OrcContext {
+    /// 工具循环运行时：OrcContext 的可变子集（linked_sessions 需要在
+    /// turn 内即时挂载，包成共享槽）。
+    fn live(&self) -> LiveRuntime {
+        LiveRuntime {
+            machines: self.machines.clone(),
+            clients: self.clients.clone(),
+            linked_sessions: Arc::new(Mutex::new(self.linked_sessions.clone())),
+            session: Arc::clone(&self.session),
+            hub: Arc::clone(&self.hub),
+            persist_on_linked_session_mounted: self.persist_on_linked_session_mounted.clone(),
+            record_tool_activity: self.record_tool_activity.clone(),
+            draft: Arc::clone(&self.draft),
+            current: Arc::clone(&self.current),
+        }
+    }
+}
+
 impl LiveRuntime {
     fn machine_index(&self, name: &str) -> Result<usize, String> {
         self.machines
@@ -1087,16 +1078,6 @@ impl LiveRuntime {
                 });
             }
         }
-    }
-
-    /// 进行中实时活动：工具执行中（执行完毕由调用方清除）。
-    fn set_tool(&self, name: &str, args: &serde_json::Value) {
-        *self.current.lock() = Some(Activity::ToolCall {
-            timestamp: now(),
-            name: name.to_string(),
-            title: Some(one_line_summary(args)),
-            content: None,
-        });
     }
 
     /// 进行中动作结束（成功或失败）。
@@ -1448,15 +1429,11 @@ where
 
 pub struct RigBackend {
     cfg: OrchestratorConfig,
-    synced_linked_sessions: Mutex<Option<Vec<LinkedSession>>>,
 }
 
 impl RigBackend {
     pub fn new(cfg: OrchestratorConfig) -> Self {
-        RigBackend {
-            cfg,
-            synced_linked_sessions: Mutex::new(None),
-        }
+        RigBackend { cfg }
     }
 
     fn preamble(&self) -> String {
@@ -1476,7 +1453,7 @@ impl OrcBackend for RigBackend {
     fn decide<'a>(
         &'a self,
         ctx: &'a OrcContext,
-    ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
             if !self.cfg.is_configured() {
                 return Err(
@@ -1491,17 +1468,7 @@ impl OrcBackend for RigBackend {
                 preamble.push_str(ctx.preamble.trim());
             }
             let model = self.cfg.model.clone();
-            let live = LiveRuntime {
-                machines: ctx.machines.clone(),
-                clients: ctx.clients.clone(),
-                linked_sessions: Arc::new(Mutex::new(ctx.linked_sessions.clone())),
-                session: ctx.session.clone(),
-                hub: ctx.hub.clone(),
-                persist_on_linked_session_mounted: ctx.persist_on_linked_session_mounted.clone(),
-                record_tool_activity: ctx.record_tool_activity.clone(),
-                draft: Arc::clone(&ctx.draft),
-                current: Arc::clone(&ctx.current),
-            };
+            let live = ctx.live();
             preamble.push_str("\n\n【工作流执行计划】\n");
             preamble.push_str(ctx.plan.trim());
             let transcript_text = if ctx.transcript.is_empty() {
@@ -1560,14 +1527,8 @@ impl OrcBackend for RigBackend {
                     .await?
                 }
             };
-            let linked_sessions = live.linked_sessions.lock().clone();
-            *self.synced_linked_sessions.lock() = Some(linked_sessions);
-            Ok(Decision { summary: text })
+            Ok(text)
         })
-    }
-
-    fn take_synced_linked_sessions(&self) -> Option<Vec<LinkedSession>> {
-        self.synced_linked_sessions.lock().take()
     }
 }
 
@@ -1586,14 +1547,14 @@ fn reason_label(r: StateChangeReason) -> &'static str {
 #[cfg(test)]
 #[doc(hidden)]
 pub struct FakeBackend {
-    decisions: Mutex<VecDeque<Decision>>,
+    decisions: Mutex<VecDeque<String>>,
 }
 
 #[doc(hidden)]
 #[cfg(test)]
 #[allow(clippy::new_ret_no_self)]
 impl FakeBackend {
-    pub fn new(decisions: Vec<Decision>) -> Arc<dyn OrcBackend> {
+    pub fn new(decisions: Vec<String>) -> Arc<dyn OrcBackend> {
         Arc::new(FakeBackend {
             decisions: Mutex::new(VecDeque::from(decisions)),
         })
@@ -1609,7 +1570,7 @@ impl OrcBackend for FakeBackend {
     fn decide<'a>(
         &'a self,
         _ctx: &'a OrcContext,
-    ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
             self.decisions
                 .lock()
@@ -1635,53 +1596,58 @@ async fn dispatch_tool(
     name: &str,
     args: serde_json::Value,
 ) -> Result<String, String> {
-    // 编排调度动作实时记录为活动并落盘（同普通会话的 tool_call 事件）
-    if let Some(record) = &live.record_tool_activity {
-        record(Activity::ToolCall {
-            timestamp: now(),
-            name: name.to_string(),
-            title: Some(one_line_summary(&args)),
-            content: None,
-        });
-    }
-    // 实时活动条只展示执行中的工具；执行完毕（成功或失败）即清除，
+    // 编排调度动作实时记录为活动并落盘（同普通会话的 tool_call 事件），
+    // 同一条活动也是进行中实时槽的内容；执行完毕（成功或失败）即清除，
     // 不让已完成的历史活动继续转圈
-    live.set_tool(name, &args);
+    let activity = Activity::ToolCall {
+        timestamp: now(),
+        name: name.to_string(),
+        title: Some(one_line_summary(&args)),
+        content: None,
+    };
+    if let Some(record) = &live.record_tool_activity {
+        record(activity.clone());
+    }
+    *live.current.lock() = Some(activity);
     let result = match name {
         "list_agents" => list_agents(live).await,
         "list_sessions" => list_sessions(live).await,
-        "create_session" => match parse_args(name, args) {
-            Ok(args) => create_session(live, args).await,
-            Err(error) => Err(error),
-        },
-        "prompt_session" => match parse_args(name, args) {
-            Ok(args) => prompt_session(live, args).await,
-            Err(error) => Err(error),
-        },
-        "cancel_session" => match parse_args(name, args) {
-            Ok(args) => cancel_session(live, args).await,
-            Err(error) => Err(error),
-        },
-        "configure_session" => match parse_args(name, args) {
-            Ok(args) => configure_session(live, args).await,
-            Err(error) => Err(error),
-        },
-        "get_session_config_options" => match parse_args(name, args) {
-            Ok(args) => get_session_config_options(live, args).await,
-            Err(error) => Err(error),
-        },
-        "read_session_history" => match parse_args(name, args) {
-            Ok(args) => read_session_page(live, args, protocol::method::SESSION_HISTORY).await,
-            Err(error) => Err(error),
-        },
-        "read_session_activities" => match parse_args(name, args) {
-            Ok(args) => read_session_page(live, args, protocol::method::SESSION_ACTIVITIES).await,
-            Err(error) => Err(error),
-        },
+        "create_session" => run_parsed(name, args, |a| create_session(live, a)).await,
+        "prompt_session" => run_parsed(name, args, |a| prompt_session(live, a)).await,
+        "cancel_session" => run_parsed(name, args, |a| cancel_session(live, a)).await,
+        "configure_session" => run_parsed(name, args, |a| configure_session(live, a)).await,
+        "get_session_config_options" => {
+            run_parsed(name, args, |a| get_session_config_options(live, a)).await
+        }
+        "read_session_history" => {
+            run_parsed(name, args, |a| {
+                read_session_page(live, a, protocol::method::SESSION_HISTORY)
+            })
+            .await
+        }
+        "read_session_activities" => {
+            run_parsed(name, args, |a| {
+                read_session_page(live, a, protocol::method::SESSION_ACTIVITIES)
+            })
+            .await
+        }
         other => Err(format!("未知工具: {other}")),
     };
     live.clear_current();
     result
+}
+
+/// 工具参数反序列化 + 调用（dispatch_tool 各分支共用的样板）。
+async fn run_parsed<T, F, Fut>(tool: &str, args: serde_json::Value, f: F) -> Result<String, String>
+where
+    T: serde::de::DeserializeOwned,
+    F: FnOnce(T) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    match parse_args(tool, args) {
+        Ok(args) => f(args).await,
+        Err(error) => Err(error),
+    }
 }
 
 fn parse_args<T: serde::de::DeserializeOwned>(
@@ -1926,20 +1892,19 @@ async fn read_session_page(
         limit: args.limit.map(|l| l as usize),
         before: args.before,
     };
-    let res: serde_json::Value = if method == protocol::method::SESSION_HISTORY {
-        let r = client
+    if method == protocol::method::SESSION_HISTORY {
+        let r: HistoryResult = client
             .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
             .await
             .map_err(|e| e.to_string())?;
-        serde_json::to_value(r).unwrap()
+        serde_json::to_string(&r).map_err(|e| format!("序列化失败: {e}"))
     } else {
-        let r = client
+        let r: ActivitiesResult = client
             .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
             .await
             .map_err(|e| e.to_string())?;
-        serde_json::to_value(r).unwrap()
-    };
-    Ok(res.to_string())
+        serde_json::to_string(&r).map_err(|e| format!("序列化失败: {e}"))
+    }
 }
 
 #[cfg(test)]
@@ -2164,9 +2129,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_injects_cancel_prompt_and_advances() {
         let (clients, m) = clients_with_machines();
-        let backend = FakeBackend::new(vec![Decision {
-            summary: "已按指令取消".into(),
-        }]);
+        let backend = FakeBackend::new(vec!["已按指令取消".into()]);
         let engine = WorkflowEngine::new(
             "计划",
             "",
@@ -2194,9 +2157,7 @@ mod tests {
     #[tokio::test]
     async fn on_linked_session_state_idle_always_triggers_advance() {
         let (clients, m) = clients_with_machines();
-        let backend = FakeBackend::new(vec![Decision {
-            summary: "本轮静默".into(),
-        }]);
+        let backend = FakeBackend::new(vec!["本轮静默".into()]);
         let engine = WorkflowEngine::new(
             "计划",
             "",
@@ -2244,9 +2205,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_reason_idle_event_does_not_advance() {
         let (clients, m) = clients_with_machines();
-        let backend = FakeBackend::new(vec![Decision {
-            summary: "不应发生".into(),
-        }]);
+        let backend = FakeBackend::new(vec!["不应发生".into()]);
         let engine = WorkflowEngine::new(
             "计划",
             "",
@@ -2335,9 +2294,7 @@ mod tests {
             .iter()
             .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "立即保存")));
 
-        let backend2 = FakeBackend::new(vec![Decision {
-            summary: "恢复后推进".into(),
-        }]);
+        let backend2 = FakeBackend::new(vec!["恢复后推进".into()]);
         let (clients2, m2) = clients_with_machines();
         let engine2 = WorkflowEngine::restore(opened, backend2, test_hub(vec![m2], clients2), &dir);
         engine2.start().await.unwrap();
@@ -2576,7 +2533,6 @@ mod tests {
             test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
             &temp_data_dir(),
         );
-        let engine = engine;
         engine.session.write().transcript.push(OrcMsg::User {
             text: "开始".into(),
 
@@ -2699,7 +2655,6 @@ mod tests {
             test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
             &temp_data_dir(),
         );
-        let engine = engine;
         engine.session.write().linked_sessions.push(LinkedSession {
             id: "s_child".into(),
             machine_name: "测试机".into(),

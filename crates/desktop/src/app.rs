@@ -132,15 +132,6 @@ pub enum Selected {
     },
 }
 
-fn session_identity_matches(
-    selected_machine: &str,
-    selected_id: &str,
-    machine: &str,
-    session_id: &str,
-) -> bool {
-    selected_machine == machine && selected_id == session_id
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum SkillAction {
     Install,
@@ -699,7 +690,6 @@ impl AmuxApp {
         }
         this.refresh_sessions(&machine_name, window, cx);
 
-        // turn 结束后选项可能经 config_option_update / available_commands_update
         // turn 结束后 Agent 侧数据可能已更新，选中会话需要重新拉取选项与命令。
         if idle {
             let selected_matches = this.is_selected_session(&machine_name, &sid);
@@ -927,9 +917,7 @@ impl AmuxApp {
 
     pub(crate) fn is_selected_session(&self, machine: &str, session_id: &str) -> bool {
         self.open_session_target()
-            .is_some_and(|(selected_machine, id)| {
-                session_identity_matches(&selected_machine, &id, machine, session_id)
-            })
+            .is_some_and(|(selected_machine, id)| selected_machine == machine && id == session_id)
     }
 
     pub(crate) fn machine(&self, i: usize) -> Option<&MachineView> {
@@ -1130,7 +1118,8 @@ impl AmuxApp {
                         (300.0 + Self::PANEL_RESIZE_HANDLE_WIDTH) * scale,
                         (max_w + Self::PANEL_RESIZE_HANDLE_WIDTH) * scale,
                     );
-                    this.resize_panel(window, cx, next);
+                    this.panel_delta_px = next;
+                    cx.notify();
                 },
             ));
         Some(
@@ -1140,16 +1129,6 @@ impl AmuxApp {
                 .child(div().w(px(panel_width)).h_full().min_w_0().child(panel))
                 .into_any(),
         )
-    }
-
-    pub(crate) fn resize_panel(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-        width: f32,
-    ) {
-        self.panel_delta_px = width;
-        cx.notify();
     }
 
     /// 滚动容器是否贴底：gpui 的 offset.y 范围为 [-max_offset.y, 0]
@@ -1341,8 +1320,7 @@ impl Render for AmuxApp {
                     .child(self.render_main(window, cx))
                     .when(self.selected.is_some(), |wrapper| {
                         wrapper.child(
-                            // 悬浮按钮贴在中间面板右上角，不占布局空间：
-                            // 右上角贴边，不占布局空间
+                            // 悬浮按钮贴在中间面板右上角，不占布局空间
                             div()
                                 .absolute()
                                 .top_2()
@@ -1388,29 +1366,4 @@ pub(crate) async fn run_engine_on_tokio<T: Send + 'static>(
     rx.await.ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::session_identity_matches;
 
-    #[test]
-    fn session_identity_requires_machine_and_id() {
-        assert!(session_identity_matches(
-            "machine-a",
-            "same-id",
-            "machine-a",
-            "same-id"
-        ));
-        assert!(!session_identity_matches(
-            "machine-a",
-            "same-id",
-            "machine-b",
-            "same-id"
-        ));
-        assert!(!session_identity_matches(
-            "machine-a",
-            "same-id",
-            "machine-a",
-            "other-id"
-        ));
-    }
-}

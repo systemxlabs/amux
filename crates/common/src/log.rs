@@ -21,12 +21,13 @@ fn current_filter() -> logforth::filter::RustLogFilter {
 /// 初始化 stderr 与文件日志。重复调用不会替换已经安装的全局 logger。
 pub fn init_file_output(path: &Path) {
     INITIALIZED.get_or_init(|| {
-        let filter = current_filter;
         let builder = logforth::starter_log::builder().dispatch(|dispatch| {
-            dispatch.filter(filter()).append(
-                logforth::append::Stderr::default()
-                    .with_layout(logforth::layout::TextLayout::default()),
-            )
+            dispatch
+                .filter(current_filter())
+                .append(
+                    logforth::append::Stderr::default()
+                        .with_layout(logforth::layout::TextLayout::default()),
+                )
         });
 
         let Some(parent) = path.parent() else {
@@ -46,7 +47,8 @@ pub fn init_file_output(path: &Path) {
             .build();
         match file {
             Ok(file) => {
-                let builder = builder.dispatch(|dispatch| dispatch.filter(filter()).append(file));
+                let builder =
+                    builder.dispatch(|dispatch| dispatch.filter(current_filter()).append(file));
                 apply(builder);
             }
             Err(error) => {

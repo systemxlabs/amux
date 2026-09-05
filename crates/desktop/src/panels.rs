@@ -286,23 +286,13 @@ impl AmuxApp {
         let Some(machine) = self.machine_idx_by_name(machine_name) else {
             return;
         };
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
+        let m = &mut self.machines[machine];
         let client = m.client.clone();
         let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
-        let request_id = self
-            .machines
-            .get_mut(machine)
-            .map(|m| {
-                m.workspace_list_request_id = m.workspace_list_request_id.saturating_add(1);
-                m.workspace_list_request_id
-            })
-            .unwrap_or_default();
-        if let Some(m) = self.machines.get_mut(machine) {
-            m.workspace_loading.insert(path.clone(), request_id);
-        }
+        m.workspace_list_request_id += 1;
+        let request_id = m.workspace_list_request_id;
+        m.workspace_loading.insert(path.clone(), request_id);
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let directory_path = path.clone();
             let params = json!({
@@ -381,29 +371,19 @@ impl AmuxApp {
         let Some(machine) = self.machine_idx_by_name(machine_name) else {
             return;
         };
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
+        let m = &mut self.machines[machine];
         let client = m.client.clone();
         let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
-        let request_id = self
-            .machines
-            .get_mut(machine)
-            .map(|m| {
-                m.workspace_read_request_id = m.workspace_read_request_id.saturating_add(1);
-                m.workspace_read_request_id
-            })
-            .unwrap_or_default();
-        if let Some(m) = self.machines.get_mut(machine) {
-            m.workspace_read_loading = true;
-            m.workspace_error = None;
-            if offset == 0 {
-                m.workspace_file = Some(path.clone());
-                m.workspace_content.clear();
-                m.workspace_read_has_more = false;
-                m.workspace_read_next_offset = 0;
-            }
+        m.workspace_read_request_id += 1;
+        let request_id = m.workspace_read_request_id;
+        m.workspace_read_loading = true;
+        m.workspace_error = None;
+        if offset == 0 {
+            m.workspace_file = Some(path.clone());
+            m.workspace_content.clear();
+            m.workspace_read_has_more = false;
+            m.workspace_read_next_offset = 0;
         }
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
@@ -635,9 +615,7 @@ impl AmuxApp {
         let Some(machine_idx) = self.machine_idx_by_name(&machine_name) else {
             return div().into_any();
         };
-        let Some(machine) = self.machine(machine_idx) else {
-            return div().into_any();
-        };
+        let machine = &self.machines[machine_idx];
         let workspace_file = machine.workspace_file.clone();
         let workspace_content = machine.workspace_content.clone();
         let workspace_error = machine.workspace_error.clone();

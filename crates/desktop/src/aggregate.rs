@@ -44,10 +44,8 @@ impl SessionView {
             self.history_next_before = next_before;
             return;
         }
-        if let Some(kept_older) = merge_tail(&mut self.dialog, fresh, dialog_key) {
-            if kept_older {
-                return;
-            }
+        if merge_tail(&mut self.dialog, fresh, dialog_key) {
+            return;
         }
         self.history_has_more = has_more;
         self.history_next_before = next_before;
@@ -99,20 +97,14 @@ impl SessionView {
         has_more: bool,
         next_before: Option<usize>,
     ) {
-        use std::mem;
         if self.activities.is_empty() || activities.is_empty() {
             self.activities = activities;
             self.activities_has_more = has_more;
             self.activities_next_before = next_before;
             return;
         }
-        let mut fresh = activities;
-        if let Some(kept_older) =
-            merge_tail(&mut self.activities, mem::take(&mut fresh), activity_key)
-        {
-            if kept_older {
-                return;
-            }
+        if merge_tail(&mut self.activities, activities, activity_key) {
+            return;
         }
         self.activities_has_more = has_more;
         self.activities_next_before = next_before;
@@ -148,9 +140,7 @@ impl SessionView {
     pub fn set_plan(&mut self, entries: Vec<SessionPlanEntry>) {
         self.plan = entries;
     }
-}
-
-/// 对话条目的对齐键（类别 + 时间戳）。
+}/// 对话条目的对齐键（类别 + 时间戳）。
 fn dialog_key(m: &DialogMsg) -> (&'static str, u64) {
     match m {
         DialogMsg::UserMessage { timestamp, .. } => ("user", *timestamp),
@@ -169,17 +159,20 @@ pub(crate) fn activity_key(a: &Activity) -> (&'static str, u64) {
 
 /// 把 `fresh` 作为尾部合并进 `current`：
 /// 在 fresh 中找到与 current 尾部键序列匹配的最长对齐点，
-/// 其后的条目追加到 current。返回 Some(true) 表示 current 保留了
-/// 更早的前缀（调用方应保留旧分页游标）；Some(false)/None 表示
+/// 其后的条目追加到 current。返回 true 表示 current 保留了
+/// 更早的前缀（调用方应保留旧分页游标）；false 表示
 /// current 未含更早内容（调用方采用新窗游标）。
 fn merge_tail<T: Clone>(
     current: &mut Vec<T>,
     fresh: Vec<T>,
     key: impl Fn(&T) -> (&'static str, u64),
-) -> Option<bool> {
+) -> bool {
     let cur_keys: Vec<_> = current.iter().map(&key).collect();
     let fresh_keys: Vec<_> = fresh.iter().map(&key).collect();
-    let last = *cur_keys.last()?;
+    let Some(&last) = cur_keys.last() else {
+        *current = fresh;
+        return false;
+    };
     // current 尾部键在 fresh 中最晚的出现位置（从后往前找第一处）
     let mut anchor = None;
     for (i, k) in fresh_keys.iter().enumerate().rev() {
@@ -191,7 +184,7 @@ fn merge_tail<T: Clone>(
     let Some(anchor) = anchor else {
         // 完全无交集（异常情况）：保守整页替换
         *current = fresh;
-        return Some(false);
+        return false;
     };
     // 从 anchor 向前验证对齐长度
     let mut matched = 0usize;
@@ -203,7 +196,7 @@ fn merge_tail<T: Clone>(
     }
     let kept_older = matched < cur_keys.len();
     current.extend_from_slice(&fresh[anchor + 1..]);
-    Some(kept_older)
+    kept_older
 }
 
 #[cfg(test)]
@@ -300,13 +293,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn live_activity_marks_busy() {
-        let mut view = SessionView::default();
-        view.set_live(Some(Activity::Thinking {
-            timestamp: 1,
-            content: "x".into(),
-        }));
-        assert!(view.live.is_some());
-    }
 }

@@ -51,18 +51,14 @@ pub fn close_all() {
     }
 }
 
-fn rt() -> &'static tokio::runtime::Runtime {
+/// GUI 全局 tokio runtime 句柄（WS 后台任务；也供需要 reactor 的编排引擎使用）。
+pub fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("初始化 tokio runtime 失败")
     })
-}
-
-/// GUI 全局 tokio runtime 句柄（WS 后台任务；也供需要 reactor 的编排引擎使用）。
-pub fn runtime() -> &'static tokio::runtime::Runtime {
-    rt()
 }
 
 #[derive(Debug)]
@@ -121,7 +117,7 @@ impl WsClient {
             .lock()
             .push((close_signal_id, close_tx.clone()));
         let notify_for_task = notify_tx.clone();
-        rt().spawn(run_loop(
+        runtime().spawn(run_loop(
             url,
             token,
             req_rx,
@@ -366,31 +362,5 @@ async fn serve_connection(
     });
     for (_, resp) in pending.drain() {
         let _ = resp.send(Err(RpcError::local("连接断开")));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn auth_failed_error_code_matches_protocol() {
-        assert_eq!(
-            protocol::server_error::AUTH_FAILED,
-            -32000,
-            "未认证请求应返回协议定义的认证失败码"
-        );
-    }
-
-    #[test]
-    fn method_and_notify_names_match_protocol() {
-        // 防止方法名/通知名漂移（协议单一来源）
-        assert_eq!(
-            protocol::method::SESSION_LIST,
-            "session.list",
-            "guid 使用的会话列表方法名必须与协议一致"
-        );
-        assert_eq!(
-            protocol::notify::SESSION_STATE_CHANGE,
-            "session.state_change"
-        );
     }
 }

@@ -180,12 +180,7 @@ impl AmuxApp {
                                 res.sessions.iter().map(|s| s.id.clone()).collect();
                             m.unavailable_workflow_sessions =
                                 missing_ids.difference(&returned_ids).cloned().collect();
-                            let (list, _) = merge_session_window(
-                                &m.sessions,
-                                res.sessions,
-                                m.sessions_has_more,
-                            );
-                            m.sessions = list;
+                            m.sessions = merge_session_window(&m.sessions, res.sessions);
                             crate::logic::sort_sessions_recent(&mut m.sessions);
                         }
                         cx.notify();
@@ -212,17 +207,29 @@ impl AmuxApp {
         .detach();
     }
 
-    pub(crate) fn refresh_dialog(
+    /// 四类会话视图刷新（对话/活动/实时活动/计划）的共用骨架：
+    /// 机器定位 → 请求序号防陈旧 → 异步请求 → 回写视图。差异点全部参数化：
+    /// `request_slot` 定位请求序号字段，`issue` 发请求，`apply` 回写，
+    /// `at_bottom`/`scroll_to_bottom` 仅对话与活动面板需要贴底跟随。
+    #[allow(clippy::too_many_arguments)]
+    fn refresh_view<R, F, Fut, A>(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         machine_name: &str,
         session_id: String,
-    ) {
-        let Some(idx) = self.machine_idx_by_name(machine_name) else {
-            return;
-        };
-        let Some(m) = self.machines.get_mut(idx) else {
+        request_slot: fn(&mut crate::aggregate::SessionView) -> &mut u64,
+        at_bottom: Option<fn(&Self) -> bool>,
+        scroll_to_bottom: Option<fn(&mut Self)>,
+        issue: F,
+        apply: A,
+    ) where
+        F: FnOnce(crate::ws::WsClient, String) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<R, crate::ws::RpcError>>,
+        A: Fn(&mut crate::aggregate::SessionView, R) + 'static,
+        R: 'static,
+    {
+        let Some(m) = self.machine_mut_by_name(machine_name) else {
             return;
         };
         let machine_name = machine_name.to_string();
@@ -230,49 +237,73 @@ impl AmuxApp {
         let Some(view) = m.views.get_mut(&session_id) else {
             return;
         };
-        view.history_request_id = view.history_request_id.saturating_add(1);
-        let request_id = view.history_request_id;
+        let request_id = {
+            let slot = request_slot(view);
+            *slot += 1;
+            *slot
+        };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionPageParams {
-                session_id: session_id.clone(),
-                limit: Some(PAGE_LIMIT),
-                before: None,
+            let Ok(res) = issue(client, session_id.clone()).await else {
+                return;
             };
-            if let Ok(res) = client
-                .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
-                .await
-            {
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    let was_at_bottom = this.dialog_at_bottom();
-                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
-                        return;
-                    };
-                    let Some(m) = this.machines.get_mut(idx) else {
-                        return;
-                    };
-                    if m.connection_generation != generation {
-                        return;
+            let _ = this.update_in(cx, |this, _w, cx| {
+                let was_at_bottom = at_bottom.map(|f| f(this));
+                let Some(m) = this.machine_mut_by_name(&machine_name) else {
+                    return;
+                };
+                if m.connection_generation != generation {
+                    return;
+                }
+                let Some(v) = m.views.get_mut(&session_id) else {
+                    return;
+                };
+                if *request_slot(v) != request_id {
+                    return;
+                }
+                apply(v, res);
+                if was_at_bottom == Some(true) {
+                    if let Some(scroll) = scroll_to_bottom {
+                        scroll(this);
                     }
-                    let Some(v) = m.views.get_mut(&session_id) else {
-                        return;
-                    };
-                    if v.history_request_id != request_id {
-                        return;
-                    }
-                    v.set_history_page(
-                        &res.items,
-                        res.has_more,
-                        res.next_before.map(|value| value as usize),
-                    );
-                    if was_at_bottom {
-                        this.dialog_scroll.scroll_to_bottom();
-                    }
-                    cx.notify();
-                });
-            }
+                }
+                cx.notify();
+            });
         })
         .detach();
+    }
+
+    pub(crate) fn refresh_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine_name: &str,
+        session_id: String,
+    ) {
+        self.refresh_view(
+            window,
+            cx,
+            machine_name,
+            session_id,
+            |v| &mut v.history_request_id,
+            Some(Self::dialog_at_bottom),
+            Some(|this: &mut Self| this.dialog_scroll.scroll_to_bottom()),
+            |client, session_id| async move {
+                client
+                    .request::<_, HistoryResult>(
+                        protocol::method::SESSION_HISTORY,
+                        Some(SessionPageParams {
+                            session_id,
+                            limit: Some(PAGE_LIMIT),
+                            before: None,
+                        }),
+                    )
+                    .await
+            },
+            |v, res: HistoryResult| {
+                v.set_history_page(&res.items, res.has_more, res.next_before.map(|x| x as usize))
+            },
+        );
     }
 
     pub(crate) fn refresh_activities(
@@ -285,60 +316,30 @@ impl AmuxApp {
         if self.panel != Some(Panel::Activities) {
             return;
         }
-        let Some(idx) = self.machine_idx_by_name(machine_name) else {
-            return;
-        };
-        let Some(m) = self.machines.get_mut(idx) else {
-            return;
-        };
-        let machine_name = machine_name.to_string();
-        let generation = m.connection_generation;
-        let Some(view) = m.views.get_mut(&session_id) else {
-            return;
-        };
-        view.activities_request_id = view.activities_request_id.saturating_add(1);
-        let request_id = view.activities_request_id;
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionPageParams {
-                session_id: session_id.clone(),
-                limit: Some(PAGE_LIMIT),
-                before: None,
-            };
-            if let Ok(res) = client
-                .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
-                .await
-            {
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    let was_at_bottom = this.activities_at_bottom();
-                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
-                        return;
-                    };
-                    let Some(m) = this.machines.get_mut(idx) else {
-                        return;
-                    };
-                    if m.connection_generation != generation {
-                        return;
-                    }
-                    let Some(v) = m.views.get_mut(&session_id) else {
-                        return;
-                    };
-                    if v.activities_request_id != request_id {
-                        return;
-                    }
-                    v.set_activities_page(
-                        res.activities,
-                        res.has_more,
-                        res.next_before.map(|value| value as usize),
-                    );
-                    if was_at_bottom {
-                        this.activities_scroll.scroll_to_bottom();
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        self.refresh_view(
+            window,
+            cx,
+            machine_name,
+            session_id,
+            |v| &mut v.activities_request_id,
+            Some(Self::activities_at_bottom),
+            Some(|this: &mut Self| this.activities_scroll.scroll_to_bottom()),
+            |client, session_id| async move {
+                client
+                    .request::<_, ActivitiesResult>(
+                        protocol::method::SESSION_ACTIVITIES,
+                        Some(SessionPageParams {
+                            session_id,
+                            limit: Some(PAGE_LIMIT),
+                            before: None,
+                        }),
+                    )
+                    .await
+            },
+            |v, res: ActivitiesResult| {
+                v.set_activities_page(res.activities, res.has_more, res.next_before.map(|x| x as usize))
+            },
+        );
     }
 
     pub(crate) fn refresh_ongoing(
@@ -348,53 +349,24 @@ impl AmuxApp {
         machine_name: &str,
         session_id: String,
     ) {
-        let Some(idx) = self.machine_idx_by_name(machine_name) else {
-            return;
-        };
-        let Some(m) = self.machines.get_mut(idx) else {
-            return;
-        };
-        let machine_name = machine_name.to_string();
-        let generation = m.connection_generation;
-        let Some(view) = m.views.get_mut(&session_id) else {
-            return;
-        };
-        view.ongoing_request_id = view.ongoing_request_id.saturating_add(1);
-        let request_id = view.ongoing_request_id;
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionIdParams {
-                session_id: session_id.clone(),
-            };
-            if let Ok(res) = client
-                .request::<_, OngoingActivityResult>(
-                    protocol::method::SESSION_ONGOING_ACTIVITY,
-                    Some(params),
-                )
-                .await
-            {
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
-                        return;
-                    };
-                    let Some(m) = this.machines.get_mut(idx) else {
-                        return;
-                    };
-                    if m.connection_generation != generation {
-                        return;
-                    }
-                    let Some(v) = m.views.get_mut(&session_id) else {
-                        return;
-                    };
-                    if v.ongoing_request_id != request_id {
-                        return;
-                    }
-                    v.set_live(res.activity);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        self.refresh_view(
+            window,
+            cx,
+            machine_name,
+            session_id,
+            |v| &mut v.ongoing_request_id,
+            None,
+            None,
+            |client, session_id| async move {
+                client
+                    .request::<_, OngoingActivityResult>(
+                        protocol::method::SESSION_ONGOING_ACTIVITY,
+                        Some(SessionIdParams { session_id }),
+                    )
+                    .await
+            },
+            |v, res: OngoingActivityResult| v.live = res.activity,
+        );
     }
 
     /// 拉取当前会话的 agent 计划。
@@ -409,50 +381,24 @@ impl AmuxApp {
         if self.panel != Some(Panel::Plan) {
             return;
         }
-        let Some(idx) = self.machine_idx_by_name(machine_name) else {
-            return;
-        };
-        let Some(m) = self.machines.get_mut(idx) else {
-            return;
-        };
-        let machine_name = machine_name.to_string();
-        let generation = m.connection_generation;
-        let Some(view) = m.views.get_mut(&session_id) else {
-            return;
-        };
-        view.plan_request_id = view.plan_request_id.saturating_add(1);
-        let request_id = view.plan_request_id;
-        let client = m.client.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = SessionIdParams {
-                session_id: session_id.clone(),
-            };
-            if let Ok(res) = client
-                .request::<_, SessionPlanResult>(protocol::method::SESSION_PLAN, Some(params))
-                .await
-            {
-                let _ = this.update_in(cx, |this, _w, cx| {
-                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
-                        return;
-                    };
-                    let Some(m) = this.machines.get_mut(idx) else {
-                        return;
-                    };
-                    if m.connection_generation != generation {
-                        return;
-                    }
-                    let Some(v) = m.views.get_mut(&session_id) else {
-                        return;
-                    };
-                    if v.plan_request_id != request_id {
-                        return;
-                    }
-                    v.set_plan(res.entries);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        self.refresh_view(
+            window,
+            cx,
+            machine_name,
+            session_id,
+            |v| &mut v.plan_request_id,
+            None,
+            None,
+            |client, session_id| async move {
+                client
+                    .request::<_, SessionPlanResult>(
+                        protocol::method::SESSION_PLAN,
+                        Some(SessionIdParams { session_id }),
+                    )
+                    .await
+            },
+            |v, res: SessionPlanResult| v.plan = res.entries,
+        );
     }
 
     fn load_more_selected_page<R, T>(
@@ -682,14 +628,12 @@ impl AmuxApp {
                     });
                 }
                 self.dialog_scroll.scroll_to_bottom();
-                let prompt_params = params;
                 let original_text = text.clone();
-                let original_attachments = attachments.clone();
-                let optimistic_blocks = blocks.clone();
+                let optimistic_blocks = blocks;
                 let optimistic_id = id.clone();
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
-                        .request_ok(protocol::method::SESSION_PROMPT, Some(prompt_params))
+                        .request_ok(protocol::method::SESSION_PROMPT, Some(params))
                         .await;
                     let _ = this.update_in(cx, |this, w, cx| {
                         let current_connection =
@@ -729,7 +673,7 @@ impl AmuxApp {
                                 {
                                     this.input_state
                                         .update(cx, |s, cx| s.set_value(&original_text, w, cx));
-                                    this.input_attachments = original_attachments.clone();
+                                    this.input_attachments = attachments;
                                 }
                                 if current_connection {
                                     w.push_notification(
@@ -967,7 +911,7 @@ impl AmuxApp {
                     }
                     Ok(()) => {
                         this.renaming_session = None;
-                        // 主动刷新会话列表以体现新标题（修复 M1：重命名后不主动刷新）
+                        // 主动刷新会话列表以体现新标题
                         this.refresh_sessions(&machine_name, w, cx);
                     }
                 }
@@ -1032,6 +976,7 @@ impl AmuxApp {
         };
         let machine_name = machine.clone();
         let generation = m.connection_generation;
+        let client = m.client.clone();
         let cwd = self.session_cwd_input.read(cx).value().trim().to_owned();
         if cwd.is_empty() {
             self.new_session_error = Some("请输入工作目录，或选择一个常用工作目录。".into());
@@ -1056,13 +1001,6 @@ impl AmuxApp {
             agent: agent.clone(),
             cwd: cwd.clone(),
             use_worktree: self.new_session_worktree,
-        };
-        let Some(client) = self
-            .machine_idx_by_name(&machine_name)
-            .and_then(|idx| self.machine(idx))
-            .map(|m| m.client.clone())
-        else {
-            return;
         };
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let res = client

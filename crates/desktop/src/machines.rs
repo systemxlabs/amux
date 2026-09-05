@@ -36,10 +36,7 @@ impl AmuxApp {
         {
             Ok(result) => {
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
-                        return;
-                    };
-                    let Some(m) = this.machines.get_mut(idx) else {
+                    let Some(m) = this.machine_mut_by_name(&machine_name) else {
                         return;
                     };
                     if m.connection_generation != generation {
@@ -54,16 +51,14 @@ impl AmuxApp {
             }
             Err(e) => {
                 let _ = this.update_in(cx, |this, _w, cx| {
-                    let Some(idx) = this.machine_idx_by_name(&machine_name) else {
+                    let Some(m) = this.machine_mut_by_name(&machine_name) else {
                         return;
                     };
-                    if let Some(m) = this.machines.get_mut(idx) {
-                        if m.connection_generation != generation {
-                            return;
-                        }
-                        // 连接状态机之外的操作级提示
-                        m.notice = Some(format!("agent 列表获取失败：{e}"));
+                    if m.connection_generation != generation {
+                        return;
                     }
+                    // 连接状态机之外的操作级提示
+                    m.notice = Some(format!("agent 列表获取失败：{e}"));
                     cx.notify();
                 });
             }
@@ -285,16 +280,10 @@ impl AmuxApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(machine_name) = self
-            .machines
-            .get(idx)
-            .map(|machine| machine.config.name.clone())
-        else {
-            return;
-        };
         let Some(machine) = self.machines.get_mut(idx) else {
             return;
         };
+        let machine_name = machine.config.name.clone();
         machine.connection_generation = next_connection_generation();
         machine.terminals.clear();
         machine.active_terminal = None;

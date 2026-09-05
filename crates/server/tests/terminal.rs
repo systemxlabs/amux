@@ -132,7 +132,8 @@ async fn close_and_conn_binding() {
     let service = std::sync::Arc::new(TerminalService::new());
     let conn = test_conn(7);
     let scope = ConnScope::new(conn.conn_id, conn.tx);
-    let _ = conn;
+    // 不读帧：提前关闭接收侧，输出泵发送失败即自行退出
+    drop(conn.rx);
 
     let tmp = std::env::temp_dir();
     let id = service
@@ -206,7 +207,8 @@ async fn release_conn_kills_terminals() {
     let service = std::sync::Arc::new(TerminalService::new());
     let conn = test_conn(42);
     let scope = ConnScope::new(conn.conn_id, conn.tx);
-    let _ = conn;
+    // 不读帧：提前关闭接收侧，输出泵发送失败即自行退出
+    drop(conn.rx);
     let tmp = std::env::temp_dir();
     let id = service
         .open(
@@ -264,7 +266,6 @@ async fn open_rejects_bad_params() {
     assert_eq!(err.code, protocol::rpc_error::INVALID_PARAMS);
 
     // 连接已关闭时不能把新建的 PTY 注册到连接表中。
-    drop(scope.frame_tx.clone());
     let (closed_tx, closed_rx) = tokio::sync::mpsc::channel(1);
     drop(closed_rx);
     let closed_scope = ConnScope::new(2, closed_tx);

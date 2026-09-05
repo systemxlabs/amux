@@ -482,6 +482,74 @@ impl AmuxApp {
         fields.into_any_element()
     }
 
+    /// 快捷指令/技能/工作流计划共用的两字段表单打开逻辑。
+    #[allow(clippy::too_many_arguments)]
+    fn open_two_field_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        name_input: Entity<InputState>,
+        content_input: Entity<InputState>,
+        name_label: &'static str,
+        content_label: &'static str,
+        name_value: Option<&str>,
+        content_value: Option<&str>,
+        title: &'static str,
+        width_rems: f32,
+        save: fn(&mut Self, &mut Context<Self>) -> bool,
+    ) {
+        name_input.update(cx, |s, cx| s.set_value(name_value.unwrap_or(""), window, cx));
+        content_input.update(cx, |s, cx| s.set_value(content_value.unwrap_or(""), window, cx));
+        self.settings.form_error = None;
+        let fields_name_input = name_input.clone();
+        let fields_content_input = content_input.clone();
+        self.open_form_dialog(
+            window,
+            cx,
+            title,
+            "保存",
+            width_rems,
+            move |this, cx| {
+                this.render_two_field_form(
+                    cx,
+                    name_label,
+                    &fields_name_input,
+                    content_label,
+                    &fields_content_input,
+                    this.settings.form_error.as_ref(),
+                )
+            },
+            move |this, _window, cx| save(this, cx),
+        );
+    }
+
+    /// 两字段表单保存的共用校验与落库：编辑目标与新名称不同即重命名
+    /// （先移除旧条目）；`add_*` 按名称 upsert，同名编辑与新增都由它覆盖。
+    #[allow(clippy::too_many_arguments)]
+    fn save_two_field_entry(
+        &mut self,
+        cx: &mut Context<Self>,
+        name: String,
+        content: String,
+        name_error: &'static str,
+        content_error: Option<&'static str>,
+        edit_target: Option<String>,
+        persist: impl FnOnce(&crate::config::ConfigStore, &str, &str, Option<String>),
+    ) -> bool {
+        if name.is_empty() {
+            self.settings.form_error = Some(name_error.into());
+        } else if let Some(content_error) = content_error.filter(|_| content.is_empty()) {
+            self.settings.form_error = Some(content_error.into());
+        } else {
+            let renamed_from = edit_target.filter(|old| *old != name);
+            persist(&self.store, &name, &content, renamed_from);
+            cx.notify();
+            return true;
+        }
+        cx.notify();
+        false
+    }
+
     pub(crate) fn open_quick_command_form(
         &mut self,
         window: &mut Window,
@@ -489,50 +557,28 @@ impl AmuxApp {
         target: Option<(String, String)>,
     ) {
         self.settings.qc_edit_target = target.as_ref().map(|(name, _)| name.clone());
-        self.settings.qc_name_input.update(cx, |s, cx| {
-            s.set_value(
-                target.as_ref().map(|(name, _)| name.as_str()).unwrap_or(""),
-                window,
-                cx,
-            );
-        });
-        self.settings.qc_prompt_input.update(cx, |s, cx| {
-            s.set_value(
-                target
-                    .as_ref()
-                    .map(|(_, prompt)| prompt.as_str())
-                    .unwrap_or(""),
-                window,
-                cx,
-            );
-        });
-        self.settings.form_error = None;
-        let title = if self.settings.qc_edit_target.is_some() {
+        let title = if target.is_some() {
             "编辑快捷指令"
         } else {
             "新增快捷指令"
         };
-        self.open_form_dialog(
+        self.open_two_field_form(
             window,
             cx,
+            self.settings.qc_name_input.clone(),
+            self.settings.qc_prompt_input.clone(),
+            "指令名称",
+            "指令内容",
+            target.as_ref().map(|(name, _)| name.as_str()),
+            target.as_ref().map(|(_, prompt)| prompt.as_str()),
             title,
-            "保存",
             32.5,
-            |this, cx| {
-                this.render_two_field_form(
-                    cx,
-                    "指令名称",
-                    &this.settings.qc_name_input,
-                    "指令内容",
-                    &this.settings.qc_prompt_input,
-                    this.settings.form_error.as_ref(),
-                )
-            },
-            |this, _window, cx| this.save_quick_command(cx),
+            Self::save_quick_command,
         );
     }
 
     pub(crate) fn save_quick_command(&mut self, cx: &mut Context<Self>) -> bool {
+        let edit_target = self.settings.qc_edit_target.take();
         let name = self
             .settings
             .qc_name_input
@@ -547,26 +593,20 @@ impl AmuxApp {
             .value()
             .trim()
             .to_owned();
-        if name.is_empty() {
-            self.settings.form_error = Some("请输入指令名称。".into());
-        } else if prompt.is_empty() {
-            self.settings.form_error = Some("请输入指令内容。".into());
-        } else {
-            if let Some(old) = self.settings.qc_edit_target.take() {
-                if old != name {
-                    self.store.remove_quick_command(&old);
-                    self.store.add_quick_command(&name, &prompt);
-                } else {
-                    self.store.update_quick_command(&old, &prompt);
+        self.save_two_field_entry(
+            cx,
+            name,
+            prompt,
+            "请输入指令名称。",
+            Some("请输入指令内容。"),
+            edit_target,
+            |store, name, prompt, renamed_from| {
+                if let Some(old) = renamed_from {
+                    store.remove_quick_command(&old);
                 }
-            } else {
-                self.store.add_quick_command(&name, &prompt);
-            }
-            cx.notify();
-            return true;
-        }
-        cx.notify();
-        false
+                store.add_quick_command(name, prompt);
+            },
+        )
     }
 
     pub(crate) fn confirm_remove_quick_command(
@@ -597,53 +637,24 @@ impl AmuxApp {
         target: Option<SkillEntry>,
     ) {
         self.settings.skill_edit_target = target.as_ref().map(|skill| skill.name.clone());
-        self.settings.skill_name_input.update(cx, |s, cx| {
-            s.set_value(
-                target
-                    .as_ref()
-                    .map(|skill| skill.name.as_str())
-                    .unwrap_or(""),
-                window,
-                cx,
-            );
-        });
-        self.settings.skill_desc_input.update(cx, |s, cx| {
-            s.set_value(
-                target
-                    .as_ref()
-                    .map(|skill| skill.description.as_str())
-                    .unwrap_or(""),
-                window,
-                cx,
-            );
-        });
-        self.settings.form_error = None;
-        let title = if self.settings.skill_edit_target.is_some() {
-            "编辑技能"
-        } else {
-            "新增技能"
-        };
-        self.open_form_dialog(
+        let title = if target.is_some() { "编辑技能" } else { "新增技能" };
+        self.open_two_field_form(
             window,
             cx,
+            self.settings.skill_name_input.clone(),
+            self.settings.skill_desc_input.clone(),
+            "技能名称",
+            "技能描述",
+            target.as_ref().map(|skill| skill.name.as_str()),
+            target.as_ref().map(|skill| skill.description.as_str()),
             title,
-            "保存",
             32.5,
-            |this, cx| {
-                this.render_two_field_form(
-                    cx,
-                    "技能名称",
-                    &this.settings.skill_name_input,
-                    "技能描述",
-                    &this.settings.skill_desc_input,
-                    this.settings.form_error.as_ref(),
-                )
-            },
-            |this, _window, cx| this.save_skill(cx),
+            Self::save_skill,
         );
     }
 
     pub(crate) fn save_skill(&mut self, cx: &mut Context<Self>) -> bool {
+        let edit_target = self.settings.skill_edit_target.take();
         let name = self
             .settings
             .skill_name_input
@@ -658,24 +669,21 @@ impl AmuxApp {
             .value()
             .trim()
             .to_owned();
-        if name.is_empty() {
-            self.settings.form_error = Some("请输入技能名称。".into());
-        } else {
-            if let Some(old) = self.settings.skill_edit_target.take() {
-                if old != name {
-                    self.store.remove_skill(&old);
-                    self.store.add_skill(&name, &description);
-                } else {
-                    self.store.update_skill(&old, &description);
+        // 技能描述允许为空（与快捷指令/计划不同），不传内容校验错误
+        self.save_two_field_entry(
+            cx,
+            name,
+            description,
+            "请输入技能名称。",
+            None,
+            edit_target,
+            |store, name, description, renamed_from| {
+                if let Some(old) = renamed_from {
+                    store.remove_skill(&old);
                 }
-            } else {
-                self.store.add_skill(&name, &description);
-            }
-            cx.notify();
-            return true;
-        }
-        cx.notify();
-        false
+                store.add_skill(name, description);
+            },
+        )
     }
 
     pub(crate) fn confirm_remove_skill(
@@ -791,53 +799,28 @@ impl AmuxApp {
         target: Option<WorkflowTemplate>,
     ) {
         self.settings.tpl_edit_target = target.as_ref().map(|template| template.name.clone());
-        self.settings.tpl_name_input.update(cx, |s, cx| {
-            s.set_value(
-                target
-                    .as_ref()
-                    .map(|template| template.name.as_str())
-                    .unwrap_or(""),
-                window,
-                cx,
-            );
-        });
-        self.settings.tpl_desc_input.update(cx, |s, cx| {
-            s.set_value(
-                target
-                    .as_ref()
-                    .map(|template| template.plan.as_str())
-                    .unwrap_or(""),
-                window,
-                cx,
-            );
-        });
-        self.settings.form_error = None;
-        let title = if self.settings.tpl_edit_target.is_some() {
+        let title = if target.is_some() {
             "编辑工作流计划"
         } else {
             "新增工作流计划"
         };
-        self.open_form_dialog(
+        self.open_two_field_form(
             window,
             cx,
+            self.settings.tpl_name_input.clone(),
+            self.settings.tpl_desc_input.clone(),
+            "计划名称",
+            "计划内容",
+            target.as_ref().map(|template| template.name.as_str()),
+            target.as_ref().map(|template| template.plan.as_str()),
             title,
-            "保存",
             35.0,
-            |this, cx| {
-                this.render_two_field_form(
-                    cx,
-                    "计划名称",
-                    &this.settings.tpl_name_input,
-                    "计划内容",
-                    &this.settings.tpl_desc_input,
-                    this.settings.form_error.as_ref(),
-                )
-            },
-            |this, _window, cx| this.save_template(cx),
+            Self::save_template,
         );
     }
 
     pub(crate) fn save_template(&mut self, cx: &mut Context<Self>) -> bool {
+        let edit_target = self.settings.tpl_edit_target.take();
         let name = self
             .settings
             .tpl_name_input
@@ -852,26 +835,20 @@ impl AmuxApp {
             .value()
             .trim()
             .to_owned();
-        if name.is_empty() {
-            self.settings.form_error = Some("请输入计划名称。".into());
-        } else if plan.is_empty() {
-            self.settings.form_error = Some("请输入计划内容。".into());
-        } else {
-            if let Some(old) = self.settings.tpl_edit_target.take() {
-                if old != name {
-                    self.store.remove_template(&old);
-                    self.store.add_template(&name, &plan);
-                } else {
-                    self.store.update_template(&old, &plan);
+        self.save_two_field_entry(
+            cx,
+            name,
+            plan,
+            "请输入计划名称。",
+            Some("请输入计划内容。"),
+            edit_target,
+            |store, name, plan, renamed_from| {
+                if let Some(old) = renamed_from {
+                    store.remove_template(&old);
                 }
-            } else {
-                self.store.add_template(&name, &plan);
-            }
-            cx.notify();
-            return true;
-        }
-        cx.notify();
-        false
+                store.add_template(name, plan);
+            },
+        )
     }
 
     pub(crate) fn confirm_remove_template(

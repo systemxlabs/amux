@@ -309,7 +309,6 @@ impl Render for TerminalState {
         };
         let rows = self.snapshot_rows(&style);
         let focus = self.focus.clone();
-        let weak = cx.entity().downgrade();
         let mut container = v_flex()
             .id("terminal-view")
             .relative()
@@ -331,7 +330,7 @@ impl Render for TerminalState {
 
         // 隐形画布：绝对定位铺满容器（默认样式尺寸为 0，曾把 resize 退化成 2 行），
         // 在 paint 阶段拿到真实 bounds 驱动行列同步 + 注册 IME 输入处理器
-        let paint_weak = weak.clone();
+        let paint_weak = cx.entity().downgrade();
         container = container.child(
             canvas(
                 |_bounds, _window, _cx| (),
@@ -356,7 +355,6 @@ impl Render for TerminalState {
             .absolute()
             .inset_0(),
         );
-        let _ = weak;
 
         if self.exited {
             container = container.child(
@@ -416,17 +414,11 @@ impl TerminalState {
         }
 
         rows.into_iter()
-            .enumerate()
-            .map(|(row_idx, cells)| self.render_row(row_idx, cells, style))
+            .map(|cells| self.render_row(cells, style))
             .collect()
     }
 
-    fn render_row(
-        &self,
-        _row_idx: usize,
-        cells: Vec<(char, CellStyle)>,
-        style: &TermThemeStyle,
-    ) -> AnyElement {
+    fn render_row(&self, cells: Vec<(char, CellStyle)>, style: &TermThemeStyle) -> AnyElement {
         let mut text = String::new();
         let mut runs: Vec<TextRun> = Vec::new();
         let font = font(style.mono_font.clone());

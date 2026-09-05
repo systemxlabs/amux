@@ -618,18 +618,15 @@ pub fn parse_session_state(s: &str) -> Option<SessionState> {
     }
 }
 
-/// 会话标题生成（协议面共享的纯逻辑）：取首行、压缩空白、截断到 max_chars。
-/// server 在首条 prompt 时用它生成默认标题；GUI 在创建工作流会话时用它生成本地标题。
+/// 会话标题生成（协议面共享的纯逻辑）：取首行、压缩空白、截断到 40 字符
+/// （超出追加省略号）。server 在首条 prompt 时用它生成默认标题；
+/// GUI 在创建工作流会话时用它生成本地标题。
 pub fn generate_title(input: &str) -> String {
-    generate_title_max(input, 40)
-}
-
-/// 从首行生成标题，并在超过 `max_chars` 时追加省略号。
-pub fn generate_title_max(input: &str, max_chars: usize) -> String {
+    const MAX_CHARS: usize = 40;
     let line = input.lines().next().unwrap_or("").trim();
     let collapsed: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out: String = collapsed.chars().take(max_chars).collect();
-    if collapsed.chars().count() > max_chars {
+    let mut out: String = collapsed.chars().take(MAX_CHARS).collect();
+    if collapsed.chars().count() > MAX_CHARS {
         out.push('…');
     }
     out
@@ -746,6 +743,19 @@ mod tests {
         assert_eq!(parse_session_state("busy"), Some(SessionState::Busy));
         assert_eq!(parse_session_state("Idle"), None);
         assert_eq!(parse_session_state(""), None);
+    }
+
+    /// as_str / parse_session_state / serde 序列化三个表示互为一致：
+    /// 任一侧漂移（手写 match 与 rename_all 不同步）都会静默破坏线上与持久化数据。
+    #[test]
+    fn session_state_representations_agree() {
+        for state in [SessionState::Idle, SessionState::Busy] {
+            assert_eq!(parse_session_state(state.as_str()), Some(state));
+            let json = serde_json::to_value(state).unwrap();
+            assert_eq!(json.as_str(), Some(state.as_str()));
+            let parsed: SessionState = serde_json::from_value(json).unwrap();
+            assert_eq!(parsed, state);
+        }
     }
 
     #[test]

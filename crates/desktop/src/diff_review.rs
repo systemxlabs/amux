@@ -183,10 +183,7 @@ impl AmuxApp {
     }
 
     pub(crate) fn clear_diff_selection(&mut self, machine_name: &str, cx: &mut Context<Self>) {
-        let Some(machine) = self.machine_idx_by_name(machine_name) else {
-            return;
-        };
-        if let Some(m) = self.machines.get_mut(machine) {
+        if let Some(m) = self.machine_mut_by_name(machine_name) {
             m.diff.update(cx, |st, _| st.selection.clear());
         }
     }
@@ -197,19 +194,15 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         machine_name: &str,
     ) {
-        let Some(machine) = self.machine_idx_by_name(machine_name) else {
+        let Some(machine_idx) = self.machine_idx_by_name(machine_name) else {
             return;
         };
-        let Some(m) = self.machine(machine) else {
-            return;
-        };
-        if !m.status.online() {
-            if let Some(m) = self.machine_mut(machine) {
-                m.notice = Some("机器离线，无法发送选中的改动".into());
-            }
+        if !self.machines[machine_idx].status.online() {
+            self.machines[machine_idx].notice = Some("机器离线，无法发送选中的改动".into());
             cx.notify();
             return;
         }
+        let m = &self.machines[machine_idx];
         let client = m.client.clone();
         let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
@@ -653,7 +646,7 @@ impl AmuxApp {
             match *kind {
                 DiffRowKind::FileHeader(fi) => {
                     if let Some(f) = files.get(fi) {
-                        out.push(self.render_diff_file_header_row(machine_name, fi, f, cx));
+                        out.push(self.render_diff_file_header_row(machine_name, f, cx));
                     }
                 }
                 DiffRowKind::HunkHeader(fi, hi) => {
@@ -684,7 +677,6 @@ impl AmuxApp {
     fn render_diff_file_header_row(
         &self,
         machine_name: &str,
-        _fi: usize,
         f: &GitDiffFile,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {

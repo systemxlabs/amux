@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use amux_desktop::workflow::{
-    AgentSlot, Decision, LinkedSession, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,
+    AgentSlot, LinkedSession, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,
     WorkflowEngine,
 };
 use amux_desktop::ws::WsClient;
@@ -27,14 +27,14 @@ struct PausableBackend {
     started: AtomicUsize,
     started_notify: tokio::sync::Notify,
     release: tokio::sync::Semaphore,
-    decisions: Mutex<VecDeque<Decision>>,
+    decisions: Mutex<VecDeque<String>>,
 }
 
 impl OrcBackend for PausableBackend {
     fn decide<'a>(
         &'a self,
         _ctx: &'a OrcContext,
-    ) -> Pin<Box<dyn Future<Output = Result<Decision, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
             self.started.fetch_add(1, Ordering::SeqCst);
             self.started_notify.notify_waiters();
@@ -90,12 +90,8 @@ async fn linked_session_completion_mid_turn_injects_message_and_reruns() {
         started_notify: tokio::sync::Notify::new(),
         release: tokio::sync::Semaphore::new(0),
         decisions: Mutex::new(VecDeque::from(vec![
-            Decision {
-                summary: "第一轮调度".into(),
-            },
-            Decision {
-                summary: "收到关联普通会话完成，继续下一阶段".into(),
-            },
+            "第一轮调度".into(),
+            "收到关联普通会话完成，继续下一阶段".into(),
         ])),
     });
     let backend_test = backend.clone();

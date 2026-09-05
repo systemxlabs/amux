@@ -47,7 +47,7 @@ impl Client {
         c
     }
 
-    async fn call(&mut self, method: &str, params: Value) -> Value {
+    async fn send(&mut self, method: &str, params: Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.write
@@ -58,6 +58,11 @@ impl Client {
             ))
             .await
             .unwrap();
+        id
+    }
+
+    async fn call(&mut self, method: &str, params: Value) -> Value {
+        let id = self.send(method, params).await;
         loop {
             let msg = self.read.next().await.unwrap().unwrap();
             let Message::Text(t) = msg else { continue };
@@ -75,16 +80,7 @@ impl Client {
     }
 
     async fn fire(&mut self, method: &str, params: Value) {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.write
-            .send(Message::Text(
-                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
+        self.send(method, params).await;
     }
 
     async fn wait_notification(
@@ -117,17 +113,21 @@ impl Client {
     }
 }
 
+/// 轮询等待 server 监听端口（server 启动含 ACP 握手，可能需要数秒）。
 async fn wait_port(port: u16) -> u16 {
-    for _ in 0..2000 {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("server 未就绪（30s 内未监听端口 {port}）");
+        }
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
         {
             return port;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("server 未就绪");
 }
 
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -183,13 +183,12 @@ async fn start_server() -> (u16, ServerGuard) {
 }
 
 fn first_agent(list: &Value) -> String {
-    list["result"]["agents"]
-        .as_array()
-        .unwrap()
+    let agents = list["result"]["agents"].as_array().unwrap();
+    agents
         .iter()
         .find(|a| a["available"].as_bool().unwrap_or(false))
         .and_then(|a| a["name"].as_str())
-        .unwrap_or("mock_acp")
+        .unwrap_or_else(|| panic!("无可用 agent: {list}"))
         .to_string()
 }
 
@@ -802,8 +801,13 @@ async fn mock_acp_name(c: &mut Client) -> String {
     first_agent(&list)
 }
 
+/// 测试端口段：避开常用端口，多进程并行（cargo test 线程池）内用 NEXT_PORT 递增去重。
+fn next_port() -> u16 {
+    36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst)
+}
+
 async fn start_server_with_dir() -> (u16, std::path::PathBuf, ServerGuard) {
-    let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+    let port = next_port();
     let data_dir = tempfile::Builder::new()
         .prefix("amux-e2e-")
         .tempdir()
@@ -887,7 +891,7 @@ async fn agent_restart_keeps_agent_available() {
 
 #[tokio::test]
 async fn busy_prompt_rejected_and_cancel_works() {
-    let port = 36000 + (std::process::id() % 500) as u16 + NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+    let port = next_port();
     let data_dir = tempfile::Builder::new()
         .prefix("amux-e2e-busy-")
         .tempdir()

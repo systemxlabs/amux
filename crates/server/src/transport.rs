@@ -262,13 +262,14 @@ async fn dispatch(
         ));
     }
     // 无 id 的帧视为非法请求（文档样例 auth 带 id=1；auth 缺 id 返回 INVALID_REQUEST）
-    let Some(id) = req.id.else_null() else {
+    if req.id == protocol::JsonRpcId::Null {
         return Some(error_response(
             protocol::JsonRpcId::Null,
             protocol::rpc_error::INVALID_REQUEST,
             "请求缺少 id",
         ));
-    };
+    }
+    let id = req.id;
 
     if req.method == method::AUTH {
         return Some(handle_auth(&req.params, token, authenticated, id));
