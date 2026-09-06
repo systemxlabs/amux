@@ -7,13 +7,13 @@ use serde::Serialize;
 use serde_json::Value;
 
 use protocol::{
-    method, rpc_error, server_error, ActivitiesResult, AgentListResult, AgentParams, HistoryResult,
-    OngoingActivityResult, OpResult, SessionConfigOptionsResult, SessionConfigureParams,
-    SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
-    SessionNewParams, SessionPageParams, SessionPlanResult, SessionPromptParams, SessionResult,
-    SessionSlashCommandsResult, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
-    TerminalOpenResult, TerminalResizeParams, WorkspaceDiffParams, WorkspaceDiffResult,
-    WorkspaceListParams, WorkspaceReadParams, WorkspaceRestoreParams,
+    method, rpc_error, server_error, AgentListResult, AgentParams, OngoingActivityResult, OpResult,
+    SessionConfigOptionsResult, SessionConfigureParams, SessionIdParams, SessionInfoParams,
+    SessionInfoResult, SessionListParams, SessionListResult, SessionNewParams, SessionPageParams,
+    SessionPlanResult, SessionPromptParams, SessionResult, SessionSlashCommandsResult,
+    TerminalIdParams, TerminalInputParams, TerminalOpenParams, TerminalOpenResult,
+    TerminalResizeParams, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListParams,
+    WorkspaceReadParams, WorkspaceRestoreParams,
 };
 
 use crate::error::SessionError;
@@ -216,30 +216,22 @@ impl Handlers {
 
             method::SESSION_HISTORY => {
                 let p: SessionPageParams = parse(params)?;
-                let (items, has_more, next_before) = self
-                    .manager
-                    .history(&p.session_id, p.limit, p.before)
-                    .await
-                    .map_err(map_session_err)?;
-                to_value(HistoryResult {
-                    items,
-                    has_more,
-                    next_before,
-                })
+                to_value(
+                    self.manager
+                        .history(&p.session_id, p.limit, p.before)
+                        .await
+                        .map_err(map_session_err)?,
+                )
             }
 
             method::SESSION_ACTIVITIES => {
                 let p: SessionPageParams = parse(params)?;
-                let (activities, has_more, next_before) = self
-                    .manager
-                    .activities(&p.session_id, p.limit, p.before)
-                    .await
-                    .map_err(map_session_err)?;
-                to_value(ActivitiesResult {
-                    activities,
-                    has_more,
-                    next_before,
-                })
+                to_value(
+                    self.manager
+                        .activities(&p.session_id, p.limit, p.before)
+                        .await
+                        .map_err(map_session_err)?,
+                )
             }
 
             method::SESSION_ONGOING_ACTIVITY => {

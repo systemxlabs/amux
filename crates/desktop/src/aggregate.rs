@@ -140,7 +140,33 @@ impl SessionView {
     pub fn set_plan(&mut self, entries: Vec<SessionPlanEntry>) {
         self.plan = entries;
     }
-}/// 对话条目的对齐键（类别 + 时间戳）。
+}/// 分页拉取的两个目标视图（对话 / 活动）：内部判别用枚举，
+/// 仅在请求边界映射为协议方法名——直接传方法名字符串会让
+/// 「选错请求序号槽」这类错误静默通过编译。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionPageKind {
+    History,
+    Activities,
+}
+
+impl SessionPageKind {
+    pub(crate) fn method(self) -> &'static str {
+        match self {
+            SessionPageKind::History => protocol::method::SESSION_HISTORY,
+            SessionPageKind::Activities => protocol::method::SESSION_ACTIVITIES,
+        }
+    }
+
+    /// 该视图的防陈旧请求序号槽。
+    pub(crate) fn request_slot(self) -> fn(&mut SessionView) -> &mut u64 {
+        match self {
+            SessionPageKind::History => |view| &mut view.history_request_id,
+            SessionPageKind::Activities => |view| &mut view.activities_request_id,
+        }
+    }
+}
+
+/// 对话条目的对齐键（类别 + 时间戳）。
 fn dialog_key(m: &DialogMsg) -> (&'static str, u64) {
     match m {
         DialogMsg::UserMessage { timestamp, .. } => ("user", *timestamp),

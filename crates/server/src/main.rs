@@ -177,10 +177,15 @@ async fn main() {
         std::process::exit(0);
     });
 
-    // 定时清理：关闭长时间无活动会话（>1h）；清理超 7 天不活跃会话的 worktree。
+    // 定时清理：关闭长时间无活动会话；清理超期不活跃会话的 worktree。
     let cleanup_manager = manager.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        const CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+        const CLOSE_IDLE_SESSION_AFTER: std::time::Duration =
+            std::time::Duration::from_secs(60 * 60);
+        const CLEANUP_WORKTREE_AFTER: std::time::Duration =
+            std::time::Duration::from_secs(7 * 24 * 60 * 60);
+        let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
         loop {
             interval.tick().await;
             let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -190,7 +195,10 @@ async fn main() {
                     continue;
                 }
             };
-            match cleanup_manager.close_idle(now_ms, 3_600_000).await {
+            match cleanup_manager
+                .close_idle(now_ms, CLOSE_IDLE_SESSION_AFTER)
+                .await
+            {
                 Ok(closed) if closed > 0 => {
                     log::info!("关闭 {closed} 个长时间无活动会话");
                 }
@@ -199,7 +207,7 @@ async fn main() {
             }
             // 超过 7 天不活跃的会话自动清理其 worktree。
             match cleanup_manager
-                .cleanup_idle_worktrees(now_ms, 7 * 24 * 3_600_000)
+                .cleanup_idle_worktrees(now_ms, CLEANUP_WORKTREE_AFTER)
                 .await
             {
                 Ok(cleaned) if cleaned > 0 => {

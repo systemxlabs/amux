@@ -159,7 +159,7 @@ impl AmuxApp {
         let Some(m) = self.machine_mut_by_name(machine_name) else {
             return;
         };
-        let key = (path, hunk);
+        let key = DiffSelectionKey { path, hunk };
         m.diff.update(cx, |st, _| {
             if !st.selection.remove(&key) {
                 st.selection.insert(key);
@@ -178,7 +178,10 @@ impl AmuxApp {
             m.diff
                 .read(cx)
                 .selection
-                .contains(&(path.to_string(), hunk))
+                .contains(&DiffSelectionKey {
+                    path: path.to_string(),
+                    hunk,
+                })
         })
     }
 
@@ -216,9 +219,17 @@ impl AmuxApp {
 
         let mut patches: Vec<String> = Vec::new();
         for f in &files {
-            let file_selected = selection.contains(&(f.path.clone(), None));
+            let file_selected = selection.contains(&DiffSelectionKey {
+                path: f.path.clone(),
+                hunk: None,
+            });
             for (i, h) in f.hunks.iter().enumerate() {
-                if file_selected || selection.contains(&(f.path.clone(), Some(i))) {
+                if file_selected
+                    || selection.contains(&DiffSelectionKey {
+                        path: f.path.clone(),
+                        hunk: Some(i),
+                    })
+                {
                     patches.push(format!("// {}\n{}", f.path, h.patch));
                 }
             }
@@ -963,11 +974,18 @@ impl DiffRowKind {
 /// 每机器的改动审查状态。
 /// 独立实体：diff 数据量与交互（选择/折叠/撤销）自成生命周期，
 /// 与机器连接状态、会话状态解耦。
+/// 改动选中项的键：`hunk: None` 表示整个文件，`Some(i)` 表示第 i 个 hunk。
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct DiffSelectionKey {
+    path: String,
+    hunk: Option<usize>,
+}
+
 #[derive(Default)]
 pub struct DiffReviewState {
     pub files: Vec<GitDiffFile>,
     pub(crate) not_repo: bool,
-    pub(crate) selection: HashSet<(String, Option<usize>)>,
+    pub(crate) selection: HashSet<DiffSelectionKey>,
     /// 陈旧响应丢弃：响应只在其 request_id 仍为最新时写入
     pub(crate) request_id: u64,
     pub(crate) loading: bool,

@@ -17,10 +17,11 @@ pub struct SessionRegistry {
 }
 
 /// 注册表条目：会话元数据 + agent 侧会话 id（驱动操作需要）。
+/// `agent_session_id` 为 None 表示 agent 侧会话尚未惰性创建（DB 存空串）。
 #[derive(Debug, Clone)]
 pub struct RegistryEntry {
     pub meta: SessionMeta,
-    pub agent_session_id: String,
+    pub agent_session_id: Option<String>,
 }
 
 /// 超时 worktree 清理所需的最小会话信息。
@@ -70,10 +71,11 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
         context_size: row.get::<_, i64>("context_size")? as u64,
         context_window_size: row.get::<_, i64>("context_window_size")? as u64,
     };
+    // DB 中空串表示「agent 侧会话尚未惰性创建」，读出时映射为 None
     let agent_session_id: String = row.get("agent_session_id")?;
     Ok(RegistryEntry {
         meta,
-        agent_session_id,
+        agent_session_id: (!agent_session_id.is_empty()).then_some(agent_session_id),
     })
 }
 
@@ -108,8 +110,8 @@ impl SessionRegistry {
         // 其 agent 侧 turn 已随进程终止，残留 busy 会令后续 prompt 永远被拒。
         // agent_session_id 保留，下一次交互按设计走惰性 session/resume。
         conn.execute(
-            "UPDATE sessions SET state = 'idle' WHERE state = 'busy'",
-            [],
+            "UPDATE sessions SET state = ?1 WHERE state = ?2",
+            params![SessionState::Idle.as_str(), SessionState::Busy.as_str()],
         )?;
         Ok(SessionRegistry {
             conn: Mutex::new(conn),
@@ -117,7 +119,8 @@ impl SessionRegistry {
     }
 
     /// 插入或更新会话元数据（create / 标题 / 状态 / 时间戳更新均走这里）。
-    pub fn upsert(&self, meta: &SessionMeta, agent_session_id: &str) -> rusqlite::Result<()> {
+    /// `agent_session_id` 为 None 表示尚无 agent 侧会话，落库为空串。
+    pub fn upsert(&self, meta: &SessionMeta, agent_session_id: Option<&str>) -> rusqlite::Result<()> {
         let conn = self.connection();
         conn.execute(
             "INSERT INTO sessions
@@ -135,7 +138,7 @@ impl SessionRegistry {
                 meta.cwd,
                 meta.state.as_str(),
                 meta.title,
-                agent_session_id,
+                agent_session_id.unwrap_or(""),
                 meta.created_at as i64,
                 meta.last_active_at as i64,
                 meta.worktree_dir,
@@ -225,14 +228,14 @@ impl SessionRegistry {
     pub fn idle_worktree_candidates(
         &self,
         now: u64,
-        idle_timeout_ms: u64,
+        idle_timeout: std::time::Duration,
     ) -> rusqlite::Result<Vec<WorktreeCandidate>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, cwd, worktree_dir, last_active_at FROM sessions
-             WHERE state = 'idle' AND worktree_dir != ''",
+             WHERE state = ?1 AND worktree_dir != ''",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([SessionState::Idle.as_str()], |row| {
             Ok((
                 WorktreeCandidate {
                     session_id: row.get::<_, String>("id")?,
@@ -245,7 +248,9 @@ impl SessionRegistry {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|(_, timestamp)| now.saturating_sub(*timestamp) > idle_timeout_ms)
+            .filter(|(_, timestamp)| {
+                now.saturating_sub(*timestamp) > idle_timeout.as_millis() as u64
+            })
             .map(|(candidate, _)| candidate)
             .collect())
     }
@@ -254,12 +259,12 @@ impl SessionRegistry {
     pub fn idle_candidates(
         &self,
         now: u64,
-        idle_timeout_ms: u64,
+        idle_timeout: std::time::Duration,
     ) -> rusqlite::Result<Vec<IdleCandidate>> {
         let conn = self.connection();
         let mut stmt =
-            conn.prepare("SELECT id, last_active_at FROM sessions WHERE state = 'idle'")?;
-        let rows = stmt.query_map([], |row| {
+            conn.prepare("SELECT id, last_active_at FROM sessions WHERE state = ?1")?;
+        let rows = stmt.query_map([SessionState::Idle.as_str()], |row| {
             Ok(IdleCandidate {
                 session_id: row.get::<_, String>("id")?,
                 last_active_at: row.get::<_, i64>("last_active_at")? as u64,
@@ -268,7 +273,9 @@ impl SessionRegistry {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|candidate| now.saturating_sub(candidate.last_active_at) > idle_timeout_ms)
+            .filter(|candidate| {
+                now.saturating_sub(candidate.last_active_at) > idle_timeout.as_millis() as u64
+            })
             .collect())
     }
 }
@@ -309,11 +316,11 @@ mod tests {
         let db = tmp_db("crud");
         let reg = SessionRegistry::open(&db).unwrap();
         let (m, aid) = meta("s1", 100);
-        reg.upsert(&m, &aid).unwrap();
+        reg.upsert(&m, Some(&aid)).unwrap();
 
         let got = reg.get("s1").unwrap().unwrap();
         assert_eq!(got.meta.id, "s1");
-        assert_eq!(got.agent_session_id, "agent_s1");
+        assert_eq!(got.agent_session_id.as_deref(), Some("agent_s1"));
         assert_eq!(got.meta.last_active_at, 100);
 
         reg.update_state("s1", SessionState::Busy, 200).unwrap();
@@ -324,7 +331,7 @@ mod tests {
         assert_eq!(got.meta.last_active_at, 300);
 
         let (m2, a2) = meta("s2", 400);
-        reg.upsert(&m2, &a2).unwrap();
+        reg.upsert(&m2, Some(&a2)).unwrap();
         let all = reg.list().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].meta.id, "s2");
@@ -344,7 +351,7 @@ mod tests {
         {
             let reg = SessionRegistry::open(&db).unwrap();
             let (m, aid) = meta("s1", 100);
-            reg.upsert(&m, &aid).unwrap();
+            reg.upsert(&m, Some(&aid)).unwrap();
             reg.update_state("s1", SessionState::Busy, 200).unwrap();
             assert_eq!(
                 reg.get("s1").unwrap().unwrap().meta.state,
@@ -357,7 +364,7 @@ mod tests {
             let got = reg.get("s1").unwrap().unwrap();
             assert_eq!(got.meta.state, SessionState::Idle);
             // agent 侧会话 id 保留：下一次交互按设计走惰性 session/resume
-            assert_eq!(got.agent_session_id, "agent_s1");
+            assert_eq!(got.agent_session_id.as_deref(), Some("agent_s1"));
         }
         let _ = std::fs::remove_file(&db);
     }
@@ -367,7 +374,7 @@ mod tests {
         let db = tmp_db("ctx");
         let reg = SessionRegistry::open(&db).unwrap();
         let (m, aid) = meta("s1", 100);
-        reg.upsert(&m, &aid).unwrap();
+        reg.upsert(&m, Some(&aid)).unwrap();
 
         reg.set_context_size("s1", 53_000, 200_000).unwrap();
         let got = reg.get("s1").unwrap().unwrap();
@@ -378,7 +385,7 @@ mod tests {
         let (mut m2, _) = meta("s1", 200);
         m2.context_size = 60_000;
         m2.context_window_size = 200_000;
-        reg.upsert(&m2, &aid).unwrap();
+        reg.upsert(&m2, Some(&aid)).unwrap();
         let got = reg.get("s1").unwrap().unwrap();
         assert_eq!(got.meta.context_size, 60_000);
         assert_eq!(got.meta.context_window_size, 200_000);
@@ -393,18 +400,20 @@ mod tests {
         // s1：有 worktree 且超时 → 候选
         let (mut m1, a1) = meta("s1", 100);
         m1.worktree_dir = "/tmp/wt1".into();
-        reg.upsert(&m1, &a1).unwrap();
+        reg.upsert(&m1, Some(&a1)).unwrap();
         // s2：无 worktree → 排除
         let (m2, a2) = meta("s2", 100);
-        reg.upsert(&m2, &a2).unwrap();
+        reg.upsert(&m2, Some(&a2)).unwrap();
         // s3：有 worktree 但最近活跃 → 排除
         let (mut m3, a3) = meta("s3", 100);
         m3.worktree_dir = "/tmp/wt3".into();
-        reg.upsert(&m3, &a3).unwrap();
+        reg.upsert(&m3, Some(&a3)).unwrap();
         reg.update_state("s3", SessionState::Idle, 900).unwrap();
 
         let now = 1000u64;
-        let cands = reg.idle_worktree_candidates(now, 500).unwrap();
+        let cands = reg
+            .idle_worktree_candidates(now, std::time::Duration::from_millis(500))
+            .unwrap();
         assert_eq!(cands.len(), 1, "仅超时的 worktree 会话入候选: {cands:?}");
         assert_eq!(
             cands[0],
@@ -422,12 +431,12 @@ mod tests {
         let db = tmp_db("defer");
         let reg = SessionRegistry::open(&db).unwrap();
         let (m, _) = meta("s1", 100);
-        reg.upsert(&m, "").unwrap();
+        reg.upsert(&m, None).unwrap();
         let got = reg.get("s1").unwrap().unwrap();
-        assert_eq!(got.agent_session_id, "");
+        assert_eq!(got.agent_session_id, None);
         reg.set_agent_session_id("s1", "mock_s_1").unwrap();
         let got = reg.get("s1").unwrap().unwrap();
-        assert_eq!(got.agent_session_id, "mock_s_1");
+        assert_eq!(got.agent_session_id.as_deref(), Some("mock_s_1"));
         let _ = std::fs::remove_file(&db);
     }
 
@@ -437,13 +446,13 @@ mod tests {
         {
             let reg = SessionRegistry::open(&db).unwrap();
             let (m, aid) = meta("s1", 100);
-            reg.upsert(&m, &aid).unwrap();
+            reg.upsert(&m, Some(&aid)).unwrap();
         }
         let reg = SessionRegistry::open(&db).unwrap();
         let all = reg.list().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].meta.id, "s1");
-        assert_eq!(all[0].agent_session_id, "agent_s1");
+        assert_eq!(all[0].agent_session_id.as_deref(), Some("agent_s1"));
         let _ = std::fs::remove_file(&db);
     }
 
@@ -454,7 +463,7 @@ mod tests {
         let reg2 = reg.clone();
         let h = std::thread::spawn(move || {
             let (m, aid) = meta("s1", 1);
-            reg2.upsert(&m, &aid).unwrap();
+            reg2.upsert(&m, Some(&aid)).unwrap();
         });
         h.join().unwrap();
         assert_eq!(reg.list().unwrap().len(), 1);

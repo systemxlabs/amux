@@ -537,12 +537,18 @@ pub struct WorkspaceReadResult {
     pub next_offset: usize,
 }
 
+/// 分页/窗口默认大小（server 兜底值与 GUI 请求值共用，避免两侧字面量漂移）。
+pub const SESSION_LIST_DEFAULT_LIMIT: usize = 50;
+pub const SESSION_PAGE_DEFAULT_LIMIT: usize = 200;
+pub const WORKSPACE_LIST_PAGE_LIMIT: usize = 200;
+pub const WORKSPACE_READ_PAGE_LIMIT: usize = 400;
+
 fn workspace_page_limit() -> usize {
-    200
+    WORKSPACE_LIST_PAGE_LIMIT
 }
 
 fn workspace_read_limit() -> usize {
-    400
+    WORKSPACE_READ_PAGE_LIMIT
 }
 
 /// `terminal.open` 参数。

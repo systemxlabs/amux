@@ -1,5 +1,7 @@
 use gpui::*;
 
+use gpui_component::button::ButtonVariant;
+
 use protocol::{
     AgentListResult, AgentParams, ContentBlock, SessionNewParams, SessionPromptParams,
     SessionResult,
@@ -222,7 +224,7 @@ impl AmuxApp {
             window,
             cx,
             "重新发现",
-            false,
+            ButtonVariant::Primary,
             "重新发现 agents",
             "确定重新扫描本机 agents 吗？".to_string(),
             move |this, window, cx| {
@@ -243,7 +245,7 @@ impl AmuxApp {
             window,
             cx,
             "重启",
-            false,
+            ButtonVariant::Primary,
             "重启 agent",
             format!("确定重启 agent「{agent}」吗？"),
             move |this, window, cx| {
@@ -263,7 +265,7 @@ impl AmuxApp {
             window,
             cx,
             "重连",
-            false,
+            ButtonVariant::Primary,
             "重连机器",
             format!("确定重连机器「{name}」吗？"),
             move |this, window, cx| {
@@ -494,7 +496,7 @@ impl AmuxApp {
             window,
             cx,
             "确认移除",
-            true,
+            ButtonVariant::Danger,
             "移除机器",
             format!("确定移除机器「{name}」吗？其本地注册信息将被删除。"),
             move |this, window, cx| {

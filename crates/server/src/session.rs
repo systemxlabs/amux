@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use protocol::{
-    generate_title, Activity, ContentBlock, HistoryItem, SessionMeta, SessionState,
-    SessionStateChange,
+    generate_title, Activity, ActivitiesResult, ContentBlock, HistoryItem, HistoryResult,
+    SessionMeta, SessionState, SessionStateChange,
 };
 
 use crate::agent::{AgentEvent, AgentRegistry};
@@ -64,7 +64,17 @@ struct SessionControl {
 #[derive(Debug, Clone)]
 struct ThinkingBuffer {
     content: String,
-    first_timestamp: u64,
+    /// 首个 chunk 的时间戳；None 表示尚未收到 chunk。
+    first_timestamp: Option<u64>,
+}
+
+/// prompt 前置准备产物：具名字段替代 4 元组返回，
+/// 避免相邻 String（agent_session_id / cwd）解构错位。
+struct PromptSetup {
+    driver: crate::agent::SharedDriver,
+    agent_session_id: String,
+    cwd: String,
+    old_state: SessionState,
 }
 
 fn now() -> u64 {
@@ -158,7 +168,7 @@ impl SessionManager {
             context_size: 0,
             context_window_size: 0,
         };
-        self.registry.upsert(&meta, "")?;
+        self.registry.upsert(&meta, None)?;
         self.controls
             .lock()
             .insert(meta.id.clone(), Self::new_control());
@@ -262,14 +272,14 @@ impl SessionManager {
         &self,
         session_id: &str,
         meta: &SessionMeta,
-        agent_session_id: &str,
+        agent_session_id: Option<&str>,
     ) -> Result<(crate::agent::SharedDriver, String), SessionError> {
         let driver = self
             .agents
             .driver_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        if !agent_session_id.is_empty() {
-            return Ok((driver, agent_session_id.to_string()));
+        if let Some(existing) = agent_session_id {
+            return Ok((driver, existing.to_string()));
         }
         let cwd = self.resolve_cwd(session_id, meta)?;
         let (sid, options) = driver
@@ -298,7 +308,7 @@ impl SessionManager {
             }
         };
         let (driver, agent_session_id) =
-            self.ensure_agent_session(session_id, &entry.meta, &entry.agent_session_id)?;
+            self.ensure_agent_session(session_id, &entry.meta, entry.agent_session_id.as_deref())?;
         let meta = entry.meta;
         // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
         // 最新选项全量覆盖内存存储；幂等 resume 返回空集合时保持既有选项。
@@ -320,14 +330,14 @@ impl SessionManager {
         session_id: &str,
     ) -> Result<Option<(crate::agent::SharedDriver, String)>, SessionError> {
         let entry = self.get_entry(session_id)?;
-        if entry.agent_session_id.is_empty() {
+        let Some(agent_session_id) = entry.agent_session_id else {
             return Ok(None);
-        }
+        };
         let driver = self
             .agents
             .driver_for(&entry.meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        Ok(Some((driver, entry.agent_session_id)))
+        Ok(Some((driver, agent_session_id)))
     }
 
     /// 查询会话斜杠命令：内存缓存以 Agent 侧数据为权威，由 ACP
@@ -394,7 +404,7 @@ impl SessionManager {
         let data_dir = self.data_dir.clone();
         let session_id2 = session_id.to_string();
         tokio::task::spawn_blocking(move || {
-            if !agent_session_id.is_empty() {
+            if let Some(agent_session_id) = agent_session_id {
                 match agents.driver_for(&meta.agent) {
                     Ok(driver) => {
                         if let Err(e) = driver.close(&agent_session_id) {
@@ -438,7 +448,9 @@ impl SessionManager {
         limit: Option<usize>,
     ) -> Result<(Vec<SessionMeta>, bool), SessionError> {
         let all = self.registry.list()?;
-        let limit = limit.unwrap_or(50).max(1);
+        let limit = limit
+            .unwrap_or(protocol::SESSION_LIST_DEFAULT_LIMIT)
+            .max(1);
         let has_more = all.len() > limit;
         let metas = all
             .into_iter()
@@ -479,8 +491,12 @@ impl SessionManager {
 
     /// 关闭长时间无活动的 agent 侧会话（>timeout_ms）。候选选出后复核状态：
     /// 已回到 Busy 的会话跳过本轮（避免关掉正在进行中的 turn 的 agent 侧会话）。
-    pub async fn close_idle(&self, now_ms: u64, timeout_ms: u64) -> Result<usize, SessionError> {
-        let candidates = self.registry.idle_candidates(now_ms, timeout_ms)?;
+    pub async fn close_idle(
+        &self,
+        now_ms: u64,
+        idle_timeout: std::time::Duration,
+    ) -> Result<usize, SessionError> {
+        let candidates = self.registry.idle_candidates(now_ms, idle_timeout)?;
         let mut closed = 0;
         for candidate in candidates {
             let sid = candidate.session_id;
@@ -495,8 +511,10 @@ impl SessionManager {
                 continue;
             };
             let meta = entry.meta;
-            let aid = entry.agent_session_id;
-            if aid.is_empty() || meta.state == SessionState::Busy {
+            let Some(aid) = entry.agent_session_id else {
+                continue;
+            };
+            if meta.state == SessionState::Busy {
                 continue;
             }
             if let Ok(driver) = self.agents.driver_for(&meta.agent) {
@@ -520,9 +538,9 @@ impl SessionManager {
     pub async fn cleanup_idle_worktrees(
         &self,
         now_ms: u64,
-        timeout_ms: u64,
+        idle_timeout: std::time::Duration,
     ) -> Result<usize, SessionError> {
-        let candidates = self.registry.idle_worktree_candidates(now_ms, timeout_ms)?;
+        let candidates = self.registry.idle_worktree_candidates(now_ms, idle_timeout)?;
         let mut cleaned = 0;
         for candidate in candidates {
             let sid = candidate.session_id;
@@ -559,12 +577,17 @@ impl SessionManager {
         session_id: &str,
         limit: Option<usize>,
         before: Option<u64>,
-    ) -> Result<(Vec<HistoryItem>, bool, Option<u64>), SessionError> {
+    ) -> Result<HistoryResult, SessionError> {
         self.get_entry(session_id)?;
         let items = SessionLog::open(&self.data_dir, session_id)
             .read_history()
             .map_err(|e| SessionError::Storage(format!("会话历史读取失败: {e}")))?;
-        Ok(Self::page(&items, limit, before))
+        let (items, has_more, next_before) = Self::page(&items, limit, before);
+        Ok(HistoryResult {
+            items,
+            has_more,
+            next_before,
+        })
     }
 
     /// 分页读活动历史：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
@@ -573,12 +596,17 @@ impl SessionManager {
         session_id: &str,
         limit: Option<usize>,
         before: Option<u64>,
-    ) -> Result<(Vec<Activity>, bool, Option<u64>), SessionError> {
+    ) -> Result<ActivitiesResult, SessionError> {
         self.get_entry(session_id)?;
         let items = SessionLog::open(&self.data_dir, session_id)
             .read_activities()
             .map_err(|e| SessionError::Storage(format!("会话活动读取失败: {e}")))?;
-        Ok(Self::page(&items, limit, before))
+        let (activities, has_more, next_before) = Self::page(&items, limit, before);
+        Ok(ActivitiesResult {
+            activities,
+            has_more,
+            next_before,
+        })
     }
 
     /// 惰性分页切窗并计算下一游标（纯函数，`history`/`activities` 共用）。
@@ -587,7 +615,7 @@ impl SessionManager {
         limit: Option<usize>,
         before: Option<u64>,
     ) -> (Vec<T>, bool, Option<u64>) {
-        let limit = limit.unwrap_or(200);
+        let limit = limit.unwrap_or(protocol::SESSION_PAGE_DEFAULT_LIMIT);
         let before_usize = before.map(|b| b as usize);
         let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
         let next_before = if has_more { Some(start as u64) } else { None };
@@ -633,7 +661,12 @@ impl SessionManager {
         // 删除会先标记 deleted 并等待这把锁；持有期间完成 agent session 创建、
         // Busy 元数据写回和用户消息首写，避免删除后旧 prompt 再创建日志。
         let setup = self.setup_prompt(session_id, &input, &control);
-        let (driver, agent_session_id, cwd, old_state) = match setup {
+        let PromptSetup {
+            driver,
+            agent_session_id,
+            cwd,
+            old_state,
+        } = match setup {
             Ok(value) => value,
             Err(error) => {
                 // 尚未进入 Busy 广播，只需释放 busy 标志；若会话已被删除，
@@ -720,7 +753,7 @@ impl SessionManager {
         session_id: &str,
         input: &[ContentBlock],
         control: &SessionControl,
-    ) -> Result<(crate::agent::SharedDriver, String, String, SessionState), SessionError> {
+    ) -> Result<PromptSetup, SessionError> {
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
@@ -728,6 +761,7 @@ impl SessionManager {
         let mut meta = entry.meta;
         let agent_session_id = entry.agent_session_id;
         let old_state = meta.state;
+        // （agent_session_id 现为 Option：None = agent 侧会话尚未惰性创建）
         if meta.state == SessionState::Busy {
             return Err(SessionError::Busy);
         }
@@ -744,12 +778,11 @@ impl SessionManager {
             .agents
             .driver_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        let (driver, agent_session_id) = if agent_session_id.is_empty() {
+        let (driver, agent_session_id) = match agent_session_id {
+            Some(id) => (driver, id),
             // 惰性创建 agent 侧会话，响应中的会话选项存入内存
             //（选项以 Agent 侧数据为权威）
-            self.ensure_agent_session(session_id, &meta, "")?
-        } else {
-            (driver, agent_session_id)
+            None => self.ensure_agent_session(session_id, &meta, None)?,
         };
         // 创建与 resume 分支统一 upsert：busy、首条 prompt 生成的标题与活跃时间
         // 立即落盘：状态以元数据为权威，避免 turn 进行中列表读到陈旧空闲，
@@ -759,8 +792,13 @@ impl SessionManager {
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
-        self.registry.upsert(&meta, &agent_session_id)?;
-        Ok((driver, agent_session_id, cwd, old_state))
+        self.registry.upsert(&meta, Some(&agent_session_id))?;
+        Ok(PromptSetup {
+            driver,
+            agent_session_id,
+            cwd,
+            old_state,
+        })
     }
 
     /// 跑单个 turn：指令发给 agent，事件喂合并器，thinking/tool_call 记为 ongoing。
@@ -801,13 +839,10 @@ impl SessionManager {
                             buf.entry(session_id.to_string())
                                 .or_insert_with(|| ThinkingBuffer {
                                     content: String::new(),
-                                    first_timestamp: ts,
+                                    first_timestamp: Some(ts),
                                 });
-                        if entry.first_timestamp == 0 {
-                            entry.first_timestamp = ts;
-                        }
                         entry.content.push_str(&text);
-                        (entry.content.clone(), entry.first_timestamp)
+                        (entry.content.clone(), entry.first_timestamp.unwrap_or(ts))
                     };
                     self.ongoing.lock().insert(
                         session_id.to_string(),
@@ -834,7 +869,7 @@ impl SessionManager {
                         session_id.to_string(),
                         Activity::ToolCall {
                             timestamp: now(),
-                            name: name.unwrap_or_else(|| "tool_call".into()),
+                            name: name.unwrap_or_else(|| crate::history::DEFAULT_TOOL_NAME.into()),
                             title,
                             content,
                         },
@@ -955,14 +990,16 @@ impl SessionManager {
         }
         let entry = self.get_entry(session_id)?;
         let meta = entry.meta;
-        let agent_session_id = entry.agent_session_id;
         // 空闲会话（或尚无 agent 侧会话）无可取消：ACP agent 对未知 turn
         // 会报错，这里幂等返回成功、不透传——GUI 的取消按钮是常驻的，
         // 调用方无需自行区分忙闲。控制块是并发状态权威，注册表可能仍在
         // prompt 初始化的写回窗口内保持 Idle。
-        if !control.busy.load(Ordering::SeqCst) || agent_session_id.is_empty() {
+        if !control.busy.load(Ordering::SeqCst) {
             return Ok(());
         }
+        let Some(agent_session_id) = entry.agent_session_id else {
+            return Ok(());
+        };
         let driver = self
             .agents
             .driver_for(&meta.agent)
@@ -997,7 +1034,7 @@ impl SessionManager {
             }
         };
         let (driver, agent_session_id) =
-            self.ensure_agent_session(session_id, &entry.meta, &entry.agent_session_id)?;
+            self.ensure_agent_session(session_id, &entry.meta, entry.agent_session_id.as_deref())?;
         log::info!(
             "会话选项设置请求：session={session_id} agent_session={agent_session_id} config_id={config_id} value={value:?}"
         );
@@ -1451,7 +1488,7 @@ mod tests {
         assert!(recent_wt.is_dir());
 
         let cleaned = mgr
-            .cleanup_idle_worktrees(now_ms, 7 * 24 * 3_600_000)
+            .cleanup_idle_worktrees(now_ms, std::time::Duration::from_secs(7 * 24 * 3_600))
             .await
             .unwrap();
         assert_eq!(cleaned, 1, "仅超期会话的 worktree 被清理");
@@ -1489,7 +1526,7 @@ mod tests {
 
         // 再次清理：重建已视为会话活跃（last_active_at 刷新），不再入候选
         let cleaned = mgr
-            .cleanup_idle_worktrees(now_ms, 7 * 24 * 3_600_000)
+            .cleanup_idle_worktrees(now_ms, std::time::Duration::from_secs(7 * 24 * 3_600))
             .await
             .unwrap();
         assert_eq!(cleaned, 0, "刚重建的 worktree 不应被下一轮清理立即回收");
@@ -1535,7 +1572,7 @@ mod tests {
         let meta = mgr.create("codex", "/tmp/lazy", false).await.unwrap();
         let entry = registry.get(&meta.id).unwrap().unwrap();
         assert!(
-            entry.agent_session_id.is_empty(),
+            entry.agent_session_id.is_none(),
             "创建会话不应触发 ACP session/new"
         );
 
@@ -1814,7 +1851,7 @@ mod tests {
         assert_eq!(stored, opts, "查询应惰性创建并返回 Agent 侧初始选项");
         let entry = registry.get(&meta.id).unwrap().unwrap();
         assert!(
-            !entry.agent_session_id.is_empty(),
+            entry.agent_session_id.is_some(),
             "查询会话选项应已创建 agent 侧会话"
         );
 
@@ -1886,7 +1923,7 @@ mod tests {
         // turn 结束后 ongoing 应已清空
         assert!(mgr.ongoing_activity(&meta.id).await.unwrap().is_none());
         // 落盘的活动历史也只剩一条合并后的 thinking
-        let (acts, _, _) = mgr.activities(&meta.id, None, None).await.unwrap();
+        let acts = mgr.activities(&meta.id, None, None).await.unwrap().activities;
         let thinking = acts
             .iter()
             .find_map(|a| match a {
@@ -1940,15 +1977,16 @@ mod tests {
         assert!(log.history_exists(), "prompt 后应写历史");
         assert!(log.activities_exists(), "prompt 后应写活动");
 
-        let (items, has_more, next_before) = mgr.history(&meta.id, None, None).await.unwrap();
+        let page = mgr.history(&meta.id, None, None).await.unwrap();
+        let items = &page.items;
         assert!(matches!(&items[0], HistoryItem::UserMessage { content, .. }
             if content.contains(&ContentBlock::Text { text: "实现登录功能".into() })));
         assert!(items.iter().any(|i| matches!(i, HistoryItem::AgentMessage { content, .. }
             if content.iter().any(|c| matches!(c, ContentBlock::Text { text } if text.contains("完成"))))));
-        assert!(!has_more);
-        assert_eq!(next_before, None);
+        assert!(!page.has_more);
+        assert_eq!(page.next_before, None);
 
-        let (acts, _, _) = mgr.activities(&meta.id, None, None).await.unwrap();
+        let acts = mgr.activities(&meta.id, None, None).await.unwrap().activities;
         assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
         assert!(acts
             .iter()
@@ -2259,7 +2297,7 @@ mod tests {
                 },
                 format!("agent_{id}"),
             );
-            registry.upsert(&m, &aid).unwrap();
+            registry.upsert(&m, Some(&aid)).unwrap();
             let _ = &mut m;
         }
         // 按数量查询：前缀 + has_more；数量增大是更长前缀，不重不漏
@@ -2316,7 +2354,7 @@ mod tests {
         first.await.unwrap().unwrap();
         let entry = registry.get(&session_id).unwrap().unwrap();
         assert!(
-            !entry.agent_session_id.is_empty(),
+            entry.agent_session_id.is_some(),
             "首轮后应有 agent 侧会话 id"
         );
         assert_eq!(entry.meta.state, SessionState::Idle);

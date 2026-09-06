@@ -27,7 +27,7 @@ use crate::workflow::{HubEvent, MachineHub, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小。
-pub(crate) const PAGE_LIMIT: usize = 50;
+pub(crate) const PAGE_LIMIT: usize = protocol::SESSION_LIST_DEFAULT_LIMIT;
 
 // 关闭设置浮窗（Escape）。浮窗为手搓 overlay，焦点落在其内部时该动作才可达；
 // 处理顺序 = 叠层从顶到底：内嵌表单对话框（含技能表单/操作弹窗）> 整个设置浮窗。
@@ -393,10 +393,10 @@ impl AmuxApp {
         n: &WsNotification,
     ) {
         match n.method.as_str() {
-            "connected" => {
+            crate::ws::lifecycle::CONNECTED => {
                 // WS 已建连但尚未认证：保持 Connecting，由 auth_ok 驱动后续
             }
-            "auth_ok" => {
+            crate::ws::lifecycle::AUTH_OK => {
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = MachineStatus::Online;
                 }
@@ -426,7 +426,7 @@ impl AmuxApp {
                     }
                 }
             }
-            "auth_failed" => {
+            crate::ws::lifecycle::AUTH_FAILED => {
                 if let Some(m) = this.machines.get_mut(idx) {
                     let msg = n
                         .params
@@ -438,14 +438,14 @@ impl AmuxApp {
                 }
                 this.clear_connection_state(idx, window, cx);
             }
-            "connect_failed" => {
+            crate::ws::lifecycle::CONNECT_FAILED => {
                 // 连接失败（server 不可达）即离线；不自动重连，由用户手动触发
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = MachineStatus::Offline;
                 }
                 this.clear_connection_state(idx, window, cx);
             }
-            "disconnected" => {
+            crate::ws::lifecycle::DISCONNECTED => {
                 if let Some(m) = this.machines.get_mut(idx) {
                     m.status = MachineStatus::Offline;
                 }
@@ -834,7 +834,9 @@ impl AmuxApp {
                     Ok(n) => {
                         let terminal = matches!(
                             n.method.as_str(),
-                            "auth_failed" | "connect_failed" | "disconnected"
+                            crate::ws::lifecycle::AUTH_FAILED
+                                | crate::ws::lifecycle::CONNECT_FAILED
+                                | crate::ws::lifecycle::DISCONNECTED
                         );
                         let mut gone = false;
                         let _ = this.update_in(cx, |this, window, cx| {
@@ -992,7 +994,7 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
         ok_text: &'static str,
-        danger: bool,
+        ok_variant: ButtonVariant,
         title: &'static str,
         description: String,
         on_ok: F,
@@ -1007,11 +1009,7 @@ impl AmuxApp {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text(ok_text)
-                        .ok_variant(if danger {
-                            ButtonVariant::Danger
-                        } else {
-                            ButtonVariant::Primary
-                        })
+                        .ok_variant(ok_variant)
                         .cancel_text("取消")
                         .show_cancel(true),
                 )

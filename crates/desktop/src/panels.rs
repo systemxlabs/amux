@@ -5,11 +5,9 @@ use gpui_component::{
     tooltip::Tooltip, *,
 };
 
-use serde_json::json;
-
 use protocol::{
-    SessionPlanEntry, SessionPlanStatus, SessionState, WorkspaceListResult, WorkspaceReadParams,
-    WorkspaceReadResult,
+    SessionPlanEntry, SessionPlanStatus, SessionState, WorkspaceListParams, WorkspaceListResult,
+    WorkspaceReadParams, WorkspaceReadResult,
 };
 
 use crate::display::info_row;
@@ -295,12 +293,12 @@ impl AmuxApp {
         m.workspace_loading.insert(path.clone(), request_id);
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let directory_path = path.clone();
-            let params = json!({
-                "sessionId": session_id.clone(),
-                "path": if path.is_empty() { None } else { Some(path.clone()) },
-                "offset": offset,
-                "limit": 200,
-            });
+            let params = WorkspaceListParams {
+                session_id: session_id.clone(),
+                path: (!path.is_empty()).then(|| path.clone()),
+                offset,
+                limit: protocol::WORKSPACE_LIST_PAGE_LIMIT,
+            };
             let res = client
                 .request::<_, WorkspaceListResult>(protocol::method::WORKSPACE_LIST, Some(params))
                 .await;
@@ -391,7 +389,7 @@ impl AmuxApp {
                 session_id: session_id.clone(),
                 path,
                 offset,
-                limit: 400,
+                limit: protocol::WORKSPACE_READ_PAGE_LIMIT,
             };
             let res = client
                 .request::<_, WorkspaceReadResult>(protocol::method::WORKSPACE_READ, Some(params))

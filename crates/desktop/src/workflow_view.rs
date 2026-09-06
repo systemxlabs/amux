@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
+
+use crate::ws::WsClient;
 use gpui::*;
 use gpui_component::{
     button::*,
@@ -197,7 +199,7 @@ impl AmuxApp {
             window,
             cx,
             "确认删除",
-            true,
+            ButtonVariant::Danger,
             "删除工作流会话",
             format!(
                 "确定删除该工作流会话吗？将同时删除其 {linked_session_count} 个关联普通会话，不可恢复。"
@@ -230,24 +232,31 @@ impl AmuxApp {
             return;
         }
         workflow.mark_deleted();
-        let mut targets = Vec::new();
+        // 异步删除期间其它机器可能被移除，导致 machines Vec 重排；只携带稳定机器名，
+        // 完成回调按名称重新解析，禁止把旧下标误当成另一台机器。
+        #[derive(Clone)]
+        struct RemoteSessionTarget {
+            machine: String,
+            client: WsClient,
+            session_id: String,
+            generation: u64,
+        }
+        let mut targets: Vec<RemoteSessionTarget> = Vec::new();
         let mut unavailable = Vec::new();
         for (machine_name, sid) in &linked_sessions {
             match self.machine_by_name(machine_name) {
-                Some(m) => targets.push((
-                    m.config.name.clone(),
-                    m.client.clone(),
-                    sid.clone(),
-                    m.connection_generation,
-                )),
+                Some(m) => targets.push(RemoteSessionTarget {
+                    machine: m.config.name.clone(),
+                    client: m.client.clone(),
+                    session_id: sid.clone(),
+                    generation: m.connection_generation,
+                }),
                 None => unavailable.push(format!("机器 {machine_name} 不可用，无法删除会话 {sid}")),
             }
         }
-        // 异步删除期间其它机器可能被移除，导致 machines Vec 重排；只携带稳定机器名，
-        // 完成回调按名称重新解析，禁止把旧下标误当成另一台机器。
         let target_connections: Vec<(String, u64)> = targets
             .iter()
-            .map(|(name, _, _, generation)| (name.clone(), *generation))
+            .map(|t| (t.machine.clone(), t.generation))
             .collect();
         let remote_targets = targets.clone();
         let data_dir = self.data_dir.clone();
@@ -255,20 +264,24 @@ impl AmuxApp {
             let result = run_engine_on_tokio(async move {
                 let mut deleted = Vec::new();
                 let mut failures = unavailable;
-                for (machine_name, client, sid, _) in &remote_targets {
+                for t in &remote_targets {
                     let params = SessionIdParams {
-                        session_id: sid.clone(),
+                        session_id: t.session_id.clone(),
                     };
-                    match client
+                    match t
+                        .client
                         .request_ok(protocol::method::SESSION_DELETE, Some(params))
                         .await
                     {
-                        Ok(()) => deleted.push((machine_name.clone(), sid.clone())),
+                        Ok(()) => deleted.push((t.machine.clone(), t.session_id.clone())),
                         Err(error) if error.code == protocol::server_error::SESSION_NOT_FOUND => {
-                            deleted.push((machine_name.clone(), sid.clone()));
+                            deleted.push((t.machine.clone(), t.session_id.clone()));
                         }
                         Err(error) => {
-                            failures.push(format!("删除关联普通会话 {sid} 失败：{error}"))
+                            failures.push(format!(
+                                "删除关联普通会话 {} 失败：{error}",
+                                t.session_id
+                            ))
                         }
                     }
                 }

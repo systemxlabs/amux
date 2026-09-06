@@ -47,7 +47,7 @@ use crate::app::{
 
 async fn request_session_page<R, T>(
     client: crate::ws::WsClient,
-    method: &'static str,
+    kind: crate::aggregate::SessionPageKind,
     session_id: String,
     before: Option<u64>,
     decode: impl FnOnce(R) -> (Vec<T>, bool, Option<u64>),
@@ -57,7 +57,7 @@ where
 {
     let response = client
         .request::<_, R>(
-            method,
+            kind.method(),
             Some(SessionPageParams {
                 session_id,
                 limit: Some(PAGE_LIMIT),
@@ -405,8 +405,8 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
+        kind: crate::aggregate::SessionPageKind,
         next_before: fn(&crate::aggregate::SessionView) -> Option<usize>,
-        method: &'static str,
         decode: impl FnOnce(R) -> (Vec<T>, bool, Option<u64>) + 'static,
         apply: impl FnOnce(&mut crate::aggregate::SessionView, Vec<T>, bool, Option<usize>) + 'static,
     ) where
@@ -429,17 +429,15 @@ impl AmuxApp {
         let Some(before) = next_before(view) else {
             return;
         };
-        let request_id = if method == protocol::method::SESSION_HISTORY {
-            view.history_request_id = view.history_request_id.saturating_add(1);
-            view.history_request_id
-        } else {
-            view.activities_request_id = view.activities_request_id.saturating_add(1);
-            view.activities_request_id
+        let request_id = {
+            let slot = kind.request_slot();
+            *slot(view) = slot(view).saturating_add(1);
+            *slot(view)
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             if let Ok((items, has_more, next_before)) =
-                request_session_page(client, method, id.clone(), Some(before as u64), decode).await
+                request_session_page(client, kind, id.clone(), Some(before as u64), decode).await
             {
                 let _ = this.update_in(cx, |this, _w, cx| {
                     let Some(idx) = this.machine_idx_by_name(&machine_name) else {
@@ -454,12 +452,7 @@ impl AmuxApp {
                     let Some(view) = m.views.get_mut(&id) else {
                         return;
                     };
-                    let current_request_id = if method == protocol::method::SESSION_HISTORY {
-                        view.history_request_id
-                    } else {
-                        view.activities_request_id
-                    };
-                    if current_request_id != request_id {
+                    if *kind.request_slot()(view) != request_id {
                         return;
                     }
                     apply(view, items, has_more, next_before);
@@ -474,8 +467,8 @@ impl AmuxApp {
         self.load_more_selected_page(
             window,
             cx,
+            crate::aggregate::SessionPageKind::History,
             |view| view.history_next_before,
-            protocol::method::SESSION_HISTORY,
             |res: HistoryResult| (res.items, res.has_more, res.next_before),
             |view, items, has_more, next_before| {
                 view.prepend_history_page(&items, has_more, next_before)
@@ -487,8 +480,8 @@ impl AmuxApp {
         self.load_more_selected_page(
             window,
             cx,
+            crate::aggregate::SessionPageKind::Activities,
             |view| view.activities_next_before,
-            protocol::method::SESSION_ACTIVITIES,
             |res: ActivitiesResult| (res.activities, res.has_more, res.next_before),
             |view, activities, has_more, next_before| {
                 view.prepend_activities_page(activities, has_more, next_before)
@@ -865,7 +858,7 @@ impl AmuxApp {
             window,
             cx,
             "确认删除",
-            true,
+            ButtonVariant::Danger,
             "删除会话",
             format!("确定删除会话 {session_id} 吗？删除后历史一并移除，不可恢复。"),
             move |this, window, cx| {
@@ -2376,7 +2369,7 @@ impl AmuxApp {
                     .any(|agent| agent.name == session.agent && agent.available);
             (
                 format!("{}@{}", session.agent, machine_view.config.name),
-                if available { "可用" } else { "不可用" },
+                available,
             )
         } else if let Some(Selected::Workflow { id }) = &self.selected {
             // header 仅标注 agent 名称与可用状态；工作状态
@@ -2386,11 +2379,7 @@ impl AmuxApp {
             };
             (
                 "编排智能体".to_string(),
-                if self.store.orchestrator().is_configured() {
-                    "可用"
-                } else {
-                    "不可用"
-                },
+                self.store.orchestrator().is_configured(),
             )
         } else {
             return h_flex().into_any();
@@ -2408,17 +2397,17 @@ impl AmuxApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground),
             )
-            .child(if status == "可用" {
+            .child(if status {
                 Tag::success()
                     .small()
                     .rounded_full()
-                    .child(Label::new(status).text_xs())
+                    .child(Label::new("可用").text_xs())
                     .into_any_element()
             } else {
                 Tag::danger()
                     .small()
                     .rounded_full()
-                    .child(Label::new(status).text_xs())
+                    .child(Label::new("不可用").text_xs())
                     .into_any_element()
             })
             .into_any()

@@ -20,6 +20,16 @@ use tokio_tungstenite::tungstenite::Message;
 
 use protocol::OpResult;
 
+/// 客户端本地合成的连接生命周期事件名（与 server 协议通知共用同一通知通道，
+/// 但不是协议方法；生产端 ws.rs 与消费端 app.rs 共用此定义，防止拼写漂移）。
+pub mod lifecycle {
+    pub const CONNECTED: &str = "connected";
+    pub const CONNECT_FAILED: &str = "connect_failed";
+    pub const AUTH_OK: &str = "auth_ok";
+    pub const AUTH_FAILED: &str = "auth_failed";
+    pub const DISCONNECTED: &str = "disconnected";
+}
+
 /// GPUI 环境无 Tokio runtime，这里维护一个独立的多线程 runtime 跑 WS 后台任务。
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -209,7 +219,7 @@ async fn run_loop(
         Ok((ws, _)) => {
             log::info!("已连接 {url}");
             let _ = notify_tx.send(Notification {
-                method: "connected".into(),
+                method: lifecycle::CONNECTED.into(),
                 params: Value::Null,
             });
             serve_connection(ws, token, &mut req_rx, &close_rx.clone(), &notify_tx).await;
@@ -218,7 +228,7 @@ async fn run_loop(
             log::debug!("连接失败: {e}");
             // UI 需区分「连不上」与「正在连」：连接失败也广播（修复机器永远显示连接中）
             let _ = notify_tx.send(Notification {
-                method: "connect_failed".into(),
+                method: lifecycle::CONNECT_FAILED.into(),
                 params: json!({ "error": e.to_string() }),
             });
         }
@@ -329,7 +339,7 @@ async fn serve_connection(
                     if let Some(err) = resp.error {
                         log::warn!("认证失败 [{}]: {}", err.code, err.message);
                         let _ = notify_tx.send(Notification {
-                            method: "auth_failed".into(),
+                            method: lifecycle::AUTH_FAILED.into(),
                             params: json!({ "code": err.code, "message": err.message }),
                         });
                         return;
@@ -337,7 +347,7 @@ async fn serve_connection(
                     log::info!("认证成功");
                     authed = true;
                     let _ = notify_tx.send(Notification {
-                        method: "auth_ok".into(),
+                        method: lifecycle::AUTH_OK.into(),
                         params: Value::Null,
                     });
                     continue;
@@ -357,7 +367,7 @@ async fn serve_connection(
     // 不做自动重连（见 run_loop 文档）：机器转 Offline，等用户手动重连
     log::warn!("连接断开（server 重启或网络中断），等待手动重连");
     let _ = notify_tx.send(Notification {
-        method: "disconnected".into(),
+        method: lifecycle::DISCONNECTED.into(),
         params: Value::Null,
     });
     for (_, resp) in pending.drain() {

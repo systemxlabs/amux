@@ -5,7 +5,7 @@ use gpui_component::{
     notification::Notification as UiNotification, radio::RadioGroup, FocusTrapElement as _, *,
 };
 
-use crate::config::{ApiFormat, OrchestratorConfig, SkillEntry, WorkflowTemplate};
+use crate::config::{ApiFormat, OrchestratorConfig, QuickCommand, SkillEntry, WorkflowTemplate};
 use crate::display::machine_status_badge;
 
 use crate::app::{AmuxApp, CloseSettingsOverlay, SettingsCategory, SkillAction};
@@ -554,9 +554,9 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        target: Option<(String, String)>,
+        target: Option<QuickCommand>,
     ) {
-        self.settings.qc_edit_target = target.as_ref().map(|(name, _)| name.clone());
+        self.settings.qc_edit_target = target.as_ref().map(|command| command.name.clone());
         let title = if target.is_some() {
             "编辑快捷指令"
         } else {
@@ -569,8 +569,8 @@ impl AmuxApp {
             self.settings.qc_prompt_input.clone(),
             "指令名称",
             "指令内容",
-            target.as_ref().map(|(name, _)| name.as_str()),
-            target.as_ref().map(|(_, prompt)| prompt.as_str()),
+            target.as_ref().map(|command| command.name.as_str()),
+            target.as_ref().map(|command| command.prompt.as_str()),
             title,
             32.5,
             Self::save_quick_command,
@@ -619,7 +619,7 @@ impl AmuxApp {
             window,
             cx,
             "删除",
-            true,
+            ButtonVariant::Danger,
             "删除快捷指令",
             format!("快捷指令「{name}」将被删除，此操作不可撤销。"),
             move |this, _window, cx| {
@@ -696,7 +696,7 @@ impl AmuxApp {
             window,
             cx,
             "删除",
-            true,
+            ButtonVariant::Danger,
             "删除技能",
             format!("技能「{name}」将被删除，此操作不可撤销。"),
             move |this, _window, cx| {
@@ -861,7 +861,7 @@ impl AmuxApp {
             window,
             cx,
             "删除",
-            true,
+            ButtonVariant::Danger,
             "删除工作流计划",
             format!("工作流计划「{name}」将被删除，此操作不可撤销。"),
             move |this, _window, cx| {
@@ -1214,21 +1214,23 @@ impl AmuxApp {
     }
 
     pub(crate) fn render_orchestrator_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let selected_api_format = match self.settings.orch_api_format {
-            ApiFormat::ChatCompletions => Some(0),
-            ApiFormat::Responses => Some(1),
-            ApiFormat::Messages => Some(2),
-        };
+        // ApiFormat ↔ 单选下标的唯一映射：两侧共用同一数组，新增变体不会漏改
+        const API_FORMATS: [ApiFormat; 3] = [
+            ApiFormat::ChatCompletions,
+            ApiFormat::Responses,
+            ApiFormat::Messages,
+        ];
+        let selected_api_format = API_FORMATS
+            .iter()
+            .position(|format| *format == self.settings.orch_api_format);
         let api_format_options = RadioGroup::horizontal("orch-api-format")
             .children(["chat_completions", "responses", "messages"])
             .selected_index(selected_api_format)
-            .on_click(cx.listener(|this, selected: &usize, _window, cx| {
-                this.settings.orch_api_format = match *selected {
-                    0 => ApiFormat::ChatCompletions,
-                    1 => ApiFormat::Responses,
-                    2 => ApiFormat::Messages,
-                    _ => return,
+            .on_click(cx.listener(move |this, selected: &usize, _window, cx| {
+                let Some(format) = API_FORMATS.get(*selected) else {
+                    return;
                 };
+                this.settings.orch_api_format = *format;
                 this.settings.orchestrator_form_error = None;
                 this.settings.orchestrator_form_status = None;
                 cx.notify();
@@ -1335,11 +1337,7 @@ impl AmuxApp {
                             .small()
                             .label("编辑")
                             .on_click(cx.listener(move |this, _ev, window, cx| {
-                                this.open_quick_command_form(
-                                    window,
-                                    cx,
-                                    Some((edit.name.clone(), edit.prompt.clone())),
-                                );
+                                this.open_quick_command_form(window, cx, Some(edit.clone()));
                             })),
                     )
                     .child(

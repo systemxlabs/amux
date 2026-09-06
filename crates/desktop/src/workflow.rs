@@ -122,9 +122,18 @@ pub enum HubEvent {
 /// WsClient 列表——否则重连后旧连接的接收端已关闭，工作流从此
 /// 无法下发/取消任何关联普通会话，新增机器也对编排 LLM 不可见。
 /// 同时充当引擎 → 应用的轻量事件通道（关联普通会话挂载后通知应用即时刷新）。
+/// 单台机器的运行时条目：摘要与连接成对存放。
+/// 替代平行 Vec——下标对齐只靠约定维护，重排/截断时会静默错位；
+/// `client` 为 None 即该机不可达（原「clients 可短于 machines，zip 截断」语义的显式化）。
+#[derive(Debug, Clone)]
+pub struct MachineEntry {
+    pub summary: MachineSummary,
+    pub client: Option<WsClient>,
+}
+
 #[derive(Debug)]
 pub struct MachineHub {
-    entries: Mutex<Vec<(MachineSummary, WsClient)>>,
+    entries: Mutex<Vec<MachineEntry>>,
     events: tokio::sync::broadcast::Sender<HubEvent>,
 }
 
@@ -142,13 +151,19 @@ impl MachineHub {
     /// 应用侧机器视图整体替换（顺序与 app.machines 一致）。clients 可短于
     /// machines（缺客户端即该机不可达，zip 截断）。
     pub fn sync(&self, machines: Vec<MachineSummary>, clients: Vec<WsClient>) {
-        *self.entries.lock() = machines.into_iter().zip(clients).collect();
+        *self.entries.lock() = machines
+            .into_iter()
+            .zip(clients)
+            .map(|(summary, client)| MachineEntry {
+                summary,
+                client: Some(client),
+            })
+            .collect();
     }
 
     /// 推进前快照：拿到最新连接与摘要。
-    pub fn snapshot(&self) -> (Vec<MachineSummary>, Vec<WsClient>) {
-        let entries = self.entries.lock();
-        entries.iter().cloned().unzip()
+    pub fn snapshot(&self) -> Vec<MachineEntry> {
+        self.entries.lock().clone()
     }
 
     /// 通知应用：编排智能体已挂载新的关联普通会话（create_session 工具）。
@@ -193,8 +208,7 @@ pub struct OrcContext {
     /// 引擎共享会话：create_session 工具即时挂载关联普通会话，
     /// 不等整轮 decide 结束就让 GUI 看到关联关系
     pub session: Arc<RwLock<OrcSession>>,
-    pub clients: Vec<WsClient>,
-    pub machines: Vec<MachineSummary>,
+    pub machines: Vec<MachineEntry>,
     /// 引擎 → 应用事件通道：挂载新关联普通会话后通知应用即时刷新会话列表
     pub hub: Arc<MachineHub>,
     /// 关联普通会话挂载后的即时落库钩子（create_session 工具挂载后立即调用；
@@ -649,7 +663,7 @@ impl WorkflowEngine {
 
     fn build_context(&self) -> OrcContext {
         // 每次推进前快照：连接与摘要取自 hub 最新状态（重连/加机后即时生效）
-        let (machines, clients) = self.hub.snapshot();
+        let machines = self.hub.snapshot();
         // 关联普通会话挂载后立即落库（后台任务写盘），不依赖整轮结束后的 persist 快照
         let engine = self.clone();
         let data_dir = self.data_dir.clone();
@@ -673,7 +687,6 @@ impl WorkflowEngine {
                 .collect(),
             linked_sessions: s.linked_sessions.clone(),
             session: Arc::clone(&self.session),
-            clients,
             machines,
             hub: Arc::clone(&self.hub),
             persist_on_linked_session_mounted,
@@ -994,8 +1007,7 @@ impl OrcSession {
 
 #[derive(Clone)]
 struct LiveRuntime {
-    machines: Vec<MachineSummary>,
-    clients: Vec<WsClient>,
+    machines: Vec<MachineEntry>,
     linked_sessions: Arc<Mutex<Vec<LinkedSession>>>,
     /// 引擎共享会话：create_session 工具即时挂载关联普通会话（不等整轮 decide 结束）
     session: Arc<RwLock<OrcSession>>,
@@ -1017,7 +1029,6 @@ impl OrcContext {
     fn live(&self) -> LiveRuntime {
         LiveRuntime {
             machines: self.machines.clone(),
-            clients: self.clients.clone(),
             linked_sessions: Arc::new(Mutex::new(self.linked_sessions.clone())),
             session: Arc::clone(&self.session),
             hub: Arc::clone(&self.hub),
@@ -1033,15 +1044,15 @@ impl LiveRuntime {
     fn machine_index(&self, name: &str) -> Result<usize, String> {
         self.machines
             .iter()
-            .position(|m| m.name == name)
+            .position(|m| m.summary.name == name)
             .ok_or_else(|| format!("机器不存在: {name}"))
     }
 
     fn client(&self, name: &str) -> Result<WsClient, String> {
         let i = self.machine_index(name)?;
-        self.clients
-            .get(i)
-            .cloned()
+        self.machines[i]
+            .client
+            .clone()
             .ok_or_else(|| format!("机器未连接: {name}"))
     }
 
@@ -1100,22 +1111,37 @@ const MAX_TOOL_TURNS: usize = 32;
 /// 连续发出完全相同调用（工具 + 参数）超过该次数判定为死循环。
 const MAX_IDENTICAL_CALLS: usize = 3;
 
+/// 编排工具名：工具 schema（tool_definitions）与 dispatch 分发共用同一常量，
+/// 任一侧拼写漂移都会让工具静默失效。
+mod tool_names {
+    pub const LIST_AGENTS: &str = "list_agents";
+    pub const LIST_SESSIONS: &str = "list_sessions";
+    pub const CREATE_SESSION: &str = "create_session";
+    pub const PROMPT_SESSION: &str = "prompt_session";
+    pub const CANCEL_SESSION: &str = "cancel_session";
+    pub const CONFIGURE_SESSION: &str = "configure_session";
+    pub const GET_SESSION_CONFIG_OPTIONS: &str = "get_session_config_options";
+    pub const READ_SESSION_HISTORY: &str = "read_session_history";
+    pub const READ_SESSION_ACTIVITIES: &str = "read_session_activities";
+}
+
 /// 编排工具清单。
 fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
     use rig_core::completion::ToolDefinition;
+    use tool_names::*;
     vec![
         ToolDefinition {
-            name: "list_agents".into(),
+            name: LIST_AGENTS.into(),
             description: "已注册机器及各机器的 agent 列表：机器在线状态、agent 可用性".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDefinition {
-            name: "list_sessions".into(),
+            name: LIST_SESSIONS.into(),
             description: "本工作流的关联普通会话列表（标题、状态、创建/活跃时间、机器在线与否、工作目录、worktree 目录、上下文用量）".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDefinition {
-            name: "create_session".into(),
+            name: CREATE_SESSION.into(),
             description: "向指定机器、指定 agent 与工作目录创建关联普通会话，返回会话 ID".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1129,7 +1155,7 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "prompt_session".into(),
+            name: PROMPT_SESSION.into(),
             description: "向关联普通会话下发指令".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1141,7 +1167,7 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "cancel_session".into(),
+            name: CANCEL_SESSION.into(),
             description: "取消关联普通会话进行中的工作".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1152,7 +1178,7 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "configure_session".into(),
+            name: CONFIGURE_SESSION.into(),
             description: "配置关联普通会话的标题或会话选项；至少提供 title 或 config".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1178,7 +1204,7 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "get_session_config_options".into(),
+            name: GET_SESSION_CONFIG_OPTIONS.into(),
             description: "获取关联普通会话当前由 agent 提供的完整会话选项集合".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1189,7 +1215,7 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "read_session_history".into(),
+            name: READ_SESSION_HISTORY.into(),
             description: "按窗口 / 游标读取关联普通会话对话内容".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1202,7 +1228,7 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "read_session_activities".into(),
+            name: READ_SESSION_ACTIVITIES.into(),
             description: "按窗口 / 游标读取关联普通会话活动内容".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1609,27 +1635,25 @@ async fn dispatch_tool(
         record(activity.clone());
     }
     *live.current.lock() = Some(activity);
+    // match 分支必须用路径形式引用常量：裸大写标识符会被编译器
+    // 当作新绑定（catch-all），整个分发静默落到第一个分支。
     let result = match name {
-        "list_agents" => list_agents(live).await,
-        "list_sessions" => list_sessions(live).await,
-        "create_session" => run_parsed(name, args, |a| create_session(live, a)).await,
-        "prompt_session" => run_parsed(name, args, |a| prompt_session(live, a)).await,
-        "cancel_session" => run_parsed(name, args, |a| cancel_session(live, a)).await,
-        "configure_session" => run_parsed(name, args, |a| configure_session(live, a)).await,
-        "get_session_config_options" => {
+        tool_names::LIST_AGENTS => list_agents(live).await,
+        tool_names::LIST_SESSIONS => list_sessions(live).await,
+        tool_names::CREATE_SESSION => run_parsed(name, args, |a| create_session(live, a)).await,
+        tool_names::PROMPT_SESSION => run_parsed(name, args, |a| prompt_session(live, a)).await,
+        tool_names::CANCEL_SESSION => run_parsed(name, args, |a| cancel_session(live, a)).await,
+        tool_names::CONFIGURE_SESSION => {
+            run_parsed(name, args, |a| configure_session(live, a)).await
+        }
+        tool_names::GET_SESSION_CONFIG_OPTIONS => {
             run_parsed(name, args, |a| get_session_config_options(live, a)).await
         }
-        "read_session_history" => {
-            run_parsed(name, args, |a| {
-                read_session_page(live, a, protocol::method::SESSION_HISTORY)
-            })
-            .await
+        tool_names::READ_SESSION_HISTORY => {
+            run_parsed(name, args, |a| read_session_page(live, a, PageKind::History)).await
         }
-        "read_session_activities" => {
-            run_parsed(name, args, |a| {
-                read_session_page(live, a, protocol::method::SESSION_ACTIVITIES)
-            })
-            .await
+        tool_names::READ_SESSION_ACTIVITIES => {
+            run_parsed(name, args, |a| read_session_page(live, a, PageKind::Activities)).await
         }
         other => Err(format!("未知工具: {other}")),
     };
@@ -1663,9 +1687,9 @@ async fn list_agents(live: &LiveRuntime) -> Result<String, String> {
         .iter()
         .map(|m| {
             serde_json::json!({
-                "name": m.name,
-                "online": m.online,
-                "agents": m.agents.iter().map(|a| serde_json::json!({
+                "name": m.summary.name,
+                "online": m.summary.online,
+                "agents": m.summary.agents.iter().map(|a| serde_json::json!({
                     "name": a.name,
                     "available": a.available,
                 })).collect::<Vec<_>>(),
@@ -1708,8 +1732,8 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
     let online_of = |c: &LinkedSession| {
         live.machines
             .iter()
-            .find(|m| m.name == c.machine_name)
-            .map(|m| m.online)
+            .find(|m| m.summary.name == c.machine_name)
+            .map(|m| m.summary.online)
             .unwrap_or(false)
     };
     let v: Vec<serde_json::Value> = linked_sessions
@@ -1880,10 +1904,27 @@ struct SessionPageArgs {
     before: Option<u64>,
 }
 
+/// 分页读取的两个目标（对话 / 活动）：内部判别用枚举，仅在请求边界
+/// 映射为协议方法名，避免把方法名字符串当分支条件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageKind {
+    History,
+    Activities,
+}
+
+impl PageKind {
+    fn method(self) -> &'static str {
+        match self {
+            PageKind::History => protocol::method::SESSION_HISTORY,
+            PageKind::Activities => protocol::method::SESSION_ACTIVITIES,
+        }
+    }
+}
+
 async fn read_session_page(
     live: &LiveRuntime,
     args: SessionPageArgs,
-    method: &'static str,
+    kind: PageKind,
 ) -> Result<String, String> {
     let linked_session = live.linked_session(&args.session)?;
     let client = live.client(&linked_session.machine_name)?;
@@ -1892,15 +1933,15 @@ async fn read_session_page(
         limit: args.limit.map(|l| l as usize),
         before: args.before,
     };
-    if method == protocol::method::SESSION_HISTORY {
+    if kind == PageKind::History {
         let r: HistoryResult = client
-            .request::<_, HistoryResult>(protocol::method::SESSION_HISTORY, Some(params))
+            .request::<_, HistoryResult>(kind.method(), Some(params))
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&r).map_err(|e| format!("序列化失败: {e}"))
     } else {
         let r: ActivitiesResult = client
-            .request::<_, ActivitiesResult>(protocol::method::SESSION_ACTIVITIES, Some(params))
+            .request::<_, ActivitiesResult>(kind.method(), Some(params))
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&r).map_err(|e| format!("序列化失败: {e}"))
@@ -1955,11 +1996,13 @@ mod tests {
             updated_at: 0,
         }));
         LiveRuntime {
-            machines: vec![MachineSummary::named("测试机", &["mock_acp"])],
-            clients: vec![WsClient::connect_with_token(
-                "ws://127.0.0.1:1".into(),
-                "unused".into(),
-            )],
+            machines: vec![MachineEntry {
+                summary: MachineSummary::named("测试机", &["mock_acp"]),
+                client: Some(WsClient::connect_with_token(
+                    "ws://127.0.0.1:1".into(),
+                    "unused".into(),
+                )),
+            }],
             linked_sessions: Arc::new(Mutex::new(Vec::new())),
             draft: Arc::new(OrcDraft::new(session.clone())),
             session,
@@ -2016,7 +2059,6 @@ mod tests {
         let persist_dir = dir.clone();
         let live = LiveRuntime {
             machines: ctx.machines.clone(),
-            clients: ctx.clients.clone(),
             linked_sessions: Arc::new(Mutex::new(ctx.linked_sessions.clone())),
             session: ctx.session.clone(),
             hub: ctx.hub.clone(),
@@ -3082,13 +3124,13 @@ mod tests {
         loop {
             match tokio::time::timeout(std::time::Duration::from_millis(200), auth_rx.recv()).await
             {
-                Ok(Ok(n)) if n.method == "auth_ok" => break,
+                Ok(Ok(n)) if n.method == crate::ws::lifecycle::AUTH_OK => break,
                 Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
                 Ok(Err(_)) => panic!("客户端连接已关闭"),
                 Err(_) => assert!(tokio::time::Instant::now() < deadline, "等待客户端认证超时"),
             }
         }
-        live.clients[0] = client;
+        live.machines[0].client = Some(client);
         live.mount_linked_session(LinkedSession {
             id: "s_child".into(),
             machine_name: "测试机".into(),

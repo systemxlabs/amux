@@ -27,7 +27,6 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::AcpAgent;
 use agent_client_protocol::ConnectionTo;
-use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
 use protocol::ContentBlock;
@@ -162,11 +161,25 @@ enum AcpCall {
     },
 }
 
+/// ACP 方法响应（进程内强类型投影：dispatch_call_inner 已拿到 SDK 类型化响应，
+/// 不再经 serde_json::Value 往返）。
+#[derive(Debug, Clone)]
+enum AcpResponse {
+    NewSession {
+        session_id: String,
+        config_options: Vec<protocol::SessionConfigOption>,
+    },
+    /// resume / set_config_option 响应中的完整会话选项集合
+    ConfigOptions(Vec<protocol::SessionConfigOption>),
+    /// cancel / close / delete 无业务载荷
+    Unit,
+}
+
 /// 主线程 → exec 线程的方法请求。
 enum ExecReq {
     Call {
         call: AcpCall,
-        resp: std::sync::mpsc::SyncSender<Result<Value, String>>,
+        resp: std::sync::mpsc::SyncSender<Result<AcpResponse, String>>,
     },
     Prompt {
         sid: String,
@@ -390,8 +403,8 @@ impl AcpAgentDriver {
     }
 
     /// 同步方法调用：请求发往 exec 线程，阻塞等待响应。
-    fn call(&self, call: AcpCall) -> Result<Value, String> {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Value, String>>(1);
+    fn call(&self, call: AcpCall) -> Result<AcpResponse, String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<AcpResponse, String>>(1);
         self.sender()?
             .send(ExecReq::Call { call, resp: tx })
             .map_err(|_| "agent 已关闭".to_string())?;
@@ -419,14 +432,15 @@ impl AgentDriver for AcpAgentDriver {
         let res = self.call(AcpCall::NewSession {
             cwd: cwd.to_string(),
         })?;
-        let sid = res
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "session/new 未返回 sessionId".to_string())?
-            .to_string();
+        let AcpResponse::NewSession {
+            session_id: sid,
+            config_options: options,
+        } = res
+        else {
+            return Err("session/new 响应类型不符".to_string());
+        };
         // 新会话 agent 已在内存中持有，无需 resume
         self.resumed.lock().insert(sid.clone());
-        let options = config_options_from_value(res.get("configOptions"));
         Ok((sid, options))
     }
 
@@ -451,7 +465,10 @@ impl AgentDriver for AcpAgentDriver {
         if result.is_ok() {
             self.resumed.lock().insert(agent_session_id.to_string());
         }
-        result.map(|res| config_options_from_value(res.get("configOptions")))
+        result.map(|res| match res {
+            AcpResponse::ConfigOptions(options) => options,
+            _ => Vec::new(),
+        })
     }
 
     fn prompt(
@@ -562,7 +579,10 @@ impl AgentDriver for AcpAgentDriver {
             config_id: config_id.to_string(),
             value,
         })
-        .map(|res| config_options_from_value(res.get("configOptions")))
+        .map(|res| match res {
+            AcpResponse::ConfigOptions(options) => options,
+            _ => Vec::new(),
+        })
     }
 
     fn available_commands(&self, agent_session_id: &str) -> Vec<protocol::SlashCommand> {
@@ -915,14 +935,11 @@ async fn connect_main(
                             tokio::spawn(async move {
                                 let result = dispatch_call(&cx, &call).await;
                                 // 会话建立成功：按 sessionId 落档建立时的 agent 侧能力
-                                if let Ok(value) = &result {
-                                    let sid = value.get("sessionId").and_then(|v| v.as_str());
+                                if let Ok(AcpResponse::NewSession { session_id, .. }) = &result {
                                     let caps = *caches.default_caps.lock();
                                     match call {
                                         AcpCall::NewSession { .. } => {
-                                            if let Some(sid) = sid {
-                                                caches.caps.lock().insert(sid.to_string(), caps);
-                                            }
+                                            caches.caps.lock().insert(session_id.clone(), caps);
                                         }
                                         AcpCall::Resume { sid, .. } => {
                                             caches.caps.lock().entry(sid).or_insert(caps);
@@ -1000,7 +1017,7 @@ async fn connect_main(
 async fn dispatch_call(
     cx: &ConnectionTo<agent_client_protocol::Agent>,
     call: &AcpCall,
-) -> Result<Value, String> {
+) -> Result<AcpResponse, String> {
     let label = match call {
         AcpCall::NewSession { .. } => "session/new",
         AcpCall::Resume { .. } => "session/resume",
@@ -1021,7 +1038,7 @@ async fn dispatch_call(
 async fn dispatch_call_inner(
     cx: &ConnectionTo<agent_client_protocol::Agent>,
     call: &AcpCall,
-) -> Result<Value, String> {
+) -> Result<AcpResponse, String> {
     match call {
         AcpCall::NewSession { cwd } => {
             let resp = cx
@@ -1029,10 +1046,10 @@ async fn dispatch_call_inner(
                 .block_task()
                 .await
                 .map_err(|e| format!("session/new 失败: {e}"))?;
-            Ok(json!({
-                "sessionId": resp.session_id,
-                "configOptions": acp_config_options(resp.config_options),
-            }))
+            Ok(AcpResponse::NewSession {
+                session_id: resp.session_id.to_string(),
+                config_options: acp_config_options(resp.config_options),
+            })
         }
         AcpCall::Resume { sid, cwd } => {
             let resp = cx
@@ -1040,19 +1057,21 @@ async fn dispatch_call_inner(
                 .block_task()
                 .await
                 .map_err(|e| format!("session/resume 失败: {e}"))?;
-            Ok(json!({ "configOptions": acp_config_options(resp.config_options) }))
+            Ok(AcpResponse::ConfigOptions(acp_config_options(
+                resp.config_options,
+            )))
         }
         AcpCall::Cancel { sid } => {
             cx.send_notification(CancelNotification::new(sid.clone()))
                 .map_err(|e| format!("session/cancel 失败: {e}"))?;
-            Ok(Value::Null)
+            Ok(AcpResponse::Unit)
         }
         AcpCall::Close { sid } => {
             cx.send_request(CloseSessionRequest::new(sid.clone()))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/close 失败: {e}"))?;
-            Ok(Value::Null)
+            Ok(AcpResponse::Unit)
         }
         AcpCall::Delete { sid } => {
             // 仅 agent 声明 sessionCapabilities.delete 时可用；不支持时返回错误，
@@ -1061,7 +1080,7 @@ async fn dispatch_call_inner(
                 .block_task()
                 .await
                 .map_err(|e| format!("session/delete 失败（agent 可能不支持删除）: {e}"))?;
-            Ok(Value::Null)
+            Ok(AcpResponse::Unit)
         }
         AcpCall::SetConfigOption {
             sid,
@@ -1090,7 +1109,9 @@ async fn dispatch_call_inner(
                 .block_task()
                 .await
                 .map_err(|e| format!("session/set_config_option 失败: {e}"))?;
-            Ok(json!({ "configOptions": acp_config_options(Some(resp.config_options)) }))
+            Ok(AcpResponse::ConfigOptions(acp_config_options(Some(
+                resp.config_options,
+            ))))
         }
     }
 }
@@ -1320,12 +1341,6 @@ fn acp_plan(
             },
         })
         .collect()
-}
-
-/// 从 ACP 方法响应 json 中解析 configOptions 字段（缺省为空）。
-fn config_options_from_value(v: Option<&Value>) -> Vec<protocol::SessionConfigOption> {
-    v.and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default()
 }
 
 /// protocol::ContentBlock → SDK ContentBlock。

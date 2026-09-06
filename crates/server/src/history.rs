@@ -68,6 +68,9 @@ impl SessionLog {
     }
 }
 
+/// tool_call 事件缺失 kind 字段时的固定名称（session.rs 实时活动共用）。
+pub(crate) const DEFAULT_TOOL_NAME: &str = "tool_call";
+
 /// 单 turn 聚合：把 turn 期间的驱动事件转换为历史 + 活动：
 /// - 用户输入 → `HistoryItem::UserMessage`
 /// - agent 输出合并为一条 `HistoryItem::AgentMessage`
@@ -173,7 +176,7 @@ impl TurnMerger {
             }
         }
         self.finish_current_tool();
-        let name = name.unwrap_or_else(|| "tool_call".into());
+        let name = name.unwrap_or_else(|| DEFAULT_TOOL_NAME.into());
         self.current_tool = Some(CurrentTool {
             id,
             name,
