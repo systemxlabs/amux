@@ -301,7 +301,11 @@ impl AmuxApp {
                     .await
             },
             |v, res: HistoryResult| {
-                v.set_history_page(&res.items, res.has_more, res.next_before.map(|x| x as usize))
+                v.set_history_page(
+                    &res.items,
+                    res.has_more,
+                    res.next_before.map(|x| x as usize),
+                )
             },
         );
     }
@@ -337,7 +341,11 @@ impl AmuxApp {
                     .await
             },
             |v, res: ActivitiesResult| {
-                v.set_activities_page(res.activities, res.has_more, res.next_before.map(|x| x as usize))
+                v.set_activities_page(
+                    res.activities,
+                    res.has_more,
+                    res.next_before.map(|x| x as usize),
+                )
             },
         );
     }
@@ -431,7 +439,7 @@ impl AmuxApp {
         };
         let request_id = {
             let slot = kind.request_slot();
-            *slot(view) = slot(view).saturating_add(1);
+            *slot(view) += 1;
             *slot(view)
         };
         let client = m.client.clone();
@@ -1427,7 +1435,7 @@ impl AmuxApp {
                                     .text_color(muted_foreground),
                             )
                             .child(
-                                TextView::markdown(format!("amd-{timestamp}"), block_text(content))
+                                TextView::markdown(format!("amd-{timestamp}"), text.clone())
                                     .selectable(true),
                             ),
                     )
@@ -2829,7 +2837,7 @@ mod tests {
         }
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn draft_isolated_per_session() {
         let mut drafts = HashMap::new();
 
@@ -2854,7 +2862,7 @@ mod tests {
         assert!(!drafts.contains_key(&session_key("m1", "s-a")));
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn empty_input_on_leaving_clears_draft() {
         // 曾在 A 留过草稿，之后清空输入再离开，不应残留旧草稿
         let mut drafts = HashMap::new();
@@ -2881,7 +2889,7 @@ mod tests {
         assert!(drafts.is_empty());
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn unowned_input_is_dropped_without_selection() {
         // 未选中会话时输入区无主，切换不应把内容挂到新会话头上
         let mut drafts = HashMap::new();

@@ -42,7 +42,10 @@ pub fn recent_workspaces_for_machine(entries: &[RecentWorkspace], machine: &str)
 /// - 首次加载：`existing` 为空 → 窗口即为当前列表
 /// - 追加：更早一窗按序并入（保持最近活跃在前）
 /// - 按 id 去重（并发刷新可能重复）
-pub fn merge_session_window(existing: &[SessionMeta], window: Vec<SessionMeta>) -> Vec<SessionMeta> {
+pub fn merge_session_window(
+    existing: &[SessionMeta],
+    window: Vec<SessionMeta>,
+) -> Vec<SessionMeta> {
     let mut out = existing.to_vec();
     for m in window {
         if let Some(existing) = out.iter_mut().find(|s| s.id == m.id) {

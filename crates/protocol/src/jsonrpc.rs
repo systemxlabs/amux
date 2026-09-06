@@ -18,8 +18,6 @@ impl From<u64> for JsonRpcId {
     }
 }
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,

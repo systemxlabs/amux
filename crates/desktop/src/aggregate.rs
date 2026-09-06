@@ -130,17 +130,9 @@ impl SessionView {
         self.activities_has_more = has_more;
         self.activities_next_before = next_before;
     }
+}
 
-    /// 设置实时活动；无（None）即回到空闲。
-    pub fn set_live(&mut self, live: Option<Activity>) {
-        self.live = live;
-    }
-
-    /// 设置 agent 计划；Agent 侧数据每次全量覆盖本地值。
-    pub fn set_plan(&mut self, entries: Vec<SessionPlanEntry>) {
-        self.plan = entries;
-    }
-}/// 分页拉取的两个目标视图（对话 / 活动）：内部判别用枚举，
+/// 分页拉取的两个目标视图（对话 / 活动）：内部判别用枚举，
 /// 仅在请求边界映射为协议方法名——直接传方法名字符串会让
 /// 「选错请求序号槽」这类错误静默通过编译。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,5 +310,4 @@ mod tests {
             "保留了更早前缀时应沿用旧游标"
         );
     }
-
 }

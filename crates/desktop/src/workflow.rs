@@ -90,19 +90,18 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// 仅内存使用（机器摘要快照），无序列化需求。
+#[derive(Debug, Clone)]
 pub struct AgentSlot {
     pub name: String,
     pub available: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// 仅内存使用（机器摘要快照），无序列化需求。
+#[derive(Debug, Clone)]
 pub struct MachineSummary {
     pub name: String,
     /// 机器是否在线
-    #[serde(default)]
     pub online: bool,
     pub agents: Vec<AgentSlot>,
 }
@@ -110,11 +109,9 @@ pub struct MachineSummary {
 /// 引擎 → 应用事件（应用订阅后即时刷新 UI）。
 #[derive(Debug, Clone)]
 pub enum HubEvent {
-    /// 编排智能体已挂载新的关联普通会话（create_session 工具执行成功）。
-    LinkedSessionMounted {
-        machine_name: String,
-        session_id: String,
-    },
+    /// 编排智能体已挂载新的关联普通会话（create_session 工具执行成功）；
+    /// 应用按 machine_name 刷新对应机器的会话列表。
+    LinkedSessionMounted { machine_name: String },
 }
 
 /// 机器运行时注册表：应用侧在机器增删/重连/状态变化时整体同步，
@@ -148,16 +145,12 @@ impl Default for MachineHub {
 }
 
 impl MachineHub {
-    /// 应用侧机器视图整体替换（顺序与 app.machines 一致）。clients 可短于
-    /// machines（缺客户端即该机不可达，zip 截断）。
-    pub fn sync(&self, machines: Vec<MachineSummary>, clients: Vec<WsClient>) {
+    /// 应用侧机器视图整体替换（顺序与 app.machines 一致）。
+    /// `client` 为 None 的机器不可达（编排侧报「机器未连接」）。
+    pub fn sync(&self, machines: Vec<(MachineSummary, Option<WsClient>)>) {
         *self.entries.lock() = machines
             .into_iter()
-            .zip(clients)
-            .map(|(summary, client)| MachineEntry {
-                summary,
-                client: Some(client),
-            })
+            .map(|(summary, client)| MachineEntry { summary, client })
             .collect();
     }
 
@@ -168,10 +161,9 @@ impl MachineHub {
 
     /// 通知应用：编排智能体已挂载新的关联普通会话（create_session 工具）。
     /// 事件丢失只影响刷新时机（应用侧 10s 轮询兜底），不阻塞编排。
-    pub fn linked_session_mounted(&self, machine_name: &str, session_id: &str) {
+    pub fn linked_session_mounted(&self, machine_name: &str) {
         let _ = self.events.send(HubEvent::LinkedSessionMounted {
             machine_name: machine_name.to_string(),
-            session_id: session_id.to_string(),
         });
     }
 
@@ -550,11 +542,6 @@ impl WorkflowEngine {
         if let Err(e) = append_jsonl(&path, items) {
             log::error!("工作流对话历史落盘失败 {id}: {e}");
         }
-    }
-
-    #[cfg(test)]
-    pub async fn start(&self) -> Result<(), String> {
-        self.advance().await
     }
 
     pub async fn advance(&self) -> Result<(), String> {
@@ -1506,6 +1493,7 @@ impl OrcBackend for RigBackend {
                 "用户消息与对话历史：\n{transcript_text}\n\n请用工具完成本轮调度，未指定的事项询问用户。"
             );
             let history = vec![Message::user(input)];
+            // 三种 ApiFormat 只在模型构建处不同，工具循环完全一致
             let text = match self.cfg.api_format {
                 ApiFormat::ChatCompletions => {
                     let client = rig_core::providers::openai::Client::builder()
@@ -1650,10 +1638,16 @@ async fn dispatch_tool(
             run_parsed(name, args, |a| get_session_config_options(live, a)).await
         }
         tool_names::READ_SESSION_HISTORY => {
-            run_parsed(name, args, |a| read_session_page(live, a, PageKind::History)).await
+            run_parsed(name, args, |a| {
+                read_session_page::<HistoryResult>(live, a, PageKind::History)
+            })
+            .await
         }
         tool_names::READ_SESSION_ACTIVITIES => {
-            run_parsed(name, args, |a| read_session_page(live, a, PageKind::Activities)).await
+            run_parsed(name, args, |a| {
+                read_session_page::<ActivitiesResult>(live, a, PageKind::Activities)
+            })
+            .await
         }
         other => Err(format!("未知工具: {other}")),
     };
@@ -1801,7 +1795,7 @@ async fn create_session(live: &LiveRuntime, args: CreateSessionArgs) -> Result<S
         id: sid.clone(),
         machine_name: machine_name.clone(),
     });
-    live.hub.linked_session_mounted(&machine_name, &sid);
+    live.hub.linked_session_mounted(&machine_name);
     Ok(sid)
 }
 
@@ -1921,7 +1915,7 @@ impl PageKind {
     }
 }
 
-async fn read_session_page(
+async fn read_session_page<R: serde::de::DeserializeOwned + serde::Serialize>(
     live: &LiveRuntime,
     args: SessionPageArgs,
     kind: PageKind,
@@ -1933,19 +1927,11 @@ async fn read_session_page(
         limit: args.limit.map(|l| l as usize),
         before: args.before,
     };
-    if kind == PageKind::History {
-        let r: HistoryResult = client
-            .request::<_, HistoryResult>(kind.method(), Some(params))
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&r).map_err(|e| format!("序列化失败: {e}"))
-    } else {
-        let r: ActivitiesResult = client
-            .request::<_, ActivitiesResult>(kind.method(), Some(params))
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&r).map_err(|e| format!("序列化失败: {e}"))
-    }
+    let r: R = client
+        .request::<_, R>(kind.method(), Some(params))
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&r).map_err(|e| format!("序列化失败: {e}"))
 }
 
 #[cfg(test)]
@@ -1965,8 +1951,15 @@ mod tests {
     }
 
     fn test_hub(machines: Vec<MachineSummary>, clients: Vec<WsClient>) -> Arc<MachineHub> {
+        test_hub_with(machines, clients.into_iter().map(Some).collect())
+    }
+
+    fn test_hub_with(
+        machines: Vec<MachineSummary>,
+        clients: Vec<Option<WsClient>>,
+    ) -> Arc<MachineHub> {
         let hub = MachineHub::default();
-        hub.sync(machines, clients);
+        hub.sync(machines.into_iter().zip(clients).collect());
         Arc::new(hub)
     }
 
@@ -2085,14 +2078,10 @@ mod tests {
     fn linked_session_mounted_event_reaches_subscriber() {
         let hub = MachineHub::default();
         let mut rx = hub.subscribe();
-        hub.linked_session_mounted("测试机", "s_child");
+        hub.linked_session_mounted("测试机");
         match rx.try_recv() {
-            Ok(HubEvent::LinkedSessionMounted {
-                machine_name,
-                session_id,
-            }) => {
+            Ok(HubEvent::LinkedSessionMounted { machine_name }) => {
                 assert_eq!(machine_name, "测试机");
-                assert_eq!(session_id, "s_child");
             }
             other => panic!("应收到 LinkedSessionMounted 事件，实际 {other:?}"),
         }
@@ -2339,7 +2328,7 @@ mod tests {
         let backend2 = FakeBackend::new(vec!["恢复后推进".into()]);
         let (clients2, m2) = clients_with_machines();
         let engine2 = WorkflowEngine::restore(opened, backend2, test_hub(vec![m2], clients2), &dir);
-        engine2.start().await.unwrap();
+        engine2.advance().await.unwrap();
         assert!(engine2
             .session
             .read()
@@ -2572,7 +2561,10 @@ mod tests {
             "",
             "",
             backend,
-            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            test_hub_with(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![None],
+            ),
             &temp_data_dir(),
         );
         engine.session.write().transcript.push(OrcMsg::User {
@@ -2599,7 +2591,10 @@ mod tests {
             "",
             "计划：先在测试机实现，再审查",
             backend,
-            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            test_hub_with(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![None],
+            ),
             &temp_data_dir(),
         );
         assert!(engine.session.read().transcript.is_empty());
@@ -2618,7 +2613,10 @@ mod tests {
             "",
             "计划：先实现后审查",
             backend,
-            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            test_hub_with(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![None],
+            ),
             &temp_data_dir(),
         );
         let should_advance = engine.record_user("实现登录功能");
@@ -2647,7 +2645,7 @@ mod tests {
             ),
             &temp_data_dir(),
         );
-        let res = engine.start().await;
+        let res = engine.advance().await;
         assert!(res.is_err());
         assert!(engine.session.read().activities.iter().any(
             |a| matches!(a, Activity::Error { detail, .. } if detail.contains("未配置编排 agent API"))
@@ -2694,7 +2692,10 @@ mod tests {
             "",
             "",
             backend,
-            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            test_hub_with(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![None],
+            ),
             &temp_data_dir(),
         );
         engine.session.write().linked_sessions.push(LinkedSession {
@@ -2731,7 +2732,10 @@ mod tests {
             "",
             "",
             FakeBackend::new_for_tests(),
-            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            test_hub_with(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![None],
+            ),
             &temp_data_dir(),
         );
         engine.session.write().linked_sessions.push(LinkedSession {
@@ -2756,7 +2760,10 @@ mod tests {
             "",
             "",
             FakeBackend::new_for_tests(),
-            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            test_hub_with(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![None],
+            ),
             &temp_data_dir(),
         );
         engine.gate.lock().running = true;
@@ -2775,7 +2782,10 @@ mod tests {
             "",
             "",
             FakeBackend::new_for_tests(),
-            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            test_hub_with(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![None],
+            ),
             &temp_data_dir(),
         );
         engine.gate.lock().requested = true;
@@ -2793,7 +2803,10 @@ mod tests {
             "",
             "",
             FakeBackend::new_for_tests(),
-            test_hub(vec![MachineSummary::named("测试机", &["mock_acp"])], vec![]),
+            test_hub_with(
+                vec![MachineSummary::named("测试机", &["mock_acp"])],
+                vec![None],
+            ),
             &temp_data_dir(),
         );
         engine.gate.lock().running = true;

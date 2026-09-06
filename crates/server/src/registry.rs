@@ -120,7 +120,11 @@ impl SessionRegistry {
 
     /// 插入或更新会话元数据（create / 标题 / 状态 / 时间戳更新均走这里）。
     /// `agent_session_id` 为 None 表示尚无 agent 侧会话，落库为空串。
-    pub fn upsert(&self, meta: &SessionMeta, agent_session_id: Option<&str>) -> rusqlite::Result<()> {
+    pub fn upsert(
+        &self,
+        meta: &SessionMeta,
+        agent_session_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
         let conn = self.connection();
         conn.execute(
             "INSERT INTO sessions
@@ -262,8 +266,7 @@ impl SessionRegistry {
         idle_timeout: std::time::Duration,
     ) -> rusqlite::Result<Vec<IdleCandidate>> {
         let conn = self.connection();
-        let mut stmt =
-            conn.prepare("SELECT id, last_active_at FROM sessions WHERE state = ?1")?;
+        let mut stmt = conn.prepare("SELECT id, last_active_at FROM sessions WHERE state = ?1")?;
         let rows = stmt.query_map([SessionState::Idle.as_str()], |row| {
             Ok(IdleCandidate {
                 session_id: row.get::<_, String>("id")?,

@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use protocol::{
-    generate_title, Activity, ActivitiesResult, ContentBlock, HistoryItem, HistoryResult,
+    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryItem, HistoryResult,
     SessionMeta, SessionState, SessionStateChange,
 };
 
@@ -448,9 +448,7 @@ impl SessionManager {
         limit: Option<usize>,
     ) -> Result<(Vec<SessionMeta>, bool), SessionError> {
         let all = self.registry.list()?;
-        let limit = limit
-            .unwrap_or(protocol::SESSION_LIST_DEFAULT_LIMIT)
-            .max(1);
+        let limit = limit.unwrap_or(protocol::SESSION_LIST_DEFAULT_LIMIT).max(1);
         let has_more = all.len() > limit;
         let metas = all
             .into_iter()
@@ -540,7 +538,9 @@ impl SessionManager {
         now_ms: u64,
         idle_timeout: std::time::Duration,
     ) -> Result<usize, SessionError> {
-        let candidates = self.registry.idle_worktree_candidates(now_ms, idle_timeout)?;
+        let candidates = self
+            .registry
+            .idle_worktree_candidates(now_ms, idle_timeout)?;
         let mut cleaned = 0;
         for candidate in candidates {
             let sid = candidate.session_id;
@@ -1923,7 +1923,11 @@ mod tests {
         // turn 结束后 ongoing 应已清空
         assert!(mgr.ongoing_activity(&meta.id).await.unwrap().is_none());
         // 落盘的活动历史也只剩一条合并后的 thinking
-        let acts = mgr.activities(&meta.id, None, None).await.unwrap().activities;
+        let acts = mgr
+            .activities(&meta.id, None, None)
+            .await
+            .unwrap()
+            .activities;
         let thinking = acts
             .iter()
             .find_map(|a| match a {
@@ -1986,7 +1990,11 @@ mod tests {
         assert!(!page.has_more);
         assert_eq!(page.next_before, None);
 
-        let acts = mgr.activities(&meta.id, None, None).await.unwrap().activities;
+        let acts = mgr
+            .activities(&meta.id, None, None)
+            .await
+            .unwrap()
+            .activities;
         assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
         assert!(acts
             .iter()

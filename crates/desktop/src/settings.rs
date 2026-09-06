@@ -498,8 +498,12 @@ impl AmuxApp {
         width_rems: f32,
         save: fn(&mut Self, &mut Context<Self>) -> bool,
     ) {
-        name_input.update(cx, |s, cx| s.set_value(name_value.unwrap_or(""), window, cx));
-        content_input.update(cx, |s, cx| s.set_value(content_value.unwrap_or(""), window, cx));
+        name_input.update(cx, |s, cx| {
+            s.set_value(name_value.unwrap_or(""), window, cx)
+        });
+        content_input.update(cx, |s, cx| {
+            s.set_value(content_value.unwrap_or(""), window, cx)
+        });
         self.settings.form_error = None;
         let fields_name_input = name_input.clone();
         let fields_content_input = content_input.clone();
@@ -637,7 +641,11 @@ impl AmuxApp {
         target: Option<SkillEntry>,
     ) {
         self.settings.skill_edit_target = target.as_ref().map(|skill| skill.name.clone());
-        let title = if target.is_some() { "编辑技能" } else { "新增技能" };
+        let title = if target.is_some() {
+            "编辑技能"
+        } else {
+            "新增技能"
+        };
         self.open_two_field_form(
             window,
             cx,

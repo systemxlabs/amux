@@ -18,7 +18,7 @@ use gpui_component::{
 use protocol::{SessionIdParams, SessionState};
 
 use crate::machine::MachineStatus;
-use crate::workflow::{AgentSlot, MachineSummary, OrcBackend, RigBackend, WorkflowEngine};
+use crate::workflow::{OrcBackend, RigBackend, WorkflowEngine};
 
 use crate::app::{run_engine_on_tokio, AmuxApp, DraftKey, Selected};
 
@@ -81,9 +81,8 @@ impl AmuxApp {
             if self.workflow_idx(&session.id).is_some() {
                 continue;
             }
-            // 每个工作流独立 backend：RigBackend 的 synced_linked_sessions/synced_activities
-            // 是单轮 decide 的回传槽位，共享实例会在并发推进时互相覆盖
-            // （A 可能取到 B 的关联普通会话快照）
+            // 每个工作流独立 backend：共享实例会在并发推进时互相覆盖
+            //（A 可能取到 B 的关联普通会话快照）
             self.workflows.push(WorkflowEngine::restore(
                 session,
                 self.orchestrator_backend(),
@@ -277,12 +276,8 @@ impl AmuxApp {
                         Err(error) if error.code == protocol::server_error::SESSION_NOT_FOUND => {
                             deleted.push((t.machine.clone(), t.session_id.clone()));
                         }
-                        Err(error) => {
-                            failures.push(format!(
-                                "删除关联普通会话 {} 失败：{error}",
-                                t.session_id
-                            ))
-                        }
+                        Err(error) => failures
+                            .push(format!("删除关联普通会话 {} 失败：{error}", t.session_id)),
                     }
                 }
                 Ok::<_, String>((deleted, failures))
@@ -360,26 +355,6 @@ impl AmuxApp {
         Arc::new(RigBackend::new(cfg))
     }
 
-    pub(crate) fn machine_summaries(&self) -> Vec<MachineSummary> {
-        // 全量透传（含不可用 agent 的真实 available）：编排 LLM 需要看到
-        // 「某 agent 不可用」才能避让或上报，预先过滤会让该事实消失
-        self.machines
-            .iter()
-            .map(|m| MachineSummary {
-                name: m.config.name.clone(),
-                online: m.status.online(),
-                agents: m
-                    .agents
-                    .iter()
-                    .map(|a| AgentSlot {
-                        name: a.name.clone(),
-                        available: a.available,
-                    })
-                    .collect(),
-            })
-            .collect()
-    }
-
     pub(crate) fn rename_workflow(&mut self, cx: &mut Context<Self>, wf_id: &str, title: String) {
         if let Some(wf) = self
             .workflow_idx(wf_id)
@@ -438,8 +413,8 @@ impl AmuxApp {
                             .flex_1()
                             .min_w_0()
                             .truncate(),
-                    ), // 状态展示同普通会话行，工作中显示转圈
-                       // 工作中，涵盖编排调度中与关联普通会话工作中），空闲无指示
+                    ), // 状态展示同普通会话行：工作中（编排调度中或关联
+                       // 普通会话工作中）显示转圈，空闲无指示
             )
             .child(
                 Button::new(format!("wf-toggle-{wf_id}"))
@@ -491,8 +466,7 @@ impl AmuxApp {
             let machine = self
                 .machine_idx_by_name(&machine_name)
                 .map(|idx| &self.machines[idx]);
-            let meta =
-                machine.and_then(|machine| machine.sessions.iter().find(|s| s.id == cid));
+            let meta = machine.and_then(|machine| machine.sessions.iter().find(|s| s.id == cid));
             let available = machine.is_some_and(|machine| {
                 machine.status == MachineStatus::Online
                     && !machine.unavailable_workflow_sessions.contains(&cid)

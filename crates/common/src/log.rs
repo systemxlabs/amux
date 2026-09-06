@@ -22,12 +22,10 @@ fn current_filter() -> logforth::filter::RustLogFilter {
 pub fn init_file_output(path: &Path) {
     INITIALIZED.get_or_init(|| {
         let builder = logforth::starter_log::builder().dispatch(|dispatch| {
-            dispatch
-                .filter(current_filter())
-                .append(
-                    logforth::append::Stderr::default()
-                        .with_layout(logforth::layout::TextLayout::default()),
-                )
+            dispatch.filter(current_filter()).append(
+                logforth::append::Stderr::default()
+                    .with_layout(logforth::layout::TextLayout::default()),
+            )
         });
 
         let Some(parent) = path.parent() else {

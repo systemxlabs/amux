@@ -175,13 +175,10 @@ impl AmuxApp {
         cx: &Context<Self>,
     ) -> bool {
         self.machine_by_name(machine_name).is_some_and(|m| {
-            m.diff
-                .read(cx)
-                .selection
-                .contains(&DiffSelectionKey {
-                    path: path.to_string(),
-                    hunk,
-                })
+            m.diff.read(cx).selection.contains(&DiffSelectionKey {
+                path: path.to_string(),
+                hunk,
+            })
         })
     }
 

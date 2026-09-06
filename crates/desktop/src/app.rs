@@ -23,7 +23,7 @@ use base64::Engine as _;
 use crate::config::{ConfigStore, SkillEntry};
 use crate::logic::InputAttachment;
 use crate::machine::{MachineStatus, MachineView};
-use crate::workflow::{HubEvent, MachineHub, WorkflowEngine};
+use crate::workflow::{AgentSlot, HubEvent, MachineHub, MachineSummary, WorkflowEngine};
 use crate::ws::{Notification as WsNotification, WsClient};
 
 /// 会话列表惰性分页窗口大小。
@@ -867,8 +867,28 @@ impl AmuxApp {
 
     /// 用当前机器视图整体刷新运行时注册表（增删/重连/状态变化后调用）。
     pub(crate) fn sync_machine_hub(&self) {
-        let clients = self.machines.iter().map(|m| m.client.clone()).collect();
-        self.machine_hub.sync(self.machine_summaries(), clients);
+        let entries = self
+            .machines
+            .iter()
+            .map(|m| {
+                // 全量透传（含不可用 agent 的真实 available）：编排 LLM 需要看到
+                // 「某 agent 不可用」才能避让或上报，预先过滤会让该事实消失
+                let summary = MachineSummary {
+                    name: m.config.name.clone(),
+                    online: m.status.online(),
+                    agents: m
+                        .agents
+                        .iter()
+                        .map(|a| AgentSlot {
+                            name: a.name.clone(),
+                            available: a.available,
+                        })
+                        .collect(),
+                };
+                (summary, Some(m.client.clone()))
+            })
+            .collect();
+        self.machine_hub.sync(entries);
     }
 
     /// 切换选中会话。输入框是全局单例，直接换会话会把 A 的未发送内容串到 B，
@@ -1363,5 +1383,3 @@ pub(crate) async fn run_engine_on_tokio<T: Send + 'static>(
     });
     rx.await.ok()
 }
-
-
