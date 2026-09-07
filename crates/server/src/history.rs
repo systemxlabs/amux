@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use amux_common::session_log::{activities_path, append_jsonl, history_path, read_jsonl};
+use amux_common::session_log::{activities_path, append_jsonl, history_path, read_jsonl_page};
 use protocol::{Activity, ContentBlock, HistoryItem};
 
 /// 按会话的数据文件（历史 + 活动）。
@@ -34,14 +34,22 @@ impl SessionLog {
         append_jsonl(&self.activities_path, items)
     }
 
-    /// 读取全部历史条目；日志缺失视为空，损坏内容返回错误。
-    pub fn read_history(&self) -> std::io::Result<Vec<HistoryItem>> {
-        read_jsonl(&self.history_path)
+    /// 分页读取历史尾部；窗口外的损坏行不会被本轮反序列化。
+    pub fn read_history_page(
+        &self,
+        limit: usize,
+        before: Option<u64>,
+    ) -> std::io::Result<(Vec<HistoryItem>, bool, Option<u64>)> {
+        read_jsonl_page(&self.history_path, limit, before)
     }
 
-    /// 读取全部活动条目；日志缺失视为空，损坏内容返回错误。
-    pub fn read_activities(&self) -> std::io::Result<Vec<Activity>> {
-        read_jsonl(&self.activities_path)
+    /// 分页读取活动尾部；窗口外的损坏行不会被本轮反序列化。
+    pub fn read_activities_page(
+        &self,
+        limit: usize,
+        before: Option<u64>,
+    ) -> std::io::Result<(Vec<Activity>, bool, Option<u64>)> {
+        read_jsonl_page(&self.activities_path, limit, before)
     }
 
     pub fn history_exists(&self) -> bool {
@@ -308,8 +316,8 @@ mod tests {
         ));
         let log = SessionLog::open(&dir, "s1");
         assert!(!log.exists_any());
-        assert!(log.read_history().unwrap().is_empty());
-        assert!(log.read_activities().unwrap().is_empty());
+        assert!(log.read_history_page(1, None).unwrap().0.is_empty());
+        assert!(log.read_activities_page(1, None).unwrap().0.is_empty());
 
         log.append_history(&[HistoryItem::UserMessage {
             content: vec![ContentBlock::Text { text: "hi".into() }],

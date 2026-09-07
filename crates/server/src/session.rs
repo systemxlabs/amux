@@ -105,13 +105,6 @@ impl SessionManager {
         (manager, rx)
     }
 
-    /// 惰性加载切窗（纯函数）：按 limit 与 before 游标计算 [start, end) 与是否还有更早。
-    pub fn window_items(len: usize, limit: usize, before: Option<usize>) -> (usize, usize, bool) {
-        let end = before.unwrap_or(len).min(len);
-        let start = end.saturating_sub(limit);
-        (start, end, start > 0)
-    }
-
     pub fn agents(&self) -> &AgentRegistry {
         &self.agents
     }
@@ -285,7 +278,7 @@ impl SessionManager {
         let (sid, options) = driver
             .create_session(&cwd)
             .map_err(SessionError::AgentUnavailable)?;
-        self.registry.set_agent_session_id(session_id, &sid)?;
+        self.registry.set_agent_session_id(session_id, Some(&sid))?;
         self.store_config_options(session_id, options);
         Ok((driver, sid))
     }
@@ -447,14 +440,9 @@ impl SessionManager {
         &self,
         limit: Option<usize>,
     ) -> Result<(Vec<SessionMeta>, bool), SessionError> {
-        let all = self.registry.list()?;
         let limit = limit.unwrap_or(protocol::SESSION_LIST_DEFAULT_LIMIT).max(1);
-        let has_more = all.len() > limit;
-        let metas = all
-            .into_iter()
-            .take(limit)
-            .map(|entry| entry.meta)
-            .collect();
+        let (entries, has_more) = self.registry.list(limit)?;
+        let metas = entries.into_iter().map(|entry| entry.meta).collect();
         Ok((metas, has_more))
     }
 
@@ -517,7 +505,7 @@ impl SessionManager {
             }
             if let Ok(driver) = self.agents.driver_for(&meta.agent) {
                 if driver.close(&aid).is_ok() {
-                    if let Ok(()) = self.registry.set_agent_session_id(&sid, "") {
+                    if let Ok(()) = self.registry.set_agent_session_id(&sid, None) {
                         // agent 侧会话已关闭，内存中的会话选项随之失效；
                         // 下次交互惰性重建时以 Agent 侧数据重新覆盖
                         self.config_options.lock().remove(&sid);
@@ -579,10 +567,10 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<HistoryResult, SessionError> {
         self.get_entry(session_id)?;
-        let items = SessionLog::open(&self.data_dir, session_id)
-            .read_history()
+        let limit = limit.unwrap_or(protocol::SESSION_PAGE_DEFAULT_LIMIT).max(1);
+        let (items, has_more, next_before) = SessionLog::open(&self.data_dir, session_id)
+            .read_history_page(limit, before)
             .map_err(|e| SessionError::Storage(format!("会话历史读取失败: {e}")))?;
-        let (items, has_more, next_before) = Self::page(&items, limit, before);
         Ok(HistoryResult {
             items,
             has_more,
@@ -598,28 +586,15 @@ impl SessionManager {
         before: Option<u64>,
     ) -> Result<ActivitiesResult, SessionError> {
         self.get_entry(session_id)?;
-        let items = SessionLog::open(&self.data_dir, session_id)
-            .read_activities()
+        let limit = limit.unwrap_or(protocol::SESSION_PAGE_DEFAULT_LIMIT).max(1);
+        let (activities, has_more, next_before) = SessionLog::open(&self.data_dir, session_id)
+            .read_activities_page(limit, before)
             .map_err(|e| SessionError::Storage(format!("会话活动读取失败: {e}")))?;
-        let (activities, has_more, next_before) = Self::page(&items, limit, before);
         Ok(ActivitiesResult {
             activities,
             has_more,
             next_before,
         })
-    }
-
-    /// 惰性分页切窗并计算下一游标（纯函数，`history`/`activities` 共用）。
-    fn page<T: Clone>(
-        items: &[T],
-        limit: Option<usize>,
-        before: Option<u64>,
-    ) -> (Vec<T>, bool, Option<u64>) {
-        let limit = limit.unwrap_or(protocol::SESSION_PAGE_DEFAULT_LIMIT);
-        let before_usize = before.map(|b| b as usize);
-        let (start, end, has_more) = Self::window_items(items.len(), limit, before_usize);
-        let next_before = if has_more { Some(start as u64) } else { None };
-        (items[start..end].to_vec(), has_more, next_before)
     }
 
     /// 查询正在进行中的活动；无则 None。
@@ -1553,7 +1528,8 @@ mod tests {
         assert!(matches!(err, SessionError::Storage(_)), "got: {err:?}");
 
         // 失败路径不留痕：注册表应为空
-        let all = registry.list().unwrap();
+        let (all, has_more) = registry.list(10).unwrap();
+        assert!(!has_more);
         assert!(all.is_empty(), "失败时不应写入注册表: {all:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1955,18 +1931,6 @@ mod tests {
         panic!("ongoing thinking 内容始终未匹配: {expected}");
     }
 
-    #[test]
-    fn window_items_lazy_loading_slices() {
-        let (start, end, has_more) = SessionManager::window_items(1000, 200, None);
-        assert_eq!((start, end, has_more), (800, 1000, true));
-        let (start, end, has_more) = SessionManager::window_items(1000, 200, Some(800));
-        assert_eq!((start, end, has_more), (600, 800, true));
-        let (start, end, has_more) = SessionManager::window_items(1000, 200, Some(200));
-        assert_eq!((start, end, has_more), (0, 200, false));
-        let (start, end, has_more) = SessionManager::window_items(50, 200, None);
-        assert_eq!((start, end, has_more), (0, 50, false));
-    }
-
     #[tokio::test]
     async fn prompt_writes_history_and_activities_with_title() {
         let (mgr, mut rx) = stub_manager("codex");
@@ -2066,7 +2030,7 @@ mod tests {
         started.notified().await;
 
         let log = SessionLog::open(&dir, &meta.id);
-        let history = log.read_history().unwrap();
+        let (history, _, _) = log.read_history_page(1000, None).unwrap();
         assert!(matches!(
             history.as_slice(),
             [HistoryItem::UserMessage { content, .. }]
@@ -2259,7 +2223,7 @@ mod tests {
         // 已定稿的活动应实时落盘，而非攒到 turn 结束统一写。
         flushed.notified().await;
         let log = SessionLog::open(&dir, &meta.id);
-        let acts = log.read_activities().unwrap();
+        let (acts, _, _) = log.read_activities_page(1000, None).unwrap();
         assert!(
             acts.iter()
                 .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "思考中")),

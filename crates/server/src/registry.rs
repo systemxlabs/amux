@@ -17,7 +17,7 @@ pub struct SessionRegistry {
 }
 
 /// 注册表条目：会话元数据 + agent 侧会话 id（驱动操作需要）。
-/// `agent_session_id` 为 None 表示 agent 侧会话尚未惰性创建（DB 存空串）。
+/// `agent_session_id` 为 None 表示 agent 侧会话尚未惰性创建。
 #[derive(Debug, Clone)]
 pub struct RegistryEntry {
     pub meta: SessionMeta,
@@ -71,11 +71,9 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
         context_size: row.get::<_, i64>("context_size")? as u64,
         context_window_size: row.get::<_, i64>("context_window_size")? as u64,
     };
-    // DB 中空串表示「agent 侧会话尚未惰性创建」，读出时映射为 None
-    let agent_session_id: String = row.get("agent_session_id")?;
     Ok(RegistryEntry {
         meta,
-        agent_session_id: (!agent_session_id.is_empty()).then_some(agent_session_id),
+        agent_session_id: row.get("agent_session_id")?,
     })
 }
 
@@ -98,7 +96,7 @@ impl SessionRegistry {
                 cwd TEXT NOT NULL,
                 state TEXT NOT NULL,
                 title TEXT NOT NULL DEFAULT '',
-                agent_session_id TEXT NOT NULL,
+                agent_session_id TEXT,
                 created_at INTEGER NOT NULL,
                 last_active_at INTEGER NOT NULL,
                 worktree_dir TEXT NOT NULL DEFAULT '',
@@ -119,7 +117,7 @@ impl SessionRegistry {
     }
 
     /// 插入或更新会话元数据（create / 标题 / 状态 / 时间戳更新均走这里）。
-    /// `agent_session_id` 为 None 表示尚无 agent 侧会话，落库为空串。
+    /// `agent_session_id` 为 NULL 表示尚无 agent 侧会话。
     pub fn upsert(
         &self,
         meta: &SessionMeta,
@@ -142,7 +140,7 @@ impl SessionRegistry {
                 meta.cwd,
                 meta.state.as_str(),
                 meta.title,
-                agent_session_id.unwrap_or(""),
+                agent_session_id,
                 meta.created_at as i64,
                 meta.last_active_at as i64,
                 meta.worktree_dir,
@@ -160,12 +158,19 @@ impl SessionRegistry {
         stmt.query_row(params![id], row_to_entry).optional()
     }
 
-    /// 全部条目，按最近活跃（last_active_at）降序——惰性分页的上游数据。
-    pub fn list(&self) -> rusqlite::Result<Vec<RegistryEntry>> {
+    /// 最近活跃的前缀，最多 `limit` 条；多读一条用于判断是否还有更多。
+    /// SQL 层截断，避免会话规模增长后把全表装载进内存。
+    pub fn list(&self, limit: usize) -> rusqlite::Result<(Vec<RegistryEntry>, bool)> {
+        let query_limit = limit.max(1).saturating_add(1) as i64;
         let conn = self.connection();
-        let mut stmt = conn.prepare(&session_select("ORDER BY last_active_at DESC, id DESC"))?;
-        let rows = stmt.query_map([], row_to_entry)?;
-        rows.collect()
+        let mut stmt = conn.prepare(&session_select(
+            "ORDER BY last_active_at DESC, id DESC LIMIT ?1",
+        ))?;
+        let rows = stmt.query_map([query_limit], row_to_entry)?;
+        let mut entries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        Ok((entries, has_more))
     }
 
     /// 删除条目；返回是否存在。
@@ -200,9 +205,13 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 回填 agent 侧会话 id：创建会话时未与 ACP 交互（agent 侧会话延后到首次
-    /// prompt 懒创建），首次 prompt 时经 `session/new` 拿到 id 后写入。
-    pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> rusqlite::Result<()> {
+    /// 回填或清除 agent 侧会话 id：创建会话时未与 ACP 交互（agent 侧会话延后到
+    /// 首次 prompt 懒创建），首次 prompt 时经 `session/new` 拿到 id 后写入。
+    pub fn set_agent_session_id(
+        &self,
+        id: &str,
+        agent_session_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
         let conn = self.connection();
         conn.execute(
             "UPDATE sessions SET agent_session_id = ?1 WHERE id = ?2",
@@ -335,10 +344,15 @@ mod tests {
 
         let (m2, a2) = meta("s2", 400);
         reg.upsert(&m2, Some(&a2)).unwrap();
-        let all = reg.list().unwrap();
+        let (all, has_more) = reg.list(10).unwrap();
+        assert!(!has_more);
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].meta.id, "s2");
         assert_eq!(all[1].meta.id, "s1");
+        let (limited, has_more) = reg.list(1).unwrap();
+        assert!(has_more);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].meta.id, "s2");
 
         assert!(reg.delete("s1").unwrap());
         assert!(!reg.delete("s1").unwrap());
@@ -437,9 +451,11 @@ mod tests {
         reg.upsert(&m, None).unwrap();
         let got = reg.get("s1").unwrap().unwrap();
         assert_eq!(got.agent_session_id, None);
-        reg.set_agent_session_id("s1", "mock_s_1").unwrap();
+        reg.set_agent_session_id("s1", Some("mock_s_1")).unwrap();
         let got = reg.get("s1").unwrap().unwrap();
         assert_eq!(got.agent_session_id.as_deref(), Some("mock_s_1"));
+        reg.set_agent_session_id("s1", None).unwrap();
+        assert_eq!(reg.get("s1").unwrap().unwrap().agent_session_id, None);
         let _ = std::fs::remove_file(&db);
     }
 
@@ -452,7 +468,8 @@ mod tests {
             reg.upsert(&m, Some(&aid)).unwrap();
         }
         let reg = SessionRegistry::open(&db).unwrap();
-        let all = reg.list().unwrap();
+        let (all, has_more) = reg.list(10).unwrap();
+        assert!(!has_more);
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].meta.id, "s1");
         assert_eq!(all[0].agent_session_id.as_deref(), Some("agent_s1"));
@@ -469,7 +486,7 @@ mod tests {
             reg2.upsert(&m, Some(&aid)).unwrap();
         });
         h.join().unwrap();
-        assert_eq!(reg.list().unwrap().len(), 1);
+        assert_eq!(reg.list(10).unwrap().0.len(), 1);
         let _ = std::fs::remove_file(&db);
     }
 }
