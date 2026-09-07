@@ -2820,7 +2820,9 @@ impl AmuxApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // gpui 的 glob 导出会带入同名 `test` 属性宏，这里显式改用 Rust 内置测试属性。
     use crate::app::{swap_draft, Draft};
+    use core::prelude::v1::test;
     use std::collections::HashMap;
 
     fn session_key(machine: &str, id: &str) -> DraftKey {

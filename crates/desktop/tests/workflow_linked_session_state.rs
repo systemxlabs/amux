@@ -17,7 +17,6 @@ use amux_desktop::workflow::{
     AgentSlot, LinkedSession, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,
     WorkflowEngine,
 };
-use amux_desktop::ws::WsClient;
 use protocol::{SessionState, StateChangeReason};
 
 /// 可暂停的编排后端：decide 阻塞在信号量上直到测试放行。
@@ -65,20 +64,17 @@ async fn wait_started(backend: &PausableBackend, expected: usize) {
 
 fn hub_with_one_machine() -> Arc<MachineHub> {
     let hub = MachineHub::default();
-    hub.sync(
-        vec![MachineSummary {
+    hub.sync(vec![(
+        MachineSummary {
             name: "测试机".into(),
             online: true,
             agents: vec![AgentSlot {
                 name: "mock_acp".into(),
                 available: true,
             }],
-        }],
-        vec![WsClient::connect_with_token(
-            "ws://127.0.0.1:1".into(),
-            "unused".into(),
-        )],
-    );
+        },
+        None,
+    )]);
     Arc::new(hub)
 }
 
