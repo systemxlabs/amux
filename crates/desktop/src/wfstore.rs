@@ -20,8 +20,7 @@ use rusqlite::{params, Connection};
 
 use crate::workflow::{LinkedSession, OrcMsg, OrcSession};
 
-const META_SELECT_COLUMNS: &str =
-    "id, title, state, last_active_at, description, plan, preamble, created_at, updated_at";
+const META_SELECT_COLUMNS: &str = "id, title, state, last_active_at, plan, created_at";
 
 fn meta_select(suffix: &str) -> String {
     format!("SELECT {META_SELECT_COLUMNS} FROM sessions {suffix}")
@@ -70,11 +69,8 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
             title TEXT NOT NULL,
             state TEXT NOT NULL,
             last_active_at INTEGER NOT NULL,
-            description TEXT NOT NULL,
             plan TEXT NOT NULL,
-            preamble TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS workflow_linked_sessions (
             workflow_id TEXT NOT NULL,
@@ -98,11 +94,8 @@ struct MetaRow {
     title: String,
     state: String,
     last_active_at: u64,
-    description: String,
     plan: String,
-    preamble: String,
     created_at: u64,
-    updated_at: u64,
 }
 
 fn read_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetaRow> {
@@ -111,11 +104,8 @@ fn read_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetaRow> {
         title: row.get(1)?,
         state: row.get(2)?,
         last_active_at: row.get::<_, i64>(3)? as u64,
-        description: row.get(4)?,
-        plan: row.get(5)?,
-        preamble: row.get(6)?,
-        created_at: row.get::<_, i64>(7)? as u64,
-        updated_at: row.get::<_, i64>(8)? as u64,
+        plan: row.get(4)?,
+        created_at: row.get::<_, i64>(5)? as u64,
     })
 }
 
@@ -125,14 +115,12 @@ fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession>
         id: row.id,
         title: row.title,
         plan: row.plan,
-        description: row.description,
-        preamble: row.preamble,
         state: state_from(&row.state)?,
         transcript: Vec::new(),
         linked_sessions: Vec::new(),
         activities: Vec::new(),
         created_at: row.created_at,
-        updated_at: row.last_active_at.max(row.updated_at),
+        last_active_at: row.last_active_at,
     })
 }
 
@@ -178,25 +166,19 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     let tx = conn.transaction().map_err(io::Error::other)?;
     tx.execute(
         "INSERT INTO sessions
-            (id, title, state, last_active_at, description, plan, preamble,
-             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            (id, title, state, last_active_at, plan, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET
             title=excluded.title, state=excluded.state,
             last_active_at=excluded.last_active_at,
-            description=excluded.description, plan=excluded.plan,
-            preamble=excluded.preamble,
-            created_at=excluded.created_at, updated_at=excluded.updated_at",
+            plan=excluded.plan, created_at=excluded.created_at",
         params![
             session.id,
             session.title,
             session.state.as_str(),
-            session.updated_at as i64,
-            session.description,
+            session.last_active_at as i64,
             session.plan,
-            session.preamble,
             session.created_at as i64,
-            session.updated_at as i64,
         ],
     )
     .map_err(io::Error::other)?;
@@ -357,8 +339,6 @@ mod tests {
             id: "orc_1".into(),
             title: "计划A".into(),
             plan: "第一步：实现\n第二步：审查".into(),
-            description: "做完再审查".into(),
-            preamble: "计划".into(),
             state: SessionState::Idle,
             transcript: vec![
                 OrcMsg::User {
@@ -376,7 +356,7 @@ mod tests {
                 content: "想".into(),
             }],
             created_at: 10,
-            updated_at: 20,
+            last_active_at: 20,
         };
         save(&dir, &session).unwrap(); // save 只写元数据
                                        // 对话历史由引擎在条目完整后实时追加写盘；这里模拟引擎追加。
@@ -399,8 +379,6 @@ mod tests {
             id: "orc_1".into(),
             title: String::new(),
             plan: String::new(),
-            description: String::new(),
-            preamble: String::new(),
             state: SessionState::Idle,
             transcript: Vec::new(),
             linked_sessions: vec![
@@ -415,7 +393,7 @@ mod tests {
             ],
             activities: Vec::new(),
             created_at: 1,
-            updated_at: 1,
+            last_active_at: 1,
         };
         let mut second = base.clone();
         second.id = "orc_2".into();
@@ -477,23 +455,21 @@ mod tests {
             id: "orc_old".into(),
             title: "旧工作流".into(),
             plan: String::new(),
-            description: String::new(),
-            preamble: String::new(),
             state: SessionState::Idle,
             transcript: Vec::new(),
             linked_sessions: Vec::new(),
             activities: Vec::new(),
             created_at: 1,
-            updated_at: 10,
+            last_active_at: 10,
         };
         let mut middle = oldest.clone();
         middle.id = "orc_middle".into();
         middle.title = "中间工作流".into();
-        middle.updated_at = 20;
+        middle.last_active_at = 20;
         let mut newest = oldest.clone();
         newest.id = "orc_new".into();
         newest.title = "新工作流".into();
-        newest.updated_at = 30;
+        newest.last_active_at = 30;
         save(&dir, &oldest).unwrap();
         save(&dir, &middle).unwrap();
         save(&dir, &newest).unwrap();
@@ -523,8 +499,6 @@ mod tests {
             id: "orc_1".into(),
             title: "计划A".into(),
             plan: "第一步：实现\n第二步：审查".into(),
-            description: "做完再审查".into(),
-            preamble: "计划".into(),
             state: SessionState::Idle,
             transcript: vec![
                 OrcMsg::User {
@@ -542,7 +516,7 @@ mod tests {
                 content: "想".into(),
             }],
             created_at: 10,
-            updated_at: 20,
+            last_active_at: 20,
         };
         save(&dir, &session).unwrap();
         // 对话历史由引擎在条目完整后实时追加写盘；这里模拟引擎追加。
@@ -563,10 +537,8 @@ mod tests {
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0].id, "orc_1");
         assert_eq!(meta[0].title, "计划A");
-        assert_eq!(meta[0].description, "做完再审查");
         // 执行计划列完整往返
         assert_eq!(meta[0].plan, "第一步：实现\n第二步：审查");
-        assert_eq!(meta[0].preamble, "计划");
         assert_eq!(meta[0].state, SessionState::Idle);
         assert!(meta[0].transcript.is_empty());
         assert!(meta[0].activities.is_empty());
@@ -594,7 +566,6 @@ mod tests {
         );
         // 补齐只影响 payload，元数据字段保持不变。
         assert_eq!(meta[0].title, "计划A");
-        assert_eq!(meta[0].preamble, "计划");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

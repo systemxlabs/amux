@@ -69,18 +69,14 @@ pub struct LinkedSession {
 pub struct OrcSession {
     pub id: String,
     pub title: String,
-    /// 完整执行计划（用户输入原文，不含上下文附件展开的内容；随元数据持久化）
+    /// 用户输入的完整执行计划；随元数据持久化
     pub plan: String,
-    /// 用户自然语言计划（含上下文附件展开的内容）
-    pub description: String,
-    /// 工作流计划/系统指令（内置进编排 agent 的系统提示词，不进入会话历史）。
-    pub preamble: String,
     pub state: SessionState,
     pub transcript: Vec<OrcMsg>,
     pub linked_sessions: Vec<LinkedSession>,
     pub activities: Vec<Activity>,
     pub created_at: u64,
-    pub updated_at: u64,
+    pub last_active_at: u64,
 }
 
 pub fn now() -> u64 {
@@ -194,7 +190,6 @@ impl MachineSummary {
 #[derive(Clone)]
 pub struct OrcContext {
     pub plan: String,
-    pub preamble: String,
     pub transcript: Vec<String>,
     pub linked_sessions: Vec<LinkedSession>,
     /// 引擎共享会话：create_session 工具即时挂载关联普通会话，
@@ -345,7 +340,7 @@ impl GateGuard {
         } else {
             SessionState::Idle
         };
-        session.updated_at = now();
+        session.last_active_at = now();
         *active = false;
     }
 
@@ -401,35 +396,26 @@ pub struct WorkflowEngine {
 
 impl WorkflowEngine {
     pub fn new(
-        description: &str,
-        context: &str,
-        preamble: &str,
+        plan: &str,
         backend: Arc<dyn OrcBackend>,
         hub: Arc<MachineHub>,
         data_dir: &Path,
     ) -> Self {
-        let full = if context.trim().is_empty() {
-            description.to_string()
-        } else {
-            format!("{description}\n\n[上下文]\n{context}")
-        };
         let transcript = Vec::new();
-        // 执行计划不进对话消息历史：计划存元数据（plan/description 字段），
-        // 用户在对话界面输入消息，经 record_user 写入 transcript 并触发推进。
+        // 执行计划不进对话消息历史：计划存元数据，用户在对话界面输入消息，
+        // 经 record_user 写入 transcript 并触发推进。
         let t = now();
         let session = OrcSession {
             id: format!("orc_{}", uuid::Uuid::new_v4()),
             // 标题由用户首个指令生成（record_user），不取自工作流计划
             title: String::new(),
-            plan: description.to_string(),
-            description: full,
-            preamble: preamble.to_string(),
+            plan: plan.to_string(),
             state: SessionState::Idle,
             transcript,
             linked_sessions: Vec::new(),
             activities: Vec::new(),
             created_at: t,
-            updated_at: t,
+            last_active_at: t,
         };
         WorkflowEngine::with_parts(session, backend, hub, data_dir)
     }
@@ -564,11 +550,11 @@ impl WorkflowEngine {
         loop {
             self.with_session(|s| {
                 s.state = SessionState::Busy;
-                s.updated_at = now();
+                s.last_active_at = now();
             });
             let result = self.do_advance().await;
             self.sync_state();
-            self.with_session(|s| s.updated_at = now());
+            self.with_session(|s| s.last_active_at = now());
             let rerun = {
                 let mut g = self.gate.lock();
                 let steer_added = self.absorb_steer_locked();
@@ -661,8 +647,7 @@ impl WorkflowEngine {
         let s = self.session.read();
         let record_engine = self.clone();
         OrcContext {
-            plan: s.description.clone(),
-            preamble: s.preamble.clone(),
+            plan: s.plan.clone(),
             record_tool_activity: Some(Arc::new(move |act| record_engine.record_activity(act))),
             transcript: s
                 .transcript
@@ -795,7 +780,7 @@ impl WorkflowEngine {
         self.gate.lock().requested = false;
         self.with_session(|s| {
             s.state = SessionState::Busy;
-            s.updated_at = now();
+            s.last_active_at = now();
         });
     }
 
@@ -803,7 +788,7 @@ impl WorkflowEngine {
     pub fn mark_busy_pending(&self) {
         self.with_session(|s| {
             s.state = SessionState::Busy;
-            s.updated_at = now();
+            s.last_active_at = now();
         });
     }
 
@@ -827,9 +812,6 @@ impl WorkflowEngine {
         }
         let ts = now();
         self.with_session(|s| {
-            if s.description.trim().is_empty() {
-                s.description = text.trim().to_string();
-            }
             if s.title.trim().is_empty() {
                 s.title = generate_title(text);
             }
@@ -837,7 +819,7 @@ impl WorkflowEngine {
                 text: text.to_string(),
                 timestamp: ts,
             });
-            s.updated_at = ts;
+            s.last_active_at = ts;
         });
         // 用户消息一产生即为完整条目，立即追加落盘。
         self.append_history(&[HistoryItem::UserMessage {
@@ -1475,11 +1457,6 @@ impl OrcBackend for RigBackend {
                 );
             }
             let mut preamble = self.preamble();
-            if !ctx.preamble.trim().is_empty() {
-                preamble.push_str("\n\n");
-                preamble.push_str("【工作流计划/执行要求】\n");
-                preamble.push_str(ctx.preamble.trim());
-            }
             let model = self.cfg.model.clone();
             let live = ctx.live();
             preamble.push_str("\n\n【工作流执行计划】\n");
@@ -1979,14 +1956,12 @@ mod tests {
             id: "orc_test".into(),
             title: String::new(),
             plan: String::new(),
-            description: String::new(),
-            preamble: String::new(),
             state: SessionState::Idle,
             transcript: Vec::new(),
             linked_sessions: Vec::new(),
             activities: Vec::new(),
             created_at: 0,
-            updated_at: 0,
+            last_active_at: 0,
         }));
         LiveRuntime {
             machines: vec![MachineEntry {
@@ -2034,8 +2009,6 @@ mod tests {
         let dir = temp_data_dir();
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             FakeBackend::new_for_tests(),
             test_hub(
                 vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -2117,8 +2090,6 @@ mod tests {
         let backend = FakeBackend::new(vec![]);
         let engine = WorkflowEngine::new(
             "实现登录功能\n然后写测试",
-            "",
-            "",
             backend,
             test_hub(vec![m], clients),
             &temp_data_dir(),
@@ -2127,7 +2098,7 @@ mod tests {
             let session = engine.session.read();
             // 新建时标题为空（列表显示占位），由用户首个指令生成
             assert!(session.title.is_empty());
-            // 计划存元数据（plan/description），不进对话消息历史
+            // 计划存元数据，不进对话消息历史
             assert_eq!(session.plan, "实现登录功能\n然后写测试");
             assert!(session.transcript.is_empty());
         }
@@ -2140,22 +2111,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn context_appended_to_description() {
-        let (clients, m) = clients_with_machines();
-        let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new(
-            "实现功能",
-            "src/main.rs 的内容……",
-            "",
-            backend,
-            test_hub(vec![m], clients),
-            &temp_data_dir(),
-        );
-        assert!(engine.session.read().description.contains("[上下文]"));
-        assert!(engine.session.read().description.contains("src/main.rs"));
-    }
-
     /// 取消按钮注入固定取消指令并推进。
     #[tokio::test]
     async fn cancel_injects_cancel_prompt_and_advances() {
@@ -2163,8 +2118,6 @@ mod tests {
         let backend = FakeBackend::new(vec!["已按指令取消".into()]);
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             backend,
             test_hub(vec![m], clients),
             &temp_data_dir(),
@@ -2191,8 +2144,6 @@ mod tests {
         let backend = FakeBackend::new(vec!["本轮静默".into()]);
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             backend,
             test_hub(vec![m], clients),
             &temp_data_dir(),
@@ -2239,8 +2190,6 @@ mod tests {
         let backend = FakeBackend::new(vec!["不应发生".into()]);
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             backend,
             test_hub(vec![m], clients),
             &temp_data_dir(),
@@ -2274,8 +2223,6 @@ mod tests {
         let (clients, machine) = clients_with_machines();
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             FakeBackend::new(vec![]),
             test_hub(vec![machine], clients),
             &dir,
@@ -2300,8 +2247,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine =
-            WorkflowEngine::new("计划A", "", "", backend, test_hub(vec![m], clients), &dir);
+        let engine = WorkflowEngine::new("计划A", backend, test_hub(vec![m], clients), &dir);
         let id = engine.session.read().id.clone();
         engine.record_user("立即保存");
         engine.persist(&dir).unwrap();
@@ -2364,8 +2310,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine =
-            WorkflowEngine::new("计划B", "", "", backend, test_hub(vec![m], clients), &dir);
+        let engine = WorkflowEngine::new("计划B", backend, test_hub(vec![m], clients), &dir);
         let id = engine.session.read().id.clone();
         engine.record_user("准备保存");
         engine.persist(&dir).unwrap();
@@ -2408,7 +2353,7 @@ mod tests {
         let dir = temp_data_dir();
         let (clients, m) = clients_with_machines();
         let backend = FakeBackend::new(vec![]);
-        let engine = WorkflowEngine::new("计划", "", "", backend, test_hub(vec![m], clients), &dir);
+        let engine = WorkflowEngine::new("计划", backend, test_hub(vec![m], clients), &dir);
         let id = engine.session.read().id.clone();
 
         engine.record_activity(Activity::Thinking {
@@ -2430,8 +2375,6 @@ mod tests {
         let (clients, m) = clients_with_machines();
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             FakeBackend::new(vec![]),
             test_hub(vec![m], clients),
             &dir,
@@ -2558,8 +2501,6 @@ mod tests {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             backend,
             test_hub_with(
                 vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -2584,11 +2525,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_as_preamble_not_in_history() {
+    fn plan_is_metadata_not_history() {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
-            "",
-            "",
             "计划：先在测试机实现，再审查",
             backend,
             test_hub_with(
@@ -2598,31 +2537,8 @@ mod tests {
             &temp_data_dir(),
         );
         assert!(engine.session.read().transcript.is_empty());
-        assert_eq!(
-            engine.session.read().preamble,
-            "计划：先在测试机实现，再审查"
-        );
+        assert_eq!(engine.session.read().plan, "计划：先在测试机实现，再审查");
         assert!(engine.session.read().title.is_empty());
-    }
-
-    #[test]
-    fn record_user_sets_description_when_empty() {
-        let backend = FakeBackend::new_for_tests();
-        let engine = WorkflowEngine::new(
-            "",
-            "",
-            "计划：先实现后审查",
-            backend,
-            test_hub_with(
-                vec![MachineSummary::named("测试机", &["mock_acp"])],
-                vec![None],
-            ),
-            &temp_data_dir(),
-        );
-        let should_advance = engine.record_user("实现登录功能");
-        assert_eq!(engine.session.read().description, "实现登录功能");
-        assert_eq!(engine.session.read().title, "实现登录功能");
-        assert!(should_advance);
     }
 
     #[tokio::test]
@@ -2636,8 +2552,6 @@ mod tests {
         let client = WsClient::connect_with_token("ws://127.0.0.1:1".into(), "unused".into());
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             backend,
             test_hub(
                 vec![MachineSummary::named("测试机", &["kimi"])],
@@ -2689,8 +2603,6 @@ mod tests {
         let backend = FakeBackend::new_for_tests();
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             backend,
             test_hub_with(
                 vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -2729,8 +2641,6 @@ mod tests {
     fn user_message_starts_turn_when_only_child_is_busy() {
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             FakeBackend::new_for_tests(),
             test_hub_with(
                 vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -2757,8 +2667,6 @@ mod tests {
     fn user_message_requests_rerun_when_orchestrator_is_busy() {
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             FakeBackend::new_for_tests(),
             test_hub_with(
                 vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -2779,8 +2687,6 @@ mod tests {
     fn pending_busy_marker_preserves_requested_rerun() {
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             FakeBackend::new_for_tests(),
             test_hub_with(
                 vec![MachineSummary::named("测试机", &["mock_acp"])],
@@ -2800,8 +2706,6 @@ mod tests {
     fn workflow_stays_busy_while_orchestrator_turn_runs() {
         let engine = WorkflowEngine::new(
             "计划",
-            "",
-            "",
             FakeBackend::new_for_tests(),
             test_hub_with(
                 vec![MachineSummary::named("测试机", &["mock_acp"])],

@@ -91,7 +91,7 @@ async fn linked_session_completion_mid_turn_injects_message_and_reruns() {
         ])),
     });
     let backend_test = backend.clone();
-    let engine = WorkflowEngine::new("计划", "", "", backend, hub_with_one_machine(), dir.path());
+    let engine = WorkflowEngine::new("计划", backend, hub_with_one_machine(), dir.path());
     engine.session.write().linked_sessions.push(LinkedSession {
         id: "s_child".into(),
         machine_name: "测试机".into(),

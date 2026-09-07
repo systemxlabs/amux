@@ -951,7 +951,7 @@ impl AmuxApp {
                 state: sg.state,
                 title: sg.title.clone(),
                 created_at: sg.created_at,
-                last_active_at: sg.updated_at,
+                last_active_at: sg.last_active_at,
                 worktree_dir: String::new(),
                 context_size: 0,
                 context_window_size: 0,
@@ -1092,7 +1092,7 @@ impl AmuxApp {
                 continue;
             }
             let s_guard = wf.snapshot();
-            let mut recency = s_guard.updated_at;
+            let mut recency = s_guard.last_active_at;
             for c in &s_guard.linked_sessions {
                 if let Some(mm) = self
                     .machines

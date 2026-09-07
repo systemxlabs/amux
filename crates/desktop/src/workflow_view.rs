@@ -100,8 +100,7 @@ impl AmuxApp {
             cx.notify();
             return;
         }
-        let description = goal;
-        self.create_workflow_with(window, cx, description, None);
+        self.create_workflow_with(window, cx, goal);
         self.workflow_input
             .update(cx, |s, cx| s.set_value("", window, cx));
     }
@@ -110,8 +109,7 @@ impl AmuxApp {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        description: String,
-        preamble: Option<String>,
+        plan: String,
     ) {
         if !self.store.orchestrator().is_configured() {
             self.workflow_error = Some(
@@ -123,14 +121,7 @@ impl AmuxApp {
         }
         self.workflow_error = None;
         let backend = self.orchestrator_backend();
-        let engine = WorkflowEngine::new(
-            &description,
-            "",
-            preamble.as_deref().unwrap_or(""),
-            backend,
-            self.machine_hub.clone(),
-            &self.data_dir,
-        );
+        let engine = WorkflowEngine::new(&plan, backend, self.machine_hub.clone(), &self.data_dir);
         let wi = self.workflows.len();
         let data_dir = self.data_dir.clone();
         self.workflows.push(engine);

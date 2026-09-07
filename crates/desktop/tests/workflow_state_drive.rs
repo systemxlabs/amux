@@ -51,8 +51,6 @@ fn child_completion_notification_injects_user_message(cx: &mut gpui::TestAppCont
         app.update(cx, |app, _cx| {
             app.workflows.push(WorkflowEngine::new(
                 "测试计划",
-                "",
-                "",
                 Arc::new(BlockingBackend),
                 Arc::new(MachineHub::default()),
                 &data_path,
