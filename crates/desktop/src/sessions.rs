@@ -2331,14 +2331,18 @@ impl AmuxApp {
 
     /// 联想下拉：展示过滤出的下一级目录项；点击回填绝对路径——目录补分隔符
     /// 以便继续联想下一级，文件原样回填（回填触发 Input Change 后继续联想）。
+    /// 用 deferred 绘制：下拉以 absolute 定位向下展开，会盖到卡片中
+    // 排在其后的兄弟节点（worktree 开关、新建按钮），
+    // 而 gpui 按树序绘制，必须推迟到整棵树之后才能盖住它们。
     fn render_cwd_suggestion(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let suggestion = self.cwd_suggestion.as_ref()?;
         let app = cx.entity();
         let hover_bg = cx.theme().accent;
         Some(
-            v_flex()
-                .id("cwd-suggest-list")
-                .absolute()
+            deferred(
+                v_flex()
+                    .id("cwd-suggest-list")
+                    .absolute()
                 // 锚在输入行容器下沿之下，向下展开
                 .top(relative(1.0))
                 .left_0()
@@ -2390,6 +2394,8 @@ impl AmuxApp {
                         )
                 }))
                 .into_any(),
+            )
+            .into_any_element(),
         )
     }
 
