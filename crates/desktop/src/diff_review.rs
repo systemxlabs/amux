@@ -16,7 +16,7 @@ use protocol::{
 
 use crate::app::AmuxApp;
 use crate::diff::{diff_lines, DiffLine, DiffLineKind};
-use crate::logic::group_changed_files_by_parent;
+use crate::logic::{build_changed_file_tree, ChangedDirNode};
 
 impl AmuxApp {
     pub(crate) fn load_diff(
@@ -447,135 +447,39 @@ impl AmuxApp {
                 .child(toolbar)
                 .into_any();
         };
-        // 左侧文件树区域：按父目录路径分组展示，分组默认展开、可单独折叠，
-        // 文件列表只包含实际发生改动的文件。
-        let groups = group_changed_files_by_parent(
+        // 左侧文件树区域：按目录层级展示改动文件，不含改动文件的目录不出现在
+        // 树中，单链中间目录合并展示；目录节点默认展开、可单独折叠。
+        let tree = build_changed_file_tree(
             &files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
         );
-        let collapsed_groups = machine
+        let collapsed_dirs = machine
             .map(|m| m.diff.read(cx).collapsed_groups.clone())
             .unwrap_or_default();
         let mut tree_items: Vec<gpui::AnyElement> = Vec::new();
-        for (dir, indices) in &groups {
-            let collapsed = collapsed_groups.contains(dir);
-            let group_label = if dir.is_empty() {
-                "（根目录）".to_string()
-            } else {
-                dir.clone()
-            };
-            let group_key = dir.clone();
-            let group_sel = dir.clone();
-            let tree_machine = machine_name.clone();
-            // 分组头使用 Button，展开状态也能通过键盘和辅助技术访问。
-            tree_items.push(
-                Button::new(format!("diff-group-{dir}"))
-                    .xsmall()
-                    .ghost()
-                    .w_full()
-                    .toggled(!collapsed)
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        if let Some(m) = this.machine_mut_by_name(&tree_machine) {
-                            m.diff.update(cx, |st, _| {
-                                if !st.collapsed_groups.remove(&group_key) {
-                                    st.collapsed_groups.insert(group_key.clone());
-                                }
-                            });
-                        }
-                        cx.notify();
-                    }))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_start()
-                            .gap_1()
-                            .pl_1()
-                            .debug_selector(move || format!("dbg-diff-tree-group-{group_sel}"))
-                            .child(
-                                Label::new(if collapsed { "▸" } else { "▾" })
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(
-                                Label::new(group_label)
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .truncate()
-                                    .text_color(cx.theme().muted_foreground),
-                            ),
-                    )
-                    .into_any_element(),
-            );
-            if collapsed {
-                continue;
-            }
-            for fi in indices {
-                let Some(f) = files.get(*fi) else { continue };
-                let path = f.path.clone();
-                let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
-                let file_sel = format!("dbg-diff-tree-file-{path}");
-                let diff_scroll = self.diff_scroll.clone();
-                let item_sizes = item_sizes.clone();
-                let app = cx.entity();
-                // 行号在本帧内确定（虚拟列表按位置定位），闭包只需捕获数值
-                let Some(&row_ix) = file_header_rows.get(*fi) else {
-                    continue;
-                };
-                tree_items.push(
-                    // Button 提供整行焦点与键盘激活；内部布局保留文件名和统计列的左对齐。
-                    Button::new(format!("diff-tree-{path}"))
-                        .xsmall()
-                        .ghost()
-                        .w_full()
-                        .on_click(move |_ev, _window, cx| {
-                            // scroll_to_item 是非严格模式，目标行已可见时不滚动；
-                            // 点击文件必须定位到对应 diff 区域，直接按行高
-                            // 累计设置滚动偏移（行高为文档化固定几何）。
-                            // set_offset 不触发重绘，必须显式 notify
-                            let y: f32 = item_sizes
-                                .iter()
-                                .take(row_ix)
-                                .map(|s| s.height.as_f32())
-                                .sum();
-                            diff_scroll.base_handle().set_offset(point(px(0.), px(-y)));
-                            app.update(cx, |_, cx| cx.notify());
-                        })
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .justify_start()
-                                .gap_1()
-                                .min_w_0()
-                                // 文件行相对分组头缩进：pl_1 + 展开箭头 + gap 的宽度，
-                                // 与分组标题文字左缘对齐
-                                .pl_4()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .debug_selector(move || file_sel.clone())
-                                        .child(
-                                            Label::new(file_name)
-                                                .text_xs()
-                                                .truncate()
-                                                .text_color(cx.theme().foreground),
-                                        ),
-                                )
-                                .child(
-                                    Label::new(format!("+{}", f.additions))
-                                        .text_xs()
-                                        .text_color(cx.theme().success),
-                                )
-                                .child(
-                                    Label::new(format!("-{}", f.deletions))
-                                        .text_xs()
-                                        .ml_1()
-                                        .text_color(cx.theme().danger),
-                                ),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
+        let app = cx.entity();
+        // 根级文件（无目录节点包裹）直接置于树顶
+        self.render_changed_file_rows(
+            &app,
+            &(0..files.len()).collect::<Vec<_>>(),
+            0,
+            &files,
+            &file_header_rows,
+            &item_sizes,
+            &mut tree_items,
+            cx,
+        );
+        self.render_changed_tree_dirs(
+            &app,
+            &tree,
+            0,
+            &files,
+            &collapsed_dirs,
+            &file_header_rows,
+            &item_sizes,
+            &machine_name,
+            &mut tree_items,
+            cx,
+        );
         // 虚拟化：只渲染可视范围内的行（行高为文档化几何——diff 行等宽
         // 字符不换行，高度固定）
         let diff_list = v_virtual_list(
@@ -634,6 +538,176 @@ impl AmuxApp {
             )
             .into_any()
     }
+    /// 递归渲染改动文件树的目录节点（含单链合并节点），目录默认展开、
+    /// 可单独折叠，折叠状态键为目录完整路径。
+    #[allow(clippy::too_many_arguments)]
+    fn render_changed_tree_dirs(
+        &self,
+        app: &gpui::Entity<Self>,
+        nodes: &[ChangedDirNode],
+        depth: usize,
+        files: &[GitDiffFile],
+        collapsed_dirs: &HashSet<String>,
+        file_header_rows: &[usize],
+        item_sizes: &std::rc::Rc<Vec<gpui::Size<Pixels>>>,
+        machine_name: &str,
+        out: &mut Vec<gpui::AnyElement>,
+        cx: &mut Context<Self>,
+    ) {
+        for node in nodes {
+            let collapsed = collapsed_dirs.contains(&node.path);
+            let node_key = node.path.clone();
+            let node_sel = node.path.clone();
+            let tree_machine = machine_name.to_string();
+            // 目录节点使用 Button，展开状态也能通过键盘和辅助技术访问。
+            out.push(
+                Button::new(format!("diff-dir-{}", node.path))
+                    .xsmall()
+                    .ghost()
+                    .w_full()
+                    .toggled(!collapsed)
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        if let Some(m) = this.machine_mut_by_name(&tree_machine) {
+                            m.diff.update(cx, |st, _| {
+                                if !st.collapsed_groups.remove(&node_key) {
+                                    st.collapsed_groups.insert(node_key.clone());
+                                }
+                            });
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_start()
+                            .gap_1()
+                            // 与工作目录树一致的按层级递进缩进
+                            .pl(rems(0.5 + depth as f32 * 0.875))
+                            .debug_selector(move || format!("dbg-diff-tree-group-{node_sel}"))
+                            .child(
+                                Label::new(if collapsed { "▸" } else { "▾" })
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                Label::new(node.label.clone())
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+            if collapsed {
+                continue;
+            }
+            self.render_changed_file_rows(
+                app,
+                &node.files,
+                depth + 1,
+                files,
+                file_header_rows,
+                item_sizes,
+                out,
+                cx,
+            );
+            self.render_changed_tree_dirs(
+                app,
+                &node.children,
+                depth + 1,
+                files,
+                collapsed_dirs,
+                file_header_rows,
+                item_sizes,
+                machine_name,
+                out,
+                cx,
+            );
+        }
+    }
+
+    /// 渲染一组文件行（diff 列表下标），缩进随所在树层级递增。
+    #[allow(clippy::too_many_arguments)]
+    fn render_changed_file_rows(
+        &self,
+        app: &gpui::Entity<Self>,
+        indices: &[usize],
+        depth: usize,
+        files: &[GitDiffFile],
+        file_header_rows: &[usize],
+        item_sizes: &std::rc::Rc<Vec<gpui::Size<Pixels>>>,
+        out: &mut Vec<gpui::AnyElement>,
+        cx: &Context<Self>,
+    ) {
+        for fi in indices {
+            let Some(f) = files.get(*fi) else { continue };
+            let path = f.path.clone();
+            let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            let file_sel = format!("dbg-diff-tree-file-{path}");
+            let diff_scroll = self.diff_scroll.clone();
+            let item_sizes = item_sizes.clone();
+            let app = app.clone();
+            // 行号在本帧内确定（虚拟列表按位置定位），闭包只需捕获数值
+            let Some(&row_ix) = file_header_rows.get(*fi) else {
+                continue;
+            };
+            out.push(
+                // Button 提供整行焦点与键盘激活；内部布局保留文件名和统计列的左对齐。
+                Button::new(format!("diff-tree-{path}"))
+                    .xsmall()
+                    .ghost()
+                    .w_full()
+                    .on_click(move |_ev, _window, cx| {
+                        // scroll_to_item 是非严格模式，目标行已可见时不滚动；
+                        // 点击文件必须定位到对应 diff 区域，直接按行高
+                        // 累计设置滚动偏移（行高为文档化固定几何）。
+                        // set_offset 不触发重绘，必须显式 notify
+                        let y: f32 = item_sizes
+                            .iter()
+                            .take(row_ix)
+                            .map(|s| s.height.as_f32())
+                            .sum();
+                        diff_scroll.base_handle().set_offset(point(px(0.), px(-y)));
+                        app.update(cx, |_, cx| cx.notify());
+                    })
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_start()
+                            .gap_1()
+                            .min_w_0()
+                            // 文件行相对所属目录节点缩进一级
+                            .pl(rems(0.5 + depth as f32 * 0.875))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .debug_selector(move || file_sel.clone())
+                                    .child(
+                                        Label::new(file_name)
+                                            .text_xs()
+                                            .truncate()
+                                            .text_color(cx.theme().foreground),
+                                    ),
+                            )
+                            .child(
+                                Label::new(format!("+{}", f.additions))
+                                    .text_xs()
+                                    .text_color(cx.theme().success),
+                            )
+                            .child(
+                                Label::new(format!("-{}", f.deletions))
+                                    .text_xs()
+                                    .ml_1()
+                                    .text_color(cx.theme().danger),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+    }
+
     /// 渲染 [range) 内的行（虚拟列表回调）。
     pub(crate) fn render_diff_rows(
         &self,

@@ -379,21 +379,75 @@ pub fn compose_workflow_text(text: &str, attachments: &[InputAttachment]) -> Str
     result
 }
 
-/// 改动审查视图左侧文件树：按文件所在父目录路径分组。
-/// 键为父目录路径（根目录文件为空串），值为其下改动文件在 diff 列表中的下标；
-/// BTreeMap 保证分组按路径排序。
-pub type ChangedFileGroups = BTreeMap<String, Vec<usize>>;
+/// 改动审查视图左侧文件树的目录节点：按目录层级组织成树，
+/// 树中只出现包含改动文件的目录。
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChangedDirNode {
+    /// 展示标签：单链合并节点为多级片段（如 "storage/s3"），普通节点为目录名
+    pub label: String,
+    /// 完整目录路径（相对仓库根），作为折叠状态键
+    pub path: String,
+    /// 直接位于本目录下的改动文件（diff 列表下标）
+    pub files: Vec<usize>,
+    /// 子目录，按名称排序
+    pub children: Vec<ChangedDirNode>,
+}
 
-pub fn group_changed_files_by_parent(paths: &[impl AsRef<str>]) -> ChangedFileGroups {
-    let mut groups: ChangedFileGroups = BTreeMap::new();
-    for (path_index, path) in paths.iter().enumerate() {
-        let parent = match path.as_ref().rsplit_once('/') {
-            Some((dir, _)) => dir.to_string(),
-            None => String::new(),
-        };
-        groups.entry(parent).or_default().push(path_index);
+/// 把改动文件路径按目录层级构建为树；不含改动文件且只有一个子目录的
+/// 中间目录与该子目录合并为单链节点（文档示例中的 `storage/s3`）。
+pub fn build_changed_file_tree(paths: &[impl AsRef<str>]) -> Vec<ChangedDirNode> {
+    struct Trie {
+        files: Vec<usize>,
+        dirs: BTreeMap<String, Trie>,
     }
-    groups
+    impl Default for Trie {
+        fn default() -> Self {
+            Trie {
+                files: Vec::new(),
+                dirs: BTreeMap::new(),
+            }
+        }
+    }
+
+    let mut root = Trie::default();
+    for (path_index, path) in paths.iter().enumerate() {
+        let segments: Vec<&str> = path.as_ref().split('/').collect();
+        let mut cur = &mut root;
+        for dir in &segments[..segments.len() - 1] {
+            cur = cur.dirs.entry((*dir).to_string()).or_default();
+        }
+        cur.files.push(path_index);
+    }
+
+    fn convert(dirs: BTreeMap<String, Trie>, prefix: &str) -> Vec<ChangedDirNode> {
+        dirs.into_iter()
+            .map(|(name, child)| {
+                let path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                let Trie { files, dirs } = child;
+                let children = convert(dirs, &path);
+                let mut node = ChangedDirNode {
+                    label: name,
+                    path: path.clone(),
+                    files,
+                    children,
+                };
+                // 单链合并：本目录不含改动文件且只有一个子目录时整体并入该子目录
+                while node.files.is_empty() && node.children.len() == 1 {
+                    let child = node.children.pop().expect("children.len() == 1");
+                    node.label = format!("{}/{}", node.label, child.label);
+                    node.path = child.path;
+                    node.files = child.files;
+                    node.children = child.children;
+                }
+                node
+            })
+            .collect()
+    }
+    convert(root.dirs, "")
 }
 
 #[cfg(test)]
@@ -403,26 +457,55 @@ mod tests {
     use protocol::SessionState;
 
     #[test]
-    fn changed_files_group_by_parent_dir() {
+    fn changed_file_tree_builds_hierarchy_and_merges_chains() {
+        // 对应 PRD 示例：src 下 catalog/storage 两级，storage/s3 为单链合并节点
         let paths = [
-            "src/ui/panel.rs",
-            "src/ui/list.rs",
-            "src/main.rs",
+            "src/catalog/helper/query.rs",
+            "src/catalog/schema.rs",
+            "src/storage/s3/parquet.rs",
             "README.md",
         ];
-        let groups = group_changed_files_by_parent(&paths);
-        // 分组键按路径排序：""（根）< "src" < "src/ui"
-        let keys: Vec<&String> = groups.keys().collect();
-        assert_eq!(keys, ["", "src", "src/ui"]);
-        assert_eq!(groups[""], &[3]);
-        assert_eq!(groups["src"], &[2]);
-        assert_eq!(groups["src/ui"], &[0, 1]);
+        let tree = build_changed_file_tree(&paths);
+        assert_eq!(tree.len(), 1, "根级只有 src 一个目录，README.md 是根级文件");
+        let src = &tree[0];
+        assert_eq!(src.label, "src");
+        assert!(src.files.is_empty(), "README.md 是根级文件，不属于任何目录节点");
+        assert_eq!(
+            src.children.iter().map(|n| n.label.as_str()).collect::<Vec<_>>(),
+            ["catalog", "storage/s3"]
+        );
+        let catalog = &src.children[0];
+        assert_eq!(catalog.path, "src/catalog");
+        assert_eq!(catalog.files, &[1]);
+        let helper = &catalog.children[0];
+        assert_eq!(helper.path, "src/catalog/helper");
+        assert_eq!(helper.files, &[0]);
+        let s3 = &src.children[1];
+        assert_eq!(s3.label, "storage/s3");
+        assert_eq!(s3.path, "src/storage/s3");
+        assert_eq!(s3.files, &[2]);
+        assert!(s3.children.is_empty());
     }
 
     #[test]
-    fn changed_files_group_keeps_order_within_dir() {
-        let groups = group_changed_files_by_parent(&["b/b2.rs", "a.rs", "b/a1.rs"]);
-        assert_eq!(groups["b"], &[0, 2]);
+    fn changed_file_tree_merges_multi_segment_chains() {
+        let tree = build_changed_file_tree(&["a/b/c/d.rs"]);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].label, "a/b/c");
+        assert_eq!(tree[0].path, "a/b/c");
+        assert_eq!(tree[0].files, &[0]);
+    }
+
+    #[test]
+    fn changed_file_tree_keeps_sibling_dirs_split() {
+        // 单链合并只发生在"无文件且唯一子目录"的情形，多子目录不合并
+        let tree = build_changed_file_tree(&["a/x/1.rs", "a/y/2.rs"]);
+        let a = &tree[0];
+        assert_eq!(a.label, "a");
+        assert!(a.files.is_empty());
+        assert_eq!(a.children.len(), 2);
+        assert_eq!(a.children[0].label, "x");
+        assert_eq!(a.children[1].label, "y");
     }
 
     fn rw(machine: &str, workspace: &str, last_used: u64) -> RecentWorkspace {
