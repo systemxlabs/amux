@@ -183,7 +183,7 @@ pub struct AmuxApp {
     pub(crate) input_attachments: Vec<InputAttachment>,
     /// 各会话未发送的输入草稿（输入框为全局单例，切换会话时按 DraftKey 换入换出）
     pub(crate) drafts: HashMap<DraftKey, Draft>,
-    pub(crate) session_cwd_input: Entity<InputState>,
+    pub session_cwd_input: Entity<InputState>,
     pub(crate) workflow_input: Entity<InputState>,
     pub(crate) title_input: Entity<InputState>,
     /// 设置域状态（浮窗开关/导航与全部表单）：所有权与逻辑归 settings.rs
@@ -201,7 +201,7 @@ pub struct AmuxApp {
     pub(crate) cwd_suggest_request_id: u64,
     /// 当前联想结果（父目录 + 前缀 + 匹配到的下一级目录绝对路径）；
     /// None 表示无联想（输入非绝对路径、无匹配或机器离线）。
-    pub(crate) cwd_suggestion: Option<CwdSuggestion>,
+    pub cwd_suggestion: Option<CwdSuggestion>,
     /// 新建工作流视图的工作流下拉弹层开启态
     pub(crate) show_workflow_dropdown: bool,
     pub(crate) workflow_error: Option<String>,
@@ -231,9 +231,9 @@ pub struct AmuxApp {
 }
 
 /// 工作目录输入联想状态（`fs.list` 返回条目经应用侧前缀过滤后的下一级目录项）。
-pub(crate) struct CwdSuggestion {
+pub struct CwdSuggestion {
     /// 匹配到的下一级目录项（文件与目录）。
-    pub(crate) matches: Vec<protocol::FsEntry>,
+    pub matches: Vec<protocol::FsEntry>,
 }
 
 /// 侧栏拖拽手柄的载荷类型。`on_drag_move` 是窗口级全局监听，仅按载荷

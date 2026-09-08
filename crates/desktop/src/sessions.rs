@@ -2346,6 +2346,13 @@ impl AmuxApp {
             deferred(
                 v_flex()
                     .id("cwd-suggest-list")
+                    // 外点取消：联想是手搓浮层，没有 Popover 的遮罩与焦点管理，
+                    // 点击列表以外任意处（捕获阶段、按命中框几何判定）即收起
+                    .on_mouse_down_out(cx.listener(|this, _ev, _window, cx| {
+                        this.cwd_suggestion = None;
+                        cx.notify();
+                    }))
+                    .debug_selector(|| "cwd-suggest-list".into())
                     .absolute()
                     // 锚在输入行容器下沿之下，向下展开
                     .top(relative(1.0))
@@ -2371,6 +2378,10 @@ impl AmuxApp {
                         let dir_val = entry.path.clone();
                         div()
                             .id(format!("cwd-suggest-option-{}", entry.path))
+                            .debug_selector({
+                                let path = entry.path.clone();
+                                move || format!("cwd-suggest-option-{path}")
+                            })
                             .w_full()
                             .h_6()
                             .flex()
@@ -2406,7 +2417,7 @@ impl AmuxApp {
         )
     }
 
-    pub(crate) fn render_workspace_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub fn render_workspace_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(machine_name) = self
             .new_session_machine
             .clone()
