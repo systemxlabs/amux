@@ -140,3 +140,68 @@ fn diff_panel_scroll_has_viewport_constraint(cx: &mut gpui::TestAppContext) {
         "diff 区域滚轮事件未改变滚动偏移（offset.y = {offset:?}）"
     );
 }
+
+/// 回归：文件树中文件行必须相对目录分组头缩进，不能与分组头左对齐。
+#[gpui::test]
+fn diff_tree_file_rows_indent_under_group(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
+
+    let app = cx.update(|window, cx| {
+        gpui_component::init(cx);
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
+        cx.new(|cx| AmuxApp::new(store, window, cx))
+    });
+
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let mut machine = MachineView::new(
+                MachineConfig {
+                    name: "test".into(),
+                    url: "ws://127.0.0.1:9/".into(),
+                    token: "t".into(),
+                },
+                cx,
+            );
+            machine.status = MachineStatus::Online;
+            machine.diff.update(cx, |st, _| {
+                st.files = vec![GitDiffFile {
+                    path: "src/lib.rs".into(),
+                    status: GitChangeStatus::Modified,
+                    additions: 1,
+                    deletions: 0,
+                    patch: String::new(),
+                    hunks: vec![],
+                }];
+                st.rebuild_rows(window.rem_size());
+            });
+            app.machines.push(machine);
+            app.selected = Some(Selected::Session {
+                machine: "test".into(),
+                id: "session-1".into(),
+            });
+            app.panel = Some(Panel::Diff);
+            cx.notify();
+        });
+    });
+
+    cx.draw(point(px(0.), px(0.)), size(px(1024.), px(768.)), |_, cx| {
+        cx.new(|_| DiffPanelHostView { app: app.clone() })
+            .into_any_element()
+    });
+
+    let group_sel: &'static str = Box::leak("dbg-diff-tree-group-src".to_string().into_boxed_str());
+    let file_sel: &'static str =
+        Box::leak("dbg-diff-tree-file-src/lib.rs".to_string().into_boxed_str());
+    let group_x = cx
+        .debug_bounds(group_sel)
+        .expect("目录分组头未渲染")
+        .origin
+        .x;
+    let file_x = cx.debug_bounds(file_sel).expect("文件行未渲染").origin.x;
+    assert!(
+        file_x > group_x + px(8.),
+        "文件行未相对目录分组头缩进（group_x = {group_x:?}, file_x = {file_x:?}）"
+    );
+}

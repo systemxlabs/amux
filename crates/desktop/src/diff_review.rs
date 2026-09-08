@@ -464,6 +464,7 @@ impl AmuxApp {
                 dir.clone()
             };
             let group_key = dir.clone();
+            let group_sel = dir.clone();
             let tree_machine = machine_name.clone();
             // 分组头使用 Button，展开状态也能通过键盘和辅助技术访问。
             tree_items.push(
@@ -488,6 +489,7 @@ impl AmuxApp {
                             .justify_start()
                             .gap_1()
                             .pl_1()
+                            .debug_selector(move || format!("dbg-diff-tree-group-{group_sel}"))
                             .child(
                                 Label::new(if collapsed { "▸" } else { "▾" })
                                     .text_xs()
@@ -510,6 +512,7 @@ impl AmuxApp {
                 let Some(f) = files.get(*fi) else { continue };
                 let path = f.path.clone();
                 let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let file_sel = format!("dbg-diff-tree-file-{path}");
                 let diff_scroll = self.diff_scroll.clone();
                 let item_sizes = item_sizes.clone();
                 let app = cx.entity();
@@ -542,13 +545,20 @@ impl AmuxApp {
                                 .justify_start()
                                 .gap_1()
                                 .min_w_0()
+                                // 文件行相对分组头缩进：pl_1 + 展开箭头 + gap 的宽度，
+                                // 与分组标题文字左缘对齐
+                                .pl_4()
                                 .child(
-                                    Label::new(file_name)
-                                        .text_xs()
-                                        .truncate()
-                                        .min_w_0()
+                                    div()
                                         .flex_1()
-                                        .text_color(cx.theme().foreground),
+                                        .min_w_0()
+                                        .debug_selector(move || file_sel.clone())
+                                        .child(
+                                            Label::new(file_name)
+                                                .text_xs()
+                                                .truncate()
+                                                .text_color(cx.theme().foreground),
+                                        ),
                                 )
                                 .child(
                                     Label::new(format!("+{}", f.additions))
