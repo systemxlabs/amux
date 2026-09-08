@@ -205,8 +205,8 @@ pub struct AmuxApp {
     /// 新建工作流视图的工作流下拉弹层开启态
     pub(crate) show_workflow_dropdown: bool,
     pub(crate) workflow_error: Option<String>,
-    pub(crate) dialog_scroll: ScrollHandle,
-    pub(crate) activities_scroll: ScrollHandle,
+    pub dialog_scroll: ScrollHandle,
+    pub activities_scroll: ScrollHandle,
     pub(crate) plan_scroll: ScrollHandle,
     pub diff_scroll: VirtualListScrollHandle,
     pub(crate) workflow_dialog_limit: usize,

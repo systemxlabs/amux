@@ -11,6 +11,7 @@ use gpui_component::{
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     notification::Notification as UiNotification,
     popover::Popover,
+    scroll::Scrollbar,
     spinner::Spinner,
     switch::Switch,
     tag::Tag,
@@ -1509,16 +1510,37 @@ impl AmuxApp {
                 .child(Label::new(hint).text_sm().text_color(muted_foreground))
                 .into_any()
         } else {
+            // 滚动条以覆盖层形式挂在滚动区外层（Scrollbar 为 absolute 定位），
+            // 放进滚动容器内部会随内容滚走；dialog_scroll 供贴底判断与自动滚动复用
             div()
-                .id("dialog")
-                .debug_selector(|| "dialog".into())
-                .v_flex()
+                .id("dialog-wrap")
+                .debug_selector(|| "dialog-wrap".into())
+                .relative()
                 .flex_1()
-                .gap_4()
-                .p_2()
-                .overflow_y_scroll()
-                .track_scroll(&self.dialog_scroll)
-                .children(content)
+                .min_h_0()
+                .child(
+                    div()
+                        .id("dialog")
+                        .debug_selector(|| "dialog".into())
+                        .v_flex()
+                        .flex_1()
+                        .h_full()
+                        .gap_4()
+                        .p_2()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.dialog_scroll)
+                        .children(content),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .debug_selector(|| "dialog-scrollbar".into())
+                        .child(Scrollbar::vertical(&self.dialog_scroll).id("dialog-scrollbar")),
+                )
                 .into_any()
         }
     }
@@ -2652,15 +2674,38 @@ impl AmuxApp {
                     ),
             )
             .child(
-                // v_flex 让卡片间 gap 生效（原为普通 div，gap 无效导致卡片贴叠）
+                // v_flex 让卡片间 gap 生效（原为普通 div，gap 无效导致卡片贴叠）；
+                // 外层 relative 容器承载覆盖式滚动条（Scrollbar 为 absolute 定位）
                 div()
-                    .id("activities-panel")
+                    .id("activities-panel-wrap")
+                    .debug_selector(|| "activities-panel-wrap".into())
+                    .relative()
                     .flex_1()
-                    .v_flex()
-                    .gap_2()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.activities_scroll)
-                    .children(children),
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("activities-panel")
+                            .flex_1()
+                            .h_full()
+                            .v_flex()
+                            .gap_2()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.activities_scroll)
+                            .children(children),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .debug_selector(|| "activities-scrollbar".into())
+                            .child(
+                                Scrollbar::vertical(&self.activities_scroll)
+                                    .id("activities-scrollbar"),
+                            ),
+                    ),
             )
             .into_any()
     }
