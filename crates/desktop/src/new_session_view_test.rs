@@ -1,5 +1,5 @@
 //! 新建会话视图回归测试：机器/agent 选择器只展示在线机器与可用 agent，
-//! 创建按钮在机器、agent、工作计划等前置条件就绪前置灰不可点击。
+//! 创建按钮在机器、agent（须显式选择）、工作目录等前置条件就绪前置灰不可点击。
 
 use std::sync::Arc;
 
@@ -113,11 +113,29 @@ fn create_button_disabled_until_machine_agent_cwd_ready(cx: &mut gpui::TestAppCo
         });
     });
 
-    // 填入工作目录后按钮可用：点击触发创建逻辑（同步清除预置错误）
+    // 未显式选择 agent：即便工作目录已填，按钮仍置灰
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.session_cwd_input
                 .update(cx, |s, cx| s.set_value("/tmp/proj", window, cx));
+        });
+    });
+    click_button(cx, &root, "ns-create-wrap");
+    cx.update(|_w, cx| {
+        app.update(cx, |app, _cx| {
+            assert_eq!(
+                app.new_session_error.as_deref(),
+                Some("预设错误"),
+                "未显式选择 agent 时创建按钮应置灰"
+            );
+        });
+    });
+
+    // 显式选择可用 agent 后按钮可用：点击触发创建逻辑（同步清除预置错误）
+    cx.update(|_window, cx| {
+        app.update(cx, |app, cx| {
+            app.new_session_agent = Some("codex".into());
+            cx.notify();
         });
     });
     click_button(cx, &root, "ns-create-wrap");
@@ -166,8 +184,8 @@ fn offline_machine_shows_disabled_and_blocks_create(cx: &mut gpui::TestAppContex
 }
 
 #[gpui::test]
-fn effective_agent_prefers_explicit_then_first_available(cx: &mut gpui::TestAppContext) {
-    let (app, root, _data_dir, cx) = new_app(cx);
+fn effective_agent_requires_explicit_available_selection(cx: &mut gpui::TestAppContext) {
+    let (app, _root, _data_dir, cx) = new_app(cx);
     cx.update(|_window, cx| {
         app.update(cx, |app, cx| {
             let mut machine = online_machine("m1", cx);
@@ -186,20 +204,22 @@ fn effective_agent_prefers_explicit_then_first_available(cx: &mut gpui::TestAppC
     });
     cx.update(|_w, cx| {
         app.update(cx, |app, _cx| {
-            // 无显式选择：回退到首个可用 agent
-            assert_eq!(app.effective_new_session_agent().as_deref(), Some("first"));
-        });
-    });
-    cx.update(|_w, cx| {
-        app.update(cx, |app, _cx| {
-            // 显式选择的 agent 已不可用：回退到首个可用 agent
+            // 无显式选择：无隐式默认（创建按钮置灰）
+            assert_eq!(app.effective_new_session_agent(), None);
+
+            // 显式选择不可用 agent：不生效
             app.new_session_agent = Some("busy".into());
-            assert_eq!(app.effective_new_session_agent().as_deref(), Some("first"));
-            // 显式选择可用：优先显式选择
-            app.new_session_agent = Some("busy".into());
+            assert_eq!(app.effective_new_session_agent(), None);
+
+            // 显式选择可用：生效
             let m = app.machine_mut_by_name("m1").unwrap();
             m.agents[0].available = true;
             assert_eq!(app.effective_new_session_agent().as_deref(), Some("busy"));
+
+            // 显式选择的 agent 失去可用性：不生效（按钮随之置灰）
+            let m = app.machine_mut_by_name("m1").unwrap();
+            m.agents[0].available = false;
+            assert_eq!(app.effective_new_session_agent(), None);
         });
     });
 }

@@ -926,17 +926,6 @@ impl AmuxApp {
         .detach();
     }
 
-    pub(crate) fn available_agent(&self, machine_name: &str) -> Option<String> {
-        self.machine_idx_by_name(machine_name)
-            .and_then(|idx| self.machine(idx))
-            .and_then(|m| {
-                m.agents
-                    .iter()
-                    .find(|a| a.available)
-                    .map(|a| a.name.clone())
-            })
-    }
-
     /// 新建会话（普通模式）生效机器：已选机器仍存在时用之，否则回退到
     /// 首台机器。可为离线机器（按钮置灰兜底），调用方须按 online 判定。
     pub(crate) fn effective_new_session_machine(&self) -> Option<&crate::machine::MachineView> {
@@ -946,22 +935,20 @@ impl AmuxApp {
             .or_else(|| self.machines.first())
     }
 
-    /// 新建会话（普通模式）生效 agent：显式选择且在生效机器上仍可用者优先，
-    /// 否则回退到该机器首个可用 agent（与 create_session_only 的回退一致）。
+    /// 新建会话（普通模式）生效 agent：仅认可用的显式选择；agent 选择器
+    /// 未选中时无隐式默认（按钮置灰兜底），调用方须按 None 判定。
     pub(crate) fn effective_new_session_agent(&self) -> Option<String> {
         let m = self.effective_new_session_machine()?;
-        let explicit = self.new_session_agent.as_deref().filter(|name| {
+        let name = self.new_session_agent.as_deref().filter(|name| {
             m.agents
                 .iter()
                 .any(|a| a.available && a.name == *name)
-        });
-        explicit
-            .map(str::to_string)
-            .or_else(|| self.available_agent(&m.config.name))
+        })?;
+        Some(name.to_string())
     }
 
-    /// 创建会话（普通模式）按钮可点击条件：已选择在线机器、已选择可用
-    /// agent、工作目录非空；机器/agent 未显式选择时按既有回退。
+    /// 创建会话（普通模式）按钮可点击条件：已选择在线机器、已显式选择
+    /// 可用 agent、工作目录非空；机器未显式选择时按既有回退到首台。
     pub(crate) fn can_create_session(&self, cx: &Context<Self>) -> bool {
         self.effective_new_session_machine()
             .is_some_and(|m| m.status.online())
@@ -999,19 +986,12 @@ impl AmuxApp {
 
     pub(crate) fn create_session_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 与视图一致：未显式选择时回退到首台机器（按钮置灰保证其在线）
-        let Some(machine) = self.effective_new_session_machine().map(|m| m.config.name.clone())
-        else {
+        let Some(machine) = self.effective_new_session_machine() else {
             return;
         };
-        let Some(idx) = self.machine_idx_by_name(&machine) else {
-            return;
-        };
-        let Some(m) = self.machine(idx) else {
-            return;
-        };
-        let machine_name = machine.clone();
-        let generation = m.connection_generation;
-        let client = m.client.clone();
+        let machine_name = machine.config.name.clone();
+        let generation = machine.connection_generation;
+        let client = machine.client.clone();
         let cwd = self.session_cwd_input.read(cx).value().trim().to_owned();
         if cwd.is_empty() {
             self.new_session_error = Some("请输入工作目录，或选择一个常用工作目录。".into());
@@ -1019,18 +999,9 @@ impl AmuxApp {
             return;
         }
         self.new_session_error = None;
-        let agent = match self.new_session_agent.clone() {
-            Some(a) => a,
-            None => match self.available_agent(&machine) {
-                Some(a) => a,
-                None => {
-                    if let Some(m) = self.machine_mut(idx) {
-                        m.notice = Some("无可用 agent".into());
-                    }
-                    cx.notify();
-                    return;
-                }
-            },
+        // 按钮置灰保证 agent 已显式选择且可用
+        let Some(agent) = self.effective_new_session_agent() else {
+            return;
         };
         let params = SessionNewParams {
             agent: agent.clone(),
@@ -2171,8 +2142,8 @@ impl AmuxApp {
                             ),
                     );
                 } else {
-                    // 创建按钮置灰条件：已选择在线机器、已选择可用 agent、
-                    // 工作目录非空；机器/agent 未显式选择时按既有回退
+                    // 创建按钮置灰条件：已选择在线机器、已显式选择可用
+                    // agent、工作目录非空；机器未显式选择时按既有回退
                     let can_create = self.can_create_session(cx);
                     card = card
                         .child(
