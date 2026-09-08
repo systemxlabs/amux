@@ -21,12 +21,12 @@ use gpui_component::{
 };
 
 use protocol::{
-    ActivitiesResult, FsListParams, FsListResult, HistoryResult, OngoingActivityResult, OpResult,
-    SessionConfigKind, SessionConfigOptionValue, SessionConfigOptionsResult, SessionConfigSetting,
-    SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
-    SessionListParams, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
-    SessionPlanResult, SessionPromptParams, SessionResult, SessionSlashCommandsResult,
-    SessionState,
+    ActivitiesResult, FsListParams, FsListResult, HistoryResult, OngoingActivityResult,
+    OpResult, SessionConfigKind, SessionConfigOptionValue, SessionConfigOptionsResult,
+    SessionConfigSetting, SessionConfigureParams, SessionIdParams, SessionInfoParams,
+    SessionInfoResult, SessionListParams, SessionListResult, SessionMeta, SessionNewParams,
+    SessionPageParams, SessionPlanResult, SessionPromptParams, SessionResult,
+    SessionSlashCommandsResult, SessionState,
 };
 
 use crate::config::QuickCommand;
@@ -937,6 +937,38 @@ impl AmuxApp {
             })
     }
 
+    /// 新建会话（普通模式）生效机器：已选机器仍存在时用之，否则回退到
+    /// 首台机器。可为离线机器（按钮置灰兜底），调用方须按 online 判定。
+    pub(crate) fn effective_new_session_machine(&self) -> Option<&crate::machine::MachineView> {
+        self.new_session_machine
+            .as_deref()
+            .and_then(|name| self.machine_by_name(name))
+            .or_else(|| self.machines.first())
+    }
+
+    /// 新建会话（普通模式）生效 agent：显式选择且在生效机器上仍可用者优先，
+    /// 否则回退到该机器首个可用 agent（与 create_session_only 的回退一致）。
+    pub(crate) fn effective_new_session_agent(&self) -> Option<String> {
+        let m = self.effective_new_session_machine()?;
+        let explicit = self.new_session_agent.as_deref().filter(|name| {
+            m.agents
+                .iter()
+                .any(|a| a.available && a.name == *name)
+        });
+        explicit
+            .map(str::to_string)
+            .or_else(|| self.available_agent(&m.config.name))
+    }
+
+    /// 创建会话（普通模式）按钮可点击条件：已选择在线机器、已选择可用
+    /// agent、工作目录非空；机器/agent 未显式选择时按既有回退。
+    pub(crate) fn can_create_session(&self, cx: &Context<Self>) -> bool {
+        self.effective_new_session_machine()
+            .is_some_and(|m| m.status.online())
+            && self.effective_new_session_agent().is_some()
+            && !self.session_cwd_input.read(cx).value().trim().is_empty()
+    }
+
     pub(crate) fn selected_meta(&self) -> Option<SessionMeta> {
         if let Some((machine_name, id)) = self.open_session_target() {
             self.machine_idx_by_name(&machine_name)
@@ -966,10 +998,8 @@ impl AmuxApp {
     }
 
     pub(crate) fn create_session_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(machine) = self
-            .new_session_machine
-            .clone()
-            .or_else(|| self.machines.first().map(|m| m.config.name.clone()))
+        // 与视图一致：未显式选择时回退到首台机器（按钮置灰保证其在线）
+        let Some(machine) = self.effective_new_session_machine().map(|m| m.config.name.clone())
         else {
             return;
         };
@@ -2141,6 +2171,9 @@ impl AmuxApp {
                             ),
                     );
                 } else {
+                    // 创建按钮置灰条件：已选择在线机器、已选择可用 agent、
+                    // 工作目录非空；机器/agent 未显式选择时按既有回退
+                    let can_create = self.can_create_session(cx);
                     card = card
                         .child(
                             h_flex()
@@ -2183,13 +2216,20 @@ impl AmuxApp {
                             view.child(Alert::error("ns-create-error", error))
                         })
                         .child(
-                            Button::new("ns-create")
-                                .primary()
-                                .mt_2()
-                                .label("创建会话")
-                                .on_click(cx.listener(|this, _ev, window, cx| {
-                                    this.create_session_only(window, cx);
-                                })),
+                            // 包装层仅承载 debug_selector 供测试定位按钮区域
+                            div()
+                                .id("ns-create-wrap")
+                                .debug_selector(|| "ns-create-wrap".into())
+                                .child(
+                                    Button::new("ns-create")
+                                        .primary()
+                                        .mt_2()
+                                        .label("创建会话")
+                                        .disabled(!can_create)
+                                        .on_click(cx.listener(|this, _ev, window, cx| {
+                                            this.create_session_only(window, cx);
+                                        })),
+                                ),
                         );
                 }
             }
@@ -2224,11 +2264,13 @@ impl AmuxApp {
                             ),
                     );
                 } else {
+                    // 创建按钮置灰条件：工作计划已输入（或从已保存计划选择后回填）
+                    let plan_ready = !self.workflow_input.read(cx).value().trim().is_empty();
                     card = card.child(
                         v_flex()
                             .gap_1()
                             .child(
-                                Label::new("工作流计划")
+                                Label::new("工作计划")
                                     .text_sm()
                                     .text_color(muted_foreground),
                             )
@@ -2243,12 +2285,19 @@ impl AmuxApp {
                         card = card.child(Alert::error("ns-wf-error", err.clone()));
                     }
                     card = card.child(
-                        Button::new("ns-create-workflow")
-                            .primary()
-                            .label("创建工作流会话")
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.create_workflow(window, cx);
-                            })),
+                        // 包装层仅承载 debug_selector 供测试定位按钮区域
+                        div()
+                            .id("ns-create-workflow-wrap")
+                            .debug_selector(|| "ns-create-workflow-wrap".into())
+                            .child(
+                                Button::new("ns-create-workflow")
+                                    .primary()
+                                    .label("创建工作流会话")
+                                    .disabled(!plan_ready)
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.create_workflow(window, cx);
+                                    })),
+                            ),
                     );
                 }
             }
@@ -2546,7 +2595,7 @@ impl AmuxApp {
             return Label::new("（请先在设置中添加机器）").into_any_element();
         }
         // ButtonGroup 单选组：子按钮 on_click 由组统一接管（按下索引回传），
-        // 选中身份仍以机器名存储
+        // 选中身份仍以机器名存储；离线/认证失败机器置灰不可点击
         ButtonGroup::new("ns-machine-group")
             .small()
             .flex_wrap()
@@ -2554,12 +2603,21 @@ impl AmuxApp {
                 Button::new(format!("ns-machine-{i}"))
                     .label(m.config.name.clone())
                     .selected(selected_machine == Some(m.config.name.clone()))
+                    .disabled(!m.status.online())
             }))
             .on_click(cx.listener(move |this, clicks: &Vec<usize>, _window, cx| {
                 let Some(&ix) = clicks.first() else {
                     return;
                 };
-                this.new_session_machine = Some(this.machines[ix].config.name.clone());
+                // 置灰机器按钮的点击可能因事件冒泡携带旧索引落进处理器，
+                // 回写前须校验目标机器在线
+                let Some(m) = this.machines.get(ix) else {
+                    return;
+                };
+                if !m.status.online() {
+                    return;
+                }
+                this.new_session_machine = Some(m.config.name.clone());
                 this.new_session_agent = None;
                 this.new_session_error = None;
                 cx.notify();
