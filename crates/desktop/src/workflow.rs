@@ -2548,6 +2548,7 @@ mod tests {
             base_url: "https://api.openai.com/v1".into(),
             api_key: String::new(),
             model: "gpt-4o-mini".into(),
+            effort: "high".into(),
         }));
         let client = WsClient::connect_with_token("ws://127.0.0.1:1".into(), "unused".into());
         let engine = WorkflowEngine::new(

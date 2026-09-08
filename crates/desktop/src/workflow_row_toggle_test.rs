@@ -26,6 +26,7 @@ fn workflow_row_toggle_expands_and_collapses_children(cx: &mut gpui::TestAppCont
             base_url: "http://127.0.0.1:9/v1".into(),
             api_key: "k".into(),
             model: "m".into(),
+            effort: "high".into(),
         });
         AmuxApp::new(store, window, cx)
     });

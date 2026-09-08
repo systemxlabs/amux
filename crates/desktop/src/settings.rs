@@ -28,6 +28,7 @@ pub(crate) struct SettingsState {
     pub(crate) orch_base_input: Entity<InputState>,
     pub(crate) orch_key_input: Entity<InputState>,
     pub(crate) orch_model_input: Entity<InputState>,
+    pub(crate) orch_effort_input: Entity<InputState>,
     pub(crate) orchestrator_form_error: Option<String>,
     pub(crate) orchestrator_form_status: Option<String>,
     // 快捷指令 / 技能 / 工作流计划（双字段同构表单）
@@ -100,6 +101,8 @@ impl SettingsState {
         });
         let orch_model_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("模型名（如 gpt-4.1）"));
+        let orch_effort_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("推理级别（如 high）"));
         SettingsState {
             focus: cx.focus_handle(),
             show: false,
@@ -112,6 +115,7 @@ impl SettingsState {
             orch_base_input,
             orch_key_input,
             orch_model_input,
+            orch_effort_input,
             orchestrator_form_error: None,
             orchestrator_form_status: None,
             qc_name_input,
@@ -141,6 +145,9 @@ impl AmuxApp {
         self.settings
             .orch_model_input
             .update(cx, |s, cx| s.set_value(&cfg.model, window, cx));
+        self.settings
+            .orch_effort_input
+            .update(cx, |s, cx| s.set_value(&cfg.effort, window, cx));
     }
 
     pub(crate) fn save_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -166,12 +173,21 @@ impl AmuxApp {
             .value()
             .trim()
             .to_owned();
+        let effort = self
+            .settings
+            .orch_effort_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
         let error = if base_url.is_empty() {
             Some("请输入 Base URL。")
         } else if api_key.is_empty() {
             Some("请输入 API Key。")
         } else if model.is_empty() {
             Some("请输入模型名称。")
+        } else if effort.is_empty() {
+            Some("请输入推理级别。")
         } else {
             None
         };
@@ -188,6 +204,7 @@ impl AmuxApp {
                 base_url,
                 api_key,
                 model,
+                effort,
             });
             match result {
                 Ok(()) => {
@@ -1271,7 +1288,13 @@ impl AmuxApp {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground),
             )
-            .child(Input::new(&self.settings.orch_model_input));
+            .child(Input::new(&self.settings.orch_model_input))
+            .child(
+                Label::new("推理级别")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(Input::new(&self.settings.orch_effort_input));
         if let Some(error) = &self.settings.orchestrator_form_error {
             form = form.child(
                 Label::new(error.clone())

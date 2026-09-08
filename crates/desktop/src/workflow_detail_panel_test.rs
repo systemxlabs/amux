@@ -26,6 +26,7 @@ fn workflow_detail_shows_linked_sessions_without_cwd_row(cx: &mut gpui::TestAppC
             base_url: "http://127.0.0.1:9/v1".into(),
             api_key: "k".into(),
             model: "m".into(),
+            effort: "high".into(),
         });
         cx.new(|cx| AmuxApp::new(store, window, cx))
     });

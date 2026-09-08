@@ -67,6 +67,8 @@ pub struct OrchestratorConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// 推理级别：用户输入的任意字符串（如 high / medium），语义由供应商决定
+    pub effort: String,
 }
 
 impl Default for OrchestratorConfig {
@@ -76,16 +78,18 @@ impl Default for OrchestratorConfig {
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
+            effort: String::new(),
         }
     }
 }
 
 impl OrchestratorConfig {
-    /// 编排 agent 是否已配置可用：Base URL、API key、模型均非空。
+    /// 编排 agent 是否已配置可用：Base URL、API key、模型、推理级别均非空。
     pub fn is_configured(&self) -> bool {
         !self.base_url.trim().is_empty()
             && !self.api_key.trim().is_empty()
             && !self.model.trim().is_empty()
+            && !self.effort.trim().is_empty()
     }
 }
 
@@ -424,14 +428,25 @@ mod tests {
     fn normalize_orchestrator_falls_back_to_default_on_missing() {
         let raw = serde_json::json!({ "baseUrl": 1 });
         assert_eq!(normalize_orchestrator(&raw).model, "");
-        let full = serde_json::json!({
+        // effort 为必填字段：缺失即整体回退默认（无需向后兼容旧文件）
+        let no_effort = serde_json::json!({
             "apiFormat": "responses", "baseUrl": "http://x", "apiKey": "k", "model": "m"
+        });
+        assert_eq!(
+            normalize_orchestrator(&no_effort),
+            OrchestratorConfig::default()
+        );
+        let full = serde_json::json!({
+            "apiFormat": "responses", "baseUrl": "http://x", "apiKey": "k", "model": "m",
+            "effort": "high"
         });
         let cfg = normalize_orchestrator(&full);
         assert_eq!(cfg.model, "m");
+        assert_eq!(cfg.effort, "high");
         assert_eq!(cfg.api_format, ApiFormat::Responses);
         let bad = serde_json::json!({
-            "apiFormat": "graphql", "baseUrl": "http://x", "apiKey": "k", "model": "m"
+            "apiFormat": "graphql", "baseUrl": "http://x", "apiKey": "k", "model": "m",
+            "effort": "high"
         });
         assert_eq!(normalize_orchestrator(&bad), OrchestratorConfig::default());
     }
@@ -476,6 +491,7 @@ mod tests {
             base_url: "http://localhost:8000/v1".into(),
             api_key: "sk".into(),
             model: "gpt-4.1".into(),
+            effort: "high".into(),
         })
         .unwrap();
 
@@ -485,6 +501,7 @@ mod tests {
         assert_eq!(s2.list_templates().len(), 1);
         assert!(s2.list_quick_commands().iter().any(|c| c.name == "构建"));
         assert_eq!(s2.orchestrator().model, "gpt-4.1");
+        assert_eq!(s2.orchestrator().effort, "high");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
