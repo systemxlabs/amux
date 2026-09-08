@@ -30,7 +30,6 @@ pub(crate) struct SettingsState {
     pub(crate) orch_model_input: Entity<InputState>,
     pub(crate) orch_effort_input: Entity<InputState>,
     pub(crate) orchestrator_form_error: Option<String>,
-    pub(crate) orchestrator_form_status: Option<String>,
     // 快捷指令 / 技能 / 工作流计划（双字段同构表单）
     pub(crate) qc_name_input: Entity<InputState>,
     pub(crate) qc_prompt_input: Entity<InputState>,
@@ -117,7 +116,6 @@ impl SettingsState {
             orch_model_input,
             orch_effort_input,
             orchestrator_form_error: None,
-            orchestrator_form_status: None,
             qc_name_input,
             qc_prompt_input,
             qc_edit_target: None,
@@ -194,7 +192,6 @@ impl AmuxApp {
         };
         if let Some(error) = error {
             self.settings.orchestrator_form_error = Some(error.into());
-            self.settings.orchestrator_form_status = None;
             window.push_notification(
                 UiNotification::error(error).title("编排智能体设置保存失败"),
                 cx,
@@ -210,7 +207,6 @@ impl AmuxApp {
             match result {
                 Ok(()) => {
                     self.settings.orchestrator_form_error = None;
-                    self.settings.orchestrator_form_status = Some("已保存。".into());
                     window.push_notification(
                         UiNotification::success("编排智能体设置已保存").title("保存成功"),
                         cx,
@@ -219,7 +215,6 @@ impl AmuxApp {
                 Err(error) => {
                     let message = format!("保存失败：{error}");
                     self.settings.orchestrator_form_error = Some(message.clone());
-                    self.settings.orchestrator_form_status = None;
                     window.push_notification(
                         UiNotification::error(message).title("编排智能体设置保存失败"),
                         cx,
@@ -1258,7 +1253,6 @@ impl AmuxApp {
                 };
                 this.settings.orch_api_format = *format;
                 this.settings.orchestrator_form_error = None;
-                this.settings.orchestrator_form_status = None;
                 cx.notify();
             }));
         let mut form = v_flex()
@@ -1301,13 +1295,6 @@ impl AmuxApp {
                 Label::new(error.clone())
                     .text_sm()
                     .text_color(cx.theme().danger),
-            );
-        }
-        if let Some(status) = &self.settings.orchestrator_form_status {
-            form = form.child(
-                Label::new(status.clone())
-                    .text_sm()
-                    .text_color(cx.theme().success),
             );
         }
         form = form.child(
