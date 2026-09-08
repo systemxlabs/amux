@@ -46,9 +46,10 @@ pub struct SessionManager {
     config_options: Mutex<HashMap<String, Vec<protocol::SessionConfigOption>>>,
     /// 进行中的活动（`session.ongoing_activity`；按会话 id 独立存储）
     ongoing: Mutex<HashMap<String, Activity>>,
-    /// 当前 turn 的累积思考文本（多 chunk 拼接）。
+    /// 当前未定型思考块的累积文本（多 chunk 拼接）。
     /// `ongoing` 中的 `Activity::Thinking.content` 写入时引用这里，保证 GUI 看到
-    /// 的是「整个思考的前一部分」而不是最新一个流式片段。
+    /// 的是「当前思考块已流式输出的前一部分」而不是最新一个流式片段。
+    /// 思考块被 TurnMerger 定稿（tool_call/error 到达）时随之重置，
     /// 与 `ongoing` 生命周期一致：turn 结束随 `ongoing` 一起清理。
     thinking_buf: Mutex<HashMap<String, ThinkingBuffer>>,
     controls: Mutex<HashMap<String, Arc<SessionControl>>>,
@@ -807,6 +808,8 @@ impl SessionManager {
                     // 累积写入 thinking_buf，再让 ongoing 引用累积内容——
                     // 否则多个流式 chunk 到达时，GUI 看到的「思考中」只会是
                     // 最新一段，落盘的历史活动（merger 累积）反而更全，行为不一致。
+                    // buf 只覆盖当前未定型的思考块：tool_call/error 定稿后已重置，
+                    // 与 merger「每个思考块一条活动」的语义保持同步。
                     let ts = now();
                     let (accumulated, first_ts) = {
                         let mut buf = self.thinking_buf.lock();
@@ -849,12 +852,17 @@ impl SessionManager {
                             content,
                         },
                     );
+                    // merger 已定稿当前思考块；重置 buf 使后续思考开启新块，
+                    // 否则 ongoing 会一直携带第一段思考的内容。
+                    self.thinking_buf.lock().remove(session_id);
                 }
                 AgentEvent::Error(detail) => {
                     merger.push_error(Activity::Error {
                         timestamp: now(),
                         detail: detail.clone(),
                     });
+                    // push_error 同样定稿思考块，同步重置。
+                    self.thinking_buf.lock().remove(session_id);
                     log::error!("agent turn 失败 {session_id}: {detail}");
                 }
                 AgentEvent::UsageUpdate { used, size } => {
@@ -1255,11 +1263,11 @@ mod tests {
         fn shutdown(&self) {}
     }
 
-    /// 测试驱动：prompt 时按顺序推送多个 thinking chunk 再结束 turn。
-    /// 每发完一个 chunk 阻塞等待 `release`，让测试可以串行观察
-    /// `ongoing_activity` 在 chunk 累积过程中的中间态。
+    /// 测试驱动：prompt 时按顺序推送事件再结束 turn。
+    /// 每发完一个事件阻塞等待 `release`，让测试可以串行观察
+    /// `ongoing_activity` 在事件流累积过程中的中间态。
     struct ThinkingChunksDriver {
-        chunks: Vec<&'static str>,
+        events: Vec<AgentEvent>,
         release: Arc<tokio::sync::Notify>,
     }
 
@@ -1285,11 +1293,11 @@ mod tests {
             _input: Vec<ContentBlock>,
         ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
             let (tx, rx) = tokio::sync::mpsc::channel(8);
-            let chunks = self.chunks.clone();
+            let events = self.events.clone();
             let release = self.release.clone();
             tokio::spawn(async move {
-                for c in chunks {
-                    let _ = tx.send(AgentEvent::Thinking(c.into())).await;
+                for ev in events {
+                    let _ = tx.send(ev).await;
                     release.notified().await;
                 }
                 let _ = tx
@@ -1855,7 +1863,7 @@ mod tests {
 
     #[tokio::test]
     async fn ongoing_thinking_accumulates_across_chunks() {
-        // GUI 通过 session.ongoing_activity 看到「思考中」应当是整个 turn 的累积内容，
+        // GUI 通过 session.ongoing_activity 看到「思考中」应当是当前思考块的累积内容，
         // 而不是最新一个流式 chunk。
         // prompt 由驱动在每个 chunk 后阻塞等待 release，测试用 wait_for_thinking
         // 串行观察三个中间态：单段 → 两段 → 三段。
@@ -1863,7 +1871,11 @@ mod tests {
         let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
             "codex",
             Arc::new(ThinkingChunksDriver {
-                chunks: vec!["先读 src/main.rs", "，再分析依赖", "，最后写结论"],
+                events: vec![
+                    AgentEvent::Thinking("先读 src/main.rs".into()),
+                    AgentEvent::Thinking("，再分析依赖".into()),
+                    AgentEvent::Thinking("，最后写结论".into()),
+                ],
                 release: release.clone(),
             }),
         ));
@@ -1929,6 +1941,85 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("ongoing thinking 内容始终未匹配: {expected}");
+    }
+
+    /// 轮询等待 ongoing 变为指定名称的工具调用（同 wait_for_thinking 的节奏）。
+    async fn wait_for_tool_call(mgr: &SessionManager, sid: &str, name: &str) {
+        for _ in 0..200 {
+            if let Some(Activity::ToolCall { name: n, .. }) =
+                mgr.ongoing_activity(sid).await.unwrap()
+            {
+                if n == name {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("ongoing 始终未变为工具调用: {name}");
+    }
+
+    #[tokio::test]
+    async fn ongoing_thinking_resets_after_tool_call_finalizes_block() {
+        // turn 内「思考 → 工具调用 → 再思考」时，merger 已在工具调用处
+        // 定稿第一个思考块，ongoing 的「思考中」应只携带第二个思考块的内容。
+        // 回归：thinking_buf 未定稿时重置，导致 ongoing 一直从第一个思考块累积。
+        let release = Arc::new(tokio::sync::Notify::new());
+        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
+            "codex",
+            Arc::new(ThinkingChunksDriver {
+                events: vec![
+                    AgentEvent::Thinking("第一段思考".into()),
+                    AgentEvent::ToolCall {
+                        id: "tc1".into(),
+                        name: Some("read_file".into()),
+                        title: Some("读取文件".into()),
+                        content: None,
+                    },
+                    AgentEvent::Thinking("第二段思考".into()),
+                ],
+                release: release.clone(),
+            }),
+        ));
+        let dir = std::env::temp_dir().join(format!(
+            "amux-thinking-reset-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, _rx) = SessionManager::new(agents, registry, dir.clone());
+        let mgr = Arc::new(mgr);
+
+        let meta = mgr.create("codex", "/tmp/think", false).await.unwrap();
+        let mgr_for_task = mgr.clone();
+        let id_for_task = meta.id.clone();
+        let prompt_task =
+            tokio::spawn(async move { mgr_for_task.prompt(&id_for_task, text("hi")).await });
+
+        wait_for_thinking(&mgr, &meta.id, "第一段思考").await;
+        release.notify_one();
+        wait_for_tool_call(&mgr, &meta.id, "read_file").await;
+        release.notify_one();
+        // 若 buf 未在工具调用处重置，这里会拿到「第一段思考第二段思考」而超时失败
+        wait_for_thinking(&mgr, &meta.id, "第二段思考").await;
+        release.notify_one();
+        prompt_task.await.unwrap().unwrap();
+
+        // 落盘的活动历史应是两条独立的 thinking，与 ongoing 的中间态一致
+        let acts = mgr
+            .activities(&meta.id, None, None)
+            .await
+            .unwrap()
+            .activities;
+        let thinkings: Vec<&str> = acts
+            .iter()
+            .filter_map(|a| match a {
+                Activity::Thinking { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinkings, vec!["第一段思考", "第二段思考"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
