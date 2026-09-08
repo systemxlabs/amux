@@ -28,6 +28,8 @@ mod new_session_view_test;
 #[cfg(test)]
 mod panels_workspace_scroll_test;
 #[cfg(test)]
+mod orchestrator_settings_test;
+#[cfg(test)]
 mod terminal_tab_test;
 #[cfg(test)]
 mod workflow_detail_panel_test;

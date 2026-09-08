@@ -406,6 +406,26 @@ impl AmuxApp {
         app.restore_workflows(window, cx);
         app.spawn_polling(window, cx);
         app.setup_orch_inputs(window, cx);
+        // 编排智能体表单输入驱动整窗重绘：保存按钮的置灰状态与校验错误
+        // 随输入实时刷新
+        for input in [
+            &app.settings.orch_base_input,
+            &app.settings.orch_key_input,
+            &app.settings.orch_model_input,
+            &app.settings.orch_effort_input,
+        ] {
+            let input = input.clone();
+            app._subs.push(cx.subscribe_in(
+                &input,
+                window,
+                |this, _input, event, _window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.settings.orchestrator_form_error = None;
+                        cx.notify();
+                    }
+                },
+            ));
+        }
         app
     }
 

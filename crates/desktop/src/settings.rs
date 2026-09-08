@@ -1,8 +1,8 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    button::*, input::Input, input::InputState, label::Label,
-    notification::Notification as UiNotification, radio::RadioGroup, FocusTrapElement as _, *,
+    button::*, dialog::DialogButtonProps, input::Input, input::InputState, label::Label,
+    radio::RadioGroup, FocusTrapElement as _, *,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig, QuickCommand, SkillEntry, WorkflowTemplate};
@@ -29,6 +29,9 @@ pub(crate) struct SettingsState {
     pub(crate) orch_key_input: Entity<InputState>,
     pub(crate) orch_model_input: Entity<InputState>,
     pub(crate) orch_effort_input: Entity<InputState>,
+    /// 最近一次落盘的编排智能体配置：保存按钮以表单当前值与它的差异
+    /// 判定是否可点击（文档要求默认置灰，任意一项修改后才可点击）
+    pub(crate) orch_saved: OrchestratorConfig,
     pub(crate) orchestrator_form_error: Option<String>,
     // 快捷指令 / 技能 / 工作流计划（双字段同构表单）
     pub(crate) qc_name_input: Entity<InputState>,
@@ -115,6 +118,7 @@ impl SettingsState {
             orch_key_input,
             orch_model_input,
             orch_effort_input,
+            orch_saved: OrchestratorConfig::default(),
             orchestrator_form_error: None,
             qc_name_input,
             qc_prompt_input,
@@ -134,6 +138,7 @@ impl AmuxApp {
     pub(crate) fn setup_orch_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 配置损坏时表单回退空值：用户保存即可重写修复；损坏详情由创建工作流时报错呈现
         let cfg = self.store.orchestrator().unwrap_or_default();
+        self.settings.orch_saved = cfg.clone();
         self.settings.orch_api_format = cfg.api_format;
         self.settings
             .orch_base_input
@@ -149,80 +154,77 @@ impl AmuxApp {
             .update(cx, |s, cx| s.set_value(&cfg.effort, window, cx));
     }
 
+    /// 表单当前值聚合为配置：与 `orch_saved` 比对即为保存按钮的修改判定。
+    fn orch_form_config(&self, cx: &App) -> OrchestratorConfig {
+        let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        OrchestratorConfig {
+            api_format: self.settings.orch_api_format,
+            base_url: value(&self.settings.orch_base_input),
+            api_key: value(&self.settings.orch_key_input),
+            model: value(&self.settings.orch_model_input),
+            effort: value(&self.settings.orch_effort_input),
+        }
+    }
+
+    pub(crate) fn orchestrator_dirty(&self, cx: &App) -> bool {
+        self.orch_form_config(cx) != self.settings.orch_saved
+    }
+
     pub(crate) fn save_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let api_format = self.settings.orch_api_format;
-        let base_url = self
-            .settings
-            .orch_base_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_owned();
-        let api_key = self
-            .settings
-            .orch_key_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_owned();
-        let model = self
-            .settings
-            .orch_model_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_owned();
-        let effort = self
-            .settings
-            .orch_effort_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_owned();
-        let error = if base_url.is_empty() {
+        let config = self.orch_form_config(cx);
+        let error = if config.base_url.is_empty() {
             Some("请输入 Base URL。")
-        } else if api_key.is_empty() {
+        } else if config.api_key.is_empty() {
             Some("请输入 API Key。")
-        } else if model.is_empty() {
+        } else if config.model.is_empty() {
             Some("请输入模型名称。")
-        } else if effort.is_empty() {
+        } else if config.effort.is_empty() {
             Some("请输入推理级别。")
         } else {
             None
         };
-        if let Some(error) = error {
-            self.settings.orchestrator_form_error = Some(error.into());
-            window.push_notification(
-                UiNotification::error(error).title("编排智能体设置保存失败"),
-                cx,
-            );
-        } else {
-            let result = self.store.save_orchestrator(&OrchestratorConfig {
-                api_format,
-                base_url,
-                api_key,
-                model,
-                effort,
-            });
-            match result {
+        match error {
+            Some(error) => {
+                self.settings.orchestrator_form_error = Some(error.into());
+                self.show_orchestrator_save_result(window, cx, false, error);
+            }
+            None => match self.store.save_orchestrator(&config) {
                 Ok(()) => {
+                    self.settings.orch_saved = config;
                     self.settings.orchestrator_form_error = None;
-                    window.push_notification(
-                        UiNotification::success("编排智能体设置已保存").title("保存成功"),
-                        cx,
-                    );
+                    self.show_orchestrator_save_result(window, cx, true, "编排智能体设置已保存。");
                 }
                 Err(error) => {
                     let message = format!("保存失败：{error}");
                     self.settings.orchestrator_form_error = Some(message.clone());
-                    window.push_notification(
-                        UiNotification::error(message).title("编排智能体设置保存失败"),
-                        cx,
-                    );
+                    self.show_orchestrator_save_result(window, cx, false, &message);
                 }
-            }
+            },
         }
         cx.notify();
+    }
+
+    /// 保存结果弹窗：文档要求点击保存后弹窗展示保存成功或失败，仅「确定」可点。
+    fn show_orchestrator_save_result(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        success: bool,
+        message: &str,
+    ) {
+        let title = if success { "保存成功" } else { "保存失败" };
+        let message = message.to_owned();
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            alert
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("确定")
+                        .show_cancel(false),
+                )
+                .title(title)
+                .description(message.clone())
+                .on_ok(|_ev, _window, _cx| true)
+        });
     }
 
     /// 打开设置浮窗并把焦点移入：Escape（绑定 SettingsOverlay key_context）
@@ -1303,6 +1305,8 @@ impl AmuxApp {
                     .small()
                     .primary()
                     .label("保存")
+                    // 文档：默认置灰不可点击，任意一项配置修改后才可点击
+                    .disabled(!self.orchestrator_dirty(cx))
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         this.save_orchestrator(window, cx);
                     })),
