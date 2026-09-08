@@ -1141,9 +1141,10 @@ async fn route_update(
         SessionUpdate::AgentMessageChunk(chunk) => {
             text_of(&chunk.content).map(AgentEvent::OutputChunk)
         }
-        SessionUpdate::AgentThoughtChunk(chunk) => {
-            text_of(&chunk.content).map(AgentEvent::Thinking)
-        }
+        // 部分 agent 会发空文本的思考块，透传会让活动历史留下无内容的 thinking 条目。
+        SessionUpdate::AgentThoughtChunk(chunk) => text_of(&chunk.content)
+            .filter(|text| !text.is_empty())
+            .map(AgentEvent::Thinking),
         SessionUpdate::ToolCall(tc) => Some(AgentEvent::ToolCall {
             id: tc.tool_call_id.0.to_string(),
             name: Some(tool_kind_str(&tc.kind)),
@@ -1640,6 +1641,26 @@ mod tests {
         .await;
         let ev = rx.try_recv().expect("应收到 thinking 事件");
         assert!(matches!(ev, AgentEvent::Thinking(s) if s == "思考中"));
+    }
+
+    #[tokio::test]
+    async fn route_update_empty_thinking_dropped() {
+        // 空 文本思考块不应产生事件，否则活动历史会留下无内容的 thinking 条目。
+        let (routes, mut rx) = route_with_channel();
+        let notif = SessionNotification::new(
+            SessionId::new("s1"),
+            SessionUpdate::AgentThoughtChunk(ContentChunk::new(AcpContentBlock::Text(
+                TextContent::new(""),
+            ))),
+        );
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
+        assert!(rx.try_recv().is_err(), "空思考块不应产生事件");
     }
 
     #[tokio::test]
