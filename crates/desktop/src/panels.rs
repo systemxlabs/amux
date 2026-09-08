@@ -659,10 +659,16 @@ impl AmuxApp {
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(cx.theme().foreground),
         );
+        // 文件内容可能远超视口：标题固定，正文区独立滚动（不滚则长文件无法查看）
+        let mut body = v_flex()
+            .debug_selector(|| "workspace-content-scroll".into())
+            .flex_1()
+            .min_h_0()
+            .gap_2();
         if let Some(error) = workspace_error {
-            content = content.child(Label::new(error).text_sm().text_color(cx.theme().danger));
+            body = body.child(Label::new(error).text_sm().text_color(cx.theme().danger));
         } else if fs_read_loading {
-            content = content.child(
+            body = body.child(
                 v_flex()
                     .items_center()
                     .gap_2()
@@ -675,7 +681,7 @@ impl AmuxApp {
                     ),
             );
         } else if let Some(path) = file {
-            content = content.child(
+            body = body.child(
                 TextView::markdown(
                     "workspace-file-content",
                     format!("```text\n{}\n```", workspace_content),
@@ -683,7 +689,7 @@ impl AmuxApp {
                 .selectable(true),
             );
             if read_has_more {
-                content = content.child(
+                body = body.child(
                     Button::new("workspace-read-more")
                         .small()
                         .ghost()
@@ -707,12 +713,13 @@ impl AmuxApp {
                 );
             }
         } else {
-            content = content.child(
+            body = body.child(
                 Label::new("选择文件查看文本内容")
                     .text_sm()
                     .text_color(cx.theme().muted_foreground),
             );
         }
+        content = content.child(body.overflow_y_scrollbar());
 
         v_flex()
             .w_full()

@@ -24,6 +24,8 @@ pub mod workflow_view;
 pub mod ws;
 
 #[cfg(test)]
+mod panels_workspace_scroll_test;
+#[cfg(test)]
 mod terminal_tab_test;
 #[cfg(test)]
 mod workflow_detail_panel_test;
