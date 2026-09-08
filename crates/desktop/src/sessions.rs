@@ -1509,6 +1509,7 @@ impl AmuxApp {
         } else {
             div()
                 .id("dialog")
+                .debug_selector(|| "dialog".into())
                 .v_flex()
                 .flex_1()
                 .gap_4()
@@ -1692,9 +1693,6 @@ impl AmuxApp {
         let muted_foreground = cx.theme().muted_foreground;
         v_flex()
             .gap_2()
-            .pt_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
             // 附件 chips：点击单个 chip 即移除该附件（原仅支持一键清空）
             .when(!self.input_attachments.is_empty(), |view| {
                 view.child(h_flex().flex_wrap().gap_1().children(
@@ -1987,7 +1985,10 @@ impl AmuxApp {
     pub(crate) fn render_quick_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let commands = self.store.list_quick_commands();
         // ghost：输入区上方的快捷入口应视觉后退，不与发送按钮争夺注意力
-        let mut row = h_flex().flex_wrap().gap_1();
+        let mut row = h_flex()
+            .debug_selector(|| "quick-buttons".into())
+            .flex_wrap()
+            .gap_1();
         for c in commands {
             let name = c.name.clone();
             let cmd = c.clone();

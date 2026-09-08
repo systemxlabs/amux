@@ -1287,10 +1287,23 @@ impl AmuxApp {
             .rounded_lg()
             .border_1()
             .border_color(cx.theme().border)
+            // 两个容器：上方对话消息框（flex_1 自行收缩），下方快捷按钮 +
+            // 实时活动 + 输入区独立成卡，仅占自然高度，不叠加在消息框之上
             .child(self.render_center(window, cx))
-            .child(self.render_quick_buttons(cx))
-            .child(self.render_activity_bar(cx))
-            .child(self.render_input(window, cx))
+            .child(
+                v_flex()
+                    .debug_selector(|| "input-bar".into())
+                    .flex_none()
+                    .gap_2()
+                    .p_2()
+                    .bg(cx.theme().muted)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_lg()
+                    .child(self.render_quick_buttons(cx))
+                    .child(self.render_activity_bar(cx))
+                    .child(self.render_input(window, cx)),
+            )
             .into_any()
     }
 }
