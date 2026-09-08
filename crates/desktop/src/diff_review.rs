@@ -457,10 +457,17 @@ impl AmuxApp {
             .unwrap_or_default();
         let mut tree_items: Vec<gpui::AnyElement> = Vec::new();
         let app = cx.entity();
-        // 根级文件（无目录节点包裹）直接置于树顶
+        // 根级文件（无目录节点包裹）直接置于树顶；其余文件只能通过目录
+        // 节点渲染，否则文件树顶部会出现整份重复的改动文件列表
+        let root_files: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.path.contains('/'))
+            .map(|(ix, _)| ix)
+            .collect();
         self.render_changed_file_rows(
             &app,
-            &(0..files.len()).collect::<Vec<_>>(),
+            &root_files,
             0,
             &files,
             &file_header_rows,
@@ -644,7 +651,13 @@ impl AmuxApp {
             let Some(f) = files.get(*fi) else { continue };
             let path = f.path.clone();
             let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            let file_sel = format!("dbg-diff-tree-file-{path}");
+            // 根级行与目录内行用不同 debug 选择器，便于测试断言目录内文件
+            // 不会重复出现在树顶
+            let file_sel = if depth == 0 {
+                format!("dbg-diff-tree-root-file-{path}")
+            } else {
+                format!("dbg-diff-tree-file-{path}")
+            };
             let diff_scroll = self.diff_scroll.clone();
             let item_sizes = item_sizes.clone();
             let app = app.clone();

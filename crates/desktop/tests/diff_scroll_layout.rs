@@ -205,3 +205,75 @@ fn diff_tree_file_rows_indent_under_group(cx: &mut gpui::TestAppContext) {
         "文件行未相对目录分组头缩进（group_x = {group_x:?}, file_x = {file_x:?}）"
     );
 }
+
+/// 回归：目录内文件不得以根级行重复出现在文件树顶部。曾经把全部改动
+/// 文件下标都铺在树顶，导致文件树上方多出一份重复的改动文件列表。
+#[gpui::test]
+fn diff_tree_no_duplicate_root_rows_for_grouped_files(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
+
+    let app = cx.update(|window, cx| {
+        gpui_component::init(cx);
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
+        cx.new(|cx| AmuxApp::new(store, window, cx))
+    });
+
+    let make_file = |path: &str| GitDiffFile {
+        path: path.into(),
+        status: GitChangeStatus::Modified,
+        additions: 1,
+        deletions: 0,
+        patch: String::new(),
+        hunks: vec![],
+    };
+
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let mut machine = MachineView::new(
+                MachineConfig {
+                    name: "test".into(),
+                    url: "ws://127.0.0.1:9/".into(),
+                    token: "t".into(),
+                },
+                cx,
+            );
+            machine.status = MachineStatus::Online;
+            machine.diff.update(cx, |st, _| {
+                st.files = vec![make_file("src/lib.rs"), make_file("README.md")];
+                st.rebuild_rows(window.rem_size());
+            });
+            app.machines.push(machine);
+            app.selected = Some(Selected::Session {
+                machine: "test".into(),
+                id: "session-1".into(),
+            });
+            app.panel = Some(Panel::Diff);
+            cx.notify();
+        });
+    });
+
+    cx.draw(point(px(0.), px(0.)), size(px(1024.), px(768.)), |_, cx| {
+        cx.new(|_| DiffPanelHostView { app: app.clone() })
+            .into_any_element()
+    });
+
+    // 真正的根级文件仍在树顶渲染
+    let readme_sel: &'static str =
+        Box::leak("dbg-diff-tree-root-file-README.md".to_string().into_boxed_str());
+    cx.debug_bounds(readme_sel)
+        .expect("根级文件应渲染在文件树顶部");
+
+    // 目录内文件只出现在目录节点下，树顶不得有重复行
+    let grouped_root_sel: &'static str =
+        Box::leak("dbg-diff-tree-root-file-src/lib.rs".to_string().into_boxed_str());
+    assert!(
+        cx.debug_bounds(grouped_root_sel).is_none(),
+        "目录内文件不应以根级行重复出现在文件树顶部"
+    );
+    let grouped_sel: &'static str =
+        Box::leak("dbg-diff-tree-file-src/lib.rs".to_string().into_boxed_str());
+    cx.debug_bounds(grouped_sel)
+        .expect("目录内文件应仍可通过目录节点渲染");
+}
