@@ -2330,7 +2330,7 @@ impl AmuxApp {
     }
 
     /// 联想下拉：展示过滤出的下一级目录项；点击回填绝对路径——目录补分隔符
-    /// 以便继续联想下一级，文件原样回填（回填触发 Input Change 后继续联想）。
+    /// 以便继续联想下一级，文件原样回填。
     /// 用 deferred 绘制：下拉以 absolute 定位向下展开，会盖到卡片中
     // 排在其后的兄弟节点（worktree 开关、新建按钮），
     // 而 gpui 按树序绘制，必须推迟到整棵树之后才能盖住它们。
@@ -2379,6 +2379,9 @@ impl AmuxApp {
                             app.update(cx, |this, cx| {
                                 this.session_cwd_input
                                     .update(cx, |s, cx| s.set_value(&fill, window, cx));
+                                // set_value 抑制 InputEvent::Change，订阅不会触发
+                                // 联想刷新，回填后须手动续弹下一级目录项
+                                this.update_cwd_suggestion(window, cx);
                                 this.new_session_error = None;
                                 cx.notify();
                             });
