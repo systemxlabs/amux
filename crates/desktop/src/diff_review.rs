@@ -601,11 +601,6 @@ impl AmuxApp {
                 .bg(cx.theme().muted)
                 .rounded_md()
                 .overflow_y_scrollbar()
-                .child(
-                    Label::new("改动文件")
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD),
-                )
                 .children(tree_items)
         });
         v_flex()
