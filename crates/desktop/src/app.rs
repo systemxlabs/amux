@@ -245,6 +245,8 @@ struct PanelResizeDrag;
 
 impl AmuxApp {
     pub(crate) const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
+    /// 中间内容列允许被压到的最小宽度（逻辑像素），侧栏/面板拖拽上限据此动态计算
+    const MIN_CONTENT_COL_WIDTH: f32 = 320.0;
     pub fn new(store: Arc<ConfigStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input_state = cx.new(|cx| {
             InputState::new(window, cx)
@@ -415,16 +417,14 @@ impl AmuxApp {
             &app.settings.orch_effort_input,
         ] {
             let input = input.clone();
-            app._subs.push(cx.subscribe_in(
-                &input,
-                window,
-                |this, _input, event, _window, cx| {
+            app._subs.push(
+                cx.subscribe_in(&input, window, |this, _input, event, _window, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.settings.orchestrator_form_error = None;
                         cx.notify();
                     }
-                },
-            ));
+                }),
+            );
         }
         app
     }
@@ -1169,13 +1169,15 @@ impl AmuxApp {
                     let Some(origin) = this.panel_resize_origin else {
                         return;
                     };
-                    // 向左拖（x 变小）即面板变宽；上限同时受 800 逻辑像素与
-                    // 窗口可用宽度约束（保住侧栏与最小中间列宽）
+                    // 向左拖（x 变小）即面板变宽；上限 = 窗口宽 − 侧栏实际
+                    // 宽度 − 最小中间列宽（动态，无固定上限）。侧栏宽度可被
+                    // 拖拽调整，须用实际值而非 SIDEBAR_WIDTH 常量；小窗口下
+                    // 限到最小面板宽，保证 clamp 区间有效
                     let scale = window.scale_factor();
                     let avail = window.bounds().size.width.as_f32() / scale
-                        - crate::theme::SIDEBAR_WIDTH
-                        - 320.0; // 最小中间列宽
-                    let max_w = 800.0f32.min(avail.max(300.0));
+                        - this.sidebar_width_px / scale
+                        - Self::MIN_CONTENT_COL_WIDTH;
+                    let max_w = avail.max(300.0);
                     let next = (this.panel_resize_initial + origin
                         - event.event.position.x.as_f32())
                     .clamp(
@@ -1302,9 +1304,15 @@ impl AmuxApp {
                     let Some(origin) = this.sidebar_resize_origin else {
                         return;
                     };
+                    // 上限 = 窗口宽 − 最小中间列宽（动态，无固定上限）；
+                    // 小窗口下限到最小侧栏宽，保证 clamp 区间有效
+                    let scale = window.scale_factor();
+                    let max_w = (window.bounds().size.width.as_f32() / scale
+                        - Self::MIN_CONTENT_COL_WIDTH)
+                        .max(180.0);
                     let next = (this.sidebar_resize_initial
                         + (event.event.position.x.as_f32() - origin))
-                        .clamp(180.0 * window.scale_factor(), 420.0 * window.scale_factor());
+                        .clamp(180.0 * scale, max_w * scale);
                     this.sidebar_width_px = next;
                     cx.notify();
                 },

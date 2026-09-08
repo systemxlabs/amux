@@ -449,9 +449,8 @@ impl AmuxApp {
         };
         // 左侧文件树区域：按目录层级展示改动文件，不含改动文件的目录不出现在
         // 树中，单链中间目录合并展示；目录节点默认展开、可单独折叠。
-        let tree = build_changed_file_tree(
-            &files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
-        );
+        let tree =
+            build_changed_file_tree(&files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>());
         let collapsed_dirs = machine
             .map(|m| m.diff.read(cx).collapsed_groups.clone())
             .unwrap_or_default();

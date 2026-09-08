@@ -51,10 +51,7 @@ fn orchestrator_save_gates_on_modification(cx: &mut gpui::TestAppContext) {
 
             // 保存成功后回到置灰，且新配置落盘
             app.save_orchestrator(window, cx);
-            assert!(
-                !app.orchestrator_dirty(cx),
-                "保存成功后保存按钮应回到置灰"
-            );
+            assert!(!app.orchestrator_dirty(cx), "保存成功后保存按钮应回到置灰");
             let saved = app.store.orchestrator().unwrap();
             assert_eq!(saved.base_url, "http://127.0.0.1:10/v1");
 

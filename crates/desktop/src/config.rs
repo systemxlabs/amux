@@ -458,7 +458,10 @@ mod tests {
         });
         assert!(normalize_orchestrator(&bad).is_err());
         // 文件不存在时读取方（orchestrator）回退默认，归一化本身不承担该分支
-        assert_eq!(ConfigStore::new(temp_dir()).orchestrator().unwrap(), OrchestratorConfig::default());
+        assert_eq!(
+            ConfigStore::new(temp_dir()).orchestrator().unwrap(),
+            OrchestratorConfig::default()
+        );
     }
 
     #[test]

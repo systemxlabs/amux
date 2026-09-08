@@ -469,9 +469,15 @@ mod tests {
         assert_eq!(tree.len(), 1, "根级只有 src 一个目录，README.md 是根级文件");
         let src = &tree[0];
         assert_eq!(src.label, "src");
-        assert!(src.files.is_empty(), "README.md 是根级文件，不属于任何目录节点");
+        assert!(
+            src.files.is_empty(),
+            "README.md 是根级文件，不属于任何目录节点"
+        );
         assert_eq!(
-            src.children.iter().map(|n| n.label.as_str()).collect::<Vec<_>>(),
+            src.children
+                .iter()
+                .map(|n| n.label.as_str())
+                .collect::<Vec<_>>(),
             ["catalog", "storage/s3"]
         );
         let catalog = &src.children[0];

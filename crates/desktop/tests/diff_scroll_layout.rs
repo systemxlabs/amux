@@ -260,14 +260,20 @@ fn diff_tree_no_duplicate_root_rows_for_grouped_files(cx: &mut gpui::TestAppCont
     });
 
     // 真正的根级文件仍在树顶渲染
-    let readme_sel: &'static str =
-        Box::leak("dbg-diff-tree-root-file-README.md".to_string().into_boxed_str());
+    let readme_sel: &'static str = Box::leak(
+        "dbg-diff-tree-root-file-README.md"
+            .to_string()
+            .into_boxed_str(),
+    );
     cx.debug_bounds(readme_sel)
         .expect("根级文件应渲染在文件树顶部");
 
     // 目录内文件只出现在目录节点下，树顶不得有重复行
-    let grouped_root_sel: &'static str =
-        Box::leak("dbg-diff-tree-root-file-src/lib.rs".to_string().into_boxed_str());
+    let grouped_root_sel: &'static str = Box::leak(
+        "dbg-diff-tree-root-file-src/lib.rs"
+            .to_string()
+            .into_boxed_str(),
+    );
     assert!(
         cx.debug_bounds(grouped_root_sel).is_none(),
         "目录内文件不应以根级行重复出现在文件树顶部"

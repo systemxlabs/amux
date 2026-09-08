@@ -66,7 +66,10 @@ fn click_button(
         .debug_bounds(selector)
         .unwrap_or_else(|| panic!("{selector} 未渲染"));
     cx.simulate_click(
-        point(bounds.left() + px(10.), (bounds.top() + bounds.bottom()) / 2.),
+        point(
+            bounds.left() + px(10.),
+            (bounds.top() + bounds.bottom()) / 2.,
+        ),
         gpui::Modifiers::default(),
     );
 }

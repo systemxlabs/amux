@@ -136,3 +136,86 @@ fn resize_handles_are_isolated(cx: &mut gpui::TestAppContext) {
     assert!(s3 > s2, "拖侧栏手柄应继续加宽侧栏（{s2} → {s3}）");
     assert_eq!(p3, p2, "再拖侧栏手柄不应影响右侧面板宽度");
 }
+
+/// 拖拽上限是动态的（无固定上限）：边界 = 窗口宽 − 最小内容列宽，
+/// 面板再减侧栏实际宽度。拖到界外应恰好停在边界上；侧栏边界（窗口宽
+/// − 320）大于旧固定上限 420，可证明固定上限已移除。
+///
+/// 注：gpui 测试平台屏幕固定 1920×1080（设备像素，scale 2 → 960 逻辑
+/// 像素宽），此宽度下面板动态公式与旧 min(800, ·) 重合，无法在测试窗口
+/// 内单独证明面板的 800 上限已移除，由侧栏断言覆盖该性质。
+#[gpui::test]
+fn resize_caps_follow_window_width(cx: &mut gpui::TestAppContext) {
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
+
+    let (app, cx) = cx.add_window_view(|window, cx| {
+        gpui_component::init(cx);
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
+        AmuxApp::new(store, window, cx)
+    });
+
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let mut machine = MachineView::new(
+                MachineConfig {
+                    name: "test".into(),
+                    url: "ws://127.0.0.1:9/".into(),
+                    token: "t".into(),
+                },
+                cx,
+            );
+            machine.status = MachineStatus::Online;
+            app.machines.push(machine);
+            app.selected = Some(Selected::Session {
+                machine: "test".into(),
+                id: "session-1".into(),
+            });
+            app.panel = Some(Panel::Diff);
+            app.panel_delta_px = 200.0 * window.scale_factor();
+            cx.notify();
+        });
+    });
+
+    cx.draw(point(px(0.), px(0.)), size(px(1920.), px(1080.)), |_, _| {
+        app.clone().into_any_element()
+    });
+    let (scale, win_w, win_w_logical) = cx.update(|window, _| {
+        (
+            window.scale_factor(),
+            window.bounds().size.width.as_f32(),
+            window.bounds().size.width.as_f32() / window.scale_factor(),
+        )
+    });
+
+    // 面板：侧栏未动（240 逻辑像素），上限 = 窗口宽 − 240 − 320（+手柄），
+    // 初始 200 逻辑像素远小于上限，向左拖到界外应停在边界
+    let handle = cx
+        .debug_bounds("panel-resize-handle")
+        .expect("面板手柄未渲染");
+    drag(cx, handle.center(), point(px(50.), handle.center().y));
+    let (_, p1) = read_widths(cx, &app);
+    let panel_cap = (win_w_logical - 240.0 - 320.0 + 5.0) * scale;
+    assert!(
+        (p1 - panel_cap).abs() < 1.0,
+        "面板应停在动态边界 {panel_cap}（实际 {p1}）"
+    );
+
+    // 侧栏：上限 = 窗口宽 − 320 = 640 逻辑像素，向窗口右缘拖应停在边界，
+    // 且越过旧固定上限 420
+    let handle = cx
+        .debug_bounds("sidebar-resize-handle")
+        .expect("侧栏手柄未渲染");
+    drag(
+        cx,
+        handle.center(),
+        point(px(win_w - 100.0), handle.center().y),
+    );
+    let (s1, _) = read_widths(cx, &app);
+    let sidebar_cap = (win_w_logical - 320.0) * scale;
+    assert!(
+        (s1 - sidebar_cap).abs() < 1.0,
+        "侧栏应停在动态边界 {sidebar_cap}（实际 {s1}）"
+    );
+    assert!(s1 > 420.0 * scale, "侧栏上限不应再受旧 420 固定值限制");
+}

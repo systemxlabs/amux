@@ -212,7 +212,11 @@ impl AmuxApp {
         success: bool,
         message: &str,
     ) {
-        let title = if success { "保存成功" } else { "保存失败" };
+        let title = if success {
+            "保存成功"
+        } else {
+            "保存失败"
+        };
         let message = message.to_owned();
         window.open_alert_dialog(cx, move |alert, _window, _cx| {
             alert

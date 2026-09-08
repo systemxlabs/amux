@@ -21,12 +21,12 @@ use gpui_component::{
 };
 
 use protocol::{
-    ActivitiesResult, FsListParams, FsListResult, HistoryResult, OngoingActivityResult,
-    OpResult, SessionConfigKind, SessionConfigOptionValue, SessionConfigOptionsResult,
-    SessionConfigSetting, SessionConfigureParams, SessionIdParams, SessionInfoParams,
-    SessionInfoResult, SessionListParams, SessionListResult, SessionMeta, SessionNewParams,
-    SessionPageParams, SessionPlanResult, SessionPromptParams, SessionResult,
-    SessionSlashCommandsResult, SessionState,
+    ActivitiesResult, FsListParams, FsListResult, HistoryResult, OngoingActivityResult, OpResult,
+    SessionConfigKind, SessionConfigOptionValue, SessionConfigOptionsResult, SessionConfigSetting,
+    SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
+    SessionListParams, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
+    SessionPlanResult, SessionPromptParams, SessionResult, SessionSlashCommandsResult,
+    SessionState,
 };
 
 use crate::config::QuickCommand;
@@ -939,11 +939,10 @@ impl AmuxApp {
     /// 未选中时无隐式默认（按钮置灰兜底），调用方须按 None 判定。
     pub(crate) fn effective_new_session_agent(&self) -> Option<String> {
         let m = self.effective_new_session_machine()?;
-        let name = self.new_session_agent.as_deref().filter(|name| {
-            m.agents
-                .iter()
-                .any(|a| a.available && a.name == *name)
-        })?;
+        let name = self
+            .new_session_agent
+            .as_deref()
+            .filter(|name| m.agents.iter().any(|a| a.available && a.name == *name))?;
         Some(name.to_string())
     }
 
