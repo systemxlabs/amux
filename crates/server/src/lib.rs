@@ -7,6 +7,7 @@ pub mod agent;
 pub mod config;
 pub mod discovery;
 pub mod error;
+pub mod fs;
 pub mod git;
 pub mod history;
 pub mod registry;
@@ -14,7 +15,6 @@ pub mod rpc;
 pub mod session;
 pub mod terminal;
 pub mod transport;
-pub mod workspace;
 
 pub use crate::rpc::{Handlers, RpcError};
 pub use crate::session::SessionManager;

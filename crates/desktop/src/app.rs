@@ -197,6 +197,11 @@ pub struct AmuxApp {
     pub(crate) new_session_worktree: bool,
     pub(crate) new_session_error: Option<String>,
     pub(crate) show_workspace_dropdown: bool,
+    /// 工作目录输入联想：`fs.list` 请求序号（乱序/陈旧响应防乱，仅最新生效）。
+    pub(crate) cwd_suggest_request_id: u64,
+    /// 当前联想结果（父目录 + 前缀 + 匹配到的下一级目录绝对路径）；
+    /// None 表示无联想（输入非绝对路径、无匹配或机器离线）。
+    pub(crate) cwd_suggestion: Option<CwdSuggestion>,
     /// 新建工作流视图的工作流下拉弹层开启态
     pub(crate) show_workflow_dropdown: bool,
     pub(crate) workflow_error: Option<String>,
@@ -223,6 +228,12 @@ pub struct AmuxApp {
     /// 持有订阅以避免其随 drop 自动取消
     pub(crate) _subs: Vec<Subscription>,
     pub(crate) _tasks: Vec<Task<()>>,
+}
+
+/// 工作目录输入联想状态（`fs.list` 返回条目经应用侧前缀过滤后的下一级目录项）。
+pub(crate) struct CwdSuggestion {
+    /// 匹配到的下一级目录项（文件与目录）。
+    pub(crate) matches: Vec<protocol::FsEntry>,
 }
 
 /// 侧栏拖拽手柄的载荷类型。`on_drag_move` 是窗口级全局监听，仅按载荷
@@ -282,6 +293,8 @@ impl AmuxApp {
             new_session_worktree: false,
             new_session_error: None,
             show_workspace_dropdown: false,
+            cwd_suggest_request_id: 0,
+            cwd_suggestion: None,
             show_workflow_dropdown: false,
             workflow_error: None,
             dialog_scroll: ScrollHandle::new(),
@@ -326,6 +339,17 @@ impl AmuxApp {
                     // 输入变化也会驱动命令候选列表重新计算。
                     InputEvent::Change => cx.notify(),
                     _ => {}
+                }
+            },
+        ));
+        // 工作目录输入联想：输入变化时按「父目录 + 前缀」发 `fs.list`，
+        // 在应用侧过滤下一级目录（见 `update_cwd_suggestion`）。
+        app._subs.push(cx.subscribe_in(
+            &app.session_cwd_input,
+            window,
+            |this, _input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.update_cwd_suggestion(window, cx);
                 }
             },
         ));
@@ -419,7 +443,9 @@ impl AmuxApp {
                     this.refresh_slash_commands(cx, &machine_name, session_id);
                     match this.panel {
                         Some(Panel::Workspace) => {
-                            this.load_workspace_list(window, cx, &machine_name, String::new(), 0);
+                            if let Some((_, cwd)) = this.selected_workspace() {
+                                this.load_workspace_list(window, cx, &machine_name, cwd, 0);
+                            }
                         }
                         Some(Panel::Diff) => this.load_diff(window, cx, &machine_name),
                         _ => {}

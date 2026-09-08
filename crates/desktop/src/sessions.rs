@@ -20,8 +20,8 @@ use gpui_component::{
 };
 
 use protocol::{
-    ActivitiesResult, HistoryResult, OngoingActivityResult, OpResult, SessionConfigKind,
-    SessionConfigOptionValue, SessionConfigOptionsResult, SessionConfigSetting,
+    ActivitiesResult, FsListParams, FsListResult, HistoryResult, OngoingActivityResult, OpResult,
+    SessionConfigKind, SessionConfigOptionValue, SessionConfigOptionsResult, SessionConfigSetting,
     SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
     SessionListParams, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
     SessionPlanResult, SessionPromptParams, SessionResult, SessionSlashCommandsResult,
@@ -31,9 +31,9 @@ use protocol::{
 use crate::config::QuickCommand;
 use crate::display::short_cwd;
 use crate::logic::{
-    activity_kind_detail, compose_prompt, compose_workflow_text, external_path_attachment,
-    filter_slash_commands, image_attachment, merge_session_window, slash_command_prefix, DialogMsg,
-    InputAttachment,
+    activity_kind_detail, compose_prompt, compose_workflow_text, cwd_completion_target,
+    external_path_attachment, filter_cwd_suggestions, filter_slash_commands, image_attachment,
+    merge_session_window, slash_command_prefix, DialogMsg, InputAttachment,
 };
 use crate::machine::MachineStatus;
 use crate::text::{block_text, format_local_time, one_line, TimePrecision};
@@ -41,8 +41,8 @@ use crate::workflow::{now, WorkflowEngine};
 use protocol::Activity;
 
 use crate::app::{
-    run_engine_on_tokio, AmuxApp, DraftKey, NewSessionMode, Panel, Selected, SelectedConfigOptions,
-    SelectedSlashCommands, SessionListItem, SettingsCategory, PAGE_LIMIT,
+    run_engine_on_tokio, AmuxApp, CwdSuggestion, DraftKey, NewSessionMode, Panel, Selected,
+    SelectedConfigOptions, SelectedSlashCommands, SessionListItem, SettingsCategory, PAGE_LIMIT,
 };
 
 async fn request_session_page<R, T>(
@@ -559,20 +559,22 @@ impl AmuxApp {
             m.workspace_directories.clear();
             m.workspace_expanded.clear();
             m.workspace_loading.clear();
-            m.workspace_list_request_id = m.workspace_list_request_id.saturating_add(1);
-            m.workspace_read_request_id = m.workspace_read_request_id.saturating_add(1);
+            m.fs_list_request_id = m.fs_list_request_id.saturating_add(1);
+            m.fs_read_request_id = m.fs_read_request_id.saturating_add(1);
             m.workspace_file = None;
             m.workspace_content.clear();
             m.workspace_error = None;
-            m.workspace_read_loading = false;
-            m.workspace_read_has_more = false;
-            m.workspace_read_next_offset = 0;
+            m.fs_read_loading = false;
+            m.fs_read_has_more = false;
+            m.fs_read_next_offset = 0;
         }
         // 会话级 diff/工作目录数据已清空，打开中的面板需按新会话重新加载；
         // 必须在清除状态之后调用，否则会打乱 diff_request_id/loading 守卫。
         match self.panel {
             Some(Panel::Workspace) => {
-                self.load_workspace_list(window, cx, machine_name, String::new(), 0);
+                if let Some((_, cwd)) = self.selected_workspace() {
+                    self.load_workspace_list(window, cx, machine_name, cwd, 0);
+                }
             }
             Some(Panel::Diff) => self.load_diff(window, cx, machine_name),
             _ => {}
@@ -2225,6 +2227,141 @@ impl AmuxApp {
             .into_any()
     }
 
+    /// 工作目录输入联想：把当前输入按最后一个路径分隔符拆成「父目录 + 前缀」，
+    /// 对父目录发 `fs.list`，响应在应用侧按前缀过滤出下一级目录（`logic` 纯函数）。
+    /// 仅父目录为绝对路径时发起；父目录不存在/无匹配/机器离线时静默不弹，
+    /// 不影响手动输入与最近目录选择。每次变更递增请求序号，仅最新响应生效。
+    pub(crate) fn update_cwd_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.session_cwd_input.read(cx).value().trim().to_owned();
+        let Some((parent, prefix)) = cwd_completion_target(&value) else {
+            self.cwd_suggestion = None;
+            // 输入清空时恢复最近目录下拉（若该机器有最近目录）
+            if value.is_empty() {
+                self.show_workspace_dropdown = true;
+            }
+            cx.notify();
+            return;
+        };
+        // 联想优先于最近目录下拉，避免两层浮层叠加
+        self.show_workspace_dropdown = false;
+        let Some(machine_name) = self
+            .new_session_machine
+            .clone()
+            .or_else(|| self.machines.first().map(|m| m.config.name.clone()))
+        else {
+            self.cwd_suggestion = None;
+            cx.notify();
+            return;
+        };
+        let Some(idx) = self.machine_idx_by_name(&machine_name) else {
+            self.cwd_suggestion = None;
+            cx.notify();
+            return;
+        };
+        let m = &mut self.machines[idx];
+        if !m.status.online() {
+            // 离线：联想静默不可用
+            self.cwd_suggestion = None;
+            cx.notify();
+            return;
+        }
+        let client = m.client.clone();
+        let generation = m.connection_generation;
+        self.cwd_suggest_request_id += 1;
+        let request_id = self.cwd_suggest_request_id;
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let params = FsListParams {
+                path: Some(parent.clone()),
+                offset: 0,
+                limit: protocol::FS_LIST_PAGE_LIMIT,
+            };
+            let res = client
+                .request::<_, FsListResult>(protocol::method::FS_LIST, Some(params))
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if !this.is_current_machine_connection(&machine_name, generation)
+                    || this.cwd_suggest_request_id != request_id
+                {
+                    return;
+                }
+                this.cwd_suggestion = match res {
+                    Ok(result) => {
+                        let matches = filter_cwd_suggestions(&result.entries, &prefix);
+                        // 无匹配不弹
+                        (!matches.is_empty()).then(|| CwdSuggestion { matches })
+                    }
+                    Err(_) => None,
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 联想下拉：展示过滤出的下一级目录项；点击回填绝对路径——目录补分隔符
+    /// 以便继续联想下一级，文件原样回填（回填触发 Input Change 后继续联想）。
+    fn render_cwd_suggestion(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let suggestion = self.cwd_suggestion.as_ref()?;
+        let app = cx.entity();
+        let hover_bg = cx.theme().accent;
+        Some(
+            v_flex()
+                .id("cwd-suggest-list")
+                .absolute()
+                // 锚在输入行容器下沿之下，向下展开
+                .top(relative(1.0))
+                .left_0()
+                .right_0()
+                .max_h(rems(16.))
+                .overflow_y_scroll()
+                .p_1()
+                .gap_0p5()
+                .bg(cx.theme().popover)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_lg()
+                .shadow_lg()
+                .children(suggestion.matches.iter().map(|entry| {
+                    let app = app.clone();
+                    // 目录回填时补分隔符，便于继续联想下一级；文件原样回填
+                    let fill = if entry.is_dir {
+                        format!("{}/", entry.path)
+                    } else {
+                        entry.path.clone()
+                    };
+                    let dir_val = entry.path.clone();
+                    div()
+                        .id(format!("cwd-suggest-option-{}", entry.path))
+                        .w_full()
+                        .h_6()
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(move |d| d.bg(hover_bg))
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.session_cwd_input
+                                    .update(cx, |s, cx| s.set_value(&fill, window, cx));
+                                this.new_session_error = None;
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            // 展示完整路径；溢出时头部截断——路径尾部
+                            // （最具体的目录段）始终可见
+                            Label::new(dir_val.clone())
+                                .text_sm()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis_start(),
+                        )
+                }))
+                .into_any(),
+        )
+    }
+
     pub(crate) fn render_workspace_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(machine_name) = self
             .new_session_machine
@@ -2255,75 +2392,90 @@ impl AmuxApp {
                     .text_color(cx.theme().muted_foreground),
             )
             .when(dirs.is_empty(), |view| {
-                view.child(Input::new(&self.session_cwd_input))
+                view.child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .child(Input::new(&self.session_cwd_input))
+                        .children(self.render_cwd_suggestion(cx)),
+                )
             })
             .when(!dirs.is_empty(), |view| {
                 view.child(
-                    Popover::new("workspace-picker")
-                        .anchor(Anchor::BottomLeft)
-                        .open(open)
-                        .on_open_change({
-                            let app = app.clone();
-                            move |is_open, _window, cx| {
-                                app.update(cx, |this, cx| {
-                                    this.show_workspace_dropdown = *is_open;
-                                    cx.notify();
-                                });
-                            }
-                        })
-                        .trigger(
-                            Input::new(&self.session_cwd_input).suffix(
-                                Icon::new(IconName::ChevronDown)
-                                    .small()
-                                    .text_color(cx.theme().muted_foreground),
-                            ),
-                        )
-                        .content(move |_, _window, cx| {
-                            // 受控开启：选项点击后经 AmuxApp 关闭（on_open_change 回写）。
-                            // 选项为手搓行而非 Button——库 Button 内容层硬编码居中，
-                            // 全宽下拉项无法左对齐（同目录树行）
-                            let dirs = store.recent_workspaces_for_machine(&machine_name);
-                            let hover_bg = cx.theme().accent;
-                            v_flex()
-                                .id("workspace-picker-list")
-                                .w(rems(26.))
-                                .max_h(rems(16.))
-                                .overflow_y_scroll()
-                                .gap_0p5()
-                                .children(dirs.into_iter().map(|dir| {
+                    div()
+                        .relative()
+                        .w_full()
+                        .child(
+                            Popover::new("workspace-picker")
+                                .anchor(Anchor::BottomLeft)
+                                .open(open)
+                                .on_open_change({
                                     let app = app.clone();
-                                    let dir_val = dir.clone();
-                                    div()
-                                        .id(format!("ns-workspace-option-{dir}"))
-                                        .w_full()
-                                        .h_6()
-                                        .flex()
-                                        .items_center()
-                                        .px_2()
-                                        .rounded_sm()
-                                        .cursor_pointer()
-                                        .hover(move |d| d.bg(hover_bg))
-                                        .on_click(move |_, window, cx| {
-                                            app.update(cx, |this, cx| {
-                                                this.session_cwd_input.update(cx, |s, cx| {
-                                                    s.set_value(&dir_val, window, cx)
-                                                });
-                                                this.show_workspace_dropdown = false;
-                                                this.new_session_error = None;
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(
-                                            // 展示完整路径；溢出时头部截断——路径尾部
-                                            // （最具体的目录段）始终可见
-                                            Label::new(dir.clone())
-                                                .text_sm()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis_start(),
-                                        )
-                                }))
-                        }),
+                                    move |is_open, _window, cx| {
+                                        app.update(cx, |this, cx| {
+                                            this.show_workspace_dropdown = *is_open;
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .trigger(
+                                    Input::new(&self.session_cwd_input).suffix(
+                                        Icon::new(IconName::ChevronDown)
+                                            .small()
+                                            .text_color(cx.theme().muted_foreground),
+                                    ),
+                                )
+                                .content(move |_, _window, cx| {
+                                    // 受控开启：选项点击后经 AmuxApp 关闭（on_open_change 回写）。
+                                    // 选项为手搓行而非 Button——库 Button 内容层硬编码居中，
+                                    // 全宽下拉项无法左对齐（同目录树行）
+                                    let dirs = store.recent_workspaces_for_machine(&machine_name);
+                                    let hover_bg = cx.theme().accent;
+                                    v_flex()
+                                        .id("workspace-picker-list")
+                                        .w(rems(26.))
+                                        .max_h(rems(16.))
+                                        .overflow_y_scroll()
+                                        .gap_0p5()
+                                        .children(dirs.into_iter().map(|dir| {
+                                            let app = app.clone();
+                                            let dir_val = dir.clone();
+                                            div()
+                                                .id(format!("ns-workspace-option-{dir}"))
+                                                .w_full()
+                                                .h_6()
+                                                .flex()
+                                                .items_center()
+                                                .px_2()
+                                                .rounded_sm()
+                                                .cursor_pointer()
+                                                .hover(move |d| d.bg(hover_bg))
+                                                .on_click(move |_, window, cx| {
+                                                    app.update(cx, |this, cx| {
+                                                        this.session_cwd_input.update(
+                                                            cx,
+                                                            |s, cx| {
+                                                                s.set_value(&dir_val, window, cx)
+                                                            },
+                                                        );
+                                                        this.show_workspace_dropdown = false;
+                                                        this.new_session_error = None;
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child(
+                                                    // 展示完整路径；溢出时头部截断——路径尾部
+                                                    // （最具体的目录段）始终可见
+                                                    Label::new(dir.clone())
+                                                        .text_sm()
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis_start(),
+                                                )
+                                        }))
+                                }),
+                        )
+                        .children(self.render_cwd_suggestion(cx)),
                 )
             })
             .into_any()

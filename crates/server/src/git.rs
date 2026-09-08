@@ -16,7 +16,7 @@ use gix::diff::blob::{ResourceKind, UnifiedDiff};
 
 use protocol::{GitChangeStatus, GitDiffFile, GitDiffHunk, OpResult, WorkspaceDiffResult};
 
-use crate::workspace::canonical_workspace_root;
+use crate::fs::canonical_workspace_root;
 
 #[derive(Default)]
 pub struct GitRunner;
@@ -74,8 +74,8 @@ fn repo_relative_path(workdir: &Path, cwd: &str, p: &str) -> String {
     }
 }
 
-/// 把仓库根相对路径换算为相对 cwd 的路径——diff 结果的 path 与 workspace.list/read
-/// 同基准（相对 cwd），GUI 侧才能把 diff 文件直接喂回浏览/读取接口。
+/// 把仓库根相对路径换算为相对 cwd 的路径——diff 结果的 path 与
+/// `workspace.restore` 的 path 同基准（相对 cwd）。
 fn cwd_relative_path(workdir: &Path, cwd: &str, repo_path: &str) -> String {
     match Path::new(cwd).strip_prefix(workdir) {
         Ok(rel) if !rel.as_os_str().is_empty() => {

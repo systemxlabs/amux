@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use amux_server::agent::{AcpAgentDriver, AgentDriver, AgentRegistry, SharedDriver};
 use amux_server::config::load_config;
+use amux_server::fs::FsBrowser;
 use amux_server::git::GitRunner;
 use amux_server::registry::SessionRegistry;
 use amux_server::rpc::Handlers;
 use amux_server::session::SessionManager;
 use amux_server::transport::{Transport, TransportOptions};
-use amux_server::workspace::WorkspaceBrowser;
 
 /// `AMUX_AGENT_BIN` 可执行路径对应注册表 agent 名（可执行文件名；路径不含文件名时回落为原始串）。
 fn configured_agent_name(bin: &str) -> String {
@@ -222,7 +222,7 @@ async fn main() {
     let handlers = Arc::new(Handlers {
         manager: manager.clone(),
         git: GitRunner::new(),
-        workspace: WorkspaceBrowser::new(),
+        fs: FsBrowser::new(),
         terminals: terminals.clone(),
     });
 

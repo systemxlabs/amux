@@ -302,14 +302,14 @@ impl AmuxApp {
         machine.workspace_directories.clear();
         machine.workspace_expanded.clear();
         machine.workspace_loading.clear();
-        machine.workspace_list_request_id = machine.workspace_list_request_id.saturating_add(1);
-        machine.workspace_read_request_id = machine.workspace_read_request_id.saturating_add(1);
+        machine.fs_list_request_id = machine.fs_list_request_id.saturating_add(1);
+        machine.fs_read_request_id = machine.fs_read_request_id.saturating_add(1);
         machine.workspace_file = None;
         machine.workspace_content.clear();
         machine.workspace_error = None;
-        machine.workspace_read_loading = false;
-        machine.workspace_read_has_more = false;
-        machine.workspace_read_next_offset = 0;
+        machine.fs_read_loading = false;
+        machine.fs_read_has_more = false;
+        machine.fs_read_next_offset = 0;
         if self
             .config_options
             .as_ref()

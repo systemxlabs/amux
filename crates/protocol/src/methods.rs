@@ -27,8 +27,10 @@ pub mod method {
     pub const SESSION_INFO: &str = "session.info";
     pub const WORKSPACE_DIFF: &str = "workspace.diff";
     pub const WORKSPACE_RESTORE: &str = "workspace.restore";
-    pub const WORKSPACE_LIST: &str = "workspace.list";
-    pub const WORKSPACE_READ: &str = "workspace.read";
+    /// 分页列出指定绝对路径目录下的条目（不限于会话工作目录）。
+    pub const FS_LIST: &str = "fs.list";
+    /// 分页读取指定绝对路径文本文件内容。
+    pub const FS_READ: &str = "fs.read";
     /// 指定初始行列打开终端，避免全屏程序先以默认尺寸渲染。
     pub const TERMINAL_OPEN: &str = "terminal.open";
     pub const TERMINAL_RESIZE: &str = "terminal.resize";

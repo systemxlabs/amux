@@ -6,8 +6,8 @@ use gpui_component::{
 };
 
 use protocol::{
-    SessionPlanEntry, SessionPlanStatus, SessionState, WorkspaceListParams, WorkspaceListResult,
-    WorkspaceReadParams, WorkspaceReadResult,
+    FsListParams, FsListResult, FsReadParams, FsReadResult, SessionPlanEntry, SessionPlanStatus,
+    SessionState,
 };
 
 use crate::display::info_row;
@@ -267,6 +267,8 @@ impl AmuxApp {
             )
             .into_any()
     }
+    /// 对绝对路径列目录（`fs.list`）。path 即目录本身（如浏览树根/子目录），
+    /// 不再携带 session_id，也不相对某 cwd 解析。
     pub(crate) fn load_workspace_list(
         &mut self,
         window: &mut Window,
@@ -288,19 +290,18 @@ impl AmuxApp {
         let client = m.client.clone();
         let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
-        m.workspace_list_request_id += 1;
-        let request_id = m.workspace_list_request_id;
+        m.fs_list_request_id += 1;
+        let request_id = m.fs_list_request_id;
         m.workspace_loading.insert(path.clone(), request_id);
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
             let directory_path = path.clone();
-            let params = WorkspaceListParams {
-                session_id: session_id.clone(),
-                path: (!path.is_empty()).then(|| path.clone()),
+            let params = FsListParams {
+                path: Some(path.clone()),
                 offset,
-                limit: protocol::WORKSPACE_LIST_PAGE_LIMIT,
+                limit: protocol::FS_LIST_PAGE_LIMIT,
             };
             let res = client
-                .request::<_, WorkspaceListResult>(protocol::method::WORKSPACE_LIST, Some(params))
+                .request::<_, FsListResult>(protocol::method::FS_LIST, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
                 let current_connection =
@@ -312,7 +313,7 @@ impl AmuxApp {
                 let owns_loading = m.workspace_loading.get(&directory_path) == Some(&request_id);
                 if !current_connection
                     || !selected_session_matches
-                    || m.workspace_list_request_id != request_id
+                    || m.fs_list_request_id != request_id
                 {
                     if owns_loading {
                         m.workspace_loading.remove(&directory_path);
@@ -352,6 +353,7 @@ impl AmuxApp {
         .detach();
     }
 
+    /// 读取绝对路径文本文件（`fs.read`），分页追加进当前文件视图。
     pub(crate) fn load_workspace_file(
         &mut self,
         window: &mut Window,
@@ -373,26 +375,25 @@ impl AmuxApp {
         let client = m.client.clone();
         let machine_name = m.config.name.clone();
         let generation = m.connection_generation;
-        m.workspace_read_request_id += 1;
-        let request_id = m.workspace_read_request_id;
-        m.workspace_read_loading = true;
+        m.fs_read_request_id += 1;
+        let request_id = m.fs_read_request_id;
+        m.fs_read_loading = true;
         m.workspace_error = None;
         if offset == 0 {
             m.workspace_file = Some(path.clone());
             m.workspace_content.clear();
-            m.workspace_read_has_more = false;
-            m.workspace_read_next_offset = 0;
+            m.fs_read_has_more = false;
+            m.fs_read_next_offset = 0;
         }
         cx.notify();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            let params = WorkspaceReadParams {
-                session_id: session_id.clone(),
+            let params = FsReadParams {
                 path,
                 offset,
-                limit: protocol::WORKSPACE_READ_PAGE_LIMIT,
+                limit: protocol::FS_READ_PAGE_LIMIT,
             };
             let res = client
-                .request::<_, WorkspaceReadResult>(protocol::method::WORKSPACE_READ, Some(params))
+                .request::<_, FsReadResult>(protocol::method::FS_READ, Some(params))
                 .await;
             let _ = this.update_in(cx, |this, _window, cx| {
                 let current_connection =
@@ -403,11 +404,11 @@ impl AmuxApp {
                 };
                 if !current_connection
                     || !selected_session_matches
-                    || m.workspace_read_request_id != request_id
+                    || m.fs_read_request_id != request_id
                 {
                     return;
                 }
-                m.workspace_read_loading = false;
+                m.fs_read_loading = false;
                 match res {
                     Ok(result) => {
                         if offset == 0 {
@@ -417,8 +418,8 @@ impl AmuxApp {
                         }
                         m.workspace_file = Some(result.path);
                         m.workspace_error = None;
-                        m.workspace_read_has_more = result.has_more;
-                        m.workspace_read_next_offset = result.next_offset;
+                        m.fs_read_has_more = result.has_more;
+                        m.fs_read_next_offset = result.next_offset;
                     }
                     Err(error) => {
                         m.workspace_error = Some(format!("读取文件失败：{error}"));
@@ -613,15 +614,31 @@ impl AmuxApp {
         let Some(machine_idx) = self.machine_idx_by_name(&machine_name) else {
             return div().into_any();
         };
+        // 浏览树根：选中会话的生效工作目录（worktree 优先）绝对路径；
+        // 无选中会话时无可浏览的根。
+        let Some(workspace_root) = self
+            .selected_workspace()
+            .filter(|(m, _)| m == &machine_name)
+            .map(|(_, cwd)| cwd)
+        else {
+            return v_flex()
+                .w_full()
+                .h_full()
+                .p_3()
+                .bg(cx.theme().popover)
+                .child(Label::new("未选择会话"))
+                .into_any();
+        };
         let machine = &self.machines[machine_idx];
         let workspace_file = machine.workspace_file.clone();
         let workspace_content = machine.workspace_content.clone();
         let workspace_error = machine.workspace_error.clone();
-        let workspace_read_loading = machine.workspace_read_loading;
-        let read_has_more = machine.workspace_read_has_more;
-        let read_next_offset = machine.workspace_read_next_offset;
+        let fs_read_loading = machine.fs_read_loading;
+        let read_has_more = machine.fs_read_has_more;
+        let read_next_offset = machine.fs_read_next_offset;
         let file = workspace_file.clone();
-        // 折叠时左侧文件树整个不渲染，展开/折叠由工具栏按钮控制
+        // 折叠时左侧文件树整个不渲染，展开/折叠由工具栏按钮控制；
+        // 树根是选中会话的生效工作目录（worktree 优先）的绝对路径
         let tree = (!machine.workspace_tree_collapsed).then(|| {
             v_flex()
                 .gap_0()
@@ -630,7 +647,7 @@ impl AmuxApp {
                 .bg(cx.theme().muted.opacity(0.35))
                 .rounded_md()
                 .overflow_y_scrollbar()
-                .children(self.render_workspace_tree(&machine_name, "", 0, cx))
+                .children(self.render_workspace_tree(&machine_name, &workspace_root, 0, cx))
         });
 
         let mut content = v_flex().flex_1().min_w_0().h_full().gap_2().child(
@@ -644,7 +661,7 @@ impl AmuxApp {
         );
         if let Some(error) = workspace_error {
             content = content.child(Label::new(error).text_sm().text_color(cx.theme().danger));
-        } else if workspace_read_loading {
+        } else if fs_read_loading {
             content = content.child(
                 v_flex()
                     .items_center()
@@ -670,12 +687,12 @@ impl AmuxApp {
                     Button::new("workspace-read-more")
                         .small()
                         .ghost()
-                        .label(if workspace_read_loading {
+                        .label(if fs_read_loading {
                             "读取中…"
                         } else {
                             "加载更多内容"
                         })
-                        .disabled(workspace_read_loading)
+                        .disabled(fs_read_loading)
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             if let Some(machine_name) = this.active_machine() {
                                 this.load_workspace_file(
@@ -1067,8 +1084,8 @@ impl AmuxApp {
                 };
                 this.set_panel(window, cx, next);
                 if next == Some(Panel::Workspace) {
-                    if let Some(machine_name) = this.active_machine() {
-                        this.load_workspace_list(window, cx, &machine_name, String::new(), 0);
+                    if let Some((machine_name, cwd)) = this.selected_workspace() {
+                        this.load_workspace_list(window, cx, &machine_name, cwd, 0);
                     }
                 }
                 if next == Some(Panel::Diff) {

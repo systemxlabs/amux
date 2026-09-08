@@ -105,6 +105,32 @@ pub fn filter_slash_commands<'a>(
         .collect()
 }
 
+/// 把输入值按最后一个路径分隔符拆成「父目录 + 前缀」，供工作目录输入联想：
+/// 仅父目录是绝对路径（以 `/` 开头）时返回——相对路径/`~` 无法直接发 `fs.list`；
+/// 前缀为空（输入以 `/` 结尾）表示联想父目录的全部下一级目录项。
+pub fn cwd_completion_target(input: &str) -> Option<(String, String)> {
+    let (parent, prefix) = input.trim().rsplit_once('/')?;
+    let parent = if parent.is_empty() { "/" } else { parent };
+    if !parent.starts_with('/') {
+        return None;
+    }
+    Some((parent.to_string(), prefix.to_string()))
+}
+
+/// 工作目录联想过滤（应用侧，server 的 `fs.list` 只负责分页列目录）：
+/// 文件与目录都保留，按名称前缀匹配（大小写不敏感，保持 server 返回顺序）。
+pub fn filter_cwd_suggestions(
+    entries: &[protocol::FsEntry],
+    prefix: &str,
+) -> Vec<protocol::FsEntry> {
+    let p = prefix.to_lowercase();
+    entries
+        .iter()
+        .filter(|e| e.name.to_lowercase().starts_with(p.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// 会话上下文占用展示文案（token）：`已用 / 窗口（百分比%）`。
 /// 两者均为 0（尚未收到 `usage_update`）时返回 None（不展示）。
 pub fn context_usage_text(used: u64, window: u64) -> Option<String> {
@@ -653,5 +679,70 @@ mod tests {
         assert_eq!(names("g"), vec!["goal"]);
         assert_eq!(names("RE"), vec!["Review"]);
         assert!(names("x").is_empty());
+    }
+
+    fn fs_entry(name: &str, is_dir: bool) -> protocol::FsEntry {
+        protocol::FsEntry {
+            name: name.into(),
+            path: format!("/home/{name}"),
+            is_dir,
+            size: 0,
+        }
+    }
+
+    #[test]
+    fn cwd_completion_target_splits_parent_and_prefix() {
+        // 根目录下的前缀
+        assert_eq!(
+            cwd_completion_target("/ho"),
+            Some(("/".into(), "ho".into()))
+        );
+        // 多级父目录
+        assert_eq!(
+            cwd_completion_target("/home/li"),
+            Some(("/home".into(), "li".into()))
+        );
+        // 以分隔符结尾：联想父目录的全部下一级目录
+        assert_eq!(
+            cwd_completion_target("/home/"),
+            Some(("/home".into(), "".into()))
+        );
+        // 两端空白不影响解析
+        assert_eq!(
+            cwd_completion_target("  /home/li  "),
+            Some(("/home".into(), "li".into()))
+        );
+        // 相对路径 / ~ / 空输入：不联想（离线手动输入或最近目录场景）
+        assert_eq!(cwd_completion_target("home/li"), None);
+        assert_eq!(cwd_completion_target("~/pro"), None);
+        assert_eq!(cwd_completion_target(""), None);
+        assert_eq!(
+            cwd_completion_target("/home/li/pro"),
+            Some(("/home/li".into(), "pro".into()))
+        );
+    }
+
+    #[test]
+    fn filter_cwd_suggestions_matches_prefix_case_insensitively() {
+        let entries = vec![
+            fs_entry("projects", true),
+            fs_entry("Pictures", true),
+            fs_entry("notes.txt", false),
+        ];
+        let names = |prefix: &str| {
+            filter_cwd_suggestions(&entries, prefix)
+                .iter()
+                .map(|e| e.name.clone())
+                .collect::<Vec<_>>()
+        };
+        // 空前缀：返回全部目录项（文件与目录）
+        assert_eq!(names(""), vec!["projects", "Pictures", "notes.txt"]);
+        // 前缀匹配（大小写不敏感）
+        assert_eq!(names("pro"), vec!["projects"]);
+        assert_eq!(names("pic"), vec!["Pictures"]);
+        // 文件也参与匹配
+        assert_eq!(names("not"), vec!["notes.txt"]);
+        // 无匹配
+        assert!(names("zzz").is_empty());
     }
 }

@@ -67,14 +67,14 @@ pub struct MachineView {
     pub(crate) workspace_expanded: HashSet<String>,
     pub(crate) workspace_tree_collapsed: bool,
     pub(crate) workspace_loading: HashMap<String, u64>,
-    pub(crate) workspace_list_request_id: u64,
-    pub(crate) workspace_read_request_id: u64,
+    pub(crate) fs_list_request_id: u64,
+    pub(crate) fs_read_request_id: u64,
     pub(crate) workspace_file: Option<String>,
     pub(crate) workspace_content: String,
     pub(crate) workspace_error: Option<String>,
-    pub(crate) workspace_read_loading: bool,
-    pub(crate) workspace_read_has_more: bool,
-    pub(crate) workspace_read_next_offset: usize,
+    pub(crate) fs_read_loading: bool,
+    pub(crate) fs_read_has_more: bool,
+    pub(crate) fs_read_next_offset: usize,
     /// 本连接打开的终端；连接断开时一并清理。
     pub(crate) terminals: Vec<crate::terminal::TerminalEntry>,
     pub(crate) active_terminal: Option<String>,
@@ -82,7 +82,7 @@ pub struct MachineView {
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct WorkspaceDirectory {
-    pub(crate) entries: Vec<protocol::WorkspaceEntry>,
+    pub(crate) entries: Vec<protocol::FsEntry>,
     pub(crate) has_more: bool,
     pub(crate) next_offset: usize,
 }
@@ -107,14 +107,14 @@ impl MachineView {
             workspace_expanded: HashSet::new(),
             workspace_tree_collapsed: false,
             workspace_loading: HashMap::new(),
-            workspace_list_request_id: 0,
-            workspace_read_request_id: 0,
+            fs_list_request_id: 0,
+            fs_read_request_id: 0,
             workspace_file: None,
             workspace_content: String::new(),
             workspace_error: None,
-            workspace_read_loading: false,
-            workspace_read_has_more: false,
-            workspace_read_next_offset: 0,
+            fs_read_loading: false,
+            fs_read_has_more: false,
+            fs_read_next_offset: 0,
             terminals: Vec::new(),
             active_terminal: None,
         }

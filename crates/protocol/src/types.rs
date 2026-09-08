@@ -480,57 +480,56 @@ pub struct WorkspaceRestoreParams {
     pub patch: Option<String>,
 }
 
-/// `workspace.list` 参数。path 始终是相对 cwd 的目录路径。
+/// `fs.list` 参数。path 为目标目录的绝对路径，缺省为调用方约定的根
+/// （应用侧浏览树时传树根绝对路径）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceListParams {
-    /// 普通会话 ID；工作目录不可由调用方任意指定。
-    pub session_id: String,
+pub struct FsListParams {
     #[serde(default)]
     pub path: Option<String>,
-    #[serde(default = "workspace_page_limit")]
+    #[serde(default = "fs_page_limit")]
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
 }
 
-/// 工作目录中的一个目录项。
+/// 目录浏览/联想共用的目录项。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceEntry {
+pub struct FsEntry {
+    /// 条目名称（最后一段）。
     pub name: String,
+    /// 条目绝对路径；客户端直接用它加载子目录/读文件，无需拼接。
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
 }
 
-/// `workspace.list` 结果。
+/// `fs.list` 结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceListResult {
+pub struct FsListResult {
     pub path: String,
-    pub entries: Vec<WorkspaceEntry>,
+    pub entries: Vec<FsEntry>,
     pub has_more: bool,
     pub next_offset: usize,
 }
 
-/// `workspace.read` 参数。offset/limit 按 UTF-8 文本行分页。
+/// `fs.read` 参数。path 为目标文件的绝对路径；offset/limit 按 UTF-8 文本行分页。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceReadParams {
-    /// 普通会话 ID；工作目录不可由调用方任意指定。
-    pub session_id: String,
+pub struct FsReadParams {
     pub path: String,
     #[serde(default)]
     pub offset: usize,
-    #[serde(default = "workspace_read_limit")]
+    #[serde(default = "fs_read_limit")]
     pub limit: usize,
 }
 
-/// `workspace.read` 结果。
+/// `fs.read` 结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceReadResult {
+pub struct FsReadResult {
     pub path: String,
     pub content: String,
     pub has_more: bool,
@@ -540,15 +539,15 @@ pub struct WorkspaceReadResult {
 /// 分页/窗口默认大小（server 兜底值与 GUI 请求值共用，避免两侧字面量漂移）。
 pub const SESSION_LIST_DEFAULT_LIMIT: usize = 50;
 pub const SESSION_PAGE_DEFAULT_LIMIT: usize = 200;
-pub const WORKSPACE_LIST_PAGE_LIMIT: usize = 200;
-pub const WORKSPACE_READ_PAGE_LIMIT: usize = 400;
+pub const FS_LIST_PAGE_LIMIT: usize = 200;
+pub const FS_READ_PAGE_LIMIT: usize = 400;
 
-fn workspace_page_limit() -> usize {
-    WORKSPACE_LIST_PAGE_LIMIT
+fn fs_page_limit() -> usize {
+    FS_LIST_PAGE_LIMIT
 }
 
-fn workspace_read_limit() -> usize {
-    WORKSPACE_READ_PAGE_LIMIT
+fn fs_read_limit() -> usize {
+    FS_READ_PAGE_LIMIT
 }
 
 /// `terminal.open` 参数。
@@ -720,20 +719,19 @@ mod tests {
     }
 
     #[test]
-    fn workspace_params_and_results_use_documented_json_shape() {
-        let list: WorkspaceListParams =
-            serde_json::from_str(r#"{"sessionId":"s1","path":"src"}"#).unwrap();
-        assert_eq!(list.session_id, "s1");
-        assert_eq!(list.path.as_deref(), Some("src"));
+    fn fs_params_and_results_use_documented_json_shape() {
+        let list: FsListParams =
+            serde_json::from_str(r#"{"path":"/home/linwei/projects"}"#).unwrap();
+        assert_eq!(list.path.as_deref(), Some("/home/linwei/projects"));
         assert_eq!(list.limit, 200);
         assert_eq!(list.offset, 0);
 
-        let read: WorkspaceReadParams =
-            serde_json::from_str(r#"{"sessionId":"s1","path":"README.md"}"#).unwrap();
+        let read: FsReadParams =
+            serde_json::from_str(r#"{"path":"/home/linwei/README.md"}"#).unwrap();
         assert_eq!(read.limit, 400);
 
-        let result = WorkspaceReadResult {
-            path: "README.md".into(),
+        let result = FsReadResult {
+            path: "/home/linwei/README.md".into(),
             content: "hello\n".into(),
             has_more: false,
             next_offset: 1,

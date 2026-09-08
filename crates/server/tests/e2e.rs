@@ -681,56 +681,47 @@ async fn workspace_diff_reflects_changes() {
 }
 
 #[tokio::test]
-async fn workspace_list_and_read_browse_session_directory() {
+async fn fs_list_and_read_browse_absolute_paths() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
     let dir = init_repo();
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(dir.path().join("README.md"), "one\ntwo\nthree\n").unwrap();
-    let session = c
-        .call(
-            "session.new",
-            json!({"agent": "mock_acp", "cwd": dir.path().to_str().unwrap()}),
-        )
-        .await["result"]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let dir_str = dir.path().to_str().unwrap().to_string();
 
     let root = c
-        .call("workspace.list", json!({"sessionId": session, "limit": 10}))
+        .call("fs.list", json!({"path": dir_str, "limit": 10}))
         .await;
     assert!(root.get("error").is_none(), "list 失败: {root}");
-    assert_eq!(root["result"]["path"], "");
+    assert_eq!(root["result"]["path"], dir_str);
     assert!(root["result"]["entries"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|entry| entry["path"] == "src" && entry["isDir"] == true));
+        .any(|entry| entry["path"] == format!("{dir_str}/src") && entry["isDir"] == true));
 
     let nested = c
-        .call(
-            "workspace.list",
-            json!({"sessionId": session, "path": "src"}),
-        )
+        .call("fs.list", json!({"path": format!("{dir_str}/src")}))
         .await;
-    assert_eq!(nested["result"]["entries"][0]["path"], "src/main.rs");
+    assert_eq!(
+        nested["result"]["entries"][0]["path"],
+        format!("{dir_str}/src/main.rs")
+    );
 
     let first = c
         .call(
-            "workspace.read",
-            json!({"sessionId": session, "path": "README.md", "limit": 2}),
+            "fs.read",
+            json!({"path": format!("{dir_str}/README.md"), "limit": 2}),
         )
         .await;
     assert_eq!(first["result"]["content"], "one\ntwo\n");
     assert_eq!(first["result"]["hasMore"], true);
     let second = c
         .call(
-            "workspace.read",
+            "fs.read",
             json!({
-                "sessionId": session,
-                "path": "README.md",
+                "path": format!("{dir_str}/README.md"),
                 "offset": first["result"]["nextOffset"],
                 "limit": 2
             }),
@@ -741,59 +732,33 @@ async fn workspace_list_and_read_browse_session_directory() {
 }
 
 #[tokio::test]
-async fn workspace_read_rejects_invalid_and_binary_paths() {
+async fn fs_read_rejects_invalid_and_binary_paths() {
     let (port, _guard) = start_server().await;
     let mut c = Client::connect(port, "test-token").await;
     let dir = init_repo();
     std::fs::write(dir.path().join("binary.dat"), [0xff, 0xfe, 0xfd]).unwrap();
-    let session = c
-        .call(
-            "session.new",
-            json!({"agent": "mock_acp", "cwd": dir.path().to_str().unwrap()}),
-        )
-        .await["result"]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
 
-    let traversal = c
+    let missing = c
         .call(
-            "workspace.read",
-            json!({"sessionId": session, "path": "../outside.txt"}),
+            "fs.read",
+            json!({"path": format!("{}/missing.txt", dir.path().display())}),
         )
         .await;
     assert!(
-        traversal.get("error").is_some(),
-        "应拒绝越界路径: {traversal}"
+        missing.get("error").is_some(),
+        "应拒绝不存在的文件: {missing}"
     );
 
     let binary = c
         .call(
-            "workspace.read",
-            json!({"sessionId": session, "path": "binary.dat"}),
+            "fs.read",
+            json!({"path": format!("{}/binary.dat", dir.path().display())}),
         )
         .await;
     assert!(
         binary.get("error").is_some(),
         "应拒绝非 UTF-8 文件: {binary}"
     );
-
-    #[cfg(unix)]
-    {
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
-        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
-        let symlink = c
-            .call(
-                "workspace.read",
-                json!({"sessionId": session, "path": "link/secret.txt"}),
-            )
-            .await;
-        assert!(
-            symlink.get("error").is_some(),
-            "应拒绝越界 symlink: {symlink}"
-        );
-    }
 }
 
 async fn mock_acp_name(c: &mut Client) -> String {

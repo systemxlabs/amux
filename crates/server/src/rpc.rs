@@ -7,20 +7,20 @@ use serde::Serialize;
 use serde_json::Value;
 
 use protocol::{
-    method, rpc_error, server_error, AgentListResult, AgentParams, OngoingActivityResult, OpResult,
-    SessionConfigOptionsResult, SessionConfigureParams, SessionIdParams, SessionInfoParams,
-    SessionInfoResult, SessionListParams, SessionListResult, SessionNewParams, SessionPageParams,
-    SessionPlanResult, SessionPromptParams, SessionResult, SessionSlashCommandsResult,
-    TerminalIdParams, TerminalInputParams, TerminalOpenParams, TerminalOpenResult,
-    TerminalResizeParams, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceListParams,
-    WorkspaceReadParams, WorkspaceRestoreParams,
+    method, rpc_error, server_error, AgentListResult, AgentParams, FsListParams, FsReadParams,
+    OngoingActivityResult, OpResult, SessionConfigOptionsResult, SessionConfigureParams,
+    SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
+    SessionNewParams, SessionPageParams, SessionPlanResult, SessionPromptParams, SessionResult,
+    SessionSlashCommandsResult, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
+    TerminalOpenResult, TerminalResizeParams, WorkspaceDiffParams, WorkspaceDiffResult,
+    WorkspaceRestoreParams,
 };
 
 use crate::error::SessionError;
+use crate::fs::FsBrowser;
 use crate::git::GitRunner;
 use crate::session::SessionManager;
 use crate::terminal::{ConnScope, TerminalService};
-use crate::workspace::WorkspaceBrowser;
 
 #[derive(Debug)]
 pub struct RpcError {
@@ -88,7 +88,7 @@ fn ok_op() -> Result<Value, RpcError> {
 pub struct Handlers {
     pub manager: Arc<SessionManager>,
     pub git: GitRunner,
-    pub workspace: WorkspaceBrowser,
+    pub fs: FsBrowser,
     pub terminals: Arc<TerminalService>,
 }
 
@@ -283,28 +283,20 @@ impl Handlers {
                 to_value(r)
             }
 
-            method::WORKSPACE_LIST => {
-                let p: WorkspaceListParams = parse(params)?;
-                let cwd = self
-                    .manager
-                    .workspace_cwd(&p.session_id)
-                    .map_err(map_session_err)?;
+            method::FS_LIST => {
+                let p: FsListParams = parse(params)?;
                 let r = self
-                    .workspace
-                    .list_workspace(&cwd, p.path.as_deref(), p.limit, p.offset)
+                    .fs
+                    .list(p.path.as_deref(), p.limit, p.offset)
                     .map_err(RpcError::internal)?;
                 to_value(r)
             }
 
-            method::WORKSPACE_READ => {
-                let p: WorkspaceReadParams = parse(params)?;
-                let cwd = self
-                    .manager
-                    .workspace_cwd(&p.session_id)
-                    .map_err(map_session_err)?;
+            method::FS_READ => {
+                let p: FsReadParams = parse(params)?;
                 let r = self
-                    .workspace
-                    .read_workspace(&cwd, &p.path, p.offset, p.limit)
+                    .fs
+                    .read(&p.path, p.offset, p.limit)
                     .map_err(RpcError::internal)?;
                 to_value(r)
             }
