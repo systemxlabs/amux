@@ -1452,7 +1452,7 @@ impl OrcBackend for RigBackend {
         Box::pin(async move {
             if !self.cfg.is_configured() {
                 return Err(
-                    "未配置编排 agent API（Base URL / API key / 模型）。请在设置 → 编排 agent 中配置后再创建工作流"
+                    "未配置编排 agent API（Base URL / API key / 模型 / 推理级别）。请在设置 → 编排 agent 中配置后再创建工作流"
                         .to_string(),
                 );
             }

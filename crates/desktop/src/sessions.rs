@@ -2194,14 +2194,18 @@ impl AmuxApp {
                 }
             }
             NewSessionMode::Workflow => {
-                if !self.store.orchestrator().is_configured() {
+                if !self
+                    .store
+                    .orchestrator()
+                    .is_ok_and(|cfg| cfg.is_configured())
+                {
                     card = card.child(
                         v_flex()
                             .gap_2()
                             .child(
                                 Alert::warning(
                                     "ns-no-orch-alert",
-                                    "请先配置 API 格式、Base URL、API Key 和模型名称。",
+                                    "请先配置 API 格式、Base URL、API Key、模型名称和推理级别。",
                                 )
                                 .title("编排智能体尚未配置"),
                             )
@@ -2580,7 +2584,9 @@ impl AmuxApp {
             };
             (
                 "编排智能体".to_string(),
-                self.store.orchestrator().is_configured(),
+                self.store
+                    .orchestrator()
+                    .is_ok_and(|cfg| cfg.is_configured()),
             )
         } else {
             return h_flex().into_any();

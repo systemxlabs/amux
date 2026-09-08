@@ -111,11 +111,16 @@ impl AmuxApp {
         cx: &mut Context<Self>,
         plan: String,
     ) {
-        if !self.store.orchestrator().is_configured() {
-            self.workflow_error = Some(
-                "编排 agent 未配置 API（Base URL / API key / 模型）。请先在 设置 → 编排 agent 中配置。"
+        let error = match self.store.orchestrator() {
+            Err(error) => Some(error),
+            Ok(cfg) if !cfg.is_configured() => Some(
+                "编排 agent 未配置 API（Base URL / API key / 模型 / 推理级别）。请先在 设置 → 编排 agent 中配置。"
                     .into(),
-            );
+            ),
+            Ok(_) => None,
+        };
+        if let Some(error) = error {
+            self.workflow_error = Some(error);
             cx.notify();
             return;
         }
@@ -342,7 +347,9 @@ impl AmuxApp {
     }
 
     pub(crate) fn orchestrator_backend(&self) -> Arc<dyn OrcBackend> {
-        let cfg = self.store.orchestrator();
+        // 配置损坏时以未配置态兜底：decide 在实际使用时报错；
+        // 损坏的精确原因在创建工作流入口（create_workflow_with）报出
+        let cfg = self.store.orchestrator().unwrap_or_default();
         Arc::new(RigBackend::new(cfg))
     }
 

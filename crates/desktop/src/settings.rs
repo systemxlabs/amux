@@ -134,7 +134,8 @@ impl SettingsState {
 
 impl AmuxApp {
     pub(crate) fn setup_orch_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let cfg = self.store.orchestrator();
+        // 配置损坏时表单回退空值：用户保存即可重写修复；损坏详情由创建工作流时报错呈现
+        let cfg = self.store.orchestrator().unwrap_or_default();
         self.settings.orch_api_format = cfg.api_format;
         self.settings
             .orch_base_input

@@ -114,9 +114,10 @@ pub fn normalize_recent_workspaces(raw: &serde_json::Value) -> Vec<RecentWorkspa
         .collect()
 }
 
-/// 编排配置归一化：字段缺失或 api_format 非法 → 整体回退默认。
-pub fn normalize_orchestrator(raw: &serde_json::Value) -> OrchestratorConfig {
-    serde_json::from_value(raw.clone()).unwrap_or_default()
+/// 编排配置解析：字段缺失（含必填的 effort）或 api_format 非法 → 报错，
+/// 不静默回退默认（静默回退会让用户在设置页看到已填字段被清空且不知原因）。
+pub fn normalize_orchestrator(raw: &serde_json::Value) -> Result<OrchestratorConfig, String> {
+    serde_json::from_value(raw.clone()).map_err(|e| format!("编排 agent 配置无效：{e}"))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -349,10 +350,20 @@ impl ConfigStore {
         write_config(&self.path("recent_workspaces.json"), &merged);
     }
 
-    pub fn orchestrator(&self) -> OrchestratorConfig {
-        read_json(&self.path("agent.json"))
-            .map(|value| normalize_orchestrator(&value))
-            .unwrap_or_default()
+    /// 读取编排配置：文件不存在 → 默认（未配置态）；文件损坏或字段缺失
+    /// （含必填的 effort）→ 报错，不静默回退。
+    pub fn orchestrator(&self) -> Result<OrchestratorConfig, String> {
+        let path = self.path("agent.json");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(OrchestratorConfig::default())
+            }
+            Err(e) => return Err(format!("读取编排 agent 配置失败 {}: {e}", path.display())),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("编排 agent 配置无效：{e}"))?;
+        normalize_orchestrator(&value)
     }
 
     pub fn save_orchestrator(&self, cfg: &OrchestratorConfig) -> std::io::Result<()> {
@@ -425,22 +436,19 @@ mod tests {
     }
 
     #[test]
-    fn normalize_orchestrator_falls_back_to_default_on_missing() {
+    fn normalize_orchestrator_errors_on_missing_fields() {
         let raw = serde_json::json!({ "baseUrl": 1 });
-        assert_eq!(normalize_orchestrator(&raw).model, "");
-        // effort 为必填字段：缺失即整体回退默认（无需向后兼容旧文件）
+        assert!(normalize_orchestrator(&raw).is_err());
+        // effort 为必填字段：缺失即报错（不为旧格式静默回退）
         let no_effort = serde_json::json!({
             "apiFormat": "responses", "baseUrl": "http://x", "apiKey": "k", "model": "m"
         });
-        assert_eq!(
-            normalize_orchestrator(&no_effort),
-            OrchestratorConfig::default()
-        );
+        assert!(normalize_orchestrator(&no_effort).is_err());
         let full = serde_json::json!({
             "apiFormat": "responses", "baseUrl": "http://x", "apiKey": "k", "model": "m",
             "effort": "high"
         });
-        let cfg = normalize_orchestrator(&full);
+        let cfg = normalize_orchestrator(&full).unwrap();
         assert_eq!(cfg.model, "m");
         assert_eq!(cfg.effort, "high");
         assert_eq!(cfg.api_format, ApiFormat::Responses);
@@ -448,7 +456,9 @@ mod tests {
             "apiFormat": "graphql", "baseUrl": "http://x", "apiKey": "k", "model": "m",
             "effort": "high"
         });
-        assert_eq!(normalize_orchestrator(&bad), OrchestratorConfig::default());
+        assert!(normalize_orchestrator(&bad).is_err());
+        // 文件不存在时读取方（orchestrator）回退默认，归一化本身不承担该分支
+        assert_eq!(ConfigStore::new(temp_dir()).orchestrator().unwrap(), OrchestratorConfig::default());
     }
 
     #[test]
@@ -500,8 +510,9 @@ mod tests {
         assert_eq!(s2.list_skills().len(), 1);
         assert_eq!(s2.list_templates().len(), 1);
         assert!(s2.list_quick_commands().iter().any(|c| c.name == "构建"));
-        assert_eq!(s2.orchestrator().model, "gpt-4.1");
-        assert_eq!(s2.orchestrator().effort, "high");
+        let orch = s2.orchestrator().unwrap();
+        assert_eq!(orch.model, "gpt-4.1");
+        assert_eq!(orch.effort, "high");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
