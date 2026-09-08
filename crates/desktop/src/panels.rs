@@ -981,6 +981,14 @@ impl AmuxApp {
             .border_1()
             .border_color(cx.theme().border)
             .shadow_sm()
+            // 悬浮栏叠在对话框右缘的滚动条条带（16px 轨道区）之上；
+            // Scrollbar 的「点击轨道即跳转」是全局 mousedown 监听（只按
+            // 位置判定，不感知被更高层元素遮挡），不在此截获会连带触发
+            // 对话框跳到点击位置（顶部按钮即“滚到最上面”）。栏自身无
+            // on_click，截获不影响子按钮的点击。
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
             // 工作目录（仅普通会话展示）
             .when(is_session, |rail| {
                 rail.child(self.render_rail_button(
@@ -1076,6 +1084,7 @@ impl AmuxApp {
         };
         div()
             .id(id.to_string())
+            .debug_selector(|| id.to_string())
             .v_flex()
             .items_center()
             .p_2()
