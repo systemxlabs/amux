@@ -211,7 +211,8 @@ impl AmuxApp {
     /// 四类会话视图刷新（对话/活动/实时活动/计划）的共用骨架：
     /// 机器定位 → 请求序号防陈旧 → 异步请求 → 回写视图。差异点全部参数化：
     /// `request_slot` 定位请求序号字段，`issue` 发请求，`apply` 回写，
-    /// `at_bottom`/`scroll_to_bottom` 仅对话与活动面板需要贴底跟随。
+    /// `at_bottom`/`scroll_to_bottom` 仅活动面板需要贴底跟随（对话框由
+    /// render_dialog 渲染期贴底接管，避免响应落地时强拉用户视口）。
     #[allow(clippy::too_many_arguments)]
     fn refresh_view<R, F, Fut, A>(
         &mut self,
@@ -287,8 +288,8 @@ impl AmuxApp {
             machine_name,
             session_id,
             |v| &mut v.history_request_id,
-            Some(Self::dialog_at_bottom),
-            Some(|this: &mut Self| this.dialog_scroll.scroll_to_bottom()),
+            None,
+            None,
             |client, session_id| async move {
                 client
                     .request::<_, HistoryResult>(
@@ -1510,6 +1511,14 @@ impl AmuxApp {
                 .child(Label::new(hint).text_sm().text_color(muted_foreground))
                 .into_any()
         } else {
+            // 贴底跟随在渲染期重申：底部操作区（活动条出现/消失、输入框
+            // auto_grow、快捷按钮换行）高度变化会缩小对话框视口，旧 offset
+            // 不再贴底，最新消息会被顶出可视区。scroll_to_bottom 标记在
+            // paint 时按新几何取 offset，视口变矮后仍停在底部；用户一旦
+            // 上滚（事件即时改写 offset）标记即不再设置，不干扰自由滚动。
+            if Self::scroll_handle_at_bottom(&self.dialog_scroll) {
+                self.dialog_scroll.scroll_to_bottom();
+            }
             // 滚动条以覆盖层形式挂在滚动区外层（Scrollbar 为 absolute 定位），
             // 放进滚动容器内部会随内容滚走；dialog_scroll 供贴底判断与自动滚动复用
             div()

@@ -1184,8 +1184,13 @@ impl AmuxApp {
     }
 
     /// 对话历史滚动区当前是否贴底。
-    pub(crate) fn dialog_at_bottom(&self) -> bool {
+    pub fn dialog_at_bottom(&self) -> bool {
         Self::scroll_handle_at_bottom(&self.dialog_scroll)
+    }
+
+    /// 对话历史滚动区贴底（进入会话、发送消息后跟随最新消息）。
+    pub fn dialog_scroll_to_bottom(&self) {
+        self.dialog_scroll.scroll_to_bottom();
     }
 
     /// 活动历史滚动区当前是否贴底，语义同 dialog_at_bottom。
