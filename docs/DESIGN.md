@@ -316,7 +316,8 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   "apiFormat": "responses",
   "baseUrl": "https://api.deepseek.com/v1",
   "apiKey": "sk-xxx",
-  "model": "deepseek-v4-flash"
+  "model": "deepseek-v4-flash",
+  "effort": "high"
 }
 ```
 读写为低频操作，无需考虑并发和原子写入问题。
