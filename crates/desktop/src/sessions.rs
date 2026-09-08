@@ -2319,7 +2319,7 @@ impl AmuxApp {
                     Ok(result) => {
                         let matches = filter_cwd_suggestions(&result.entries, &prefix);
                         // 无匹配不弹
-                        (!matches.is_empty()).then(|| CwdSuggestion { matches })
+                        (!matches.is_empty()).then_some(CwdSuggestion { matches })
                     }
                     Err(_) => None,
                 };
@@ -2343,60 +2343,60 @@ impl AmuxApp {
                 v_flex()
                     .id("cwd-suggest-list")
                     .absolute()
-                // 锚在输入行容器下沿之下，向下展开
-                .top(relative(1.0))
-                .left_0()
-                .right_0()
-                .max_h(rems(16.))
-                .overflow_y_scroll()
-                .p_1()
-                .gap_0p5()
-                .bg(cx.theme().popover)
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_lg()
-                .shadow_lg()
-                .children(suggestion.matches.iter().map(|entry| {
-                    let app = app.clone();
-                    // 目录回填时补分隔符，便于继续联想下一级；文件原样回填
-                    let fill = if entry.is_dir {
-                        format!("{}/", entry.path)
-                    } else {
-                        entry.path.clone()
-                    };
-                    let dir_val = entry.path.clone();
-                    div()
-                        .id(format!("cwd-suggest-option-{}", entry.path))
-                        .w_full()
-                        .h_6()
-                        .flex()
-                        .items_center()
-                        .px_2()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .hover(move |d| d.bg(hover_bg))
-                        .on_click(move |_, window, cx| {
-                            app.update(cx, |this, cx| {
-                                this.session_cwd_input
-                                    .update(cx, |s, cx| s.set_value(&fill, window, cx));
-                                // set_value 抑制 InputEvent::Change，订阅不会触发
-                                // 联想刷新，回填后须手动续弹下一级目录项
-                                this.update_cwd_suggestion(window, cx);
-                                this.new_session_error = None;
-                                cx.notify();
-                            });
-                        })
-                        .child(
-                            // 展示完整路径；溢出时头部截断——路径尾部
-                            // （最具体的目录段）始终可见
-                            Label::new(dir_val.clone())
-                                .text_sm()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis_start(),
-                        )
-                }))
-                .into_any(),
+                    // 锚在输入行容器下沿之下，向下展开
+                    .top(relative(1.0))
+                    .left_0()
+                    .right_0()
+                    .max_h(rems(16.))
+                    .overflow_y_scroll()
+                    .p_1()
+                    .gap_0p5()
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_lg()
+                    .shadow_lg()
+                    .children(suggestion.matches.iter().map(|entry| {
+                        let app = app.clone();
+                        // 目录回填时补分隔符，便于继续联想下一级；文件原样回填
+                        let fill = if entry.is_dir {
+                            format!("{}/", entry.path)
+                        } else {
+                            entry.path.clone()
+                        };
+                        let dir_val = entry.path.clone();
+                        div()
+                            .id(format!("cwd-suggest-option-{}", entry.path))
+                            .w_full()
+                            .h_6()
+                            .flex()
+                            .items_center()
+                            .px_2()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(move |d| d.bg(hover_bg))
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.session_cwd_input
+                                        .update(cx, |s, cx| s.set_value(&fill, window, cx));
+                                    // set_value 抑制 InputEvent::Change，订阅不会触发
+                                    // 联想刷新，回填后须手动续弹下一级目录项
+                                    this.update_cwd_suggestion(window, cx);
+                                    this.new_session_error = None;
+                                    cx.notify();
+                                });
+                            })
+                            .child(
+                                // 展示完整路径；溢出时头部截断——路径尾部
+                                // （最具体的目录段）始终可见
+                                Label::new(dir_val.clone())
+                                    .text_sm()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis_start(),
+                            )
+                    }))
+                    .into_any(),
             )
             .into_any_element(),
         )
