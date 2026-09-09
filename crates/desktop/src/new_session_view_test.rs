@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gpui::{point, px, size, AppContext, IntoElement};
 
-use protocol::AgentInfo;
+use protocol::{AgentInfo, AgentStatus};
 
 use crate::app::{AmuxApp, NewSessionMode, Selected};
 use crate::config::{ApiFormat, ConfigStore, MachineConfig, OrchestratorConfig};
@@ -95,7 +95,7 @@ fn create_button_disabled_until_machine_agent_cwd_ready(cx: &mut gpui::TestAppCo
             let mut machine = online_machine("m1", cx);
             machine.agents = vec![AgentInfo {
                 name: "codex".into(),
-                available: true,
+                status: AgentStatus::Available,
             }];
             app.machines.push(machine);
             // 预置错误：按钮置灰时点击不应触发 create_session_only（不会清除它）
@@ -162,7 +162,7 @@ fn offline_machine_shows_disabled_and_blocks_create(cx: &mut gpui::TestAppContex
             machine.status = MachineStatus::Connecting;
             machine.agents = vec![AgentInfo {
                 name: "codex".into(),
-                available: true,
+                status: AgentStatus::Available,
             }];
             app.machines.push(machine);
             app.new_session_error = Some("预设错误".into());
@@ -195,11 +195,15 @@ fn effective_agent_requires_explicit_available_selection(cx: &mut gpui::TestAppC
             machine.agents = vec![
                 AgentInfo {
                     name: "busy".into(),
-                    available: false,
+                    status: AgentStatus::Unavailable,
+                },
+                AgentInfo {
+                    name: "unauthed".into(),
+                    status: AgentStatus::Unauthenticated,
                 },
                 AgentInfo {
                     name: "first".into(),
-                    available: true,
+                    status: AgentStatus::Available,
                 },
             ];
             app.machines.push(machine);
@@ -214,14 +218,19 @@ fn effective_agent_requires_explicit_available_selection(cx: &mut gpui::TestAppC
             app.new_session_agent = Some("busy".into());
             assert_eq!(app.effective_new_session_agent(), None);
 
+            // 显式选择未认证 agent：同样不生效
+            app.new_session_agent = Some("unauthed".into());
+            assert_eq!(app.effective_new_session_agent(), None);
+
             // 显式选择可用：生效
             let m = app.machine_mut_by_name("m1").unwrap();
-            m.agents[0].available = true;
+            m.agents[0].status = AgentStatus::Available;
+            app.new_session_agent = Some("busy".into());
             assert_eq!(app.effective_new_session_agent().as_deref(), Some("busy"));
 
             // 显式选择的 agent 失去可用性：不生效（按钮随之置灰）
             let m = app.machine_mut_by_name("m1").unwrap();
-            m.agents[0].available = false;
+            m.agents[0].status = AgentStatus::Unavailable;
             assert_eq!(app.effective_new_session_agent(), None);
         });
     });

@@ -21,12 +21,12 @@ use gpui_component::{
 };
 
 use protocol::{
-    ActivitiesResult, FsListParams, FsListResult, HistoryResult, OngoingActivityResult, OpResult,
-    SessionConfigKind, SessionConfigOptionValue, SessionConfigOptionsResult, SessionConfigSetting,
-    SessionConfigureParams, SessionContextResult, SessionIdParams, SessionInfoParams,
-    SessionInfoResult, SessionListParams, SessionListResult, SessionMeta, SessionNewParams,
-    SessionPageParams, SessionPlanResult, SessionPromptParams, SessionResult,
-    SessionSlashCommandsResult, SessionState,
+    ActivitiesResult, AgentStatus, FsListParams, FsListResult, HistoryResult,
+    OngoingActivityResult, OpResult, SessionConfigKind, SessionConfigOptionValue,
+    SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams, SessionContextResult,
+    SessionIdParams, SessionInfoParams, SessionInfoResult, SessionListParams, SessionListResult,
+    SessionMeta, SessionNewParams, SessionPageParams, SessionPlanResult, SessionPromptParams,
+    SessionResult, SessionSlashCommandsResult, SessionState,
 };
 
 use crate::config::QuickCommand;
@@ -78,14 +78,13 @@ fn activity_bar_text(current: &Option<Activity>) -> Option<String> {
         Some(Activity::Thinking { thinking, .. }) => {
             Some(format!("思考中：{}", one_line(thinking)))
         }
-        Some(Activity::ToolCall { tool_name, title, .. }) => Some(format!(
+        Some(Activity::ToolCall {
+            tool_name, title, ..
+        }) => Some(format!(
             "工具调用：{} {}",
             tool_name,
             one_line(title.as_deref().unwrap_or(""))
         )),
-        Some(Activity::ToolResult { tool_result, .. }) => {
-            Some(format!("工具结果：{}", one_line(&block_text(tool_result))))
-        }
         Some(Activity::Error { error, .. }) => Some(format!("错误：{}", one_line(error))),
         None => None,
     }
@@ -994,10 +993,11 @@ impl AmuxApp {
     /// 未选中时无隐式默认（按钮置灰兜底），调用方须按 None 判定。
     pub(crate) fn effective_new_session_agent(&self) -> Option<String> {
         let m = self.effective_new_session_machine()?;
-        let name = self
-            .new_session_agent
-            .as_deref()
-            .filter(|name| m.agents.iter().any(|a| a.available && a.name == *name))?;
+        let name = self.new_session_agent.as_deref().filter(|name| {
+            m.agents
+                .iter()
+                .any(|a| a.status == AgentStatus::Available && a.name == *name)
+        })?;
         Some(name.to_string())
     }
 
@@ -1659,22 +1659,6 @@ impl AmuxApp {
                         .text_color(warning_foreground),
                 )
                 .into_any(),
-            Some(Activity::ToolResult { .. }) => h_flex()
-                .w_full()
-                .gap_2()
-                .p_2()
-                .bg(warning.opacity(0.16))
-                .border_1()
-                .border_color(warning.opacity(0.45))
-                .rounded_md()
-                .child(
-                    Label::new(text.unwrap_or_default())
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(warning_foreground),
-                )
-                .into_any(),
             Some(Activity::Error { .. }) => h_flex()
                 .w_full()
                 .gap_2()
@@ -1696,15 +1680,12 @@ impl AmuxApp {
     }
 
     /// 活动行身份：语义键（aggregate::activity_key）+ 前缀，而非下标——加载更早
-    /// 活动会前移插入，下标键会让展开态漂移到其他条目。工具调用附名称、工具
-    /// 结果附调用 ID，以区分同毫秒的多个条目。
+    /// 活动会前移插入，下标键会让展开态漂移到其他条目。工具调用附名称以区分
+    /// 同毫秒的多个条目。
     pub(crate) fn activity_row_key(prefix: &str, a: &Activity) -> String {
         let (kind, ts) = crate::aggregate::activity_key(a);
         match a {
             Activity::ToolCall { tool_name, .. } => format!("{prefix}-{kind}-{ts}-{tool_name}"),
-            Activity::ToolResult { tool_call_id, .. } => {
-                format!("{prefix}-{kind}-{ts}-{tool_call_id}")
-            }
             _ => format!("{prefix}-{kind}-{ts}"),
         }
     }
@@ -2657,14 +2638,19 @@ impl AmuxApp {
             let Some(session) = machine_view.sessions.iter().find(|s| s.id == id) else {
                 return h_flex().into_any();
             };
-            let available = machine_view.status.online()
-                && machine_view
+            let status = if machine_view.status.online() {
+                machine_view
                     .agents
                     .iter()
-                    .any(|agent| agent.name == session.agent && agent.available);
+                    .find(|agent| agent.name == session.agent)
+                    .map(|a| a.status)
+                    .unwrap_or(AgentStatus::Unavailable)
+            } else {
+                AgentStatus::Unavailable
+            };
             (
                 format!("{}@{}", session.agent, machine_view.config.name),
-                available,
+                status,
             )
         } else if let Some(Selected::Workflow { id }) = &self.selected {
             // header 仅标注 agent 名称与可用状态；工作状态
@@ -2674,9 +2660,15 @@ impl AmuxApp {
             };
             (
                 "编排智能体".to_string(),
-                self.store
+                if self
+                    .store
                     .orchestrator()
-                    .is_ok_and(|cfg| cfg.is_configured()),
+                    .is_ok_and(|cfg| cfg.is_configured())
+                {
+                    AgentStatus::Available
+                } else {
+                    AgentStatus::Unavailable
+                },
             )
         } else {
             return h_flex().into_any();
@@ -2694,18 +2686,22 @@ impl AmuxApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground),
             )
-            .child(if status {
-                Tag::success()
+            .child(match status {
+                AgentStatus::Available => Tag::success()
                     .small()
                     .rounded_full()
                     .child(Label::new("可用").text_xs())
-                    .into_any_element()
-            } else {
-                Tag::danger()
+                    .into_any_element(),
+                AgentStatus::Unauthenticated => Tag::warning()
+                    .small()
+                    .rounded_full()
+                    .child(Label::new("未认证").text_xs())
+                    .into_any_element(),
+                AgentStatus::Unavailable => Tag::danger()
                     .small()
                     .rounded_full()
                     .child(Label::new("不可用").text_xs())
-                    .into_any_element()
+                    .into_any_element(),
             })
             .into_any()
     }
@@ -2852,12 +2848,12 @@ impl AmuxApp {
                 .small()
                 .label(name)
                 .when(selected, |b| b.primary());
-            if !a.available {
+            let usable = a.status == AgentStatus::Available;
+            if !usable {
                 btn = btn.disabled(true);
             }
-            let available = a.available;
             row = row.child(btn.on_click(cx.listener(move |this, _ev, _window, cx| {
-                if available {
+                if usable {
                     this.new_session_agent = Some(name_click.clone());
                     cx.notify();
                 }

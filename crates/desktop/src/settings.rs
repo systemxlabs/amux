@@ -1171,7 +1171,11 @@ impl AmuxApp {
                             .truncate(),
                     );
                 for a in &m.agents {
-                    let available = a.available;
+                    let status_label = match a.status {
+                        protocol::AgentStatus::Available => "可用",
+                        protocol::AgentStatus::Unavailable => "不可用",
+                        protocol::AgentStatus::Unauthenticated => "未认证",
+                    };
                     let agent = a.name.clone();
                     let agent_restart = agent.clone();
                     let agent_machine = machine_name.clone();
@@ -1179,14 +1183,7 @@ impl AmuxApp {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(
-                                Label::new(format!(
-                                    "{} · {}",
-                                    agent,
-                                    if available { "可用" } else { "不可用" }
-                                ))
-                                .text_sm(),
-                            )
+                            .child(Label::new(format!("{} · {}", agent, status_label)).text_sm())
                             .child(div().flex_1())
                             .child(
                                 Button::new(format!("restart-agent-{machine_name}-{agent}"))

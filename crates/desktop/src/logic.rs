@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use crate::config::RecentWorkspace;
-use crate::text::block_text;
 use protocol::{Activity, ContentBlock, HistoryItem, SessionMeta};
 
 /// 合并一条新近使用记录：(machine, workspace) 唯一、去重后移到最前、整体按最近使用降序、
@@ -210,9 +209,6 @@ pub fn activity_kind_detail(a: &Activity) -> (String, String) {
                 format!("{title}\n{body}")
             };
             (format!("工具调用：{tool_name}"), combined)
-        }
-        Activity::ToolResult { tool_result, .. } => {
-            ("工具结果".to_string(), block_text(tool_result))
         }
         Activity::Error { error, .. } => ("错误".to_string(), error.clone()),
     }
@@ -702,15 +698,6 @@ mod tests {
         assert_eq!(
             activity_kind_detail(&tool),
             ("工具调用：execute".into(), "运行\ncargo test".into())
-        );
-        let result = Activity::ToolResult {
-            timestamp: 3,
-            tool_call_id: "tc1".into(),
-            tool_result: vec![ContentBlock::Text { text: "输出".into() }],
-        };
-        assert_eq!(
-            activity_kind_detail(&result),
-            ("工具结果".into(), "输出".into())
         );
         let err = Activity::Error {
             timestamp: 4,

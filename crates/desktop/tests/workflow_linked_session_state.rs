@@ -70,7 +70,7 @@ fn hub_with_one_machine() -> Arc<MachineHub> {
             online: true,
             agents: vec![AgentSlot {
                 name: "mock_acp".into(),
-                available: true,
+                status: protocol::AgentStatus::Available,
             }],
         },
         None,

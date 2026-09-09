@@ -34,7 +34,7 @@ use protocol::AgentInfo;
 ///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
 ///   - 发现的 agent 在 server 启动时**直接拉起**（`launch_discovered`，后续
 ///     `driver_for` 复用缓存驱动）；
-///     **拉起失败的 agent 标记为不可用**（agent.list 的 available=false，使用时报明确错误）；
+///     **拉起失败的 agent 标记为不可用、`initialize` 声明非空 `authMethods` 的 agent 标记为未认证**（agent.list 的 status 反映；使用时报明确错误）；
 ///     运行期新发现的 agent 仍走惰性拉起兜底
 /// - 生产路径不提供内置 Stub；没有发现 agent 时 `agent.list` 为空，使用未知 agent 会报错。
 pub struct AgentRegistry {
@@ -55,8 +55,11 @@ pub struct AgentRegistry {
     discovered: Mutex<Vec<DiscoveredAgent>>,
     /// 已拉起的发现驱动（启动拉起 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
     spawned: Mutex<HashMap<String, SharedDriver>>,
-    /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 available=false、driver_for 报错）
+    /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 status=unavailable、driver_for 报错）
     unavailable: Mutex<HashSet<String>>,
+    /// initialize 响应携带非空 authMethods 的 agent（标记未认证：agent.list 的
+    /// status=unauthenticated、driver_for 报错）
+    unauthenticated: Mutex<HashSet<String>>,
     /// server 退出后阻止新的 ACP driver 启动或进入缓存。
     shutting_down: Arc<AtomicBool>,
     /// 线性化显式 driver 的替换与 server 关闭，避免新 driver 发布在关闭快照之后。
@@ -88,6 +91,7 @@ impl AgentRegistry {
             discovered: Mutex::new(Vec::new()),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
+            unauthenticated: Mutex::new(HashSet::new()),
             shutting_down,
             lifecycle: Mutex::new(()),
         };
@@ -133,6 +137,7 @@ impl AgentRegistry {
             discovered: Mutex::new(Vec::new()),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
+            unauthenticated: Mutex::new(HashSet::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             lifecycle: Mutex::new(()),
         }
@@ -149,6 +154,7 @@ impl AgentRegistry {
             discovered: Mutex::new(Vec::new()),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
+            unauthenticated: Mutex::new(HashSet::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             lifecycle: Mutex::new(()),
         }
@@ -175,22 +181,43 @@ impl AgentRegistry {
             .is_some_and(|spec| spec.name == name)
         {
             self.unavailable.lock().insert(name.to_string());
+            self.unauthenticated.lock().remove(name);
         }
     }
+    /// 标记 agent 未认证（initialize 响应携带非空 authMethods）。
+    pub fn mark_unauthenticated(&self, name: &str) {
+        self.unauthenticated.lock().insert(name.to_string());
+        self.unavailable.lock().remove(name);
+    }
+    fn status_for(
+        name: &str,
+        unavailable: &HashSet<String>,
+        unauthenticated: &HashSet<String>,
+    ) -> protocol::AgentStatus {
+        if unauthenticated.contains(name) {
+            protocol::AgentStatus::Unauthenticated
+        } else if unavailable.contains(name) {
+            protocol::AgentStatus::Unavailable
+        } else {
+            protocol::AgentStatus::Available
+        }
+    }
+
     pub fn list_agents(&self) -> Vec<AgentInfo> {
         self.refresh_discovery();
         let discovered = self.discovered.lock();
         let unavailable = self.unavailable.lock();
+        let unauthenticated = self.unauthenticated.lock();
         let mut out: Vec<AgentInfo> = Vec::new();
         if let Some((name, _)) = &self.configured {
             out.push(AgentInfo {
                 name: name.clone(),
-                available: !unavailable.contains(name),
+                status: Self::status_for(name, &unavailable, &unauthenticated),
             });
         } else if let Some(spec) = self.configured_spec.lock().as_ref() {
             out.push(AgentInfo {
                 name: spec.name.clone(),
-                available: !unavailable.contains(&spec.name),
+                status: Self::status_for(&spec.name, &unavailable, &unauthenticated),
             });
         }
         for d in discovered.iter() {
@@ -199,7 +226,7 @@ impl AgentRegistry {
             }
             out.push(AgentInfo {
                 name: d.name.clone(),
-                available: !unavailable.contains(&d.name),
+                status: Self::status_for(&d.name, &unavailable, &unauthenticated),
             });
         }
         out
@@ -213,6 +240,9 @@ impl AgentRegistry {
         }
         if self.unavailable.lock().contains(agent) {
             return Err(format!("agent 不可用（启动时拉起失败）: {agent}"));
+        }
+        if self.unauthenticated.lock().contains(agent) {
+            return Err(format!("agent 未认证: {agent}"));
         }
         if let Some((name, _)) = &self.configured {
             if name == agent {
@@ -234,7 +264,11 @@ impl AgentRegistry {
             .filter(|spec| spec.name == agent)
             .cloned()
         {
-            return self.spawn_and_cache(&spec);
+            let driver = self.spawn_and_cache(&spec)?;
+            if driver.requires_auth() {
+                return Err(format!("agent 未认证: {agent}"));
+            }
+            return Ok(driver);
         }
         self.refresh_discovery();
         let found = self
@@ -244,15 +278,31 @@ impl AgentRegistry {
             .find(|d| d.name == agent)
             .cloned();
         if let Some(d) = found {
-            return self.spawn_and_cache(&d);
+            let driver = self.spawn_and_cache(&d)?;
+            if driver.requires_auth() {
+                return Err(format!("agent 未认证: {agent}"));
+            }
+            return Ok(driver);
         }
         Err(format!("本机未发现 agent: {agent}"))
     }
+    /// 按驱动握手结果同步未认证状态（initialize 携带非空 authMethods）。
+    /// 驱动成功拉起即可用/未认证，原先的不可用标记一并清除。
+    fn sync_auth_status(&self, name: &str, driver: &SharedDriver) {
+        if driver.requires_auth() {
+            self.unauthenticated.lock().insert(name.to_string());
+        } else {
+            self.unauthenticated.lock().remove(name);
+        }
+        self.unavailable.lock().remove(name);
+    }
+
     fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<SharedDriver, String> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err("agent registry 正在关闭".into());
         }
         if let Some(driver) = self.spawned.lock().get(&d.name).cloned() {
+            self.sync_auth_status(&d.name, &driver);
             return Ok(driver);
         }
         let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
@@ -279,6 +329,7 @@ impl AgentRegistry {
             }
             None => {
                 spawned.insert(d.name.clone(), driver.clone());
+                self.sync_auth_status(&d.name, &driver);
                 Ok(driver)
             }
         }
@@ -341,10 +392,12 @@ impl AgentRegistry {
                 Ok(driver) => driver,
                 Err(e) => {
                     self.unavailable.lock().insert(agent.to_string());
+                    self.unauthenticated.lock().remove(agent);
                     return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
                 }
             };
             let new_driver: SharedDriver = Arc::new(driver);
+            self.sync_auth_status(agent, &new_driver);
             if configured_name {
                 let _lifecycle = self.lifecycle.lock();
                 if self.shutting_down.load(Ordering::Acquire) {
@@ -372,11 +425,11 @@ impl AgentRegistry {
                     old.shutdown_and_join();
                 }
             }
-            self.unavailable.lock().remove(agent);
             log::info!("手动重启成功：{}（agent={}）", spec.bin, agent);
             return Ok(());
         }
         self.unavailable.lock().remove(agent);
+        self.unauthenticated.lock().remove(agent);
         self.refresh_discovery();
         let found = self
             .discovered
@@ -399,6 +452,7 @@ impl AgentRegistry {
             }
             Err(e) => {
                 self.unavailable.lock().insert(agent.to_string());
+                self.unauthenticated.lock().remove(agent);
                 log::error!("手动重启失败（agent={}）: {e}", d.name);
                 Err(e)
             }
@@ -580,6 +634,7 @@ mod tests {
             discovered: Mutex::new(discovered),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
+            unauthenticated: Mutex::new(HashSet::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             lifecycle: Mutex::new(()),
         }
@@ -636,14 +691,19 @@ mod tests {
             .iter()
             .find(|a| a.name == "mock_acp")
             .expect("mock_acp 在列表");
-        assert!(mock_info.available, "拉起成功的 agent 应 available=true");
+        assert_eq!(
+            mock_info.status,
+            protocol::AgentStatus::Available,
+            "拉起成功的 agent 应 available"
+        );
         let broken_info = agents
             .iter()
             .find(|a| a.name == "broken")
             .expect("broken 在列表");
-        assert!(
-            !broken_info.available,
-            "拉起失败的 agent 应 available=false"
+        assert_eq!(
+            broken_info.status,
+            protocol::AgentStatus::Unavailable,
+            "拉起失败的 agent 应 unavailable"
         );
         let d1 = reg.driver_for("mock_acp").expect("已拉起驱动应直接返回");
         let d2 = reg.driver_for("mock_acp").expect("已拉起驱动应直接返回");
@@ -675,17 +735,18 @@ mod tests {
             .into_iter()
             .find(|agent| agent.name == "broken")
             .expect("显式配置的失败 agent 应保留在列表");
-        assert!(!info.available);
+        assert!(matches!(info.status, protocol::AgentStatus::Unavailable));
         let error = reg
             .restart_agent("broken")
             .expect_err("重启不存在的 agent 应失败");
         assert!(error.contains("失败"));
-        assert!(
-            !reg.list_agents()
+        assert_eq!(
+            reg.list_agents()
                 .into_iter()
                 .find(|agent| agent.name == "broken")
                 .expect("失败 agent 应仍在列表")
-                .available
+                .status,
+            protocol::AgentStatus::Unavailable
         );
     }
     #[test]

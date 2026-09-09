@@ -2,7 +2,7 @@
 //! - 对话历史：`data_dir/sessions/<session_id>_history.jsonl`，每行一个 `HistoryItem`
 //!   （仅用户输入 `UserMessage` 与 agent 输出 `AgentMessage`，流式输出合并后写入）
 //! - 活动：`data_dir/sessions/<session_id>_activities.jsonl`，每行一个 `Activity`
-//!   （thinking / tool_call / compaction / error）
+//!   （thinking / tool_call / error）
 //!
 //! 文件布局与 JSONL 读写复用 `amux-common::session_log`。
 
@@ -84,8 +84,7 @@ pub(crate) const DEFAULT_TOOL_NAME: &str = "tool_call";
 /// - agent 输出合并为一条 `HistoryItem::AgentMessage`
 /// - thinking 累积为一条 `Activity::Thinking`
 /// - 同一 `tool_call_id` 的 tool_call / tool_call_update 合并为一条
-///   `Activity::ToolCall`；工具结果（Regular Content）单独成条
-///   `Activity::ToolResult`，与 tool_call 以 `tool_call_id` 关联
+///   `Activity::ToolCall`
 #[derive(Default)]
 pub struct TurnMerger {
     output: Option<(String, u64)>,
@@ -194,23 +193,6 @@ impl TurnMerger {
             title,
             parameters,
             timestamp,
-        });
-    }
-
-    /// 工具结果（仅 Regular Content）：与 tool_call 分开记录；
-    /// 结果到达时先把同 id 的进行中调用定稿，保证 tool_call 在前。
-    pub fn push_tool_result(&mut self, id: String, result: Vec<ContentBlock>, timestamp: u64) {
-        if self
-            .current_tool
-            .as_ref()
-            .is_some_and(|tool| tool.id == id)
-        {
-            self.finish_current_tool();
-        }
-        self.activities.push(Activity::ToolResult {
-            timestamp,
-            tool_call_id: id,
-            tool_result: result,
         });
     }
 
@@ -329,44 +311,6 @@ mod tests {
             }
             _ => panic!("应为 ToolCall"),
         }
-    }
-
-    #[test]
-    fn tool_result_recorded_after_call_and_before_next() {
-        // 同 id 的结果到达时先定稿 tool_call，再落 tool_result；
-        // 后续同 id 的更新不再合并，而是开启新条目。
-        let mut m = TurnMerger::new();
-        m.push_tool_call(
-            "tc1".into(),
-            Some("read".into()),
-            Some("读文件".into()),
-            Some(r#"{"path":"a"}"#.into()),
-            1,
-        );
-        m.push_tool_result(
-            "tc1".into(),
-            vec![ContentBlock::Text { text: "内容".into() }],
-            2,
-        );
-        m.push_tool_call("tc1".into(), None, Some("更新标题".into()), None, 3);
-        let (_, acts) = m.finish();
-        assert_eq!(acts.len(), 3);
-        assert!(matches!(&acts[0], Activity::ToolCall { tool_call_id, .. } if tool_call_id == "tc1"));
-        match &acts[1] {
-            Activity::ToolResult {
-                tool_call_id,
-                tool_result,
-                ..
-            } => {
-                assert_eq!(tool_call_id, "tc1");
-                assert_eq!(
-                    tool_result,
-                    &vec![ContentBlock::Text { text: "内容".into() }]
-                );
-            }
-            _ => panic!("第二条应为 ToolResult"),
-        }
-        assert!(matches!(&acts[2], Activity::ToolCall { title, .. } if title.as_deref() == Some("更新标题")));
     }
 
     #[test]

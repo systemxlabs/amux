@@ -173,7 +173,6 @@ pub(crate) fn activity_key(a: &Activity) -> (&'static str, u64) {
     match a {
         Activity::Thinking { timestamp, .. } => ("thinking", *timestamp),
         Activity::ToolCall { timestamp, .. } => ("tool", *timestamp),
-        Activity::ToolResult { timestamp, .. } => ("tool_result", *timestamp),
         Activity::Error { timestamp, .. } => ("error", *timestamp),
     }
 }
@@ -268,10 +267,12 @@ mod tests {
     fn activities_set_and_prepend() {
         let mut view = SessionView::default();
         view.set_activities_page(
-            vec![Activity::ToolResult {
+            vec![Activity::ToolCall {
                 timestamp: 2,
                 tool_call_id: "tc1".into(),
-                tool_result: vec![ContentBlock::Text { text: "压缩".into() }],
+                tool_name: "read".into(),
+                title: None,
+                parameters: None,
             }],
             false,
             None,

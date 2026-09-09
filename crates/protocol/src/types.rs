@@ -6,12 +6,21 @@ pub struct AuthParams {
     pub token: String,
 }
 
-/// 某机器上的一个 agent：名称与可用性。
+/// Agent 状态：可用、不可用或未认证（ACP `initialize` 响应携带非空 `authMethods`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Available,
+    Unavailable,
+    Unauthenticated,
+}
+
+/// 某机器上的一个 agent：名称与状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInfo {
     pub name: String,
-    pub available: bool,
+    pub status: AgentStatus,
 }
 
 /// `session.new` / `session.prompt` 等标识 agent 的名字。
@@ -382,9 +391,7 @@ pub struct HistoryResult {
     pub next_before: Option<u64>,
 }
 
-/// 会话活动：turn 过程中的详细活动。tool_call 与 tool_result 按
-/// `tool_call_id` 关联、分别成条记录；tool_result 仅接收 Regular Content
-/// （ACP `ToolCallContent::Content`，diff/terminal 不落活动）。
+/// 会话活动：turn 过程中的详细活动（thinking / tool_call / error）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
@@ -400,11 +407,6 @@ pub enum Activity {
         title: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         parameters: Option<String>,
-    },
-    ToolResult {
-        timestamp: u64,
-        tool_call_id: String,
-        tool_result: Vec<ContentBlock>,
     },
     Error {
         timestamp: u64,
@@ -706,6 +708,28 @@ mod tests {
     }
 
     #[test]
+    fn agent_info_serializes_status_snake_case() {
+        let available = AgentInfo {
+            name: "codex".into(),
+            status: AgentStatus::Available,
+        };
+        let unavailable = AgentInfo {
+            name: "kimi".into(),
+            status: AgentStatus::Unavailable,
+        };
+        let unauthenticated = AgentInfo {
+            name: "claude".into(),
+            status: AgentStatus::Unauthenticated,
+        };
+        let s = serde_json::to_string(&available).unwrap();
+        assert!(s.contains(r#""status":"available""#), "{s}");
+        let s = serde_json::to_string(&unavailable).unwrap();
+        assert!(s.contains(r#""status":"unavailable""#), "{s}");
+        let s = serde_json::to_string(&unauthenticated).unwrap();
+        assert!(s.contains(r#""status":"unauthenticated""#), "{s}");
+    }
+
+    #[test]
     fn session_list_result_serialize_camel_case() {
         let res = SessionListResult {
             sessions: Vec::new(),
@@ -770,16 +794,6 @@ mod tests {
         assert!(s.contains(r#""tool_name":"read_file""#), "{s}");
         assert!(s.contains(r#""title":"读 src/lib.rs""#), "{s}");
         assert!(s.contains(r#""parameters""#), "{s}");
-
-        let result = Activity::ToolResult {
-            timestamp: 1694230805000,
-            tool_call_id: "call_001".into(),
-            tool_result: vec![ContentBlock::Text { text: "ok".into() }],
-        };
-        let s = serde_json::to_string(&result).unwrap();
-        assert!(s.starts_with(r#"{"kind":"tool_result""#), "{s}");
-        assert!(s.contains(r#""tool_call_id":"call_001""#), "{s}");
-        assert!(s.contains(r#""tool_result""#), "{s}");
 
         let error = Activity::Error {
             timestamp: 1694230810000,

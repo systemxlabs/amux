@@ -13,9 +13,7 @@
 
 #[cfg(test)]
 use amux_common::session_log::read_jsonl;
-use amux_common::session_log::{
-    append_jsonl, workflow_activities_path, workflow_history_path,
-};
+use amux_common::session_log::{append_jsonl, workflow_activities_path, workflow_history_path};
 use parking_lot::{Mutex, RwLock};
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -37,10 +35,11 @@ use rig_core::streaming::StreamedAssistantContent;
 use serde::{Deserialize, Serialize};
 
 use protocol::{
-    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryItem, HistoryResult,
-    SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams, SessionContextResult,
-    SessionIdParams, SessionInfoParams, SessionInfoResult, SessionMeta, SessionNewParams,
-    SessionPageParams, SessionPromptParams, SessionResult, SessionState, StateChangeReason,
+    generate_title, ActivitiesResult, Activity, AgentStatus, ContentBlock, HistoryItem,
+    HistoryResult, SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams,
+    SessionContextResult, SessionIdParams, SessionInfoParams, SessionInfoResult, SessionMeta,
+    SessionNewParams, SessionPageParams, SessionPromptParams, SessionResult, SessionState,
+    StateChangeReason,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig};
@@ -92,7 +91,7 @@ pub fn now() -> u64 {
 #[derive(Debug, Clone)]
 pub struct AgentSlot {
     pub name: String,
-    pub available: bool,
+    pub status: AgentStatus,
 }
 
 /// 仅内存使用（机器摘要快照），无序列化需求。
@@ -181,7 +180,7 @@ impl MachineSummary {
                 .iter()
                 .map(|a| AgentSlot {
                     name: (*a).into(),
-                    available: true,
+                    status: AgentStatus::Available,
                 })
                 .collect(),
         }
@@ -1588,9 +1587,9 @@ async fn dispatch_tool(
     name: &str,
     args: serde_json::Value,
 ) -> Result<String, String> {
-    // 编排调度动作按文档活动格式记录：tool_call 与 tool_result 以
-    // tool_call_id 关联、分别成条落盘；tool_call 同时是进行中实时槽的内容，
-    // 执行完毕（成功或失败）即清除，不让已完成的历史活动继续转圈。
+    // 编排调度动作按文档活动格式记录：工具调用成条落盘；tool_call 同时是
+    // 进行中实时槽的内容，执行完毕（成功或失败）即清除，不让已完成的活动
+    // 继续转圈。
     let tool_call_id = uuid::Uuid::new_v4().to_string();
     let activity = Activity::ToolCall {
         timestamp: now(),
@@ -1631,16 +1630,6 @@ async fn dispatch_tool(
         }
         other => Err(format!("未知工具: {other}")),
     };
-    // 工具结果与 tool_call 分开落盘（成功或失败都以文本结果成条记录）
-    if let Some(record) = &live.record_tool_activity {
-        record(Activity::ToolResult {
-            timestamp: now(),
-            tool_call_id,
-            tool_result: vec![ContentBlock::Text {
-                text: result.clone().unwrap_or_else(|e| format!("工具执行失败：{e}")),
-            }],
-        });
-    }
     live.clear_current();
     result
 }
@@ -1673,10 +1662,18 @@ async fn list_agents(live: &LiveRuntime) -> Result<String, String> {
             serde_json::json!({
                 "name": m.summary.name,
                 "online": m.summary.online,
-                "agents": m.summary.agents.iter().map(|a| serde_json::json!({
-                    "name": a.name,
-                    "available": a.available,
-                })).collect::<Vec<_>>(),
+                "agents": m.summary.agents.iter().map(|a| {
+                    let status = match a.status {
+                        AgentStatus::Available => "available",
+                        AgentStatus::Unavailable => "unavailable",
+                        AgentStatus::Unauthenticated => "unauthenticated",
+                    };
+                    serde_json::json!({
+                        "name": a.name,
+                        "status": status,
+                        "available": a.status == AgentStatus::Available,
+                    })
+                }).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -3104,7 +3101,8 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let cur = live.current.lock().clone();
-            if matches!(&cur, Some(Activity::ToolCall { tool_name, .. }) if tool_name == "prompt_session") {
+            if matches!(&cur, Some(Activity::ToolCall { tool_name, .. }) if tool_name == "prompt_session")
+            {
                 break;
             }
             assert!(

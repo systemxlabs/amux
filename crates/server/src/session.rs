@@ -865,11 +865,6 @@ impl SessionManager {
                     // 否则 ongoing 会一直携带第一段思考的内容。
                     self.thinking_buf.lock().remove(session_id);
                 }
-                AgentEvent::ToolResult { id, content } => {
-                    // 工具结果与 tool_call 分开记录；进行中槽仍展示该调用，
-                    // 直到 turn 结束统一清理。
-                    merger.push_tool_result(id, content, now());
-                }
                 AgentEvent::Error(detail) => {
                     merger.push_error(Activity::Error {
                         timestamp: now(),
