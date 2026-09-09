@@ -605,6 +605,9 @@ impl AmuxApp {
         self.refresh_dialog(window, cx, machine_name, session_id.clone());
         self.refresh_activities(window, cx, machine_name, session_id.clone());
         self.refresh_ongoing(window, cx, machine_name, session_id.clone());
+        // 计划视图同活动视图：面板已打开时，切换会话也需立即刷新一次
+        // （refresh_plan 内部有「面板已打开」守卫，未打开时不触发）
+        self.refresh_plan(window, cx, machine_name, session_id.clone());
         self.refresh_config_options(cx, machine_name, session_id.clone());
         self.refresh_slash_commands(cx, machine_name, session_id);
         self.dialog_scroll.scroll_to_bottom();
