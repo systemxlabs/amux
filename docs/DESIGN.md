@@ -100,7 +100,7 @@ Server 在启动阶段会同时通过子进程方式并行启动已发现的 ACP
 
 ### ACP Server 生命周期
 
-Server 启动时会同时启动所有已安装的 ACP Servers，如果 ACP Server 启动失败，则标记不可用。
+Server 启动时会同时启动所有已安装的 ACP Servers，如果 ACP Server 启动失败，则标记不可用。ACP Server 启动后，Server 向其发送 `initialize` 请求，如响应携带非空 `authMethods` 字段，则标记未认证。
 
 用户可从应用侧重启某一 ACP Server（无论是否已启动）。
 
@@ -188,8 +188,6 @@ Server 作为 ACP client 与 ACP servers 通信
   ```json
   {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
   {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "title": "读 src/lib.rs", "parameters": "..."}
-  // tool result 只接收 Regular Content
-  {"kind": "tool_result", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_result": [ ... ]}
   {"kind": "error", "timestamp": 1694230810000, "error": "工具执行失败: …"}
   ```
 
@@ -327,7 +325,6 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
   ```json
   {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
   {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "title": "读 src/lib.rs", "parameters": "..."}
-  {"kind": "tool_result", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_result": [ ... ]}
   {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
   ```
 
