@@ -1575,11 +1575,10 @@ impl OrcBackend for FakeBackend {
 // 错误以 String 返回、由循环回传给模型纠正。
 
 /// 工具调用统一入口：按名称分派，参数从模型给出的 JSON 反序列化。
-/// 工具参数摘要（单行、120 字截断），供活动条目展示。
+/// 工具参数摘要（单行；不截断，展示宽度由活动条渲染层按可用宽度处理）。
 fn one_line_summary(args: &serde_json::Value) -> String {
     let text = args.to_string();
-    let line = text.lines().next().unwrap_or("").trim();
-    amux_common::text::truncate(line, 120)
+    text.lines().next().unwrap_or("").trim().to_string()
 }
 
 async fn dispatch_tool(

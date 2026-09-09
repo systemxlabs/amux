@@ -70,6 +70,27 @@ where
     Ok((items, has_more, next_before.map(|value| value as usize)))
 }
 
+/// 实时活动条的展示文本（None 即无进行中活动）。内容只折叠空白、不做字符
+/// 上限截断：超长文本由 Label 的 `.truncate()` 按可用宽度收缩，拉宽窗口即可
+/// 看到更多内容（曾在此处硬截 120 字，导致加宽窗口也无法展示更多）。
+fn activity_bar_text(current: &Option<Activity>) -> Option<String> {
+    match current {
+        Some(Activity::Thinking { content, .. }) => {
+            Some(format!("思考中：{}", one_line(content)))
+        }
+        Some(Activity::ToolCall { name, title, .. }) => Some(format!(
+            "工具调用：{} {}",
+            name,
+            one_line(title.as_deref().unwrap_or(""))
+        )),
+        Some(Activity::Compaction { detail, .. }) => {
+            Some(format!("上下文压缩：{}", one_line(detail)))
+        }
+        Some(Activity::Error { detail, .. }) => Some(format!("错误：{}", one_line(detail))),
+        None => None,
+    }
+}
+
 impl AmuxApp {
     pub(crate) fn refresh_sessions(
         &mut self,
@@ -1577,8 +1598,9 @@ impl AmuxApp {
         let warning = cx.theme().warning;
         let warning_foreground = cx.theme().warning_foreground;
         let danger = cx.theme().danger;
+        let text = activity_bar_text(&current);
         match &current {
-            Some(Activity::Thinking { content, .. }) => h_flex()
+            Some(Activity::Thinking { .. }) => h_flex()
                 .w_full()
                 .gap_2()
                 .p_2()
@@ -1588,14 +1610,16 @@ impl AmuxApp {
                 .rounded_md()
                 .child(Spinner::new())
                 .child(
-                    Label::new(format!("思考中：{}", one_line(content, 120)))
+                    // 内容不做字符上限截断：超长时由 .truncate() 按可用宽度
+                    // 收缩展示，拉宽窗口即可看到更多
+                    Label::new(text.unwrap_or_default())
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .text_color(warning_foreground),
                 )
                 .into_any(),
-            Some(Activity::ToolCall { name, title, .. }) => h_flex()
+            Some(Activity::ToolCall { .. }) => h_flex()
                 .w_full()
                 .gap_2()
                 .p_2()
@@ -1605,18 +1629,14 @@ impl AmuxApp {
                 .rounded_md()
                 .child(Spinner::new())
                 .child(
-                    Label::new(format!(
-                        "工具调用：{} {}",
-                        name,
-                        one_line(title.as_deref().unwrap_or(""), 120)
-                    ))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(warning_foreground),
+                    Label::new(text.unwrap_or_default())
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(warning_foreground),
                 )
                 .into_any(),
-            Some(Activity::Compaction { detail, .. }) => h_flex()
+            Some(Activity::Compaction { .. }) => h_flex()
                 .w_full()
                 .gap_2()
                 .p_2()
@@ -1625,14 +1645,14 @@ impl AmuxApp {
                 .border_color(warning.opacity(0.45))
                 .rounded_md()
                 .child(
-                    Label::new(format!("上下文压缩：{}", one_line(detail, 120)))
+                    Label::new(text.unwrap_or_default())
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .text_color(warning_foreground),
                 )
                 .into_any(),
-            Some(Activity::Error { detail, .. }) => h_flex()
+            Some(Activity::Error { .. }) => h_flex()
                 .w_full()
                 .gap_2()
                 .p_2()
@@ -1641,7 +1661,7 @@ impl AmuxApp {
                 .border_color(danger.opacity(0.45))
                 .rounded_md()
                 .child(
-                    Label::new(format!("错误：{}", one_line(detail, 120)))
+                    Label::new(text.unwrap_or_default())
                         .flex_1()
                         .min_w_0()
                         .truncate()
@@ -3157,6 +3177,31 @@ mod tests {
         );
         assert_eq!(for_b.text, "");
         assert!(drafts.is_empty());
+    }
+
+    #[test]
+    fn activity_bar_text_keeps_long_content_untruncated() {
+        // 回归点：活动条文本曾按 120 字符硬截断，拉宽窗口也无法看到更多。
+        // 展示层不设字符上限，超长部分交由 Label 按可用宽度截断。
+        let content = "很".repeat(300);
+        let text = activity_bar_text(&Some(Activity::Thinking {
+            timestamp: 1,
+            content: content.clone(),
+        }))
+        .unwrap();
+        assert_eq!(text, format!("思考中：{content}"));
+
+        let title = "参数".repeat(200);
+        let text = activity_bar_text(&Some(Activity::ToolCall {
+            timestamp: 1,
+            name: "prompt_session".into(),
+            title: Some(title.clone()),
+            content: None,
+        }))
+        .unwrap();
+        assert_eq!(text, format!("工具调用：prompt_session {title}"));
+
+        assert_eq!(activity_bar_text(&None), None);
     }
 
     #[test]

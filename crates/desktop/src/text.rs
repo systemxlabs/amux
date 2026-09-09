@@ -47,10 +47,10 @@ pub fn message_images(content: &[ContentBlock]) -> Vec<gpui::Image> {
         .collect()
 }
 
-/// 折叠空白为单个空格后再截断（单行展示用）。
-pub fn one_line(s: &str, max: usize) -> String {
-    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    amux_common::text::truncate(&collapsed, max)
+/// 折叠空白为单个空格（单行展示用）；超长截断由渲染层按可用宽度处理，
+/// 这里不设字符上限，保证拉宽窗口能看到更多内容。
+pub fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// CJK 等全角字符判定（近似）：这些字符在等宽估算中占一个 em。
@@ -179,10 +179,13 @@ mod tests {
     }
 
     #[test]
-    fn one_line_collapses_whitespace_and_truncates() {
-        assert_eq!(one_line("a  b\nc\td", 100), "a b c d");
-        assert_eq!(one_line("abcdef", 3), "abc…");
-        assert_eq!(one_line("", 3), "");
+    fn one_line_collapses_whitespace() {
+        assert_eq!(one_line("a  b\nc\td"), "a b c d");
+        assert_eq!(one_line("abcdef"), "abcdef");
+        // 不截断：超长内容完整保留，由渲染层按可用宽度截断
+        let long = "很长的内容 ".repeat(100);
+        assert!(one_line(&long).chars().count() > 500, "不应被字符上限截断");
+        assert_eq!(one_line(""), "");
     }
 
     #[test]
