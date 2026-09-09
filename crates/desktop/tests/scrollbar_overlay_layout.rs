@@ -1,11 +1,13 @@
-//! 对话消息框与活动历史面板的覆盖式滚动条布局回归测试。
+//! 对话消息框与活动历史面板的滚动条布局回归测试。
 //!
 //! 历史背景：两个滚动区原本只有原生滚动（无可见滚动条）。滚动条以
 //! `Scrollbar`（absolute 覆盖层）形式挂在滚动区的外层容器上——放进滚动
-//! 容器内部会随内容滚走。锁定不变量：
+//! 容器内部会随内容滚走。滚动容器右内边距预留 16px 滚动条沟槽（Scrollbar
+//! 覆盖滚动区右缘 16px 宽的轨道区）。锁定不变量：
 //! 1) 滚动条覆盖层渲染且覆盖滚动区（与外层容器边界一致）；
 //! 2) 加覆盖层后滚动区仍参与 flex 布局（不塌缩、不被挤走）且内容可滚
-//!    （max_offset 反映超出视口的内容）。
+//!    （max_offset 反映超出视口的内容）；
+//! 3) 内容（气泡/活动卡片）右缘不进入滚动条轨道区，滚动条不覆盖内容。
 
 use std::sync::Arc;
 
@@ -98,6 +100,16 @@ fn dialog_scrollbar_overlays_scroll_area(cx: &mut gpui::TestAppContext) {
             && (scrollbar.size.height - wrap.size.height).abs() <= px(1.),
         "对话滚动条应覆盖消息框区域（scrollbar {scrollbar:?} vs wrap {wrap:?}）"
     );
+    // 滚动条沟槽：气泡右缘不得进入滚动条右缘 16px 宽的轨道区
+    let bubble = visual
+        .debug_bounds("dbg-user-bubble")
+        .expect("用户气泡应参与布局");
+    assert!(
+        bubble.origin.x + bubble.size.width <= scrollbar.origin.x + scrollbar.size.width - px(15.),
+        "用户气泡不应被滚动条覆盖（气泡右缘 {}，滚动条轨道左缘 {}）",
+        bubble.origin.x + bubble.size.width,
+        scrollbar.origin.x + scrollbar.size.width - px(16.),
+    );
     // 滚动区不塌缩：与外层容器同高
     assert_eq!(dialog.size, wrap.size, "消息框应占满外层容器");
     // 内容超出视口仍可滚
@@ -115,6 +127,8 @@ fn activities_panel_scrollbar_overlays_scroll_area(cx: &mut gpui::TestAppContext
     let app = setup(visual);
     visual.update(|_window, cx| {
         app.update(cx, |app, cx| {
+            // 面板宽度由 panel_delta_px 换算（默认 0 会把面板压成 0 宽）
+            app.panel_delta_px = 480.0;
             app.panel = Some(Panel::Activities);
             cx.notify();
         });
@@ -137,6 +151,16 @@ fn activities_panel_scrollbar_overlays_scroll_area(cx: &mut gpui::TestAppContext
             && (scrollbar.size.width - panel.size.width).abs() <= px(1.)
             && (scrollbar.size.height - panel.size.height).abs() <= px(1.),
         "活动历史滚动条应覆盖面板区域（scrollbar {scrollbar:?} vs panel {panel:?}）"
+    );
+    // 滚动条沟槽：活动卡片右缘不得进入滚动条右缘 16px 宽的轨道区
+    let card = visual
+        .debug_bounds("dbg-activity-card")
+        .expect("活动卡片应参与布局");
+    assert!(
+        card.origin.x + card.size.width <= scrollbar.origin.x + scrollbar.size.width - px(15.),
+        "活动卡片不应被滚动条覆盖（卡片右缘 {}，滚动条轨道左缘 {}）",
+        card.origin.x + card.size.width,
+        scrollbar.origin.x + scrollbar.size.width - px(16.),
     );
     let scroll = visual.update(|_, cx| app.read(cx).activities_scroll.clone());
     assert!(

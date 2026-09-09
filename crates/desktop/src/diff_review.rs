@@ -6,7 +6,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
     button::*, checkbox::Checkbox, label::Label, notification::Notification as UiNotification,
-    scroll::ScrollableElement, spinner::Spinner, tag::Tag, tooltip::Tooltip, *,
+    scroll::ScrollableElement, scroll::Scrollbar, spinner::Spinner, tag::Tag, tooltip::Tooltip, *,
 };
 
 use protocol::{
@@ -530,16 +530,38 @@ impl AmuxApp {
                     .gap_2()
                     .children(tree)
                     .child(
+                        // 外层 relative 容器承载覆盖式滚动条（Scrollbar 为
+                        // absolute 定位，放进滚动容器内部会随内容滚走）；
+                        // 列表右内边距预留滚动条沟槽，diff 行不被滑块遮挡。
+                        //
                         // 注意：h_flex() 默认 items_center，子项高度会退化为内容高度，
                         // 必须显式 h_full 约束为行高，否则虚拟列表无视口可滚
                         div()
-                            .id("diff-panel")
-                            .debug_selector(|| "dbg-diff-scroll".into())
+                            .relative()
                             .flex_1()
                             .h_full()
                             .min_w_0()
                             .min_h_0()
-                            .child(diff_list),
+                            .child(
+                                div()
+                                    .id("diff-panel")
+                                    .debug_selector(|| "dbg-diff-scroll".into())
+                                    .flex_1()
+                                    .h_full()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .pr_4()
+                                    .child(diff_list),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .debug_selector(|| "diff-scrollbar".into())
+                                    .child(
+                                        Scrollbar::vertical(&self.diff_scroll).id("diff-scrollbar"),
+                                    ),
+                            ),
                     ),
             )
             .into_any()

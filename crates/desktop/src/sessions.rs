@@ -1370,6 +1370,7 @@ impl AmuxApp {
                     }
                     div().id(("user-row", *timestamp)).w_full().child(
                         div()
+                            .debug_selector(|| "dbg-user-bubble".into())
                             .ml_auto()
                             .flex_none()
                             .w(bubble_w)
@@ -1520,7 +1521,9 @@ impl AmuxApp {
                 self.dialog_scroll.scroll_to_bottom();
             }
             // 滚动条以覆盖层形式挂在滚动区外层（Scrollbar 为 absolute 定位），
-            // 放进滚动容器内部会随内容滚走；dialog_scroll 供贴底判断与自动滚动复用
+            // 放进滚动容器内部会随内容滚走；滚动容器右内边距预留滚动条沟槽
+            // （Scrollbar 覆盖滚动区右缘 16px），气泡不被滑块遮挡；
+            // dialog_scroll 供贴底判断与自动滚动复用
             div()
                 .id("dialog-wrap")
                 .debug_selector(|| "dialog-wrap".into())
@@ -1536,6 +1539,7 @@ impl AmuxApp {
                         .h_full()
                         .gap_4()
                         .p_2()
+                        .pr_4()
                         .overflow_y_scroll()
                         .track_scroll(&self.dialog_scroll)
                         .children(content),
@@ -1673,6 +1677,7 @@ impl AmuxApp {
         let (kind, detail) = activity_kind_detail(a);
         div()
             .id(key_toggle.clone())
+            .debug_selector(|| "dbg-activity-card".into())
             .w_full()
             .p_2()
             .bg(cx.theme().muted.opacity(0.55))
@@ -2738,7 +2743,8 @@ impl AmuxApp {
             )
             .child(
                 // v_flex 让卡片间 gap 生效（原为普通 div，gap 无效导致卡片贴叠）；
-                // 外层 relative 容器承载覆盖式滚动条（Scrollbar 为 absolute 定位）
+                // 外层 relative 容器承载覆盖式滚动条（Scrollbar 为 absolute 定位），
+                // 滚动容器右内边距预留滚动条沟槽，活动卡片不被滑块遮挡
                 div()
                     .id("activities-panel-wrap")
                     .debug_selector(|| "activities-panel-wrap".into())
@@ -2752,6 +2758,7 @@ impl AmuxApp {
                             .h_full()
                             .v_flex()
                             .gap_2()
+                            .pr_4()
                             .overflow_y_scroll()
                             .track_scroll(&self.activities_scroll)
                             .children(children),

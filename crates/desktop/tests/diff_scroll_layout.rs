@@ -283,3 +283,72 @@ fn diff_tree_no_duplicate_root_rows_for_grouped_files(cx: &mut gpui::TestAppCont
     cx.debug_bounds(grouped_sel)
         .expect("目录内文件应仍可通过目录节点渲染");
 }
+
+/// diff 区域滚动条：覆盖层渲染且覆盖滚动区；滚动容器右内边距预留 16px
+/// 沟槽（Scrollbar 覆盖滚动区右缘 16px 宽轨道区），diff 行不被滑块遮挡。
+#[gpui::test]
+fn diff_panel_scrollbar_overlays_diff_area(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
+
+    let app = cx.update(|window, cx| {
+        gpui_component::init(cx);
+        let store = Arc::new(ConfigStore::new(data_path.clone()));
+        cx.new(|cx| AmuxApp::new(store, window, cx))
+    });
+
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let mut machine = MachineView::new(
+                MachineConfig {
+                    name: "test".into(),
+                    url: "ws://127.0.0.1:9/".into(),
+                    token: "t".into(),
+                },
+                cx,
+            );
+            machine.status = MachineStatus::Online;
+            machine.diff.update(cx, |st, _| {
+                st.files = big_diff_files();
+                st.rebuild_rows(window.rem_size());
+            });
+            app.machines.push(machine);
+            app.selected = Some(Selected::Session {
+                machine: "test".into(),
+                id: "session-1".into(),
+            });
+            app.panel = Some(Panel::Diff);
+            app.panel_delta_px = 420.0 * window.scale_factor();
+            cx.notify();
+        });
+    });
+
+    cx.draw(point(px(0.), px(0.)), size(px(1024.), px(768.)), |_, cx| {
+        cx.new(|_| DiffPanelHostView { app: app.clone() })
+            .into_any_element()
+    });
+
+    let scroll_sel: &'static str = Box::leak("dbg-diff-scroll".to_string().into_boxed_str());
+    let scroll_area = cx.debug_bounds(scroll_sel).expect("diff 滚动区未渲染");
+    let bar_sel: &'static str = Box::leak("diff-scrollbar".to_string().into_boxed_str());
+    let scrollbar = cx.debug_bounds(bar_sel).expect("diff 滚动条覆盖层未渲染");
+    assert!(
+        (scrollbar.origin.x - scroll_area.origin.x).abs() <= px(1.)
+            && (scrollbar.origin.y - scroll_area.origin.y).abs() <= px(1.)
+            && (scrollbar.size.width - scroll_area.size.width).abs() <= px(1.)
+            && (scrollbar.size.height - scroll_area.size.height).abs() <= px(1.),
+        "diff 滚动条应覆盖滚动区（scrollbar {scrollbar:?} vs scroll_area {scroll_area:?}）"
+    );
+
+    // 滚动条沟槽：diff 行右缘不得进入滚动条右缘 16px 宽的轨道区
+    let header_sel: &'static str =
+        Box::leak("dbg-diff-file-src/lib.rs".to_string().into_boxed_str());
+    let header = cx.debug_bounds(header_sel).expect("diff 文件头行未渲染");
+    assert!(
+        header.origin.x + header.size.width <= scrollbar.origin.x + scrollbar.size.width - px(15.),
+        "diff 行不应被滚动条覆盖（行右缘 {}，滚动条轨道左缘 {}）",
+        header.origin.x + header.size.width,
+        scrollbar.origin.x + scrollbar.size.width - px(16.),
+    );
+}
