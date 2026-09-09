@@ -12,7 +12,7 @@
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -56,7 +56,9 @@ pub struct SessionManager {
 }
 
 struct SessionControl {
-    busy: AtomicBool,
+    /// 进行中的 turn 数：0 = 空闲。并发 prompt 均直接转发给 ACP server
+    /// （是否受理由 agent 决定），用计数而非布尔跟踪忙闲。
+    turns: AtomicUsize,
     deleted: AtomicBool,
     /// 串行化删除与 agent 侧会话创建/元数据写回，避免删除竞态下会话复活。
     lifecycle: Mutex<()>,
@@ -171,7 +173,7 @@ impl SessionManager {
 
     fn new_control() -> Arc<SessionControl> {
         Arc::new(SessionControl {
-            busy: AtomicBool::new(false),
+            turns: AtomicUsize::new(0),
             deleted: AtomicBool::new(false),
             lifecycle: Mutex::new(()),
         })
@@ -611,6 +613,11 @@ impl SessionManager {
     /// agent 会话（session/new）→ resume → 用户消息立即落盘 → 跑 turn（事件喂
     /// TurnMerger，记录 ongoing）→ 写 agent 历史/活动 → 置空闲；必要时广播
     /// `session.state_change`（Busy<->Idle）。落盘失败向上传播（GUI 可见）。
+    ///
+    /// 不做本地忙时拒绝：turn 进行中收到的新 prompt 照样转发给 ACP server，
+    /// 是否受理（steer/排队/报错）由 agent 决定；agent 以错误响应拒绝时经
+    /// `PromptFailed` 上报为请求错误。同会话多个 turn 并发时以 `turns` 计数
+    /// 维护忙闲，最后一个 turn 结束才回空闲。
     pub async fn prompt(
         &self,
         session_id: &str,
@@ -620,18 +627,11 @@ impl SessionManager {
             return Err(SessionError::EmptyInput);
         }
         let control = self.control(session_id)?;
-        // 先取得生命周期锁再设置 busy，使 prompt 与 cancel/delete 有明确的
+        // 先取得生命周期锁再递增 turns，使 prompt 与 cancel/delete 有明确的
         // 线性化顺序；否则 cancel 可能在 setup_prompt 写回 Busy 前读到旧的 Idle。
         let lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
-        }
-        if control
-            .busy
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Err(SessionError::Busy);
         }
 
         // 删除会先标记 deleted 并等待这把锁；持有期间完成 agent session 创建、
@@ -645,13 +645,12 @@ impl SessionManager {
         } = match setup {
             Ok(value) => value,
             Err(error) => {
-                // 尚未进入 Busy 广播，只需释放 busy 标志；若会话已被删除，
-                // 同时移除这次竞态中刚创建的孤儿控制块。
-                control.busy.store(false, Ordering::SeqCst);
+                // 若会话已被删除，移除这次竞态中刚创建的孤儿控制块。
                 self.remove_control_if_not_found(session_id, &control, &error);
                 return Err(error);
             }
         };
+        control.turns.fetch_add(1, Ordering::SeqCst);
 
         if old_state != SessionState::Busy {
             self.broadcast_state_change(
@@ -724,6 +723,8 @@ impl SessionManager {
     }
 
     /// prompt 前置准备：读元数据、生成标题、置 Busy、惰性创建 agent 侧会话。
+    /// turn 进行中（meta.state == Busy）不拒绝：原样置 Busy 落盘并返回，
+    /// 受理与否由 agent 决定。
     fn setup_prompt(
         &self,
         session_id: &str,
@@ -738,9 +739,6 @@ impl SessionManager {
         let agent_session_id = entry.agent_session_id;
         let old_state = meta.state;
         // （agent_session_id 现为 Option：None = agent 侧会话尚未惰性创建）
-        if meta.state == SessionState::Busy {
-            return Err(SessionError::Busy);
-        }
         if meta.title.is_empty() {
             meta.title = generate_title(&first_text(input));
         }
@@ -761,8 +759,7 @@ impl SessionManager {
             None => self.ensure_agent_session(session_id, &meta, None)?,
         };
         // 创建与 resume 分支统一 upsert：busy、首条 prompt 生成的标题与活跃时间
-        // 立即落盘：状态以元数据为权威，避免 turn 进行中列表读到陈旧空闲，
-        // 或让并发 prompt 通过 Busy 检查。
+        // 立即落盘：状态以元数据为权威，避免 turn 进行中列表读到陈旧空闲。
         // resume 分支若只更新状态，先查过会话选项的会话（agent 侧会话已提前
         // 创建）首条 prompt 生成的标题将永远不落盘。
         if control.deleted.load(Ordering::SeqCst) {
@@ -794,6 +791,8 @@ impl SessionManager {
         let mut turn_completed = false;
         // 中断时没有 ACP stopReason，保持 aborted。
         let mut turn_reason = protocol::StateChangeReason::Aborted;
+        // ACP server 以错误响应拒绝本次 prompt（turn 未开始）：作为请求错误上报
+        let mut prompt_failed: Option<String> = None;
         let mut storage_error: Option<SessionError> = None;
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -865,6 +864,15 @@ impl SessionManager {
                     self.thinking_buf.lock().remove(session_id);
                     log::error!("agent turn 失败 {session_id}: {detail}");
                 }
+                AgentEvent::PromptFailed(detail) => {
+                    merger.push_error(Activity::Error {
+                        timestamp: now(),
+                        detail: detail.clone(),
+                    });
+                    self.thinking_buf.lock().remove(session_id);
+                    log::error!("agent 拒绝 prompt {session_id}: {detail}");
+                    prompt_failed = Some(detail);
+                }
                 AgentEvent::UsageUpdate { used, size } => {
                     // 记录 ACP 提供的会话上下文大小。
                     if !control.deleted.load(Ordering::SeqCst) {
@@ -912,6 +920,9 @@ impl SessionManager {
                 }
             }
         }
+        if let Some(detail) = prompt_failed {
+            storage_error = Some(SessionError::PromptFailed(detail));
+        }
         (storage_error, turn_reason)
     }
 
@@ -940,8 +951,9 @@ impl SessionManager {
         Ok(())
     }
 
-    /// turn 统一收尾：清 ongoing、释放 busy、置 Idle 并广播结束原因
-    /// （deleted 时跳过状态回写，避免已删除会话在注册表中复活）。
+    /// turn 统一收尾：递减进行中计数；归零时清 ongoing、置 Idle 并广播结束
+    /// 原因（并发 turn 未全部结束则保持 Busy，ongoing 交由余下 turn 继续）。
+    /// deleted 时跳过状态回写，避免已删除会话在注册表中复活。
     fn finalize_turn(
         &self,
         session_id: &str,
@@ -950,9 +962,11 @@ impl SessionManager {
     ) {
         let _lifecycle = control.lifecycle.lock();
         let deleted = control.deleted.load(Ordering::SeqCst);
+        if control.turns.fetch_sub(1, Ordering::SeqCst) > 1 {
+            return;
+        }
         self.ongoing.lock().remove(session_id);
         self.thinking_buf.lock().remove(session_id);
-        control.busy.store(false, Ordering::SeqCst);
         if !deleted {
             if let Err(e) = self
                 .registry
@@ -977,7 +991,7 @@ impl SessionManager {
         // 会报错，这里幂等返回成功、不透传——GUI 的取消按钮是常驻的，
         // 调用方无需自行区分忙闲。控制块是并发状态权威，注册表可能仍在
         // prompt 初始化的写回窗口内保持 Idle。
-        if !control.busy.load(Ordering::SeqCst) {
+        if control.turns.load(Ordering::SeqCst) == 0 {
             return Ok(());
         }
         let Some(agent_session_id) = entry.agent_session_id else {
@@ -990,8 +1004,8 @@ impl SessionManager {
         driver
             .cancel(&agent_session_id)
             .map_err(SessionError::AgentUnavailable)?;
-        // 只请求 ACP 取消，不提前伪造 Idle；prompt 事件流结束后才释放 busy，
-        // 从而避免旧 turn 尚未结束时被新的 prompt 并发启动。
+        // 只请求 ACP 取消，不提前伪造 Idle；turn 事件流结束后才递减 turns，
+        // 会话忙闲始终由真实在途的 turn 数决定。
         Ok(())
     }
 
@@ -1131,10 +1145,12 @@ mod tests {
         assert!(manager.controls.lock().is_empty());
     }
     /// 阻塞型驱动：prompt 后等待 release 才结束 turn（用于控制 turn 生命周期，
-    /// 在 turn 进行中并发执行删除以验证删除语义）。
+    /// 在 turn 进行中并发执行删除/新 prompt 以验证并发语义）。
     struct BlockingDriver {
         started: Arc<Notify>,
-        release: Arc<Notify>,
+        /// 许可被永久消费（不回收）：每个 turn 消耗一个，测试按需 add_permits，
+        /// 与 Notify 的单许可语义相比可确定性地放行任意数量的并发 turn
+        release: Arc<tokio::sync::Semaphore>,
     }
 
     impl AgentDriver for BlockingDriver {
@@ -1163,7 +1179,9 @@ mod tests {
             let release = self.release.clone();
             tokio::spawn(async move {
                 started.notify_one();
-                release.notified().await;
+                if let Ok(permit) = release.acquire().await {
+                    std::mem::forget(permit);
+                }
                 let _ = tx
                     .send(AgentEvent::TurnEnded(
                         protocol::StateChangeReason::Completed,
@@ -2092,7 +2110,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_persists_user_message_before_turn_ends() {
         let started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
         let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
             "blocking",
             Arc::new(BlockingDriver {
@@ -2128,14 +2146,14 @@ mod tests {
                 if content == &text("立即保存")
         ));
 
-        release.notify_one();
+        release.add_permits(1);
         prompt_task.await.unwrap().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[tokio::test]
     async fn deleted_mid_turn_does_not_broadcast_state_change() {
         let started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
         let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
             "blocking",
             Arc::new(BlockingDriver {
@@ -2170,7 +2188,7 @@ mod tests {
         started.notified().await;
         manager.delete(&session_id).await.unwrap();
 
-        release.notify_one();
+        release.add_permits(1);
         let prompt_result = prompt_task.await.unwrap();
         assert!(
             matches!(prompt_result, Err(SessionError::NotFound(_))),
@@ -2385,7 +2403,7 @@ mod tests {
         // 落盘。回归：resume 分支（已有 agent 侧会话）此前 busy 只改内存，
         // turn 进行中列表读到陈旧空闲，且 Busy 前置检查放行并发 prompt。
         let started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
         let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
             "blocking",
             Arc::new(BlockingDriver {
@@ -2413,7 +2431,7 @@ mod tests {
         let sid1 = session_id.clone();
         let first = tokio::spawn(async move { pm.prompt(&sid1, text("第一轮")).await });
         started.notified().await;
-        release.notify_one();
+        release.add_permits(1);
         first.await.unwrap().unwrap();
         let entry = registry.get(&session_id).unwrap().unwrap();
         assert!(
@@ -2433,16 +2451,23 @@ mod tests {
             SessionState::Busy,
             "resume 分支的 busy 应立即落盘"
         );
-        // 元数据为权威：并发 prompt 被拒绝
-        assert!(matches!(
-            manager.prompt(&session_id, text("并发")).await,
-            Err(SessionError::Busy)
-        ));
+        // 元数据为工作中：并发 prompt 直接转发给 agent（不被本地拒绝），
+        // 同会话多个在途 turn 以计数维护忙闲
+        let concurrent = {
+            let pm = manager.clone();
+            let sid3 = session_id.clone();
+            tokio::spawn(async move { pm.prompt(&sid3, text("并发")).await })
+        };
 
-        release.notify_one();
+        release.add_permits(2);
         second.await.unwrap().unwrap();
+        concurrent.await.unwrap().unwrap();
         let entry = registry.get(&session_id).unwrap().unwrap();
-        assert_eq!(entry.meta.state, SessionState::Idle, "响应接收后回到空闲");
+        assert_eq!(
+            entry.meta.state,
+            SessionState::Idle,
+            "全部 turn 结束后回空闲"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

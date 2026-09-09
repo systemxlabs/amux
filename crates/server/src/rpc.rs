@@ -66,7 +66,7 @@ fn map_session_err(e: SessionError) -> RpcError {
     let message = e.to_string();
     let code = match &e {
         SessionError::NotFound(_) => server_error::SESSION_NOT_FOUND,
-        SessionError::Busy => server_error::SESSION_BUSY,
+        SessionError::PromptFailed(_) => server_error::AGENT_UNAVAILABLE,
         SessionError::AgentUnavailable(_) => server_error::AGENT_UNAVAILABLE,
         SessionError::EmptyInput => server_error::INVALID_INPUT,
         SessionError::Storage(_) => rpc_error::INTERNAL_ERROR,
@@ -355,8 +355,8 @@ mod tests {
     fn map_session_err_codes() {
         let e = map_session_err(SessionError::NotFound("nope".into()));
         assert_eq!(e.code, server_error::SESSION_NOT_FOUND);
-        let e = map_session_err(SessionError::Busy);
-        assert_eq!(e.code, server_error::SESSION_BUSY);
+        let e = map_session_err(SessionError::PromptFailed("busy".into()));
+        assert_eq!(e.code, server_error::AGENT_UNAVAILABLE);
         let e = map_session_err(SessionError::AgentUnavailable("x".into()));
         assert_eq!(e.code, server_error::AGENT_UNAVAILABLE);
         let e = map_session_err(SessionError::EmptyInput);

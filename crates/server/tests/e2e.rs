@@ -855,7 +855,7 @@ async fn agent_restart_keeps_agent_available() {
 }
 
 #[tokio::test]
-async fn busy_prompt_rejected_and_cancel_works() {
+async fn busy_prompt_forwarded_to_agent_and_cancel_works() {
     let port = next_port();
     let data_dir = tempfile::Builder::new()
         .prefix("amux-e2e-busy-")
@@ -887,17 +887,30 @@ async fn busy_prompt_rejected_and_cancel_works() {
         .await;
     assert!(got_busy, "应推送 idle→busy");
 
+    // 忙时再次 prompt：server 不做本地拒绝，直接转发给 ACP server；
+    // mock agent 并发受理该 prompt（第一个 turn 仍在等待取消）
     let second = c
         .call(
             "session.prompt",
             json!({"sessionId": sid, "input": [{"type":"text","text":"插队"}]}),
         )
         .await;
-    assert_eq!(
-        second["error"]["code"],
-        json!(-32003),
-        "忙时 prompt 应返回 -32003: {second}"
+    assert!(
+        second["error"].is_null(),
+        "忙时 prompt 应转发给 agent 而非本地拒绝: {second}"
     );
+
+    // 插队 turn 已结束，但首个 turn（等待取消）仍在途：会话应保持工作中
+    let list = c.call("session.list", json!({})).await;
+    let state = list["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == json!(sid))
+        .and_then(|s| s["state"].as_str())
+        .unwrap()
+        .to_string();
+    assert_eq!(state, "busy", "并发 turn 未全部结束应保持 busy: {list}");
 
     let cancelled = c.call("session.cancel", json!({"sessionId": sid})).await;
     assert_eq!(
@@ -919,11 +932,26 @@ async fn busy_prompt_rejected_and_cancel_works() {
             json!({"sessionId": sid, "input": [{"type":"text","text":"再来"}]}),
         )
         .await;
-    assert_ne!(
-        again["error"]["code"],
-        json!(-32003),
-        "空闲后不应再报 busy: {again}"
+    assert!(
+        again["error"].is_null(),
+        "空闲后 prompt 应正常转发: {again}"
     );
+
+    // 三个用户消息均已落盘：插队消息没有被拒绝丢弃
+    let h = c.call("session.history", json!({"sessionId": sid})).await;
+    let user_texts: Vec<&str> = h["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == json!("user_message"))
+        .filter_map(|i| i["content"][0]["text"].as_str())
+        .collect();
+    for expected in ["长任务", "插队", "再来"] {
+        assert!(
+            user_texts.iter().any(|t| *t == expected),
+            "历史应包含用户消息 {expected}: {h}"
+        );
+    }
 }
 
 use base64::Engine as _;

@@ -105,7 +105,7 @@ impl SessionRegistry {
             );",
         )?;
         // server 重启后恢复的会话一律回到空闲：busy 状态由上一进程持有，
-        // 其 agent 侧 turn 已随进程终止，残留 busy 会令后续 prompt 永远被拒。
+        // 其 agent 侧 turn 已随进程终止，残留 busy 会让列表状态永远不空闲。
         // agent_session_id 保留，下一次交互按设计走惰性 session/resume。
         conn.execute(
             "UPDATE sessions SET state = ?1 WHERE state = ?2",
@@ -362,8 +362,8 @@ mod tests {
 
     #[test]
     fn reopen_resets_stale_busy_to_idle() {
-        // 回归：server 重启后残留 busy 会让 prompt 永远被拒（agent 侧 turn 已随
-        // 进程终止），重新打开注册表时必须复位为空闲。
+        // 回归：server 重启后残留 busy 与真实状态不符（agent 侧 turn 已随
+        // 进程终止，不会再有 turn 收尾回写空闲），重新打开注册表时必须复位为空闲。
         let db = tmp_db("reset-busy");
         {
             let reg = SessionRegistry::open(&db).unwrap();

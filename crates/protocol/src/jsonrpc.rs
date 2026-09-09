@@ -67,7 +67,6 @@ pub mod server_error {
     pub const AUTH_FAILED: i32 = -32000;
     pub const SESSION_NOT_FOUND: i32 = -32001;
     pub const AGENT_UNAVAILABLE: i32 = -32002;
-    pub const SESSION_BUSY: i32 = -32003;
     pub const INVALID_INPUT: i32 = -32005;
     pub const TERMINAL_NOT_FOUND: i32 = -32006;
 }

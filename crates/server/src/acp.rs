@@ -58,6 +58,9 @@ pub enum AgentEvent {
     },
     /// ACP 请求或传输失败
     Error(String),
+    /// ACP `session/prompt` 响应为错误（turn 未开始）。与 `Error`（turn 内
+    /// 错误）区分：调用方可据此把失败作为请求错误上报。
+    PromptFailed(String),
     /// 会话上下文大小更新（ACP `usage_update`：当前上下文大小与窗口总大小，token）。
     UsageUpdate {
         /// 当前在上下文中的 token 数
@@ -184,7 +187,9 @@ enum ExecReq {
     Prompt {
         sid: String,
         prompt: Vec<ContentBlock>,
-        routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
+        routes: Arc<Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>>,
+        /// 本次 prompt 的事件发送端：响应回调按通道身份回收自己的路由条目
+        tx: mpsc::Sender<AgentEvent>,
     },
 }
 
@@ -224,8 +229,10 @@ fn session_caps_from_agent_caps(
 /// `session/update` 通知处理器共享的连接级状态（驱动与 exec 线程各持一份克隆）。
 #[derive(Clone)]
 struct SessionCaches {
-    /// 会话事件路由：agent sessionId -> prompt 的事件接收端
-    routes: Arc<Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>>,
+    /// 会话事件路由：agent sessionId -> 该会话所有进行中 prompt 的事件接收端。
+    /// 同一会话允许多个 prompt 并发在途（是否受理由 ACP server 决定），
+    /// `session/update` 通知不区分来源，扇出给全部在途订阅者。
+    routes: Arc<Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>>,
     /// 会话斜杠命令：agent sessionId -> 最近一次 `available_commands_update`
     /// 的全量集合。缓存在驱动层而非事件流——通知可能出现在无 prompt 路由的
     /// 窗口（如 session/new 后 agent 立即下发）。
@@ -266,8 +273,10 @@ impl SessionCaches {
     fn clear_on_disconnect(&self) {
         self.alive.store(false, Ordering::SeqCst);
         let routes = std::mem::take(&mut *self.routes.lock());
-        for (_, tx) in routes {
-            send_disconnect_events(tx);
+        for (_, txs) in routes {
+            for tx in txs {
+                send_disconnect_events(tx);
+            }
         }
         self.commands.lock().clear();
         self.plans.lock().clear();
@@ -480,7 +489,10 @@ impl AgentDriver for AcpAgentDriver {
         let registered = {
             let mut routes = self.caches.routes.lock();
             if self.caches.alive.load(Ordering::SeqCst) {
-                routes.insert(agent_session_id.to_string(), tx.clone());
+                routes
+                    .entry(agent_session_id.to_string())
+                    .or_default()
+                    .push(tx.clone());
                 true
             } else {
                 false
@@ -495,13 +507,25 @@ impl AgentDriver for AcpAgentDriver {
             sid: agent_session_id.to_string(),
             prompt: input,
             routes: self.caches.routes.clone(),
+            tx: tx.clone(),
         };
         if let Err(error) = self
             .sender()
             .and_then(|sender| sender.send(req).map_err(|_| "agent 已关闭".to_string()))
         {
-            let removed = self.caches.routes.lock().remove(agent_session_id);
-            if removed.is_some() {
+            // 只回收本次 prompt 自己的路由条目；同会话其他在途 prompt 不受影响
+            let removed = {
+                let mut routes = self.caches.routes.lock();
+                routes
+                    .get_mut(agent_session_id)
+                    .and_then(|txs| {
+                        txs.iter()
+                            .position(|s| s.same_channel(&tx))
+                            .map(|idx| txs.remove(idx))
+                    })
+                    .is_some()
+            };
+            if removed {
                 let _ = tx.try_send(AgentEvent::Error(error));
                 let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
             }
@@ -954,6 +978,7 @@ async fn connect_main(
                             sid,
                             prompt,
                             routes,
+                            tx,
                         } => {
                             let cx = cx.clone();
                             tokio::spawn(async move {
@@ -963,12 +988,30 @@ async fn connect_main(
                                     .collect::<Vec<_>>();
                                 let callback_sid = sid.clone();
                                 let callback_routes = routes.clone();
+                                let callback_tx = tx.clone();
                                 let result = cx
                                     .send_request(PromptRequest::new(sid.clone(), blocks))
                                     .on_receiving_result(async move |result| {
-                                        // turn 完成：移除路由并发送 TurnEnded（在最后一批通知之后）。
+                                        // turn 完成：按通道身份移除本次 prompt 的路由条目并发送
+                                        // TurnEnded（在最后一批通知之后）。同会话其他在途 prompt
+                                        // 的条目保留，继续接收后续通知。
                                         // 结束原因取自 ACP prompt 响应的 stopReason（权威归因）
-                                        let route = callback_routes.lock().remove(&callback_sid);
+                                        let route = {
+                                            let mut routes = callback_routes.lock();
+                                            let mut found = None;
+                                            if let Some(txs) = routes.get_mut(&callback_sid) {
+                                                if let Some(idx) = txs
+                                                    .iter()
+                                                    .position(|s| s.same_channel(&callback_tx))
+                                                {
+                                                    found = Some(txs.remove(idx));
+                                                }
+                                                if txs.is_empty() {
+                                                    routes.remove(&callback_sid);
+                                                }
+                                            }
+                                            found
+                                        };
                                         if let Some(tx) = route {
                                             let reason = match &result {
                                                 Ok(resp) => stop_reason_reason(resp.stop_reason),
@@ -976,7 +1019,7 @@ async fn connect_main(
                                             };
                                             if let core::result::Result::Err(e) = &result {
                                                 let _ = tx
-                                                    .send(AgentEvent::Error(format!(
+                                                    .send(AgentEvent::PromptFailed(format!(
                                                         "ACP prompt 失败: {e}"
                                                     )))
                                                     .await;
@@ -987,7 +1030,22 @@ async fn connect_main(
                                     });
                                 if let Err(e) = result {
                                     log::error!("prompt 调用失败 {sid}: {e}");
-                                    let route = routes.lock().remove(&sid);
+                                    // 回调不会触发：按通道身份回收自己的路由条目并结束本次事件流
+                                    let route = {
+                                        let mut routes = routes.lock();
+                                        let mut found = None;
+                                        if let Some(txs) = routes.get_mut(&sid) {
+                                            if let Some(idx) =
+                                                txs.iter().position(|s| s.same_channel(&tx))
+                                            {
+                                                found = Some(txs.remove(idx));
+                                            }
+                                            if txs.is_empty() {
+                                                routes.remove(&sid);
+                                            }
+                                        }
+                                        found
+                                    };
                                     if let Some(tx) = route {
                                         let _ = tx
                                             .send(AgentEvent::Error(format!(
@@ -1130,7 +1188,7 @@ fn stop_reason_reason(reason: StopReason) -> protocol::StateChangeReason {
 
 /// 把 ACP `session/update` 通知映射为 AgentEvent 并路由。
 async fn route_update(
-    routes: &Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
+    routes: &Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>,
     commands: &Mutex<HashMap<String, Vec<protocol::SlashCommand>>>,
     plans: &Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>>,
     notif: &SessionNotification,
@@ -1197,12 +1255,13 @@ async fn route_update(
         _ => None,
     };
     if let Some(ev) = ev {
-        let tx = routes
+        let txs = routes
             .lock()
             .get(notif.session_id.to_string().as_str())
-            .cloned();
-        if let Some(tx) = tx {
-            if tx.send(ev).await.is_err() {
+            .cloned()
+            .unwrap_or_default();
+        for tx in txs {
+            if tx.send(ev.clone()).await.is_err() {
                 log::warn!("agent 事件接收端已关闭");
             }
         }
@@ -1393,11 +1452,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn route_with_channel() -> (
-        Mutex<HashMap<String, mpsc::Sender<AgentEvent>>>,
+        Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>,
         mpsc::Receiver<AgentEvent>,
     ) {
         let (tx, rx) = mpsc::channel(16);
-        let routes = Mutex::new(HashMap::from([("s1".to_string(), tx)]));
+        let routes = Mutex::new(HashMap::from([("s1".to_string(), vec![tx])]));
         (routes, rx)
     }
 
@@ -1407,7 +1466,7 @@ mod tests {
         tx.try_send(AgentEvent::OutputChunk("尚未处理".into()))
             .unwrap();
         let caches = SessionCaches {
-            routes: Arc::new(Mutex::new(HashMap::from([("s1".into(), tx)]))),
+            routes: Arc::new(Mutex::new(HashMap::from([("s1".into(), vec![tx])]))),
             ..SessionCaches::default()
         };
 

@@ -7,8 +7,8 @@ use thiserror::Error;
 pub enum SessionError {
     #[error("会话不存在: {0}")]
     NotFound(String),
-    #[error("会话忙：agent 不支持进行中注入（steer），请等待当前工作结束")]
-    Busy,
+    #[error("ACP server 拒绝了 prompt: {0}")]
+    PromptFailed(String),
     #[error("agent 不可用: {0}")]
     AgentUnavailable(String),
     #[error("prompt 输入必须非空")]
