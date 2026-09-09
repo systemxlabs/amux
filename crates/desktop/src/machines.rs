@@ -381,7 +381,7 @@ impl AmuxApp {
             .store
             .add_machine(name.trim(), url.trim(), token.trim());
         let view = MachineView::new(machine, cx);
-        // 初始 Connecting：状态由 ws 认证通知驱动，不伪造「已连接」
+        // 初始 Connecting：状态由 ws 认证通知驱动，不伪造「在线」
         let idx = self.machines.len();
         self.machines.push(view);
         let client = self.machines[idx].client.clone();

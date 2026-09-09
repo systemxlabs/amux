@@ -34,7 +34,7 @@ impl MachineStatus {
     pub fn label(&self) -> String {
         match self {
             MachineStatus::Connecting => "连接中…".into(),
-            MachineStatus::Online => "已连接".into(),
+            MachineStatus::Online => "在线".into(),
             MachineStatus::AuthFailed(e) => format!("认证失败（{e}）"),
             MachineStatus::Offline => "离线".into(),
         }
