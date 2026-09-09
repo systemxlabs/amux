@@ -35,6 +35,7 @@ Server 在未收到此认证消息并通过认证前，请求均返回认证失�
 | `session.config_options` | 获取指定普通会话的会话选项 |
 | `session.slash_commands` | 获取指定普通会话的斜杠命令 |
 | `session.plan` | 获取指定普通会话的 agent 计划 |
+| `session.context` | 获取指定普通会话的上下文信息 |
 | `session.history` | 分页查询指定普通会话的对话历史 |
 | `session.activities` | 分页查询指定普通会话的活动历史 |
 | `session.ongoing_activity` | 查询指定普通会话正在进行中的活动 |
@@ -117,7 +118,6 @@ Server 作为 ACP client 与 ACP servers 通信
 - 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
 - 取消会话：当用户取消会话时，向 ACP Server 发送 `session/cancel` 请求来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
-- 会话上下文大小：接收 ACP Server 的 `session/update` 通知的 `usage_update` 类型并记录会话的上下文窗口总大小和当前上下文大小
 
 ### 普通会话状态
 
@@ -145,6 +145,10 @@ Server 作为 ACP client 与 ACP servers 通信
 
 普通会话计划存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `plan` 类型时，其通知中的计划全量覆盖内存存储。
 
+### 普通会话上下文信息
+
+普通会话上下文信息存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `usage_update` 类型时，其通知中的上下文窗口总大小和当前上下文大小全量覆盖内存存储。
+
 ### 普通会话删除
 
 当用户请求删除普通会话时，立即从元数据中删除该普通会话，然后发起异步任务清理相关资源（如关闭或删除 agent 侧会话，清理关联的 worktree），随后返回响应。异步清理资源采用尽力而为的方式，不无限重试。
@@ -152,9 +156,42 @@ Server 作为 ACP client 与 ACP servers 通信
 ### 普通会话存储
 
 普通会话数据包含三部分
-- 元数据：存储在 `~/.amux/server/session.sqlite` 文件中，包含会话 ID、会话标题、会话状态、所属 Agent、Agent 会话 ID、工作目录、worktree 目录、上下文大小、上下文窗口总大小、最近活跃时间、创建时间等
-- 对话历史：存储在 `~/.amux/server/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和 agent 输出（agent 流式输出合并后写入）
-- 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等（流式输出合并后写入）
+- 元数据：存储在 `~/.amux/server/session.sqlite` 文件中
+  ```SQL
+  CREATE TABLE IF NOT EXISTS sessions (
+    -- 会话 ID
+    id TEXT PRIMARY KEY,
+    -- 会话状态
+    state TEXT NOT NULL,
+    -- 会话标题
+    title TEXT,
+    -- 工作目录
+    workspace TEXT NOT NULL,
+    -- worktree 目录
+    worktree_dir TEXT,
+    -- 所属 Agent
+    agent TEXT NOT NULL,
+    -- Agent 会话 ID
+    agent_session_id TEXT,
+    -- 创建时间
+    created_at INTEGER NOT NULL,
+    -- 最近活跃时间
+    last_active_at INTEGER NOT NULL
+  );
+  ```
+- 对话历史：存储在 `~/.amux/server/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和 agent 输出
+  ```json
+  {"role": "user", "content": [ ... ], "timestamp": 1725800000000}
+  {"role": "agent", "content": [ ... ], "timestamp": 1725800001000}
+  ```
+- 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等
+  ```json
+  {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
+  {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "title": "读 src/lib.rs", "parameters": "..."}
+  // tool result 只接收 Regular Content
+  {"kind": "tool_result", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_result": [ ... ]}
+  {"kind": "error", "timestamp": 1694230810000, "error": "工具执行失败: …"}
+  ```
 
 流式输出合并后写入：agent 输出、thinking、工具调用等等流式传输均在内存中进行合并，合并成完整条目后立即进行追加写入磁盘。
 
@@ -201,6 +238,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 会话的对话视图未打开时，不主动刷新，打开后才进行刷新。
 
 对话消息刷新机制为
+- 会话打开后立即刷新一次
 - 定时刷新：每隔 10s 刷新一次，如有新增对话消息，增量渲染
 - 主动刷新：当用户输入消息后，主动触发刷新，此时新增用户输入消息，增量渲染
 
@@ -208,7 +246,11 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 
 ### 活动视图
 
-会话的活动视图未打开时，不主动刷新。打开后，采用定时刷新机制，每隔 10s 刷新一次，如有新增活动，增量渲染。
+会话的活动视图未打开时，不主动刷新。打开后，立即刷新一次，然后采用定时刷新机制，每隔 10s 刷新一次，如有新增活动，增量渲染。
+
+### 计划视图
+
+会话的计划视图未打开时，不主动刷新。打开后，立即刷新一次，然后采用定时刷新机制，每隔 10s 刷新一次。
 
 ### 编排智能体
 
@@ -247,11 +289,47 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 ### 工作流会话存储
 
 工作流会话数据包含如下部分
-- 元数据：存储在 `~/.amux/app/session.sqlite` 文件中
-  - 工作流会话表：包含会话 ID、会话标题、会话状态、执行计划、最近活跃时间等
-  - 关联普通会话表：包含工作流会话 ID、关联普通会话 ID、机器名称
-- 对话历史：存储在 `~/.amux/app/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出
-- 活动历史：存储在 `~/.amux/app/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等
+- 元数据：存储在 `~/.amux/app/workflow.sqlite` 文件中
+  ```SQL
+  -- 工作流会话表
+  CREATE TABLE IF NOT EXISTS workflows (
+    -- 工作流会话 ID
+    id TEXT PRIMARY KEY,
+    -- 会话标题
+    title TEXT,
+    -- 会话状态
+    state TEXT NOT NULL,
+    -- 执行计划
+    plan TEXT NOT NULL,
+    -- 创建时间
+    created_at INTEGER NOT NULL,
+    -- 最近活跃时间
+    last_active_at INTEGER NOT NULL
+  );
+
+  -- 关联普通会话表
+  CREATE TABLE IF NOT EXISTS workflow_linked_sessions (
+    -- 工作流会话 ID
+    workflow_id TEXT NOT NULL,
+    -- 关联普通会话 ID
+    session_id TEXT NOT NULL,
+    -- 机器名称
+    machine_name TEXT NOT NULL,
+    PRIMARY KEY (workflow_id, machine_name, session_id)
+  );
+  ```
+- 对话历史：存储在 `~/.amux/app/workflows/<workflow_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出
+  ```json
+  {"role": "user", "content": [ ... ], "timestamp": 1725800000000}
+  {"role": "agent", "content": [ ... ], "timestamp": 1725800001000}
+  ```
+- 活动历史：存储在 `~/.amux/app/workflows/<workflow_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等
+  ```json
+  {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
+  {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "title": "读 src/lib.rs", "parameters": "..."}
+  {"kind": "tool_result", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_result": [ ... ]}
+  {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
+  ```
 
 流式输出合并后写入：编排智能体输出、thinking、工具调用等等流式传输均在内存中进行合并，合并成完整条目后立即进行追加写入磁盘。
 
