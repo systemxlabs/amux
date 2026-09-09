@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use amux_server::agent::{AcpAgentDriver, AgentRegistry};
+use amux_server::agent::{AcpConnection, AgentRegistry};
 use amux_server::config::load_config;
 use amux_server::fs::FsBrowser;
 use amux_server::git::GitRunner;
@@ -41,14 +41,14 @@ async fn main() {
         .unwrap_or_else(|| cfg.data_dir.join("server.log"));
     amux_common::log::init_file_output(&log_path);
 
-    // 依赖组装：ACP agent 驱动（AMUX_AGENT_BIN 指定 agent 可执行与子命令参数）；未指定时由
+    // 依赖组装：ACP agent 连接（AMUX_AGENT_BIN 指定 agent 可执行与子命令参数）；未指定时由
     // AgentRegistry 自动发现本机 ACP agent。单个显式 agent 拉起失败不阻止
     // Server 监听，其他已发现 agent 仍可用。
     //
     // 显式 agent 的 initialize 可能阻塞较久；放入 blocking 线程并在此阶段先监听退出信号，
     // 避免 SIGTERM 恰好落在启动握手期间时无法通知 ACP 线程回收子进程。
     let shutting_down = Arc::new(AtomicBool::new(false));
-    let configured: Option<(String, Arc<AcpAgentDriver>)> = if let Some(bin) = cfg.agent_bin.clone()
+    let configured: Option<(String, Arc<AcpConnection>)> = if let Some(bin) = cfg.agent_bin.clone()
     {
         let name = configured_agent_name(&bin);
         let log_bin = bin.clone();
@@ -56,14 +56,14 @@ async fn main() {
         let startup_shutdown = shutting_down.clone();
         let mut startup = tokio::task::spawn_blocking(move || {
             let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
-            AcpAgentDriver::spawn_with_shutdown(&bin, &args_ref, &[], Some(startup_shutdown))
+            AcpConnection::spawn_with_shutdown(&bin, &args_ref, &[], Some(startup_shutdown))
         });
         let startup_result = tokio::select! {
             result = &mut startup => result,
             _ = tokio::signal::ctrl_c() => {
                 shutting_down.store(true, Ordering::Release);
-                if let Ok(Ok(driver)) = startup.await {
-                    driver.shutdown_and_join();
+                if let Ok(Ok(connection)) = startup.await {
+                    connection.shutdown_and_join();
                 }
                 std::process::exit(0);
             },
@@ -75,14 +75,14 @@ async fn main() {
                 sigterm.recv().await
             } => {
                 shutting_down.store(true, Ordering::Release);
-                if let Ok(Ok(driver)) = startup.await {
-                    driver.shutdown_and_join();
+                if let Ok(Ok(connection)) = startup.await {
+                    connection.shutdown_and_join();
                 }
                 std::process::exit(0);
             },
         };
         match startup_result {
-            Ok(Ok(driver)) => Some((name, Arc::new(driver))),
+            Ok(Ok(connection)) => Some((name, Arc::new(connection))),
             Ok(Err(e)) => {
                 log::warn!("启动 ACP agent ({log_bin}) 失败，Server 将继续监听: {e}");
                 None
@@ -98,15 +98,15 @@ async fn main() {
 
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
         log::error!("创建数据目录失败: {e}");
-        if let Some((_, driver)) = &configured {
-            driver.shutdown_and_join();
+        if let Some((_, connection)) = &configured {
+            connection.shutdown_and_join();
         }
         std::process::exit(1);
     }
     let configured_failed = cfg.agent_bin.is_some() && configured.is_none();
     let configured_requires_auth = configured
         .as_ref()
-        .is_some_and(|(_, driver)| driver.requires_auth());
+        .is_some_and(|(_, connection)| connection.requires_auth());
     let agents = Arc::new(AgentRegistry::with_shutdown(
         configured,
         shutting_down.clone(),

@@ -23,7 +23,7 @@ use protocol::{
     SessionMeta, SessionState, SessionStateChange,
 };
 
-use crate::agent::{AcpAgentDriver, AgentEvent, AgentRegistry};
+use crate::agent::{AcpConnection, AgentEvent, AgentRegistry};
 use crate::error::SessionError;
 use crate::git::GitRunner;
 use crate::history::{SessionLog, TurnMerger};
@@ -74,7 +74,7 @@ struct ThinkingBuffer {
 /// prompt 前置准备产物：具名字段替代 4 元组返回，
 /// 避免相邻 String（agent_session_id / cwd）解构错位。
 struct PromptSetup {
-    driver: Arc<AcpAgentDriver>,
+    connection: Arc<AcpConnection>,
     agent_session_id: String,
     cwd: String,
     old_state: SessionState,
@@ -267,21 +267,21 @@ impl SessionManager {
         session_id: &str,
         meta: &SessionMeta,
         agent_session_id: Option<&str>,
-    ) -> Result<(Arc<AcpAgentDriver>, String), SessionError> {
-        let driver = self
+    ) -> Result<(Arc<AcpConnection>, String), SessionError> {
+        let connection = self
             .agents
-            .driver_for(&meta.agent)
+            .connection_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
         if let Some(existing) = agent_session_id {
-            return Ok((driver, existing.to_string()));
+            return Ok((connection, existing.to_string()));
         }
         let cwd = self.resolve_cwd(session_id, meta)?;
-        let (sid, options) = driver
+        let (sid, options) = connection
             .create_session(&cwd)
             .map_err(SessionError::AgentUnavailable)?;
         self.registry.set_agent_session_id(session_id, Some(&sid))?;
         self.store_config_options(session_id, options);
-        Ok((driver, sid))
+        Ok((connection, sid))
     }
 
     /// 查询会话选项：触发惰性创建/恢复，并返回内存中以 Agent 侧数据为权威的集合。
@@ -301,13 +301,13 @@ impl SessionManager {
                 return Err(error);
             }
         };
-        let (driver, agent_session_id) =
+        let (connection, agent_session_id) =
             self.ensure_agent_session(session_id, &entry.meta, entry.agent_session_id.as_deref())?;
         let meta = entry.meta;
         // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
         // 最新选项全量覆盖内存存储；幂等 resume 返回空集合时保持既有选项。
         let cwd = self.resolve_cwd(session_id, &meta)?;
-        match driver.resume_session(&agent_session_id, &cwd) {
+        match connection.resume_session(&agent_session_id, &cwd) {
             Ok(options) => {
                 if !options.is_empty() {
                     self.store_config_options(session_id, options);
@@ -322,43 +322,43 @@ impl SessionManager {
     fn existing_agent_session(
         &self,
         session_id: &str,
-    ) -> Result<Option<(Arc<AcpAgentDriver>, String)>, SessionError> {
+    ) -> Result<Option<(Arc<AcpConnection>, String)>, SessionError> {
         let entry = self.get_entry(session_id)?;
         let Some(agent_session_id) = entry.agent_session_id else {
             return Ok(None);
         };
-        let driver = self
+        let connection = self
             .agents
-            .driver_for(&entry.meta.agent)
+            .connection_for(&entry.meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        Ok(Some((driver, agent_session_id)))
+        Ok(Some((connection, agent_session_id)))
     }
 
     /// 查询会话斜杠命令：内存缓存以 Agent 侧数据为权威，由 ACP
-    /// `available_commands_update` 通知驱动。
+    /// `available_commands_update` 通知连接。
     /// 查询不触发惰性创建：尚无 agent 侧会话时返回空（agent 侧会话创建后
     /// agent 才会下发命令集合）。
     pub async fn slash_commands(
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SlashCommand>, SessionError> {
-        let Some((driver, agent_session_id)) = self.existing_agent_session(session_id)? else {
+        let Some((connection, agent_session_id)) = self.existing_agent_session(session_id)? else {
             return Ok(Vec::new());
         };
-        Ok(driver.available_commands(&agent_session_id))
+        Ok(connection.available_commands(&agent_session_id))
     }
 
-    /// 查询会话计划：内存缓存以 Agent 侧数据为权威，由 ACP `plan` 通知驱动。
+    /// 查询会话计划：内存缓存以 Agent 侧数据为权威，由 ACP `plan` 通知连接。
     /// 查询不触发惰性创建：尚无
     /// agent 侧会话时返回空。
     pub async fn plan(
         &self,
         session_id: &str,
     ) -> Result<Vec<protocol::SessionPlanEntry>, SessionError> {
-        let Some((driver, agent_session_id)) = self.existing_agent_session(session_id)? else {
+        let Some((connection, agent_session_id)) = self.existing_agent_session(session_id)? else {
             return Ok(Vec::new());
         };
-        Ok(driver.session_plan(&agent_session_id))
+        Ok(connection.session_plan(&agent_session_id))
     }
 
     /// 查询会话上下文信息（内存存储，以 Agent 侧数据为权威；
@@ -409,19 +409,19 @@ impl SessionManager {
         let session_id2 = session_id.to_string();
         tokio::task::spawn_blocking(move || {
             if let Some(agent_session_id) = agent_session_id {
-                match agents.driver_for(&meta.agent) {
-                    Ok(driver) => {
-                        if let Err(e) = driver.close(&agent_session_id) {
+                match agents.connection_for(&meta.agent) {
+                    Ok(connection) => {
+                        if let Err(e) = connection.close(&agent_session_id) {
                             log::error!("关闭 ACP 会话失败（继续本地删除）{session_id2}: {e}");
                         }
-                        if let Err(e) = driver.delete_session(&agent_session_id) {
+                        if let Err(e) = connection.delete_session(&agent_session_id) {
                             log::debug!(
                                 "agent 不支持或删除 ACP 会话失败（忽略）{session_id2}: {e}"
                             );
                         }
                     }
                     Err(e) => {
-                        log::error!("解析 agent 驱动失败（继续本地删除）{session_id2}: {e}");
+                        log::error!("解析 agent 连接失败（继续本地删除）{session_id2}: {e}");
                     }
                 }
             }
@@ -514,8 +514,8 @@ impl SessionManager {
             if meta.state == SessionState::Busy {
                 continue;
             }
-            if let Ok(driver) = self.agents.driver_for(&meta.agent) {
-                if driver.close(&aid).is_ok() {
+            if let Ok(connection) = self.agents.connection_for(&meta.agent) {
+                if connection.close(&aid).is_ok() {
                     if let Ok(()) = self.registry.set_agent_session_id(&sid, None) {
                         // agent 侧会话已关闭，内存中的会话选项随之失效；
                         // 下次交互惰性重建时以 Agent 侧数据重新覆盖
@@ -646,7 +646,7 @@ impl SessionManager {
         // Busy 元数据写回和用户消息首写，避免删除后旧 prompt 再创建日志。
         let setup = self.setup_prompt(session_id, &input, &control);
         let PromptSetup {
-            driver,
+            connection,
             agent_session_id,
             cwd,
             old_state,
@@ -687,7 +687,7 @@ impl SessionManager {
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
         // 恢复响应携带的最新配置选项（幂等 resume 返回空）全量覆盖内存存储。
-        match driver.resume_session(&agent_session_id, &cwd) {
+        match connection.resume_session(&agent_session_id, &cwd) {
             Ok(options) => {
                 if !options.is_empty() {
                     self.store_config_options(session_id, options);
@@ -715,7 +715,7 @@ impl SessionManager {
 
         let started = std::time::Instant::now();
         let (storage_error, turn_reason) = self
-            .run_turn(session_id, &driver, &agent_session_id, input, &control)
+            .run_turn(session_id, &connection, &agent_session_id, input, &control)
             .await;
 
         self.finalize_turn(session_id, &control, turn_reason);
@@ -756,12 +756,12 @@ impl SessionManager {
         // agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
         // create/resume 共用此值，GUI 的 workspace/diff RPC 也按它下发。
         let cwd = self.resolve_cwd(session_id, &meta)?;
-        let driver = self
+        let connection = self
             .agents
-            .driver_for(&meta.agent)
+            .connection_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        let (driver, agent_session_id) = match agent_session_id {
-            Some(id) => (driver, id),
+        let (connection, agent_session_id) = match agent_session_id {
+            Some(id) => (connection, id),
             // 惰性创建 agent 侧会话，响应中的会话选项存入内存
             //（选项以 Agent 侧数据为权威）
             None => self.ensure_agent_session(session_id, &meta, None)?,
@@ -775,7 +775,7 @@ impl SessionManager {
         }
         self.registry.upsert(&meta, Some(&agent_session_id))?;
         Ok(PromptSetup {
-            driver,
+            connection,
             agent_session_id,
             cwd,
             old_state,
@@ -788,14 +788,14 @@ impl SessionManager {
     async fn run_turn(
         &self,
         session_id: &str,
-        driver: &Arc<AcpAgentDriver>,
+        connection: &Arc<AcpConnection>,
         agent_session_id: &str,
         input: Vec<ContentBlock>,
         control: &SessionControl,
     ) -> (Option<SessionError>, protocol::StateChangeReason) {
         let log = SessionLog::open(&self.data_dir, session_id);
         let mut merger = TurnMerger::new();
-        let mut rx = driver.prompt(agent_session_id, input);
+        let mut rx = connection.prompt(agent_session_id, input);
         let mut turn_completed = false;
         // 中断时没有 ACP stopReason，保持 aborted。
         let mut turn_reason = protocol::StateChangeReason::Aborted;
@@ -1005,11 +1005,11 @@ impl SessionManager {
         let Some(agent_session_id) = entry.agent_session_id else {
             return Ok(());
         };
-        let driver = self
+        let connection = self
             .agents
-            .driver_for(&meta.agent)
+            .connection_for(&meta.agent)
             .map_err(SessionError::AgentUnavailable)?;
-        driver
+        connection
             .cancel(&agent_session_id)
             .map_err(SessionError::AgentUnavailable)?;
         // 只请求 ACP 取消，不提前伪造 Idle；turn 事件流结束后才递减 turns，
@@ -1038,12 +1038,12 @@ impl SessionManager {
                 return Err(error);
             }
         };
-        let (driver, agent_session_id) =
+        let (connection, agent_session_id) =
             self.ensure_agent_session(session_id, &entry.meta, entry.agent_session_id.as_deref())?;
         log::info!(
             "会话选项设置请求：session={session_id} agent_session={agent_session_id} config_id={config_id} value={value:?}"
         );
-        let options = driver
+        let options = connection
             .set_config_option(&agent_session_id, config_id, value)
             .map_err(SessionError::AgentUnavailable)?;
         if options.is_empty() {
@@ -1104,7 +1104,7 @@ mod tests {
         }]
     }
 
-    /// 测试注册表：禁用自动发现、不配置驱动。本模块用例均不触达 agent；
+    /// 测试注册表：禁用自动发现、不配置连接。本模块用例均不触达 agent；
     /// 触达 agent 的用例在 tests/session_manager.rs，经 mock_acp 子进程走真实路径。
     fn test_agents() -> Arc<AgentRegistry> {
         std::env::set_var("AMUX_NO_DISCOVERY", "1");

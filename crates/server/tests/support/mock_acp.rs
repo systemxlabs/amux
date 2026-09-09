@@ -1,7 +1,7 @@
 //! 模拟 ACP v1 agent（官方 SDK `agent-client-protocol` 的 **Agent 侧**实现）。
-//! server 侧全部测试（驱动对接、会话管理、端到端）都经此子进程走真实 ACP v1
+//! server 侧全部测试（连接对接、会话管理、端到端）都经此子进程走真实 ACP v1
 //! stdio 路径——与 codex / kimi 等真实 agent 的交互方式一致，测试不使用
-//! 进程内驱动替身。
+//! 进程内连接替身。
 //!
 //! 行为要点（与协议语义对齐）：
 //! - `session/new` 返回自增的唯一 sessionId（mock_s_1、mock_s_2、…），支持多会话

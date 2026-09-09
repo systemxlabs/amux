@@ -87,7 +87,7 @@ enum Cmd {
     Tick,
 }
 
-/// 一个 driver 连接内的终端集合。终端与会话的关联由 agent 维护，
+/// 一个 ACP 连接内的终端集合。终端与会话的关联由 agent 维护，
 /// 客户端只按 id 提供生命周期与输出（ACP spec 未要求客户端校验会话归属）。
 pub struct TerminalRegistry {
     next_id: AtomicU64,

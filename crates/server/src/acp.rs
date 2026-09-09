@@ -1,7 +1,7 @@
-//! ACP v1 驱动：官方 SDK `agent-client-protocol` 的 Client 角色，
+//! ACP v1 连接：官方 SDK `agent-client-protocol` 的 Client 角色，
 //! 经 stdio 与 ACP server 子进程通信。
 //!
-//! `AcpAgentDriver` 使用**专用 exec 线程**承载全部异步 IO（SDK 连接、子进程 stdio、
+//! `AcpConnection` 使用**专用 exec 线程**承载全部异步 IO（SDK 连接、子进程 stdio、
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨
 //! runtime 嵌套的 tokio 问题（调用方可能处于任意 tokio runtime 上下文）。
 
@@ -133,7 +133,7 @@ enum ExecReq {
 }
 
 /// ACP v1 客户端（官方 SDK stdio 传输）。
-pub struct AcpAgentDriver {
+pub struct AcpConnection {
     /// 主线程 → exec 线程的请求发送端；连接结束或 shutdown 时置 None
     exec_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>>,
     /// 连接级缓存与事件路由（与 exec 线程的通知处理器共享）
@@ -167,7 +167,7 @@ fn session_caps_from_agent_caps(
     }
 }
 
-/// `session/update` 通知处理器共享的连接级状态（驱动与 exec 线程各持一份克隆）。
+/// `session/update` 通知处理器共享的连接级状态（连接与 exec 线程各持一份克隆）。
 #[derive(Clone)]
 struct SessionCaches {
     /// 会话事件路由：agent sessionId -> 该会话所有进行中 prompt 的事件接收端。
@@ -175,7 +175,7 @@ struct SessionCaches {
     /// `session/update` 通知不区分来源，扇出给全部在途订阅者。
     routes: Arc<Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>>,
     /// 会话斜杠命令：agent sessionId -> 最近一次 `available_commands_update`
-    /// 的全量集合。缓存在驱动层而非事件流——通知可能出现在无 prompt 路由的
+    /// 的全量集合。缓存在连接层而非事件流——通知可能出现在无 prompt 路由的
     /// 窗口（如 session/new 后 agent 立即下发）。
     commands: Arc<Mutex<HashMap<String, Vec<protocol::SlashCommand>>>>,
     /// 会话计划：agent sessionId -> 最近一次 `plan` 通知的全量条目（缓存理由同上）。
@@ -249,7 +249,7 @@ fn send_disconnect_events(tx: mpsc::Sender<AgentEvent>) {
     }
 }
 
-impl AcpAgentDriver {
+impl AcpConnection {
     /// 启动 ACP agent 子进程（官方 SDK `AcpAgent` 管理 stdio 传输与进程生命周期）；
     /// `env` 为附加环境变量（经 from_args 的 `NAME=value` 前缀传入）；
     /// exec 线程承载全部异步 IO。
@@ -258,7 +258,7 @@ impl AcpAgentDriver {
     /// 握手」后才返回——二进制缺失 / 进程立即退出（如 npx 不可用、无网络）在此快速
     /// 失败并返回明确错误；健康 agent 在握手完成后立即返回。等待受
     /// `AMUX_ACP_SPAWN_TIMEOUT_MS` 限制（默认 30s；npx 首次按需下载可能较慢，
-    /// 超时按失败处理，`driver_for` 兜底会重试）。
+    /// 超时按失败处理，`connection_for` 兜底会重试）。
     pub fn spawn(bin: &str, args: &[&str], env: &[(String, String)]) -> Result<Self, String> {
         Self::spawn_with_shutdown(bin, args, env, None)
     }
@@ -336,7 +336,7 @@ impl AcpAgentDriver {
             let _ = thread.join();
             return Err(error);
         }
-        Ok(AcpAgentDriver {
+        Ok(AcpConnection {
             exec_tx,
             caches,
             resumed: Arc::new(Mutex::new(HashSet::new())),
@@ -378,7 +378,7 @@ impl AcpAgentDriver {
     }
 }
 
-impl AcpAgentDriver {
+impl AcpConnection {
     /// 是否处于未认证状态（ACP `initialize` 响应携带非空 `authMethods`）。
     pub fn requires_auth(&self) -> bool {
         self.requires_auth.load(Ordering::SeqCst)
@@ -621,7 +621,7 @@ struct ExecControl {
 /// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
 /// `ready_tx`：就绪握手——连接建立（子进程拉起）且 initialize 握手完成后发送结果；
 /// 若连接在握手前就失败（二进制缺失 / 进程立即退出），在此补发 `Err` 供
-/// `AcpAgentDriver::spawn` 同步快速失败，而非等满超时。
+/// `AcpConnection::spawn` 同步快速失败，而非等满超时。
 async fn exec_main(
     bin: &str,
     args: &[String],
@@ -695,7 +695,7 @@ async fn exec_main(
 
     // 连接异常结束：若就绪信号尚未发出（连接建立前传输层失败：二进制缺失 /
     // 进程立即退出 / npx 不可用 / 无网络），补报为 spawn 失败；若已报过就绪，
-    // 之后的连接异常仅记录，不影响已缓存的驱动。
+    // 之后的连接异常仅记录，不影响已缓存的连接。
     if let core::result::Result::Err(e) = &result {
         log::error!("ACP 连接异常结束: {e}");
         if !ready_sent.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1025,7 +1025,7 @@ async fn connect_main(
                         }
                     }
                 }
-                // 服务循环结束（driver 已 shutdown）：回收本连接的终端子进程
+                // 服务循环结束（connection 已 shutdown）：回收本连接的终端子进程
                 shutdown_terminals.terminate_all().await;
                 core::result::Result::Ok(())
             }
@@ -1199,9 +1199,9 @@ async fn route_update(
         SessionUpdate::ConfigOptionUpdate(update) => vec![AgentEvent::ConfigOptions(
             acp_config_options(Some(update.config_options.clone())),
         )],
-        // ACP `available_commands_update`：斜杠命令全量覆盖驱动内存缓存
+        // ACP `available_commands_update`：斜杠命令全量覆盖连接内存缓存
         // 以 Agent 侧数据为权威。
-        // 不产生事件流——通知可能出现在无 prompt 路由的窗口，缓存于驱动层。
+        // 不产生事件流——通知可能出现在无 prompt 路由的窗口，缓存于连接层。
         SessionUpdate::AvailableCommandsUpdate(update) => {
             commands.lock().insert(
                 notif.session_id.to_string(),
@@ -1209,7 +1209,7 @@ async fn route_update(
             );
             Vec::new()
         }
-        // ACP `plan`：agent 计划全量覆盖驱动内存缓存
+        // ACP `plan`：agent 计划全量覆盖连接内存缓存
         // 以 Agent 侧数据为权威。
         // 不产生事件流，理由同上。
         SessionUpdate::Plan(update) => {
@@ -1463,7 +1463,7 @@ mod tests {
         let child_shutdown = shutdown.clone();
         let started = std::time::Instant::now();
         let task = std::thread::spawn(move || {
-            AcpAgentDriver::spawn_with_shutdown(
+            AcpConnection::spawn_with_shutdown(
                 "/bin/sh",
                 &["-c", "sleep 30"],
                 &[],
@@ -1491,7 +1491,7 @@ mod tests {
         let caches = SessionCaches::default();
         caches.clear_on_disconnect();
         let (stop_tx, _stop_rx) = watch::channel(false);
-        let driver = AcpAgentDriver {
+        let connection = AcpConnection {
             exec_tx: Arc::new(Mutex::new(None)),
             caches,
             resumed: Arc::new(Mutex::new(HashSet::new())),
@@ -1499,7 +1499,7 @@ mod tests {
             thread: Mutex::new(None),
             requires_auth: Arc::new(AtomicBool::new(false)),
         };
-        let mut rx = driver.prompt("s1", Vec::new());
+        let mut rx = connection.prompt("s1", Vec::new());
         assert!(matches!(
             rx.recv().await,
             Some(AgentEvent::Error(message)) if message == "agent 已关闭"

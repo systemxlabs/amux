@@ -1,5 +1,5 @@
-//! 普通会话管理集成测试：全部走真实路径——`AcpAgentDriver` 子进程对接
-//! `mock_acp`（与 codex / kimi 同为 ACP v1 agent），不再使用进程内驱动替身。
+//! 普通会话管理集成测试：全部走真实路径——`AcpConnection` 子进程对接
+//! `mock_acp`（与 codex / kimi 同为 ACP v1 agent），不再使用进程内连接替身。
 //! 时序控制经 mock 的跨进程协调机制（闸门/步骤/阻塞 session/new），测试以
 //! server 侧可观察状态（注册表、ongoing、落盘文件、calls 记录）为同步点。
 
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use amux_server::agent::{AcpAgentDriver, AgentRegistry};
+use amux_server::agent::{AcpConnection, AgentRegistry};
 use amux_server::error::SessionError;
 use amux_server::history::SessionLog;
 use amux_server::registry::SessionRegistry;
@@ -37,7 +37,7 @@ where
     panic!("等待超时：{desc}");
 }
 
-/// 一个测试环境：mock_acp 子进程（AcpAgentDriver 经真实 ACP v1 stdio 对接）+
+/// 一个测试环境：mock_acp 子进程（AcpConnection 经真实 ACP v1 stdio 对接）+
 /// 独立数据目录的 SessionManager。`prepare` 在临时目录里生成场景文件并返回
 /// 传给 mock 的环境变量。
 struct Env {
@@ -52,20 +52,23 @@ struct Env {
 fn spawn_env(
     prepare: impl FnOnce(&Path) -> Vec<(String, String)>,
 ) -> (Env, broadcast::Receiver<ServerNotification>) {
-    // 隔离本机 PATH 上真实 agent 的自动发现，只使用显式配置的 mock 驱动。
+    // 隔离本机 PATH 上真实 agent 的自动发现，只使用显式配置的 mock 连接。
     std::env::set_var("AMUX_NO_DISCOVERY", "1");
     let temp = tempfile::tempdir().unwrap();
     let work = temp.path().to_path_buf();
     let mock_env = prepare(&work);
     let state = work.join("mock_state");
     let state_s = state.to_str().unwrap().to_string();
-    let driver = AcpAgentDriver::spawn(
+    let connection = AcpConnection::spawn(
         env!("CARGO_BIN_EXE_mock_acp"),
         &[state_s.as_str()],
         &mock_env,
     )
     .expect("拉起 mock_acp 失败");
-    let agents = Arc::new(AgentRegistry::new(Some(("mock".into(), Arc::new(driver)))));
+    let agents = Arc::new(AgentRegistry::new(Some((
+        "mock".into(),
+        Arc::new(connection),
+    ))));
     let data_dir = work.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
     let registry = Arc::new(SessionRegistry::open(&data_dir.join("session.sqlite")).unwrap());
@@ -784,7 +787,7 @@ async fn activities_flush_during_turn_not_only_at_end() {
 }
 
 #[tokio::test]
-async fn delete_triggers_driver_close() {
+async fn delete_triggers_connection_close() {
     // mock 声明支持 session/delete：删除应先 close 再 delete，各恰好一次。
     let (env, _rx) = spawn_env(|_| Vec::new());
     let meta = env

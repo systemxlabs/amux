@@ -1,5 +1,5 @@
 //! amux server crate。二进制入口在 `main.rs`；模块导出供
-//! 集成测试（tests/）复用实现（如 `AcpAgentDriver`）。
+//! 集成测试（tests/）复用实现（如 `AcpConnection`）。
 
 pub mod acp;
 pub mod acp_terminal;

@@ -1,15 +1,15 @@
-//! Agent 驱动：server 与 agent 的唯一接口。
-//! `AcpAgentDriver` 经官方 SDK `agent-client-protocol` 对接真实 ACP v1
+//! Agent 连接：server 与 agent 的唯一接口。
+//! `AcpConnection` 经官方 SDK `agent-client-protocol` 对接真实 ACP v1
 //! （`AcpAgent` stdio 传输 + typed 请求/通知，`grok agent`、`codex-acp` /
 //! `claude-acp` / `kimi acp`）；测试经 `mock_acp` 子进程走同一真实路径。
-//! `AgentRegistry` 按 agent 名解析驱动——`AMUX_AGENT_BIN` 配置的驱动 +
+//! `AgentRegistry` 按 agent 名解析连接——`AMUX_AGENT_BIN` 配置的连接 +
 //! PATH 自动发现的 agent（启动即拉起并复用；拉起失败标记不可用；
 //! 运行期新发现的惰性拉起）。
 //!
 //! ACP v1 语义：session/new、resume、prompt、cancel、close 等
 //! 方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
 //!
-//! AcpAgentDriver 使用**专用 exec 线程**承载全部异步 IO（官方 SDK 连接、子进程 stdio、
+//! AcpConnection 使用**专用 exec 线程**承载全部异步 IO（官方 SDK 连接、子进程 stdio、
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨 runtime
 //! 嵌套的 tokio 问题（调用方可能处于任意 tokio runtime 上下文）。
 
@@ -18,19 +18,19 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub use crate::acp::{AcpAgentDriver, AgentEvent, AgentSessionCaps, LaunchSummary};
+pub use crate::acp::{AcpConnection, AgentEvent, AgentSessionCaps, LaunchSummary};
 use crate::discovery::{discover_acp_agents, DiscoveredAgent};
 use protocol::AgentInfo;
 
 /// agent 注册表（自动发现可执行路径，不要求手动指定）：
 ///
-/// - `AMUX_AGENT_BIN` 指定的驱动（agent 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
+/// - `AMUX_AGENT_BIN` 指定的连接（agent 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
 /// - 自动发现（无需显式配置）：
 ///   - 已知 CLI 的 `acp` 子命令探测（如 `kimi acp`，ACP 原生）
 ///   - 已知 CLI 的 `agent` 子命令探测（如 `grok agent --always-approve stdio`）
 ///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
 ///   - 发现的 agent 在 server 启动时**直接拉起**（`launch_discovered`，后续
-///     `driver_for` 复用缓存驱动）；
+///     `connection_for` 复用缓存连接）；
 ///     **拉起失败的 agent 标记为不可用、`initialize` 声明非空 `authMethods` 的 agent 标记为未认证**（agent.list 的 status 反映；使用时报明确错误）；
 ///     运行期新发现的 agent 仍走惰性拉起兜底
 /// - 没有发现 agent 时 `agent.list` 为空，使用未知 agent 会报错。
@@ -38,37 +38,37 @@ pub struct AgentRegistry {
     /// 禁用运行期自动发现（`AMUX_NO_DISCOVERY=1`）：只使用 `AMUX_AGENT_BIN` 显式配置的 agent。
     /// 供受限环境与测试隔离（避免拉起本机未配置的 agent 并恢复其会话）。
     no_discovery: bool,
-    /// 配置驱动：agent 名 + 驱动
-    configured: Option<(String, Arc<AcpAgentDriver>)>,
-    /// 显式配置 agent 的重启参数；驱动重启后仍复用同一注册表条目。
+    /// 配置连接：agent 名 + 连接
+    configured: Option<(String, Arc<AcpConnection>)>,
+    /// 显式配置 agent 的重启参数；连接重启后仍复用同一注册表条目。
     configured_spec: Mutex<Option<DiscoveredAgent>>,
-    /// 显式配置 agent 最近一次重启后的驱动。
-    configured_override: Mutex<Option<Arc<AcpAgentDriver>>>,
+    /// 显式配置 agent 最近一次重启后的连接。
+    configured_override: Mutex<Option<Arc<AcpConnection>>>,
     /// 自动发现的 agent（不含已配置的；可运行期刷新）
     discovered: Mutex<Vec<DiscoveredAgent>>,
-    /// 已拉起的发现驱动（启动拉起 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
-    spawned: Mutex<HashMap<String, Arc<AcpAgentDriver>>>,
-    /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 status=unavailable、driver_for 报错）
+    /// 已拉起的发现连接（启动拉起 + 懒路径共用缓存；`connection_for` 不再二次 spawn）
+    spawned: Mutex<HashMap<String, Arc<AcpConnection>>>,
+    /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 status=unavailable、connection_for 报错）
     unavailable: Mutex<HashSet<String>>,
     /// initialize 响应携带非空 authMethods 的 agent（标记未认证：agent.list 的
-    /// status=unauthenticated、driver_for 报错）
+    /// status=unauthenticated、connection_for 报错）
     unauthenticated: Mutex<HashSet<String>>,
-    /// server 退出后阻止新的 ACP driver 启动或进入缓存。
+    /// server 退出后阻止新的 ACP 连接启动或进入缓存。
     shutting_down: Arc<AtomicBool>,
-    /// 线性化显式 driver 的替换与 server 关闭，避免新 driver 发布在关闭快照之后。
+    /// 线性化显式连接的替换与 server 关闭，避免新连接发布在关闭快照之后。
     lifecycle: Mutex<()>,
 }
 
 impl AgentRegistry {
     /// 构建注册表（生产路径：自动发现本机 ACP agent）。
-    /// - `configured`：`AMUX_AGENT_BIN` 显式指定的驱动，可为 None（由自动发现接管）
-    pub fn new(configured: Option<(String, Arc<AcpAgentDriver>)>) -> Self {
+    /// - `configured`：`AMUX_AGENT_BIN` 显式指定的连接，可为 None（由自动发现接管）
+    pub fn new(configured: Option<(String, Arc<AcpConnection>)>) -> Self {
         Self::with_shutdown(configured, Arc::new(AtomicBool::new(false)))
     }
 
     /// 使用 server 统一的关闭标志构建注册表，使启动中的 ACP 握手也能响应退出信号。
     pub fn with_shutdown(
-        configured: Option<(String, Arc<AcpAgentDriver>)>,
+        configured: Option<(String, Arc<AcpConnection>)>,
         shutting_down: Arc<AtomicBool>,
     ) -> Self {
         let no_discovery = std::env::var("AMUX_NO_DISCOVERY")
@@ -184,7 +184,7 @@ impl AgentRegistry {
         }
         out
     }
-    pub fn driver_for(&self, agent: &str) -> Result<Arc<AcpAgentDriver>, String> {
+    pub fn connection_for(&self, agent: &str) -> Result<Arc<AcpConnection>, String> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err("agent registry 正在关闭".into());
         }
@@ -196,13 +196,13 @@ impl AgentRegistry {
         }
         if let Some((name, _)) = &self.configured {
             if name == agent {
-                if let Some(driver) = self.configured_override.lock().as_ref() {
-                    return Ok(driver.clone());
+                if let Some(connection) = self.configured_override.lock().as_ref() {
+                    return Ok(connection.clone());
                 }
                 return Ok(self
                     .configured
                     .as_ref()
-                    .expect("配置驱动刚刚存在")
+                    .expect("配置连接刚刚存在")
                     .1
                     .clone());
             }
@@ -214,11 +214,11 @@ impl AgentRegistry {
             .filter(|spec| spec.name == agent)
             .cloned()
         {
-            let driver = self.spawn_and_cache(&spec)?;
-            if driver.requires_auth() {
+            let connection = self.spawn_and_cache(&spec)?;
+            if connection.requires_auth() {
                 return Err(format!("agent 未认证: {agent}"));
             }
-            return Ok(driver);
+            return Ok(connection);
         }
         self.refresh_discovery();
         let found = self
@@ -228,18 +228,18 @@ impl AgentRegistry {
             .find(|d| d.name == agent)
             .cloned();
         if let Some(d) = found {
-            let driver = self.spawn_and_cache(&d)?;
-            if driver.requires_auth() {
+            let connection = self.spawn_and_cache(&d)?;
+            if connection.requires_auth() {
                 return Err(format!("agent 未认证: {agent}"));
             }
-            return Ok(driver);
+            return Ok(connection);
         }
         Err(format!("本机未发现 agent: {agent}"))
     }
-    /// 按驱动握手结果同步未认证状态（initialize 携带非空 authMethods）。
-    /// 驱动成功拉起即可用/未认证，原先的不可用标记一并清除。
-    fn sync_auth_status(&self, name: &str, driver: &Arc<AcpAgentDriver>) {
-        if driver.requires_auth() {
+    /// 按连接握手结果同步未认证状态（initialize 携带非空 authMethods）。
+    /// 连接成功拉起即可用/未认证，原先的不可用标记一并清除。
+    fn sync_auth_status(&self, name: &str, connection: &Arc<AcpConnection>) {
+        if connection.requires_auth() {
             self.unauthenticated.lock().insert(name.to_string());
         } else {
             self.unauthenticated.lock().remove(name);
@@ -247,40 +247,40 @@ impl AgentRegistry {
         self.unavailable.lock().remove(name);
     }
 
-    fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<Arc<AcpAgentDriver>, String> {
+    fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<Arc<AcpConnection>, String> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err("agent registry 正在关闭".into());
         }
-        if let Some(driver) = self.spawned.lock().get(&d.name).cloned() {
-            self.sync_auth_status(&d.name, &driver);
-            return Ok(driver);
+        if let Some(connection) = self.spawned.lock().get(&d.name).cloned() {
+            self.sync_auth_status(&d.name, &connection);
+            return Ok(connection);
         }
         let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
-        let driver = AcpAgentDriver::spawn_with_shutdown(
+        let connection = AcpConnection::spawn_with_shutdown(
             &d.bin,
             &args,
             &d.env,
             Some(self.shutting_down.clone()),
         )
         .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
-        let driver: Arc<AcpAgentDriver> = Arc::new(driver);
+        let connection: Arc<AcpConnection> = Arc::new(connection);
         let mut spawned = self.spawned.lock();
         if self.shutting_down.load(Ordering::Acquire) {
             drop(spawned);
-            driver.shutdown_and_join();
+            connection.shutdown_and_join();
             return Err("agent registry 正在关闭".into());
         }
         match spawned.get(&d.name) {
             Some(existing) => {
                 let existing = existing.clone();
                 drop(spawned);
-                driver.shutdown_and_join();
+                connection.shutdown_and_join();
                 Ok(existing)
             }
             None => {
-                spawned.insert(d.name.clone(), driver.clone());
-                self.sync_auth_status(&d.name, &driver);
-                Ok(driver)
+                spawned.insert(d.name.clone(), connection.clone());
+                self.sync_auth_status(&d.name, &connection);
+                Ok(connection)
             }
         }
     }
@@ -330,43 +330,43 @@ impl AgentRegistry {
                 .clone()
                 .ok_or_else(|| format!("显式 agent 缺少重启配置: {agent}"))?;
             let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
-            let driver = match AcpAgentDriver::spawn_with_shutdown(
+            let connection = match AcpConnection::spawn_with_shutdown(
                 &spec.bin,
                 &args,
                 &spec.env,
                 Some(self.shutting_down.clone()),
             ) {
-                Ok(driver) => driver,
+                Ok(connection) => connection,
                 Err(e) => {
                     self.unavailable.lock().insert(agent.to_string());
                     self.unauthenticated.lock().remove(agent);
                     return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
                 }
             };
-            let new_driver: Arc<AcpAgentDriver> = Arc::new(driver);
-            self.sync_auth_status(agent, &new_driver);
+            let new_connection: Arc<AcpConnection> = Arc::new(connection);
+            self.sync_auth_status(agent, &new_connection);
             if configured_name {
                 let _lifecycle = self.lifecycle.lock();
                 if self.shutting_down.load(Ordering::Acquire) {
                     drop(_lifecycle);
-                    new_driver.shutdown_and_join();
+                    new_connection.shutdown_and_join();
                     return Err("agent registry 正在关闭".into());
                 }
                 let old =
                     self.configured_override.lock().take().unwrap_or_else(|| {
-                        self.configured.as_ref().expect("配置驱动不存在").1.clone()
+                        self.configured.as_ref().expect("配置连接不存在").1.clone()
                     });
-                *self.configured_override.lock() = Some(new_driver);
+                *self.configured_override.lock() = Some(new_connection);
                 drop(_lifecycle);
                 old.shutdown_and_join();
             } else {
                 let mut spawned = self.spawned.lock();
                 if self.shutting_down.load(Ordering::Acquire) {
                     drop(spawned);
-                    new_driver.shutdown_and_join();
+                    new_connection.shutdown_and_join();
                     return Err("agent registry 正在关闭".into());
                 }
-                let old = spawned.insert(agent.to_string(), new_driver);
+                let old = spawned.insert(agent.to_string(), new_connection);
                 drop(spawned);
                 if let Some(old) = old {
                     old.shutdown_and_join();
@@ -387,8 +387,8 @@ impl AgentRegistry {
         let Some(d) = found else {
             return Err(format!("本机未发现 agent: {agent}"));
         };
-        // `spawn_and_cache` intentionally reuses an existing driver for normal
-        // lookups, but restart must evict and shut down that driver first.
+        // `spawn_and_cache` intentionally reuses an existing connection for normal
+        // lookups, but restart must evict and shut down that connection first.
         if let Some(old) = self.spawned.lock().remove(agent) {
             old.shutdown_and_join();
         }
@@ -406,28 +406,29 @@ impl AgentRegistry {
         }
     }
     /// 重新发现 agents（`agent.rediscover`）：重扫本机 ACP agent 并拉起未运行的。
-    /// 已运行的复用现有驱动不重复拉起；此前拉起失败的在此重试。stub/no_discovery
-    /// 模式下为 no-op。
+    /// 已运行的复用现有连接不重复拉起；此前拉起失败的在此重试。
+    /// no_discovery 模式下为 no-op。
     pub fn rediscover_agents(&self) -> LaunchSummary {
         self.refresh_discovery();
         self.launch_discovered()
     }
 
     pub fn shutdown_all(&self) {
-        // Close the admission gate before detaching cached drivers. A concurrent
+        // Close the admission gate before detaching cached connections. A concurrent
         // spawn either observes this gate before starting or observes it while
-        // publishing and reclaims the newly-created driver itself.
+        // publishing and reclaims the newly-created connection itself.
         self.shutting_down.store(true, Ordering::Release);
 
-        let configured_driver = {
+        let configured_connection = {
             let _lifecycle = self.lifecycle.lock();
-            self.configured_override
-                .lock()
-                .take()
-                .or_else(|| self.configured.as_ref().map(|(_, driver)| driver.clone()))
+            self.configured_override.lock().take().or_else(|| {
+                self.configured
+                    .as_ref()
+                    .map(|(_, connection)| connection.clone())
+            })
         };
-        if let Some(driver) = configured_driver {
-            driver.shutdown_and_join();
+        if let Some(connection) = configured_connection {
+            connection.shutdown_and_join();
         }
         let spawned = std::mem::take(&mut *self.spawned.lock());
         for (_, d) in spawned {
@@ -531,12 +532,16 @@ mod tests {
             protocol::AgentStatus::Unavailable,
             "拉起失败的 agent 应 unavailable"
         );
-        let d1 = reg.driver_for("mock_acp").expect("已拉起驱动应直接返回");
-        let d2 = reg.driver_for("mock_acp").expect("已拉起驱动应直接返回");
-        assert!(Arc::ptr_eq(&d1, &d2), "driver_for 应复用同一缓存驱动");
-        let err = match reg.driver_for("broken") {
+        let d1 = reg
+            .connection_for("mock_acp")
+            .expect("已拉起连接应直接返回");
+        let d2 = reg
+            .connection_for("mock_acp")
+            .expect("已拉起连接应直接返回");
+        assert!(Arc::ptr_eq(&d1, &d2), "connection_for 应复用同一缓存连接");
+        let err = match reg.connection_for("broken") {
             Err(e) => e,
-            Ok(_) => panic!("不可用 agent 的 driver_for 应返回错误"),
+            Ok(_) => panic!("不可用 agent 的 connection_for 应返回错误"),
         };
         assert!(err.contains("不可用"), "不可用 agent 的错误应明确: {err}");
         assert!(
@@ -617,7 +622,7 @@ mod tests {
         let mock = sibling_bin("mock_acp");
         assert!(mock.exists(), "mock_acp 应已构建: {}", mock.display());
         // initialize 声明非空 authMethods（AMUX_MOCK_AUTH）→ 未认证：列表 status
-        // 与 driver_for 错误一致；重启为不带 auth 的实例后恢复可用。
+        // 与 connection_for 错误一致；重启为不带 auth 的实例后恢复可用。
         let reg = test_registry(
             vec![DiscoveredAgent {
                 name: "mock_auth".into(),
@@ -627,10 +632,10 @@ mod tests {
             }],
             true,
         );
-        // 惰性拉起：driver_for 触发 spawn 并按 initialize 声明标记未认证
-        let err = match reg.driver_for("mock_auth") {
+        // 惰性拉起：connection_for 触发 spawn 并按 initialize 声明标记未认证
+        let err = match reg.connection_for("mock_auth") {
             Err(e) => e,
-            Ok(_) => panic!("未认证 agent 的 driver_for 应报错"),
+            Ok(_) => panic!("未认证 agent 的 connection_for 应报错"),
         };
         assert!(err.contains("未认证"), "未认证错误应明确: {err}");
         let status = reg
@@ -656,6 +661,6 @@ mod tests {
             .expect("mock_auth 在列表")
             .status;
         assert_eq!(status, protocol::AgentStatus::Available);
-        reg.driver_for("mock_auth").expect("重启后应可用");
+        reg.connection_for("mock_auth").expect("重启后应可用");
     }
 }

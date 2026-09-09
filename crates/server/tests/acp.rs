@@ -1,4 +1,4 @@
-//! ACP v1 真实对接测试：起模拟 ACP agent（stdio 子进程），驱动 `AcpAgentDriver`
+//! ACP v1 真实对接测试：起模拟 ACP agent（stdio 子进程），连接 `AcpConnection`
 //! 的真实实现——验证方法帧序列、session/update 聚合、yolo 自动批准、
 //! `session/resume`（恢复 agent 自身上下文）。
 //! 关闭会话经 `session/close` 帧释放 agent 侧资源，删除经 `session/delete` 清理远端记录。
@@ -8,21 +8,21 @@ use std::time::Duration;
 
 use protocol::ContentBlock;
 
-use amux_server::agent::{AcpAgentDriver, AgentEvent};
+use amux_server::agent::{AcpConnection, AgentEvent};
 
 #[tokio::test]
-async fn acp_driver_terminal_flow() {
+async fn acp_client_terminal_flow() {
     // agent 经 terminal/* 反向请求在客户端执行命令（kimi acp 的 shell 执行路径）
     let temp_dir = tempfile::tempdir().unwrap();
     let state_file = temp_dir.path().join("mock_acp_term");
     let state_file_s = state_file.to_str().unwrap().to_string();
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");
-    let driver =
-        AcpAgentDriver::spawn(mock, &[state_file_s.as_str()], &[]).expect("spawn mock acp");
+    let connection =
+        AcpConnection::spawn(mock, &[state_file_s.as_str()], &[]).expect("spawn mock acp");
 
-    let (sid, _) = driver.create_session("/tmp/work").expect("create");
-    let mut rx = driver.prompt(
+    let (sid, _) = connection.create_session("/tmp/work").expect("create");
+    let mut rx = connection.prompt(
         &sid,
         vec![ContentBlock::Text {
             text: "/terminal".into(),
@@ -47,21 +47,21 @@ async fn acp_driver_terminal_flow() {
         "terminal/wait_for_exit 应返回退出状态: {joined:?}"
     );
 
-    driver.close(&sid).expect("close");
+    connection.close(&sid).expect("close");
 }
 
 #[tokio::test]
-async fn acp_driver_full_flow() {
+async fn acp_client_full_flow() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_file = temp_dir.path().join("mock_acp_state");
     let calls_file = state_file.with_extension("calls");
     let state_file_s = state_file.to_str().unwrap().to_string();
 
     let mock = env!("CARGO_BIN_EXE_mock_acp");
-    let driver =
-        AcpAgentDriver::spawn(mock, &[state_file_s.as_str()], &[]).expect("spawn mock acp");
+    let connection =
+        AcpConnection::spawn(mock, &[state_file_s.as_str()], &[]).expect("spawn mock acp");
 
-    let (sid, options) = driver.create_session("/tmp/work").expect("create");
+    let (sid, options) = connection.create_session("/tmp/work").expect("create");
     assert_eq!(sid, "mock_s_1");
     // mock 声明了 configOptions 能力：new 响应带回初始选项
     assert_eq!(options.len(), 1, "初始选项应含 model: {options:?}");
@@ -71,12 +71,12 @@ async fn acp_driver_full_flow() {
         other => panic!("应为 Select 选项: {other:?}"),
     };
     assert_eq!(model_current, "gpt-4o");
-    driver
+    connection
         .resume_session("mock_s_restored", "/tmp/work")
         .expect("restore");
 
     // 设置会话选项：返回更新后的完整选项集合
-    let updated = driver
+    let updated = connection
         .set_config_option(
             &sid,
             "model",
@@ -96,7 +96,7 @@ async fn acp_driver_full_flow() {
         other => panic!("应为 Select 选项: {other:?}"),
     }
 
-    let mut rx = driver.prompt(
+    let mut rx = connection.prompt(
         &sid,
         vec![ContentBlock::Text {
             text: "你好".into(),
@@ -158,8 +158,8 @@ async fn acp_driver_full_flow() {
         "恢复会话应恰好 resume 一次（幂等）: {calls:?}"
     );
 
-    driver.close(&sid).expect("close");
-    driver.delete_session(&sid).expect("delete");
+    connection.close(&sid).expect("close");
+    connection.delete_session(&sid).expect("delete");
     let calls = std::fs::read_to_string(&calls_file).unwrap_or_default();
     assert!(
         calls.contains("session/close"),

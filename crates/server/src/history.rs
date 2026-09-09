@@ -79,7 +79,7 @@ impl SessionLog {
 /// tool_call 事件缺失 kind 字段时的固定名称（session.rs 实时活动共用）。
 pub(crate) const DEFAULT_TOOL_NAME: &str = "tool_call";
 
-/// 单 turn 聚合：把 turn 期间的驱动事件转换为历史 + 活动：
+/// 单 turn 聚合：把 turn 期间的 agent 事件转换为历史 + 活动：
 /// - 用户输入 → `HistoryItem::UserMessage`
 /// - agent 输出合并为一条 `HistoryItem::AgentMessage`
 /// - thinking 累积为一条 `Activity::Thinking`
