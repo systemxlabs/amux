@@ -23,7 +23,7 @@ use protocol::{
     SessionMeta, SessionState, SessionStateChange,
 };
 
-use crate::agent::{AgentEvent, AgentRegistry};
+use crate::agent::{AcpAgentDriver, AgentEvent, AgentRegistry};
 use crate::error::SessionError;
 use crate::git::GitRunner;
 use crate::history::{SessionLog, TurnMerger};
@@ -74,7 +74,7 @@ struct ThinkingBuffer {
 /// prompt 前置准备产物：具名字段替代 4 元组返回，
 /// 避免相邻 String（agent_session_id / cwd）解构错位。
 struct PromptSetup {
-    driver: crate::agent::SharedDriver,
+    driver: Arc<AcpAgentDriver>,
     agent_session_id: String,
     cwd: String,
     old_state: SessionState,
@@ -267,7 +267,7 @@ impl SessionManager {
         session_id: &str,
         meta: &SessionMeta,
         agent_session_id: Option<&str>,
-    ) -> Result<(crate::agent::SharedDriver, String), SessionError> {
+    ) -> Result<(Arc<AcpAgentDriver>, String), SessionError> {
         let driver = self
             .agents
             .driver_for(&meta.agent)
@@ -322,7 +322,7 @@ impl SessionManager {
     fn existing_agent_session(
         &self,
         session_id: &str,
-    ) -> Result<Option<(crate::agent::SharedDriver, String)>, SessionError> {
+    ) -> Result<Option<(Arc<AcpAgentDriver>, String)>, SessionError> {
         let entry = self.get_entry(session_id)?;
         let Some(agent_session_id) = entry.agent_session_id else {
             return Ok(None);
@@ -788,7 +788,7 @@ impl SessionManager {
     async fn run_turn(
         &self,
         session_id: &str,
-        driver: &crate::agent::SharedDriver,
+        driver: &Arc<AcpAgentDriver>,
         agent_session_id: &str,
         input: Vec<ContentBlock>,
         control: &SessionControl,
@@ -1095,12 +1095,8 @@ fn first_text(input: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AgentDriver, AgentEvent, AgentRegistry, StubAgentDriver};
-    use crate::history::SessionLog;
     use crate::registry::SessionRegistry;
     use protocol::ContentBlock;
-    use std::sync::{Arc, Barrier};
-    use tokio::sync::Notify;
 
     fn text(s: &str) -> Vec<ContentBlock> {
         vec![ContentBlock::Text {
@@ -1108,25 +1104,34 @@ mod tests {
         }]
     }
 
-    fn stub_manager(agent: &str) -> (Arc<SessionManager>, broadcast::Receiver<ServerNotification>) {
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            agent,
-            Arc::new(crate::agent::StubAgentDriver::new()),
-        ));
+    /// 测试注册表：禁用自动发现、不配置驱动。本模块用例均不触达 agent；
+    /// 触达 agent 的用例在 tests/session_manager.rs，经 mock_acp 子进程走真实路径。
+    fn test_agents() -> Arc<AgentRegistry> {
+        std::env::set_var("AMUX_NO_DISCOVERY", "1");
+        Arc::new(AgentRegistry::new(None))
+    }
+
+    fn manager_at(
+        dir: &std::path::Path,
+    ) -> (
+        Arc<SessionManager>,
+        Arc<SessionRegistry>,
+        broadcast::Receiver<ServerNotification>,
+    ) {
+        std::fs::create_dir_all(dir).unwrap();
+        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
+        let (mgr, rx) = SessionManager::new(test_agents(), registry.clone(), dir.to_path_buf());
+        (Arc::new(mgr), registry, rx)
+    }
+
+    #[tokio::test]
+    async fn missing_session_requests_do_not_allocate_controls() {
         let dir = std::env::temp_dir().join(format!(
             "amux-sess-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, rx) = SessionManager::new(agents, registry, dir);
-        (Arc::new(mgr), rx)
-    }
-
-    #[tokio::test]
-    async fn missing_session_requests_do_not_allocate_controls() {
-        let (manager, _rx) = stub_manager("stub");
+        let (manager, _registry, _rx) = manager_at(&dir);
         assert!(manager.controls.lock().is_empty());
 
         assert!(matches!(
@@ -1151,212 +1156,7 @@ mod tests {
         ));
         assert!(manager.delete("missing").await.is_ok());
         assert!(manager.controls.lock().is_empty());
-    }
-    /// 阻塞型驱动：prompt 后等待 release 才结束 turn（用于控制 turn 生命周期，
-    /// 在 turn 进行中并发执行删除/新 prompt 以验证并发语义）。
-    struct BlockingDriver {
-        started: Arc<Notify>,
-        /// 许可被永久消费（不回收）：每个 turn 消耗一个，测试按需 add_permits，
-        /// 与 Notify 的单许可语义相比可确定性地放行任意数量的并发 turn
-        release: Arc<tokio::sync::Semaphore>,
-    }
-
-    impl AgentDriver for BlockingDriver {
-        fn create_session(
-            &self,
-            _cwd: &str,
-        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-            Ok(("agent_blocking".into(), Vec::new()))
-        }
-
-        fn resume_session(
-            &self,
-            _agent_session_id: &str,
-            _cwd: &str,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn prompt(
-            &self,
-            _agent_session_id: &str,
-            _input: Vec<ContentBlock>,
-        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            let started = self.started.clone();
-            let release = self.release.clone();
-            tokio::spawn(async move {
-                started.notify_one();
-                if let Ok(permit) = release.acquire().await {
-                    std::mem::forget(permit);
-                }
-                let _ = tx
-                    .send(AgentEvent::TurnEnded(
-                        protocol::StateChangeReason::Completed,
-                    ))
-                    .await;
-            });
-            rx
-        }
-
-        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn close(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn set_config_option(
-            &self,
-            _agent_session_id: &str,
-            _config_id: &str,
-            _value: protocol::SessionConfigOptionValue,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn shutdown(&self) {}
-    }
-
-    /// 测试驱动：prompt 时先发一条上下文大小更新，再正常结束 turn
-    /// （验证 usage_update → 注册表记录的链路）。
-    struct UsageDriver {
-        used: u64,
-        size: u64,
-    }
-
-    impl AgentDriver for UsageDriver {
-        fn create_session(
-            &self,
-            _cwd: &str,
-        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-            Ok(("agent_usage".into(), Vec::new()))
-        }
-
-        fn resume_session(
-            &self,
-            _agent_session_id: &str,
-            _cwd: &str,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn prompt(
-            &self,
-            _agent_session_id: &str,
-            _input: Vec<ContentBlock>,
-        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-            let (tx, rx) = tokio::sync::mpsc::channel(2);
-            let used = self.used;
-            let size = self.size;
-            tokio::spawn(async move {
-                let _ = tx.send(AgentEvent::UsageUpdate { used, size }).await;
-                let _ = tx
-                    .send(AgentEvent::TurnEnded(
-                        protocol::StateChangeReason::Completed,
-                    ))
-                    .await;
-            });
-            rx
-        }
-
-        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn close(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn set_config_option(
-            &self,
-            _agent_session_id: &str,
-            _config_id: &str,
-            _value: protocol::SessionConfigOptionValue,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn shutdown(&self) {}
-    }
-
-    /// 测试驱动：prompt 时按顺序推送事件再结束 turn。
-    /// 每发完一个事件阻塞等待 `release`，让测试可以串行观察
-    /// `ongoing_activity` 在事件流累积过程中的中间态。
-    struct ThinkingChunksDriver {
-        events: Vec<AgentEvent>,
-        release: Arc<tokio::sync::Notify>,
-    }
-
-    impl AgentDriver for ThinkingChunksDriver {
-        fn create_session(
-            &self,
-            _cwd: &str,
-        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-            Ok(("agent_thinking".into(), Vec::new()))
-        }
-
-        fn resume_session(
-            &self,
-            _agent_session_id: &str,
-            _cwd: &str,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn prompt(
-            &self,
-            _agent_session_id: &str,
-            _input: Vec<ContentBlock>,
-        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-            let (tx, rx) = tokio::sync::mpsc::channel(8);
-            let events = self.events.clone();
-            let release = self.release.clone();
-            tokio::spawn(async move {
-                for ev in events {
-                    let _ = tx.send(ev).await;
-                    release.notified().await;
-                }
-                let _ = tx
-                    .send(AgentEvent::TurnEnded(
-                        protocol::StateChangeReason::Completed,
-                    ))
-                    .await;
-            });
-            rx
-        }
-
-        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn close(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn set_config_option(
-            &self,
-            _agent_session_id: &str,
-            _config_id: &str,
-            _value: protocol::SessionConfigOptionValue,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn shutdown(&self) {}
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn git(cwd: &std::path::Path, args: &[&str]) -> String {
@@ -1375,73 +1175,14 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    #[tokio::test]
-    async fn worktree_eager_create_and_delete_cascade() {
-        // data_dir 嵌套一层：worktree 根落在用例沙箱内（data_dir 同级 worktrees/）
-        let case = std::env::temp_dir().join(format!(
-            "amux-wt-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(case.join("server").join("sessions")).unwrap();
-
-        // 主仓库：需要已有提交（unborn HEAD 无法建 worktree）
-        let repo = case.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-b", "main", "-q"]);
-        git(&repo, &["config", "user.email", "t@t"]);
-        git(&repo, &["config", "user.name", "t"]);
+    fn commit_repo(repo: &std::path::Path) {
+        std::fs::create_dir_all(repo).unwrap();
+        git(repo, &["init", "-b", "main", "-q"]);
+        git(repo, &["config", "user.email", "t@t"]);
+        git(repo, &["config", "user.name", "t"]);
         std::fs::write(repo.join("a.txt"), "v1\n").unwrap();
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-m", "init", "-q"]);
-
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "codex",
-            Arc::new(crate::agent::StubAgentDriver::new()),
-        ));
-        let registry =
-            Arc::new(SessionRegistry::open(&case.join("server").join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry, case.join("server"));
-
-        // session.new 即落盘工作树。
-        let meta = mgr
-            .create("codex", repo.to_str().unwrap(), true)
-            .await
-            .unwrap();
-        assert!(meta
-            .worktree_dir
-            .starts_with(case.join("worktrees").to_str().unwrap()));
-        let wt = std::path::PathBuf::from(&meta.worktree_dir);
-        assert!(wt.is_dir(), "session.new 应立即创建工作树");
-        assert!(wt.join(".git").is_file(), ".git 为文件是 worktree 的特征");
-        let list = git(&repo, &["worktree", "list", "--porcelain"]);
-        assert!(list.contains(meta.worktree_dir.trim()));
-
-        // 首次指令：工作树已就位，prompt 正常完成
-        mgr.prompt(&meta.id, text("hi")).await.unwrap();
-        assert!(wt.is_dir(), "prompt 后工作树仍应存在");
-
-        // 改动视图（workspace RPC）应作用于 worktree 目录，而非原始工作目录
-        assert_eq!(
-            mgr.workspace_cwd(&meta.id).unwrap(),
-            meta.worktree_dir,
-            "worktree 会话的 workspace_cwd 应返回 worktree 目录"
-        );
-
-        // 删除会话：工作树级联移除（资源清理已异步化，轮询等待后台完成）
-        mgr.delete(&meta.id).await.unwrap();
-        let mut removed = false;
-        for _ in 0..100 {
-            if !wt.exists() {
-                removed = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(removed, "删除会话应级联删除工作树");
-        let list = git(&repo, &["worktree", "list", "--porcelain"]);
-        assert!(!list.contains(meta.worktree_dir.trim()));
-        let _ = std::fs::remove_dir_all(&case);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "init", "-q"]);
     }
 
     #[tokio::test]
@@ -1452,28 +1193,12 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        std::fs::create_dir_all(case.join("server").join("sessions")).unwrap();
-
-        let repo = case.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-b", "main", "-q"]);
-        git(&repo, &["config", "user.email", "t@t"]);
-        git(&repo, &["config", "user.name", "t"]);
-        std::fs::write(repo.join("a.txt"), "v1\n").unwrap();
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-m", "init", "-q"]);
-
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "codex",
-            Arc::new(crate::agent::StubAgentDriver::new()),
-        ));
-        let registry =
-            Arc::new(SessionRegistry::open(&case.join("server").join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), case.join("server"));
+        commit_repo(&case.join("repo"));
+        let (mgr, registry, _rx) = manager_at(&case.join("server"));
 
         // 超时会话：worktree 应被清理，元数据保留，后续访问按原路径重建
         let stale = mgr
-            .create("codex", repo.to_str().unwrap(), true)
+            .create("codex", case.join("repo").to_str().unwrap(), true)
             .await
             .unwrap();
         let stale_wt = PathBuf::from(&stale.worktree_dir);
@@ -1490,7 +1215,7 @@ mod tests {
 
         // 近期会话：worktree 保留
         let recent = mgr
-            .create("codex", repo.to_str().unwrap(), true)
+            .create("codex", case.join("repo").to_str().unwrap(), true)
             .await
             .unwrap();
         let recent_wt = PathBuf::from(&recent.worktree_dir);
@@ -1508,7 +1233,7 @@ mod tests {
             stored.meta.worktree_dir, stale.worktree_dir,
             "清理保留 worktree 元数据"
         );
-        let list = git(&repo, &["worktree", "list", "--porcelain"]);
+        let list = git(&case.join("repo"), &["worktree", "list", "--porcelain"]);
         assert!(
             !list.contains(stale.worktree_dir.trim()),
             "主仓库不应再登记已清理 worktree"
@@ -1527,7 +1252,7 @@ mod tests {
             stale_wt.file_name().unwrap().to_str().unwrap(),
             "重建 worktree 应检回原工作分支"
         );
-        let list = git(&repo, &["worktree", "list", "--porcelain"]);
+        let list = git(&case.join("repo"), &["worktree", "list", "--porcelain"]);
         assert!(
             list.contains(stale.worktree_dir.trim()),
             "重建后主仓库重新登记 worktree"
@@ -1545,14 +1270,12 @@ mod tests {
 
     #[tokio::test]
     async fn worktree_create_rejects_non_git_cwd() {
-        let agents = Arc::new(AgentRegistry::new_for_tests());
         let dir = std::env::temp_dir().join(format!(
             "amux-wt-norepo-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+        let (mgr, registry, _rx) = manager_at(&dir);
 
         // 非 git 目录启用 worktree 应直接拒绝
         let err = mgr
@@ -1570,14 +1293,12 @@ mod tests {
 
     #[tokio::test]
     async fn create_is_lazy_until_first_prompt() {
-        let agents = Arc::new(AgentRegistry::new_for_tests());
         let dir = std::env::temp_dir().join(format!(
             "amux-lazy-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+        let (mgr, registry, _rx) = manager_at(&dir);
 
         let meta = mgr.create("codex", "/tmp/lazy", false).await.unwrap();
         let entry = registry.get(&meta.id).unwrap().unwrap();
@@ -1595,803 +1316,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ACP session/new 与删除并发时，删除不能被 setup 的最终 upsert 绕过。
-    struct BlockingCreateDriver {
-        entered: Arc<Barrier>,
-        release: Arc<Barrier>,
-        inner: StubAgentDriver,
-    }
-
-    impl AgentDriver for BlockingCreateDriver {
-        fn create_session(
-            &self,
-            cwd: &str,
-        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-            self.entered.wait();
-            self.release.wait();
-            self.inner.create_session(cwd)
-        }
-
-        fn resume_session(
-            &self,
-            agent_session_id: &str,
-            cwd: &str,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            self.inner.resume_session(agent_session_id, cwd)
-        }
-
-        fn prompt(
-            &self,
-            agent_session_id: &str,
-            input: Vec<ContentBlock>,
-        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-            self.inner.prompt(agent_session_id, input)
-        }
-
-        fn cancel(&self, agent_session_id: &str) -> Result<(), String> {
-            self.inner.cancel(agent_session_id)
-        }
-
-        fn close(&self, agent_session_id: &str) -> Result<(), String> {
-            self.inner.close(agent_session_id)
-        }
-
-        fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
-            self.inner.delete_session(agent_session_id)
-        }
-
-        fn set_config_option(
-            &self,
-            agent_session_id: &str,
-            config_id: &str,
-            value: protocol::SessionConfigOptionValue,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            self.inner
-                .set_config_option(agent_session_id, config_id, value)
-        }
-
-        fn shutdown(&self) {
-            self.inner.shutdown()
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_during_lazy_create_does_not_resurrect_session() {
-        let entered = Arc::new(Barrier::new(2));
-        let release = Arc::new(Barrier::new(2));
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "race",
-            Arc::new(BlockingCreateDriver {
-                entered: entered.clone(),
-                release: release.clone(),
-                inner: StubAgentDriver::new(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-delete-create-race-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
-        let mgr = Arc::new(mgr);
-        let meta = mgr.create("race", "/tmp/race", false).await.unwrap();
-        let session_id = meta.id.clone();
-
-        let prompt_mgr = mgr.clone();
-        let prompt_id = session_id.clone();
-        let prompt_task =
-            tokio::spawn(async move { prompt_mgr.prompt(&prompt_id, text("hi")).await });
-
-        // Wait until setup is inside the synchronous ACP create call.
-        tokio::task::spawn_blocking(move || entered.wait())
-            .await
-            .unwrap();
-
-        let delete_mgr = mgr.clone();
-        let delete_id = session_id.clone();
-        let delete_task = tokio::spawn(async move { delete_mgr.delete(&delete_id).await });
-        while !mgr
-            .control(&session_id)
-            .expect("测试会话仍应存在")
-            .deleted
-            .load(Ordering::SeqCst)
-        {
-            tokio::task::yield_now().await;
-        }
-
-        // Let session/new return. setup must observe deleted and avoid upsert.
-        tokio::task::spawn_blocking(move || release.wait())
-            .await
-            .unwrap();
-        let prompt_result = prompt_task.await.unwrap();
-        assert!(matches!(prompt_result, Err(SessionError::NotFound(_))));
-        delete_task.await.unwrap().unwrap();
-        assert!(registry.get(&session_id).unwrap().is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn prompt_records_usage_update_context_size() {
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "codex",
-            Arc::new(UsageDriver {
-                used: 53_000,
-                size: 200_000,
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-usage-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
-
-        let meta = mgr.create("codex", "/tmp/usage", false).await.unwrap();
-        mgr.prompt(&meta.id, text("hi")).await.unwrap();
-
-        // 上下文信息为内存存储；session.context 应返回通知上报的值
-        let context = mgr.context(&meta.id).await.unwrap();
-        assert_eq!(
-            context,
-            protocol::SessionContextResult {
-                context_size: 53_000,
-                context_window_size: 200_000,
-            }
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 测试驱动：持有会话配置选项，`set_config_option` 按 config_id 更新并返回完整集合
-    /// （验证会话选项查询/设置 → 内存记录的链路）。
-    struct ConfigDriver {
-        options: Mutex<Vec<protocol::SessionConfigOption>>,
-    }
-
-    impl AgentDriver for ConfigDriver {
-        fn create_session(
-            &self,
-            _cwd: &str,
-        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-            Ok(("agent_cfg".into(), self.options.lock().clone()))
-        }
-
-        fn resume_session(
-            &self,
-            _agent_session_id: &str,
-            _cwd: &str,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(self.options.lock().clone())
-        }
-
-        fn prompt(
-            &self,
-            _agent_session_id: &str,
-            _input: Vec<ContentBlock>,
-        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            tokio::spawn(async move {
-                let _ = tx
-                    .send(AgentEvent::TurnEnded(
-                        protocol::StateChangeReason::Completed,
-                    ))
-                    .await;
-            });
-            rx
-        }
-
-        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn close(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn set_config_option(
-            &self,
-            _agent_session_id: &str,
-            config_id: &str,
-            value: protocol::SessionConfigOptionValue,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            let mut options = self.options.lock();
-            for opt in options.iter_mut() {
-                if opt.id != config_id {
-                    continue;
-                }
-                match (&mut opt.kind, &value) {
-                    (
-                        protocol::SessionConfigKind::Select { current_value, .. },
-                        protocol::SessionConfigOptionValue::ValueId { value: v },
-                    ) => *current_value = v.clone(),
-                    (
-                        protocol::SessionConfigKind::Boolean { current_value },
-                        protocol::SessionConfigOptionValue::Boolean { value: v },
-                    ) => *current_value = *v,
-                    _ => return Err(format!("选项 {config_id} 与值类型不匹配")),
-                }
-            }
-            Ok(options.clone())
-        }
-
-        fn shutdown(&self) {}
-    }
-
-    #[tokio::test]
-    async fn config_options_lazy_query_and_set() {
-        // 选项存储在内存，以 Agent 侧数据为权威；查询会话选项同样触发惰性创建/恢复。
-        let opts = vec![protocol::SessionConfigOption {
-            id: "model".into(),
-            name: "模型".into(),
-            description: None,
-            category: Some("model".into()),
-            kind: protocol::SessionConfigKind::Select {
-                current_value: "gpt-4o".into(),
-                options: vec![
-                    protocol::SessionConfigSelectEntry {
-                        value: "gpt-4o".into(),
-                        name: "GPT-4o".into(),
-                    },
-                    protocol::SessionConfigSelectEntry {
-                        value: "gpt-5".into(),
-                        name: "GPT-5".into(),
-                    },
-                ],
-            },
-        }];
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "codex",
-            Arc::new(ConfigDriver {
-                options: Mutex::new(opts.clone()),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-cfg-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
-
-        let meta = mgr.create("codex", "/tmp/cfg", false).await.unwrap();
-        // 查询触发惰性创建：agent 侧会话建立，初始选项来自 new 响应
-        let stored = mgr.config_options(&meta.id).await.unwrap();
-        assert_eq!(stored, opts, "查询应惰性创建并返回 Agent 侧初始选项");
-        let entry = registry.get(&meta.id).unwrap().unwrap();
-        assert!(
-            entry.agent_session_id.is_some(),
-            "查询会话选项应已创建 agent 侧会话"
-        );
-
-        // 设置选项：set_config_option 响应全量覆盖内存存储
-        let updated = mgr
-            .set_config_option(
-                &meta.id,
-                "model",
-                protocol::SessionConfigOptionValue::ValueId {
-                    value: "gpt-5".into(),
-                },
-            )
-            .await
-            .unwrap();
-        match &updated[0].kind {
-            protocol::SessionConfigKind::Select { current_value, .. } => {
-                assert_eq!(current_value, "gpt-5")
-            }
-            other => panic!("应为 Select，得到 {other:?}"),
-        }
-        let again = mgr.config_options(&meta.id).await.unwrap();
-        assert_eq!(again, updated, "后续查询应读到 Agent 侧最新的全量选项");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn ongoing_thinking_accumulates_across_chunks() {
-        // GUI 通过 session.ongoing_activity 看到「思考中」应当是当前思考块的累积内容，
-        // 而不是最新一个流式 chunk。
-        // prompt 由驱动在每个 chunk 后阻塞等待 release，测试用 wait_for_thinking
-        // 串行观察三个中间态：单段 → 两段 → 三段。
-        let release = Arc::new(tokio::sync::Notify::new());
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "codex",
-            Arc::new(ThinkingChunksDriver {
-                events: vec![
-                    AgentEvent::Thinking("先读 src/main.rs".into()),
-                    AgentEvent::Thinking("，再分析依赖".into()),
-                    AgentEvent::Thinking("，最后写结论".into()),
-                ],
-                release: release.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-thinking-accum-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry, dir.clone());
-        let mgr = Arc::new(mgr);
-
-        let meta = mgr.create("codex", "/tmp/think", false).await.unwrap();
-
-        // 异步推进 prompt；通过 release 闸门控制驱动节奏
-        let mgr_for_task = mgr.clone();
-        let id_for_task = meta.id.clone();
-        let prompt_task =
-            tokio::spawn(async move { mgr_for_task.prompt(&id_for_task, text("hi")).await });
-
-        // 每个 chunk 之后释放 driver 推进下一个 chunk；最后一段也需释放以让 turn 收尾
-        for expected in [
-            "先读 src/main.rs",
-            "先读 src/main.rs，再分析依赖",
-            "先读 src/main.rs，再分析依赖，最后写结论",
-        ] {
-            wait_for_thinking(&mgr, &meta.id, expected).await;
-            release.notify_one();
-        }
-        prompt_task.await.unwrap().unwrap();
-
-        // turn 结束后 ongoing 应已清空
-        assert!(mgr.ongoing_activity(&meta.id).await.unwrap().is_none());
-        // 落盘的活动历史也只剩一条合并后的 thinking
-        let acts = mgr
-            .activities(&meta.id, None, None)
-            .await
-            .unwrap()
-            .activities;
-        let thinking = acts
-            .iter()
-            .find_map(|a| match a {
-                Activity::Thinking { thinking, .. } => Some(thinking.clone()),
-                _ => None,
-            })
-            .expect("应有累积的 thinking 活动");
-        assert_eq!(thinking, "先读 src/main.rs，再分析依赖，最后写结论");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 轮询等待 ongoing 出现 expected 内容。10ms tick × 200 = 2s 上限；
-    /// 真实场景下 1 个 tick 即应到位（事件经 mpsc 同步分发）。
-    async fn wait_for_thinking(mgr: &SessionManager, sid: &str, expected: &str) {
-        for _ in 0..200 {
-            if let Some(Activity::Thinking { thinking, .. }) =
-                mgr.ongoing_activity(sid).await.unwrap()
-            {
-                if thinking == expected {
-                    return;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("ongoing thinking 内容始终未匹配: {expected}");
-    }
-
-    /// 轮询等待 ongoing 变为指定名称的工具调用（同 wait_for_thinking 的节奏）。
-    async fn wait_for_tool_call(mgr: &SessionManager, sid: &str, name: &str) {
-        for _ in 0..200 {
-            if let Some(Activity::ToolCall { tool_name: n, .. }) =
-                mgr.ongoing_activity(sid).await.unwrap()
-            {
-                if n == name {
-                    return;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("ongoing 始终未变为工具调用: {name}");
-    }
-
-    #[tokio::test]
-    async fn ongoing_thinking_resets_after_tool_call_finalizes_block() {
-        // turn 内「思考 → 工具调用 → 再思考」时，merger 已在工具调用处
-        // 定稿第一个思考块，ongoing 的「思考中」应只携带第二个思考块的内容。
-        // 回归：thinking_buf 未定稿时重置，导致 ongoing 一直从第一个思考块累积。
-        let release = Arc::new(tokio::sync::Notify::new());
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "codex",
-            Arc::new(ThinkingChunksDriver {
-                events: vec![
-                    AgentEvent::Thinking("第一段思考".into()),
-                    AgentEvent::ToolCall {
-                        id: "tc1".into(),
-                        name: Some("read_file".into()),
-                        title: Some("读取文件".into()),
-                        parameters: None,
-                    },
-                    AgentEvent::Thinking("第二段思考".into()),
-                ],
-                release: release.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-thinking-reset-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry, dir.clone());
-        let mgr = Arc::new(mgr);
-
-        let meta = mgr.create("codex", "/tmp/think", false).await.unwrap();
-        let mgr_for_task = mgr.clone();
-        let id_for_task = meta.id.clone();
-        let prompt_task =
-            tokio::spawn(async move { mgr_for_task.prompt(&id_for_task, text("hi")).await });
-
-        wait_for_thinking(&mgr, &meta.id, "第一段思考").await;
-        release.notify_one();
-        wait_for_tool_call(&mgr, &meta.id, "read_file").await;
-        release.notify_one();
-        // 若 buf 未在工具调用处重置，这里会拿到「第一段思考第二段思考」而超时失败
-        wait_for_thinking(&mgr, &meta.id, "第二段思考").await;
-        release.notify_one();
-        prompt_task.await.unwrap().unwrap();
-
-        // 落盘的活动历史应是两条独立的 thinking，与 ongoing 的中间态一致
-        let acts = mgr
-            .activities(&meta.id, None, None)
-            .await
-            .unwrap()
-            .activities;
-        let thinkings: Vec<&str> = acts
-            .iter()
-            .filter_map(|a| match a {
-                Activity::Thinking { thinking, .. } => Some(thinking.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(thinkings, vec!["第一段思考", "第二段思考"]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn prompt_writes_history_and_activities_with_title() {
-        let (mgr, mut rx) = stub_manager("codex");
-        let meta = mgr.create("codex", "/tmp/work", false).await.unwrap();
-
-        mgr.prompt(&meta.id, text("实现登录功能")).await.unwrap();
-
-        let (list, _) = mgr.list(None).await.unwrap();
-        assert_eq!(list[0].title, "实现登录功能");
-
-        let log = SessionLog::open(&mgr.data_dir, &meta.id);
-        assert!(log.history_exists(), "prompt 后应写历史");
-        assert!(log.activities_exists(), "prompt 后应写活动");
-
-        let page = mgr.history(&meta.id, None, None).await.unwrap();
-        let items = &page.items;
-        assert!(matches!(&items[0], HistoryItem::UserMessage { content, .. }
-            if content.contains(&ContentBlock::Text { text: "实现登录功能".into() })));
-        assert!(items.iter().any(|i| matches!(i, HistoryItem::AgentMessage { content, .. }
-            if content.iter().any(|c| matches!(c, ContentBlock::Text { text } if text.contains("完成"))))));
-        assert!(!page.has_more);
-        assert_eq!(page.next_before, None);
-
-        let acts = mgr
-            .activities(&meta.id, None, None)
-            .await
-            .unwrap()
-            .activities;
-        assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
-        assert!(acts
-            .iter()
-            .any(|a| matches!(a, Activity::ToolCall { tool_name, .. } if tool_name == "read_file")));
-
-        let (list, _) = mgr.list(None).await.unwrap();
-        assert_eq!(list[0].state, SessionState::Idle);
-        assert!(mgr.ongoing_activity(&meta.id).await.unwrap().is_none());
-
-        let mut saw = false;
-        while let Ok(n) = rx.recv().await {
-            let ServerNotification::StateChange(c) = n;
-            if c.session_id == meta.id
-                && c.old_state == SessionState::Busy
-                && c.new_state == SessionState::Idle
-            {
-                saw = true;
-                break;
-            }
-        }
-        assert!(saw, "prompt 结束应广播 busy→idle");
-        let _ = std::fs::remove_dir_all(&mgr.data_dir);
-    }
-
-    #[tokio::test]
-    async fn prompt_persists_title_when_agent_session_precreated() {
-        // GUI 选中会话即查询会话选项，选项查询会惰性创建 agent 侧会话并落盘
-        // agent_session_id；首条 prompt 因此走 resume 分支，生成的标题仍须落盘。
-        let (mgr, _rx) = stub_manager("codex");
-        let meta = mgr.create("codex", "/tmp/work", false).await.unwrap();
-
-        mgr.config_options(&meta.id).await.unwrap();
-        mgr.prompt(&meta.id, text("实现登录功能")).await.unwrap();
-
-        let (list, _) = mgr.list(None).await.unwrap();
-        assert_eq!(list[0].title, "实现登录功能");
-        let _ = std::fs::remove_dir_all(&mgr.data_dir);
-    }
-
-    #[tokio::test]
-    async fn prompt_persists_user_message_before_turn_ends() {
-        let started = Arc::new(Notify::new());
-        let release = Arc::new(tokio::sync::Semaphore::new(0));
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "blocking",
-            Arc::new(BlockingDriver {
-                started: started.clone(),
-                release: release.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-immediate-history-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (manager, _rx) = SessionManager::new(agents, registry, dir.clone());
-        let manager = Arc::new(manager);
-        let meta = manager
-            .create("blocking", "/tmp/work", false)
-            .await
-            .unwrap();
-        let session_id = meta.id.clone();
-
-        let prompt_manager = manager.clone();
-        let prompt_task =
-            tokio::spawn(async move { prompt_manager.prompt(&session_id, text("立即保存")).await });
-        started.notified().await;
-
-        let log = SessionLog::open(&dir, &meta.id);
-        let (history, _, _) = log.read_history_page(1000, None).unwrap();
-        assert!(matches!(
-            history.as_slice(),
-            [HistoryItem::UserMessage { content, .. }]
-                if content == &text("立即保存")
-        ));
-
-        release.add_permits(1);
-        prompt_task.await.unwrap().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    #[tokio::test]
-    async fn deleted_mid_turn_does_not_broadcast_state_change() {
-        let started = Arc::new(Notify::new());
-        let release = Arc::new(tokio::sync::Semaphore::new(0));
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "blocking",
-            Arc::new(BlockingDriver {
-                started: started.clone(),
-                release: release.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-del-mid-turn-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (manager, mut rx) = SessionManager::new(agents, registry.clone(), dir.clone());
-        let manager = Arc::new(manager);
-        let meta = manager
-            .create("blocking", "/tmp/work", false)
-            .await
-            .unwrap();
-        let session_id = meta.id.clone();
-
-        // turn 进行中删除会话：finalize_turn 不应为已删除会话广播状态变更，
-        // 也不应使其在注册表中复活。
-        let prompt_manager = manager.clone();
-        let prompt_session_id = session_id.clone();
-        let prompt_task = tokio::spawn(async move {
-            prompt_manager
-                .prompt(&prompt_session_id, text("进行中"))
-                .await
-        });
-        started.notified().await;
-        manager.delete(&session_id).await.unwrap();
-
-        release.add_permits(1);
-        let prompt_result = prompt_task.await.unwrap();
-        assert!(
-            matches!(prompt_result, Err(SessionError::NotFound(_))),
-            "turn 结束后已删除会话应返回 NotFound: {prompt_result:?}"
-        );
-        assert!(
-            registry.get(&session_id).unwrap().is_none(),
-            "删除的会话不应在注册表中复活"
-        );
-
-        assert!(
-            !SessionLog::open(&dir, &session_id).exists_any(),
-            "删除后旧 turn 不得重新创建历史或活动日志"
-        );
-
-        // 已删除会话不应再广播任何状态变更（删除期间收到的 Busy 广播除外）。
-        let mut saw_deleted_broadcast = false;
-        while let Ok(n) = rx.try_recv() {
-            let ServerNotification::StateChange(c) = n;
-            if c.session_id == session_id && c.new_state == SessionState::Idle {
-                saw_deleted_broadcast = true;
-            }
-        }
-        assert!(
-            !saw_deleted_broadcast,
-            "已删除会话不应广播 busy→idle 状态变更"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    #[tokio::test]
-    async fn activities_flush_during_turn_not_only_at_end() {
-        struct StreamingDriver {
-            started: Arc<Notify>,
-            flushed: Arc<Notify>,
-            release: Arc<Notify>,
-        }
-
-        impl AgentDriver for StreamingDriver {
-            fn create_session(
-                &self,
-                _cwd: &str,
-            ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-                Ok(("agent_stream".into(), Vec::new()))
-            }
-
-            fn resume_session(
-                &self,
-                _agent_session_id: &str,
-                _cwd: &str,
-            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-
-            fn prompt(
-                &self,
-                _agent_session_id: &str,
-                _input: Vec<ContentBlock>,
-            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-                let (tx, rx) = tokio::sync::mpsc::channel(8);
-                let started = self.started.clone();
-                let flushed = self.flushed.clone();
-                let release = self.release.clone();
-                tokio::spawn(async move {
-                    started.notify_one();
-                    let _ = tx.send(AgentEvent::Thinking("思考中".into())).await;
-                    let _ = tx
-                        .send(AgentEvent::ToolCall {
-                            id: "tc1".into(),
-                            name: Some("read_file".into()),
-                            title: None,
-                            parameters: None,
-                        })
-                        .await;
-                    // tool_call 合并到同一条活动，遇到 output 后定稿并落盘。
-                    let _ = tx.send(AgentEvent::OutputChunk("完成".into())).await;
-                    // 事件已发完但 turn 未结束（release 未放行）。
-                    flushed.notify_one();
-                    release.notified().await;
-                    let _ = tx
-                        .send(AgentEvent::TurnEnded(
-                            protocol::StateChangeReason::Completed,
-                        ))
-                        .await;
-                });
-                rx
-            }
-
-            fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn close(&self, _agent_session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn set_config_option(
-                &self,
-                _agent_session_id: &str,
-                _config_id: &str,
-                _value: protocol::SessionConfigOptionValue,
-            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-
-            fn shutdown(&self) {}
-        }
-
-        let started = Arc::new(Notify::new());
-        let flushed = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "stream",
-            Arc::new(StreamingDriver {
-                started: started.clone(),
-                flushed: flushed.clone(),
-                release: release.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-real-time-activity-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (manager, _rx) = SessionManager::new(agents, registry, dir.clone());
-        let manager = Arc::new(manager);
-        let meta = manager.create("stream", "/tmp/work", false).await.unwrap();
-        let session_id = meta.id.clone();
-
-        let prompt_manager = manager.clone();
-        let prompt_task =
-            tokio::spawn(async move { prompt_manager.prompt(&session_id, text("立即保存")).await });
-        started.notified().await;
-
-        // thinking + tool_call 事件已处理，但 turn 尚未结束（release 未放行）：
-        // 已定稿的活动应实时落盘，而非攒到 turn 结束统一写。
-        flushed.notified().await;
-        let log = SessionLog::open(&dir, &meta.id);
-        let (acts, _, _) = log.read_activities_page(1000, None).unwrap();
-        assert!(
-            acts.iter()
-                .any(|a| matches!(a, Activity::Thinking { thinking, .. } if thinking == "思考中")),
-            "thinking 应在 turn 结束前实时落盘"
-        );
-        assert!(
-            acts.iter()
-                .any(|a| matches!(a, Activity::ToolCall { tool_name, .. } if tool_name == "read_file")),
-            "tool_call 应在 turn 结束前实时落盘"
-        );
-
-        release.notify_one();
-        prompt_task.await.unwrap().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
     #[tokio::test]
     async fn session_list_count_semantics() {
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "codex",
-            Arc::new(crate::agent::StubAgentDriver::new()),
-        ));
         let dir = std::env::temp_dir().join(format!(
             "amux-list-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
+        let (mgr, registry, _rx) = manager_at(&dir);
         for (id, ts) in [("s1", 100), ("s2", 200), ("s3", 300)] {
-            let (mut m, aid) = (
-                SessionMeta {
-                    id: id.into(),
-                    agent: "codex".into(),
-                    cwd: "/tmp".into(),
-                    state: SessionState::Idle,
-                    title: String::new(),
-                    created_at: 1,
-                    last_active_at: ts,
-                    worktree_dir: String::new(),
-                },
-                format!("agent_{id}"),
-            );
-            registry.upsert(&m, Some(&aid)).unwrap();
-            let _ = &mut m;
+            let m = SessionMeta {
+                id: id.into(),
+                agent: "codex".into(),
+                cwd: "/tmp".into(),
+                state: SessionState::Idle,
+                title: String::new(),
+                created_at: 1,
+                last_active_at: ts,
+                worktree_dir: String::new(),
+            };
+            registry.upsert(&m, Some(&format!("agent_{id}"))).unwrap();
         }
         // 按数量查询：前缀 + has_more；数量增大是更长前缀，不重不漏
         let (metas, has_more) = mgr.list(Some(2)).await.unwrap();
@@ -2410,416 +1354,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn busy_state_persisted_immediately_on_resume_path() {
-        // 发送 session/prompt 时置工作中并立即
-        // 落盘。回归：resume 分支（已有 agent 侧会话）此前 busy 只改内存，
-        // turn 进行中列表读到陈旧空闲，且 Busy 前置检查放行并发 prompt。
-        let started = Arc::new(Notify::new());
-        let release = Arc::new(tokio::sync::Semaphore::new(0));
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "blocking",
-            Arc::new(BlockingDriver {
-                started: started.clone(),
-                release: release.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-busy-resume-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (manager, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
-        let manager = Arc::new(manager);
-        let meta = manager
-            .create("blocking", "/tmp/work", false)
-            .await
-            .unwrap();
-        let session_id = meta.id.clone();
-
-        // 第一轮：走惰性创建分支（upsert 已含 busy），正常结束
-        let pm = manager.clone();
-        let sid1 = session_id.clone();
-        let first = tokio::spawn(async move { pm.prompt(&sid1, text("第一轮")).await });
-        started.notified().await;
-        release.add_permits(1);
-        first.await.unwrap().unwrap();
-        let entry = registry.get(&session_id).unwrap().unwrap();
-        assert!(
-            entry.agent_session_id.is_some(),
-            "首轮后应有 agent 侧会话 id"
-        );
-        assert_eq!(entry.meta.state, SessionState::Idle);
-
-        // 第二轮：走 resume 分支——turn 进行中元数据必须是工作中
-        let pm = manager.clone();
-        let sid2 = session_id.clone();
-        let second = tokio::spawn(async move { pm.prompt(&sid2, text("第二轮")).await });
-        started.notified().await;
-        let entry = registry.get(&session_id).unwrap().unwrap();
-        assert_eq!(
-            entry.meta.state,
-            SessionState::Busy,
-            "resume 分支的 busy 应立即落盘"
-        );
-        // 元数据为工作中：并发 prompt 直接转发给 agent（不被本地拒绝），
-        // 同会话多个在途 turn 以计数维护忙闲
-        let concurrent = {
-            let pm = manager.clone();
-            let sid3 = session_id.clone();
-            tokio::spawn(async move { pm.prompt(&sid3, text("并发")).await })
-        };
-
-        release.add_permits(2);
-        second.await.unwrap().unwrap();
-        concurrent.await.unwrap().unwrap();
-        let entry = registry.get(&session_id).unwrap().unwrap();
-        assert_eq!(
-            entry.meta.state,
-            SessionState::Idle,
-            "全部 turn 结束后回空闲"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn delete_triggers_driver_close() {
-        struct Tracking {
-            closed: Arc<std::sync::atomic::AtomicUsize>,
-        }
-        impl AgentDriver for Tracking {
-            fn create_session(
-                &self,
-                cwd: &str,
-            ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-                Ok((format!("agent_{}", cwd.replace('/', "_")), Vec::new()))
-            }
-            fn resume_session(
-                &self,
-                _a: &str,
-                _c: &str,
-            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-            fn prompt(
-                &self,
-                _a: &str,
-                _i: Vec<ContentBlock>,
-            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-                let (tx, rx) = tokio::sync::mpsc::channel(8);
-                tokio::spawn(async move {
-                    let _ = tx.send(AgentEvent::OutputChunk("输出".into())).await;
-                    let _ = tx
-                        .send(AgentEvent::TurnEnded(
-                            protocol::StateChangeReason::Completed,
-                        ))
-                        .await;
-                });
-                rx
-            }
-            fn cancel(&self, _a: &str) -> Result<(), String> {
-                Ok(())
-            }
-            fn close(&self, _a: &str) -> Result<(), String> {
-                self.closed
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            }
-            fn delete_session(&self, _a: &str) -> Result<(), String> {
-                Err("method not found".into())
-            }
-            fn set_config_option(
-                &self,
-                _a: &str,
-                _config_id: &str,
-                _value: protocol::SessionConfigOptionValue,
-            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-
-            fn shutdown(&self) {}
-        }
-
-        let closed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "track",
-            Arc::new(Tracking {
-                closed: closed.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-del-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
-        let meta = mgr.create("track", "/tmp/work", false).await.unwrap();
-        mgr.prompt(&meta.id, text("hi")).await.unwrap();
-        assert_eq!(closed.load(std::sync::atomic::Ordering::SeqCst), 0);
-
-        mgr.delete(&meta.id).await.unwrap();
-        // 清理已异步化：轮询等待后台 driver.close 完成后再断言计数
-        let mut closed_seen = false;
-        for _ in 0..100 {
-            if closed.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
-                closed_seen = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(
-            closed_seen,
-            "删除应触发一次 driver.close（ACP session/close）"
-        );
-        assert!(registry.get(&meta.id).unwrap().is_none(), "注册表应已删除");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    #[tokio::test]
     async fn delete_unprompted_needs_no_close() {
-        let (mgr, _rx) = stub_manager("codex");
+        let dir = std::env::temp_dir().join(format!(
+            "amux-noop-del-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let (mgr, registry, _rx) = manager_at(&dir);
         let meta = mgr.create("codex", "/tmp/noop", false).await.unwrap();
         mgr.delete(&meta.id).await.unwrap();
         mgr.delete(&meta.id).await.expect("重复删除应保持幂等");
-        assert!(mgr.registry.get(&meta.id).unwrap().is_none());
-        let _ = std::fs::remove_dir_all(&mgr.data_dir);
+        assert!(registry.get(&meta.id).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
+
     #[tokio::test]
     async fn missing_session_errors() {
-        let (mgr, _rx) = stub_manager("codex");
+        let dir = std::env::temp_dir().join(format!(
+            "amux-miss-err-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let (mgr, _registry, _rx) = manager_at(&dir);
         assert!(mgr.prompt("nope", text("x")).await.is_err());
         assert!(mgr.history("nope", None, None).await.is_err());
         assert!(mgr.delete("nope").await.is_ok());
         assert!(mgr.controls.lock().is_empty(), "未知会话请求不应创建控制块");
-        let _ = std::fs::remove_dir_all(&mgr.data_dir);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancel_during_prompt_setup_is_not_dropped() {
-        struct SetupGate {
-            started: Arc<Notify>,
-            release_setup: Arc<std::sync::Barrier>,
-            prompt_started: Arc<Notify>,
-            release_turn: Arc<Notify>,
-            cancels: Arc<std::sync::atomic::AtomicUsize>,
-        }
-
-        impl AgentDriver for SetupGate {
-            fn create_session(
-                &self,
-                _cwd: &str,
-            ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-                self.started.notify_one();
-                self.release_setup.wait();
-                Ok(("agent_setup_gate".into(), Vec::new()))
-            }
-
-            fn resume_session(
-                &self,
-                _agent_session_id: &str,
-                _cwd: &str,
-            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-
-            fn prompt(
-                &self,
-                _agent_session_id: &str,
-                _input: Vec<ContentBlock>,
-            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                let prompt_started = self.prompt_started.clone();
-                let release_turn = self.release_turn.clone();
-                tokio::spawn(async move {
-                    prompt_started.notify_one();
-                    release_turn.notified().await;
-                    let _ = tx
-                        .send(AgentEvent::TurnEnded(
-                            protocol::StateChangeReason::Completed,
-                        ))
-                        .await;
-                });
-                rx
-            }
-
-            fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-                self.cancels
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            }
-
-            fn close(&self, _agent_session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn delete_session(&self, _agent_session_id: &str) -> Result<(), String> {
-                Ok(())
-            }
-
-            fn set_config_option(
-                &self,
-                _agent_session_id: &str,
-                _config_id: &str,
-                _value: protocol::SessionConfigOptionValue,
-            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-
-            fn shutdown(&self) {}
-        }
-
-        let started = Arc::new(Notify::new());
-        let release_setup = Arc::new(std::sync::Barrier::new(2));
-        let prompt_started = Arc::new(Notify::new());
-        let release_turn = Arc::new(Notify::new());
-        let cancels = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "setup_gate",
-            Arc::new(SetupGate {
-                started: started.clone(),
-                release_setup: release_setup.clone(),
-                prompt_started: prompt_started.clone(),
-                release_turn: release_turn.clone(),
-                cancels: cancels.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-cancel-setup-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (manager, _rx) = SessionManager::new(agents, registry, dir.clone());
-        let manager = Arc::new(manager);
-        let meta = manager
-            .create("setup_gate", "/tmp/setup-gate", false)
-            .await
-            .unwrap();
-
-        let prompt_manager = manager.clone();
-        let prompt_id = meta.id.clone();
-        let prompt_task =
-            tokio::spawn(async move { prompt_manager.prompt(&prompt_id, text("开始")).await });
-        started.notified().await;
-
-        let cancel_manager = manager.clone();
-        let cancel_id = meta.id.clone();
-        let cancel_task = tokio::spawn(async move { cancel_manager.cancel(&cancel_id).await });
-        tokio::task::yield_now().await;
-        assert!(
-            !cancel_task.is_finished(),
-            "取消不应在 prompt 初始化期间提前返回"
-        );
-        assert_eq!(
-            cancels.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "初始化尚未完成时不应提前调用 agent cancel"
-        );
-
-        let release_setup_task = tokio::task::spawn_blocking(move || release_setup.wait());
-        release_setup_task.await.unwrap();
-        prompt_started.notified().await;
-        cancel_task.await.unwrap().unwrap();
-        assert_eq!(
-            cancels.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "初始化完成后取消必须透传给 agent"
-        );
-
-        release_turn.notify_one();
-        prompt_task.await.unwrap().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn cancel_on_idle_session_skips_acp() {
-        struct Counting {
-            cancels: Arc<std::sync::atomic::AtomicUsize>,
-        }
-        impl AgentDriver for Counting {
-            fn create_session(
-                &self,
-                cwd: &str,
-            ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-                Ok((format!("agent_{}", cwd.replace('/', "_")), Vec::new()))
-            }
-            fn resume_session(
-                &self,
-                _a: &str,
-                _c: &str,
-            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-            fn prompt(
-                &self,
-                _a: &str,
-                _i: Vec<ContentBlock>,
-            ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-                let (tx, rx) = tokio::sync::mpsc::channel(8);
-                tokio::spawn(async move {
-                    let _ = tx
-                        .send(AgentEvent::TurnEnded(
-                            protocol::StateChangeReason::Completed,
-                        ))
-                        .await;
-                });
-                rx
-            }
-            fn cancel(&self, _a: &str) -> Result<(), String> {
-                self.cancels
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            }
-            fn close(&self, _a: &str) -> Result<(), String> {
-                Ok(())
-            }
-            fn delete_session(&self, _a: &str) -> Result<(), String> {
-                Err("method not found".into())
-            }
-            fn set_config_option(
-                &self,
-                _a: &str,
-                _config_id: &str,
-                _value: protocol::SessionConfigOptionValue,
-            ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-                Ok(Vec::new())
-            }
-
-            fn shutdown(&self) {}
-        }
-
-        let cancels = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let agents = Arc::new(AgentRegistry::new_for_tests_with_driver(
-            "track",
-            Arc::new(Counting {
-                cancels: cancels.clone(),
-            }),
-        ));
-        let dir = std::env::temp_dir().join(format!(
-            "amux-cancel-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
-        let (mgr, _rx) = SessionManager::new(agents, registry.clone(), dir.clone());
-
-        // 从未 prompt 的会话处于 Idle：cancel 应幂等成功且不触达 ACP
-        let meta = mgr.create("track", "/tmp/idle", false).await.unwrap();
-        mgr.cancel(&meta.id).await.unwrap();
-        assert_eq!(
-            cancels.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "空闲会话的取消不应透传 ACP agent"
-        );
-        // 状态不被取消操作扰动
-        assert_eq!(
-            registry.get(&meta.id).unwrap().unwrap().meta.state,
-            protocol::SessionState::Idle
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

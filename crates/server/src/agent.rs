@@ -1,11 +1,10 @@
-//! Agent 驱动抽象：server 与 agent 的唯一接口。
-//! 本模块提供：
-//! - `AcpAgentDriver`：真实 ACP v1 对接（官方 SDK `agent-client-protocol`，
-//!   `AcpAgent` stdio 传输 + typed 请求/通知，`grok agent`、`codex-acp` / `claude-acp` / `kimi acp`）
-//! - `StubAgentDriver`：内存 Stub（演示/无需 agent 的测试）
-//! - `AgentRegistry`：按 agent 名解析驱动——`AMUX_AGENT_BIN` 配置的驱动 + PATH 自动发现的
-//!   agent（启动即拉起并复用；拉起失败标记不可用；
-//!   运行期新发现的惰性拉起）
+//! Agent 驱动：server 与 agent 的唯一接口。
+//! `AcpAgentDriver` 经官方 SDK `agent-client-protocol` 对接真实 ACP v1
+//! （`AcpAgent` stdio 传输 + typed 请求/通知，`grok agent`、`codex-acp` /
+//! `claude-acp` / `kimi acp`）；测试经 `mock_acp` 子进程走同一真实路径。
+//! `AgentRegistry` 按 agent 名解析驱动——`AMUX_AGENT_BIN` 配置的驱动 +
+//! PATH 自动发现的 agent（启动即拉起并复用；拉起失败标记不可用；
+//! 运行期新发现的惰性拉起）。
 //!
 //! ACP v1 语义：session/new、resume、prompt、cancel、close 等
 //! 方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
@@ -19,9 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub use crate::acp::{
-    AcpAgentDriver, AgentDriver, AgentEvent, AgentSessionCaps, LaunchSummary, SharedDriver,
-};
+pub use crate::acp::{AcpAgentDriver, AgentEvent, AgentSessionCaps, LaunchSummary};
 use crate::discovery::{discover_acp_agents, DiscoveredAgent};
 use protocol::AgentInfo;
 
@@ -36,25 +33,21 @@ use protocol::AgentInfo;
 ///     `driver_for` 复用缓存驱动）；
 ///     **拉起失败的 agent 标记为不可用、`initialize` 声明非空 `authMethods` 的 agent 标记为未认证**（agent.list 的 status 反映；使用时报明确错误）；
 ///     运行期新发现的 agent 仍走惰性拉起兜底
-/// - 生产路径不提供内置 Stub；没有发现 agent 时 `agent.list` 为空，使用未知 agent 会报错。
+/// - 没有发现 agent 时 `agent.list` 为空，使用未知 agent 会报错。
 pub struct AgentRegistry {
-    /// 仅测试使用的 Stub 驱动。
-    stub: Mutex<Option<SharedDriver>>,
-    /// 测试强制 stub：跳过运行期发现（避免本机 PATH 干扰单测）
-    force_stub: bool,
     /// 禁用运行期自动发现（`AMUX_NO_DISCOVERY=1`）：只使用 `AMUX_AGENT_BIN` 显式配置的 agent。
     /// 供受限环境与测试隔离（避免拉起本机未配置的 agent 并恢复其会话）。
     no_discovery: bool,
     /// 配置驱动：agent 名 + 驱动
-    configured: Option<(String, SharedDriver)>,
+    configured: Option<(String, Arc<AcpAgentDriver>)>,
     /// 显式配置 agent 的重启参数；驱动重启后仍复用同一注册表条目。
     configured_spec: Mutex<Option<DiscoveredAgent>>,
     /// 显式配置 agent 最近一次重启后的驱动。
-    configured_override: Mutex<Option<SharedDriver>>,
+    configured_override: Mutex<Option<Arc<AcpAgentDriver>>>,
     /// 自动发现的 agent（不含已配置的；可运行期刷新）
     discovered: Mutex<Vec<DiscoveredAgent>>,
     /// 已拉起的发现驱动（启动拉起 + 懒路径共用缓存；`driver_for` 不再二次 spawn）
-    spawned: Mutex<HashMap<String, SharedDriver>>,
+    spawned: Mutex<HashMap<String, Arc<AcpAgentDriver>>>,
     /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 status=unavailable、driver_for 报错）
     unavailable: Mutex<HashSet<String>>,
     /// initialize 响应携带非空 authMethods 的 agent（标记未认证：agent.list 的
@@ -69,21 +62,19 @@ pub struct AgentRegistry {
 impl AgentRegistry {
     /// 构建注册表（生产路径：自动发现本机 ACP agent）。
     /// - `configured`：`AMUX_AGENT_BIN` 显式指定的驱动，可为 None（由自动发现接管）
-    pub fn new(configured: Option<(String, SharedDriver)>) -> Self {
+    pub fn new(configured: Option<(String, Arc<AcpAgentDriver>)>) -> Self {
         Self::with_shutdown(configured, Arc::new(AtomicBool::new(false)))
     }
 
     /// 使用 server 统一的关闭标志构建注册表，使启动中的 ACP 握手也能响应退出信号。
     pub fn with_shutdown(
-        configured: Option<(String, SharedDriver)>,
+        configured: Option<(String, Arc<AcpAgentDriver>)>,
         shutting_down: Arc<AtomicBool>,
     ) -> Self {
         let no_discovery = std::env::var("AMUX_NO_DISCOVERY")
             .map(|v| v == "1")
             .unwrap_or(false);
         let registry = AgentRegistry {
-            stub: Mutex::new(None),
-            force_stub: false,
             no_discovery,
             configured,
             configured_spec: Mutex::new(None),
@@ -102,11 +93,8 @@ impl AgentRegistry {
     }
 
     /// 重新扫描本机 ACP agent，供运行期安装的新 agent 刷新发现。
-    /// 合并新发现的 agent，保留已配置/已发现条目。生产路径没有 Stub 兜底。
+    /// 合并新发现的 agent，保留已配置/已发现条目。
     fn refresh_discovery(&self) {
-        if self.force_stub {
-            return;
-        }
         if !self.no_discovery {
             let current = discover_acp_agents();
             let mut disc = self.discovered.lock();
@@ -124,41 +112,6 @@ impl AgentRegistry {
         }
     }
 
-    /// 测试构造：忽略本机 PATH 发现，强制 stub 演示模式（agent 任意）。
-    #[cfg(test)]
-    pub fn new_for_tests() -> Self {
-        AgentRegistry {
-            stub: Mutex::new(Some(Arc::new(StubAgentDriver::new()))),
-            force_stub: true,
-            no_discovery: false,
-            configured: None,
-            configured_spec: Mutex::new(None),
-            configured_override: Mutex::new(None),
-            discovered: Mutex::new(Vec::new()),
-            spawned: Mutex::new(HashMap::new()),
-            unavailable: Mutex::new(HashSet::new()),
-            unauthenticated: Mutex::new(HashSet::new()),
-            shutting_down: Arc::new(AtomicBool::new(false)),
-            lifecycle: Mutex::new(()),
-        }
-    }
-    #[cfg(test)]
-    pub fn new_for_tests_with_driver(agent: &str, driver: SharedDriver) -> Self {
-        AgentRegistry {
-            stub: Mutex::new(None),
-            force_stub: false,
-            no_discovery: true,
-            configured: Some((agent.to_string(), driver)),
-            configured_spec: Mutex::new(None),
-            configured_override: Mutex::new(None),
-            discovered: Mutex::new(Vec::new()),
-            spawned: Mutex::new(HashMap::new()),
-            unavailable: Mutex::new(HashSet::new()),
-            unauthenticated: Mutex::new(HashSet::new()),
-            shutting_down: Arc::new(AtomicBool::new(false)),
-            lifecycle: Mutex::new(()),
-        }
-    }
     pub fn set_configured_spec(
         &self,
         name: String,
@@ -231,12 +184,9 @@ impl AgentRegistry {
         }
         out
     }
-    pub fn driver_for(&self, agent: &str) -> Result<SharedDriver, String> {
+    pub fn driver_for(&self, agent: &str) -> Result<Arc<AcpAgentDriver>, String> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err("agent registry 正在关闭".into());
-        }
-        if let Some(stub) = &*self.stub.lock() {
-            return Ok(stub.clone());
         }
         if self.unavailable.lock().contains(agent) {
             return Err(format!("agent 不可用（启动时拉起失败）: {agent}"));
@@ -288,7 +238,7 @@ impl AgentRegistry {
     }
     /// 按驱动握手结果同步未认证状态（initialize 携带非空 authMethods）。
     /// 驱动成功拉起即可用/未认证，原先的不可用标记一并清除。
-    fn sync_auth_status(&self, name: &str, driver: &SharedDriver) {
+    fn sync_auth_status(&self, name: &str, driver: &Arc<AcpAgentDriver>) {
         if driver.requires_auth() {
             self.unauthenticated.lock().insert(name.to_string());
         } else {
@@ -297,7 +247,7 @@ impl AgentRegistry {
         self.unavailable.lock().remove(name);
     }
 
-    fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<SharedDriver, String> {
+    fn spawn_and_cache(&self, d: &DiscoveredAgent) -> Result<Arc<AcpAgentDriver>, String> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err("agent registry 正在关闭".into());
         }
@@ -313,7 +263,7 @@ impl AgentRegistry {
             Some(self.shutting_down.clone()),
         )
         .map_err(|e| format!("启动 ACP agent ({}) 失败: {e}", d.bin))?;
-        let driver: SharedDriver = Arc::new(driver);
+        let driver: Arc<AcpAgentDriver> = Arc::new(driver);
         let mut spawned = self.spawned.lock();
         if self.shutting_down.load(Ordering::Acquire) {
             drop(spawned);
@@ -335,10 +285,7 @@ impl AgentRegistry {
         }
     }
     pub fn launch_discovered(&self) -> LaunchSummary {
-        if self.force_stub || self.no_discovery {
-            return LaunchSummary::default();
-        }
-        if self.stub.lock().is_some() {
+        if self.no_discovery {
             return LaunchSummary::default();
         }
         let discovered = self.discovered.lock().clone();
@@ -396,7 +343,7 @@ impl AgentRegistry {
                     return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
                 }
             };
-            let new_driver: SharedDriver = Arc::new(driver);
+            let new_driver: Arc<AcpAgentDriver> = Arc::new(driver);
             self.sync_auth_status(agent, &new_driver);
             if configured_name {
                 let _lifecycle = self.lifecycle.lock();
@@ -482,135 +429,23 @@ impl AgentRegistry {
         if let Some(driver) = configured_driver {
             driver.shutdown_and_join();
         }
-        if let Some(stub) = &*self.stub.lock() {
-            stub.shutdown_and_join();
-        }
         let spawned = std::mem::take(&mut *self.spawned.lock());
         for (_, d) in spawned {
             d.shutdown_and_join();
         }
     }
 }
-#[cfg(test)]
-mod stub {
-    use super::*;
-    use protocol::ContentBlock;
-    use tokio::sync::mpsc;
-
-    pub struct StubAgentDriver {
-        sessions: Mutex<Vec<String>>,
-        pub output_prefix: String,
-    }
-
-    impl StubAgentDriver {
-        pub fn new() -> Self {
-            Self::default()
-        }
-    }
-
-    impl Default for StubAgentDriver {
-        fn default() -> Self {
-            StubAgentDriver {
-                sessions: Mutex::new(Vec::new()),
-                output_prefix: "模拟输出：".into(),
-            }
-        }
-    }
-
-    impl AgentDriver for StubAgentDriver {
-        fn create_session(
-            &self,
-            cwd: &str,
-        ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
-            let id = format!("agent_{}", cwd.replace('/', "_"));
-            self.sessions.lock().push(id.clone());
-            Ok((id, Vec::new()))
-        }
-
-        fn resume_session(
-            &self,
-            _agent_session_id: &str,
-            _cwd: &str,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn prompt(
-            &self,
-            _agent_session_id: &str,
-            _input: Vec<ContentBlock>,
-        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
-            let (tx, rx) = mpsc::channel(16);
-            let prefix = self.output_prefix.clone();
-            tokio::spawn(async move {
-                tx.send(AgentEvent::Thinking("正在分析问题…".into()))
-                    .await
-                    .ok();
-                tx.send(AgentEvent::ToolCall {
-                    id: "tc1".into(),
-                    name: Some("read_file".into()),
-                    title: Some("读取 src/main.rs".into()),
-                    parameters: None,
-                })
-                .await
-                .ok();
-                tx.send(AgentEvent::OutputChunk(format!("{prefix}完成")))
-                    .await
-                    .ok();
-                tx.send(AgentEvent::TurnEnded(
-                    protocol::StateChangeReason::Completed,
-                ))
-                .await
-                .ok();
-            });
-            rx
-        }
-
-        fn cancel(&self, _agent_session_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn close(&self, agent_session_id: &str) -> Result<(), String> {
-            self.sessions.lock().retain(|s| s != agent_session_id);
-            Ok(())
-        }
-
-        fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
-            self.close(agent_session_id)
-        }
-
-        fn set_config_option(
-            &self,
-            _agent_session_id: &str,
-            _config_id: &str,
-            _value: protocol::SessionConfigOptionValue,
-        ) -> Result<Vec<protocol::SessionConfigOption>, String> {
-            Ok(Vec::new())
-        }
-
-        fn shutdown(&self) {}
-    }
-}
-
-#[cfg(test)]
-pub use stub::StubAgentDriver;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn no_discovery_skips_auto_discovery() {
-        let mut reg = AgentRegistry::new_for_tests();
-        reg.no_discovery = true;
-        reg.force_stub = false;
+        let reg = test_registry(Vec::new(), true);
         reg.refresh_discovery();
-        assert!(reg.stub.lock().is_some());
         assert!(reg.discovered.lock().is_empty());
-        reg.stub = Mutex::new(None);
-        reg.configured = Some((
-            "mock_acp".to_string(),
-            Arc::new(StubAgentDriver::new()) as SharedDriver,
-        ));
+        // no_discovery 下仅显式配置（configured_spec）进入列表
+        reg.set_configured_spec("mock_acp".into(), "mock_acp".into(), Vec::new(), Vec::new());
         reg.refresh_discovery();
         let agents = reg.list_agents();
         assert_eq!(agents.len(), 1);
@@ -618,15 +453,8 @@ mod tests {
         assert!(reg.discovered.lock().is_empty());
     }
     #[cfg(test)]
-    fn test_registry(
-        discovered: Vec<DiscoveredAgent>,
-        force_stub: bool,
-        no_discovery: bool,
-        stub: Option<SharedDriver>,
-    ) -> AgentRegistry {
+    fn test_registry(discovered: Vec<DiscoveredAgent>, no_discovery: bool) -> AgentRegistry {
         AgentRegistry {
-            stub: Mutex::new(stub),
-            force_stub,
             no_discovery,
             configured: None,
             configured_spec: Mutex::new(None),
@@ -669,8 +497,6 @@ mod tests {
                 },
             ],
             false,
-            false,
-            None,
         );
         let summary = reg.launch_discovered();
         assert_eq!(
@@ -721,7 +547,7 @@ mod tests {
 
     #[test]
     fn configured_launch_failure_remains_visible_and_restartable() {
-        let reg = test_registry(Vec::new(), false, true, None);
+        let reg = test_registry(Vec::new(), true);
         reg.set_configured_spec(
             "broken".into(),
             "/nonexistent/bin/definitely-not-here".into(),
@@ -750,15 +576,14 @@ mod tests {
         );
     }
     #[test]
-    fn launch_discovered_skips_when_no_discovery_or_stub() {
-        let mock = sibling_bin("mock_acp");
+    fn launch_discovered_skips_when_no_discovery() {
         let entry = DiscoveredAgent {
             name: "mock_acp".into(),
-            bin: mock.display().to_string(),
+            bin: sibling_bin("mock_acp").display().to_string(),
             args: Vec::new(),
             env: Vec::new(),
         };
-        let reg = test_registry(vec![entry.clone()], false, true, None);
+        let reg = test_registry(vec![entry], true);
         let summary = reg.launch_discovered();
         assert_eq!(
             summary.started + summary.failed,
@@ -766,48 +591,71 @@ mod tests {
             "AMUX_NO_DISCOVERY=1 不应拉起: {summary:?}"
         );
         assert!(reg.spawned.lock().is_empty());
-        let reg = test_registry(vec![entry.clone()], true, false, None);
-        let summary = reg.launch_discovered();
-        assert_eq!(summary.started + summary.failed, 0);
-        assert!(reg.spawned.lock().is_empty());
-        let reg = test_registry(
-            vec![entry.clone()],
-            false,
-            false,
-            Some(Arc::new(StubAgentDriver::new())),
-        );
-        let summary = reg.launch_discovered();
-        assert_eq!(summary.started + summary.failed, 0);
-        assert!(reg.spawned.lock().is_empty());
     }
 
     #[test]
-    fn rediscover_agents_noop_when_disabled_or_stub() {
+    fn rediscover_agents_noop_when_disabled() {
         let entry = DiscoveredAgent {
             name: "mock_acp".into(),
             bin: sibling_bin("mock_acp").display().to_string(),
             args: Vec::new(),
             env: Vec::new(),
         };
-        // no_discovery / force_stub / stub 三种受限模式均为 no-op：
-        // 受限模式下重新发现不会拉起任何 agent。
-        for reg in [
-            test_registry(vec![entry.clone()], false, true, None),
-            test_registry(vec![entry.clone()], true, false, None),
-            test_registry(
-                vec![entry],
-                false,
-                false,
-                Some(Arc::new(StubAgentDriver::new())),
-            ),
-        ] {
-            let summary = reg.rediscover_agents();
-            assert_eq!(
-                summary.started + summary.failed,
-                0,
-                "受限模式 rediscover 不应拉起: {summary:?}"
-            );
-            assert!(reg.spawned.lock().is_empty());
-        }
+        // no_discovery 受限模式下重新发现为 no-op，不拉起任何 agent。
+        let reg = test_registry(vec![entry], true);
+        let summary = reg.rediscover_agents();
+        assert_eq!(
+            summary.started + summary.failed,
+            0,
+            "受限模式 rediscover 不应拉起: {summary:?}"
+        );
+        assert!(reg.spawned.lock().is_empty());
+    }
+
+    #[test]
+    fn unauthenticated_status_from_initialize_and_restart() {
+        let mock = sibling_bin("mock_acp");
+        assert!(mock.exists(), "mock_acp 应已构建: {}", mock.display());
+        // initialize 声明非空 authMethods（AMUX_MOCK_AUTH）→ 未认证：列表 status
+        // 与 driver_for 错误一致；重启为不带 auth 的实例后恢复可用。
+        let reg = test_registry(
+            vec![DiscoveredAgent {
+                name: "mock_auth".into(),
+                bin: mock.display().to_string(),
+                args: Vec::new(),
+                env: vec![("AMUX_MOCK_AUTH".into(), "1".into())],
+            }],
+            true,
+        );
+        // 惰性拉起：driver_for 触发 spawn 并按 initialize 声明标记未认证
+        let err = match reg.driver_for("mock_auth") {
+            Err(e) => e,
+            Ok(_) => panic!("未认证 agent 的 driver_for 应报错"),
+        };
+        assert!(err.contains("未认证"), "未认证错误应明确: {err}");
+        let status = reg
+            .list_agents()
+            .into_iter()
+            .find(|a| a.name == "mock_auth")
+            .expect("mock_auth 在列表")
+            .status;
+        assert_eq!(status, protocol::AgentStatus::Unauthenticated);
+
+        // 重启为不带 auth 的 mock：恢复可用（sync_auth_status 双向清除）。
+        reg.set_configured_spec(
+            "mock_auth".into(),
+            mock.display().to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+        reg.restart_agent("mock_auth").expect("重启应成功");
+        let status = reg
+            .list_agents()
+            .into_iter()
+            .find(|a| a.name == "mock_auth")
+            .expect("mock_auth 在列表")
+            .status;
+        assert_eq!(status, protocol::AgentStatus::Available);
+        reg.driver_for("mock_auth").expect("重启后应可用");
     }
 }

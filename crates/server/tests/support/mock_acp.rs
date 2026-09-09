@@ -1,6 +1,7 @@
 //! 模拟 ACP v1 agent（官方 SDK `agent-client-protocol` 的 **Agent 侧**实现）。
-//! 用于驱动 `AcpAgentDriver` 的对接测试（crates/server/tests/acp.rs）与
-//! test-server 的端到端测试。
+//! server 侧全部测试（驱动对接、会话管理、端到端）都经此子进程走真实 ACP v1
+//! stdio 路径——与 codex / kimi 等真实 agent 的交互方式一致，测试不使用
+//! 进程内驱动替身。
 //!
 //! 行为要点（与协议语义对齐）：
 //! - `session/new` 返回自增的唯一 sessionId（mock_s_1、mock_s_2、…），支持多会话
@@ -12,9 +13,21 @@
 //! - `session/prompt` 指令为 `/terminal` 时，经 `terminal/create`、
 //!   `terminal/wait_for_exit`、`terminal/output`、`terminal/release` 全链路在
 //!   客户端执行 shell 并把结果作为 agent 输出回传（模拟 kimi acp 的行为）。
-//! - 把收到的**方法名**追加到 `<state_file>.calls`（供测试断言 server 的 ACP 调用面，
-//!   包括 open_session 不触发 `session/load`、resume 幂等只调一次及 close/delete）。
+//! - 把收到的**方法名**追加到 `<state_file>.calls`（含 cancel 通知；供测试断言
+//!   server 的 ACP 调用面，包括 open_session 不触发 `session/load`、resume
+//!   幂等只调一次及 close/delete）
 //! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
+//!
+//! 场景机制（全部经环境变量开启，供跨进程时序协调）：
+//! - `AMUX_MOCK_TURN_GATES=f1,f2,…`：prompt 序号 n 等待文件 f_n 出现才继续
+//!   （文件不删除，并发 turn 可共用）；无对应序号的 prompt 不受限
+//! - `AMUX_MOCK_STEPS=<json 文件>`：`{"steps":[{kind,text,title,id,tool,gate}…],
+//!   "end_gate":…}`，prompt 序号 n 执行 steps[n-1..]（每个步骤先等 gate 文件；
+//!   越界走默认事件流），全部发完等 end_gate 再收尾
+//! - `AMUX_MOCK_BLOCK_NEW_SESSION=<entered>:<gate>`：session/new 先落 entered
+//!   文件再等 gate 放行（模拟创建卡住，供删除/取消与惰性创建的并发测试）
+//! - `AMUX_MOCK_NO_DELETE=1`：initialize 不声明 sessionCapabilities.delete
+//! - `AMUX_MOCK_AUTH=1`：initialize 声明非空 authMethods（未认证状态测试）
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -39,6 +52,17 @@ use agent_client_protocol::{Agent, Result, Stdio};
 use serde_json::{json, Value};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// 本进程收到的 session/prompt 序号（1 起始）。供 `AMUX_MOCK_TURN_GATES` /
+/// `AMUX_MOCK_STEPS` 按序号选闸门/步骤。
+static PROMPT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// 等待闸门文件出现（测试写入以放行；轮询间隔 5ms，确定性协调）。
+async fn wait_for_file(path: &str) {
+    while !std::path::Path::new(path).exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
 
 fn history() -> &'static Mutex<HashMap<String, Vec<Value>>> {
     use std::sync::OnceLock;
@@ -151,19 +175,26 @@ async fn run(state_file: &str) -> Result<()> {
     let calls_close = calls_file.clone();
     let calls_list = calls_file.clone();
     let calls_cfg = calls_file.clone();
+    let calls_cancel = calls_file.clone();
     let state_prompt = state_file.clone();
     Agent
         .builder()
         .name("mock_acp")
         .on_receive_request(
             async move |initialize: InitializeRequest, responder, _cx| {
-                let init = InitializeResponse::new(initialize.protocol_version).agent_capabilities(
+                // AMUX_MOCK_NO_DELETE=1 时不声明 sessionCapabilities.delete，
+                // 模拟不支持会话删除的 agent（codex 这类）。
+                let caps = if std::env::var_os("AMUX_MOCK_NO_DELETE").is_some() {
+                    AgentCapabilities::new()
+                } else {
                     AgentCapabilities::new().session_capabilities(
                         agent_client_protocol::schema::v1::SessionCapabilities::new().delete(
                             agent_client_protocol::schema::v1::SessionDeleteCapabilities::new(),
                         ),
-                    ),
-                );
+                    )
+                };
+                let init = InitializeResponse::new(initialize.protocol_version)
+                    .agent_capabilities(caps);
                 // AMUX_MOCK_AUTH=1 时声明非空 authMethods，供「未认证」状态测试。
                 let resp = if std::env::var_os("AMUX_MOCK_AUTH").is_some() {
                     init.auth_methods(vec![AuthMethod::Agent(AuthMethodAgent::new(
@@ -180,6 +211,17 @@ async fn run(state_file: &str) -> Result<()> {
         .on_receive_request(
             async move |request: NewSessionRequest, responder, _cx| {
                 record_call(&calls_new, "session/new");
+                // AMUX_MOCK_BLOCK_NEW_SESSION="<entered_file>:<gate_file>"：
+                // 先落 entered 文件（测试确认已进入阻塞），再等 gate 文件放行。
+                // 模拟 session/new 慢/卡住，供删除与惰性创建的并发时序测试。
+                if let Some(spec) = std::env::var_os("AMUX_MOCK_BLOCK_NEW_SESSION") {
+                    let spec = spec.to_string_lossy().into_owned();
+                    let (entered, gate) = spec
+                        .split_once(':')
+                        .expect("BLOCK_NEW_SESSION 格式应为 <entered>:<gate>");
+                    std::fs::write(entered, "1").ok();
+                    wait_for_file(gate).await;
+                }
                 let n = SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
                 let sid = format!("mock_s_{n}");
                 let cwd = request.cwd.to_string_lossy().into_owned();
@@ -282,6 +324,16 @@ async fn run(state_file: &str) -> Result<()> {
                 let state_file = state_prompt.clone();
                 let cx_task = cx.clone();
                 cx.spawn(async move {
+                    // 场景闸门（AMUX_MOCK_TURN_GATES=f1,f2,…）：prompt 序号 n 等
+                    // f_n 出现才继续（文件不删除，多个并发 turn 可共用同一闸门）；
+                    // 无对应序号的 prompt 不受闸门。模拟 turn 长时间不结束。
+                    let prompt_no = PROMPT_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+                    if let Ok(gates) = std::env::var("AMUX_MOCK_TURN_GATES") {
+                        let gates: Vec<&str> = gates.split(',').collect();
+                        if let Some(gate) = gates.get(prompt_no as usize - 1) {
+                            wait_for_file(gate).await;
+                        }
+                    }
                     let perm = ToolCallUpdate::new(
                         "tc1",
                         ToolCallUpdateFields::new()
@@ -356,6 +408,91 @@ async fn run(state_file: &str) -> Result<()> {
                         ))?;
                     }
 
+                    // 场景步骤（AMUX_MOCK_STEPS=<json 文件>）：
+                    // {"steps":[{"kind":"thinking|tool_call|output","text":…,
+                    //   "title":…,"id":…,"tool":"read|execute","gate":…}…],"end_gate":…}
+                    // prompt 序号 n 执行 steps[n-1]（越界走默认事件流）；每个步骤先等
+                    // gate 文件出现再发送，全部发完等 end_gate。测试以 server 侧
+                    // 可观察状态（ongoing/活动落盘）为同步点后写 gate 放行。
+                    let mut steps_output = String::new();
+                    let steps_applied = match std::env::var("AMUX_MOCK_STEPS") {
+                        Ok(path) => {
+                            let spec: serde_json::Value = serde_json::from_str(
+                                &std::fs::read_to_string(&path).unwrap_or_default(),
+                            )
+                            .unwrap_or(serde_json::Value::Null);
+                            let arr = spec["steps"].as_array().cloned().unwrap_or_default();
+                            let idx = prompt_no as usize;
+                            if idx >= 1 && arr.len() >= idx {
+                                for step in &arr[idx - 1..] {
+                                    if let Some(gate) = step["gate"].as_str() {
+                                        wait_for_file(gate).await;
+                                    }
+                                    let text =
+                                        step["text"].as_str().unwrap_or_default().to_string();
+                                    match step["kind"].as_str().unwrap_or_default() {
+                                        "thinking" => cx_task.send_notification(
+                                            SessionNotification::new(
+                                                request.session_id.clone(),
+                                                SessionUpdate::AgentThoughtChunk(
+                                                    ContentChunk::new(ContentBlock::Text(
+                                                        TextContent::new(text),
+                                                    )),
+                                                ),
+                                            ),
+                                        )?,
+                                        "tool_call" => {
+                                            let kind = match step["tool"].as_str() {
+                                                Some("read") => ToolKind::Read,
+                                                _ => ToolKind::Execute,
+                                            };
+                                            cx_task.send_notification(
+                                                SessionNotification::new(
+                                                    request.session_id.clone(),
+                                                    SessionUpdate::ToolCall(
+                                                        ToolCall::new(
+                                                            step["id"]
+                                                                .as_str()
+                                                                .unwrap_or("tc1")
+                                                                .to_owned(),
+                                                            step["title"]
+                                                                .as_str()
+                                                                .unwrap_or_default()
+                                                                .to_owned(),
+                                                        )
+                                                        .kind(kind)
+                                                        .status(ToolCallStatus::Pending),
+                                                    ),
+                                                ),
+                                            )?;
+                                        }
+                                        "output" => {
+                                            steps_output.push_str(&text);
+                                            cx_task.send_notification(
+                                                SessionNotification::new(
+                                                    request.session_id.clone(),
+                                                    SessionUpdate::AgentMessageChunk(
+                                                        ContentChunk::new(ContentBlock::Text(
+                                                            TextContent::new(text),
+                                                        )),
+                                                    ),
+                                                ),
+                                            )?;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if let Some(end) = spec["end_gate"].as_str() {
+                                    wait_for_file(end).await;
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Err(_) => false,
+                    };
+                    if !steps_applied {
                     cx_task.send_notification(SessionNotification::new(
                         request.session_id.clone(),
                         SessionUpdate::AgentThoughtChunk(ContentChunk::new(
@@ -423,7 +560,14 @@ async fn run(state_file: &str) -> Result<()> {
                         ])),
                     ))?;
 
+                    }
+
                     let agent_mid = format!("a{}", history_len(&request.session_id.to_string()));
+                    let agent_text = if steps_applied && !steps_output.is_empty() {
+                        steps_output
+                    } else {
+                        "完成！".to_string()
+                    };
                     history()
                         .lock()
                         .entry(sid)
@@ -431,7 +575,7 @@ async fn run(state_file: &str) -> Result<()> {
                         .push(json!({
                             "messageId": agent_mid,
                             "kind": "agent",
-                            "content": { "type": "text", "text": "完成！" }
+                            "content": { "type": "text", "text": agent_text }
                         }));
 
                     responder.respond(PromptResponse::new(StopReason::EndTurn))
@@ -474,6 +618,7 @@ async fn run(state_file: &str) -> Result<()> {
         )
         .on_receive_notification(
             async move |cancel: CancelNotification, _cx| {
+                record_call(&calls_cancel, "session/cancel");
                 cancelled_sessions()
                     .lock()
                     .insert(cancel.session_id.to_string());

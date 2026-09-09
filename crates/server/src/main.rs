@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use amux_server::agent::{AcpAgentDriver, AgentDriver, AgentRegistry, SharedDriver};
+use amux_server::agent::{AcpAgentDriver, AgentRegistry};
 use amux_server::config::load_config;
 use amux_server::fs::FsBrowser;
 use amux_server::git::GitRunner;
@@ -48,7 +48,8 @@ async fn main() {
     // 显式 agent 的 initialize 可能阻塞较久；放入 blocking 线程并在此阶段先监听退出信号，
     // 避免 SIGTERM 恰好落在启动握手期间时无法通知 ACP 线程回收子进程。
     let shutting_down = Arc::new(AtomicBool::new(false));
-    let configured: Option<(String, SharedDriver)> = if let Some(bin) = cfg.agent_bin.clone() {
+    let configured: Option<(String, Arc<AcpAgentDriver>)> = if let Some(bin) = cfg.agent_bin.clone()
+    {
         let name = configured_agent_name(&bin);
         let log_bin = bin.clone();
         let args = cfg.agent_args.clone();
@@ -81,7 +82,7 @@ async fn main() {
             },
         };
         match startup_result {
-            Ok(Ok(driver)) => Some((name, Arc::new(driver) as SharedDriver)),
+            Ok(Ok(driver)) => Some((name, Arc::new(driver))),
             Ok(Err(e)) => {
                 log::warn!("启动 ACP agent ({log_bin}) 失败，Server 将继续监听: {e}");
                 None

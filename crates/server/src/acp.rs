@@ -74,71 +74,6 @@ pub enum AgentEvent {
     TurnEnded(protocol::StateChangeReason),
 }
 
-/// 与单个 agent 的驱动接口（ACP v1 语义的投影）。
-pub trait AgentDriver: Send + Sync {
-    /// 新建会话，返回 agent 侧会话 id 与初始配置选项
-    fn create_session(
-        &self,
-        cwd: &str,
-    ) -> Result<(String, Vec<protocol::SessionConfigOption>), String>;
-    /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史；
-    /// 同一进程内对同一会话幂等——已恢复过则直接成功），返回会话配置选项
-    fn resume_session(
-        &self,
-        agent_session_id: &str,
-        cwd: &str,
-    ) -> Result<Vec<protocol::SessionConfigOption>, String>;
-    /// 发送 prompt，返回事件流（阻塞直到 turn 结束）
-    fn prompt(
-        &self,
-        agent_session_id: &str,
-        input: Vec<ContentBlock>,
-    ) -> mpsc::Receiver<AgentEvent>;
-    /// 取消进行中的工作
-    fn cancel(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 关闭会话，释放 agent 侧资源。
-    fn close(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 删除会话：close 之后若 ACP Server 支持会话删除，
-    /// 则发送 `session/delete` 删除 agent 侧会话；不支持删除的 agent 返回错误，
-    /// 调用方按「不支持」忽略）
-    fn delete_session(&self, agent_session_id: &str) -> Result<(), String>;
-    /// 设置会话配置选项（ACP `session/set_config_option`），返回更新后的完整选项集合。
-    fn set_config_option(
-        &self,
-        agent_session_id: &str,
-        config_id: &str,
-        value: protocol::SessionConfigOptionValue,
-    ) -> Result<Vec<protocol::SessionConfigOption>, String>;
-    /// 会话当前斜杠命令（最近一次 ACP `available_commands_update` 通知的全量集合；
-    /// 无通知则空）。默认空（不支持命令的驱动）。
-    fn available_commands(&self, _agent_session_id: &str) -> Vec<protocol::SlashCommand> {
-        Vec::new()
-    }
-    /// 会话当前计划（最近一次 ACP `plan` 通知的全量条目；无通知则空）。默认空
-    /// （不支持计划的驱动）。
-    fn session_plan(&self, _agent_session_id: &str) -> Vec<protocol::SessionPlanEntry> {
-        Vec::new()
-    }
-    /// 会话建立时记录的 agent 侧能力。默认全不支持。
-    fn session_caps(&self, _agent_session_id: &str) -> AgentSessionCaps {
-        AgentSessionCaps::default()
-    }
-    /// 是否处于未认证状态（ACP `initialize` 响应携带非空 `authMethods`）。
-    fn requires_auth(&self) -> bool {
-        false
-    }
-    /// 关闭驱动自身，释放 ACP 子进程资源。
-    fn shutdown(&self);
-    /// 关闭并等待驱动后台线程退出（默认仅 shutdown、不等待；确定性退出路径使用，
-    /// 避免 process::exit 抢在子进程清理之前）。
-    fn shutdown_and_join(&self) {
-        self.shutdown();
-    }
-}
-
-/// 驱动的共享句柄（注册表缓存与调用方传递）。
-pub type SharedDriver = Arc<dyn AgentDriver>;
-
 /// 主线程 → exec 线程的 ACP 方法调用（强类型，替代裸 method 字符串 + Value 参数，
 /// 消除 params 里 cwd 缺省回落 "/" 的魔法值）。
 #[derive(Debug, Clone)]
@@ -443,12 +378,14 @@ impl AcpAgentDriver {
     }
 }
 
-impl AgentDriver for AcpAgentDriver {
-    fn requires_auth(&self) -> bool {
+impl AcpAgentDriver {
+    /// 是否处于未认证状态（ACP `initialize` 响应携带非空 `authMethods`）。
+    pub fn requires_auth(&self) -> bool {
         self.requires_auth.load(Ordering::SeqCst)
     }
 
-    fn create_session(
+    /// 新建会话，返回 agent 侧会话 id 与初始配置选项。
+    pub fn create_session(
         &self,
         cwd: &str,
     ) -> Result<(String, Vec<protocol::SessionConfigOption>), String> {
@@ -470,7 +407,7 @@ impl AgentDriver for AcpAgentDriver {
     /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史——
     /// 历史以 server 本地日志为权威。
     /// 同一进程内对同一会话幂等（已恢复过则直接成功），返回会话配置选项。
-    fn resume_session(
+    pub fn resume_session(
         &self,
         agent_session_id: &str,
         cwd: &str,
@@ -494,7 +431,7 @@ impl AgentDriver for AcpAgentDriver {
         })
     }
 
-    fn prompt(
+    pub fn prompt(
         &self,
         agent_session_id: &str,
         input: Vec<ContentBlock>,
@@ -547,7 +484,7 @@ impl AgentDriver for AcpAgentDriver {
         rx
     }
 
-    fn shutdown(&self) {
+    pub fn shutdown(&self) {
         self.caches.alive.store(false, Ordering::SeqCst);
         let _ = self.stop_tx.send(true);
         let _ = self.exec_tx.lock().take();
@@ -556,21 +493,21 @@ impl AgentDriver for AcpAgentDriver {
 
     /// 关闭并等待 exec 线程退出：通道关闭 → 服务循环结束 → SDK 连接 drop（子进程
     /// 随之回收）。server 退出路径调用，保证清理先于进程退出完成。
-    fn shutdown_and_join(&self) {
+    pub fn shutdown_and_join(&self) {
         self.shutdown();
         if let Some(handle) = self.thread.lock().take() {
             let _ = handle.join();
         }
     }
 
-    fn cancel(&self, agent_session_id: &str) -> Result<(), String> {
+    pub fn cancel(&self, agent_session_id: &str) -> Result<(), String> {
         self.call(AcpCall::Cancel {
             sid: agent_session_id.to_string(),
         })
         .map(|_| ())
     }
 
-    fn close(&self, agent_session_id: &str) -> Result<(), String> {
+    pub fn close(&self, agent_session_id: &str) -> Result<(), String> {
         self.resumed.lock().remove(agent_session_id);
         // Keep the capability snapshot until delete_session() has checked it:
         // close is intentionally followed by session/delete on supported agents.
@@ -583,7 +520,7 @@ impl AgentDriver for AcpAgentDriver {
 
     /// 删除 agent 侧会话：close 之后，agent 支持
     /// 删除才调用；不支持删除的 agent 返回 METHOD_NOT_FOUND 类错误，调用方忽略）。
-    fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
+    pub fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
         // 会话建立时 agent 未声明 sessionCapabilities.delete：不发请求直接报不支持
         //（调用方按「不支持」忽略）。避免对 codex 这类声明语义缺失的 agent
         // 发出必然失败的 session/delete（"no rollout found"）。
@@ -606,7 +543,7 @@ impl AgentDriver for AcpAgentDriver {
     }
 
     /// 设置会话配置选项（ACP `session/set_config_option`），返回更新后的完整选项集合。
-    fn set_config_option(
+    pub fn set_config_option(
         &self,
         agent_session_id: &str,
         config_id: &str,
@@ -623,7 +560,7 @@ impl AgentDriver for AcpAgentDriver {
         })
     }
 
-    fn available_commands(&self, agent_session_id: &str) -> Vec<protocol::SlashCommand> {
+    pub fn available_commands(&self, agent_session_id: &str) -> Vec<protocol::SlashCommand> {
         self.caches
             .commands
             .lock()
@@ -632,7 +569,7 @@ impl AgentDriver for AcpAgentDriver {
             .unwrap_or_default()
     }
 
-    fn session_plan(&self, agent_session_id: &str) -> Vec<protocol::SessionPlanEntry> {
+    pub fn session_plan(&self, agent_session_id: &str) -> Vec<protocol::SessionPlanEntry> {
         self.caches
             .plans
             .lock()
@@ -641,7 +578,7 @@ impl AgentDriver for AcpAgentDriver {
             .unwrap_or_default()
     }
 
-    fn session_caps(&self, agent_session_id: &str) -> AgentSessionCaps {
+    pub fn session_caps(&self, agent_session_id: &str) -> AgentSessionCaps {
         self.caches
             .caps
             .lock()

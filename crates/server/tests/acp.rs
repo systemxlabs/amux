@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use protocol::ContentBlock;
 
-use amux_server::agent::{AcpAgentDriver, AgentDriver, AgentEvent};
+use amux_server::agent::{AcpAgentDriver, AgentEvent};
 
 #[tokio::test]
 async fn acp_driver_terminal_flow() {
