@@ -61,7 +61,7 @@ fn setup(visual: &mut VisualTestContext) -> gpui::Entity<AmuxApp> {
             for i in 0..60 {
                 view.activities.push(Activity::Thinking {
                     timestamp: 1_700_000_000 + i,
-                    content: format!("思考内容 {i}，用于撑出活动面板滚动空间"),
+                    thinking: format!("思考内容 {i}，用于撑出活动面板滚动空间"),
                 });
             }
             machine.views.insert("session-1".into(), view);

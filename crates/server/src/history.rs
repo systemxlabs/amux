@@ -83,7 +83,9 @@ pub(crate) const DEFAULT_TOOL_NAME: &str = "tool_call";
 /// - 用户输入 → `HistoryItem::UserMessage`
 /// - agent 输出合并为一条 `HistoryItem::AgentMessage`
 /// - thinking 累积为一条 `Activity::Thinking`
-/// - 同一 `tool_call_id` 的 tool_call / tool_call_update 合并为一条 `Activity::ToolCall`
+/// - 同一 `tool_call_id` 的 tool_call / tool_call_update 合并为一条
+///   `Activity::ToolCall`；工具结果（Regular Content）单独成条
+///   `Activity::ToolResult`，与 tool_call 以 `tool_call_id` 关联
 #[derive(Default)]
 pub struct TurnMerger {
     output: Option<(String, u64)>,
@@ -98,7 +100,7 @@ struct CurrentTool {
     id: String,
     name: String,
     title: Option<String>,
-    content: Option<String>,
+    parameters: Option<String>,
     timestamp: u64,
 }
 
@@ -132,9 +134,10 @@ impl TurnMerger {
         if let Some(tool) = self.current_tool.take() {
             self.activities.push(Activity::ToolCall {
                 timestamp: tool.timestamp,
-                name: tool.name,
+                tool_call_id: tool.id,
+                tool_name: tool.name,
                 title: tool.title,
-                content: tool.content,
+                parameters: tool.parameters,
             });
         }
     }
@@ -155,7 +158,7 @@ impl TurnMerger {
         if let Some((content, ts)) = self.thinking.take() {
             self.activities.push(Activity::Thinking {
                 timestamp: ts,
-                content,
+                thinking: content,
             });
         }
     }
@@ -165,7 +168,7 @@ impl TurnMerger {
         id: String,
         name: Option<String>,
         title: Option<String>,
-        content: Option<String>,
+        parameters: Option<String>,
         timestamp: u64,
     ) {
         self.finish_thinking();
@@ -177,8 +180,8 @@ impl TurnMerger {
                 if title.is_some() {
                     tool.title = title;
                 }
-                if content.is_some() {
-                    tool.content = content;
+                if parameters.is_some() {
+                    tool.parameters = parameters;
                 }
                 return;
             }
@@ -189,8 +192,25 @@ impl TurnMerger {
             id,
             name,
             title,
-            content,
+            parameters,
             timestamp,
+        });
+    }
+
+    /// 工具结果（仅 Regular Content）：与 tool_call 分开记录；
+    /// 结果到达时先把同 id 的进行中调用定稿，保证 tool_call 在前。
+    pub fn push_tool_result(&mut self, id: String, result: Vec<ContentBlock>, timestamp: u64) {
+        if self
+            .current_tool
+            .as_ref()
+            .is_some_and(|tool| tool.id == id)
+        {
+            self.finish_current_tool();
+        }
+        self.activities.push(Activity::ToolResult {
+            timestamp,
+            tool_call_id: id,
+            tool_result: result,
         });
     }
 
@@ -228,7 +248,7 @@ mod tests {
         m.push_tool_call("tc1".into(), Some("t".into()), None, None, 7);
         m.push_error(Activity::Error {
             timestamp: 8,
-            detail: "出错".into(),
+            error: "出错".into(),
         });
         let (hist, acts) = m.finish();
         assert_eq!(hist.len(), 1, "仅输出合并为一条");
@@ -242,13 +262,13 @@ mod tests {
         assert_eq!(acts.len(), 3, "thinking 合并 + tool + error");
         assert!(acts
             .iter()
-            .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "xy")));
+            .any(|a| matches!(a, Activity::Thinking { thinking, .. } if thinking == "xy")));
         assert!(acts
             .iter()
-            .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "t")));
+            .any(|a| matches!(a, Activity::ToolCall { tool_name, .. } if tool_name == "t")));
         assert!(acts
             .iter()
-            .any(|a| matches!(a, Activity::Error { detail, .. } if detail == "出错")));
+            .any(|a| matches!(a, Activity::Error { error, .. } if error == "出错")));
     }
 
     #[test]
@@ -281,30 +301,72 @@ mod tests {
         assert_eq!(acts.len(), 2, "同 id 的多条 update 应合并为一条 ToolCall");
         match &acts[0] {
             Activity::ToolCall {
-                name,
+                tool_call_id,
+                tool_name,
                 title,
-                content,
+                parameters,
                 ..
             } => {
-                assert_eq!(name, "read");
+                assert_eq!(tool_call_id, "tc1");
+                assert_eq!(tool_name, "read");
                 assert_eq!(title.as_deref(), Some("读文件 v2"));
-                assert_eq!(content.as_deref(), Some(r#"{"path":"b"}"#));
+                assert_eq!(parameters.as_deref(), Some(r#"{"path":"b"}"#));
             }
             _ => panic!("应为 ToolCall"),
         }
         match &acts[1] {
             Activity::ToolCall {
-                name,
+                tool_call_id,
+                tool_name,
                 title,
-                content,
+                parameters,
                 ..
             } => {
-                assert_eq!(name, "execute");
+                assert_eq!(tool_call_id, "tc2");
+                assert_eq!(tool_name, "execute");
                 assert_eq!(title.as_deref(), Some("运行测试完成"));
-                assert_eq!(content.as_deref(), Some(r#"{"cmd":"cargo test"}"#));
+                assert_eq!(parameters.as_deref(), Some(r#"{"cmd":"cargo test"}"#));
             }
             _ => panic!("应为 ToolCall"),
         }
+    }
+
+    #[test]
+    fn tool_result_recorded_after_call_and_before_next() {
+        // 同 id 的结果到达时先定稿 tool_call，再落 tool_result；
+        // 后续同 id 的更新不再合并，而是开启新条目。
+        let mut m = TurnMerger::new();
+        m.push_tool_call(
+            "tc1".into(),
+            Some("read".into()),
+            Some("读文件".into()),
+            Some(r#"{"path":"a"}"#.into()),
+            1,
+        );
+        m.push_tool_result(
+            "tc1".into(),
+            vec![ContentBlock::Text { text: "内容".into() }],
+            2,
+        );
+        m.push_tool_call("tc1".into(), None, Some("更新标题".into()), None, 3);
+        let (_, acts) = m.finish();
+        assert_eq!(acts.len(), 3);
+        assert!(matches!(&acts[0], Activity::ToolCall { tool_call_id, .. } if tool_call_id == "tc1"));
+        match &acts[1] {
+            Activity::ToolResult {
+                tool_call_id,
+                tool_result,
+                ..
+            } => {
+                assert_eq!(tool_call_id, "tc1");
+                assert_eq!(
+                    tool_result,
+                    &vec![ContentBlock::Text { text: "内容".into() }]
+                );
+            }
+            _ => panic!("第二条应为 ToolResult"),
+        }
+        assert!(matches!(&acts[2], Activity::ToolCall { title, .. } if title.as_deref() == Some("更新标题")));
     }
 
     #[test]
@@ -329,7 +391,7 @@ mod tests {
 
         log.append_activities(&[Activity::Thinking {
             timestamp: 1,
-            content: "想".into(),
+            thinking: "想".into(),
         }])
         .unwrap();
         assert!(log.activities_exists());

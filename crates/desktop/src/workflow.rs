@@ -13,7 +13,9 @@
 
 #[cfg(test)]
 use amux_common::session_log::read_jsonl;
-use amux_common::session_log::{activities_path, append_jsonl, history_path};
+use amux_common::session_log::{
+    append_jsonl, workflow_activities_path, workflow_history_path,
+};
 use parking_lot::{Mutex, RwLock};
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -36,9 +38,9 @@ use serde::{Deserialize, Serialize};
 
 use protocol::{
     generate_title, ActivitiesResult, Activity, ContentBlock, HistoryItem, HistoryResult,
-    SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams, SessionIdParams,
-    SessionInfoParams, SessionInfoResult, SessionMeta, SessionNewParams, SessionPageParams,
-    SessionPromptParams, SessionResult, SessionState, StateChangeReason,
+    SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams, SessionContextResult,
+    SessionIdParams, SessionInfoParams, SessionInfoResult, SessionMeta, SessionNewParams,
+    SessionPageParams, SessionPromptParams, SessionResult, SessionState, StateChangeReason,
 };
 
 use crate::config::{ApiFormat, OrchestratorConfig};
@@ -513,7 +515,7 @@ impl WorkflowEngine {
     fn append_activities(&self, acts: &[Activity]) {
         let _log = self.log_lock.lock();
         let id = self.session.read().id.clone();
-        let path = activities_path(&self.data_dir, &id);
+        let path = workflow_activities_path(&self.data_dir, &id);
         if let Err(e) = append_jsonl(&path, acts) {
             log::error!("工作流活动落盘失败 {id}: {e}");
         }
@@ -524,7 +526,7 @@ impl WorkflowEngine {
     fn append_history(&self, items: &[HistoryItem]) {
         let _log = self.log_lock.lock();
         let id = self.session.read().id.clone();
-        let path = history_path(&self.data_dir, &id);
+        let path = workflow_history_path(&self.data_dir, &id);
         if let Err(e) = append_jsonl(&path, items) {
             log::error!("工作流对话历史落盘失败 {id}: {e}");
         }
@@ -591,7 +593,7 @@ impl WorkflowEngine {
                 self.clear_current_activity();
                 self.record_activity(Activity::Error {
                     timestamp: now(),
-                    detail: format!("编排 agent 调用失败：{e}"),
+                    error: format!("编排 agent 调用失败：{e}"),
                 });
                 return Err(e);
             }
@@ -716,7 +718,7 @@ impl WorkflowEngine {
             if let Err(e) = self.advance().await {
                 self.record_activity(Activity::Error {
                     timestamp: now(),
-                    detail: format!("关联会话推进失败：{e}"),
+                    error: format!("关联会话推进失败：{e}"),
                 });
                 return Err(e);
             }
@@ -1050,11 +1052,11 @@ impl LiveRuntime {
     fn set_thinking(&self, delta: &str) {
         let mut cur = self.current.lock();
         match &mut *cur {
-            Some(Activity::Thinking { content, .. }) => content.push_str(delta),
+            Some(Activity::Thinking { thinking, .. }) => thinking.push_str(delta),
             _ => {
                 *cur = Some(Activity::Thinking {
                     timestamp: now(),
-                    content: delta.to_string(),
+                    thinking: delta.to_string(),
                 });
             }
         }
@@ -1241,7 +1243,7 @@ fn record_reasoning(live: &LiveRuntime, reasoning: &Reasoning) {
     if !text.trim().is_empty() {
         record(Activity::Thinking {
             timestamp: now(),
-            content: text,
+            thinking: text,
         });
     }
 }
@@ -1330,7 +1332,7 @@ where
                 if !text.trim().is_empty() {
                     record(Activity::Thinking {
                         timestamp: now(),
-                        content: text,
+                        thinking: text,
                     });
                 }
             }
@@ -1586,14 +1588,16 @@ async fn dispatch_tool(
     name: &str,
     args: serde_json::Value,
 ) -> Result<String, String> {
-    // 编排调度动作实时记录为活动并落盘（同普通会话的 tool_call 事件），
-    // 同一条活动也是进行中实时槽的内容；执行完毕（成功或失败）即清除，
-    // 不让已完成的历史活动继续转圈
+    // 编排调度动作按文档活动格式记录：tool_call 与 tool_result 以
+    // tool_call_id 关联、分别成条落盘；tool_call 同时是进行中实时槽的内容，
+    // 执行完毕（成功或失败）即清除，不让已完成的历史活动继续转圈。
+    let tool_call_id = uuid::Uuid::new_v4().to_string();
     let activity = Activity::ToolCall {
         timestamp: now(),
-        name: name.to_string(),
+        tool_call_id: tool_call_id.clone(),
+        tool_name: name.to_string(),
         title: Some(one_line_summary(&args)),
-        content: None,
+        parameters: Some(args.to_string()),
     };
     if let Some(record) = &live.record_tool_activity {
         record(activity.clone());
@@ -1627,6 +1631,16 @@ async fn dispatch_tool(
         }
         other => Err(format!("未知工具: {other}")),
     };
+    // 工具结果与 tool_call 分开落盘（成功或失败都以文本结果成条记录）
+    if let Some(record) = &live.record_tool_activity {
+        record(Activity::ToolResult {
+            timestamp: now(),
+            tool_call_id,
+            tool_result: vec![ContentBlock::Text {
+                text: result.clone().unwrap_or_else(|e| format!("工具执行失败：{e}")),
+            }],
+        });
+    }
     live.clear_current();
     result
 }
@@ -1683,6 +1697,7 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
             .push(c.id.clone());
     }
     let mut metas: HashMap<String, SessionMeta> = HashMap::new();
+    let mut contexts: HashMap<String, SessionContextResult> = HashMap::new();
     for (machine_name, ids) in ids_by_machine {
         let Ok(client) = live.client(&machine_name) else {
             continue;
@@ -1695,6 +1710,18 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
             .await
         {
             for m in r.sessions {
+                // 上下文大小存储在各 server 的内存中，按会话单独查询
+                if let Ok(ctx) = client
+                    .request::<_, SessionContextResult>(
+                        protocol::method::SESSION_CONTEXT,
+                        Some(SessionIdParams {
+                            session_id: m.id.clone(),
+                        }),
+                    )
+                    .await
+                {
+                    contexts.insert(m.id.clone(), ctx);
+                }
                 metas.insert(m.id.clone(), m);
             }
         }
@@ -1720,8 +1747,8 @@ async fn list_sessions(live: &LiveRuntime) -> Result<String, String> {
                 "machineOnline": online_of(c),
                 "cwd": m.cwd,
                 "worktreeDir": m.worktree_dir,
-                "contextSize": m.context_size,
-                "contextWindowSize": m.context_window_size,
+                "contextSize": contexts.get(&c.id).map(|x| x.context_size).unwrap_or(0),
+                "contextWindowSize": contexts.get(&c.id).map(|x| x.context_window_size).unwrap_or(0),
             }),
             // server 侧已不存在（被删除等）：显式告知编排者
             None => serde_json::json!({
@@ -2357,14 +2384,14 @@ mod tests {
 
         engine.record_activity(Activity::Thinking {
             timestamp: 1,
-            content: "想".into(),
+            thinking: "想".into(),
         });
 
         // 活动实时追加写盘：无需 persist，磁盘即可读到。
-        let path = activities_path(&dir, &id);
+        let path = workflow_activities_path(&dir, &id);
         let acts = read_jsonl::<Activity>(&path).unwrap();
         assert_eq!(acts.len(), 1, "活动应实时落盘");
-        assert!(matches!(&acts[0], Activity::Thinking { content, .. } if content == "想"));
+        assert!(matches!(&acts[0], Activity::Thinking { thinking, .. } if thinking == "想"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2387,7 +2414,7 @@ mod tests {
                     for item in 0..per_worker {
                         engine.record_activity(Activity::Thinking {
                             timestamp: (worker * per_worker + item) as u64,
-                            content: format!("worker-{worker}-item-{item}"),
+                            thinking: format!("worker-{worker}-item-{item}"),
                         });
                     }
                 });
@@ -2395,11 +2422,11 @@ mod tests {
         });
 
         let id = engine.id();
-        let activities = read_jsonl::<Activity>(&activities_path(&dir, &id)).unwrap();
+        let activities = read_jsonl::<Activity>(&workflow_activities_path(&dir, &id)).unwrap();
         assert_eq!(activities.len(), workers * per_worker);
         assert!(activities.iter().all(|activity| matches!(
             activity,
-            Activity::Thinking { content, .. } if content.starts_with("worker-")
+            Activity::Thinking { thinking, .. } if thinking.starts_with("worker-")
         )));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2562,7 +2589,7 @@ mod tests {
         let res = engine.advance().await;
         assert!(res.is_err());
         assert!(engine.session.read().activities.iter().any(
-            |a| matches!(a, Activity::Error { detail, .. } if detail.contains("未配置编排 agent API"))
+            |a| matches!(a, Activity::Error { error, .. } if error.contains("未配置编排 agent API"))
         ));
         assert_eq!(engine.session.read().state, SessionState::Idle);
     }
@@ -2965,8 +2992,8 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&seen);
         live.record_tool_activity = Some(Arc::new(move |act| {
-            if let Activity::Thinking { content, .. } = act {
-                sink.lock().push(content);
+            if let Activity::Thinking { thinking, .. } = act {
+                sink.lock().push(thinking);
             }
         }));
         let inbox = Mutex::new(Vec::new());
@@ -2999,7 +3026,7 @@ mod tests {
         live.set_thinking("法");
         assert!(matches!(
             &*live.current.lock(),
-            Some(Activity::Thinking { content, .. }) if content == "想法"
+            Some(Activity::Thinking { thinking, .. }) if thinking == "想法"
         ));
         live.clear_current();
         assert!(live.current.lock().is_none());
@@ -3077,7 +3104,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let cur = live.current.lock().clone();
-            if matches!(&cur, Some(Activity::ToolCall { name, .. }) if name == "prompt_session") {
+            if matches!(&cur, Some(Activity::ToolCall { tool_name, .. }) if tool_name == "prompt_session") {
                 break;
             }
             assert!(

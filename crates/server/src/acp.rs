@@ -54,7 +54,13 @@ pub enum AgentEvent {
         id: String,
         name: Option<String>,
         title: Option<String>,
-        content: Option<String>,
+        parameters: Option<String>,
+    },
+    /// 工具结果（ACP `tool_call_update` 携带的 Regular Content；
+    /// diff/terminal 等非 Regular 内容忽略）
+    ToolResult {
+        id: String,
+        content: Vec<ContentBlock>,
     },
     /// ACP 请求或传输失败
     Error(String),
@@ -1193,43 +1199,58 @@ async fn route_update(
     plans: &Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>>,
     notif: &SessionNotification,
 ) {
-    let ev = match &notif.update {
+    // 一次通知可能同时产生多个事件（如 tool_call_update 同时更新标题并携带结果）。
+    let evs: Vec<AgentEvent> = match &notif.update {
         // 用户消息由 server 直接落盘，不重复放入活动流。
-        SessionUpdate::UserMessageChunk(_) => None,
+        SessionUpdate::UserMessageChunk(_) => Vec::new(),
         SessionUpdate::AgentMessageChunk(chunk) => {
-            text_of(&chunk.content).map(AgentEvent::OutputChunk)
+            text_of(&chunk.content).map(AgentEvent::OutputChunk).into_iter().collect()
         }
         SessionUpdate::AgentThoughtChunk(chunk) => {
-            text_of(&chunk.content).map(AgentEvent::Thinking)
+            text_of(&chunk.content).map(AgentEvent::Thinking).into_iter().collect()
         }
-        SessionUpdate::ToolCall(tc) => Some(AgentEvent::ToolCall {
+        SessionUpdate::ToolCall(tc) => vec![AgentEvent::ToolCall {
             id: tc.tool_call_id.0.to_string(),
             name: Some(tool_kind_str(&tc.kind)),
             title: Some(tc.title.clone()),
-            content: tc.raw_input.as_ref().map(|v| v.to_string()),
-        }),
-        // ACP `tool_call_update`：按 `tool_call_id` 合并到同一条活动。
-        // `kind`/`title` 可选；缺失时沿用已在合并器中的同 id 工具调用名称。
-        // 仅当更新携带可合并字段时才发出事件，避免空更新产生无意义条目。
+            parameters: tc.raw_input.as_ref().map(|v| v.to_string()),
+        }],
+        // ACP `tool_call_update`：`kind`/`title`/`raw_input` 按 `tool_call_id`
+        // 合并到同一条活动；`content`（Regular Content）作为独立的工具结果事件。
+        // 仅当携带可合并字段时才发出调用事件，避免空更新产生无意义条目。
         SessionUpdate::ToolCallUpdate(tcu) => {
+            let id = tcu.tool_call_id.0.to_string();
             let name = tcu.fields.kind.as_ref().map(tool_kind_str);
             let title = tcu.fields.title.clone();
-            let content = tcu.fields.raw_input.as_ref().map(|v| v.to_string());
-            (name.is_some() || title.is_some() || content.is_some()).then(|| AgentEvent::ToolCall {
-                id: tcu.tool_call_id.0.to_string(),
-                name,
-                title,
-                content,
-            })
+            let parameters = tcu.fields.raw_input.as_ref().map(|v| v.to_string());
+            let mut evs = Vec::new();
+            if name.is_some() || title.is_some() || parameters.is_some() {
+                evs.push(AgentEvent::ToolCall {
+                    id: id.clone(),
+                    name,
+                    title,
+                    parameters,
+                });
+            }
+            if let Some(content) = tcu.fields.content.as_ref() {
+                let blocks: Vec<ContentBlock> = content
+                    .iter()
+                    .filter_map(tool_call_content_to_amux)
+                    .collect();
+                if !blocks.is_empty() {
+                    evs.push(AgentEvent::ToolResult { id, content: blocks });
+                }
+            }
+            evs
         }
-        SessionUpdate::UsageUpdate(update) => Some(AgentEvent::UsageUpdate {
+        SessionUpdate::UsageUpdate(update) => vec![AgentEvent::UsageUpdate {
             used: update.used,
             size: update.size,
-        }),
+        }],
         // ACP `config_options_update`：会话配置选项变更（完整集合）。
-        SessionUpdate::ConfigOptionUpdate(update) => Some(AgentEvent::ConfigOptions(
+        SessionUpdate::ConfigOptionUpdate(update) => vec![AgentEvent::ConfigOptions(
             acp_config_options(Some(update.config_options.clone())),
-        )),
+        )],
         // ACP `available_commands_update`：斜杠命令全量覆盖驱动内存缓存
         // 以 Agent 侧数据为权威。
         // 不产生事件流——通知可能出现在无 prompt 路由的窗口，缓存于驱动层。
@@ -1238,7 +1259,7 @@ async fn route_update(
                 notif.session_id.to_string(),
                 acp_slash_commands(update.available_commands.clone()),
             );
-            None
+            Vec::new()
         }
         // ACP `plan`：agent 计划全量覆盖驱动内存缓存
         // 以 Agent 侧数据为权威。
@@ -1248,21 +1269,23 @@ async fn route_update(
                 notif.session_id.to_string(),
                 acp_plan(update.entries.clone()),
             );
-            None
+            Vec::new()
         }
         // SessionInfoUpdate（ACP v1 未携带状态字段）/ CurrentModeUpdate 等
         // 不产生 AgentEvent
-        _ => None,
+        _ => Vec::new(),
     };
-    if let Some(ev) = ev {
+    if !evs.is_empty() {
         let txs = routes
             .lock()
             .get(notif.session_id.to_string().as_str())
             .cloned()
             .unwrap_or_default();
         for tx in txs {
-            if tx.send(ev.clone()).await.is_err() {
-                log::warn!("agent 事件接收端已关闭");
+            for ev in &evs {
+                if tx.send(ev.clone()).await.is_err() {
+                    log::warn!("agent 事件接收端已关闭");
+                }
             }
         }
     }
@@ -1293,6 +1316,67 @@ fn tool_kind_str(kind: &ToolKind) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| "tool_call".to_string())
+}
+
+/// ACP `ToolCallContent` → amux 协议内容块：仅接收 Regular Content
+/// （`ToolCallContent::Content`），diff/terminal 等表现形式忽略。
+fn tool_call_content_to_amux(content: &agent_client_protocol::schema::v1::ToolCallContent) -> Option<ContentBlock> {
+    match content {
+        agent_client_protocol::schema::v1::ToolCallContent::Content(c) => {
+            content_block_to_amux(&c.content)
+        }
+        _ => None,
+    }
+}
+
+/// ACP `ContentBlock` → amux 协议内容块投影。
+/// image/audio 以 resource（blob）表示，保持数据不丢失。
+fn content_block_to_amux(block: &AcpContentBlock) -> Option<ContentBlock> {
+    match block {
+        AcpContentBlock::Text(t) => Some(ContentBlock::Text {
+            text: t.text.clone(),
+        }),
+        AcpContentBlock::Image(i) => Some(ContentBlock::Resource {
+            mime_type: i.mime_type.clone(),
+            uri: i.uri.clone(),
+            text: None,
+            blob: Some(i.data.clone()),
+        }),
+        AcpContentBlock::Audio(a) => Some(ContentBlock::Resource {
+            mime_type: a.mime_type.clone(),
+            uri: None,
+            text: None,
+            blob: Some(a.data.clone()),
+        }),
+        AcpContentBlock::ResourceLink(l) => Some(ContentBlock::ResourceLink {
+            uri: l.uri.clone(),
+            name: l.name.clone(),
+            mime_type: l.mime_type.clone(),
+            title: l.title.clone(),
+            description: l.description.clone(),
+        }),
+        AcpContentBlock::Resource(r) => {
+            let (mime_type, uri, text, blob) = match &r.resource {
+                EmbeddedResourceResource::TextResourceContents(t) => {
+                    (t.mime_type.clone(), Some(t.uri.clone()), Some(t.text.clone()), None)
+                }
+                EmbeddedResourceResource::BlobResourceContents(b) => (
+                    b.mime_type.clone(),
+                    Some(b.uri.clone()),
+                    None,
+                    Some(b.blob.clone()),
+                ),
+                _ => (None, None, None, None),
+            };
+            Some(ContentBlock::Resource {
+                mime_type: mime_type.unwrap_or_default(),
+                uri,
+                text,
+                blob,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// ACP `SessionConfigOption` 列表 → amux 协议投影。
@@ -1451,10 +1535,9 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    fn route_with_channel() -> (
-        Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>,
-        mpsc::Receiver<AgentEvent>,
-    ) {
+    type Routes = Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>;
+
+    fn route_with_channel() -> (Routes, mpsc::Receiver<AgentEvent>) {
         let (tx, rx) = mpsc::channel(16);
         let routes = Mutex::new(HashMap::from([("s1".to_string(), vec![tx])]));
         (routes, rx)
@@ -1722,12 +1805,12 @@ mod tests {
                 id,
                 name,
                 title,
-                content,
+                parameters,
             } => {
                 assert_eq!(id, "tc1");
                 assert_eq!(name.as_deref(), Some("execute"));
                 assert_eq!(title.as_deref(), Some("运行 cargo test"));
-                assert!(content.unwrap_or_default().contains("cargo test"));
+                assert!(parameters.unwrap_or_default().contains("cargo test"));
             }
             other => panic!("应为 ToolCall，得到 {other:?}"),
         }
@@ -1758,12 +1841,12 @@ mod tests {
                 id,
                 name,
                 title,
-                content,
+                parameters,
             } => {
                 assert_eq!(id, "tc1");
                 assert_eq!(name.as_deref(), Some("execute"));
                 assert_eq!(title.as_deref(), Some("运行测试"));
-                assert!(content.unwrap_or_default().contains("cargo test"));
+                assert!(parameters.unwrap_or_default().contains("cargo test"));
             }
             other => panic!("应为 ToolCall，得到 {other:?}"),
         }
@@ -1814,6 +1897,49 @@ mod tests {
         )
         .await;
         assert!(rx.try_recv().is_err(), "仅 status 的 update 不应产生事件");
+    }
+
+    #[tokio::test]
+    async fn route_update_tool_result_extracts_regular_content_only() {
+        use agent_client_protocol::schema::v1::{Content as AcpContent, Diff, ToolCallContent};
+
+        let (routes, mut rx) = route_with_channel();
+        // title + content 同时更新：一次通知产生 ToolCall 与 ToolResult 两个事件。
+        // diff 属于非 Regular Content，忽略。
+        let tcu = ToolCallUpdate::new(
+            "tc1",
+            ToolCallUpdateFields::new()
+                .title("读完了")
+                .content(vec![
+                    ToolCallContent::Content(AcpContent::new("文件内容")),
+                    ToolCallContent::Diff(Diff::new("a.rs", "新内容")),
+                ]),
+        );
+        let notif =
+            SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
+        route_update(
+            &routes,
+            &Mutex::new(HashMap::new()),
+            &Mutex::new(HashMap::new()),
+            &notif,
+        )
+        .await;
+        let ev = rx.try_recv().expect("应收到 tool_call 事件");
+        assert!(matches!(ev, AgentEvent::ToolCall { title, .. } if title.as_deref() == Some("读完了")));
+        let ev = rx.try_recv().expect("应收到 tool_result 事件");
+        match ev {
+            AgentEvent::ToolResult { id, content } => {
+                assert_eq!(id, "tc1");
+                assert_eq!(
+                    content,
+                    vec![ContentBlock::Text {
+                        text: "文件内容".into()
+                    }]
+                );
+            }
+            other => panic!("应为 ToolResult，得到 {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "diff 不应产生事件");
     }
 
     #[tokio::test]

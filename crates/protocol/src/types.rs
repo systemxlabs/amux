@@ -74,12 +74,6 @@ pub struct SessionMeta {
     /// 空串 = 未启用 worktree。
     #[serde(default)]
     pub worktree_dir: String,
-    /// 当前上下文大小（token，ACP `usage_update` 的 used）；0 = 尚未收到通知。
-    #[serde(default)]
-    pub context_size: u64,
-    /// 上下文窗口总大小（token，ACP `usage_update` 的 size）；0 = 尚未收到通知。
-    #[serde(default)]
-    pub context_window_size: u64,
 }
 
 /// 会话配置选项（ACP `configOptions` 的投影；类型与协议对齐）。
@@ -268,6 +262,17 @@ pub struct SessionPlanResult {
     pub entries: Vec<SessionPlanEntry>,
 }
 
+/// `session.context` 结果。上下文信息存储在内存，以 Agent 侧数据为权威；
+/// 尚未收到 ACP `usage_update` 通知时两者均为 0。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContextResult {
+    /// 当前上下文大小（token）；0 = 尚未收到通知。
+    pub context_size: u64,
+    /// 上下文窗口总大小（token）；0 = 尚未收到通知。
+    pub context_window_size: u64,
+}
+
 /// `session.list` 结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -351,13 +356,16 @@ pub enum ContentBlock {
 }
 
 /// 对话历史条目：仅包含用户输入与合并后的 agent 输出。
+/// JSONL 线上格式：`{"role":"user","content":[...],"timestamp":...}`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum HistoryItem {
+    #[serde(rename = "user")]
     UserMessage {
         content: Vec<ContentBlock>,
         timestamp: u64,
     },
+    #[serde(rename = "agent")]
     AgentMessage {
         content: Vec<ContentBlock>,
         timestamp: u64,
@@ -374,29 +382,33 @@ pub struct HistoryResult {
     pub next_before: Option<u64>,
 }
 
-/// 会话活动：turn 过程中的详细活动。
+/// 会话活动：turn 过程中的详细活动。tool_call 与 tool_result 按
+/// `tool_call_id` 关联、分别成条记录；tool_result 仅接收 Regular Content
+/// （ACP `ToolCallContent::Content`，diff/terminal 不落活动）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
     Thinking {
         timestamp: u64,
-        content: String,
+        thinking: String,
     },
     ToolCall {
         timestamp: u64,
-        name: String,
+        tool_call_id: String,
+        tool_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<String>,
+        parameters: Option<String>,
     },
-    Compaction {
+    ToolResult {
         timestamp: u64,
-        detail: String,
+        tool_call_id: String,
+        tool_result: Vec<ContentBlock>,
     },
     Error {
         timestamp: u64,
-        detail: String,
+        error: String,
     },
 }
 
@@ -716,6 +728,66 @@ mod tests {
         assert!(s.contains("\"sessionId\":\"s1\""), "{s}");
         assert!(s.contains("\"newState\":\"idle\""), "{s}");
         assert!(s.contains("\"reason\":\"cancelled\""), "{s}");
+    }
+
+    /// 历史/活动 JSONL 线上格式与 DESIGN.md 中的示例逐字段一致：
+    /// 这些是跨进程持久化格式，字段名漂移会静默破坏落盘数据。
+    #[test]
+    fn history_and_activity_jsonl_match_documented_shape() {
+        let user = HistoryItem::UserMessage {
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+            timestamp: 1725800000000,
+        };
+        let s = serde_json::to_string(&user).unwrap();
+        assert!(s.starts_with(r#"{"role":"user""#), "{s}");
+        assert!(s.contains(r#""timestamp":1725800000000"#), "{s}");
+
+        let agent = HistoryItem::AgentMessage {
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+            timestamp: 1725800001000,
+        };
+        let s = serde_json::to_string(&agent).unwrap();
+        assert!(s.starts_with(r#"{"role":"agent""#), "{s}");
+
+        let thinking = Activity::Thinking {
+            timestamp: 1694230800000,
+            thinking: "先查看目录结构".into(),
+        };
+        let s = serde_json::to_string(&thinking).unwrap();
+        assert!(s.starts_with(r#"{"kind":"thinking""#), "{s}");
+        assert!(s.contains(r#""thinking":"先查看目录结构""#), "{s}");
+
+        let call = Activity::ToolCall {
+            timestamp: 1694230805000,
+            tool_call_id: "call_001".into(),
+            tool_name: "read_file".into(),
+            title: Some("读 src/lib.rs".into()),
+            parameters: Some("{\"path\":\"src/lib.rs\"}".into()),
+        };
+        let s = serde_json::to_string(&call).unwrap();
+        assert!(s.starts_with(r#"{"kind":"tool_call""#), "{s}");
+        assert!(s.contains(r#""tool_call_id":"call_001""#), "{s}");
+        assert!(s.contains(r#""tool_name":"read_file""#), "{s}");
+        assert!(s.contains(r#""title":"读 src/lib.rs""#), "{s}");
+        assert!(s.contains(r#""parameters""#), "{s}");
+
+        let result = Activity::ToolResult {
+            timestamp: 1694230805000,
+            tool_call_id: "call_001".into(),
+            tool_result: vec![ContentBlock::Text { text: "ok".into() }],
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert!(s.starts_with(r#"{"kind":"tool_result""#), "{s}");
+        assert!(s.contains(r#""tool_call_id":"call_001""#), "{s}");
+        assert!(s.contains(r#""tool_result""#), "{s}");
+
+        let error = Activity::Error {
+            timestamp: 1694230810000,
+            error: "工具执行失败".into(),
+        };
+        let s = serde_json::to_string(&error).unwrap();
+        assert!(s.starts_with(r#"{"kind":"error""#), "{s}");
+        assert!(s.contains(r#""error":"工具执行失败""#), "{s}");
     }
 
     #[test]

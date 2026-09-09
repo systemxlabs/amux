@@ -23,10 +23,10 @@ use gpui_component::{
 use protocol::{
     ActivitiesResult, FsListParams, FsListResult, HistoryResult, OngoingActivityResult, OpResult,
     SessionConfigKind, SessionConfigOptionValue, SessionConfigOptionsResult, SessionConfigSetting,
-    SessionConfigureParams, SessionIdParams, SessionInfoParams, SessionInfoResult,
-    SessionListParams, SessionListResult, SessionMeta, SessionNewParams, SessionPageParams,
-    SessionPlanResult, SessionPromptParams, SessionResult, SessionSlashCommandsResult,
-    SessionState,
+    SessionConfigureParams, SessionContextResult, SessionIdParams, SessionInfoParams,
+    SessionInfoResult, SessionListParams, SessionListResult, SessionMeta, SessionNewParams,
+    SessionPageParams, SessionPlanResult, SessionPromptParams, SessionResult,
+    SessionSlashCommandsResult, SessionState,
 };
 
 use crate::config::QuickCommand;
@@ -75,18 +75,18 @@ where
 /// 看到更多内容（曾在此处硬截 120 字，导致加宽窗口也无法展示更多）。
 fn activity_bar_text(current: &Option<Activity>) -> Option<String> {
     match current {
-        Some(Activity::Thinking { content, .. }) => {
-            Some(format!("思考中：{}", one_line(content)))
+        Some(Activity::Thinking { thinking, .. }) => {
+            Some(format!("思考中：{}", one_line(thinking)))
         }
-        Some(Activity::ToolCall { name, title, .. }) => Some(format!(
+        Some(Activity::ToolCall { tool_name, title, .. }) => Some(format!(
             "工具调用：{} {}",
-            name,
+            tool_name,
             one_line(title.as_deref().unwrap_or(""))
         )),
-        Some(Activity::Compaction { detail, .. }) => {
-            Some(format!("上下文压缩：{}", one_line(detail)))
+        Some(Activity::ToolResult { tool_result, .. }) => {
+            Some(format!("工具结果：{}", one_line(&block_text(tool_result))))
         }
-        Some(Activity::Error { detail, .. }) => Some(format!("错误：{}", one_line(detail))),
+        Some(Activity::Error { error, .. }) => Some(format!("错误：{}", one_line(error))),
         None => None,
     }
 }
@@ -429,6 +429,37 @@ impl AmuxApp {
                     .await
             },
             |v, res: SessionPlanResult| v.plan = res.entries,
+        );
+    }
+
+    /// 拉取当前会话的上下文信息。面板未打开时不主动刷新，与 refresh_plan 同策略。
+    pub(crate) fn refresh_context(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        machine_name: &str,
+        session_id: String,
+    ) {
+        if self.panel != Some(Panel::Detail) {
+            return;
+        }
+        self.refresh_view(
+            window,
+            cx,
+            machine_name,
+            session_id,
+            |v| &mut v.context_request_id,
+            None,
+            None,
+            |client, session_id| async move {
+                client
+                    .request::<_, SessionContextResult>(
+                        protocol::method::SESSION_CONTEXT,
+                        Some(SessionIdParams { session_id }),
+                    )
+                    .await
+            },
+            |v, res: SessionContextResult| v.context = res,
         );
     }
 
@@ -999,12 +1030,19 @@ impl AmuxApp {
                 created_at: sg.created_at,
                 last_active_at: sg.last_active_at,
                 worktree_dir: String::new(),
-                context_size: 0,
-                context_window_size: 0,
             })
         } else {
             None
         }
+    }
+
+    /// 选中普通会话的上下文信息（`session.context` 缓存）；工作流无此数据。
+    pub(crate) fn selected_context(&self) -> Option<SessionContextResult> {
+        let (machine_name, id) = self.open_session_target()?;
+        self.machine_idx_by_name(&machine_name)
+            .and_then(|idx| self.machine(idx))
+            .and_then(|m| m.views.get(&id))
+            .map(|v| v.context)
     }
 
     pub(crate) fn create_session_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1603,26 +1641,8 @@ impl AmuxApp {
         let danger = cx.theme().danger;
         let text = activity_bar_text(&current);
         match &current {
-            Some(Activity::Thinking { .. }) => h_flex()
-                .w_full()
-                .gap_2()
-                .p_2()
-                .bg(warning.opacity(0.16))
-                .border_1()
-                .border_color(warning.opacity(0.45))
-                .rounded_md()
-                .child(Spinner::new())
-                .child(
-                    // 内容不做字符上限截断：超长时由 .truncate() 按可用宽度
-                    // 收缩展示，拉宽窗口即可看到更多
-                    Label::new(text.unwrap_or_default())
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(warning_foreground),
-                )
-                .into_any(),
-            Some(Activity::ToolCall { .. }) => h_flex()
+            // 进行中的思考/工具调用带 spinner；结果已成条，不再转圈
+            Some(Activity::Thinking { .. }) | Some(Activity::ToolCall { .. }) => h_flex()
                 .w_full()
                 .gap_2()
                 .p_2()
@@ -1639,7 +1659,7 @@ impl AmuxApp {
                         .text_color(warning_foreground),
                 )
                 .into_any(),
-            Some(Activity::Compaction { .. }) => h_flex()
+            Some(Activity::ToolResult { .. }) => h_flex()
                 .w_full()
                 .gap_2()
                 .p_2()
@@ -1676,12 +1696,15 @@ impl AmuxApp {
     }
 
     /// 活动行身份：语义键（aggregate::activity_key）+ 前缀，而非下标——加载更早
-    /// 活动会前移插入，下标键会让展开态漂移到其他条目。工具调用附名称以区分
-    /// 同毫秒的多个调用。
+    /// 活动会前移插入，下标键会让展开态漂移到其他条目。工具调用附名称、工具
+    /// 结果附调用 ID，以区分同毫秒的多个条目。
     pub(crate) fn activity_row_key(prefix: &str, a: &Activity) -> String {
         let (kind, ts) = crate::aggregate::activity_key(a);
         match a {
-            Activity::ToolCall { name, .. } => format!("{prefix}-{kind}-{ts}-{name}"),
+            Activity::ToolCall { tool_name, .. } => format!("{prefix}-{kind}-{ts}-{tool_name}"),
+            Activity::ToolResult { tool_call_id, .. } => {
+                format!("{prefix}-{kind}-{ts}-{tool_call_id}")
+            }
             _ => format!("{prefix}-{kind}-{ts}"),
         }
     }
@@ -3189,7 +3212,7 @@ mod tests {
         let content = "很".repeat(300);
         let text = activity_bar_text(&Some(Activity::Thinking {
             timestamp: 1,
-            content: content.clone(),
+            thinking: content.clone(),
         }))
         .unwrap();
         assert_eq!(text, format!("思考中：{content}"));
@@ -3197,9 +3220,10 @@ mod tests {
         let title = "参数".repeat(200);
         let text = activity_bar_text(&Some(Activity::ToolCall {
             timestamp: 1,
-            name: "prompt_session".into(),
+            tool_call_id: "tc1".into(),
+            tool_name: "prompt_session".into(),
             title: Some(title.clone()),
-            content: None,
+            parameters: None,
         }))
         .unwrap();
         assert_eq!(text, format!("工具调用：prompt_session {title}"));

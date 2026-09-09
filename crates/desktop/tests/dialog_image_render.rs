@@ -67,8 +67,6 @@ fn dialog_renders_user_message_with_image(cx: &mut gpui::TestAppContext) {
                 created_at: 0,
                 last_active_at: 0,
                 worktree_dir: String::new(),
-                context_size: 0,
-                context_window_size: 0,
             });
             let view = machine.views.entry("session-1".into()).or_default();
             view.dialog

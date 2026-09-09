@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::config::RecentWorkspace;
+use crate::text::block_text;
 use protocol::{Activity, ContentBlock, HistoryItem, SessionMeta};
 
 /// 合并一条新近使用记录：(machine, workspace) 唯一、去重后移到最前、整体按最近使用降序、
@@ -192,15 +193,15 @@ pub fn history_to_dialog(items: &[HistoryItem]) -> Vec<DialogMsg> {
 /// 活动 → （种类标签, 详情文案）纯逻辑（渲染层做样式）。
 pub fn activity_kind_detail(a: &Activity) -> (String, String) {
     match a {
-        Activity::Thinking { content, .. } => ("思考".to_string(), content.clone()),
+        Activity::Thinking { thinking, .. } => ("思考".to_string(), thinking.clone()),
         Activity::ToolCall {
-            name,
+            tool_name,
             title,
-            content,
+            parameters,
             ..
         } => {
             let title = title.clone().unwrap_or_default();
-            let body = content.clone().unwrap_or_default();
+            let body = parameters.clone().unwrap_or_default();
             let combined = if title.trim().is_empty() {
                 body
             } else if body.trim().is_empty() {
@@ -208,10 +209,12 @@ pub fn activity_kind_detail(a: &Activity) -> (String, String) {
             } else {
                 format!("{title}\n{body}")
             };
-            (format!("工具调用：{name}"), combined)
+            (format!("工具调用：{tool_name}"), combined)
         }
-        Activity::Compaction { detail, .. } => ("上下文压缩".to_string(), detail.clone()),
-        Activity::Error { detail, .. } => ("错误".to_string(), detail.clone()),
+        Activity::ToolResult { tool_result, .. } => {
+            ("工具结果".to_string(), block_text(tool_result))
+        }
+        Activity::Error { error, .. } => ("错误".to_string(), error.clone()),
     }
 }
 
@@ -593,8 +596,6 @@ mod tests {
             created_at: 1,
             last_active_at: last,
             worktree_dir: String::new(),
-            context_size: 0,
-            context_window_size: 0,
         }
     }
 
@@ -685,7 +686,7 @@ mod tests {
     fn activity_kind_detail_maps_variants() {
         let thinking = Activity::Thinking {
             timestamp: 1,
-            content: "思考中".into(),
+            thinking: "思考中".into(),
         };
         assert_eq!(
             activity_kind_detail(&thinking),
@@ -693,17 +694,27 @@ mod tests {
         );
         let tool = Activity::ToolCall {
             timestamp: 2,
-            name: "execute".into(),
+            tool_call_id: "tc1".into(),
+            tool_name: "execute".into(),
             title: Some("运行".into()),
-            content: Some("cargo test".into()),
+            parameters: Some("cargo test".into()),
         };
         assert_eq!(
             activity_kind_detail(&tool),
             ("工具调用：execute".into(), "运行\ncargo test".into())
         );
-        let err = Activity::Error {
+        let result = Activity::ToolResult {
             timestamp: 3,
-            detail: "失败".into(),
+            tool_call_id: "tc1".into(),
+            tool_result: vec![ContentBlock::Text { text: "输出".into() }],
+        };
+        assert_eq!(
+            activity_kind_detail(&result),
+            ("工具结果".into(), "输出".into())
+        );
+        let err = Activity::Error {
+            timestamp: 4,
+            error: "失败".into(),
         };
         assert_eq!(activity_kind_detail(&err), ("错误".into(), "失败".into()));
     }

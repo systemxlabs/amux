@@ -161,8 +161,6 @@ impl SessionManager {
             created_at: ts,
             last_active_at: ts,
             worktree_dir,
-            context_size: 0,
-            context_window_size: 0,
         };
         self.registry.upsert(&meta, None)?;
         self.controls
@@ -361,6 +359,16 @@ impl SessionManager {
             return Ok(Vec::new());
         };
         Ok(driver.session_plan(&agent_session_id))
+    }
+
+    /// 查询会话上下文信息（内存存储，以 Agent 侧数据为权威；
+    /// 查询本身不创建或恢复 agent 侧会话）。
+    pub async fn context(
+        &self,
+        session_id: &str,
+    ) -> Result<protocol::SessionContextResult, SessionError> {
+        self.get_entry(session_id)?;
+        Ok(self.registry.context(session_id))
     }
 
     /// 删除会话：若已有 agent 侧会话，先经 ACP
@@ -689,7 +697,7 @@ impl SessionManager {
                 log::error!("resume 失败 {session_id}: {e}");
                 let err = Activity::Error {
                     timestamp: now(),
-                    detail: format!("恢复 agent 上下文失败: {e}"),
+                    error: format!("恢复 agent 上下文失败: {e}"),
                 };
                 let _lifecycle = control.lifecycle.lock();
                 if !control.deleted.load(Ordering::SeqCst) {
@@ -825,7 +833,7 @@ impl SessionManager {
                         session_id.to_string(),
                         Activity::Thinking {
                             timestamp: first_ts,
-                            content: accumulated,
+                            thinking: accumulated,
                         },
                     );
                 }
@@ -833,32 +841,39 @@ impl SessionManager {
                     id,
                     name,
                     title,
-                    content,
+                    parameters,
                 } => {
                     merger.push_tool_call(
                         id.clone(),
                         name.clone(),
                         title.clone(),
-                        content.clone(),
+                        parameters.clone(),
                         now(),
                     );
                     self.ongoing.lock().insert(
                         session_id.to_string(),
                         Activity::ToolCall {
                             timestamp: now(),
-                            name: name.unwrap_or_else(|| crate::history::DEFAULT_TOOL_NAME.into()),
+                            tool_call_id: id,
+                            tool_name: name
+                                .unwrap_or_else(|| crate::history::DEFAULT_TOOL_NAME.into()),
                             title,
-                            content,
+                            parameters,
                         },
                     );
                     // merger 已定稿当前思考块；重置 buf 使后续思考开启新块，
                     // 否则 ongoing 会一直携带第一段思考的内容。
                     self.thinking_buf.lock().remove(session_id);
                 }
+                AgentEvent::ToolResult { id, content } => {
+                    // 工具结果与 tool_call 分开记录；进行中槽仍展示该调用，
+                    // 直到 turn 结束统一清理。
+                    merger.push_tool_result(id, content, now());
+                }
                 AgentEvent::Error(detail) => {
                     merger.push_error(Activity::Error {
                         timestamp: now(),
-                        detail: detail.clone(),
+                        error: detail.clone(),
                     });
                     // push_error 同样定稿思考块，同步重置。
                     self.thinking_buf.lock().remove(session_id);
@@ -867,18 +882,16 @@ impl SessionManager {
                 AgentEvent::PromptFailed(detail) => {
                     merger.push_error(Activity::Error {
                         timestamp: now(),
-                        detail: detail.clone(),
+                        error: detail.clone(),
                     });
                     self.thinking_buf.lock().remove(session_id);
                     log::error!("agent 拒绝 prompt {session_id}: {detail}");
                     prompt_failed = Some(detail);
                 }
                 AgentEvent::UsageUpdate { used, size } => {
-                    // 记录 ACP 提供的会话上下文大小。
+                    // 记录 ACP 提供的会话上下文大小（内存存储，以 Agent 侧为权威）。
                     if !control.deleted.load(Ordering::SeqCst) {
-                        if let Err(e) = self.registry.set_context_size(session_id, used, size) {
-                            log::error!("记录会话上下文大小失败 {session_id}: {e}");
-                        }
+                        self.registry.set_context_size(session_id, used, size);
                     }
                 }
                 AgentEvent::ConfigOptions(options) => {
@@ -899,7 +912,7 @@ impl SessionManager {
         if !turn_completed {
             let err = Activity::Error {
                 timestamp: now(),
-                detail: "agent turn 未正常结束（连接中断或 turn 被异常终止）".into(),
+                error: "agent turn 未正常结束（连接中断或 turn 被异常终止）".into(),
             };
             merger.push_error(err);
         }
@@ -1725,9 +1738,15 @@ mod tests {
         let meta = mgr.create("codex", "/tmp/usage", false).await.unwrap();
         mgr.prompt(&meta.id, text("hi")).await.unwrap();
 
-        let stored = registry.get(&meta.id).unwrap().unwrap();
-        assert_eq!(stored.meta.context_size, 53_000);
-        assert_eq!(stored.meta.context_window_size, 200_000);
+        // 上下文信息为内存存储；session.context 应返回通知上报的值
+        let context = mgr.context(&meta.id).await.unwrap();
+        assert_eq!(
+            context,
+            protocol::SessionContextResult {
+                context_size: 53_000,
+                context_window_size: 200_000,
+            }
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1937,7 +1956,7 @@ mod tests {
         let thinking = acts
             .iter()
             .find_map(|a| match a {
-                Activity::Thinking { content, .. } => Some(content.clone()),
+                Activity::Thinking { thinking, .. } => Some(thinking.clone()),
                 _ => None,
             })
             .expect("应有累积的 thinking 活动");
@@ -1949,10 +1968,10 @@ mod tests {
     /// 真实场景下 1 个 tick 即应到位（事件经 mpsc 同步分发）。
     async fn wait_for_thinking(mgr: &SessionManager, sid: &str, expected: &str) {
         for _ in 0..200 {
-            if let Some(Activity::Thinking { content, .. }) =
+            if let Some(Activity::Thinking { thinking, .. }) =
                 mgr.ongoing_activity(sid).await.unwrap()
             {
-                if content == expected {
+                if thinking == expected {
                     return;
                 }
             }
@@ -1964,7 +1983,7 @@ mod tests {
     /// 轮询等待 ongoing 变为指定名称的工具调用（同 wait_for_thinking 的节奏）。
     async fn wait_for_tool_call(mgr: &SessionManager, sid: &str, name: &str) {
         for _ in 0..200 {
-            if let Some(Activity::ToolCall { name: n, .. }) =
+            if let Some(Activity::ToolCall { tool_name: n, .. }) =
                 mgr.ongoing_activity(sid).await.unwrap()
             {
                 if n == name {
@@ -1991,7 +2010,7 @@ mod tests {
                         id: "tc1".into(),
                         name: Some("read_file".into()),
                         title: Some("读取文件".into()),
-                        content: None,
+                        parameters: None,
                     },
                     AgentEvent::Thinking("第二段思考".into()),
                 ],
@@ -2032,7 +2051,7 @@ mod tests {
         let thinkings: Vec<&str> = acts
             .iter()
             .filter_map(|a| match a {
-                Activity::Thinking { content, .. } => Some(content.as_str()),
+                Activity::Thinking { thinking, .. } => Some(thinking.as_str()),
                 _ => None,
             })
             .collect();
@@ -2071,7 +2090,7 @@ mod tests {
         assert!(acts.iter().any(|a| matches!(a, Activity::Thinking { .. })));
         assert!(acts
             .iter()
-            .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")));
+            .any(|a| matches!(a, Activity::ToolCall { tool_name, .. } if tool_name == "read_file")));
 
         let (list, _) = mgr.list(None).await.unwrap();
         assert_eq!(list[0].state, SessionState::Idle);
@@ -2259,7 +2278,7 @@ mod tests {
                             id: "tc1".into(),
                             name: Some("read_file".into()),
                             title: None,
-                            content: None,
+                            parameters: None,
                         })
                         .await;
                     // tool_call 合并到同一条活动，遇到 output 后定稿并落盘。
@@ -2335,12 +2354,12 @@ mod tests {
         let (acts, _, _) = log.read_activities_page(1000, None).unwrap();
         assert!(
             acts.iter()
-                .any(|a| matches!(a, Activity::Thinking { content, .. } if content == "思考中")),
+                .any(|a| matches!(a, Activity::Thinking { thinking, .. } if thinking == "思考中")),
             "thinking 应在 turn 结束前实时落盘"
         );
         assert!(
             acts.iter()
-                .any(|a| matches!(a, Activity::ToolCall { name, .. } if name == "read_file")),
+                .any(|a| matches!(a, Activity::ToolCall { tool_name, .. } if tool_name == "read_file")),
             "tool_call 应在 turn 结束前实时落盘"
         );
 
@@ -2373,8 +2392,6 @@ mod tests {
                     created_at: 1,
                     last_active_at: ts,
                     worktree_dir: String::new(),
-                    context_size: 0,
-                    context_window_size: 0,
                 },
                 format!("agent_{id}"),
             );

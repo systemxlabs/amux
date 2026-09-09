@@ -15,7 +15,6 @@ use protocol::{
     TerminalOpenResult, TerminalResizeParams, WorkspaceDiffParams, WorkspaceDiffResult,
     WorkspaceRestoreParams,
 };
-
 use crate::error::SessionError;
 use crate::fs::FsBrowser;
 use crate::git::GitRunner;
@@ -212,6 +211,16 @@ impl Handlers {
                     .await
                     .map_err(map_session_err)?;
                 to_value(SessionPlanResult { entries })
+            }
+
+            method::SESSION_CONTEXT => {
+                let p: SessionIdParams = parse(params)?;
+                let context = self
+                    .manager
+                    .context(&p.session_id)
+                    .await
+                    .map_err(map_session_err)?;
+                to_value(context)
             }
 
             method::SESSION_HISTORY => {

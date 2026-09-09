@@ -1,9 +1,9 @@
 //! 工作流会话存储：
-//! - 元数据：`~/.amux/app/session.sqlite`
-//!   - 工作流会话表：标题/状态/执行计划等
-//!   - 关联普通会话表：工作流会话 ↔ 关联普通会话（会话 ID + 机器名称）
-//! - 对话历史：`~/.amux/app/sessions/<session_id>_history.jsonl`
-//! - 活动历史：`~/.amux/app/sessions/<session_id>_activities.jsonl`
+//! - 元数据：`~/.amux/app/workflow.sqlite`
+//!   - 工作流会话表（workflows）：标题/状态/执行计划等
+//!   - 关联普通会话表（workflow_linked_sessions）：工作流会话 ↔ 关联普通会话（会话 ID + 机器名称）
+//! - 对话历史：`~/.amux/app/workflows/<workflow_id>_history.jsonl`
+//! - 活动历史：`~/.amux/app/workflows/<workflow_id>_activities.jsonl`
 //!
 //! 历史/活动文件布局与读取复用 `amux-common::session_log`，由引擎在条目
 //! 完整后逐条追加写盘。
@@ -14,7 +14,7 @@ use std::path::Path;
 
 #[cfg(test)]
 use amux_common::session_log::append_jsonl;
-use amux_common::session_log::{activities_path, history_path, read_jsonl};
+use amux_common::session_log::{read_jsonl, workflow_activities_path, workflow_history_path};
 use protocol::{Activity, ContentBlock, HistoryItem};
 use rusqlite::{params, Connection};
 
@@ -23,11 +23,11 @@ use crate::workflow::{LinkedSession, OrcMsg, OrcSession};
 const META_SELECT_COLUMNS: &str = "id, title, state, last_active_at, plan, created_at";
 
 fn meta_select(suffix: &str) -> String {
-    format!("SELECT {META_SELECT_COLUMNS} FROM sessions {suffix}")
+    format!("SELECT {META_SELECT_COLUMNS} FROM workflows {suffix}")
 }
 
 fn sqlite_path(data_dir: &Path) -> std::path::PathBuf {
-    data_dir.join("session.sqlite")
+    data_dir.join("workflow.sqlite")
 }
 
 fn content_text(content: &[ContentBlock]) -> String {
@@ -64,7 +64,7 @@ fn open_db(data_dir: &Path) -> rusqlite::Result<Connection> {
     // 多个写者可能并发持久化（各自独立连接）：等锁而非报 "database is locked"
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sessions (
+        "CREATE TABLE IF NOT EXISTS workflows (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             state TEXT NOT NULL,
@@ -165,7 +165,7 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
     let mut conn = open_db(data_dir).map_err(io::Error::other)?;
     let tx = conn.transaction().map_err(io::Error::other)?;
     tx.execute(
-        "INSERT INTO sessions
+        "INSERT INTO workflows
             (id, title, state, last_active_at, plan, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET
@@ -274,21 +274,24 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
 /// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
 /// 调用方可先在锁外读盘、再短暂持锁合并——避免持写锁做 IO 阻塞渲染与后台推进。
 pub fn load_payload(data_dir: &Path, id: &str) -> io::Result<(Vec<OrcMsg>, Vec<Activity>)> {
-    let transcript = transcript_from_history(&read_jsonl(&history_path(data_dir, id))?);
-    let activities = read_jsonl(&activities_path(data_dir, id))?;
+    let transcript = transcript_from_history(&read_jsonl(&workflow_history_path(data_dir, id))?);
+    let activities = read_jsonl(&workflow_activities_path(data_dir, id))?;
     Ok((transcript, activities))
 }
 
 pub fn remove(data_dir: &Path, id: &str) -> io::Result<()> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
-    conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
+    conn.execute("DELETE FROM workflows WHERE id = ?1", params![id])
         .map_err(io::Error::other)?;
     conn.execute(
         "DELETE FROM workflow_linked_sessions WHERE workflow_id = ?1",
         params![id],
     )
     .map_err(io::Error::other)?;
-    for path in [history_path(data_dir, id), activities_path(data_dir, id)] {
+    for path in [
+        workflow_history_path(data_dir, id),
+        workflow_activities_path(data_dir, id),
+    ] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -312,7 +315,7 @@ mod tests {
     /// 模拟引擎侧行为：用户输入与编排输出在条目完整后逐条追加写 history JSONL。
     fn append_history_transcript(dir: &Path, session_id: &str) {
         append_jsonl(
-            &history_path(dir, session_id),
+            &workflow_history_path(dir, session_id),
             &[
                 HistoryItem::UserMessage {
                     content: vec![ContentBlock::Text {
@@ -353,7 +356,7 @@ mod tests {
             linked_sessions: vec![],
             activities: vec![Activity::Thinking {
                 timestamp: 1,
-                content: "想".into(),
+                thinking: "想".into(),
             }],
             created_at: 10,
             last_active_at: 20,
@@ -361,10 +364,10 @@ mod tests {
         save(&dir, &session).unwrap(); // save 只写元数据
                                        // 对话历史由引擎在条目完整后实时追加写盘；这里模拟引擎追加。
         append_history_transcript(&dir, "orc_1");
-        assert!(dir.join("session.sqlite").is_file());
-        assert!(dir.join("sessions/orc_1_history.jsonl").is_file());
+        assert!(dir.join("workflow.sqlite").is_file());
+        assert!(dir.join("workflows/orc_1_history.jsonl").is_file());
         // 活动由引擎实时追加写盘，save 不生成活动文件。
-        assert!(!dir.join("sessions/orc_1_activities.jsonl").exists());
+        assert!(!dir.join("workflows/orc_1_activities.jsonl").exists());
 
         remove(&dir, "orc_1").unwrap();
         assert!(load_all_meta(&dir).unwrap().is_empty());
@@ -513,7 +516,7 @@ mod tests {
             linked_sessions: vec![],
             activities: vec![Activity::Thinking {
                 timestamp: 1,
-                content: "想".into(),
+                thinking: "想".into(),
             }],
             created_at: 10,
             last_active_at: 20,
@@ -522,12 +525,12 @@ mod tests {
         // 对话历史由引擎在条目完整后实时追加写盘；这里模拟引擎追加。
         append_history_transcript(&dir, "orc_1");
         // 活动由引擎实时追加写盘；这里模拟已实时追加的活动，供 backfill 恢复。
-        let act_path = activities_path(&dir, "orc_1");
+        let act_path = workflow_activities_path(&dir, "orc_1");
         append_jsonl(
             &act_path,
             &[Activity::Thinking {
                 timestamp: 1,
-                content: "想".into(),
+                thinking: "想".into(),
             }],
         )
         .unwrap();
@@ -561,7 +564,7 @@ mod tests {
             meta[0].activities[0],
             Activity::Thinking {
                 timestamp: 1,
-                content: "想".into()
+                thinking: "想".into()
             }
         );
         // 补齐只影响 payload，元数据字段保持不变。

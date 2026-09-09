@@ -459,6 +459,7 @@ impl AmuxApp {
                     this.refresh_activities(window, cx, &machine_name, session_id.clone());
                     this.refresh_ongoing(window, cx, &machine_name, session_id.clone());
                     this.refresh_plan(window, cx, &machine_name, session_id.clone());
+                    this.refresh_context(window, cx, &machine_name, session_id.clone());
                     this.refresh_config_options(cx, &machine_name, session_id.clone());
                     this.refresh_slash_commands(cx, &machine_name, session_id);
                     match this.panel {
@@ -826,7 +827,8 @@ impl AmuxApp {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.refresh_dialog(window, cx, &machine, id.clone());
                     this.refresh_activities(window, cx, &machine, id.clone());
-                    this.refresh_plan(window, cx, &machine, id);
+                    this.refresh_plan(window, cx, &machine, id.clone());
+                    this.refresh_context(window, cx, &machine, id);
                     cx.notify();
                 });
             }

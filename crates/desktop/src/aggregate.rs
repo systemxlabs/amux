@@ -2,11 +2,11 @@
 //! `session.history` / `session.activities` / `session.ongoing_activity` 拉取的数据
 //! 聚合为对话气泡与活动列表。纯函数，与 GPUI/WS 分离，便于单测。
 
-use protocol::{Activity, HistoryItem, SessionPlanEntry};
+use protocol::{Activity, HistoryItem, SessionContextResult, SessionPlanEntry};
 
 use crate::logic::{history_to_dialog, DialogMsg};
 
-/// 普通会话视图：对话气泡 + 活动历史 + 实时活动 + agent 计划。
+/// 普通会话视图：对话气泡 + 活动历史 + 实时活动 + agent 计划 + 上下文信息。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SessionView {
     pub dialog: Vec<DialogMsg>,
@@ -19,11 +19,14 @@ pub struct SessionView {
     pub live: Option<Activity>,
     /// agent 计划（`session.plan` 查询结果，全量替换）。
     pub plan: Vec<SessionPlanEntry>,
+    /// 上下文信息（`session.context` 查询结果，全量替换）。
+    pub context: SessionContextResult,
     /// 各类详情请求序号；轮询、切换会话和手动加载可能并发，旧响应不得覆盖新状态。
     pub history_request_id: u64,
     pub activities_request_id: u64,
     pub ongoing_request_id: u64,
     pub plan_request_id: u64,
+    pub context_request_id: u64,
 }
 
 impl SessionView {
@@ -170,7 +173,7 @@ pub(crate) fn activity_key(a: &Activity) -> (&'static str, u64) {
     match a {
         Activity::Thinking { timestamp, .. } => ("thinking", *timestamp),
         Activity::ToolCall { timestamp, .. } => ("tool", *timestamp),
-        Activity::Compaction { timestamp, .. } => ("compaction", *timestamp),
+        Activity::ToolResult { timestamp, .. } => ("tool_result", *timestamp),
         Activity::Error { timestamp, .. } => ("error", *timestamp),
     }
 }
@@ -265,9 +268,10 @@ mod tests {
     fn activities_set_and_prepend() {
         let mut view = SessionView::default();
         view.set_activities_page(
-            vec![Activity::Compaction {
+            vec![Activity::ToolResult {
                 timestamp: 2,
-                detail: "压缩".into(),
+                tool_call_id: "tc1".into(),
+                tool_result: vec![ContentBlock::Text { text: "压缩".into() }],
             }],
             false,
             None,
@@ -275,7 +279,7 @@ mod tests {
         assert_eq!(view.activities.len(), 1);
         view.prepend_activities(vec![Activity::Error {
             timestamp: 1,
-            detail: "早期错误".into(),
+            error: "早期错误".into(),
         }]);
         assert_eq!(view.activities.len(), 2);
         assert!(matches!(view.activities[0], Activity::Error { .. }));

@@ -375,10 +375,10 @@ async fn session_lifecycle_state_change_and_delete() {
     let items = h["result"]["items"].as_array().unwrap();
     assert!(!items.is_empty());
     assert_eq!(
-        items[0]["kind"], "user_message",
+        items[0]["role"], "user",
         "历史首条为用户消息: {items:?}"
     );
-    assert!(items.iter().any(|i| i["kind"] == "agent_message"));
+    assert!(items.iter().any(|i| i["role"] == "agent"));
 
     let a = c
         .call("session.activities", json!({"sessionId": sid}))
@@ -943,12 +943,12 @@ async fn busy_prompt_forwarded_to_agent_and_cancel_works() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|i| i["kind"] == json!("user_message"))
+        .filter(|i| i["role"] == json!("user"))
         .filter_map(|i| i["content"][0]["text"].as_str())
         .collect();
     for expected in ["长任务", "插队", "再来"] {
         assert!(
-            user_texts.iter().any(|t| *t == expected),
+            user_texts.contains(&expected),
             "历史应包含用户消息 {expected}: {h}"
         );
     }

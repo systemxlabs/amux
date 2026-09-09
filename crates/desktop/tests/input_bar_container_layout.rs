@@ -79,7 +79,7 @@ fn bottom_bar_stays_below_dialog(cx: &mut gpui::TestAppContext) {
         visual,
         Some(Activity::Thinking {
             timestamp: 1_700_009_999,
-            content: "正在思考一个很长的问题".into(),
+            thinking: "正在思考一个很长的问题".into(),
         }),
     );
     visual.draw(
@@ -128,7 +128,7 @@ fn bottom_bar_stays_below_dialog_on_short_window(cx: &mut gpui::TestAppContext) 
         visual,
         Some(Activity::Thinking {
             timestamp: 1_700_009_999,
-            content: "正在思考一个很长的问题".into(),
+            thinking: "正在思考一个很长的问题".into(),
         }),
     );
     visual.draw(point(px(0.), px(0.)), size(px(900.), px(500.)), |_, _cx| {
@@ -158,7 +158,7 @@ fn grown_input_keeps_dialog_visible(cx: &mut gpui::TestAppContext) {
         visual,
         Some(Activity::Thinking {
             timestamp: 1_700_009_999,
-            content: "正在思考一个很长的问题".into(),
+            thinking: "正在思考一个很长的问题".into(),
         }),
     );
     visual.update(|window, cx| {
@@ -224,7 +224,7 @@ fn activity_appearance_keeps_dialog_bottom_pinned(cx: &mut gpui::TestAppContext)
             let view = machine.views.get_mut("session-1").unwrap();
             view.live = Some(Activity::Thinking {
                 timestamp: 1_700_009_999,
-                content: "正在思考一个很长的问题".into(),
+                thinking: "正在思考一个很长的问题".into(),
             });
             cx.notify();
         });

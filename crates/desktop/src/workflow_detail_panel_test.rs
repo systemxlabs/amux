@@ -103,8 +103,6 @@ fn session_detail_keeps_cwd_row(cx: &mut gpui::TestAppContext) {
                 created_at: 1,
                 last_active_at: 1,
                 worktree_dir: String::new(),
-                context_size: 0,
-                context_window_size: 0,
             });
             app.machines.push(machine);
             app.selected = Some(Selected::Session {

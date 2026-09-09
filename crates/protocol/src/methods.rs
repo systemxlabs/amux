@@ -20,6 +20,8 @@ pub mod method {
     pub const SESSION_SLASH_COMMANDS: &str = "session.slash_commands";
     /// 结果来自 ACP `plan` 通知缓存，查询本身不创建会话。
     pub const SESSION_PLAN: &str = "session.plan";
+    /// 结果来自 ACP `usage_update` 通知的内存缓存，查询本身不创建会话。
+    pub const SESSION_CONTEXT: &str = "session.context";
     pub const SESSION_HISTORY: &str = "session.history";
     pub const SESSION_ACTIVITIES: &str = "session.activities";
     pub const SESSION_ONGOING_ACTIVITY: &str = "session.ongoing_activity";

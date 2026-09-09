@@ -71,8 +71,6 @@ fn workspace_file_content_scroll_has_viewport_constraint(cx: &mut gpui::TestAppC
                 created_at: 0,
                 last_active_at: 0,
                 worktree_dir: String::new(),
-                context_size: 0,
-                context_window_size: 0,
             });
             machine.workspace_file = Some("big.txt".into());
             machine.workspace_content = big_file_content();

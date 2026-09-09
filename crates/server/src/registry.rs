@@ -6,14 +6,18 @@
 //! agent 侧存在但注册表未知的旧会话不出现（不列出、不打开、不回填）。
 
 use parking_lot::{Mutex, MutexGuard};
+use std::collections::HashMap;
 use std::path::Path;
 
-use protocol::{SessionMeta, SessionState};
+use protocol::{SessionContextResult, SessionMeta, SessionState};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 
 /// SQLite 会话注册表（server 单写者：内部 Connection 用互斥锁串行化）。
+/// 会话上下文大小不落盘：存储在内存（`contexts`），以 Agent 侧数据为权威，
+/// server 重启后由下一次 ACP `usage_update` 通知重新填充。
 pub struct SessionRegistry {
     conn: Mutex<Connection>,
+    contexts: Mutex<HashMap<String, SessionContextResult>>,
 }
 
 /// 注册表条目：会话元数据 + agent 侧会话 id（驱动操作需要）。
@@ -39,7 +43,7 @@ pub struct IdleCandidate {
     pub last_active_at: u64,
 }
 
-const SESSION_SELECT_COLUMNS: &str = "id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size";
+const SESSION_SELECT_COLUMNS: &str = "id, state, title, workspace, worktree_dir, agent, agent_session_id, created_at, last_active_at";
 
 fn session_select(suffix: &str) -> String {
     format!("SELECT {SESSION_SELECT_COLUMNS} FROM sessions {suffix}")
@@ -62,14 +66,12 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<RegistryEntry> {
     let meta = SessionMeta {
         id: row.get("id")?,
         agent: row.get("agent")?,
-        cwd: row.get("cwd")?,
+        cwd: row.get("workspace")?,
         state: state_from_str(&row.get::<_, String>("state")?)?,
         title: row.get("title")?,
         created_at: row.get::<_, i64>("created_at")? as u64,
         last_active_at: row.get::<_, i64>("last_active_at")? as u64,
         worktree_dir: row.get("worktree_dir")?,
-        context_size: row.get::<_, i64>("context_size")? as u64,
-        context_window_size: row.get::<_, i64>("context_window_size")? as u64,
     };
     Ok(RegistryEntry {
         meta,
@@ -92,16 +94,14 @@ impl SessionRegistry {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
-                agent TEXT NOT NULL,
-                cwd TEXT NOT NULL,
                 state TEXT NOT NULL,
                 title TEXT NOT NULL DEFAULT '',
+                workspace TEXT NOT NULL,
+                worktree_dir TEXT NOT NULL DEFAULT '',
+                agent TEXT NOT NULL,
                 agent_session_id TEXT,
                 created_at INTEGER NOT NULL,
-                last_active_at INTEGER NOT NULL,
-                worktree_dir TEXT NOT NULL DEFAULT '',
-                context_size INTEGER NOT NULL DEFAULT 0,
-                context_window_size INTEGER NOT NULL DEFAULT 0
+                last_active_at INTEGER NOT NULL
             );",
         )?;
         // server 重启后恢复的会话一律回到空闲：busy 状态由上一进程持有，
@@ -113,6 +113,7 @@ impl SessionRegistry {
         )?;
         Ok(SessionRegistry {
             conn: Mutex::new(conn),
+            contexts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -126,26 +127,23 @@ impl SessionRegistry {
         let conn = self.connection();
         conn.execute(
             "INSERT INTO sessions
-                (id, agent, cwd, state, title, agent_session_id, created_at, last_active_at, worktree_dir, context_size, context_window_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                (id, state, title, workspace, worktree_dir, agent, agent_session_id, created_at, last_active_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
-                agent=excluded.agent, cwd=excluded.cwd, state=excluded.state,
-                title=excluded.title, agent_session_id=excluded.agent_session_id,
-                created_at=excluded.created_at, last_active_at=excluded.last_active_at,
-                worktree_dir=excluded.worktree_dir,
-                context_size=excluded.context_size, context_window_size=excluded.context_window_size",
+                state=excluded.state, title=excluded.title, workspace=excluded.workspace,
+                worktree_dir=excluded.worktree_dir, agent=excluded.agent,
+                agent_session_id=excluded.agent_session_id,
+                created_at=excluded.created_at, last_active_at=excluded.last_active_at",
             params![
                 meta.id,
-                meta.agent,
-                meta.cwd,
                 meta.state.as_str(),
                 meta.title,
+                meta.cwd,
+                meta.worktree_dir,
+                meta.agent,
                 agent_session_id,
                 meta.created_at as i64,
                 meta.last_active_at as i64,
-                meta.worktree_dir,
-                meta.context_size as i64,
-                meta.context_window_size as i64,
             ],
         )?;
         Ok(())
@@ -175,6 +173,7 @@ impl SessionRegistry {
 
     /// 删除条目；返回是否存在。
     pub fn delete(&self, id: &str) -> rusqlite::Result<bool> {
+        self.contexts.lock().remove(id);
         let conn = self.connection();
         let n = conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         Ok(n > 0)
@@ -220,20 +219,30 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 记录会话上下文大小（接收 ACP `usage_update`
-    /// 通知后写入当前上下文大小与窗口总大小，单位 token）。
+    /// 记录会话上下文大小（接收 ACP `usage_update` 通知后写入，
+    /// 单位 token；仅内存存储，以 Agent 侧数据为权威）。
     pub fn set_context_size(
         &self,
         id: &str,
         context_size: u64,
         context_window_size: u64,
-    ) -> rusqlite::Result<()> {
-        let conn = self.connection();
-        conn.execute(
-            "UPDATE sessions SET context_size = ?1, context_window_size = ?2 WHERE id = ?3",
-            params![context_size as i64, context_window_size as i64, id],
-        )?;
-        Ok(())
+    ) {
+        self.contexts.lock().insert(
+            id.to_string(),
+            SessionContextResult {
+                context_size,
+                context_window_size,
+            },
+        );
+    }
+
+    /// 查询会话上下文大小；尚未收到 `usage_update` 通知时两者均为 0。
+    pub fn context(&self, id: &str) -> SessionContextResult {
+        self.contexts
+            .lock()
+            .get(id)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// 有 worktree 且超过 `idle_timeout_ms` 不活跃的 idle 会话候选。
@@ -245,14 +254,14 @@ impl SessionRegistry {
     ) -> rusqlite::Result<Vec<WorktreeCandidate>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
-            "SELECT id, cwd, worktree_dir, last_active_at FROM sessions
+            "SELECT id, workspace, worktree_dir, last_active_at FROM sessions
              WHERE state = ?1 AND worktree_dir != ''",
         )?;
         let rows = stmt.query_map([SessionState::Idle.as_str()], |row| {
             Ok((
                 WorktreeCandidate {
                     session_id: row.get::<_, String>("id")?,
-                    cwd: row.get::<_, String>("cwd")?,
+                    cwd: row.get::<_, String>("workspace")?,
                     worktree_dir: row.get::<_, String>("worktree_dir")?,
                 },
                 row.get::<_, i64>("last_active_at")? as u64,
@@ -316,8 +325,6 @@ mod tests {
                 created_at: 1,
                 last_active_at,
                 worktree_dir: String::new(),
-                context_size: 0,
-                context_window_size: 0,
             },
             format!("agent_{id}"),
         )
@@ -387,25 +394,31 @@ mod tests {
     }
 
     #[test]
-    fn context_size_persists_and_roundtrips() {
+    fn context_size_kept_in_memory_only() {
         let db = tmp_db("ctx");
         let reg = SessionRegistry::open(&db).unwrap();
         let (m, aid) = meta("s1", 100);
         reg.upsert(&m, Some(&aid)).unwrap();
 
-        reg.set_context_size("s1", 53_000, 200_000).unwrap();
-        let got = reg.get("s1").unwrap().unwrap();
-        assert_eq!(got.meta.context_size, 53_000);
-        assert_eq!(got.meta.context_window_size, 200_000);
+        assert_eq!(reg.context("s1"), SessionContextResult::default());
+        reg.set_context_size("s1", 53_000, 200_000);
+        assert_eq!(
+            reg.context("s1"),
+            SessionContextResult {
+                context_size: 53_000,
+                context_window_size: 200_000,
+            }
+        );
 
-        // upsert（标题/状态更新）不应覆盖已记录的上下文大小
-        let (mut m2, _) = meta("s1", 200);
-        m2.context_size = 60_000;
-        m2.context_window_size = 200_000;
+        // 上下文不落盘：同一份 sqlite 重新打开（模拟 server 重启）后回到未上报状态
+        drop(reg);
+        let reg = SessionRegistry::open(&db).unwrap();
+        assert_eq!(reg.context("s1"), SessionContextResult::default());
+
+        // 元数据不含上下文字段：upsert 也无法覆盖上下文内存
+        let (m2, _) = meta("s1", 200);
         reg.upsert(&m2, Some(&aid)).unwrap();
-        let got = reg.get("s1").unwrap().unwrap();
-        assert_eq!(got.meta.context_size, 60_000);
-        assert_eq!(got.meta.context_window_size, 200_000);
+        assert_eq!(reg.context("s1"), SessionContextResult::default());
         let _ = std::fs::remove_file(&db);
     }
 

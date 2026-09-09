@@ -1,25 +1,42 @@
 //! 会话对话历史与活动记录的 JSONL 存储布局。
 //!
-//! server（权威日志）与 desktop（工作流会话本地缓存）共用同一套文件布局：
-//! `<data_dir>/sessions/<session_id>_history.jsonl` 与 `<id>_activities.jsonl`，
-//! 每行一条 JSON。读取与路径收口在此，避免两处硬编码布局漂移。
+//! server（普通会话权威日志）与 desktop（工作流会话本地缓存）共用同一套读取实现：
+//! - 普通会话：`<data_dir>/sessions/<session_id>_history.jsonl` 与 `<id>_activities.jsonl`
+//! - 工作流会话：`<data_dir>/workflows/<workflow_id>_history.jsonl` 与 `<id>_activities.jsonl`
+//!
+//! 每行一条 JSON。读取与路径收口在此，避免各处硬编码布局漂移。
 
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-/// 会话数据目录：`<data_dir>/sessions/`。
+/// 普通会话数据目录：`<data_dir>/sessions/`。
 fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("sessions")
 }
 
-/// 会话对话历史文件：`<data_dir>/sessions/<session_id>_history.jsonl`。
+/// 工作流会话数据目录：`<data_dir>/workflows/`。
+fn workflows_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("workflows")
+}
+
+/// 普通会话对话历史文件：`<data_dir>/sessions/<session_id>_history.jsonl`。
 pub fn history_path(data_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir(data_dir).join(format!("{session_id}_history.jsonl"))
 }
 
-/// 会话活动记录文件：`<data_dir>/sessions/<session_id>_activities.jsonl`。
+/// 普通会话活动记录文件：`<data_dir>/sessions/<session_id>_activities.jsonl`。
 pub fn activities_path(data_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir(data_dir).join(format!("{session_id}_activities.jsonl"))
+}
+
+/// 工作流对话历史文件：`<data_dir>/workflows/<workflow_id>_history.jsonl`。
+pub fn workflow_history_path(data_dir: &Path, workflow_id: &str) -> PathBuf {
+    workflows_dir(data_dir).join(format!("{workflow_id}_history.jsonl"))
+}
+
+/// 工作流活动记录文件：`<data_dir>/workflows/<workflow_id>_activities.jsonl`。
+pub fn workflow_activities_path(data_dir: &Path, workflow_id: &str) -> PathBuf {
+    workflows_dir(data_dir).join(format!("{workflow_id}_activities.jsonl"))
 }
 
 /// 追加 JSONL 行（append-only）。空输入直接返回；缺失父目录会创建。
@@ -208,6 +225,14 @@ mod tests {
         assert_eq!(
             activities_path(dir, "s1"),
             PathBuf::from("/data/sessions/s1_activities.jsonl")
+        );
+        assert_eq!(
+            workflow_history_path(dir, "w1"),
+            PathBuf::from("/data/workflows/w1_history.jsonl")
+        );
+        assert_eq!(
+            workflow_activities_path(dir, "w1"),
+            PathBuf::from("/data/workflows/w1_activities.jsonl")
         );
     }
 

@@ -863,17 +863,25 @@ impl AmuxApp {
                 cx.theme().foreground,
             ))
             .when(
-                self.open_session_target().is_some()
-                    && context_usage_text(meta.context_size, meta.context_window_size).is_some(),
+                self.open_session_target().is_some(),
                 |view| {
-                    // 会话上下文占用，单位为 token。
-                    view.child(info_row(
-                        "上下文",
-                        &context_usage_text(meta.context_size, meta.context_window_size)
-                            .expect("上方已判非 None"),
-                        cx.theme().muted_foreground,
-                        cx.theme().foreground,
-                    ))
+                    // 会话上下文占用，单位为 token。数据来自 `session.context`
+                    // 查询缓存（Agent 侧 usage_update 通知）；两者均为 0 表示
+                    // 尚未收到通知，不展示该行。
+                    let context = self.selected_context().unwrap_or_default();
+                    view.when(
+                        context_usage_text(context.context_size, context.context_window_size)
+                            .is_some(),
+                        |view| {
+                            view.child(info_row(
+                                "上下文",
+                                &context_usage_text(context.context_size, context.context_window_size)
+                                    .expect("上方已判非 None"),
+                                cx.theme().muted_foreground,
+                                cx.theme().foreground,
+                            ))
+                        },
+                    )
                 },
             )
             .child(info_row(
@@ -1119,6 +1127,11 @@ impl AmuxApp {
                 if next == Some(Panel::Plan) {
                     if let Some((machine_name, id)) = this.open_session_target() {
                         this.refresh_plan(window, cx, &machine_name, id);
+                    }
+                }
+                if next == Some(Panel::Detail) {
+                    if let Some((machine_name, id)) = this.open_session_target() {
+                        this.refresh_context(window, cx, &machine_name, id);
                     }
                 }
             }))
