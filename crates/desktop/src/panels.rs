@@ -787,7 +787,7 @@ impl AmuxApp {
         let Some(meta) = self.selected_meta() else {
             return div().w_full().child(Label::new("未选择会话")).into_any();
         };
-        // 工作流会话详情数据仅来自应用侧会话元数据（OrcSession，见 wfstore）：
+        // 工作流会话详情数据仅来自应用侧会话元数据（WorkflowSession，见 wfstore）：
         // 无工作目录等普通会话字段，下方对应行按选中类型过滤
         let is_workflow = matches!(self.selected, Some(Selected::Workflow { .. }));
         let mut body = v_flex()
@@ -862,28 +862,24 @@ impl AmuxApp {
                 cx.theme().muted_foreground,
                 cx.theme().foreground,
             ))
-            .when(
-                self.open_session_target().is_some(),
-                |view| {
-                    // 会话上下文占用，单位为 token。数据来自 `session.context`
-                    // 查询缓存（Agent 侧 usage_update 通知）；两者均为 0 表示
-                    // 尚未收到通知，不展示该行。
-                    let context = self.selected_context().unwrap_or_default();
-                    view.when(
-                        context_usage_text(context.context_size, context.context_window_size)
-                            .is_some(),
-                        |view| {
-                            view.child(info_row(
-                                "上下文",
-                                &context_usage_text(context.context_size, context.context_window_size)
-                                    .expect("上方已判非 None"),
-                                cx.theme().muted_foreground,
-                                cx.theme().foreground,
-                            ))
-                        },
-                    )
-                },
-            )
+            .when(self.open_session_target().is_some(), |view| {
+                // 会话上下文占用，单位为 token。数据来自 `session.context`
+                // 查询缓存（Agent 侧 usage_update 通知）；两者均为 0 表示
+                // 尚未收到通知，不展示该行。
+                let context = self.selected_context().unwrap_or_default();
+                view.when(
+                    context_usage_text(context.context_size, context.context_window_size).is_some(),
+                    |view| {
+                        view.child(info_row(
+                            "上下文",
+                            &context_usage_text(context.context_size, context.context_window_size)
+                                .expect("上方已判非 None"),
+                            cx.theme().muted_foreground,
+                            cx.theme().foreground,
+                        ))
+                    },
+                )
+            })
             .child(info_row(
                 "创建时间",
                 &format_local_time(meta.created_at, TimePrecision::Seconds),
@@ -923,7 +919,7 @@ impl AmuxApp {
         ));
         if let Some(Selected::Workflow { id }) = &self.selected {
             // 关联普通会话（仅工作流会话展示）：列表数据仅来自应用侧会话元数据
-            // （OrcSession.linked_sessions，含会话 ID 与所属机器名），不查询各机器状态
+            // （WorkflowSession.linked_sessions，含会话 ID 与所属机器名），不查询各机器状态
             if let Some(wf) = self.workflow(id) {
                 let linked_sessions = wf.linked_sessions();
                 body = body.child(

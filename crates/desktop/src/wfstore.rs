@@ -18,7 +18,7 @@ use amux_common::session_log::{read_jsonl, workflow_activities_path, workflow_hi
 use protocol::{Activity, ContentBlock, HistoryItem};
 use rusqlite::{params, Connection};
 
-use crate::workflow::{LinkedSession, OrcMsg, OrcSession};
+use crate::workflow::{LinkedSession, WorkflowMsg, WorkflowSession};
 
 const META_SELECT_COLUMNS: &str = "id, title, state, last_active_at, plan, created_at";
 
@@ -41,15 +41,15 @@ fn content_text(content: &[ContentBlock]) -> String {
         .join("")
 }
 
-fn transcript_from_history(items: &[HistoryItem]) -> Vec<OrcMsg> {
+fn transcript_from_history(items: &[HistoryItem]) -> Vec<WorkflowMsg> {
     items
         .iter()
         .map(|h| match h {
-            HistoryItem::UserMessage { content, timestamp } => OrcMsg::User {
+            HistoryItem::UserMessage { content, timestamp } => WorkflowMsg::User {
                 text: content_text(content),
                 timestamp: *timestamp,
             },
-            HistoryItem::AgentMessage { content, timestamp } => OrcMsg::Orc {
+            HistoryItem::AgentMessage { content, timestamp } => WorkflowMsg::Agent {
                 text: content_text(content),
                 timestamp: *timestamp,
             },
@@ -109,9 +109,9 @@ fn read_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MetaRow> {
     })
 }
 
-fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<OrcSession> {
+fn meta_row_to_session(row: rusqlite::Result<MetaRow>) -> io::Result<WorkflowSession> {
     let row = row.map_err(io::Error::other)?;
-    Ok(OrcSession {
+    Ok(WorkflowSession {
         id: row.id,
         title: row.title,
         plan: row.plan,
@@ -151,7 +151,7 @@ fn load_linked_sessions(
 }
 
 fn attach_linked_sessions(
-    sessions: &mut [OrcSession],
+    sessions: &mut [WorkflowSession],
     linked: HashMap<String, Vec<LinkedSession>>,
 ) {
     for session in sessions {
@@ -161,7 +161,7 @@ fn attach_linked_sessions(
     }
 }
 
-pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
+pub fn save(data_dir: &Path, session: &WorkflowSession) -> io::Result<()> {
     let mut conn = open_db(data_dir).map_err(io::Error::other)?;
     let tx = conn.transaction().map_err(io::Error::other)?;
     tx.execute(
@@ -206,7 +206,7 @@ pub fn save(data_dir: &Path, session: &OrcSession) -> io::Result<()> {
 
 /// 惰性加载（元数据）：仅从 sqlite 读取会话骨架，不读取 transcript/activities
 /// 两份 JSONL 文件体。调用方仅在渲染对话/活动视图（`load_payload`）时才按需补齐。
-pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<OrcSession>, bool)> {
+pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<WorkflowSession>, bool)> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let query_limit = limit.saturating_add(1) as i64;
     let mut stmt = conn
@@ -217,7 +217,8 @@ pub fn load_meta_window(data_dir: &Path, limit: usize) -> io::Result<(Vec<OrcSes
     let rows = stmt
         .query_map([query_limit], read_meta_row)
         .map_err(io::Error::other)?;
-    let mut sessions: Vec<OrcSession> = rows.map(meta_row_to_session).collect::<io::Result<_>>()?;
+    let mut sessions: Vec<WorkflowSession> =
+        rows.map(meta_row_to_session).collect::<io::Result<_>>()?;
     let has_more = sessions.len() > limit;
     sessions.truncate(limit);
     let linked = load_linked_sessions(&conn).map_err(io::Error::other)?;
@@ -257,7 +258,7 @@ pub fn has_linked_sessions_on_machine(data_dir: &Path, machine_name: &str) -> io
     .map_err(io::Error::other)
 }
 
-pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
+pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<WorkflowSession>> {
     let conn = open_db(data_dir).map_err(io::Error::other)?;
     let mut stmt = conn
         .prepare(&meta_select("ORDER BY last_active_at DESC, id DESC"))
@@ -265,7 +266,8 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
     let rows = stmt
         .query_map([], read_meta_row)
         .map_err(io::Error::other)?;
-    let mut sessions: Vec<OrcSession> = rows.map(meta_row_to_session).collect::<io::Result<_>>()?;
+    let mut sessions: Vec<WorkflowSession> =
+        rows.map(meta_row_to_session).collect::<io::Result<_>>()?;
     let linked = load_linked_sessions(&conn).map_err(io::Error::other)?;
     attach_linked_sessions(&mut sessions, linked);
     Ok(sessions)
@@ -273,7 +275,7 @@ pub fn load_all_meta(data_dir: &Path) -> io::Result<Vec<OrcSession>> {
 
 /// 惰性加载（按需补齐）：读取指定会话的 transcript/activities payload。
 /// 调用方可先在锁外读盘、再短暂持锁合并——避免持写锁做 IO 阻塞渲染与后台推进。
-pub fn load_payload(data_dir: &Path, id: &str) -> io::Result<(Vec<OrcMsg>, Vec<Activity>)> {
+pub fn load_payload(data_dir: &Path, id: &str) -> io::Result<(Vec<WorkflowMsg>, Vec<Activity>)> {
     let transcript = transcript_from_history(&read_jsonl(&workflow_history_path(data_dir, id))?);
     let activities = read_jsonl(&workflow_activities_path(data_dir, id))?;
     Ok((transcript, activities))
@@ -338,17 +340,17 @@ mod tests {
     fn save_remove_matches_design_layout() {
         let dir = temp();
         let _ = std::fs::remove_dir_all(&dir);
-        let session = OrcSession {
-            id: "orc_1".into(),
+        let session = WorkflowSession {
+            id: "wf_1".into(),
             title: "计划A".into(),
             plan: "第一步：实现\n第二步：审查".into(),
             state: SessionState::Idle,
             transcript: vec![
-                OrcMsg::User {
+                WorkflowMsg::User {
                     text: "开始".into(),
                     timestamp: 1,
                 },
-                OrcMsg::Orc {
+                WorkflowMsg::Agent {
                     text: "已转发".into(),
                     timestamp: 2,
                 },
@@ -363,13 +365,13 @@ mod tests {
         };
         save(&dir, &session).unwrap(); // save 只写元数据
                                        // 对话历史由引擎在条目完整后实时追加写盘；这里模拟引擎追加。
-        append_history_transcript(&dir, "orc_1");
+        append_history_transcript(&dir, "wf_1");
         assert!(dir.join("workflow.sqlite").is_file());
-        assert!(dir.join("workflows/orc_1_history.jsonl").is_file());
+        assert!(dir.join("workflows/wf_1_history.jsonl").is_file());
         // 活动由引擎实时追加写盘，save 不生成活动文件。
-        assert!(!dir.join("workflows/orc_1_activities.jsonl").exists());
+        assert!(!dir.join("workflows/wf_1_activities.jsonl").exists());
 
-        remove(&dir, "orc_1").unwrap();
+        remove(&dir, "wf_1").unwrap();
         assert!(load_all_meta(&dir).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -378,8 +380,8 @@ mod tests {
     fn linked_sessions_persist_in_dedicated_table() {
         let dir = temp();
         let _ = std::fs::remove_dir_all(&dir);
-        let mut base = OrcSession {
-            id: "orc_1".into(),
+        let mut base = WorkflowSession {
+            id: "wf_1".into(),
             title: String::new(),
             plan: String::new(),
             state: SessionState::Idle,
@@ -399,7 +401,7 @@ mod tests {
             last_active_at: 1,
         };
         let mut second = base.clone();
-        second.id = "orc_2".into();
+        second.id = "wf_2".into();
         second.linked_sessions = vec![LinkedSession {
             id: "s2".into(),
             machine_name: "m1".into(),
@@ -422,9 +424,9 @@ mod tests {
 
         // 加载回读：机器名保留
         let meta = load_all_meta(&dir).unwrap();
-        let orc_1 = meta.iter().find(|m| m.id == "orc_1").unwrap();
-        assert_eq!(orc_1.linked_sessions.len(), 1, "重复挂载去重");
-        assert_eq!(orc_1.linked_sessions[0].machine_name, "m1");
+        let wf_1 = meta.iter().find(|m| m.id == "wf_1").unwrap();
+        assert_eq!(wf_1.linked_sessions.len(), 1, "重复挂载去重");
+        assert_eq!(wf_1.linked_sessions[0].machine_name, "m1");
 
         // save 以内存为权威整组替换关联
         base.linked_sessions = vec![LinkedSession {
@@ -443,7 +445,7 @@ mod tests {
         );
 
         // 删除工作流级联删除其关联
-        remove(&dir, "orc_2").unwrap();
+        remove(&dir, "wf_2").unwrap();
         let ids = load_all_linked_session_ids(&dir).unwrap();
         assert_eq!(ids, HashSet::from([("m2".to_string(), "s3".to_string())]));
 
@@ -454,8 +456,8 @@ mod tests {
     fn meta_window_limits_and_orders_sessions() {
         let dir = temp();
         let _ = std::fs::remove_dir_all(&dir);
-        let oldest = OrcSession {
-            id: "orc_old".into(),
+        let oldest = WorkflowSession {
+            id: "wf_old".into(),
             title: "旧工作流".into(),
             plan: String::new(),
             state: SessionState::Idle,
@@ -466,11 +468,11 @@ mod tests {
             last_active_at: 10,
         };
         let mut middle = oldest.clone();
-        middle.id = "orc_middle".into();
+        middle.id = "wf_middle".into();
         middle.title = "中间工作流".into();
         middle.last_active_at = 20;
         let mut newest = oldest.clone();
-        newest.id = "orc_new".into();
+        newest.id = "wf_new".into();
         newest.title = "新工作流".into();
         newest.last_active_at = 30;
         save(&dir, &oldest).unwrap();
@@ -484,12 +486,12 @@ mod tests {
                 .iter()
                 .map(|session| session.id.as_str())
                 .collect::<Vec<_>>(),
-            ["orc_new", "orc_middle"]
+            ["wf_new", "wf_middle"]
         );
         let (window, has_more) = load_meta_window(&dir, 3).unwrap();
         assert!(!has_more);
         assert_eq!(window.len(), 3);
-        assert_eq!(window[2].id, "orc_old");
+        assert_eq!(window[2].id, "wf_old");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -498,17 +500,17 @@ mod tests {
     fn meta_lazy_load_then_backfill_restores_payload() {
         let dir = temp();
         let _ = std::fs::remove_dir_all(&dir);
-        let session = OrcSession {
-            id: "orc_1".into(),
+        let session = WorkflowSession {
+            id: "wf_1".into(),
             title: "计划A".into(),
             plan: "第一步：实现\n第二步：审查".into(),
             state: SessionState::Idle,
             transcript: vec![
-                OrcMsg::User {
+                WorkflowMsg::User {
                     text: "开始".into(),
                     timestamp: 1,
                 },
-                OrcMsg::Orc {
+                WorkflowMsg::Agent {
                     text: "已转发".into(),
                     timestamp: 2,
                 },
@@ -523,9 +525,9 @@ mod tests {
         };
         save(&dir, &session).unwrap();
         // 对话历史由引擎在条目完整后实时追加写盘；这里模拟引擎追加。
-        append_history_transcript(&dir, "orc_1");
+        append_history_transcript(&dir, "wf_1");
         // 活动由引擎实时追加写盘；这里模拟已实时追加的活动，供 backfill 恢复。
-        let act_path = workflow_activities_path(&dir, "orc_1");
+        let act_path = workflow_activities_path(&dir, "wf_1");
         append_jsonl(
             &act_path,
             &[Activity::Thinking {
@@ -538,7 +540,7 @@ mod tests {
         // 惰性元数据加载：只读 sqlite，不触碰 JSONL 文件体。
         let mut meta = load_all_meta(&dir).unwrap();
         assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].id, "orc_1");
+        assert_eq!(meta[0].id, "wf_1");
         assert_eq!(meta[0].title, "计划A");
         // 执行计划列完整往返
         assert_eq!(meta[0].plan, "第一步：实现\n第二步：审查");
@@ -553,11 +555,11 @@ mod tests {
         assert_eq!(meta[0].transcript.len(), 2);
         assert!(matches!(
             &meta[0].transcript[0],
-            OrcMsg::User { text, timestamp } if text == "开始" && *timestamp == 1
+            WorkflowMsg::User { text, timestamp } if text == "开始" && *timestamp == 1
         ));
         assert!(matches!(
             &meta[0].transcript[1],
-            OrcMsg::Orc { text, timestamp } if text == "已转发" && *timestamp == 2
+            WorkflowMsg::Agent { text, timestamp } if text == "已转发" && *timestamp == 2
         ));
         assert_eq!(meta[0].activities.len(), 1);
         assert_eq!(

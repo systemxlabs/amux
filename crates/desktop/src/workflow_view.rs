@@ -18,7 +18,7 @@ use gpui_component::{
 use protocol::{SessionIdParams, SessionState};
 
 use crate::machine::MachineStatus;
-use crate::workflow::{OrcBackend, RigBackend, WorkflowEngine};
+use crate::workflow::{OrchestratorBackend, RigBackend, WorkflowEngine};
 
 use crate::app::{run_engine_on_tokio, AmuxApp, DraftKey, Selected};
 
@@ -346,7 +346,7 @@ impl AmuxApp {
         self._tasks.push(t);
     }
 
-    pub(crate) fn orchestrator_backend(&self) -> Arc<dyn OrcBackend> {
+    pub(crate) fn orchestrator_backend(&self) -> Arc<dyn OrchestratorBackend> {
         // 配置损坏时以未配置态兜底：decide 在实际使用时报错；
         // 损坏的精确原因在创建工作流入口（create_workflow_with）报出
         let cfg = self.store.orchestrator().unwrap_or_default();

@@ -6,6 +6,11 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::error::SessionError;
+use crate::fs::FsBrowser;
+use crate::git::GitRunner;
+use crate::session::SessionManager;
+use crate::terminal::{ConnScope, TerminalService};
 use protocol::{
     method, rpc_error, server_error, AgentListResult, AgentParams, FsListParams, FsReadParams,
     OngoingActivityResult, OpResult, SessionConfigOptionsResult, SessionConfigureParams,
@@ -15,11 +20,6 @@ use protocol::{
     TerminalOpenResult, TerminalResizeParams, WorkspaceDiffParams, WorkspaceDiffResult,
     WorkspaceRestoreParams,
 };
-use crate::error::SessionError;
-use crate::fs::FsBrowser;
-use crate::git::GitRunner;
-use crate::session::SessionManager;
-use crate::terminal::{ConnScope, TerminalService};
 
 #[derive(Debug)]
 pub struct RpcError {

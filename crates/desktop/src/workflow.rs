@@ -1,8 +1,8 @@
 //! 工作流引擎：
 //! GUI 本地工作流会话 + 自研薄工具循环编排。
 //!
-//! - `OrcSession`：工作流会话状态，可序列化持久化到 SQLite 和两份 JSONL 日志
-//! - `OrcBackend`：单 turn 决策器；真实实现 `RigBackend` 保留 rig provider 层，
+//! - `WorkflowSession`：工作流会话状态，可序列化持久化到 SQLite 和两份 JSONL 日志
+//! - `OrchestratorBackend`：单 turn 决策器；真实实现 `RigBackend` 保留 rig provider 层，
 //!   循环自研（`run_tool_loop`，参考 rig-agent 的流式运行时）——流式请求 →
 //!   文本增量实时进对话流、reasoning 增量合并为 thinking 活动 → 解析工具调用 →
 //!   执行 → 结果回填 → drain steer 插话 → 再流式请求，使 steer 能在轮次边界
@@ -32,8 +32,6 @@ use rig_core::completion::message::{
 use rig_core::completion::{AssistantContent, CompletionModel, Message};
 use rig_core::streaming::StreamedAssistantContent;
 
-use serde::{Deserialize, Serialize};
-
 use protocol::{
     generate_title, ActivitiesResult, Activity, AgentStatus, ContentBlock, HistoryItem,
     HistoryResult, SessionConfigOptionsResult, SessionConfigSetting, SessionConfigureParams,
@@ -47,11 +45,10 @@ use crate::logic::DialogMsg;
 use crate::ws::WsClient;
 
 /// 工作流会话中的一条消息（对话历史）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum OrcMsg {
+#[derive(Debug, Clone)]
+pub enum WorkflowMsg {
     User { text: String, timestamp: u64 },
-    Orc { text: String, timestamp: u64 },
+    Agent { text: String, timestamp: u64 },
 }
 
 /// 关联普通会话的挂载关系（工作流 ↔ 普通会话）。只存路由信息：
@@ -67,13 +64,13 @@ pub struct LinkedSession {
 
 /// 工作流会话（GUI 本地状态）。
 #[derive(Debug, Clone)]
-pub struct OrcSession {
+pub struct WorkflowSession {
     pub id: String,
     pub title: String,
     /// 用户输入的完整执行计划；随元数据持久化
     pub plan: String,
     pub state: SessionState,
-    pub transcript: Vec<OrcMsg>,
+    pub transcript: Vec<WorkflowMsg>,
     pub linked_sessions: Vec<LinkedSession>,
     pub activities: Vec<Activity>,
     pub created_at: u64,
@@ -189,13 +186,13 @@ impl MachineSummary {
 
 /// 编排上下文（每次 decide 的输入）。
 #[derive(Clone)]
-pub struct OrcContext {
+pub struct OrchestratorContext {
     pub plan: String,
     pub transcript: Vec<String>,
     pub linked_sessions: Vec<LinkedSession>,
     /// 引擎共享会话：create_session 工具即时挂载关联普通会话，
     /// 不等整轮 decide 结束就让 GUI 看到关联关系
-    pub session: Arc<RwLock<OrcSession>>,
+    pub session: Arc<RwLock<WorkflowSession>>,
     pub machines: Vec<MachineEntry>,
     /// 引擎 → 应用事件通道：挂载新关联普通会话后通知应用即时刷新会话列表
     pub hub: Arc<MachineHub>,
@@ -210,7 +207,7 @@ pub struct OrcContext {
     pub steer_inbox: Arc<Mutex<Vec<String>>>,
     /// 编排输出草稿：流式文本实时进入对话流；
     /// 引擎在整轮结束后据此判断 backend 是否已自行提交输出，避免重复推送。
-    pub draft: Arc<OrcDraft>,
+    pub draft: Arc<OrchestratorDraft>,
     /// 进行中实时活动槽（见 `WorkflowEngine.current_activity`）：工具循环写入，
     /// 动作结束即清除。
     pub current: Arc<Mutex<Option<Activity>>>,
@@ -222,14 +219,14 @@ pub struct OrcContext {
 ///
 /// transcript 在 turn 期间只增不删，草稿按下标定位自身消息；turn 期间
 /// 可能并发插入的只有用户消息（record_user/absorb_steer），不影响下标。
-pub struct OrcDraft {
-    session: Arc<RwLock<OrcSession>>,
+pub struct OrchestratorDraft {
+    session: Arc<RwLock<WorkflowSession>>,
     slot: Mutex<Option<usize>>,
 }
 
-impl OrcDraft {
-    fn new(session: Arc<RwLock<OrcSession>>) -> Self {
-        OrcDraft {
+impl OrchestratorDraft {
+    fn new(session: Arc<RwLock<WorkflowSession>>) -> Self {
+        OrchestratorDraft {
             session,
             slot: Mutex::new(None),
         }
@@ -244,12 +241,12 @@ impl OrcDraft {
         let mut s = self.session.write();
         match *slot {
             Some(i) => {
-                if let Some(OrcMsg::Orc { text, .. }) = s.transcript.get_mut(i) {
+                if let Some(WorkflowMsg::Agent { text, .. }) = s.transcript.get_mut(i) {
                     text.push_str(delta);
                 }
             }
             None => {
-                s.transcript.push(OrcMsg::Orc {
+                s.transcript.push(WorkflowMsg::Agent {
                     text: delta.to_string(),
                     timestamp: now(),
                 });
@@ -262,7 +259,7 @@ impl OrcDraft {
     fn push_message(&self, text: &str) {
         let mut slot = self.slot.lock();
         let mut s = self.session.write();
-        s.transcript.push(OrcMsg::Orc {
+        s.transcript.push(WorkflowMsg::Agent {
             text: text.to_string(),
             timestamp: now(),
         });
@@ -276,7 +273,7 @@ impl OrcDraft {
         let mut slot = self.slot.lock();
         if let Some(i) = slot.take() {
             let mut s = self.session.write();
-            if matches!(s.transcript.get(i), Some(OrcMsg::Orc { .. })) {
+            if matches!(s.transcript.get(i), Some(WorkflowMsg::Agent { .. })) {
                 s.transcript.remove(i);
             }
         }
@@ -293,10 +290,10 @@ impl OrcDraft {
     }
 }
 
-pub trait OrcBackend: Send + Sync {
+pub trait OrchestratorBackend: Send + Sync {
     fn decide<'a>(
         &'a self,
-        ctx: &'a OrcContext,
+        ctx: &'a OrchestratorContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 }
 
@@ -318,7 +315,7 @@ struct AdvanceGate {
 struct GateGuard {
     gate: Arc<Mutex<AdvanceGate>>,
     busy_linked_sessions: Arc<Mutex<usize>>,
-    session: Arc<RwLock<OrcSession>>,
+    session: Arc<RwLock<WorkflowSession>>,
     active: bool,
 }
 
@@ -327,7 +324,7 @@ impl GateGuard {
     fn finish_locked(
         active: &mut bool,
         busy_linked_sessions: &Arc<Mutex<usize>>,
-        session: &Arc<RwLock<OrcSession>>,
+        session: &Arc<RwLock<WorkflowSession>>,
         gate: &mut AdvanceGate,
     ) {
         if !*active {
@@ -371,8 +368,8 @@ impl Drop for GateGuard {
 pub struct WorkflowEngine {
     /// 共享会话快照：GUI 渲染读、引擎任务写（短临界区），克隆之间天然一致——
     /// 后台推进不再「克隆-跑-整引擎回写」，并发分叉与后写覆盖随之消失。
-    pub session: Arc<RwLock<OrcSession>>,
-    backend: Arc<dyn OrcBackend>,
+    pub session: Arc<RwLock<WorkflowSession>>,
+    backend: Arc<dyn OrchestratorBackend>,
     hub: Arc<MachineHub>,
     gate: Arc<Mutex<AdvanceGate>>,
     /// 工作中收到的用户消息（steer 注入；当前轮结束后合并）。
@@ -385,7 +382,7 @@ pub struct WorkflowEngine {
     data_dir: PathBuf,
     /// 编排智能体正在进行的实时活动（进行中才有）：流式思考增量、执行中的
     /// 工具调用。动作结束即清除——历史活动不充当实时展示（修复工具执行
-    /// 完毕后实时活动条一直展示）。与 `OrcContext.current` 是同一个 Arc。
+    /// 完毕后实时活动条一直展示）。与 `OrchestratorContext.current` 是同一个 Arc。
     current_activity: Arc<Mutex<Option<Activity>>>,
     /// 串行化同一工作流的后台持久化，避免旧快照在新快照之后落盘。
     persist_lock: Arc<Mutex<()>>,
@@ -398,7 +395,7 @@ pub struct WorkflowEngine {
 impl WorkflowEngine {
     pub fn new(
         plan: &str,
-        backend: Arc<dyn OrcBackend>,
+        backend: Arc<dyn OrchestratorBackend>,
         hub: Arc<MachineHub>,
         data_dir: &Path,
     ) -> Self {
@@ -406,8 +403,8 @@ impl WorkflowEngine {
         // 执行计划不进对话消息历史：计划存元数据，用户在对话界面输入消息，
         // 经 record_user 写入 transcript 并触发推进。
         let t = now();
-        let session = OrcSession {
-            id: format!("orc_{}", uuid::Uuid::new_v4()),
+        let session = WorkflowSession {
+            id: format!("wf_{}", uuid::Uuid::new_v4()),
             // 标题由用户首个指令生成（record_user），不取自工作流计划
             title: String::new(),
             plan: plan.to_string(),
@@ -422,8 +419,8 @@ impl WorkflowEngine {
     }
 
     pub fn restore(
-        mut session: OrcSession,
-        backend: Arc<dyn OrcBackend>,
+        mut session: WorkflowSession,
+        backend: Arc<dyn OrchestratorBackend>,
         hub: Arc<MachineHub>,
         data_dir: &Path,
     ) -> Self {
@@ -434,8 +431,8 @@ impl WorkflowEngine {
 
     /// 两个构造函数的共享主体：并发状态（gate/inbox/锁）一律全新空态。
     fn with_parts(
-        session: OrcSession,
-        backend: Arc<dyn OrcBackend>,
+        session: WorkflowSession,
+        backend: Arc<dyn OrchestratorBackend>,
         hub: Arc<MachineHub>,
         data_dir: &Path,
     ) -> Self {
@@ -455,7 +452,7 @@ impl WorkflowEngine {
     }
 
     /// 短临界区可变访问（长 await 一律发生在锁外）。
-    fn with_session<R>(&self, f: impl FnOnce(&mut OrcSession) -> R) -> R {
+    fn with_session<R>(&self, f: impl FnOnce(&mut WorkflowSession) -> R) -> R {
         let mut s = self.session.write();
         f(&mut s)
     }
@@ -491,7 +488,7 @@ impl WorkflowEngine {
     }
 
     /// 会话快照（仅读字段的克隆；调用方需持有 RwLock 语义）。
-    pub fn snapshot(&self) -> OrcSession {
+    pub fn snapshot(&self) -> WorkflowSession {
         self.session.read().clone()
     }
 
@@ -607,10 +604,12 @@ impl WorkflowEngine {
             let item = {
                 let s = self.session.read();
                 match s.transcript.get(i) {
-                    Some(OrcMsg::Orc { text, timestamp }) => Some(HistoryItem::AgentMessage {
-                        content: vec![ContentBlock::Text { text: text.clone() }],
-                        timestamp: *timestamp,
-                    }),
+                    Some(WorkflowMsg::Agent { text, timestamp }) => {
+                        Some(HistoryItem::AgentMessage {
+                            content: vec![ContentBlock::Text { text: text.clone() }],
+                            timestamp: *timestamp,
+                        })
+                    }
                     _ => None,
                 }
             };
@@ -622,7 +621,7 @@ impl WorkflowEngine {
             let output = decision;
             let ts = now();
             self.with_session(|s| {
-                s.transcript.push(OrcMsg::Orc {
+                s.transcript.push(WorkflowMsg::Agent {
                     text: output.clone(),
                     timestamp: ts,
                 });
@@ -635,7 +634,7 @@ impl WorkflowEngine {
         Ok(())
     }
 
-    fn build_context(&self) -> OrcContext {
+    fn build_context(&self) -> OrchestratorContext {
         // 每次推进前快照：连接与摘要取自 hub 最新状态（重连/加机后即时生效）
         let machines = self.hub.snapshot();
         // 关联普通会话挂载后立即落库（后台任务写盘），不依赖整轮结束后的 persist 快照
@@ -647,15 +646,15 @@ impl WorkflowEngine {
             }));
         let s = self.session.read();
         let record_engine = self.clone();
-        OrcContext {
+        OrchestratorContext {
             plan: s.plan.clone(),
             record_tool_activity: Some(Arc::new(move |act| record_engine.record_activity(act))),
             transcript: s
                 .transcript
                 .iter()
                 .map(|m| match m {
-                    OrcMsg::User { text, .. } => format!("用户：{text}"),
-                    OrcMsg::Orc { text, .. } => format!("编排：{text}"),
+                    WorkflowMsg::User { text, .. } => format!("用户：{text}"),
+                    WorkflowMsg::Agent { text, .. } => format!("编排：{text}"),
                 })
                 .collect(),
             linked_sessions: s.linked_sessions.clone(),
@@ -664,7 +663,7 @@ impl WorkflowEngine {
             hub: Arc::clone(&self.hub),
             persist_on_linked_session_mounted,
             steer_inbox: Arc::clone(&self.steer_inbox),
-            draft: Arc::new(OrcDraft::new(Arc::clone(&self.session))),
+            draft: Arc::new(OrchestratorDraft::new(Arc::clone(&self.session))),
             current: Arc::clone(&self.current_activity),
         }
     }
@@ -704,7 +703,7 @@ impl WorkflowEngine {
             );
             let ts = now();
             self.with_session(|s| {
-                s.transcript.push(OrcMsg::User {
+                s.transcript.push(WorkflowMsg::User {
                     text: msg.clone(),
                     timestamp: ts,
                 });
@@ -816,7 +815,7 @@ impl WorkflowEngine {
             if s.title.trim().is_empty() {
                 s.title = generate_title(text);
             }
-            s.transcript.push(OrcMsg::User {
+            s.transcript.push(WorkflowMsg::User {
                 text: text.to_string(),
                 timestamp: ts,
             });
@@ -845,10 +844,10 @@ impl WorkflowEngine {
                 .read()
                 .transcript
                 .iter()
-                .any(|m| matches!(m, OrcMsg::User { text: t, .. } if t == &text));
+                .any(|m| matches!(m, WorkflowMsg::User { text: t, .. } if t == &text));
             if !exists {
                 self.with_session(|s| {
-                    s.transcript.push(OrcMsg::User {
+                    s.transcript.push(WorkflowMsg::User {
                         text,
                         timestamp: now(),
                     });
@@ -904,7 +903,10 @@ impl WorkflowEngine {
         });
     }
 
-    pub fn load_window(data_dir: &Path, limit: usize) -> std::io::Result<(Vec<OrcSession>, bool)> {
+    pub fn load_window(
+        data_dir: &Path,
+        limit: usize,
+    ) -> std::io::Result<(Vec<WorkflowSession>, bool)> {
         // 惰性元数据加载：只读 sqlite，不读取 transcript/activities 两份 JSONL。
         crate::wfstore::load_meta_window(data_dir, limit)
     }
@@ -925,7 +927,7 @@ impl WorkflowEngine {
 
     /// 全量读取入口：仅存储测试使用。
     #[cfg(test)]
-    pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<OrcSession>> {
+    pub fn load_all(data_dir: &Path) -> std::io::Result<Vec<WorkflowSession>> {
         crate::wfstore::load_all_meta(data_dir)
     }
 
@@ -956,17 +958,17 @@ impl WorkflowEngine {
     }
 }
 
-impl OrcSession {
+impl WorkflowSession {
     /// 工作流会话对话流：用户消息（含系统注入的推进消息）与编排输出。
     pub fn to_dialog(&self) -> Vec<DialogMsg> {
         self.transcript
             .iter()
             .map(|m| match m {
-                OrcMsg::User { text, timestamp } => DialogMsg::UserMessage {
+                WorkflowMsg::User { text, timestamp } => DialogMsg::UserMessage {
                     content: vec![ContentBlock::Text { text: text.clone() }],
                     timestamp: *timestamp,
                 },
-                OrcMsg::Orc { text, timestamp } => DialogMsg::AgentMessage {
+                WorkflowMsg::Agent { text, timestamp } => DialogMsg::AgentMessage {
                     content: vec![ContentBlock::Text { text: text.clone() }],
                     timestamp: *timestamp,
                 },
@@ -980,21 +982,21 @@ struct LiveRuntime {
     machines: Vec<MachineEntry>,
     linked_sessions: Arc<Mutex<Vec<LinkedSession>>>,
     /// 引擎共享会话：create_session 工具即时挂载关联普通会话（不等整轮 decide 结束）
-    session: Arc<RwLock<OrcSession>>,
+    session: Arc<RwLock<WorkflowSession>>,
     /// 引擎 → 应用事件通道：挂载新关联普通会话后通知应用即时刷新会话列表
     hub: Arc<MachineHub>,
-    /// 关联普通会话挂载后的即时落库钩子（见 `OrcContext.persist_on_linked_session_mounted`）
+    /// 关联普通会话挂载后的即时落库钩子（见 `OrchestratorContext.persist_on_linked_session_mounted`）
     persist_on_linked_session_mounted: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// 编排工具调用活动钩子（见 `OrcContext.record_tool_activity`）
+    /// 编排工具调用活动钩子（见 `OrchestratorContext.record_tool_activity`）
     record_tool_activity: Option<Arc<dyn Fn(Activity) + Send + Sync>>,
-    /// 编排输出草稿（见 `OrcContext.draft`）：流式文本实时进 transcript
-    draft: Arc<OrcDraft>,
-    /// 进行中实时活动槽（见 `OrcContext.current`）
+    /// 编排输出草稿（见 `OrchestratorContext.draft`）：流式文本实时进 transcript
+    draft: Arc<OrchestratorDraft>,
+    /// 进行中实时活动槽（见 `OrchestratorContext.current`）
     current: Arc<Mutex<Option<Activity>>>,
 }
 
-impl OrcContext {
-    /// 工具循环运行时：OrcContext 的可变子集（linked_sessions 需要在
+impl OrchestratorContext {
+    /// 工具循环运行时：OrchestratorContext 的可变子集（linked_sessions 需要在
     /// turn 内即时挂载，包成共享槽）。
     fn live(&self) -> LiveRuntime {
         LiveRuntime {
@@ -1250,7 +1252,7 @@ fn record_reasoning(live: &LiveRuntime, reasoning: &Reasoning) {
 /// 薄工具循环：驱动模型直至输出纯文本（turn 结束）。
 ///
 /// - 每轮请求前 drain `steer_inbox`，把用户插话注入为 user 消息（真实 steer）
-/// - 流式消费模型输出：文本增量实时经 [`OrcDraft`] 写入对话流，reasoning 增量
+/// - 流式消费模型输出：文本增量实时经 [`OrchestratorDraft`] 写入对话流，reasoning 增量
 ///   按 part 合并、part 结束即上报 thinking 活动）；turn 失败移除草稿，不留半截输出
 /// - assistant 响应整体保留（含 reasoning/image 与 message_id），provider 协议
 ///   要求后续请求原样回传（如 OpenAI Responses API 的 reasoning 配对）
@@ -1445,10 +1447,10 @@ impl RigBackend {
     }
 }
 
-impl OrcBackend for RigBackend {
+impl OrchestratorBackend for RigBackend {
     fn decide<'a>(
         &'a self,
-        ctx: &'a OrcContext,
+        ctx: &'a OrchestratorContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
             if !self.cfg.is_configured() {
@@ -1546,22 +1548,22 @@ pub struct FakeBackend {
 #[cfg(test)]
 #[allow(clippy::new_ret_no_self)]
 impl FakeBackend {
-    pub fn new(decisions: Vec<String>) -> Arc<dyn OrcBackend> {
+    pub fn new(decisions: Vec<String>) -> Arc<dyn OrchestratorBackend> {
         Arc::new(FakeBackend {
             decisions: Mutex::new(VecDeque::from(decisions)),
         })
     }
 
-    pub fn new_for_tests() -> Arc<dyn OrcBackend> {
+    pub fn new_for_tests() -> Arc<dyn OrchestratorBackend> {
         Self::new(vec![])
     }
 }
 
 #[cfg(test)]
-impl OrcBackend for FakeBackend {
+impl OrchestratorBackend for FakeBackend {
     fn decide<'a>(
         &'a self,
-        _ctx: &'a OrcContext,
+        _ctx: &'a OrchestratorContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
             self.decisions
@@ -1975,7 +1977,7 @@ mod tests {
     }
 
     fn test_live() -> LiveRuntime {
-        let session = Arc::new(RwLock::new(OrcSession {
+        let session = Arc::new(RwLock::new(WorkflowSession {
             id: "orc_test".into(),
             title: String::new(),
             plan: String::new(),
@@ -1995,7 +1997,7 @@ mod tests {
                 )),
             }],
             linked_sessions: Arc::new(Mutex::new(Vec::new())),
-            draft: Arc::new(OrcDraft::new(session.clone())),
+            draft: Arc::new(OrchestratorDraft::new(session.clone())),
             session,
             hub: Arc::new(MachineHub::default()),
             persist_on_linked_session_mounted: None,
@@ -2051,7 +2053,7 @@ mod tests {
             linked_sessions: Arc::new(Mutex::new(ctx.linked_sessions.clone())),
             session: ctx.session.clone(),
             hub: ctx.hub.clone(),
-            draft: Arc::new(OrcDraft::new(ctx.session.clone())),
+            draft: Arc::new(OrchestratorDraft::new(ctx.session.clone())),
             persist_on_linked_session_mounted: Some(Arc::new(move || {
                 let _ = persist_engine.persist(&persist_dir);
             })),
@@ -2146,19 +2148,16 @@ mod tests {
             &temp_data_dir(),
         );
         assert!(engine.cancel(), "空闲工作流取消应立即推进");
-        assert!(engine
-            .session
-            .read()
-            .transcript
-            .iter()
-            .any(|msg| matches!(msg, OrcMsg::User { text, .. } if text == WORKFLOW_CANCEL_PROMPT)));
+        assert!(engine.session.read().transcript.iter().any(
+            |msg| matches!(msg, WorkflowMsg::User { text, .. } if text == WORKFLOW_CANCEL_PROMPT)
+        ));
         engine.advance().await.unwrap();
         assert!(engine
             .session
             .read()
             .transcript
             .iter()
-            .any(|msg| matches!(msg, OrcMsg::Orc { text, .. } if text == "已按指令取消")));
+            .any(|msg| matches!(msg, WorkflowMsg::Agent { text, .. } if text == "已按指令取消")));
     }
 
     #[tokio::test]
@@ -2192,7 +2191,7 @@ mod tests {
                 .read()
                 .transcript
                 .iter()
-                .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text == "本轮静默")),
+                .any(|m| matches!(m, WorkflowMsg::Agent { text, .. } if text == "本轮静默")),
             "静默决策也应作为编排输出进入对话流"
         );
         assert!(
@@ -2201,7 +2200,7 @@ mod tests {
                 .read()
                 .transcript
                 .iter()
-                .any(|m| matches!(m, OrcMsg::User { text, .. }
+                .any(|m| matches!(m, WorkflowMsg::User { text, .. }
                     if text.contains("busy -> idle，变更原因为正常完成"))),
             "注入文本应包含变更原因"
         );
@@ -2237,7 +2236,7 @@ mod tests {
             .read()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text, .. } if text.contains("状态变更"))));
+            .any(|m| matches!(m, WorkflowMsg::User { text, .. } if text.contains("状态变更"))));
     }
 
     #[test]
@@ -2292,7 +2291,7 @@ mod tests {
         assert!(opened
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "立即保存")));
+            .any(|m| matches!(m, WorkflowMsg::User { text, .. } if text == "立即保存")));
 
         let backend2 = FakeBackend::new(vec!["恢复后推进".into()]);
         let (clients2, m2) = clients_with_machines();
@@ -2303,7 +2302,7 @@ mod tests {
             .read()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text == "恢复后推进")));
+            .any(|m| matches!(m, WorkflowMsg::Agent { text, .. } if text == "恢复后推进")));
 
         // 推进后仍能持久化；再次惰性加载 + 补齐应恢复出完整 transcript（含推进消息）。
         engine2.persist(&dir).unwrap();
@@ -2316,11 +2315,11 @@ mod tests {
         assert!(opened2
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "立即保存")));
+            .any(|m| matches!(m, WorkflowMsg::User { text, .. } if text == "立即保存")));
         assert!(opened2
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::Orc { text, .. } if text == "恢复后推进")));
+            .any(|m| matches!(m, WorkflowMsg::Agent { text, .. } if text == "恢复后推进")));
 
         WorkflowEngine::remove(&dir, &id).unwrap();
         assert!(WorkflowEngine::load_all(&dir).unwrap().is_empty());
@@ -2354,7 +2353,7 @@ mod tests {
             .read()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "准备保存")));
+            .any(|m| matches!(m, WorkflowMsg::User { text, .. } if text == "准备保存")));
 
         // 已在内存（推进中）的会话：backfill 不应被磁盘旧快照覆盖。
         let live = engine2.session.read().transcript.len();
@@ -2365,7 +2364,7 @@ mod tests {
         assert!(after
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text, .. } if text == "推进中新增")));
+            .any(|m| matches!(m, WorkflowMsg::User { text, .. } if text == "推进中新增")));
 
         WorkflowEngine::remove(&dir, &id).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -2531,12 +2530,12 @@ mod tests {
             ),
             &temp_data_dir(),
         );
-        engine.session.write().transcript.push(OrcMsg::User {
+        engine.session.write().transcript.push(WorkflowMsg::User {
             text: "开始".into(),
 
             timestamp: now(),
         });
-        engine.session.write().transcript.push(OrcMsg::Orc {
+        engine.session.write().transcript.push(WorkflowMsg::Agent {
             text: "决策".into(),
 
             timestamp: now(),
@@ -2771,7 +2770,7 @@ mod tests {
         assert!(
             matches!(
                 live.session.read().transcript.last(),
-                Some(OrcMsg::Orc { text, .. }) if text == "已查询可用 agent，本轮无调度动作"
+                Some(WorkflowMsg::Agent { text, .. }) if text == "已查询可用 agent，本轮无调度动作"
             ),
             "流式文本应实时进入对话流（草稿即最终输出）"
         );
@@ -2853,7 +2852,7 @@ mod tests {
         // 收尾文案也应提交进对话流
         assert!(matches!(
             live.session.read().transcript.last(),
-            Some(OrcMsg::Orc { text, .. }) if *text == res
+            Some(WorkflowMsg::Agent { text, .. }) if *text == res
         ));
     }
 
@@ -2973,7 +2972,9 @@ mod tests {
         assert_eq!(out, "你好，世界");
         let s = live.session.read();
         assert_eq!(s.transcript.len(), 1, "多段增量应合并为同一条编排消息");
-        assert!(matches!(&s.transcript[0], OrcMsg::Orc { text, .. } if text == "你好，世界"));
+        assert!(
+            matches!(&s.transcript[0], WorkflowMsg::Agent { text, .. } if text == "你好，世界")
+        );
     }
 
     /// reasoning 增量按 part 合并，流结束（provider 未发完整事件时）上报为

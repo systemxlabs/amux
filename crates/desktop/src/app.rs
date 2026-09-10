@@ -324,7 +324,7 @@ impl AmuxApp {
         // Tab/Shift+Tab 进终端输入：终端 context 比 Root 的全局 tab（焦点循环）
         // 更深、优先级更高，防止按 Tab 抢走焦点导致终端收不到输入
         crate::terminal::init(cx);
-        // 数据根（~/.amux/app）：session.sqlite 与 sessions/ JSONL 的统一根，
+        // 数据根（~/.amux/app）：workflow.sqlite 与 workflows/ JSONL 的统一根，
         // 与 amux_common::session_log 的目录约定一致
         app.data_dir = app.store.data_dir();
         // Enter 提交发送：Input 组件在 submit_on_enter 时消费 Enter 键并发出

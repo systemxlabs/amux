@@ -378,10 +378,7 @@ async fn session_lifecycle_state_change_and_delete() {
     let h = c.call("session.history", json!({"sessionId": sid})).await;
     let items = h["result"]["items"].as_array().unwrap();
     assert!(!items.is_empty());
-    assert_eq!(
-        items[0]["role"], "user",
-        "历史首条为用户消息: {items:?}"
-    );
+    assert_eq!(items[0]["role"], "user", "历史首条为用户消息: {items:?}");
     assert!(items.iter().any(|i| i["role"] == "agent"));
 
     let a = c

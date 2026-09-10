@@ -1,7 +1,7 @@
 //! GUI 本地配置：
 //! 应用本地数据**拆到 `~/.amux/app/` 多个文件**：
 //! machines.json、skills.json、workflows.json、recent_workspaces.json、quick_commands.json、
-//! agent.json，以及工作流会话的 sessions/ 目录。
+//! agent.json，以及工作流会话的 workflow.sqlite 与 workflows/ 目录。
 //!
 //! 纯逻辑与 IO 分离：每种文件的校验/归一化（坏条目丢弃）为可单测纯函数；
 //! `ConfigStore` 按文件读写（数据目录可注入，测试用临时目录）。
@@ -374,8 +374,8 @@ impl ConfigStore {
         std::fs::write(self.path("agent.json"), body)
     }
 
-    /// 应用数据根目录（~/.amux/app/）。工作流元数据 session.sqlite 与
-    /// sessions/ 子目录（对话/活动 JSONL）均以它为根。
+    /// 应用数据根目录（~/.amux/app/）。工作流元数据 workflow.sqlite 与
+    /// workflows/ 子目录（对话/活动 JSONL）均以它为根。
     pub fn data_dir(&self) -> PathBuf {
         self.data_dir.clone()
     }

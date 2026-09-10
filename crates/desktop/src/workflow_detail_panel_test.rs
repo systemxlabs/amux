@@ -1,5 +1,5 @@
 //! 工作流会话详情面板回归测试：详情数据仅来自应用侧会话元数据——
-//! 关联普通会话列表取自 OrcSession.linked_sessions（不依赖机器/server 状态），
+//! 关联普通会话列表取自 WorkflowSession.linked_sessions（不依赖机器/server 状态），
 //! 且工作流会话不展示普通会话专属的工作目录项。
 
 use std::sync::Arc;
@@ -36,7 +36,7 @@ fn workflow_detail_shows_linked_sessions_without_cwd_row(cx: &mut gpui::TestAppC
             app.workflow_input
                 .update(cx, |s, cx| s.set_value("测试计划", window, cx));
             app.create_workflow(window, cx);
-            // 关联普通会话仅存在于应用侧元数据（OrcSession.linked_sessions）；
+            // 关联普通会话仅存在于应用侧元数据（WorkflowSession.linked_sessions）；
             // 未注册任何机器，详情渲染不应依赖机器/server 状态
             app.workflows[0]
                 .session

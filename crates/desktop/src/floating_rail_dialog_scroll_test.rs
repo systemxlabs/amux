@@ -24,7 +24,7 @@ fn rail_button_click_keeps_dialog_scroll(cx: &mut gpui::TestAppContext) {
     let data_path = data_dir.path().to_path_buf();
     std::mem::forget(data_dir); // 测试进程存活期内路径有效即可
 
-    let mut visual = cx.add_empty_window();
+    let visual = cx.add_empty_window();
     let store = Arc::new(ConfigStore::new(data_path));
     let app = visual.update(|window, cx| {
         gpui_component::init(cx);
@@ -74,12 +74,12 @@ fn rail_button_click_keeps_dialog_scroll(cx: &mut gpui::TestAppContext) {
             |_, _cx| app.clone().into_any_element(),
         );
     };
-    draw(&mut visual);
+    draw(visual);
     let scroll = visual.update(|_, cx| app.read(cx).dialog_scroll.clone());
 
     // 预置滚动到中部（顶部按钮的跳转目标是 0，最能暴露回归）
     scroll.set_offset(point(px(0.), px(-400.)));
-    draw(&mut visual);
+    draw(visual);
 
     for id in [
         "float-workspace",
@@ -108,7 +108,7 @@ fn rail_button_click_keeps_dialog_scroll(cx: &mut gpui::TestAppContext) {
             modifiers: Default::default(),
             click_count: 1,
         });
-        draw(&mut visual);
+        draw(visual);
         let offset = scroll.offset().y;
         assert!(
             offset <= px(-300.),

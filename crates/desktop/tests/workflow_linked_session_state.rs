@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use amux_desktop::workflow::{
-    AgentSlot, LinkedSession, MachineHub, MachineSummary, OrcBackend, OrcContext, OrcMsg,
-    WorkflowEngine,
+    AgentSlot, LinkedSession, MachineHub, MachineSummary, OrchestratorBackend, OrchestratorContext,
+    WorkflowEngine, WorkflowMsg,
 };
 use protocol::{SessionState, StateChangeReason};
 
@@ -29,10 +29,10 @@ struct PausableBackend {
     decisions: Mutex<VecDeque<String>>,
 }
 
-impl OrcBackend for PausableBackend {
+impl OrchestratorBackend for PausableBackend {
     fn decide<'a>(
         &'a self,
-        _ctx: &'a OrcContext,
+        _ctx: &'a OrchestratorContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
             self.started.fetch_add(1, Ordering::SeqCst);
@@ -120,7 +120,7 @@ async fn linked_session_completion_mid_turn_injects_message_and_reruns() {
             .read()
             .transcript
             .iter()
-            .any(|m| matches!(m, OrcMsg::User { text, .. }
+            .any(|m| matches!(m, WorkflowMsg::User { text, .. }
                 if text.contains("s_child@测试机 检测到状态变更"))),
         "关联普通会话完成（turn 进行中）应立即注入用户消息"
     );
@@ -135,7 +135,7 @@ async fn linked_session_completion_mid_turn_injects_message_and_reruns() {
     // 第二轮（带注入消息的 rerun）的编排输出应出现在对话流
     assert!(
         engine.session.read().transcript.iter().any(
-            |m| matches!(m, OrcMsg::Orc { text, .. } if text == "收到关联普通会话完成，继续下一阶段")
+            |m| matches!(m, WorkflowMsg::Agent { text, .. } if text == "收到关联普通会话完成，继续下一阶段")
         ),
         "注入消息应触发编排补跑一轮处理"
     );

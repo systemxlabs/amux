@@ -221,12 +221,7 @@ impl SessionRegistry {
 
     /// 记录会话上下文大小（接收 ACP `usage_update` 通知后写入，
     /// 单位 token；仅内存存储，以 Agent 侧数据为权威）。
-    pub fn set_context_size(
-        &self,
-        id: &str,
-        context_size: u64,
-        context_window_size: u64,
-    ) {
+    pub fn set_context_size(&self, id: &str, context_size: u64, context_window_size: u64) {
         self.contexts.lock().insert(
             id.to_string(),
             SessionContextResult {
@@ -238,11 +233,7 @@ impl SessionRegistry {
 
     /// 查询会话上下文大小；尚未收到 `usage_update` 通知时两者均为 0。
     pub fn context(&self, id: &str) -> SessionContextResult {
-        self.contexts
-            .lock()
-            .get(id)
-            .copied()
-            .unwrap_or_default()
+        self.contexts.lock().get(id).copied().unwrap_or_default()
     }
 
     /// 有 worktree 且超过 `idle_timeout_ms` 不活跃的 idle 会话候选。

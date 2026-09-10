@@ -395,17 +395,10 @@ pub struct ChangedDirNode {
 /// 把改动文件路径按目录层级构建为树；不含改动文件且只有一个子目录的
 /// 中间目录与该子目录合并为单链节点（文档示例中的 `storage/s3`）。
 pub fn build_changed_file_tree(paths: &[impl AsRef<str>]) -> Vec<ChangedDirNode> {
+    #[derive(Default)]
     struct Trie {
         files: Vec<usize>,
         dirs: BTreeMap<String, Trie>,
-    }
-    impl Default for Trie {
-        fn default() -> Self {
-            Trie {
-                files: Vec::new(),
-                dirs: BTreeMap::new(),
-            }
-        }
     }
 
     let mut root = Trie::default();
