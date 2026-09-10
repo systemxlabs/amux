@@ -100,7 +100,7 @@ Server 在启动阶段会同时通过子进程方式并行启动已发现的 ACP
 
 ### ACP Server 生命周期
 
-Server 启动时会同时启动所有已安装的 ACP Servers，如果 ACP Server 启动失败，则标记不可用。ACP Server 启动后，Server 向其发送 `initialize` 请求，如响应携带非空 `authMethods` 字段，则标记未认证。
+Server 启动时会同时启动所有已安装的 ACP Servers，如果 ACP Server 启动失败，则标记不可用。
 
 用户可从应用侧重启某一 ACP Server（无论是否已启动）。
 
