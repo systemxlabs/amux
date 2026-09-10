@@ -31,7 +31,7 @@ use protocol::AgentInfo;
 ///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
 ///   - 发现的 agent 在 server 启动时**直接拉起**（`launch_discovered`，后续
 ///     `connection_for` 复用缓存连接）；
-///     **拉起失败的 agent 标记为不可用、`initialize` 声明非空 `authMethods` 的 agent 标记为未认证**（agent.list 的 status 反映；使用时报明确错误）；
+///     **拉起失败的 agent 标记为不可用**（agent.list 的 status 反映；使用时报明确错误）；
 ///     运行期新发现的 agent 仍走惰性拉起兜底
 /// - 没有发现 agent 时 `agent.list` 为空，使用未知 agent 会报错。
 pub struct AgentRegistry {
@@ -50,9 +50,6 @@ pub struct AgentRegistry {
     spawned: Mutex<HashMap<String, Arc<AcpConnection>>>,
     /// 启动时拉起失败的 agent（标记为不可用：agent.list 的 status=unavailable、connection_for 报错）
     unavailable: Mutex<HashSet<String>>,
-    /// initialize 响应携带非空 authMethods 的 agent（标记未认证：agent.list 的
-    /// status=unauthenticated、connection_for 报错）
-    unauthenticated: Mutex<HashSet<String>>,
     /// server 退出后阻止新的 ACP 连接启动或进入缓存。
     shutting_down: Arc<AtomicBool>,
     /// 线性化显式连接的替换与 server 关闭，避免新连接发布在关闭快照之后。
@@ -82,7 +79,6 @@ impl AgentRegistry {
             discovered: Mutex::new(Vec::new()),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
-            unauthenticated: Mutex::new(HashSet::new()),
             shutting_down,
             lifecycle: Mutex::new(()),
         };
@@ -134,22 +130,10 @@ impl AgentRegistry {
             .is_some_and(|spec| spec.name == name)
         {
             self.unavailable.lock().insert(name.to_string());
-            self.unauthenticated.lock().remove(name);
         }
     }
-    /// 标记 agent 未认证（initialize 响应携带非空 authMethods）。
-    pub fn mark_unauthenticated(&self, name: &str) {
-        self.unauthenticated.lock().insert(name.to_string());
-        self.unavailable.lock().remove(name);
-    }
-    fn status_for(
-        name: &str,
-        unavailable: &HashSet<String>,
-        unauthenticated: &HashSet<String>,
-    ) -> protocol::AgentStatus {
-        if unauthenticated.contains(name) {
-            protocol::AgentStatus::Unauthenticated
-        } else if unavailable.contains(name) {
+    fn status_for(name: &str, unavailable: &HashSet<String>) -> protocol::AgentStatus {
+        if unavailable.contains(name) {
             protocol::AgentStatus::Unavailable
         } else {
             protocol::AgentStatus::Available
@@ -160,17 +144,16 @@ impl AgentRegistry {
         self.refresh_discovery();
         let discovered = self.discovered.lock();
         let unavailable = self.unavailable.lock();
-        let unauthenticated = self.unauthenticated.lock();
         let mut out: Vec<AgentInfo> = Vec::new();
         if let Some((name, _)) = &self.configured {
             out.push(AgentInfo {
                 name: name.clone(),
-                status: Self::status_for(name, &unavailable, &unauthenticated),
+                status: Self::status_for(name, &unavailable),
             });
         } else if let Some(spec) = self.configured_spec.lock().as_ref() {
             out.push(AgentInfo {
                 name: spec.name.clone(),
-                status: Self::status_for(&spec.name, &unavailable, &unauthenticated),
+                status: Self::status_for(&spec.name, &unavailable),
             });
         }
         for d in discovered.iter() {
@@ -179,7 +162,7 @@ impl AgentRegistry {
             }
             out.push(AgentInfo {
                 name: d.name.clone(),
-                status: Self::status_for(&d.name, &unavailable, &unauthenticated),
+                status: Self::status_for(&d.name, &unavailable),
             });
         }
         out
@@ -190,9 +173,6 @@ impl AgentRegistry {
         }
         if self.unavailable.lock().contains(agent) {
             return Err(format!("agent 不可用（启动时拉起失败）: {agent}"));
-        }
-        if self.unauthenticated.lock().contains(agent) {
-            return Err(format!("agent 未认证: {agent}"));
         }
         if let Some((name, _)) = &self.configured {
             if name == agent {
@@ -214,11 +194,7 @@ impl AgentRegistry {
             .filter(|spec| spec.name == agent)
             .cloned()
         {
-            let connection = self.spawn_and_cache(&spec)?;
-            if connection.requires_auth() {
-                return Err(format!("agent 未认证: {agent}"));
-            }
-            return Ok(connection);
+            return self.spawn_and_cache(&spec);
         }
         self.refresh_discovery();
         let found = self
@@ -228,22 +204,12 @@ impl AgentRegistry {
             .find(|d| d.name == agent)
             .cloned();
         if let Some(d) = found {
-            let connection = self.spawn_and_cache(&d)?;
-            if connection.requires_auth() {
-                return Err(format!("agent 未认证: {agent}"));
-            }
-            return Ok(connection);
+            return self.spawn_and_cache(&d);
         }
         Err(format!("本机未发现 agent: {agent}"))
     }
-    /// 按连接握手结果同步未认证状态（initialize 携带非空 authMethods）。
-    /// 连接成功拉起即可用/未认证，原先的不可用标记一并清除。
-    fn sync_auth_status(&self, name: &str, connection: &Arc<AcpConnection>) {
-        if connection.requires_auth() {
-            self.unauthenticated.lock().insert(name.to_string());
-        } else {
-            self.unauthenticated.lock().remove(name);
-        }
+    /// 连接成功拉起即视为可用：清除此前记录的不可用标记。
+    fn clear_unavailable(&self, name: &str) {
         self.unavailable.lock().remove(name);
     }
 
@@ -252,7 +218,7 @@ impl AgentRegistry {
             return Err("agent registry 正在关闭".into());
         }
         if let Some(connection) = self.spawned.lock().get(&d.name).cloned() {
-            self.sync_auth_status(&d.name, &connection);
+            self.clear_unavailable(&d.name);
             return Ok(connection);
         }
         let args: Vec<&str> = d.args.iter().map(String::as_str).collect();
@@ -279,7 +245,7 @@ impl AgentRegistry {
             }
             None => {
                 spawned.insert(d.name.clone(), connection.clone());
-                self.sync_auth_status(&d.name, &connection);
+                self.clear_unavailable(&d.name);
                 Ok(connection)
             }
         }
@@ -339,12 +305,11 @@ impl AgentRegistry {
                 Ok(connection) => connection,
                 Err(e) => {
                     self.unavailable.lock().insert(agent.to_string());
-                    self.unauthenticated.lock().remove(agent);
                     return Err(format!("重启 ACP agent ({}) 失败: {e}", spec.bin));
                 }
             };
             let new_connection: Arc<AcpConnection> = Arc::new(connection);
-            self.sync_auth_status(agent, &new_connection);
+            self.clear_unavailable(agent);
             if configured_name {
                 let _lifecycle = self.lifecycle.lock();
                 if self.shutting_down.load(Ordering::Acquire) {
@@ -376,7 +341,6 @@ impl AgentRegistry {
             return Ok(());
         }
         self.unavailable.lock().remove(agent);
-        self.unauthenticated.lock().remove(agent);
         self.refresh_discovery();
         let found = self
             .discovered
@@ -399,7 +363,6 @@ impl AgentRegistry {
             }
             Err(e) => {
                 self.unavailable.lock().insert(agent.to_string());
-                self.unauthenticated.lock().remove(agent);
                 log::error!("手动重启失败（agent={}）: {e}", d.name);
                 Err(e)
             }
@@ -463,7 +426,6 @@ mod tests {
             discovered: Mutex::new(discovered),
             spawned: Mutex::new(HashMap::new()),
             unavailable: Mutex::new(HashSet::new()),
-            unauthenticated: Mutex::new(HashSet::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             lifecycle: Mutex::new(()),
         }
@@ -615,52 +577,5 @@ mod tests {
             "受限模式 rediscover 不应拉起: {summary:?}"
         );
         assert!(reg.spawned.lock().is_empty());
-    }
-
-    #[test]
-    fn unauthenticated_status_from_initialize_and_restart() {
-        let mock = sibling_bin("mock_acp");
-        assert!(mock.exists(), "mock_acp 应已构建: {}", mock.display());
-        // initialize 声明非空 authMethods（AMUX_MOCK_AUTH）→ 未认证：列表 status
-        // 与 connection_for 错误一致；重启为不带 auth 的实例后恢复可用。
-        let reg = test_registry(
-            vec![DiscoveredAgent {
-                name: "mock_auth".into(),
-                bin: mock.display().to_string(),
-                args: Vec::new(),
-                env: vec![("AMUX_MOCK_AUTH".into(), "1".into())],
-            }],
-            true,
-        );
-        // 惰性拉起：connection_for 触发 spawn 并按 initialize 声明标记未认证
-        let err = match reg.connection_for("mock_auth") {
-            Err(e) => e,
-            Ok(_) => panic!("未认证 agent 的 connection_for 应报错"),
-        };
-        assert!(err.contains("未认证"), "未认证错误应明确: {err}");
-        let status = reg
-            .list_agents()
-            .into_iter()
-            .find(|a| a.name == "mock_auth")
-            .expect("mock_auth 在列表")
-            .status;
-        assert_eq!(status, protocol::AgentStatus::Unauthenticated);
-
-        // 重启为不带 auth 的 mock：恢复可用（sync_auth_status 双向清除）。
-        reg.set_configured_spec(
-            "mock_auth".into(),
-            mock.display().to_string(),
-            Vec::new(),
-            Vec::new(),
-        );
-        reg.restart_agent("mock_auth").expect("重启应成功");
-        let status = reg
-            .list_agents()
-            .into_iter()
-            .find(|a| a.name == "mock_auth")
-            .expect("mock_auth 在列表")
-            .status;
-        assert_eq!(status, protocol::AgentStatus::Available);
-        reg.connection_for("mock_auth").expect("重启后应可用");
     }
 }

@@ -1668,7 +1668,6 @@ async fn list_agents(live: &LiveRuntime) -> Result<String, String> {
                     let status = match a.status {
                         AgentStatus::Available => "available",
                         AgentStatus::Unavailable => "unavailable",
-                        AgentStatus::Unauthenticated => "unauthenticated",
                     };
                     serde_json::json!({
                         "name": a.name,

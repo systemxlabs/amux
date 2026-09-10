@@ -148,7 +148,6 @@ async fn spawn_server_with_delay(
     port: u16,
     data_dir: tempfile::TempDir,
     wait_for_cancel: bool,
-    mock_auth: bool,
 ) -> ServerGuard {
     let data_path = data_dir.path();
     let bin = env!("CARGO_BIN_EXE_test-server");
@@ -165,9 +164,6 @@ async fn spawn_server_with_delay(
     .env("AMUX_NO_DISCOVERY", "1");
     if wait_for_cancel {
         cmd.env("AMUX_MOCK_WAIT_FOR_CANCEL", "1");
-    }
-    if mock_auth {
-        cmd.env("AMUX_MOCK_AUTH", "1");
     }
     let child = cmd
         .stdout(std::process::Stdio::null())
@@ -779,7 +775,7 @@ async fn start_server_with_dir() -> (u16, std::path::PathBuf, ServerGuard) {
         .tempdir()
         .unwrap();
     let data_path = data_dir.path().to_path_buf();
-    let guard = spawn_server_with_delay(port, data_dir, false, false).await;
+    let guard = spawn_server_with_delay(port, data_dir, false).await;
     (port, data_path, guard)
 }
 
@@ -811,53 +807,6 @@ fn init_repo() -> tempfile::TempDir {
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-m", "init", "-q"]);
     dir
-}
-
-#[tokio::test]
-async fn agent_with_auth_methods_marked_unauthenticated() {
-    let port = next_port();
-    let data_dir = tempfile::Builder::new()
-        .prefix("amux-e2e-auth-")
-        .tempdir()
-        .unwrap();
-    let _guard = spawn_server_with_delay(port, data_dir, false, true).await;
-    let mut c = Client::connect(port, "test-token").await;
-    let list = c.call("agent.list", json!({})).await;
-    let entry = list["result"]["agents"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .cloned()
-        .expect("agent.list 应含 agent: {list}");
-    let agent = entry["name"].as_str().unwrap().to_string();
-    assert_eq!(
-        entry["status"], "unauthenticated",
-        "initialize 声明非空 authMethods 应标记未认证: {list}"
-    );
-
-    // 会话创建是惰性的（server 侧先落盘），未认证在首次使用时才暴露。
-    let created = c
-        .call("session.new", json!({ "agent": agent, "cwd": "/tmp/auth" }))
-        .await;
-    let sid = created["result"]["session"]["id"]
-        .as_str()
-        .expect("惰性创建会话应成功: {created}")
-        .to_string();
-    let prompted = c
-        .call(
-            "session.prompt",
-            json!({ "sessionId": sid, "input": [{"type": "text", "text": "hi"}] }),
-        )
-        .await;
-    assert_eq!(
-        prompted["error"]["code"], -32002,
-        "未认证 agent 不应能 prompt: {prompted}"
-    );
-    assert!(
-        prompted["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("未认证")),
-        "未认证错误应明确: {prompted}"
-    );
 }
 
 #[tokio::test]
@@ -909,7 +858,7 @@ async fn busy_prompt_forwarded_to_agent_and_cancel_works() {
         .prefix("amux-e2e-busy-")
         .tempdir()
         .unwrap();
-    let _guard = spawn_server_with_delay(port, data_dir, true, false).await;
+    let _guard = spawn_server_with_delay(port, data_dir, true).await;
     let mut c = Client::connect(port, "test-token").await;
     let agent = mock_acp_name(&mut c).await;
 

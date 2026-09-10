@@ -919,8 +919,8 @@ impl AmuxApp {
             .machines
             .iter()
             .map(|m| {
-                // 全量透传（含不可用/未认证 agent 的真实 status）：编排 LLM 需要看到
-                // 「某 agent 不可用/未认证」才能避让或上报，预先过滤会让该事实消失
+                // 全量透传（含不可用 agent 的真实 status）：编排 LLM 需要看到
+                // 「某 agent 不可用」才能避让或上报，预先过滤会让该事实消失
                 let summary = MachineSummary {
                     name: m.config.name.clone(),
                     online: m.status.online(),

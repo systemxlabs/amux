@@ -2692,11 +2692,6 @@ impl AmuxApp {
                     .rounded_full()
                     .child(Label::new("可用").text_xs())
                     .into_any_element(),
-                AgentStatus::Unauthenticated => Tag::warning()
-                    .small()
-                    .rounded_full()
-                    .child(Label::new("未认证").text_xs())
-                    .into_any_element(),
                 AgentStatus::Unavailable => Tag::danger()
                     .small()
                     .rounded_full()

@@ -6,13 +6,12 @@ pub struct AuthParams {
     pub token: String,
 }
 
-/// Agent 状态：可用、不可用或未认证（ACP `initialize` 响应携带非空 `authMethods`）。
+/// Agent 状态：可用或不可用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Available,
     Unavailable,
-    Unauthenticated,
 }
 
 /// 某机器上的一个 agent：名称与状态。
@@ -717,16 +716,10 @@ mod tests {
             name: "kimi".into(),
             status: AgentStatus::Unavailable,
         };
-        let unauthenticated = AgentInfo {
-            name: "claude".into(),
-            status: AgentStatus::Unauthenticated,
-        };
         let s = serde_json::to_string(&available).unwrap();
         assert!(s.contains(r#""status":"available""#), "{s}");
         let s = serde_json::to_string(&unavailable).unwrap();
         assert!(s.contains(r#""status":"unavailable""#), "{s}");
-        let s = serde_json::to_string(&unauthenticated).unwrap();
-        assert!(s.contains(r#""status":"unauthenticated""#), "{s}");
     }
 
     #[test]

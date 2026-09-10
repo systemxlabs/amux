@@ -146,8 +146,6 @@ pub struct AcpConnection {
     /// exec 线程句柄（Mutex 包装以便 `shutdown_and_join` 从 &self 取出并 join；
     /// 连接由 SDK 管理，线程结束即子进程清理）
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// `initialize` 响应是否携带非空 `authMethods`（标记未认证）。
-    requires_auth: Arc<AtomicBool>,
 }
 
 /// 会话建立时 agent 侧声明的能力快照。能力由 initialize 握手的
@@ -277,8 +275,6 @@ impl AcpConnection {
         let (stop_tx, stop_rx) = watch::channel(false);
         let caches = SessionCaches::default();
         let caches2 = caches.clone();
-        let requires_auth = Arc::new(AtomicBool::new(false));
-        let requires_auth2 = requires_auth.clone();
         let bin = bin.to_string();
         let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let env = env.to_vec();
@@ -298,7 +294,6 @@ impl AcpConnection {
                     ready_tx,
                 },
                 caches2,
-                requires_auth2,
             ));
         });
         let timeout_ms = std::env::var("AMUX_ACP_SPAWN_TIMEOUT_MS")
@@ -342,7 +337,6 @@ impl AcpConnection {
             resumed: Arc::new(Mutex::new(HashSet::new())),
             stop_tx,
             thread: Mutex::new(Some(thread)),
-            requires_auth,
         })
     }
 
@@ -379,11 +373,6 @@ impl AcpConnection {
 }
 
 impl AcpConnection {
-    /// 是否处于未认证状态（ACP `initialize` 响应携带非空 `authMethods`）。
-    pub fn requires_auth(&self) -> bool {
-        self.requires_auth.load(Ordering::SeqCst)
-    }
-
     /// 新建会话，返回 agent 侧会话 id 与初始配置选项。
     pub fn create_session(
         &self,
@@ -628,7 +617,6 @@ async fn exec_main(
     env: &[(String, String)],
     control: ExecControl,
     caches: SessionCaches,
-    requires_auth: Arc<AtomicBool>,
 ) {
     let ExecControl {
         exec_rx,
@@ -679,7 +667,6 @@ async fn exec_main(
             caches.clone(),
             &ready_tx,
             ready_sent.clone(),
-            requires_auth,
         ) => result,
         changed = stop_rx.changed() => {
             let _ = changed;
@@ -710,7 +697,6 @@ async fn connect_main(
     caches: SessionCaches,
     ready_tx: &std::sync::mpsc::Sender<Result<(), String>>,
     ready_sent: Arc<std::sync::atomic::AtomicBool>,
-    requires_auth: Arc<AtomicBool>,
 ) -> agent_client_protocol::Result<()> {
     // 本连接内的 ACP 终端宿主：terminal/* 反向请求在此执行命令并回收进程
     let terminals: acp_terminal::SharedTerminals =
@@ -873,14 +859,6 @@ async fn connect_main(
                         // 记录 agent 侧声明的连接默认能力，供后续会话建立时复制。
                         *caches.default_caps.lock() =
                             session_caps_from_agent_caps(&resp.agent_capabilities);
-                        // 非空 authMethods 表示 ACP server 需要认证：标记未认证。
-                        if !resp.auth_methods.is_empty() {
-                            requires_auth.store(true, Ordering::SeqCst);
-                            log::warn!(
-                                "ACP server 声明 {} 种认证方式，标记未认证",
-                                resp.auth_methods.len()
-                            );
-                        }
                         log::debug!("initialize 完成");
                         core::result::Result::Ok(())
                     }
@@ -1497,7 +1475,6 @@ mod tests {
             resumed: Arc::new(Mutex::new(HashSet::new())),
             stop_tx,
             thread: Mutex::new(None),
-            requires_auth: Arc::new(AtomicBool::new(false)),
         };
         let mut rx = connection.prompt("s1", Vec::new());
         assert!(matches!(

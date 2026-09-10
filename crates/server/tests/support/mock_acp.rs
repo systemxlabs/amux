@@ -27,26 +27,24 @@
 //! - `AMUX_MOCK_BLOCK_NEW_SESSION=<entered>:<gate>`：session/new 先落 entered
 //!   文件再等 gate 放行（模拟创建卡住，供删除/取消与惰性创建的并发测试）
 //! - `AMUX_MOCK_NO_DELETE=1`：initialize 不声明 sessionCapabilities.delete
-//! - `AMUX_MOCK_AUTH=1`：initialize 声明非空 authMethods（未认证状态测试）
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, AuthMethod, AuthMethodAgent, AvailableCommand, AvailableCommandInput,
-    AvailableCommandsUpdate, CancelNotification, CloseSessionRequest, CloseSessionResponse,
-    ContentBlock, ContentChunk, CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, MessageId, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    PromptRequest, PromptResponse, ReleaseTerminalRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption,
-    SessionConfigOptionValue, SessionInfo, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    TerminalOutputRequest, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, UsageUpdate,
-    WaitForTerminalExitRequest,
+    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+    CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
+    CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse, InitializeRequest,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, MessageId, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptRequest,
+    PromptResponse, ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue,
+    SessionInfo, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, TerminalOutputRequest, TextContent, ToolCall,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
+    UsageUpdate, WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{Agent, Result, Stdio};
 use serde_json::{json, Value};
@@ -193,18 +191,10 @@ async fn run(state_file: &str) -> Result<()> {
                         ),
                     )
                 };
-                let init = InitializeResponse::new(initialize.protocol_version)
-                    .agent_capabilities(caps);
-                // AMUX_MOCK_AUTH=1 时声明非空 authMethods，供「未认证」状态测试。
-                let resp = if std::env::var_os("AMUX_MOCK_AUTH").is_some() {
-                    init.auth_methods(vec![AuthMethod::Agent(AuthMethodAgent::new(
-                        "test-auth",
-                        "Test Auth",
-                    ))])
-                } else {
-                    init
-                };
-                responder.respond(resp)
+                responder.respond(
+                    InitializeResponse::new(initialize.protocol_version)
+                        .agent_capabilities(caps),
+                )
             },
             agent_client_protocol::on_receive_request!(),
         )

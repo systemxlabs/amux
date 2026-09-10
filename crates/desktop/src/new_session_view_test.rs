@@ -198,10 +198,6 @@ fn effective_agent_requires_explicit_available_selection(cx: &mut gpui::TestAppC
                     status: AgentStatus::Unavailable,
                 },
                 AgentInfo {
-                    name: "unauthed".into(),
-                    status: AgentStatus::Unauthenticated,
-                },
-                AgentInfo {
                     name: "first".into(),
                     status: AgentStatus::Available,
                 },
@@ -216,10 +212,6 @@ fn effective_agent_requires_explicit_available_selection(cx: &mut gpui::TestAppC
 
             // 显式选择不可用 agent：不生效
             app.new_session_agent = Some("busy".into());
-            assert_eq!(app.effective_new_session_agent(), None);
-
-            // 显式选择未认证 agent：同样不生效
-            app.new_session_agent = Some("unauthed".into());
             assert_eq!(app.effective_new_session_agent(), None);
 
             // 显式选择可用：生效

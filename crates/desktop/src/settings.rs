@@ -1174,7 +1174,6 @@ impl AmuxApp {
                     let status_label = match a.status {
                         protocol::AgentStatus::Available => "可用",
                         protocol::AgentStatus::Unavailable => "不可用",
-                        protocol::AgentStatus::Unauthenticated => "未认证",
                     };
                     let agent = a.name.clone();
                     let agent_restart = agent.clone();

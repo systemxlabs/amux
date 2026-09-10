@@ -104,9 +104,6 @@ async fn main() {
         std::process::exit(1);
     }
     let configured_failed = cfg.agent_bin.is_some() && configured.is_none();
-    let configured_requires_auth = configured
-        .as_ref()
-        .is_some_and(|(_, connection)| connection.requires_auth());
     let agents = Arc::new(AgentRegistry::with_shutdown(
         configured,
         shutting_down.clone(),
@@ -116,8 +113,6 @@ async fn main() {
         agents.set_configured_spec(name.clone(), bin, cfg.agent_args.clone(), Vec::new());
         if configured_failed {
             agents.mark_configured_unavailable(&name);
-        } else if configured_requires_auth {
-            agents.mark_unauthenticated(&name);
         }
     }
 
