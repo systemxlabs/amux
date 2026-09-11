@@ -4,7 +4,7 @@
 
 ## 总体架构
 
-Client-Server 架构：应用与各机器上的 Server 进程通过 WebSocket 通信；Server 负责管理并对接（基于 ACP 协议）各 agent。
+Client-Server 架构：应用与各机器上的 Server 进程通过 WebSocket 通信；Server 负责管理并对接各 agent。
 
 ![架构图](./amux-arch.drawio.png)
 
@@ -16,7 +16,7 @@ Client-Server 通信采用 WebSocket，消息格式为 **JSON-RPC 2.0**。
 
 每个 Server 启动时需要指定连接认证 Token，应用在机器注册阶段存储认证 Token，在应用与 Server 建立好 WS 连接后，应用必须发送如下认证消息
 ```json
-{"jsonrpc":"2.0","method":"auth","params":{"token":"..."},"id":1}
+{"jsonrpc": "2.0", "method": "auth", "params": {"token": "..."}, "id": 1}
 ```
 Server 在未收到此认证消息并通过认证前，请求均返回认证失败响应。
 
@@ -82,10 +82,7 @@ Server 在启动阶段会自动从本机发现当前已安装的 Agent。
 
 | agent | 发现方式 |
 |---|---|
-| kimi | 本机装有 `kimi` CLI 且 `kimi acp --help` 可用 |
-| claude | 本机装有 `claude` CLI 且 npx 可用 |
 | codex | 本机装有 `codex` CLI 且 npx 可用 |
-| grok | 本机装有 `grok` CLI 且 `grok agent --help` 可用 |
 
 ### ACP Server 启动
 
@@ -93,10 +90,7 @@ Server 在启动阶段会同时通过子进程方式并行启动已发现的 ACP
 
 | agent | 启动方式 |
 |---|---|
-| kimi | `kimi acp` |
-| claude | `npx -y @agentclientprotocol/claude-agent-acp` |
-| codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @agentclientprotocol/codex-acp` |
-| grok | `grok agent --always-approve stdio` |
+| codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @nyssance/codex-acp-v2` |
 
 ### ACP Server 生命周期
 
@@ -109,14 +103,14 @@ Server 关闭时会同时关闭所有已启动的 ACP Servers，释放相应资�
 ### ACP 通信
 
 Server 作为 ACP client 与 ACP servers 通信
-- 采用 ACP V1 协议通信
+- 采用 ACP V2 协议通信，不支持 V1 协议
 - 权限自动审批
-- Client 能力支持：Terminal、Boolean Config Options
+- Client 能力支持：空
 - 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送指令或查询会话选项时，才向 ACP Server 发送 `session/new` 请求创建 agent 侧会话
 - 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 ACP Server 发送 `session/resume` 请求恢复 agent 侧已有会话
 - 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 ACP Server 发送 `session/set_config_option` 请求进行设置
 - 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
-- 取消会话：当用户取消会话时，向 ACP Server 发送 `session/cancel` 请求来取消会话执行
+- 取消会话：当用户取消会话时，向 ACP Server 发送 `session/cancel` 通知来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
 
 ### 普通会话状态
@@ -126,9 +120,9 @@ Server 作为 ACP client 与 ACP servers 通信
 普通会话状态变更
 - 新建会话时，会话状态为空闲
 - Server 重启后，其上所有普通会话状态应置为空闲
-- 当发送 `session/prompt` ACP 请求时，会话状态变为工作中
-- 当接收 `session/prompt` ACP 响应时，会话状态变为空闲
-- 当用户取消会话时，会话状态变为空闲
+- 当接收 `session/update` ACP 通知的 `state_update` 类型时
+  - 若状态为 `running` 或 `requires_action` 则为工作中
+  - 若状态为 `idle` 则为空闲
 
 ### 普通会话选项
 
@@ -143,7 +137,7 @@ Server 作为 ACP client 与 ACP servers 通信
 
 ### 普通会话计划
 
-普通会话计划存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `plan` 类型时，其通知中的计划全量覆盖内存存储。
+普通会话计划存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `plan_update` 类型时，其通知中的计划全量覆盖内存存储。
 
 ### 普通会话上下文信息
 
@@ -159,39 +153,44 @@ Server 作为 ACP client 与 ACP servers 通信
 - 元数据：存储在 `~/.amux/server/session.sqlite` 文件中
   ```SQL
   CREATE TABLE IF NOT EXISTS sessions (
-    -- 会话 ID
-    id TEXT PRIMARY KEY,
-    -- 会话状态
-    state TEXT NOT NULL,
-    -- 会话标题
-    title TEXT,
-    -- 工作目录
-    workspace TEXT NOT NULL,
-    -- worktree 目录
-    worktree_dir TEXT,
-    -- 所属 Agent
-    agent TEXT NOT NULL,
-    -- Agent 会话 ID
-    agent_session_id TEXT,
-    -- 创建时间
-    created_at INTEGER NOT NULL,
-    -- 最近活跃时间
-    last_active_at INTEGER NOT NULL
+    id TEXT PRIMARY KEY,             -- 会话 ID
+    state TEXT NOT NULL,             -- 会话状态
+    title TEXT,                      -- 会话标题
+    workspace TEXT NOT NULL,         -- 工作目录
+    worktree_dir TEXT,               -- worktree 目录
+    agent TEXT NOT NULL,             -- 所属 Agent
+    agent_session_id TEXT,           -- Agent 会话 ID
+    created_at INTEGER NOT NULL,     -- 创建时间
+    last_active_at INTEGER NOT NULL  -- 最近活跃时间
   );
   ```
-- 对话历史：存储在 `~/.amux/server/sessions/<session_id>_history.jsonl` 文件中，仅包含用户输入和 agent 输出
-  ```json
-  {"role": "user", "content": [ ... ], "timestamp": 1725800000000}
-  {"role": "agent", "content": [ ... ], "timestamp": 1725800001000}
+- 对话历史：存储在 `~/.amux/server/session.sqlite` 文件中
+  - Server 在往 ACP Server 发送 `session/prompt` 成功后，应立即给用户消息赋予消息 ID 并落盘，忽略 ACP Server 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
+  ```SQL
+  CREATE TABLE IF NOT EXISTS messages (
+      session_id TEXT NOT NULL,      -- Amux 普通会话 ID
+      message_id TEXT NOT NULL,      -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 ACP Server 提供
+      role TEXT NOT NULL,            -- user / agent
+      content TEXT NOT NULL,         -- 消息内容，以 json 格式存放
+      created_at INTEGER NOT NULL,   -- 创建时间
+      updated_at INTEGER NOT NULL,   -- 更新时间
+      PRIMARY KEY (session_id, message_id)
+  );
   ```
-- 活动历史：存储在 `~/.amux/server/sessions/<session_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等
-  ```json
-  {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
-  {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "title": "读 src/lib.rs", "parameters": "..."}
-  {"kind": "error", "timestamp": 1694230810000, "error": "工具执行失败: …"}
+- 活动历史：存储在 `~/.amux/server/session.sqlite` 文件中
+  ```
+  CREATE TABLE IF NOT EXISTS activities (
+      session_id TEXT NOT NULL,      -- Amux 普通会话 ID
+      activity_id TEXT NOT NULL,     -- toolCallId / thought message id / 本地生成的唯一 ID
+      kind TEXT NOT NULL,            -- 类别：tool_call / thinking / error
+      content TEXT,                  -- 活动内容，以 json 格式存放
+      created_at INTEGER NOT NULL,   -- 创建时间
+      updated_at INTEGER NOT NULL,   -- 更新时间
+      PRIMARY KEY (session_id, activity_id)
+  );
   ```
 
-流式输出合并后写入：agent 输出、thinking、工具调用等等流式传输均在内存中进行合并，合并成完整条目后立即进行追加写入磁盘。
+Server 在接收到流式内容后，应按 ACP V2 流式传输的 upsert 语义立即落盘。
 
 ### 工作树存储
 
@@ -334,9 +333,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 
 存储在 `~/.amux/app/workflows.json` 路径，格式为
 ```json
-[
-  { "name": "amux开发工作流", "plan": "xxx" }
-]
+[{ "name": "amux开发工作流", "plan": "xxx" }]
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
@@ -344,9 +341,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 
 存储在 `~/.amux/app/machines.json` 路径，格式为
 ```json
-[
-  { "name": "localpc", "url": "ws://127.0.0.1:3457", "token": "xxx" }
-]
+[{ "name": "localpc", "url": "ws://127.0.0.1:3457", "token": "xxx" }]
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
@@ -354,9 +349,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 
 存储在 `~/.amux/app/skills.json` 路径，格式为
 ```json
-[
-  { "name": "opencli", "description": "位于 https://github.com/jackwener/OpenCLI/tree/main/skills，包含多个 skills" }
-]
+[{ "name": "opencli", "description": "位于 https://github.com/jackwener/OpenCLI/tree/main/skills，包含多个 skills" }]
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
@@ -364,9 +357,7 @@ Server 发送终端事件时，仅向该终端关联的应用连接发送。
 
 存储在 `~/.amux/app/recent_workspaces.json` 路径，格式为
 ```json
-[
-  { "machine": "localpc", "workspace": "/home/linwei/workspace/amux", "lastUsed": 1729000000000 }
-]
+[{ "machine": "localpc", "workspace": "/home/linwei/workspace/amux", "lastUsed": 1729000000000 }]
 ```
 注意 (machine, workspace) 组合必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
