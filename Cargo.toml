@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-# agent-client-protocol 1.3.0（ACP 官方 SDK）要求 rustc ≥ 1.88
+# agent-client-protocol（ACP 官方 SDK）要求 rustc ≥ 1.88
 rust-version = "1.88"
 
 [workspace.dependencies]
@@ -22,7 +22,7 @@ log = "0.4.34"
 logforth = { version = "0.30", features = ["starter-log"] }
 tokio = { version = "1" }
 tokio-tungstenite = "0.30"
-agent-client-protocol = "1"
+agent-client-protocol = "2.1.0"
 uuid = { version = "1.26.0", features = ["v4"] }
 parking_lot = "=0.12.5"
 tempfile = "=3.27.0"

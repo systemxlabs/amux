@@ -1,37 +1,38 @@
-//! ACP v1 连接：官方 SDK `agent-client-protocol` 的 Client 角色，
+//! ACP v2 连接：官方 SDK `agent-client-protocol` 的 Client 角色（v2 surface），
 //! 经 stdio 与 ACP server 子进程通信。
 //!
 //! `AcpConnection` 使用**专用 exec 线程**承载全部异步 IO（SDK 连接、子进程 stdio、
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨
 //! runtime 嵌套的 tokio 问题（调用方可能处于任意 tokio runtime 上下文）。
+//!
+//! v2 与 v1 的关键差异：
+//! - `session/prompt` 响应只表示**已受理**，前台工作结束由 `state_update` 的 `idle` 报告；
+//! - `session/cancel` 是通知；
+//! - 消息、工具调用、思考均按 `messageId` / `toolCallId` 的 upsert 语义增量下发。
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
-    AvailableCommandInput, BlobResourceContents, BooleanConfigOptionCapabilities,
-    CancelNotification, ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
-    ContentBlock as AcpContentBlock, CreateTerminalRequest, DeleteSessionRequest, EmbeddedResource,
-    EmbeddedResourceResource, InitializeRequest, KillTerminalRequest, NewSessionRequest,
-    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
-    ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
+use agent_client_protocol::schema::v2::{
+    AvailableCommand, AvailableCommandInput, BlobResourceContents, CancelSessionNotification,
+    ClientCapabilities, CloseSessionRequest, ContentBlock as AcpContentBlock, DeleteSessionRequest,
+    EmbeddedResource, EmbeddedResourceResource, Implementation, InitializeRequest, MediaType,
+    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    PlanUpdateContent, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionConfigOption as AcpSessionConfigOption,
-    SessionConfigOptionValue as AcpSessionConfigOptionValue, SessionConfigOptionsCapabilities,
-    SessionConfigSelectOptions, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    StopReason, TerminalOutputRequest, TextContent, TextResourceContents, ToolKind,
-    WaitForTerminalExitRequest,
+    SessionConfigKind, SessionConfigOption as AcpSessionConfigOption,
+    SessionConfigOptionValue as AcpSessionConfigOptionValue, SessionConfigSelectOptions,
+    SessionUpdate, SetSessionConfigOptionRequest, StateUpdate, StopReason, TextContent,
+    TextResourceContents, ToolCallUpdate, UpdateSessionNotification,
 };
-use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::AcpAgent;
-use agent_client_protocol::ConnectionTo;
+use agent_client_protocol::V2ConnectionTo;
 use tokio::sync::{mpsc, watch};
 
-use protocol::ContentBlock;
-
-use crate::acp_terminal;
+use protocol::{ContentBlock, SessionState};
 
 /// 拉起的统计（server 启动日志用）。
 #[derive(Debug, Default, Clone, Copy)]
@@ -42,40 +43,60 @@ pub struct LaunchSummary {
     pub failed: usize,
 }
 
-/// turn 过程中的 agent 事件，供 server 透传给 GUI 聚合。
+/// turn 过程中的 agent 事件，供 server 透传给 GUI 聚合与落盘。
+///
+/// v2 的流式内容带 `messageId`（消息/思考）或 `toolCallId`（工具调用），
+/// 落盘按这些 id upsert，因此事件本身也是增量/替换语义。
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    /// agent 输出的增量片段
-    OutputChunk(String),
-    /// 思考片段
-    Thinking(String),
-    /// 工具调用（ACP `tool_call` / `tool_call_update`，按 `tool_call_id` 合并）
+    /// agent 消息增量（`agent_message_chunk`：追加到同 `message_id` 的消息）
+    AgentMessageChunk { message_id: String, text: String },
+    /// agent 消息整条更新（`agent_message`）：全量替换同 `message_id` 的内容，
+    /// `None` 表示清空。
+    AgentMessageSnapshot {
+        message_id: String,
+        text: Option<String>,
+    },
+    /// 思考增量（`agent_thought_chunk`）
+    ThinkingChunk { message_id: String, text: String },
+    /// 思考整条更新（`agent_thought`）：`None` 表示清空
+    ThinkingSnapshot {
+        message_id: String,
+        text: Option<String>,
+    },
+    /// 工具调用 upsert（`tool_call_update`，按 `tool_call_id` 合并；
+    /// 未携带的字段保持不变）
     ToolCall {
         id: String,
         name: Option<String>,
         title: Option<String>,
         parameters: Option<String>,
     },
+    /// 会话前台状态变更（`state_update`）。`idle` 表示前台工作结束，
+    /// 携带结束原因；`running` / `requires_action` 表示工作中。
+    StateUpdate {
+        state: SessionState,
+        reason: protocol::StateChangeReason,
+    },
+    /// ACP `session/prompt` 已受理（v2 的 prompt 响应只表示受理，
+    /// 前台工作结束另由 `state_update(idle)` 报告）
+    PromptAccepted,
     /// ACP 请求或传输失败
     Error(String),
-    /// ACP `session/prompt` 响应为错误（turn 未开始）。与 `Error`（turn 内
-    /// 错误）区分：调用方可据此把失败作为请求错误上报。
+    /// ACP `session/prompt` 请求被拒绝（前台工作未开始）
     PromptFailed(String),
-    /// 会话上下文大小更新（ACP `usage_update`：当前上下文大小与窗口总大小，token）。
+    /// 会话上下文大小更新（`usage_update`）
     UsageUpdate {
         /// 当前在上下文中的 token 数
         used: u64,
         /// 上下文窗口总大小（token）
         size: u64,
     },
-    /// 会话配置选项更新（ACP `config_options_update`：完整的选项集合与当前值）。
+    /// 会话配置选项更新（`config_option_update`：完整的选项集合与当前值）
     ConfigOptions(Vec<protocol::SessionConfigOption>),
-    /// turn 完成（携带结束原因）。
-    TurnEnded(protocol::StateChangeReason),
 }
 
-/// 主线程 → exec 线程的 ACP 方法调用（强类型，替代裸 method 字符串 + Value 参数，
-/// 消除 params 里 cwd 缺省回落 "/" 的魔法值）。
+/// 主线程 → exec 线程的 ACP 方法调用。
 #[derive(Debug, Clone)]
 enum AcpCall {
     NewSession {
@@ -103,8 +124,7 @@ enum AcpCall {
     },
 }
 
-/// ACP 方法响应（进程内强类型投影：dispatch_call_inner 已拿到 SDK 类型化响应，
-/// 不再经 serde_json::Value 往返）。
+/// ACP 方法响应（进程内强类型投影）。
 #[derive(Debug, Clone)]
 enum AcpResponse {
     NewSession {
@@ -117,6 +137,37 @@ enum AcpResponse {
     Unit,
 }
 
+/// 一次 prompt 的事件流（含自身路由条目的注销能力）。
+///
+/// 路由条目按**通道身份**注销：同会话并发的多个 prompt 互不影响；注销由该 turn
+/// 自己完成，而不是由 `state_update(idle)` 广播式回收。
+pub struct PromptStream {
+    rx: mpsc::Receiver<AgentEvent>,
+    tx: mpsc::Sender<AgentEvent>,
+    routes: Arc<Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>>,
+    agent_session_id: String,
+}
+
+impl PromptStream {
+    pub async fn recv(&mut self) -> Option<AgentEvent> {
+        self.rx.recv().await
+    }
+
+    /// 注销本 turn 的路由条目（turn 结束时调用；幂等）。
+    pub fn close(self) {
+        let mut routes = self.routes.lock();
+        let Some(txs) = routes.get_mut(&self.agent_session_id) else {
+            return;
+        };
+        if let Some(index) = txs.iter().position(|s| s.same_channel(&self.tx)) {
+            txs.remove(index);
+        }
+        if txs.is_empty() {
+            routes.remove(&self.agent_session_id);
+        }
+    }
+}
+
 /// 主线程 → exec 线程的方法请求。
 enum ExecReq {
     Call {
@@ -127,12 +178,12 @@ enum ExecReq {
         sid: String,
         prompt: Vec<ContentBlock>,
         routes: Arc<Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>>,
-        /// 本次 prompt 的事件发送端：响应回调按通道身份回收自己的路由条目
+        /// 本次 prompt 的事件发送端：state_update(idle) 按通道身份回收自己的路由条目
         tx: mpsc::Sender<AgentEvent>,
     },
 }
 
-/// ACP v1 客户端（官方 SDK stdio 传输）。
+/// ACP v2 客户端（官方 SDK stdio 传输）。
 pub struct AcpConnection {
     /// 主线程 → exec 线程的请求发送端；连接结束或 shutdown 时置 None
     exec_tx: Arc<Mutex<Option<std::sync::mpsc::SyncSender<ExecReq>>>>,
@@ -149,34 +200,37 @@ pub struct AcpConnection {
 }
 
 /// 会话建立时 agent 侧声明的能力快照。能力由 initialize 握手的
-/// agentCapabilities 声明，按 agent sessionId 存档于连接级缓存。
+/// `capabilities.session` 声明，按 agent sessionId 存档于连接级缓存。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AgentSessionCaps {
     /// agent 是否支持 `session/delete`
     pub delete: bool,
 }
 
-/// initialize 响应的 agentCapabilities → 会话能力快照（纯函数，可单测）。
+/// initialize 响应的 `capabilities` → 会话能力快照（纯函数，可单测）。
 fn session_caps_from_agent_caps(
-    caps: &agent_client_protocol::schema::v1::AgentCapabilities,
+    caps: &agent_client_protocol::schema::v2::AgentCapabilities,
 ) -> AgentSessionCaps {
     AgentSessionCaps {
-        delete: caps.session_capabilities.delete.is_some(),
+        delete: caps
+            .session
+            .as_ref()
+            .and_then(|session| session.delete.as_ref())
+            .is_some(),
     }
 }
 
 /// `session/update` 通知处理器共享的连接级状态（连接与 exec 线程各持一份克隆）。
 #[derive(Clone)]
 struct SessionCaches {
-    /// 会话事件路由：agent sessionId -> 该会话所有进行中 prompt 的事件接收端。
-    /// 同一会话允许多个 prompt 并发在途（是否受理由 ACP server 决定），
-    /// `session/update` 通知不区分来源，扇出给全部在途订阅者。
+    /// 会话事件路由：agent sessionId -> 该会话进行中 prompt 的事件接收端。
+    /// `state_update(idle)` 到达时回收该会话全部路由（前台工作已结束）。
     routes: Arc<Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>>,
     /// 会话斜杠命令：agent sessionId -> 最近一次 `available_commands_update`
     /// 的全量集合。缓存在连接层而非事件流——通知可能出现在无 prompt 路由的
     /// 窗口（如 session/new 后 agent 立即下发）。
     commands: Arc<Mutex<HashMap<String, Vec<protocol::SlashCommand>>>>,
-    /// 会话计划：agent sessionId -> 最近一次 `plan` 通知的全量条目（缓存理由同上）。
+    /// 会话计划：agent sessionId -> 最近一次 `plan_update` 通知的全量条目（缓存理由同上）。
     plans: Arc<Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>>>,
     /// ACP 连接是否仍可接受新的调用；断连时先标记失效，再清理事件路由。
     alive: Arc<AtomicBool>,
@@ -226,8 +280,12 @@ impl SessionCaches {
 
 fn send_disconnect_events(tx: mpsc::Sender<AgentEvent>) {
     let error = AgentEvent::Error("ACP 连接已关闭".into());
+    let ended = AgentEvent::StateUpdate {
+        state: SessionState::Idle,
+        reason: protocol::StateChangeReason::Aborted,
+    };
     match tx.try_send(error) {
-        Ok(()) => match tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted)) {
+        Ok(()) => match tx.try_send(ended) {
             Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
             Err(mpsc::error::TrySendError::Full(event)) => {
                 std::thread::spawn(move || {
@@ -239,8 +297,7 @@ fn send_disconnect_events(tx: mpsc::Sender<AgentEvent>) {
         Err(mpsc::error::TrySendError::Full(error)) => {
             std::thread::spawn(move || {
                 if tx.blocking_send(error).is_ok() {
-                    let _ = tx
-                        .blocking_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
+                    let _ = tx.blocking_send(ended);
                 }
             });
         }
@@ -393,8 +450,8 @@ impl AcpConnection {
         Ok((sid, options))
     }
 
-    /// 恢复 agent 自身上下文（ACP `session/resume`，不向客户端重放历史——
-    /// 历史以 server 本地日志为权威。
+    /// 恢复 agent 自身上下文（ACP `session/resume`，不带 `replayFrom`：只恢复上下文、
+    /// 不重放历史——历史以 server 本地存储为权威。
     /// 同一进程内对同一会话幂等（已恢复过则直接成功），返回会话配置选项。
     pub fn resume_session(
         &self,
@@ -420,11 +477,7 @@ impl AcpConnection {
         })
     }
 
-    pub fn prompt(
-        &self,
-        agent_session_id: &str,
-        input: Vec<ContentBlock>,
-    ) -> mpsc::Receiver<AgentEvent> {
+    pub fn prompt(&self, agent_session_id: &str, input: Vec<ContentBlock>) -> PromptStream {
         let (tx, rx) = mpsc::channel::<AgentEvent>(64);
         let registered = {
             let mut routes = self.caches.routes.lock();
@@ -440,8 +493,16 @@ impl AcpConnection {
         };
         if !registered {
             let _ = tx.try_send(AgentEvent::Error("agent 已关闭".into()));
-            let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
-            return rx;
+            let _ = tx.try_send(AgentEvent::StateUpdate {
+                state: SessionState::Idle,
+                reason: protocol::StateChangeReason::Aborted,
+            });
+            return PromptStream {
+                rx,
+                tx,
+                routes: self.caches.routes.clone(),
+                agent_session_id: agent_session_id.to_string(),
+            };
         }
         let req = ExecReq::Prompt {
             sid: agent_session_id.to_string(),
@@ -467,10 +528,18 @@ impl AcpConnection {
             };
             if removed {
                 let _ = tx.try_send(AgentEvent::Error(error));
-                let _ = tx.try_send(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted));
+                let _ = tx.try_send(AgentEvent::StateUpdate {
+                    state: SessionState::Idle,
+                    reason: protocol::StateChangeReason::Aborted,
+                });
             }
         }
-        rx
+        PromptStream {
+            rx,
+            tx,
+            routes: self.caches.routes.clone(),
+            agent_session_id: agent_session_id.to_string(),
+        }
     }
 
     pub fn shutdown(&self) {
@@ -489,6 +558,8 @@ impl AcpConnection {
         }
     }
 
+    /// 取消会话前台工作：ACP v2 中 `session/cancel` 是**通知**，
+    /// 结束以随后到达的 `state_update(idle)` 为准。
     pub fn cancel(&self, agent_session_id: &str) -> Result<(), String> {
         self.call(AcpCall::Cancel {
             sid: agent_session_id.to_string(),
@@ -510,13 +581,12 @@ impl AcpConnection {
     /// 删除 agent 侧会话：close 之后，agent 支持
     /// 删除才调用；不支持删除的 agent 返回 METHOD_NOT_FOUND 类错误，调用方忽略）。
     pub fn delete_session(&self, agent_session_id: &str) -> Result<(), String> {
-        // 会话建立时 agent 未声明 sessionCapabilities.delete：不发请求直接报不支持
-        //（调用方按「不支持」忽略）。避免对 codex 这类声明语义缺失的 agent
-        // 发出必然失败的 session/delete（"no rollout found"）。
+        // 会话建立时 agent 未声明 `capabilities.session.delete`：不发请求直接报不支持
+        //（调用方按「不支持」忽略）。
         if !self.session_caps(agent_session_id).delete {
             self.caches.caps.lock().remove(agent_session_id);
             return Err(
-                "agent 不支持 session/delete（initialize 未声明 sessionCapabilities.delete）"
+                "agent 不支持 session/delete（initialize 未声明 capabilities.session.delete）"
                     .into(),
             );
         }
@@ -577,7 +647,7 @@ impl AcpConnection {
     }
 }
 
-/// yolo 权限批准：从请求选项中选出要批准的选项（纯函数，可单测）。
+/// 权限自动审批：从请求选项中选出要批准的选项（纯函数，可单测）。
 /// 优先 `AllowAlways` > `AllowOnce` > 任意非拒绝选项；
 /// 全为拒绝选项或列表为空 → `None`（无批准项，按取消处理）。
 fn pick_approve_option(options: &[PermissionOption]) -> Option<PermissionOptionId> {
@@ -607,7 +677,7 @@ struct ExecControl {
     ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
 }
 
-/// exec 线程主循环：经官方 SDK 建立 ACP 连接，承载方法分发、通知路由与权限批准。
+/// exec 线程主循环：经官方 SDK 建立 ACP v2 连接，承载方法分发、通知路由与权限批准。
 /// `ready_tx`：就绪握手——连接建立（子进程拉起）且 initialize 握手完成后发送结果；
 /// 若连接在握手前就失败（二进制缺失 / 进程立即退出），在此补发 `Err` 供
 /// `AcpConnection::spawn` 同步快速失败，而非等满超时。
@@ -698,18 +768,13 @@ async fn connect_main(
     ready_tx: &std::sync::mpsc::Sender<Result<(), String>>,
     ready_sent: Arc<std::sync::atomic::AtomicBool>,
 ) -> agent_client_protocol::Result<()> {
-    // 本连接内的 ACP 终端宿主：terminal/* 反向请求在此执行命令并回收进程
-    let terminals: acp_terminal::SharedTerminals =
-        std::sync::Arc::new(acp_terminal::TerminalRegistry::new());
-    // 连接终止时回收剩余终端（service 循环结束时调用）
-    let shutdown_terminals = terminals.clone();
     agent_client_protocol::Client
-        .builder()
+        .v2()
         .name("amux-server")
         .on_receive_notification(
             {
                 let caches = caches.clone();
-                async move |notif: SessionNotification, _cx| {
+                async move |notif: UpdateSessionNotification, _cx| {
                     let SessionCaches {
                         routes,
                         commands,
@@ -724,10 +789,9 @@ async fn connect_main(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
-                // yolo：自动批准，避免额外的审批往返。
-                // 必须选 allow 类选项：claude-acp 等包装器的选项列表**第一项往往是
-                // 「Deny/reject」**，选第一个会被 agent 误判为用户拒绝
-                // （"User refused permission to run tool"）。
+                // 自动审批，避免额外的审批往返。
+                // 必须选 allow 类选项：选项列表**第一项往往是「拒绝」**，
+                // 选第一个会被 agent 误判为用户拒绝。
                 let outcome = pick_approve_option(&request.options)
                     .map(|id| {
                         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id))
@@ -738,127 +802,27 @@ async fn connect_main(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        // ACP terminal/* 反向请求（初始化已声明 terminal 能力）
-        .on_receive_request(
-            {
-                let terminals = terminals.clone();
-                async move |request: CreateTerminalRequest, responder, _cx| {
-                    match terminals.create(&request) {
-                        Ok(resp) => {
-                            let _ = responder.respond(resp);
-                        }
-                        Err(e) => {
-                            log::warn!("{e}");
-                            let _ = responder.respond_with_internal_error(e);
-                        }
-                    }
-                    Ok(())
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = terminals.clone();
-                async move |request: TerminalOutputRequest, responder, _cx| {
-                    match terminals.output(&request) {
-                        Ok(resp) => {
-                            let _ = responder.respond(resp);
-                        }
-                        Err(e) => {
-                            log::warn!("{e}");
-                            let _ = responder.respond_with_internal_error(e);
-                        }
-                    }
-                    Ok(())
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = terminals.clone();
-                async move |request: WaitForTerminalExitRequest, responder, _cx| {
-                    match terminals.wait(&request).await {
-                        Ok(resp) => {
-                            let _ = responder.respond(resp);
-                        }
-                        Err(e) => {
-                            log::warn!("{e}");
-                            let _ = responder.respond_with_internal_error(e);
-                        }
-                    }
-                    Ok(())
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = terminals.clone();
-                async move |request: KillTerminalRequest, responder, _cx| {
-                    match terminals.kill(&request) {
-                        Ok(resp) => {
-                            let _ = responder.respond(resp);
-                        }
-                        Err(e) => {
-                            log::warn!("{e}");
-                            let _ = responder.respond_with_internal_error(e);
-                        }
-                    }
-                    Ok(())
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let terminals = terminals.clone();
-                async move |request: ReleaseTerminalRequest, responder, _cx| {
-                    match terminals.release(&request) {
-                        Ok(resp) => {
-                            let _ = responder.respond(resp);
-                        }
-                        Err(e) => {
-                            log::warn!("{e}");
-                            let _ = responder.respond_with_internal_error(e);
-                        }
-                    }
-                    Ok(())
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
         .connect_with(agent, {
             let caches = caches.clone();
-            move |cx: ConnectionTo<agent_client_protocol::Agent>| async move {
+            move |cx: V2ConnectionTo<agent_client_protocol::Agent>| async move {
                 let caches = caches;
                 let req_rx = req_rx;
                 // 初始化握手（版本协商）。失败需区分两种情形：
-                // - **协议级失败**（agent 存活但不实现 initialize，如返回 method not
-                //   found）：仅记录、连接保持可用，视为拉起成功；
+                // - **协议级失败**（agent 存活但不实现 initialize）：仅记录、连接保持可用；
                 // - **传输层失败**（进程已退出 / 连接已死，如 npx 不可用、无网络）：拉起失败。
                 // 二者用短窗口探测连接活性区分：incoming_closed 在传输层关闭后很快完成，
                 // 超时则连接仍存活。
-                // 声明客户端能力：会话配置选项由 ACP 会话提供，需客户端声明
-                // configOptions 能力
-                // agent 才会在 new/resume 响应中下发选项并接受 set_config_option）
-                // 与 terminal/*（kimi acp 等将 shell 执行委托给客户端）。
-                let init_request = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
-                    ClientCapabilities::new()
-                        .session(
-                            ClientSessionCapabilities::new().config_options(
-                                SessionConfigOptionsCapabilities::new()
-                                    .boolean(BooleanConfigOptionCapabilities::new()),
-                            ),
-                        )
-                        .terminal(true),
-                );
+                // 客户端能力为空：不使用文件系统/终端反向能力，会话选项由 ACP 会话提供。
+                let init_request = InitializeRequest::new(
+                    ProtocolVersion::V2,
+                    Implementation::new("amux-server", env!("CARGO_PKG_VERSION")),
+                )
+                .capabilities(ClientCapabilities::default());
                 let init_result = match cx.send_request(init_request).block_task().await {
                     core::result::Result::Ok(resp) => {
                         // 记录 agent 侧声明的连接默认能力，供后续会话建立时复制。
                         *caches.default_caps.lock() =
-                            session_caps_from_agent_caps(&resp.agent_capabilities);
+                            session_caps_from_agent_caps(&resp.capabilities);
                         log::debug!("initialize 完成");
                         core::result::Result::Ok(())
                     }
@@ -926,94 +890,63 @@ async fn connect_main(
                                     .iter()
                                     .filter_map(acp_content_block)
                                     .collect::<Vec<_>>();
-                                let callback_sid = sid.clone();
-                                let callback_routes = routes.clone();
-                                let callback_tx = tx.clone();
-                                let result = cx
+                                // v2 的 prompt 响应只表示受理；前台工作结束由
+                                // `state_update(idle)` 报告（通知路由据此回收路由）。
+                                match cx
                                     .send_request(PromptRequest::new(sid.clone(), blocks))
-                                    .on_receiving_result(async move |result| {
-                                        // turn 完成：按通道身份移除本次 prompt 的路由条目并发送
-                                        // TurnEnded（在最后一批通知之后）。同会话其他在途 prompt
-                                        // 的条目保留，继续接收后续通知。
-                                        // 结束原因取自 ACP prompt 响应的 stopReason（权威归因）
-                                        let route = {
-                                            let mut routes = callback_routes.lock();
+                                    .block_task()
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        log::debug!("prompt 已受理 {sid}");
+                                        let _ = tx.send(AgentEvent::PromptAccepted).await;
+                                    }
+                                    Err(e) => {
+                                        log::error!("prompt 调用失败 {sid}: {e}");
+                                        // 路由回收沿用它自己的通道身份：同会话其他在途 prompt 不受影响
+                                        let removed = {
+                                            let mut routes = routes.lock();
                                             let mut found = None;
-                                            if let Some(txs) = routes.get_mut(&callback_sid) {
-                                                if let Some(idx) = txs
-                                                    .iter()
-                                                    .position(|s| s.same_channel(&callback_tx))
+                                            if let Some(txs) = routes.get_mut(&sid) {
+                                                if let Some(idx) =
+                                                    txs.iter().position(|s| s.same_channel(&tx))
                                                 {
                                                     found = Some(txs.remove(idx));
                                                 }
                                                 if txs.is_empty() {
-                                                    routes.remove(&callback_sid);
+                                                    routes.remove(&sid);
                                                 }
                                             }
                                             found
                                         };
-                                        if let Some(tx) = route {
-                                            let reason = match &result {
-                                                Ok(resp) => stop_reason_reason(resp.stop_reason),
-                                                Err(_) => protocol::StateChangeReason::Aborted,
-                                            };
-                                            if let core::result::Result::Err(e) = &result {
-                                                let _ = tx
-                                                    .send(AgentEvent::PromptFailed(format!(
-                                                        "ACP prompt 失败: {e}"
-                                                    )))
-                                                    .await;
-                                            }
-                                            let _ = tx.send(AgentEvent::TurnEnded(reason)).await;
+                                        if let Some(tx) = removed {
+                                            let _ = tx
+                                                .send(AgentEvent::PromptFailed(format!(
+                                                    "ACP prompt 失败: {e}"
+                                                )))
+                                                .await;
+                                            let _ = tx
+                                                .send(AgentEvent::StateUpdate {
+                                                    state: SessionState::Idle,
+                                                    reason: protocol::StateChangeReason::Aborted,
+                                                })
+                                                .await;
                                         }
-                                        core::result::Result::Ok(())
-                                    });
-                                if let Err(e) = result {
-                                    log::error!("prompt 调用失败 {sid}: {e}");
-                                    // 回调不会触发：按通道身份回收自己的路由条目并结束本次事件流
-                                    let route = {
-                                        let mut routes = routes.lock();
-                                        let mut found = None;
-                                        if let Some(txs) = routes.get_mut(&sid) {
-                                            if let Some(idx) =
-                                                txs.iter().position(|s| s.same_channel(&tx))
-                                            {
-                                                found = Some(txs.remove(idx));
-                                            }
-                                            if txs.is_empty() {
-                                                routes.remove(&sid);
-                                            }
-                                        }
-                                        found
-                                    };
-                                    if let Some(tx) = route {
-                                        let _ = tx
-                                            .send(AgentEvent::Error(format!(
-                                                "ACP prompt 调用失败: {e}"
-                                            )))
-                                            .await;
-                                        let _ = tx
-                                            .send(AgentEvent::TurnEnded(
-                                                protocol::StateChangeReason::Aborted,
-                                            ))
-                                            .await;
                                     }
                                 }
                             });
                         }
                     }
                 }
-                // 服务循环结束（connection 已 shutdown）：回收本连接的终端子进程
-                shutdown_terminals.terminate_all().await;
                 core::result::Result::Ok(())
             }
         })
         .await
 }
 
-/// 分发 ACP v1 方法调用（强类型 AcpCall，经官方 SDK 传输）。
+/// 分发 ACP v2 方法调用（强类型 AcpCall，经官方 SDK 传输）。
 async fn dispatch_call(
-    cx: &ConnectionTo<agent_client_protocol::Agent>,
+    cx: &V2ConnectionTo<agent_client_protocol::Agent>,
     call: &AcpCall,
 ) -> Result<AcpResponse, String> {
     let label = match call {
@@ -1034,13 +967,13 @@ async fn dispatch_call(
 }
 
 async fn dispatch_call_inner(
-    cx: &ConnectionTo<agent_client_protocol::Agent>,
+    cx: &V2ConnectionTo<agent_client_protocol::Agent>,
     call: &AcpCall,
 ) -> Result<AcpResponse, String> {
     match call {
         AcpCall::NewSession { cwd } => {
             let resp = cx
-                .send_request(NewSessionRequest::new(cwd))
+                .send_request(NewSessionRequest::new(cwd.as_str()))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/new 失败: {e}"))?;
@@ -1050,8 +983,9 @@ async fn dispatch_call_inner(
             })
         }
         AcpCall::Resume { sid, cwd } => {
+            // 不带 replayFrom：只恢复 agent 上下文，历史以 server 本地存储为权威
             let resp = cx
-                .send_request(ResumeSessionRequest::new(sid.clone(), cwd))
+                .send_request(ResumeSessionRequest::new(sid.as_str(), cwd.as_str()))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/resume 失败: {e}"))?;
@@ -1060,21 +994,21 @@ async fn dispatch_call_inner(
             )))
         }
         AcpCall::Cancel { sid } => {
-            cx.send_notification(CancelNotification::new(sid.clone()))
+            cx.send_notification(CancelSessionNotification::new(sid.as_str()))
                 .map_err(|e| format!("session/cancel 失败: {e}"))?;
             Ok(AcpResponse::Unit)
         }
         AcpCall::Close { sid } => {
-            cx.send_request(CloseSessionRequest::new(sid.clone()))
+            cx.send_request(CloseSessionRequest::new(sid.as_str()))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/close 失败: {e}"))?;
             Ok(AcpResponse::Unit)
         }
         AcpCall::Delete { sid } => {
-            // 仅 agent 声明 sessionCapabilities.delete 时可用；不支持时返回错误，
+            // 仅 agent 声明 `capabilities.session.delete` 时可用；不支持时返回错误，
             // 调用方（会话删除路径）按「不支持删除」忽略。
-            cx.send_request(DeleteSessionRequest::new(sid.clone()))
+            cx.send_request(DeleteSessionRequest::new(sid.as_str()))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/delete 失败（agent 可能不支持删除）: {e}"))?;
@@ -1085,159 +1019,251 @@ async fn dispatch_call_inner(
             config_id,
             value,
         } => {
-            // 客户端已声明 configOptions 能力；不支持时 agent 返回错误并向上传播。
             let acp_value = match value {
                 protocol::SessionConfigOptionValue::ValueId { value } => {
-                    AcpSessionConfigOptionValue::value_id(
-                        agent_client_protocol::schema::v1::SessionConfigValueId::new(
+                    AcpSessionConfigOptionValue::Id {
+                        value: agent_client_protocol::schema::v2::SessionConfigValueId::new(
                             value.as_str(),
                         ),
-                    )
+                    }
                 }
                 protocol::SessionConfigOptionValue::Boolean { value } => {
-                    AcpSessionConfigOptionValue::boolean(*value)
+                    AcpSessionConfigOptionValue::Boolean { value: *value }
                 }
             };
             let resp = cx
                 .send_request(SetSessionConfigOptionRequest::new(
-                    sid.clone(),
-                    config_id.clone(),
+                    sid.as_str(),
+                    config_id.as_str(),
                     acp_value,
                 ))
                 .block_task()
                 .await
                 .map_err(|e| format!("session/set_config_option 失败: {e}"))?;
-            Ok(AcpResponse::ConfigOptions(acp_config_options(Some(
+            Ok(AcpResponse::ConfigOptions(acp_config_options(
                 resp.config_options,
-            ))))
+            )))
         }
     }
 }
 
 /// ACP stopReason → 状态变更原因。
 /// 未识别的新枚举值按正常结束处理（仅 cancelled 参与注入过滤）。
-fn stop_reason_reason(reason: StopReason) -> protocol::StateChangeReason {
+fn stop_reason_reason(reason: Option<&StopReason>) -> protocol::StateChangeReason {
     match reason {
-        StopReason::Cancelled => protocol::StateChangeReason::Cancelled,
-        StopReason::MaxTokens => protocol::StateChangeReason::MaxTokens,
-        StopReason::MaxTurnRequests => protocol::StateChangeReason::MaxTurnRequests,
-        StopReason::Refusal => protocol::StateChangeReason::Refusal,
-        _ => protocol::StateChangeReason::Completed,
+        Some(StopReason::Cancelled) => protocol::StateChangeReason::Cancelled,
+        Some(StopReason::MaxTokens) => protocol::StateChangeReason::MaxTokens,
+        Some(StopReason::MaxTurnRequests) => protocol::StateChangeReason::MaxTurnRequests,
+        Some(StopReason::Refusal) => protocol::StateChangeReason::Refusal,
+        // 实现自定义的 `_error`：前台工作以错误结束
+        Some(StopReason::Other(value)) if value == ERROR_STOP_REASON => {
+            protocol::StateChangeReason::Aborted
+        }
+        None => protocol::StateChangeReason::Completed,
+        Some(_) => protocol::StateChangeReason::Completed,
     }
 }
 
+/// agent 以错误结束前台工作时上报的 stopReason（实现自定义值）。
+const ERROR_STOP_REASON: &str = "_error";
+
 /// 把 ACP `session/update` 通知映射为 AgentEvent 并路由。
+/// `state_update(idle)` 表示前台工作结束：事件送达后回收该会话的全部路由，
+/// 使各在途 turn 的事件流随之结束。
 async fn route_update(
     routes: &Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>,
     commands: &Mutex<HashMap<String, Vec<protocol::SlashCommand>>>,
     plans: &Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>>,
-    notif: &SessionNotification,
+    notif: &UpdateSessionNotification,
 ) {
-    // 一次通知可能同时产生多个事件（如 tool_call_update 同时更新标题并携带结果）。
-    let evs: Vec<AgentEvent> = match &notif.update {
-        // 用户消息由 server 直接落盘，不重复放入活动流。
-        SessionUpdate::UserMessageChunk(_) => Vec::new(),
-        SessionUpdate::AgentMessageChunk(chunk) => text_of(&chunk.content)
-            .map(AgentEvent::OutputChunk)
-            .into_iter()
-            .collect(),
-        SessionUpdate::AgentThoughtChunk(chunk) => text_of(&chunk.content)
-            .map(AgentEvent::Thinking)
-            .into_iter()
-            .collect(),
-        SessionUpdate::ToolCall(tc) => vec![AgentEvent::ToolCall {
-            id: tc.tool_call_id.0.to_string(),
-            name: Some(tool_kind_str(&tc.kind)),
-            title: Some(tc.title.clone()),
-            parameters: tc.raw_input.as_ref().map(|v| v.to_string()),
-        }],
-        // ACP `tool_call_update`：`kind`/`title`/`raw_input` 按 `tool_call_id`
-        // 合并到同一条活动；`content`（工具结果）不单独成条活动。
-        // 仅当携带可合并字段时才发出调用事件，避免空更新产生无意义条目。
-        SessionUpdate::ToolCallUpdate(tcu) => {
-            let name = tcu.fields.kind.as_ref().map(tool_kind_str);
-            let title = tcu.fields.title.clone();
-            let parameters = tcu.fields.raw_input.as_ref().map(|v| v.to_string());
-            if name.is_some() || title.is_some() || parameters.is_some() {
-                vec![AgentEvent::ToolCall {
-                    id: tcu.tool_call_id.0.to_string(),
-                    name,
-                    title,
-                    parameters,
-                }]
-            } else {
-                Vec::new()
+    let session_id = notif.session_id.to_string();
+    // 一次通知可能同时产生多个事件。
+    let mut evs: Vec<AgentEvent> = Vec::new();
+    let mut idle = false;
+    match &notif.update {
+        // 用户消息由 server 直接落盘，不重复进入历史与活动流。
+        SessionUpdate::UserMessageChunk(_) | SessionUpdate::UserMessage(_) => {}
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            if let Some(text) = text_of(&chunk.content) {
+                evs.push(AgentEvent::AgentMessageChunk {
+                    message_id: chunk.message_id.to_string(),
+                    text,
+                });
             }
         }
-        SessionUpdate::UsageUpdate(update) => vec![AgentEvent::UsageUpdate {
+        SessionUpdate::AgentMessage(message) => {
+            let text = match &message.content {
+                MaybeUndefined::Undefined => None,
+                MaybeUndefined::Null => Some(None),
+                MaybeUndefined::Value(blocks) => Some(join_text(blocks)),
+            };
+            if let Some(text) = text {
+                evs.push(AgentEvent::AgentMessageSnapshot {
+                    message_id: message.message_id.to_string(),
+                    text,
+                });
+            }
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            if let Some(text) = text_of(&chunk.content) {
+                evs.push(AgentEvent::ThinkingChunk {
+                    message_id: chunk.message_id.to_string(),
+                    text,
+                });
+            }
+        }
+        SessionUpdate::AgentThought(thought) => {
+            let text = match &thought.content {
+                MaybeUndefined::Undefined => None,
+                MaybeUndefined::Null => Some(None),
+                MaybeUndefined::Value(blocks) => Some(join_text(blocks)),
+            };
+            if let Some(text) = text {
+                evs.push(AgentEvent::ThinkingSnapshot {
+                    message_id: thought.message_id.to_string(),
+                    text,
+                });
+            }
+        }
+        SessionUpdate::StateUpdate(state) => match state {
+            StateUpdate::Running(_) | StateUpdate::RequiresAction(_) => {
+                evs.push(AgentEvent::StateUpdate {
+                    state: SessionState::Busy,
+                    reason: protocol::StateChangeReason::Completed,
+                });
+            }
+            StateUpdate::Idle(idle_state) => {
+                idle = true;
+                let reason = stop_reason_reason(idle_state.stop_reason.as_ref());
+                // 错误结束的前台工作：先记一条错误活动，再以上报状态结束本轮
+                if matches!(
+                    idle_state.stop_reason.as_ref(),
+                    Some(StopReason::Other(value)) if value == ERROR_STOP_REASON
+                ) {
+                    evs.push(AgentEvent::Error(
+                        "agent 前台工作以错误结束（stopReason=_error）".to_string(),
+                    ));
+                }
+                evs.push(AgentEvent::StateUpdate {
+                    state: SessionState::Idle,
+                    reason,
+                });
+            }
+            _ => {}
+        },
+        SessionUpdate::ToolCallUpdate(update) => {
+            if let Some(event) = tool_call_event(update) {
+                evs.push(event);
+            }
+        }
+        SessionUpdate::UsageUpdate(update) => evs.push(AgentEvent::UsageUpdate {
             used: update.used,
             size: update.size,
-        }],
-        // ACP `config_options_update`：会话配置选项变更（完整集合）。
-        SessionUpdate::ConfigOptionUpdate(update) => vec![AgentEvent::ConfigOptions(
-            acp_config_options(Some(update.config_options.clone())),
-        )],
-        // ACP `available_commands_update`：斜杠命令全量覆盖连接内存缓存
-        // 以 Agent 侧数据为权威。
-        // 不产生事件流——通知可能出现在无 prompt 路由的窗口，缓存于连接层。
+        }),
+        // `config_option_update`：会话配置选项变更（完整集合）。
+        SessionUpdate::ConfigOptionUpdate(update) => evs.push(AgentEvent::ConfigOptions(
+            acp_config_options(update.config_options.clone()),
+        )),
+        // `available_commands_update`：斜杠命令全量覆盖连接内存缓存
+        // 以 Agent 侧数据为权威。不产生事件流——通知可能出现在无 prompt 路由的窗口。
         SessionUpdate::AvailableCommandsUpdate(update) => {
             commands.lock().insert(
-                notif.session_id.to_string(),
-                acp_slash_commands(update.available_commands.clone()),
+                session_id.clone(),
+                acp_slash_commands(&update.available_commands),
             );
-            Vec::new()
         }
-        // ACP `plan`：agent 计划全量覆盖连接内存缓存
-        // 以 Agent 侧数据为权威。
-        // 不产生事件流，理由同上。
-        SessionUpdate::Plan(update) => {
-            plans.lock().insert(
-                notif.session_id.to_string(),
-                acp_plan(update.entries.clone()),
-            );
-            Vec::new()
+        // `plan_update`：agent 计划全量覆盖连接内存缓存（仅 items 型计划有对应投影）。
+        SessionUpdate::PlanUpdate(update) => {
+            if let PlanUpdateContent::Items(items) = &update.plan {
+                plans
+                    .lock()
+                    .insert(session_id.clone(), acp_plan(&items.entries));
+            }
         }
-        // SessionInfoUpdate（ACP v1 未携带状态字段）/ CurrentModeUpdate 等
-        // 不产生 AgentEvent
-        _ => Vec::new(),
-    };
-    if !evs.is_empty() {
-        let txs = routes
-            .lock()
-            .get(notif.session_id.to_string().as_str())
-            .cloned()
-            .unwrap_or_default();
-        for tx in txs {
-            for ev in &evs {
-                if tx.send(ev.clone()).await.is_err() {
-                    log::warn!("agent 事件接收端已关闭");
-                }
+        // 工具调用内容流、agent 自有终端、会话元信息等不进入 amux 的活动模型
+        _ => {}
+    }
+    let _ = idle;
+    if evs.is_empty() {
+        return;
+    }
+    // 路由回收由各 turn 自己完成（见 `PromptStream::close`）：一条提前到达的
+    // idle 不能注销尚未观察到 running 的 turn，否则它会收不到自己的 running。
+    let txs = routes.lock().get(&session_id).cloned().unwrap_or_default();
+    for tx in txs {
+        for ev in &evs {
+            if tx.send(ev.clone()).await.is_err() {
+                log::warn!("agent 事件接收端已关闭");
             }
         }
     }
 }
 
-/// ContentBlock → 文本（仅 text 类型；其他类型记 debug 日志后忽略——
-/// 对话历史按 IM 式文本流处理，非文本块暂无落盘表示。
+/// `tool_call_update` → 工具调用事件（`name`/`title`/`raw_input` 均可缺省，
+/// 缺省字段表示保持不变）。
+fn tool_call_event(update: &ToolCallUpdate) -> Option<AgentEvent> {
+    let name = match &update.kind {
+        MaybeUndefined::Value(kind) => Some(tool_kind_str(kind)),
+        MaybeUndefined::Null => Some(String::new()),
+        MaybeUndefined::Undefined => None,
+    };
+    let title = match &update.title {
+        MaybeUndefined::Value(title) => Some(title.clone()),
+        MaybeUndefined::Null => Some(String::new()),
+        MaybeUndefined::Undefined => None,
+    };
+    let parameters = match &update.raw_input {
+        MaybeUndefined::Value(value) => Some(value.to_string()),
+        // `null` 清除参数：以空字符串表示「已清空」，与「未携带」区分
+        MaybeUndefined::Null => Some(String::new()),
+        MaybeUndefined::Undefined => None,
+    };
+    if name.is_none() && title.is_none() && parameters.is_none() {
+        return None;
+    }
+    Some(AgentEvent::ToolCall {
+        id: update.tool_call_id.to_string(),
+        name: name.filter(|s| !s.is_empty()),
+        title: title.filter(|s| !s.is_empty()),
+        parameters: parameters.filter(|s| !s.is_empty()),
+    })
+}
+
+/// 内容块 → 文本（仅 text 类型；其他类型记 debug 日志后忽略——
+/// 对话历史按 IM 式文本流处理，非文本块暂无落盘表示）。
 fn text_of(block: &AcpContentBlock) -> Option<String> {
     match block {
         AcpContentBlock::Text(t) => Some(t.text.clone()),
         other => {
-            let kind = match other {
-                AcpContentBlock::Image(_) => "image",
-                AcpContentBlock::Audio(_) => "audio",
-                AcpContentBlock::Resource(_) => "resource",
-                AcpContentBlock::ResourceLink(_) => "resource_link",
-                _ => "unknown",
-            };
-            log::debug!("忽略非文本内容块（{kind}）");
+            log::debug!("忽略非文本内容块（{}）", content_kind(other));
             None
         }
     }
 }
 
+/// 内容块列表 → 文本（多块直接拼接；非文本块忽略）。
+fn join_text(blocks: &[AcpContentBlock]) -> Option<String> {
+    let text: String = blocks.iter().filter_map(text_of).collect();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn content_kind(block: &AcpContentBlock) -> &'static str {
+    match block {
+        AcpContentBlock::Text(_) => "text",
+        AcpContentBlock::Image(_) => "image",
+        AcpContentBlock::Audio(_) => "audio",
+        AcpContentBlock::Resource(_) => "resource",
+        AcpContentBlock::ResourceLink(_) => "resource_link",
+        _ => "unknown",
+    }
+}
+
 /// ToolKind → 字符串（serde 序列化的 snake_case 名，如 `execute` / `read`）。
-fn tool_kind_str(kind: &ToolKind) -> String {
+fn tool_kind_str(kind: &agent_client_protocol::schema::v2::ToolKind) -> String {
     serde_json::to_value(kind)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
@@ -1246,15 +1272,14 @@ fn tool_kind_str(kind: &ToolKind) -> String {
 
 /// ACP `SessionConfigOption` 列表 → amux 协议投影。
 /// select 选项的分组展平为扁平 (value, name) 列表（group 名并入 name 前缀）。
-fn acp_config_options(
-    options: Option<Vec<AcpSessionConfigOption>>,
+pub(crate) fn acp_config_options(
+    options: Vec<AcpSessionConfigOption>,
 ) -> Vec<protocol::SessionConfigOption> {
     options
-        .unwrap_or_default()
         .into_iter()
         .map(|opt| {
             let kind = match opt.kind {
-                agent_client_protocol::schema::v1::SessionConfigKind::Select(sel) => {
+                SessionConfigKind::Select(sel) => {
                     let entries: Vec<protocol::SessionConfigSelectEntry> = match sel.options {
                         SessionConfigSelectOptions::Ungrouped(list) => list
                             .into_iter()
@@ -1266,7 +1291,7 @@ fn acp_config_options(
                         SessionConfigSelectOptions::Grouped(groups) => groups
                             .into_iter()
                             .flat_map(|g| {
-                                let prefix = format!("{} · ", g.group.0);
+                                let prefix = format!("{} · ", g.name);
                                 g.options.into_iter().map(move |o| {
                                     protocol::SessionConfigSelectEntry {
                                         value: o.value.0.to_string(),
@@ -1275,7 +1300,6 @@ fn acp_config_options(
                                 })
                             })
                             .collect(),
-                        // SDK 1.4.0 仅含 Ungrouped/Grouped；non_exhaustive 要求通配
                         _ => Vec::new(),
                     };
                     protocol::SessionConfigKind::Select {
@@ -1283,19 +1307,17 @@ fn acp_config_options(
                         options: entries,
                     }
                 }
-                agent_client_protocol::schema::v1::SessionConfigKind::Boolean(b) => {
-                    protocol::SessionConfigKind::Boolean {
-                        current_value: b.current_value,
-                    }
-                }
-                // SDK 1.4.0 仅含 Select/Boolean；non_exhaustive 要求通配
+                SessionConfigKind::Boolean(b) => protocol::SessionConfigKind::Boolean {
+                    current_value: b.current_value,
+                },
+                // 未知/未来类型：降级为空 select（保留选项本身）
                 _ => protocol::SessionConfigKind::Select {
                     current_value: String::new(),
                     options: Vec::new(),
                 },
             };
             protocol::SessionConfigOption {
-                id: opt.id.0.to_string(),
+                id: opt.config_id.0.to_string(),
                 name: opt.name,
                 description: opt.description,
                 // category 序列化为不带 JSON 引号的 snake_case 字符串（如 model）
@@ -1310,35 +1332,33 @@ fn acp_config_options(
         .collect()
 }
 
-/// ACP `AvailableCommand` 列表 → amux 协议投影（input 仅支持 unstructured 提示）。
-fn acp_slash_commands(
-    commands: Vec<agent_client_protocol::schema::v1::AvailableCommand>,
-) -> Vec<protocol::SlashCommand> {
+/// ACP `AvailableCommand` 列表 → amux 协议投影（input 仅支持文本提示）。
+fn acp_slash_commands(commands: &[AvailableCommand]) -> Vec<protocol::SlashCommand> {
     commands
-        .into_iter()
+        .iter()
         .map(|c| protocol::SlashCommand {
-            name: c.name,
-            description: c.description,
-            hint: c.input.and_then(|input| match input {
-                AvailableCommandInput::Unstructured(u) => Some(u.hint),
-                // SDK 1.4.0 仅含 Unstructured；non_exhaustive 要求通配
+            name: c.name.clone(),
+            description: c.description.clone(),
+            hint: c.input.as_ref().and_then(|input| match input {
+                AvailableCommandInput::Text(text) => Some(text.hint.clone()),
                 _ => None,
             }),
         })
         .collect()
 }
 
-/// ACP `PlanEntry` 列表 → amux 协议投影（priority/status 非穷尽枚举按通配回落 Medium/Pending）。
+/// ACP `PlanEntry` 列表 → amux 协议投影（priority/status 非穷尽枚举按通配回落）。
 fn acp_plan(
-    entries: Vec<agent_client_protocol::schema::v1::PlanEntry>,
+    entries: &[agent_client_protocol::schema::v2::PlanEntry],
 ) -> Vec<protocol::SessionPlanEntry> {
-    use agent_client_protocol::schema::v1::{PlanEntryPriority, PlanEntryStatus};
+    use agent_client_protocol::schema::v2::{PlanEntryPriority, PlanEntryStatus};
     entries
-        .into_iter()
+        .iter()
         .map(|e| protocol::SessionPlanEntry {
-            content: e.content,
+            content: e.content.clone(),
             priority: match e.priority {
                 PlanEntryPriority::High => protocol::SessionPlanPriority::High,
+                PlanEntryPriority::Medium => protocol::SessionPlanPriority::Medium,
                 PlanEntryPriority::Low => protocol::SessionPlanPriority::Low,
                 _ => protocol::SessionPlanPriority::Medium,
             },
@@ -1362,15 +1382,15 @@ fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
             blob,
         } => {
             let uri = uri.clone().unwrap_or_default();
+            let media_type = (!mime_type.is_empty()).then(|| MediaType::new(mime_type.clone()));
             let resource = if let Some(blob) = blob {
                 EmbeddedResourceResource::BlobResourceContents(
-                    BlobResourceContents::new(blob.clone(), uri.clone())
-                        .mime_type(mime_type.clone()),
+                    BlobResourceContents::new(blob.clone(), uri.clone()).mime_type(media_type),
                 )
             } else {
                 EmbeddedResourceResource::TextResourceContents(
                     TextResourceContents::new(text.clone().unwrap_or_default(), uri.clone())
-                        .mime_type(mime_type.clone()),
+                        .mime_type(media_type),
                 )
             };
             Some(AcpContentBlock::Resource(EmbeddedResource::new(resource)))
@@ -1383,7 +1403,7 @@ fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
             description,
         } => Some(AcpContentBlock::ResourceLink(
             ResourceLink::new(name.clone(), uri.clone())
-                .mime_type(mime_type.clone())
+                .mime_type(mime_type.clone().map(MediaType::new))
                 .title(title.clone())
                 .description(description.clone()),
         )),
@@ -1393,26 +1413,18 @@ fn acp_content_block(b: &ContentBlock) -> Option<AcpContentBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{
-        AvailableCommandsUpdate, ConfigOptionUpdate, ContentBlock as AcpContentBlock, ContentChunk,
-        SessionConfigOption, SessionConfigSelectOption, SessionId, TextContent, ToolCall,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    };
     use tokio::sync::mpsc;
 
     type Routes = Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>;
 
-    fn route_with_channel() -> (Routes, mpsc::Receiver<AgentEvent>) {
-        let (tx, rx) = mpsc::channel(16);
-        let routes = Mutex::new(HashMap::from([("s1".to_string(), vec![tx])]));
-        (routes, rx)
+    fn routes_with(tx: mpsc::Sender<AgentEvent>) -> Routes {
+        Mutex::new(HashMap::from([("s1".to_string(), vec![tx])]))
     }
 
     #[tokio::test]
     async fn disconnect_wakes_turn_when_event_channel_is_full() {
         let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(AgentEvent::OutputChunk("尚未处理".into()))
-            .unwrap();
+        tx.try_send(AgentEvent::Error("尚未处理".into())).unwrap();
         let caches = SessionCaches {
             routes: Arc::new(Mutex::new(HashMap::from([("s1".into(), vec![tx])]))),
             ..SessionCaches::default()
@@ -1422,14 +1434,18 @@ mod tests {
 
         assert!(matches!(
             rx.recv().await,
-            Some(AgentEvent::OutputChunk(text)) if text == "尚未处理"
+            Some(AgentEvent::Error(message)) if message == "尚未处理"
         ));
-        assert!(
-            matches!(rx.recv().await, Some(AgentEvent::Error(message)) if message == "ACP 连接已关闭")
-        );
         assert!(matches!(
             rx.recv().await,
-            Some(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted))
+            Some(AgentEvent::Error(message)) if message == "ACP 连接已关闭"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AgentEvent::StateUpdate {
+                state: SessionState::Idle,
+                reason: protocol::StateChangeReason::Aborted
+            })
         ));
         assert!(caches.routes.lock().is_empty());
     }
@@ -1483,432 +1499,141 @@ mod tests {
         ));
         assert!(matches!(
             rx.recv().await,
-            Some(AgentEvent::TurnEnded(protocol::StateChangeReason::Aborted))
+            Some(AgentEvent::StateUpdate {
+                state: SessionState::Idle,
+                reason: protocol::StateChangeReason::Aborted
+            })
         ));
     }
 
     #[test]
     fn session_caps_from_agent_capabilities() {
-        use agent_client_protocol::schema::v1::{
+        use agent_client_protocol::schema::v2::{
             AgentCapabilities, SessionCapabilities, SessionDeleteCapabilities,
         };
-        // 未声明 sessionCapabilities.delete：不支持删除
-        let caps = session_caps_from_agent_caps(&AgentCapabilities::new());
+        // 未声明 capabilities.session.delete：不支持删除
+        let caps = session_caps_from_agent_caps(&AgentCapabilities::default());
         assert!(!caps.delete);
         // 声明 `{}`：支持删除
-        let caps = session_caps_from_agent_caps(&AgentCapabilities::new().session_capabilities(
-            SessionCapabilities::new().delete(SessionDeleteCapabilities::new()),
-        ));
+        let caps =
+            session_caps_from_agent_caps(&AgentCapabilities::default().session(
+                SessionCapabilities::default().delete(SessionDeleteCapabilities::default()),
+            ));
         assert!(caps.delete);
     }
 
-    #[tokio::test]
-    async fn route_update_available_commands_overwrites_cache() {
-        let routes = Mutex::new(HashMap::new());
-        let commands: Mutex<HashMap<String, Vec<protocol::SlashCommand>>> =
-            Mutex::new(HashMap::new());
-        let notif = |cmds: Vec<agent_client_protocol::schema::v1::AvailableCommand>| {
-            SessionNotification::new(
-                SessionId::new("s1"),
-                SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(cmds)),
-            )
-        };
-        route_update(
-            &routes,
-            &commands,
-            &Mutex::new(HashMap::new()),
-            &notif(vec![
-                agent_client_protocol::schema::v1::AvailableCommand::new("goal", "目标"),
-            ]),
-        )
-        .await;
-        assert_eq!(commands.lock()["s1"].len(), 1);
-        // 新通知全量覆盖旧集合。
-        route_update(
-            &routes,
-            &commands,
-            &Mutex::new(HashMap::new()),
-            &notif(Vec::new()),
-        )
-        .await;
-        assert!(commands.lock()["s1"].is_empty());
-        // 无 prompt 路由时通知仍被缓存（不产生事件流）
-    }
+    #[test]
+    fn idle_state_update_is_delivered_and_keeps_routes() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            let routes = routes_with(tx);
+            let commands = Mutex::new(HashMap::new());
+            let plans = Mutex::new(HashMap::new());
+            let notif = UpdateSessionNotification::new(
+                "s1",
+                SessionUpdate::StateUpdate(StateUpdate::Idle(
+                    agent_client_protocol::schema::v2::IdleStateUpdate::default()
+                        .stop_reason(StopReason::EndTurn),
+                )),
+            );
+            route_update(&routes, &commands, &plans, &notif).await;
 
-    #[tokio::test]
-    async fn route_update_plan_overwrites_cache() {
-        use agent_client_protocol::schema::v1::{
-            Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-        };
-        let routes = Mutex::new(HashMap::new());
-        let plans: Mutex<HashMap<String, Vec<protocol::SessionPlanEntry>>> =
-            Mutex::new(HashMap::new());
-        let notif = |entries: Vec<agent_client_protocol::schema::v1::PlanEntry>| {
-            SessionNotification::new(
-                SessionId::new("s1"),
-                SessionUpdate::Plan(Plan::new(entries)),
-            )
-        };
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &plans,
-            &notif(vec![
-                PlanEntry::new(
-                    "第一步",
-                    PlanEntryPriority::High,
-                    PlanEntryStatus::InProgress,
-                ),
-                PlanEntry::new("收尾", PlanEntryPriority::Low, PlanEntryStatus::Pending),
-            ]),
-        )
-        .await;
-        let cached = plans.lock()["s1"].clone();
-        assert_eq!(
-            cached,
-            vec![
-                protocol::SessionPlanEntry {
-                    content: "第一步".to_string(),
-                    priority: protocol::SessionPlanPriority::High,
-                    status: protocol::SessionPlanStatus::InProgress,
-                },
-                protocol::SessionPlanEntry {
-                    content: "收尾".to_string(),
-                    priority: protocol::SessionPlanPriority::Low,
-                    status: protocol::SessionPlanStatus::Pending,
-                },
-            ]
-        );
-        // 新通知全量覆盖旧计划。
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &plans,
-            &notif(Vec::new()),
-        )
-        .await;
-        assert!(plans.lock()["s1"].is_empty());
-    }
-
-    #[tokio::test]
-    async fn route_update_user_message_chunk() {
-        let (routes, mut rx) = route_with_channel();
-        let notif = SessionNotification::new(
-            SessionId::new("s1"),
-            SessionUpdate::UserMessageChunk(ContentChunk::new(AcpContentBlock::Text(
-                TextContent::new("收到"),
-            ))),
-        );
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn route_update_agent_message_chunk() {
-        let (routes, mut rx) = route_with_channel();
-        let notif = SessionNotification::new(
-            SessionId::new("s1"),
-            SessionUpdate::AgentMessageChunk(ContentChunk::new(AcpContentBlock::Text(
-                TextContent::new("输出"),
-            ))),
-        );
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        let ev = rx.try_recv().expect("应收到事件");
-        assert!(matches!(ev, AgentEvent::OutputChunk(s) if s == "输出"));
-    }
-
-    #[tokio::test]
-    async fn route_update_thinking() {
-        let (routes, mut rx) = route_with_channel();
-        let notif = SessionNotification::new(
-            SessionId::new("s1"),
-            SessionUpdate::AgentThoughtChunk(ContentChunk::new(AcpContentBlock::Text(
-                TextContent::new("思考中"),
-            ))),
-        );
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        let ev = rx.try_recv().expect("应收到 thinking 事件");
-        assert!(matches!(ev, AgentEvent::Thinking(s) if s == "思考中"));
-    }
-
-    #[tokio::test]
-    async fn route_update_tool_call() {
-        let (routes, mut rx) = route_with_channel();
-        let tc = ToolCall::new("tc1", "运行 cargo test")
-            .kind(ToolKind::Execute)
-            .status(ToolCallStatus::Pending)
-            .raw_input(serde_json::json!({"command": "cargo test"}));
-        let notif = SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCall(tc));
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        let ev = rx.try_recv().expect("应收到 tool_call 事件");
-        match ev {
-            AgentEvent::ToolCall {
-                id,
-                name,
-                title,
-                parameters,
-            } => {
-                assert_eq!(id, "tc1");
-                assert_eq!(name.as_deref(), Some("execute"));
-                assert_eq!(title.as_deref(), Some("运行 cargo test"));
-                assert!(parameters.unwrap_or_default().contains("cargo test"));
-            }
-            other => panic!("应为 ToolCall，得到 {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn route_update_tool_call_update_with_fields() {
-        let (routes, mut rx) = route_with_channel();
-        let tcu = ToolCallUpdate::new(
-            "tc1",
-            ToolCallUpdateFields::new()
-                .kind(ToolKind::Execute)
-                .title("运行测试")
-                .raw_input(serde_json::json!({"cmd": "cargo test"})),
-        );
-        let notif =
-            SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        let ev = rx.try_recv().expect("应收到 tool_call_update 事件");
-        match ev {
-            AgentEvent::ToolCall {
-                id,
-                name,
-                title,
-                parameters,
-            } => {
-                assert_eq!(id, "tc1");
-                assert_eq!(name.as_deref(), Some("execute"));
-                assert_eq!(title.as_deref(), Some("运行测试"));
-                assert!(parameters.unwrap_or_default().contains("cargo test"));
-            }
-            other => panic!("应为 ToolCall，得到 {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn route_update_tool_call_update_kind_missing_keeps_others() {
-        let (routes, mut rx) = route_with_channel();
-        // ACP tool_call_update 的 kind 可选，常缺失；只更新 title。
-        let tcu = ToolCallUpdate::new("tc1", ToolCallUpdateFields::new().title("更新后的标题"));
-        let notif =
-            SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        let ev = rx.try_recv().expect("应收到 tool_call_update 事件");
-        match ev {
-            AgentEvent::ToolCall { name, title, .. } => {
-                assert_eq!(
-                    name, None,
-                    "kind 缺失时 name 应为 None（沿用合并器中的同 id 名称）"
-                );
-                assert_eq!(title.as_deref(), Some("更新后的标题"));
-            }
-            other => panic!("应为 ToolCall，得到 {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn route_update_tool_call_update_empty_skipped() {
-        let (routes, mut rx) = route_with_channel();
-        // 仅 status 变化（无可合并字段）不产生事件，避免空条目。
-        let tcu = ToolCallUpdate::new(
-            "tc1",
-            ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
-        );
-        let notif =
-            SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        assert!(rx.try_recv().is_err(), "仅 status 的 update 不应产生事件");
-    }
-
-    #[tokio::test]
-    async fn route_update_tool_call_update_content_not_recorded_as_activity() {
-        let (routes, mut rx) = route_with_channel();
-        // `tool_call_update` 携带 title 时仅合并到 tool_call 活动；
-        // `content`（工具结果）不再单独成条活动（DESIGN 活动格式无 tool_result）。
-        let tcu = ToolCallUpdate::new("tc1", ToolCallUpdateFields::new().title("读完了"));
-        let notif =
-            SessionNotification::new(SessionId::new("s1"), SessionUpdate::ToolCallUpdate(tcu));
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        let ev = rx.try_recv().expect("应收到 tool_call 事件");
-        assert!(
-            matches!(ev, AgentEvent::ToolCall { title, .. } if title.as_deref() == Some("读完了"))
-        );
-        assert!(rx.try_recv().is_err(), "content 不应单独产生工具结果活动");
-    }
-
-    #[tokio::test]
-    async fn route_update_session_info() {
-        let (routes, mut rx) = route_with_channel();
-        let notif = SessionNotification::new(
-            SessionId::new("s1"),
-            SessionUpdate::SessionInfoUpdate(
-                agent_client_protocol::schema::v1::SessionInfoUpdate::new(),
-            ),
-        );
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn route_update_usage_update() {
-        let (routes, mut rx) = route_with_channel();
-        let notif = SessionNotification::new(
-            SessionId::new("s1"),
-            SessionUpdate::UsageUpdate(agent_client_protocol::schema::v1::UsageUpdate::new(
-                53_000, 200_000,
-            )),
-        );
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        let ev = rx.try_recv().expect("应收到 usage 事件");
-        match ev {
-            AgentEvent::UsageUpdate { used, size } => {
-                assert_eq!(used, 53_000);
-                assert_eq!(size, 200_000);
-            }
-            other => panic!("应为 UsageUpdate，得到 {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn route_update_config_option_update() {
-        let (routes, mut rx) = route_with_channel();
-        let opt = SessionConfigOption::select(
-            "model",
-            "模型",
-            "gpt-5",
-            vec![SessionConfigSelectOption::new("gpt-5", "GPT-5")],
-        );
-        let notif = SessionNotification::new(
-            SessionId::new("s1"),
-            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![opt])),
-        );
-        route_update(
-            &routes,
-            &Mutex::new(HashMap::new()),
-            &Mutex::new(HashMap::new()),
-            &notif,
-        )
-        .await;
-        let ev = rx.try_recv().expect("应收到 config_options 事件");
-        match ev {
-            AgentEvent::ConfigOptions(opts) => {
-                assert_eq!(opts.len(), 1);
-                assert_eq!(opts[0].id, "model");
-                assert_eq!(opts[0].name, "模型");
-                match &opts[0].kind {
-                    protocol::SessionConfigKind::Select {
-                        current_value,
-                        options,
-                    } => {
-                        assert_eq!(current_value, "gpt-5");
-                        assert_eq!(options.len(), 1);
-                        assert_eq!(options[0].value, "gpt-5");
-                    }
-                    other => panic!("应为 Select 选项，得到 {other:?}"),
-                }
-            }
-            other => panic!("应为 ConfigOptions，得到 {other:?}"),
-        }
+            assert!(matches!(
+                rx.recv().await,
+                Some(AgentEvent::StateUpdate {
+                    state: SessionState::Idle,
+                    reason: protocol::StateChangeReason::Completed
+                })
+            ));
+            // idle 不回收路由：回收由各 turn 自己完成（否则一条先到的 idle 会让
+            // 尚未观察到 running 的在途 turn 收不到自己的 running）
+            assert_eq!(routes.lock().len(), 1, "idle 不应注销路由");
+        });
     }
 
     #[test]
-    fn pick_approve_option_prefers_allow() {
-        fn opt(id: &str, kind: PermissionOptionKind) -> PermissionOption {
-            PermissionOption::new(id.to_string(), id.to_string(), kind)
-        }
+    fn idle_with_error_stop_reason_reports_error_activity() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            let routes = routes_with(tx);
+            let commands = Mutex::new(HashMap::new());
+            let plans = Mutex::new(HashMap::new());
+            let notif = UpdateSessionNotification::new(
+                "s1",
+                SessionUpdate::StateUpdate(StateUpdate::Idle(
+                    agent_client_protocol::schema::v2::IdleStateUpdate::default()
+                        .stop_reason(StopReason::Other("_error".to_string())),
+                )),
+            );
+            route_update(&routes, &commands, &plans, &notif).await;
 
-        let opts = vec![
-            opt("reject", PermissionOptionKind::RejectOnce),
-            opt("allow", PermissionOptionKind::AllowOnce),
-            opt("allow_always", PermissionOptionKind::AllowAlways),
-        ];
-        let picked = pick_approve_option(&opts).expect("应批准");
-        assert_eq!(
-            picked.to_string(),
-            "allow_always",
-            "应优先选 AllowAlways（yolo 免重复询问）"
-        );
+            assert!(matches!(rx.recv().await, Some(AgentEvent::Error(_))));
+            assert!(matches!(
+                rx.recv().await,
+                Some(AgentEvent::StateUpdate {
+                    state: SessionState::Idle,
+                    reason: protocol::StateChangeReason::Aborted
+                })
+            ));
+        });
+    }
 
-        let opts = vec![
-            opt("reject", PermissionOptionKind::RejectOnce),
-            opt("allow", PermissionOptionKind::AllowOnce),
-        ];
-        assert_eq!(pick_approve_option(&opts).unwrap().to_string(), "allow");
+    /// 注销只影响自己的条目：同会话并发的其他 prompt 路由保持不动。
+    #[tokio::test]
+    async fn prompt_stream_close_removes_only_its_own_route() {
+        let (tx_a, _rx_a) = mpsc::channel(8);
+        let (tx_b, _rx_b) = mpsc::channel(8);
+        let routes = Arc::new(Mutex::new(HashMap::from([(
+            "s1".to_string(),
+            vec![tx_a.clone(), tx_b.clone()],
+        )])));
+        let stream = PromptStream {
+            rx: mpsc::channel(1).1,
+            tx: tx_a,
+            routes: routes.clone(),
+            agent_session_id: "s1".to_string(),
+        };
+        stream.close();
+        let remaining = routes.lock().get("s1").cloned().unwrap_or_default();
+        assert_eq!(remaining.len(), 1, "只应注销自己的条目");
+        assert!(remaining[0].same_channel(&tx_b));
+    }
 
-        let opts = vec![opt("allow-once", PermissionOptionKind::AllowOnce)];
-        assert_eq!(
-            pick_approve_option(&opts).unwrap().to_string(),
-            "allow-once"
-        );
+    #[test]
+    fn running_state_update_maps_to_busy() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            let routes = routes_with(tx);
+            let commands = Mutex::new(HashMap::new());
+            let plans = Mutex::new(HashMap::new());
+            let notif = UpdateSessionNotification::new(
+                "s1",
+                SessionUpdate::StateUpdate(StateUpdate::Running(
+                    agent_client_protocol::schema::v2::RunningStateUpdate::default(),
+                )),
+            );
+            route_update(&routes, &commands, &plans, &notif).await;
 
-        let opts = vec![
-            opt("reject", PermissionOptionKind::RejectOnce),
-            opt("reject_all", PermissionOptionKind::RejectAlways),
-        ];
-        assert!(pick_approve_option(&opts).is_none());
-
-        assert!(pick_approve_option(&[]).is_none());
+            assert!(matches!(
+                rx.recv().await,
+                Some(AgentEvent::StateUpdate {
+                    state: SessionState::Busy,
+                    ..
+                })
+            ));
+            assert_eq!(routes.lock().len(), 1, "running 不回收路由");
+        });
     }
 }

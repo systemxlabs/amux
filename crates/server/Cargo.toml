@@ -19,8 +19,8 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 # 强类型错误（rpc 边界一次映射 JSON-RPC 错误码）
 thiserror.workspace = true
-# ACP 官方 SDK：Client 角色 + schema v1 + AcpAgent stdio 传输
-agent-client-protocol = { workspace = true, features = ["unstable"] }
+# ACP 官方 SDK：Client 角色 + schema v2（draft，须显式开启 unstable_protocol_v2）
+agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2"] }
 uuid.workspace = true
 parking_lot.workspace = true
 # 会话注册表持久化（server 单写者，同步 API）

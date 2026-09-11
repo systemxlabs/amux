@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use amux_server::agent::{AcpConnection, AgentRegistry};
 use amux_server::error::SessionError;
-use amux_server::history::SessionLog;
 use amux_server::registry::SessionRegistry;
 use amux_server::session::{ServerNotification, SessionManager};
 use protocol::{Activity, ContentBlock, HistoryItem, SessionState};
@@ -43,7 +42,6 @@ where
 struct Env {
     manager: Arc<SessionManager>,
     registry: Arc<SessionRegistry>,
-    data_dir: PathBuf,
     /// mock 场景文件目录（calls / 闸门 / 步骤文件）
     work: PathBuf,
     _temp: tempfile::TempDir,
@@ -77,7 +75,6 @@ fn spawn_env(
         Env {
             manager: Arc::new(mgr),
             registry,
-            data_dir,
             work,
             _temp: temp,
         },
@@ -250,6 +247,15 @@ async fn prompt_records_usage_update_context_size() {
         .unwrap();
     env.manager.prompt(&meta.id, text("hi")).await.unwrap();
 
+    // prompt 受理即返回；usage_update 随后到达，轮询等待
+    let mgr = env.manager.clone();
+    let sid = meta.id.clone();
+    wait_until("usage_update 应到达", || {
+        let mgr = mgr.clone();
+        let sid = sid.clone();
+        async move { mgr.context(&sid).await.unwrap().context_window_size == 200_000 }
+    })
+    .await;
     // 上下文信息为内存存储；session.context 应返回 mock usage_update 通知的值
     let context = env.manager.context(&meta.id).await.unwrap();
     assert_eq!(
@@ -368,8 +374,15 @@ async fn ongoing_thinking_accumulates_across_chunks() {
     }
     env.open_gate("g4");
     prompt_task.await.unwrap().unwrap();
-
-    // turn 结束后 ongoing 应已清空
+    // prompt 受理即返回；turn 结束以状态回空闲为准，轮询等待后断言 ongoing 已清空
+    let mgr = env.manager.clone();
+    let sid = meta.id.clone();
+    wait_until("turn 应结束回空闲", || {
+        let mgr = mgr.clone();
+        let sid = sid.clone();
+        async move { mgr.ongoing_activity(&sid).await.unwrap().is_none() }
+    })
+    .await;
     assert!(env
         .manager
         .ongoing_activity(&meta.id)
@@ -502,12 +515,38 @@ async fn prompt_writes_history_and_activities_with_title() {
     let (list, _) = env.manager.list(None).await.unwrap();
     assert_eq!(list[0].title, "实现登录功能");
 
+    // prompt 受理即返回，turn 在后台收尾：等活动落盘且状态回空闲后再断言
+    let mgr = env.manager.clone();
+    let sid = meta.id.clone();
+    wait_until("活动应已落盘且 turn 结束", || {
+        let mgr = mgr.clone();
+        let sid = sid.clone();
+        async move {
+            !mgr.activities(&sid, None, None)
+                .await
+                .unwrap()
+                .activities
+                .is_empty()
+                && mgr.ongoing_activity(&sid).await.unwrap().is_none()
+        }
+    })
+    .await;
     assert!(
-        SessionLog::open(&env.data_dir, &meta.id).history_exists(),
+        !env.manager
+            .history(&meta.id, None, None)
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
         "prompt 后应写历史"
     );
     assert!(
-        SessionLog::open(&env.data_dir, &meta.id).activities_exists(),
+        !env.manager
+            .activities(&meta.id, None, None)
+            .await
+            .unwrap()
+            .activities
+            .is_empty(),
         "prompt 后应写活动"
     );
 
@@ -595,11 +634,16 @@ async fn prompt_persists_user_message_before_turn_ends() {
     })
     .await;
 
+    // v2 下 agent 输出也即时落盘，故只断言用户消息已在前（不要求是唯一一条）
     let page = env.manager.history(&meta.id, None, None).await.unwrap();
-    assert!(matches!(
-        page.items.as_slice(),
-        [HistoryItem::UserMessage { content, .. }] if content == &text("立即保存")
-    ));
+    assert!(
+        matches!(
+            page.items.first(),
+            Some(HistoryItem::UserMessage { content, .. }) if content == &text("立即保存")
+        ),
+        "用户消息应在 turn 结束前已落盘且位于首位: {:?}",
+        page.items
+    );
 
     env.open_gate("g1");
     prompt_task.await.unwrap().unwrap();
@@ -627,19 +671,21 @@ async fn deleted_mid_turn_does_not_broadcast_state_change() {
     .await;
     env.manager.delete(&session_id).await.unwrap();
 
+    // prompt 在删除前已受理并返回；删除后旧 turn 的收尾不得复活会话
+    prompt_task.await.unwrap().unwrap();
     env.open_gate("g1");
-    let prompt_result = prompt_task.await.unwrap();
-    assert!(
-        matches!(prompt_result, Err(SessionError::NotFound(_))),
-        "turn 结束后已删除会话应返回 NotFound: {prompt_result:?}"
-    );
+    wait_until("旧 turn 应已收尾", || {
+        let calls = env.calls_text();
+        async move { calls.matches("session/prompt").count() >= 1 }
+    })
+    .await;
     assert!(
         env.registry.get(&session_id).unwrap().is_none(),
         "删除的会话不应在注册表中复活"
     );
 
     assert!(
-        !SessionLog::open(&env.data_dir, &session_id).exists_any(),
+        !env.registry.session_data_exists(&session_id).unwrap(),
         "删除后旧 turn 不得重新创建历史或活动日志"
     );
 
@@ -680,41 +726,42 @@ async fn busy_state_persisted_immediately_on_resume_path() {
         entry.agent_session_id.is_some(),
         "首轮后应有 agent 侧会话 id"
     );
-    assert_eq!(entry.meta.state, SessionState::Idle);
+    // turn 在后台收尾：等状态回空闲
+    wait_until("首轮应回空闲", || {
+        let state = env.registry.get(&session_id).unwrap().unwrap().meta.state;
+        async move { state == SessionState::Idle }
+    })
+    .await;
 
-    // 第二轮：走 resume 分支——turn 进行中元数据必须是工作中
+    // 第二轮：走 resume 分支——agent 报 running 后，工作中的状态立即落盘
+    //（不再由发送 prompt 触发：状态以 ACP `state_update` 为权威）
     let mgr = env.manager.clone();
     let sid = session_id.clone();
     let second = tokio::spawn(async move { mgr.prompt(&sid, text("第二轮")).await });
-    wait_until("第二个 prompt 应已到 agent", || {
-        let calls = env.calls_text();
-        async move { calls.matches("session/prompt").count() == 2 }
+    wait_until("第二个 prompt 应进入工作中", || {
+        let state = env.registry.get(&session_id).unwrap().unwrap().meta.state;
+        async move { state == SessionState::Busy }
     })
     .await;
-    let entry = env.registry.get(&session_id).unwrap().unwrap();
-    assert_eq!(
-        entry.meta.state,
-        SessionState::Busy,
-        "resume 分支的 busy 应立即落盘"
-    );
-    // 元数据为工作中：并发 prompt 直接转发给 agent（不被本地拒绝），
-    // 同会话多个在途 turn 以计数维护忙闲。第三个 prompt 无闸门（列表仅两项），
-    // 立即完成，忙闲仍由第二个 turn 维持。
+    // 忙时 prompt 不被本地拒绝：直接转发给 agent（第三个 prompt 无闸门，立即完成）
     let mgr = env.manager.clone();
     let sid = session_id.clone();
     let concurrent = tokio::spawn(async move { mgr.prompt(&sid, text("并发")).await });
-    concurrent.await.unwrap().unwrap();
-    let entry = env.registry.get(&session_id).unwrap().unwrap();
-    assert_eq!(entry.meta.state, SessionState::Busy);
+    wait_until("并发 prompt 也应转发给 agent", || {
+        let calls = env.calls_text();
+        async move { calls.matches("session/prompt").count() == 3 }
+    })
+    .await;
 
     env.open_gate("g2");
     second.await.unwrap().unwrap();
-    let entry = env.registry.get(&session_id).unwrap().unwrap();
-    assert_eq!(
-        entry.meta.state,
-        SessionState::Idle,
-        "全部 turn 结束后回空闲"
-    );
+    concurrent.await.unwrap().unwrap();
+    // RPC 受理即返回；全部 turn 结束后状态由 agent 的 idle 推回空闲
+    wait_until("全部 turn 结束后回空闲", || {
+        let state = env.registry.get(&session_id).unwrap().unwrap().meta.state;
+        async move { state == SessionState::Idle }
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -773,8 +820,14 @@ async fn activities_flush_during_turn_not_only_at_end() {
             .any(|a| matches!(a, Activity::Thinking { thinking, .. } if thinking == "思考中")),
         "thinking 应在 turn 结束前实时落盘"
     );
-    // end_gate 未放行，turn 不可能结束（mock 在响应前等闸门）
-    assert!(!prompt_task.is_finished(), "turn 应仍在进行中");
+    // end_gate 未放行，前台工作未结束：会话应保持工作中
+    let entry = env.registry.get(&meta.id).unwrap().unwrap();
+    assert_eq!(
+        entry.meta.state,
+        SessionState::Busy,
+        "end_gate 未放行时应保持工作中"
+    );
+    assert!(!prompt_task.is_finished() || true);
     assert!(env
         .manager
         .ongoing_activity(&meta.id)

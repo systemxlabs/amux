@@ -9,7 +9,7 @@ use parking_lot::{Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::path::Path;
 
-use protocol::{SessionContextResult, SessionMeta, SessionState};
+use protocol::{Activity, HistoryItem, SessionContextResult, SessionMeta, SessionState};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 
 /// SQLite 会话注册表（server 单写者：内部 Connection 用互斥锁串行化）。
@@ -47,6 +47,30 @@ const SESSION_SELECT_COLUMNS: &str = "id, state, title, workspace, worktree_dir,
 
 fn session_select(suffix: &str) -> String {
     format!("SELECT {SESSION_SELECT_COLUMNS} FROM sessions {suffix}")
+}
+
+/// 分页查询的单行：`seq` 是分页游标，`kind` 为 messages.role / activities.kind，
+/// `content` 为条目 JSON，`created_at` 为首次写入时间。
+struct StoredRow {
+    seq: u64,
+    kind: String,
+    content: String,
+    created_at: u64,
+}
+
+/// 组装分页窗口：`has_more` 由是否多取一条决定；`next_before` 为窗口最小 seq
+/// （更早一窗的独占上界），窗口按 seq 升序返回。
+fn finish_page<T>(
+    rows: &[StoredRow],
+    has_more: bool,
+    items: Vec<T>,
+) -> (Vec<T>, bool, Option<u64>) {
+    let next_before = if has_more {
+        rows.first().map(|row| row.seq)
+    } else {
+        None
+    };
+    (items, has_more, next_before)
 }
 
 fn state_from_str(s: &str) -> rusqlite::Result<SessionState> {
@@ -102,7 +126,32 @@ impl SessionRegistry {
                 agent_session_id TEXT,
                 created_at INTEGER NOT NULL,
                 last_active_at INTEGER NOT NULL
-            );",
+            );
+            -- 对话历史：消息内容按 (session_id, message_id) upsert（v2 流式 update
+            -- 的 upsert 语义）。seq 是分页游标：只增不改，游标语义与协议一致。
+            CREATE TABLE IF NOT EXISTS messages (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE (session_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS messages_session_seq ON messages (session_id, seq);
+            -- 活动历史：activity_id = toolCallId / thought messageId / 本地生成 ID
+            CREATE TABLE IF NOT EXISTS activities (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE (session_id, activity_id)
+            );
+            CREATE INDEX IF NOT EXISTS activities_session_seq ON activities (session_id, seq);",
         )?;
         // server 重启后恢复的会话一律回到空闲：busy 状态由上一进程持有，
         // 其 agent 侧 turn 已随进程终止，残留 busy 会让列表状态永远不空闲。
@@ -234,6 +283,183 @@ impl SessionRegistry {
     /// 查询会话上下文大小；尚未收到 `usage_update` 通知时两者均为 0。
     pub fn context(&self, id: &str) -> SessionContextResult {
         self.contexts.lock().get(id).copied().unwrap_or_default()
+    }
+
+    /// 消息 upsert（对话历史）：同 (session_id, message_id) 覆盖内容与 updated_at，
+    /// 首次插入时记录 created_at。消息 ID 由上游提供（用户消息为 Amux 生成，
+    /// agent 消息为 ACP `messageId`）。
+    pub fn upsert_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        role: &str,
+        content_json: &str,
+        created_at: u64,
+        updated_at: u64,
+    ) -> rusqlite::Result<()> {
+        self.connection().execute(
+            "INSERT INTO messages (session_id, message_id, role, content, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (session_id, message_id) DO UPDATE SET
+                content = excluded.content,
+                updated_at = excluded.updated_at",
+            params![
+                session_id,
+                message_id,
+                role,
+                content_json,
+                created_at as i64,
+                updated_at as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 删除单条消息（v2 `agent_message` 清空内容时不留空条目）。
+    pub fn remove_message(&self, session_id: &str, message_id: &str) -> rusqlite::Result<()> {
+        self.connection().execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND message_id = ?2",
+            params![session_id, message_id],
+        )?;
+        Ok(())
+    }
+
+    /// 活动 upsert：activity_id = toolCallId / thought messageId / 本地生成 ID。
+    pub fn upsert_activity(
+        &self,
+        session_id: &str,
+        activity_id: &str,
+        kind: &str,
+        content_json: &str,
+        created_at: u64,
+        updated_at: u64,
+    ) -> rusqlite::Result<()> {
+        self.connection().execute(
+            "INSERT INTO activities (session_id, activity_id, kind, content, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (session_id, activity_id) DO UPDATE SET
+                kind = excluded.kind,
+                content = excluded.content,
+                updated_at = excluded.updated_at",
+            params![
+                session_id,
+                activity_id,
+                kind,
+                content_json,
+                created_at as i64,
+                updated_at as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 分页读取对话历史尾部：`before` 是独占 seq 游标（None = 最新一窗），
+    /// 返回按 seq 升序的窗口。
+    pub fn history_page(
+        &self,
+        session_id: &str,
+        limit: usize,
+        before: Option<u64>,
+    ) -> rusqlite::Result<(Vec<HistoryItem>, bool, Option<u64>)> {
+        let (rows, has_more) = self.page_rows("messages", session_id, limit, before)?;
+        let mut items = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let blocks: Vec<protocol::ContentBlock> = serde_json::from_str(&row.content)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            items.push(match row.kind.as_str() {
+                "user" => HistoryItem::UserMessage {
+                    content: blocks,
+                    timestamp: row.created_at,
+                },
+                _ => HistoryItem::AgentMessage {
+                    content: blocks,
+                    timestamp: row.created_at,
+                },
+            });
+        }
+        Ok(finish_page(&rows, has_more, items))
+    }
+
+    /// 分页读取活动历史尾部；游标语义同 [`Self::history_page`]。
+    pub fn activities_page(
+        &self,
+        session_id: &str,
+        limit: usize,
+        before: Option<u64>,
+    ) -> rusqlite::Result<(Vec<Activity>, bool, Option<u64>)> {
+        let (rows, has_more) = self.page_rows("activities", session_id, limit, before)?;
+        let mut items = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let activity: Activity = serde_json::from_str(&row.content)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            items.push(activity);
+        }
+        Ok(finish_page(&rows, has_more, items))
+    }
+
+    /// 会话是否有任何历史/活动数据（删除路径据此决定是否清理）。
+    pub fn session_data_exists(&self, session_id: &str) -> rusqlite::Result<bool> {
+        let conn = self.connection();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ?1)
+                 OR EXISTS(SELECT 1 FROM activities WHERE session_id = ?1)",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    /// 删除会话的历史与活动数据。
+    pub fn remove_session_data(&self, session_id: &str) -> rusqlite::Result<()> {
+        let conn = self.connection();
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        conn.execute(
+            "DELETE FROM activities WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// 按 seq 倒序取一窗（多取一条判断 has_more），返回升序窗口。
+    /// 每行：`(seq, role/kind, content, created_at)`。
+    fn page_rows(
+        &self,
+        table: &str,
+        session_id: &str,
+        limit: usize,
+        before: Option<u64>,
+    ) -> rusqlite::Result<(Vec<StoredRow>, bool)> {
+        let limit = limit.max(1);
+        let conn = self.connection();
+        let sql = format!(
+            "SELECT seq, {kind}, content, created_at FROM {table}
+             WHERE session_id = ?1 AND (?2 IS NULL OR seq < ?2)
+             ORDER BY seq DESC LIMIT ?3",
+            kind = if table == "messages" { "role" } else { "kind" },
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mapped = stmt.query_map(
+            params![session_id, before.map(|b| b as i64), limit as i64 + 1],
+            |row| {
+                Ok(StoredRow {
+                    seq: row.get::<_, i64>(0)? as u64,
+                    kind: row.get::<_, String>(1)?,
+                    content: row.get::<_, String>(2)?,
+                    created_at: row.get::<_, i64>(3)? as u64,
+                })
+            },
+        )?;
+        let mut rows = mapped.collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = rows.len() > limit;
+        if has_more {
+            // 多取的是最旧一条：它属于更早一窗
+            rows.remove(0);
+        }
+        rows.reverse();
+        Ok((rows, has_more))
     }
 
     /// 有 worktree 且超过 `idle_timeout_ms` 不活跃的 idle 会话候选。

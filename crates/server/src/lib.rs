@@ -2,14 +2,12 @@
 //! 集成测试（tests/）复用实现（如 `AcpConnection`）。
 
 pub mod acp;
-pub mod acp_terminal;
 pub mod agent;
 pub mod config;
 pub mod discovery;
 pub mod error;
 pub mod fs;
 pub mod git;
-pub mod history;
 pub mod registry;
 pub mod rpc;
 pub mod session;

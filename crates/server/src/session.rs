@@ -1,13 +1,15 @@
 //! 会话管理：会话列表与历史权威在 server。
 //! - 会话元数据持久化于 SQLite（`session.sqlite`），列表由 server 维护
-//! - busy/idle 状态在 server 维护并存注册表；每次 Busy<->Idle 变更广播 `session.state_change`
+//! - busy/idle 状态在 server 维护并存注册表，由 ACP `state_update` 通知驱动；
+//!   每次状态变更广播 `session.state_change`
 //! - 惰性会话：`session.new` 只写注册表，agent 侧会话延后到首条指令
 //!   （`session.prompt`）或查询/设置会话选项时懒创建（ACP `session/new`），
 //!   已有 agent 会话先经 `session/resume` 恢复
 //! - 会话选项存储在内存，以 Agent 侧数据为权威
 //! - 删除会话先经 ACP `session/close` 释放资源，再尝试 `session/delete`；长时间无活动
 //!   会话只经 `session/close` 关闭并保留 server 历史
-//! - 对话历史与活动历史落 `data_dir/sessions/<id>_history.jsonl` / `<id>_activities.jsonl`
+//! - 对话历史与活动历史落 SQLite（`session.sqlite` 的 messages / activities 表），
+//!   按 ACP v2 的 upsert 语义（messageId / toolCallId）即时落盘
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -19,14 +21,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use protocol::{
-    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryItem, HistoryResult,
-    SessionMeta, SessionState, SessionStateChange,
+    generate_title, ActivitiesResult, Activity, ContentBlock, HistoryResult, SessionMeta,
+    SessionState, SessionStateChange,
 };
 
 use crate::agent::{AcpConnection, AgentEvent, AgentRegistry};
 use crate::error::SessionError;
 use crate::git::GitRunner;
-use crate::history::{SessionLog, TurnMerger};
 use crate::registry::SessionRegistry;
 
 /// server → GUI 的会话状态通知。
@@ -46,12 +47,16 @@ pub struct SessionManager {
     config_options: Mutex<HashMap<String, Vec<protocol::SessionConfigOption>>>,
     /// 进行中的活动（`session.ongoing_activity`；按会话 id 独立存储）
     ongoing: Mutex<HashMap<String, Activity>>,
-    /// 当前未定型思考块的累积文本（多 chunk 拼接）。
-    /// `ongoing` 中的 `Activity::Thinking.content` 写入时引用这里，保证 GUI 看到
-    /// 的是「当前思考块已流式输出的前一部分」而不是最新一个流式片段。
-    /// 思考块被 TurnMerger 定稿（tool_call/error 到达）时随之重置，
-    /// 与 `ongoing` 生命周期一致：turn 结束随 `ongoing` 一起清理。
-    thinking_buf: Mutex<HashMap<String, ThinkingBuffer>>,
+    /// agent 消息累积文本：`(会话 id, messageId)` → 已输出内容
+    /// （v2 的 `agent_message_chunk` 追加、`agent_message` 整条替换/清空）。
+    message_buf: Mutex<HashMap<(String, String), String>>,
+    /// 思考块累积文本：`(会话 id, thought messageId)` → 累积内容与首块时间戳。
+    /// `ongoing` 中的 `Activity::Thinking` 写入时引用累积内容，保证 GUI 看到的是
+    /// 「当前思考块已流式输出的全部内容」而不是最新一个片段。
+    thinking_buf: Mutex<HashMap<(String, String), ThinkingBuffer>>,
+    /// 工具调用累积字段：`(会话 id, toolCallId)` → 合并后的活动字段
+    /// （v2 的 `tool_call_update` 按字段 upsert，缺省字段保持上一版）。
+    tool_calls: Mutex<HashMap<(String, String), CurrentTool>>,
     controls: Mutex<HashMap<String, Arc<SessionControl>>>,
 }
 
@@ -77,7 +82,29 @@ struct PromptSetup {
     connection: Arc<AcpConnection>,
     agent_session_id: String,
     cwd: String,
-    old_state: SessionState,
+    control: Arc<SessionControl>,
+}
+
+/// 工具调用累积字段（v2 `tool_call_update` 按字段 upsert）。
+#[derive(Debug, Clone)]
+struct CurrentTool {
+    name: Option<String>,
+    title: Option<String>,
+    parameters: Option<String>,
+    /// 首次出现时间（活动 created_at）
+    timestamp: u64,
+}
+
+/// 工具调用未声明名称时的固定名称。
+const DEFAULT_TOOL_NAME: &str = "tool_call";
+
+/// 活动类别字符串（`session.activities` 的 kind 列）。
+fn activity_kind(activity: &Activity) -> &'static str {
+    match activity {
+        Activity::Thinking { .. } => "thinking",
+        Activity::ToolCall { .. } => "tool_call",
+        Activity::Error { .. } => "error",
+    }
 }
 
 fn now() -> u64 {
@@ -88,7 +115,7 @@ fn now() -> u64 {
 }
 
 impl SessionManager {
-    /// `data_dir`：server 数据目录（会话历史/活动日志目录在其 `sessions/` 下）。
+    /// `data_dir`：server 数据目录（worktree 根在其同级 `worktrees/` 下）。
     pub fn new(
         agents: Arc<AgentRegistry>,
         registry: Arc<SessionRegistry>,
@@ -102,7 +129,9 @@ impl SessionManager {
             tx,
             config_options: Mutex::new(HashMap::new()),
             ongoing: Mutex::new(HashMap::new()),
+            message_buf: Mutex::new(HashMap::new()),
             thinking_buf: Mutex::new(HashMap::new()),
+            tool_calls: Mutex::new(HashMap::new()),
             controls: Mutex::new(HashMap::new()),
         };
         (manager, rx)
@@ -380,32 +409,33 @@ impl SessionManager {
         // 不存在的 ID 仍保持删除幂等，但不能为随机 ID 创建控制块。
         let entry = self.registry.get(session_id)?;
         if entry.is_none() {
-            return SessionLog::open(&self.data_dir, session_id)
-                .remove()
-                .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
+            return self
+                .registry
+                .remove_session_data(session_id)
+                .map_err(|e| SessionError::Storage(format!("会话数据删除失败: {e}")));
         }
         let control = self.control(session_id)?;
         control.deleted.store(true, Ordering::SeqCst);
         let _lifecycle = control.lifecycle.lock();
-        let log = SessionLog::open(&self.data_dir, session_id);
         let Some(entry) = self.registry.get(session_id)? else {
             // 另一条删除请求可能已经完成本地删除；当前控制块仍需移除。
             self.remove_control_if_current(session_id, &control);
-            return log
-                .remove()
-                .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")));
+            return self
+                .registry
+                .remove_session_data(session_id)
+                .map_err(|e| SessionError::Storage(format!("会话数据删除失败: {e}")));
         };
         let meta = entry.meta;
         let agent_session_id = entry.agent_session_id;
         // 即刻生效；agent 往返与 worktree 清理较慢，交由后台任务异步完成。
         self.registry.delete(session_id)?;
-        log.remove()
-            .map_err(|e| SessionError::Storage(format!("会话日志删除失败: {e}")))?;
+        self.registry
+            .remove_session_data(session_id)
+            .map_err(|e| SessionError::Storage(format!("会话数据删除失败: {e}")))?;
 
         // 资源清理包括 ACP close/delete 往返和 worktree 目录清理，
         // 均为尽力而为，不阻断本地删除。
         let agents = self.agents.clone();
-        let data_dir = self.data_dir.clone();
         let session_id2 = session_id.to_string();
         tokio::task::spawn_blocking(move || {
             if let Some(agent_session_id) = agent_session_id {
@@ -431,8 +461,6 @@ impl SessionManager {
                     GitRunner::new().remove_worktree(&meta.cwd, &wt);
                 }
             }
-            // 会话日志文件可能在删除前一刻仍有流式追加（并发 turn 兜底），再清一次
-            let _ = SessionLog::open(&data_dir, &session_id2).remove();
             log::info!("会话资源清理完成 {session_id2}");
         });
 
@@ -579,8 +607,9 @@ impl SessionManager {
     ) -> Result<HistoryResult, SessionError> {
         self.get_entry(session_id)?;
         let limit = limit.unwrap_or(protocol::SESSION_PAGE_DEFAULT_LIMIT).max(1);
-        let (items, has_more, next_before) = SessionLog::open(&self.data_dir, session_id)
-            .read_history_page(limit, before)
+        let (items, has_more, next_before) = self
+            .registry
+            .history_page(session_id, limit, before)
             .map_err(|e| SessionError::Storage(format!("会话历史读取失败: {e}")))?;
         Ok(HistoryResult {
             items,
@@ -598,8 +627,9 @@ impl SessionManager {
     ) -> Result<ActivitiesResult, SessionError> {
         self.get_entry(session_id)?;
         let limit = limit.unwrap_or(protocol::SESSION_PAGE_DEFAULT_LIMIT).max(1);
-        let (activities, has_more, next_before) = SessionLog::open(&self.data_dir, session_id)
-            .read_activities_page(limit, before)
+        let (activities, has_more, next_before) = self
+            .registry
+            .activities_page(session_id, limit, before)
             .map_err(|e| SessionError::Storage(format!("会话活动读取失败: {e}")))?;
         Ok(ActivitiesResult {
             activities,
@@ -617,17 +647,16 @@ impl SessionManager {
         Ok(self.ongoing.lock().get(session_id).cloned())
     }
 
-    /// 发送指令：busy 检查 → 首条生成标题 → 惰性创建
-    /// agent 会话（session/new）→ resume → 用户消息立即落盘 → 跑 turn（事件喂
-    /// TurnMerger，记录 ongoing）→ 写 agent 历史/活动 → 置空闲；必要时广播
-    /// `session.state_change`（Busy<->Idle）。落盘失败向上传播（GUI 可见）。
+    /// 发送指令：惰性创建 agent 会话（session/new）→ resume → 用户消息落盘 →
+    /// 跑 turn（v2 事件按 upsert 语义落盘；前台工作结束由 `state_update(idle)` 报告）
+    /// → 广播状态变更。落盘失败向上传播（GUI 可见）。
     ///
     /// 不做本地忙时拒绝：turn 进行中收到的新 prompt 照样转发给 ACP server，
     /// 是否受理（steer/排队/报错）由 agent 决定；agent 以错误响应拒绝时经
     /// `PromptFailed` 上报为请求错误。同会话多个 turn 并发时以 `turns` 计数
-    /// 维护忙闲，最后一个 turn 结束才回空闲。
+    /// 维护忙闲，最后一个 turn 结束才清理进行中活动。
     pub async fn prompt(
-        &self,
+        self: &Arc<Self>,
         session_id: &str,
         input: Vec<ContentBlock>,
     ) -> Result<(), SessionError> {
@@ -636,20 +665,20 @@ impl SessionManager {
         }
         let control = self.control(session_id)?;
         // 先取得生命周期锁再递增 turns，使 prompt 与 cancel/delete 有明确的
-        // 线性化顺序；否则 cancel 可能在 setup_prompt 写回 Busy 前读到旧的 Idle。
+        // 线性化顺序；否则 cancel 可能在 setup_prompt 完成前读到旧的 Idle。
         let lifecycle = control.lifecycle.lock();
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
 
-        // 删除会先标记 deleted 并等待这把锁；持有期间完成 agent session 创建、
-        // Busy 元数据写回和用户消息首写，避免删除后旧 prompt 再创建日志。
+        // 删除会先标记 deleted 并等待这把锁；持有期间完成 agent session 创建与
+        // 元数据写回，避免删除后旧 prompt 再写回数据。
         let setup = self.setup_prompt(session_id, &input, &control);
         let PromptSetup {
             connection,
             agent_session_id,
             cwd,
-            old_state,
+            control: _setup_control,
         } = match setup {
             Ok(value) => value,
             Err(error) => {
@@ -659,30 +688,8 @@ impl SessionManager {
             }
         };
         control.turns.fetch_add(1, Ordering::SeqCst);
-
-        if old_state != SessionState::Busy {
-            self.broadcast_state_change(
-                session_id,
-                old_state,
-                SessionState::Busy,
-                protocol::StateChangeReason::Completed,
-            );
-        }
-
-        let ts = now();
-        let log = SessionLog::open(&self.data_dir, session_id);
-        let user_message = HistoryItem::UserMessage {
-            content: input.clone(),
-            timestamp: ts,
-        };
-        if let Err(e) = log.append_history(std::slice::from_ref(&user_message)) {
-            log::error!("用户消息落盘失败 {session_id}: {e}");
-            drop(lifecycle);
-            self.finalize_turn(session_id, &control, protocol::StateChangeReason::Aborted);
-            return Err(SessionError::Storage(format!("用户消息落盘失败: {e}")));
-        }
-        // 从这里开始删除可以安全清理日志；后续 turn 只会追加活动/历史，且均受
-        // deleted 标记保护，不会在删除后重新创建已删除会话。
+        // 用户消息在 agent 受理后才落盘（见下方）；这里先释放生命周期锁，
+        // 让删除/取消能在等受理期间推进。
         drop(lifecycle);
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
@@ -695,13 +702,17 @@ impl SessionManager {
             }
             Err(e) => {
                 log::error!("resume 失败 {session_id}: {e}");
-                let err = Activity::Error {
-                    timestamp: now(),
+                let ts = now();
+                let activity = Activity::Error {
+                    timestamp: ts,
                     error: format!("恢复 agent 上下文失败: {e}"),
                 };
+                let activity_id = format!("a_{}", uuid::Uuid::new_v4());
                 let _lifecycle = control.lifecycle.lock();
                 if !control.deleted.load(Ordering::SeqCst) {
-                    if let Err(log_error) = log.append_activities(&[err]) {
+                    if let Err(log_error) =
+                        self.upsert_activity(session_id, &activity_id, &activity, ts)
+                    {
                         log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
                     }
                 }
@@ -713,31 +724,82 @@ impl SessionManager {
             }
         }
 
-        let started = std::time::Instant::now();
-        let (storage_error, turn_reason) = self
-            .run_turn(session_id, &connection, &agent_session_id, input, &control)
-            .await;
-
-        self.finalize_turn(session_id, &control, turn_reason);
-        log::info!(
-            "prompt 完成 {session_id}（{}ms）",
-            started.elapsed().as_millis()
-        );
-        match (control.deleted.load(Ordering::SeqCst), storage_error) {
-            (true, _) => Err(SessionError::NotFound(format!("{session_id}（已删除）"))),
-            (false, Some(e)) => Err(e),
-            (false, None) => Ok(()),
+        // 等待 agent 受理：v2 的 prompt 响应只表示受理，前台工作结束由
+        // `state_update(idle)` 报告——因此 RPC 受理即返回，turn 的聚合与状态推进
+        // 交给后台任务（并发 prompt 也不会互相等待）。
+        let mut stream = connection.prompt(&agent_session_id, input.clone());
+        let mut pending: Vec<AgentEvent> = Vec::new();
+        loop {
+            match stream.recv().await {
+                Some(AgentEvent::PromptAccepted) => break,
+                Some(AgentEvent::PromptFailed(detail)) => {
+                    let ts = now();
+                    let activity = Activity::Error {
+                        timestamp: ts,
+                        error: detail.clone(),
+                    };
+                    let activity_id = format!("a_{}", uuid::Uuid::new_v4());
+                    if let Err(e) = self.upsert_activity(session_id, &activity_id, &activity, ts) {
+                        log::error!("prompt 失败活动落盘失败 {session_id}: {e}");
+                    }
+                    self.ongoing.lock().remove(session_id);
+                    log::error!("agent 拒绝 prompt {session_id}: {detail}");
+                    self.finalize_turn(session_id, &control, protocol::StateChangeReason::Aborted);
+                    return Err(SessionError::PromptFailed(detail));
+                }
+                // 受理之前到达的状态/输出先缓存，交给后台 turn 处理
+                Some(ev) => pending.push(ev),
+                None => {
+                    self.finalize_turn(session_id, &control, protocol::StateChangeReason::Aborted);
+                    return Err(SessionError::AgentUnavailable(
+                        "ACP 连接已关闭（prompt 未被受理）".into(),
+                    ));
+                }
+            }
         }
+
+        // 受理成功后立即落盘用户消息：Amux 生成消息 ID，agent 侧对同一消息的
+        // `user_message` / `user_message_chunk` 通知忽略（见 acp.rs）。
+        // 此写入先于后台 turn 处理任何 agent 事件，保证历史里用户消息在前。
+        let ts = now();
+        let user_message_id = format!("m_{}", uuid::Uuid::new_v4());
+        let write_result = {
+            let _lifecycle = control.lifecycle.lock();
+            if control.deleted.load(Ordering::SeqCst) {
+                Err(SessionError::NotFound(session_id.to_string()))
+            } else {
+                self.upsert_message(session_id, &user_message_id, "user", &input, ts, ts)
+            }
+        };
+        if let Err(error) = write_result {
+            self.finalize_turn(session_id, &control, protocol::StateChangeReason::Aborted);
+            return Err(error);
+        }
+
+        let manager = Arc::clone(self);
+        let session_id_owned = session_id.to_string();
+        let control_task = control.clone();
+        tokio::spawn(async move {
+            let (storage_error, turn_reason) = manager
+                .run_turn(&session_id_owned, stream, pending, &control_task)
+                .await;
+            manager.finalize_turn(&session_id_owned, &control_task, turn_reason);
+            if let Some(error) = storage_error {
+                if !control_task.deleted.load(Ordering::SeqCst) {
+                    log::error!("turn 落盘失败 {session_id_owned}: {error:?}");
+                }
+            }
+        });
+        Ok(())
     }
 
-    /// prompt 前置准备：读元数据、生成标题、置 Busy、惰性创建 agent 侧会话。
-    /// turn 进行中（meta.state == Busy）不拒绝：原样置 Busy 落盘并返回，
-    /// 受理与否由 agent 决定。
+    /// prompt 前置准备：读元数据、生成标题、置活跃时间、惰性创建 agent 侧会话。
+    /// 会话状态不在此处变更——v2 的状态以 `state_update` 通知为权威。
     fn setup_prompt(
         &self,
         session_id: &str,
         input: &[ContentBlock],
-        control: &SessionControl,
+        control: &Arc<SessionControl>,
     ) -> Result<PromptSetup, SessionError> {
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
@@ -745,12 +807,10 @@ impl SessionManager {
         let entry = self.get_entry(session_id)?;
         let mut meta = entry.meta;
         let agent_session_id = entry.agent_session_id;
-        let old_state = meta.state;
         // （agent_session_id 现为 Option：None = agent 侧会话尚未惰性创建）
         if meta.title.is_empty() {
             meta.title = generate_title(&first_text(input));
         }
-        meta.state = SessionState::Busy;
         meta.last_active_at = now();
         // worktree 在 session.new 已落盘；被过期清理后此处按原路径惰性重建。
         // agent 实际工作目录：启用 worktree 时为工作树，否则用户指定目录。
@@ -766,76 +826,89 @@ impl SessionManager {
             //（选项以 Agent 侧数据为权威）
             None => self.ensure_agent_session(session_id, &meta, None)?,
         };
-        // 创建与 resume 分支统一 upsert：busy、首条 prompt 生成的标题与活跃时间
-        // 立即落盘：状态以元数据为权威，避免 turn 进行中列表读到陈旧空闲。
-        // resume 分支若只更新状态，先查过会话选项的会话（agent 侧会话已提前
-        // 创建）首条 prompt 生成的标题将永远不落盘。
         if control.deleted.load(Ordering::SeqCst) {
             return Err(SessionError::NotFound(session_id.to_string()));
         }
+        // 创建与 resume 分支统一 upsert：首条 prompt 生成的标题与活跃时间立即落盘。
         self.registry.upsert(&meta, Some(&agent_session_id))?;
         Ok(PromptSetup {
             connection,
             agent_session_id,
             cwd,
-            old_state,
+            control: Arc::clone(control),
         })
     }
 
-    /// 跑单个 turn：指令发给 agent，事件喂合并器，thinking/tool_call 记为 ongoing。
-    /// 返回（落盘阶段的存储错误、turn 结束原因）。删除与 prompt 并发时，
-    /// 旧 turn 不得在删除后重新创建历史文件。
+    /// 跑单个 turn：指令发给 agent，事件按 v2 upsert 语义即时落盘。
+    /// 返回（落盘阶段的存储错误、turn 结束原因）。
+    /// 删除与 prompt 并发时，旧 turn 不得在删除后重新创建数据。
     async fn run_turn(
         &self,
         session_id: &str,
-        connection: &Arc<AcpConnection>,
-        agent_session_id: &str,
-        input: Vec<ContentBlock>,
+        mut stream: crate::acp::PromptStream,
+        pending: Vec<AgentEvent>,
         control: &SessionControl,
     ) -> (Option<SessionError>, protocol::StateChangeReason) {
-        let log = SessionLog::open(&self.data_dir, session_id);
-        let mut merger = TurnMerger::new();
-        let mut rx = connection.prompt(agent_session_id, input);
         let mut turn_completed = false;
         // 中断时没有 ACP stopReason，保持 aborted。
         let mut turn_reason = protocol::StateChangeReason::Aborted;
         // ACP server 以错误响应拒绝本次 prompt（turn 未开始）：作为请求错误上报
         let mut prompt_failed: Option<String> = None;
         let mut storage_error: Option<SessionError> = None;
-        while let Some(ev) = rx.recv().await {
+        // v2：prompt 响应只表示受理，前台结束由 `state_update(idle)` 报告。
+        // 只有观察到 running 之后到达的 idle 才算本次 turn 的结束——prompt 之前
+        // 遗留的后台 idle 不能提前结束（否则会把在途 turn 误判为完成）。
+        let mut observed_running = false;
+        let mut queued = std::collections::VecDeque::from(pending);
+        while let Some(ev) = match queued.pop_front() {
+            Some(ev) => Some(ev),
+            None => stream.recv().await,
+        } {
             match ev {
-                AgentEvent::TurnEnded(reason) => {
-                    turn_completed = true;
-                    turn_reason = reason;
-                    break;
+                // 受理信号在 prompt() 中已消费；重复收到直接忽略
+                AgentEvent::PromptAccepted => {}
+                AgentEvent::StateUpdate { state, reason } => {
+                    if state == SessionState::Busy {
+                        observed_running = true;
+                        self.set_state(session_id, SessionState::Busy, reason, control);
+                    } else if observed_running {
+                        self.set_state(session_id, SessionState::Idle, reason, control);
+                        turn_completed = true;
+                        turn_reason = reason;
+                        break;
+                    }
                 }
-                AgentEvent::OutputChunk(text) => merger.push_output(text, now()),
-                AgentEvent::Thinking(text) => {
-                    merger.push_thinking(text.clone(), now());
-                    // 累积写入 thinking_buf，再让 ongoing 引用累积内容——
-                    // 否则多个流式 chunk 到达时，GUI 看到的「思考中」只会是
-                    // 最新一段，落盘的历史活动（merger 累积）反而更全，行为不一致。
-                    // buf 只覆盖当前未定型的思考块：tool_call/error 定稿后已重置，
-                    // 与 merger「每个思考块一条活动」的语义保持同步。
-                    let ts = now();
-                    let (accumulated, first_ts) = {
-                        let mut buf = self.thinking_buf.lock();
-                        let entry =
-                            buf.entry(session_id.to_string())
-                                .or_insert_with(|| ThinkingBuffer {
-                                    content: String::new(),
-                                    first_timestamp: Some(ts),
-                                });
-                        entry.content.push_str(&text);
-                        (entry.content.clone(), entry.first_timestamp.unwrap_or(ts))
-                    };
-                    self.ongoing.lock().insert(
-                        session_id.to_string(),
-                        Activity::Thinking {
-                            timestamp: first_ts,
-                            thinking: accumulated,
-                        },
-                    );
+                AgentEvent::AgentMessageChunk { message_id, text } => {
+                    let full = self.push_message_text(session_id, &message_id, Some(text));
+                    if let Err(e) = self.store_message_text(session_id, &message_id, "agent", &full)
+                    {
+                        storage_error = Some(e);
+                    }
+                }
+                AgentEvent::AgentMessageSnapshot { message_id, text } => {
+                    let full = self.push_message_text(session_id, &message_id, text);
+                    if let Err(e) = self.store_message_text(session_id, &message_id, "agent", &full)
+                    {
+                        storage_error = Some(e);
+                    }
+                }
+                AgentEvent::ThinkingChunk { message_id, text } => {
+                    let (accumulated, first_ts) =
+                        self.push_thinking_text(session_id, &message_id, Some(text));
+                    if let Err(e) =
+                        self.store_thinking(session_id, &message_id, accumulated, first_ts)
+                    {
+                        storage_error = Some(e);
+                    }
+                }
+                AgentEvent::ThinkingSnapshot { message_id, text } => {
+                    let (accumulated, first_ts) =
+                        self.push_thinking_text(session_id, &message_id, text);
+                    if let Err(e) =
+                        self.store_thinking(session_id, &message_id, accumulated, first_ts)
+                    {
+                        storage_error = Some(e);
+                    }
                 }
                 AgentEvent::ToolCall {
                     id,
@@ -843,43 +916,35 @@ impl SessionManager {
                     title,
                     parameters,
                 } => {
-                    merger.push_tool_call(
-                        id.clone(),
-                        name.clone(),
-                        title.clone(),
-                        parameters.clone(),
-                        now(),
-                    );
-                    self.ongoing.lock().insert(
-                        session_id.to_string(),
-                        Activity::ToolCall {
-                            timestamp: now(),
-                            tool_call_id: id,
-                            tool_name: name
-                                .unwrap_or_else(|| crate::history::DEFAULT_TOOL_NAME.into()),
-                            title,
-                            parameters,
-                        },
-                    );
-                    // merger 已定稿当前思考块；重置 buf 使后续思考开启新块，
-                    // 否则 ongoing 会一直携带第一段思考的内容。
-                    self.thinking_buf.lock().remove(session_id);
+                    if let Err(e) = self.store_tool_call(session_id, &id, name, title, parameters) {
+                        storage_error = Some(e);
+                    }
                 }
                 AgentEvent::Error(detail) => {
-                    merger.push_error(Activity::Error {
-                        timestamp: now(),
+                    let ts = now();
+                    let activity = Activity::Error {
+                        timestamp: ts,
                         error: detail.clone(),
-                    });
-                    // push_error 同样定稿思考块，同步重置。
-                    self.thinking_buf.lock().remove(session_id);
+                    };
+                    let activity_id = format!("a_{}", uuid::Uuid::new_v4());
+                    if let Err(e) = self.upsert_activity(session_id, &activity_id, &activity, ts) {
+                        storage_error = Some(e);
+                    }
+                    // 错误定稿当前思考块：后续思考开启新的进行中条目
+                    self.ongoing.lock().remove(session_id);
                     log::error!("agent turn 失败 {session_id}: {detail}");
                 }
                 AgentEvent::PromptFailed(detail) => {
-                    merger.push_error(Activity::Error {
-                        timestamp: now(),
+                    let ts = now();
+                    let activity = Activity::Error {
+                        timestamp: ts,
                         error: detail.clone(),
-                    });
-                    self.thinking_buf.lock().remove(session_id);
+                    };
+                    let activity_id = format!("a_{}", uuid::Uuid::new_v4());
+                    if let Err(e) = self.upsert_activity(session_id, &activity_id, &activity, ts) {
+                        storage_error = Some(e);
+                    }
+                    self.ongoing.lock().remove(session_id);
                     log::error!("agent 拒绝 prompt {session_id}: {detail}");
                     prompt_failed = Some(detail);
                 }
@@ -890,77 +955,243 @@ impl SessionManager {
                     }
                 }
                 AgentEvent::ConfigOptions(options) => {
-                    // 会话配置选项变更（ACP config_options_update）：全量覆盖内存存储
+                    // 会话配置选项变更（ACP config_option_update）：全量覆盖内存存储
                     if !control.deleted.load(Ordering::SeqCst) {
                         self.store_config_options(session_id, options);
                     }
                 }
             }
-            // 活动实时逐条落盘：thinking 累积到 tool_call/error 才定稿，
-            // 定稿即写，不等 turn 结束。删除与 prompt 并发时旧 turn 不得
-            // 重新创建活动文件，故由 flush_ready_activities 与删除共用生命周期锁。
-            if let Err(e) = self.flush_ready_activities(session_id, &log, &mut merger, control) {
-                storage_error = Some(e);
-            }
         }
         // 连接中断或异常终止的 turn 也要留下可见错误活动。
-        if !turn_completed {
-            let err = Activity::Error {
-                timestamp: now(),
+        // 会话已删除时不写：删除是终态，旧 turn 不得重新创建数据。
+        if !turn_completed && !control.deleted.load(Ordering::SeqCst) {
+            let ts = now();
+            let activity = Activity::Error {
+                timestamp: ts,
                 error: "agent turn 未正常结束（连接中断或 turn 被异常终止）".into(),
             };
-            merger.push_error(err);
-        }
-
-        let (history, activities) = merger.finish();
-        let _lifecycle = control.lifecycle.lock();
-        if !control.deleted.load(Ordering::SeqCst) {
-            if !history.is_empty() {
-                if let Err(e) = log.append_history(&history) {
-                    log::error!("历史落盘失败 {session_id}: {e}");
-                    storage_error = Some(SessionError::Storage(format!("历史落盘失败: {e}")));
-                }
-            }
-            if !activities.is_empty() {
-                if let Err(e) = log.append_activities(&activities) {
-                    log::error!("活动落盘失败 {session_id}: {e}");
-                    storage_error = Some(SessionError::Storage(format!("活动落盘失败: {e}")));
-                }
+            let activity_id = format!("a_{}", uuid::Uuid::new_v4());
+            if let Err(e) = self.upsert_activity(session_id, &activity_id, &activity, ts) {
+                storage_error = Some(e);
             }
         }
         if let Some(detail) = prompt_failed {
             storage_error = Some(SessionError::PromptFailed(detail));
         }
+        // 本 turn 结束：注销自己的路由条目（同会话并发 turn 互不影响）
+        stream.close();
         (storage_error, turn_reason)
     }
 
-    /// 把已定稿的活动实时追加写盘。返回落盘错误（写盘后仍会继续跑 turn，
-    /// 仅收集错误供调用方上报）。
-    fn flush_ready_activities(
+    /// 追加/替换 agent 消息的累积文本；返回替换后的完整文本。
+    /// `text = None` 表示整条清空（`agent_message` 的 `null`）。
+    fn push_message_text(
         &self,
         session_id: &str,
-        log: &SessionLog,
-        merger: &mut TurnMerger,
-        control: &SessionControl,
-    ) -> Result<(), SessionError> {
-        let _lifecycle = control.lifecycle.lock();
-        if control.deleted.load(Ordering::SeqCst) {
-            merger.take_ready();
-            return Ok(());
+        message_id: &str,
+        text: Option<String>,
+    ) -> String {
+        let key = (session_id.to_string(), message_id.to_string());
+        let mut buffers = self.message_buf.lock();
+        match text {
+            Some(chunk) => buffers.entry(key).or_default().push_str(&chunk),
+            None => {
+                buffers.insert(key, String::new());
+            }
         }
-        let ready = merger.take_ready();
-        if ready.is_empty() {
-            return Ok(());
-        }
-        if let Err(e) = log.append_activities(&ready) {
-            log::error!("活动落盘失败 {session_id}: {e}");
-            return Err(SessionError::Storage(format!("活动落盘失败: {e}")));
-        }
-        Ok(())
+        buffers
+            .get(&(session_id.to_string(), message_id.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 
-    /// turn 统一收尾：递减进行中计数；归零时清 ongoing、置 Idle 并广播结束
-    /// 原因（并发 turn 未全部结束则保持 Busy，ongoing 交由余下 turn 继续）。
+    /// 追加/替换思考块的累积文本；返回（累积文本，首块时间戳）。
+    fn push_thinking_text(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        text: Option<String>,
+    ) -> (String, u64) {
+        let ts = now();
+        let key = (session_id.to_string(), message_id.to_string());
+        let mut buffers = self.thinking_buf.lock();
+        let entry = buffers.entry(key).or_insert_with(|| ThinkingBuffer {
+            content: String::new(),
+            first_timestamp: Some(ts),
+        });
+        match text {
+            Some(chunk) => entry.content.push_str(&chunk),
+            None => entry.content.clear(),
+        }
+        (entry.content.clone(), entry.first_timestamp.unwrap_or(ts))
+    }
+
+    /// agent 消息落盘（按 messageId upsert）；文本为空则删除该消息。
+    fn store_message_text(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        role: &str,
+        text: &str,
+    ) -> Result<(), SessionError> {
+        let control = self.control(session_id)?;
+        let _lifecycle = control.lifecycle.lock();
+        if control.deleted.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if text.is_empty() {
+            self.registry
+                .remove_message(session_id, message_id)
+                .map_err(|e| SessionError::Storage(format!("消息删除失败: {e}")))?;
+            return Ok(());
+        }
+        let content = vec![ContentBlock::Text { text: text.into() }];
+        let ts = now();
+        self.upsert_message(session_id, message_id, role, &content, ts, ts)
+    }
+
+    /// 思考活动落盘（按 thought messageId upsert）并更新进行中活动。
+    fn store_thinking(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        text: String,
+        first_ts: u64,
+    ) -> Result<(), SessionError> {
+        let activity = Activity::Thinking {
+            timestamp: first_ts,
+            thinking: text,
+        };
+        let control = self.control(session_id)?;
+        let _lifecycle = control.lifecycle.lock();
+        if control.deleted.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.ongoing
+            .lock()
+            .insert(session_id.to_string(), activity.clone());
+        self.upsert_activity(session_id, message_id, &activity, first_ts)
+    }
+
+    /// 工具调用活动落盘（按 toolCallId upsert，缺省字段保持上一版）并更新进行中活动。
+    fn store_tool_call(
+        &self,
+        session_id: &str,
+        tool_call_id: &str,
+        name: Option<String>,
+        title: Option<String>,
+        parameters: Option<String>,
+    ) -> Result<(), SessionError> {
+        let key = (session_id.to_string(), tool_call_id.to_string());
+        let ts = now();
+        let (activity, created_at) = {
+            let mut tools = self.tool_calls.lock();
+            let entry = tools.entry(key).or_insert_with(|| CurrentTool {
+                name: None,
+                title: None,
+                parameters: None,
+                timestamp: ts,
+            });
+            if name.is_some() {
+                entry.name = name;
+            }
+            if title.is_some() {
+                entry.title = title;
+            }
+            if parameters.is_some() {
+                entry.parameters = parameters;
+            }
+            (
+                Activity::ToolCall {
+                    timestamp: entry.timestamp,
+                    tool_call_id: tool_call_id.to_string(),
+                    tool_name: entry
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_TOOL_NAME.to_string()),
+                    title: entry.title.clone(),
+                    parameters: entry.parameters.clone(),
+                },
+                entry.timestamp,
+            )
+        };
+        let control = self.control(session_id)?;
+        let _lifecycle = control.lifecycle.lock();
+        if control.deleted.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.ongoing
+            .lock()
+            .insert(session_id.to_string(), activity.clone());
+        self.upsert_activity(session_id, tool_call_id, &activity, created_at)
+    }
+
+    /// 消息 upsert（内容 JSON 序列化）。
+    fn upsert_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        role: &str,
+        content: &[ContentBlock],
+        created_at: u64,
+        updated_at: u64,
+    ) -> Result<(), SessionError> {
+        let json = serde_json::to_string(content)
+            .map_err(|e| SessionError::Storage(format!("消息序列化失败: {e}")))?;
+        self.registry
+            .upsert_message(session_id, message_id, role, &json, created_at, updated_at)
+            .map_err(|e| SessionError::Storage(format!("消息落盘失败: {e}")))
+    }
+
+    /// 活动 upsert（内容 JSON 序列化）。
+    fn upsert_activity(
+        &self,
+        session_id: &str,
+        activity_id: &str,
+        activity: &Activity,
+        created_at: u64,
+    ) -> Result<(), SessionError> {
+        let json = serde_json::to_string(activity)
+            .map_err(|e| SessionError::Storage(format!("活动序列化失败: {e}")))?;
+        let kind = activity_kind(activity);
+        self.registry
+            .upsert_activity(session_id, activity_id, kind, &json, created_at, now())
+            .map_err(|e| SessionError::Storage(format!("活动落盘失败: {e}")))
+    }
+
+    /// 会话状态变更：以注册表元数据为权威，变化时立即落盘并广播
+    /// `session.state_change`（来源为 ACP `state_update`）。
+    fn set_state(
+        &self,
+        session_id: &str,
+        new_state: SessionState,
+        reason: protocol::StateChangeReason,
+        control: &SessionControl,
+    ) {
+        let _lifecycle = control.lifecycle.lock();
+        if control.deleted.load(Ordering::SeqCst) {
+            return;
+        }
+        let old_state = match self.registry.get(session_id) {
+            Ok(Some(entry)) => entry.meta.state,
+            Ok(None) => return,
+            Err(error) => {
+                log::error!("读取会话状态失败 {session_id}: {error}");
+                return;
+            }
+        };
+        if old_state == new_state {
+            return;
+        }
+        if let Err(e) = self.registry.update_state(session_id, new_state, now()) {
+            log::error!("更新会话状态失败 {session_id}: {e}");
+            return;
+        }
+        self.broadcast_state_change(session_id, old_state, new_state, reason);
+    }
+
+    /// turn 统一收尾：递减进行中计数；归零时清进行中活动、清理流式缓冲，
+    /// 并在 turn 异常结束（未收到 `state_update(idle)`）时兜底置空闲。
     /// deleted 时跳过状态回写，避免已删除会话在注册表中复活。
     fn finalize_turn(
         &self,
@@ -968,24 +1199,31 @@ impl SessionManager {
         control: &SessionControl,
         reason: protocol::StateChangeReason,
     ) {
-        let _lifecycle = control.lifecycle.lock();
-        let deleted = control.deleted.load(Ordering::SeqCst);
-        if control.turns.fetch_sub(1, Ordering::SeqCst) > 1 {
-            return;
-        }
-        self.ongoing.lock().remove(session_id);
-        self.thinking_buf.lock().remove(session_id);
-        if !deleted {
-            if let Err(e) = self
-                .registry
-                .update_state(session_id, SessionState::Idle, now())
-            {
-                log::error!("更新空闲状态失败 {session_id}: {e}");
+        // 生命周期锁只覆盖清理；`set_state` 自己会取同一把锁（不可重入），
+        // 故必须先释放。
+        let deleted = {
+            let _lifecycle = control.lifecycle.lock();
+            let deleted = control.deleted.load(Ordering::SeqCst);
+            if control.turns.fetch_sub(1, Ordering::SeqCst) > 1 {
+                return;
             }
-            self.broadcast_state_change(session_id, SessionState::Busy, SessionState::Idle, reason);
+            self.ongoing.lock().remove(session_id);
+            self.message_buf
+                .lock()
+                .retain(|(sid, _), _| sid != session_id);
+            self.thinking_buf
+                .lock()
+                .retain(|(sid, _), _| sid != session_id);
+            self.tool_calls
+                .lock()
+                .retain(|(sid, _), _| sid != session_id);
+            deleted
+        };
+        if !deleted {
+            // 正常结束已由 state_update(idle) 置空闲；此处仅为异常结束兜底
+            self.set_state(session_id, SessionState::Idle, reason, control);
         }
     }
-
     /// 取消指定普通会话正在进行的工作。
     pub async fn cancel(&self, session_id: &str) -> Result<(), SessionError> {
         let control = self.control(session_id)?;
