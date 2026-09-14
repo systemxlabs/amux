@@ -598,43 +598,45 @@ impl SessionManager {
         Ok(cleaned)
     }
 
-    /// 分页读对话历史：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
+    /// LIMIT/OFFSET 分页读对话历史：`offset` 从最新一条算起跳过条数（None = 首页）。
     pub async fn history(
         &self,
         session_id: &str,
         limit: Option<usize>,
-        before: Option<u64>,
+        offset: Option<usize>,
     ) -> Result<HistoryResult, SessionError> {
         self.get_entry(session_id)?;
         let limit = limit.unwrap_or(protocol::SESSION_PAGE_DEFAULT_LIMIT).max(1);
-        let (items, has_more, next_before) = self
+        let offset = offset.unwrap_or(0);
+        let (items, has_more, next_offset) = self
             .registry
-            .history_page(session_id, limit, before)
+            .history_page(session_id, limit, offset)
             .map_err(|e| SessionError::Storage(format!("会话历史读取失败: {e}")))?;
         Ok(HistoryResult {
             items,
             has_more,
-            next_before,
+            next_offset,
         })
     }
 
-    /// 分页读活动历史：`before` 为独占上界游标（条目下标，u64 统一协议游标类型）。
+    /// LIMIT/OFFSET 分页读活动历史；语义同 [`Self::history`]。
     pub async fn activities(
         &self,
         session_id: &str,
         limit: Option<usize>,
-        before: Option<u64>,
+        offset: Option<usize>,
     ) -> Result<ActivitiesResult, SessionError> {
         self.get_entry(session_id)?;
         let limit = limit.unwrap_or(protocol::SESSION_PAGE_DEFAULT_LIMIT).max(1);
-        let (activities, has_more, next_before) = self
+        let offset = offset.unwrap_or(0);
+        let (activities, has_more, next_offset) = self
             .registry
-            .activities_page(session_id, limit, before)
+            .activities_page(session_id, limit, offset)
             .map_err(|e| SessionError::Storage(format!("会话活动读取失败: {e}")))?;
         Ok(ActivitiesResult {
             activities,
             has_more,
-            next_before,
+            next_offset,
         })
     }
 

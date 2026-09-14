@@ -49,28 +49,28 @@ fn session_select(suffix: &str) -> String {
     format!("SELECT {SESSION_SELECT_COLUMNS} FROM sessions {suffix}")
 }
 
-/// 分页查询的单行：`seq` 是分页游标，`kind` 为 messages.role / activities.kind，
+/// 分页查询的单行：`kind` 为 messages.role / activities.kind，
 /// `content` 为条目 JSON，`created_at` 为首次写入时间。
 struct StoredRow {
-    seq: u64,
     kind: String,
     content: String,
     created_at: u64,
 }
 
-/// 组装分页窗口：`has_more` 由是否多取一条决定；`next_before` 为窗口最小 seq
-/// （更早一窗的独占上界），窗口按 seq 升序返回。
+/// 组装分页窗口：`has_more` 由是否多取一条决定；`next_offset` 为下一页
+/// 的 LIMIT/OFFSET 偏移（= 本页 offset + 已返回条数），窗口按 rowid 升序返回。
 fn finish_page<T>(
     rows: &[StoredRow],
     has_more: bool,
+    offset: usize,
     items: Vec<T>,
-) -> (Vec<T>, bool, Option<u64>) {
-    let next_before = if has_more {
-        rows.first().map(|row| row.seq)
+) -> (Vec<T>, bool, Option<usize>) {
+    let next_offset = if has_more {
+        Some(offset + rows.len())
     } else {
         None
     };
-    (items, has_more, next_before)
+    (items, has_more, next_offset)
 }
 
 fn state_from_str(s: &str) -> rusqlite::Result<SessionState> {
@@ -119,39 +119,35 @@ impl SessionRegistry {
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT '',
+                title TEXT,
                 workspace TEXT NOT NULL,
-                worktree_dir TEXT NOT NULL DEFAULT '',
+                worktree_dir TEXT,
                 agent TEXT NOT NULL,
                 agent_session_id TEXT,
                 created_at INTEGER NOT NULL,
                 last_active_at INTEGER NOT NULL
             );
             -- 对话历史：消息内容按 (session_id, message_id) upsert（v2 流式 update
-            -- 的 upsert 语义）。seq 是分页游标：只增不改，游标语义与协议一致。
+            -- 的 upsert 语义）；LIMIT/OFFSET 分页按 rowid（首次插入顺序）倒序取窗。
             CREATE TABLE IF NOT EXISTS messages (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
-                UNIQUE (session_id, message_id)
+                PRIMARY KEY (session_id, message_id)
             );
-            CREATE INDEX IF NOT EXISTS messages_session_seq ON messages (session_id, seq);
             -- 活动历史：activity_id = toolCallId / thought messageId / 本地生成 ID
             CREATE TABLE IF NOT EXISTS activities (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 activity_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                content TEXT NOT NULL,
+                content TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
-                UNIQUE (session_id, activity_id)
-            );
-            CREATE INDEX IF NOT EXISTS activities_session_seq ON activities (session_id, seq);",
+                PRIMARY KEY (session_id, activity_id)
+            );",
         )?;
         // server 重启后恢复的会话一律回到空闲：busy 状态由上一进程持有，
         // 其 agent 侧 turn 已随进程终止，残留 busy 会让列表状态永远不空闲。
@@ -353,15 +349,15 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 分页读取对话历史尾部：`before` 是独占 seq 游标（None = 最新一窗），
-    /// 返回按 seq 升序的窗口。
+    /// LIMIT/OFFSET 分页读取对话历史尾部：`offset` 从最新一条算起跳过条数
+    /// （0 = 最新一窗），返回按 rowid 升序的窗口。
     pub fn history_page(
         &self,
         session_id: &str,
         limit: usize,
-        before: Option<u64>,
-    ) -> rusqlite::Result<(Vec<HistoryItem>, bool, Option<u64>)> {
-        let (rows, has_more) = self.page_rows("messages", session_id, limit, before)?;
+        offset: usize,
+    ) -> rusqlite::Result<(Vec<HistoryItem>, bool, Option<usize>)> {
+        let (rows, has_more) = self.page_rows("messages", session_id, limit, offset)?;
         let mut items = Vec::with_capacity(rows.len());
         for row in &rows {
             let blocks: Vec<protocol::ContentBlock> = serde_json::from_str(&row.content)
@@ -377,24 +373,24 @@ impl SessionRegistry {
                 },
             });
         }
-        Ok(finish_page(&rows, has_more, items))
+        Ok(finish_page(&rows, has_more, offset, items))
     }
 
-    /// 分页读取活动历史尾部；游标语义同 [`Self::history_page`]。
+    /// LIMIT/OFFSET 分页读取活动历史尾部；语义同 [`Self::history_page`]。
     pub fn activities_page(
         &self,
         session_id: &str,
         limit: usize,
-        before: Option<u64>,
-    ) -> rusqlite::Result<(Vec<Activity>, bool, Option<u64>)> {
-        let (rows, has_more) = self.page_rows("activities", session_id, limit, before)?;
+        offset: usize,
+    ) -> rusqlite::Result<(Vec<Activity>, bool, Option<usize>)> {
+        let (rows, has_more) = self.page_rows("activities", session_id, limit, offset)?;
         let mut items = Vec::with_capacity(rows.len());
         for row in &rows {
             let activity: Activity = serde_json::from_str(&row.content)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             items.push(activity);
         }
-        Ok(finish_page(&rows, has_more, items))
+        Ok(finish_page(&rows, has_more, offset, items))
     }
 
     /// 会话是否有任何历史/活动数据（删除路径据此决定是否清理）。
@@ -423,40 +419,39 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 按 seq 倒序取一窗（多取一条判断 has_more），返回升序窗口。
-    /// 每行：`(seq, role/kind, content, created_at)`。
+    /// 按首次插入顺序（rowid）倒序取一窗（多取一条判断 has_more），返回升序窗口。
+    /// 每行：`(role/kind, content, created_at)`。
     fn page_rows(
         &self,
         table: &str,
         session_id: &str,
         limit: usize,
-        before: Option<u64>,
+        offset: usize,
     ) -> rusqlite::Result<(Vec<StoredRow>, bool)> {
         let limit = limit.max(1);
         let conn = self.connection();
         let sql = format!(
-            "SELECT seq, {kind}, content, created_at FROM {table}
-             WHERE session_id = ?1 AND (?2 IS NULL OR seq < ?2)
-             ORDER BY seq DESC LIMIT ?3",
+            "SELECT {kind}, content, created_at FROM {table}
+             WHERE session_id = ?1
+             ORDER BY rowid DESC LIMIT ?2 OFFSET ?3",
             kind = if table == "messages" { "role" } else { "kind" },
         );
         let mut stmt = conn.prepare(&sql)?;
         let mapped = stmt.query_map(
-            params![session_id, before.map(|b| b as i64), limit as i64 + 1],
+            params![session_id, limit as i64 + 1, offset as i64],
             |row| {
                 Ok(StoredRow {
-                    seq: row.get::<_, i64>(0)? as u64,
-                    kind: row.get::<_, String>(1)?,
-                    content: row.get::<_, String>(2)?,
-                    created_at: row.get::<_, i64>(3)? as u64,
+                    kind: row.get::<_, String>(0)?,
+                    content: row.get::<_, String>(1)?,
+                    created_at: row.get::<_, i64>(2)? as u64,
                 })
             },
         )?;
         let mut rows = mapped.collect::<rusqlite::Result<Vec<_>>>()?;
         let has_more = rows.len() > limit;
         if has_more {
-            // 多取的是最旧一条：它属于更早一窗
-            rows.remove(0);
+            // 多取的是最旧一条（位于 DESC 窗口末尾）：仅保留最新 limit 条
+            rows.truncate(limit);
         }
         rows.reverse();
         Ok((rows, has_more))
@@ -521,7 +516,30 @@ impl SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::ContentBlock;
     use std::sync::Arc;
+
+    fn text_blocks(text: &str) -> String {
+        serde_json::to_string(&[ContentBlock::Text { text: text.into() }]).unwrap()
+    }
+
+    fn text_of(blocks: &[ContentBlock]) -> String {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn item_text(item: &HistoryItem) -> String {
+        match item {
+            HistoryItem::UserMessage { content, .. }
+            | HistoryItem::AgentMessage { content, .. } => text_of(content),
+        }
+    }
 
     fn tmp_db(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -703,6 +721,54 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].meta.id, "s1");
         assert_eq!(all[0].agent_session_id.as_deref(), Some("agent_s1"));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn message_page_offset_returns_newest_window_first() {
+        let db = tmp_db("page");
+        let reg = SessionRegistry::open(&db).unwrap();
+        let (m, aid) = meta("s1", 100);
+        reg.upsert(&m, Some(&aid)).unwrap();
+
+        // 连续写入 5 条消息：rowid 即插入顺序，created_at 单调递增
+        for i in 0..5 {
+            reg.upsert_message(
+                "s1",
+                &format!("m{i}"),
+                "user",
+                &text_blocks(&format!("msg-{i}")),
+                i as u64,
+                i as u64,
+            )
+            .unwrap();
+        }
+
+        // 首页：最新 3 条（msg-2/3/4），has_more=true，next_offset=3
+        let (page, has_more, next_offset) = reg.history_page("s1", 3, 0).unwrap();
+        assert_eq!(page.len(), 3);
+        assert_eq!(item_text(&page[0]), "msg-2");
+        assert_eq!(item_text(&page[2]), "msg-4");
+        assert!(has_more);
+        assert_eq!(next_offset, Some(3));
+
+        // 更早一窗：跳过 3 条，只剩 msg-0/1，has_more=false
+        let (page, has_more, next_offset) =
+            reg.history_page("s1", 3, next_offset.unwrap()).unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(item_text(&page[0]), "msg-0");
+        assert_eq!(item_text(&page[1]), "msg-1");
+        assert!(!has_more);
+        assert_eq!(next_offset, None);
+
+        // upsert 不改变 rowid 位置：覆盖 msg-3 后首页 3 条仍为 msg-2/3/4（msg-4 位于末尾）
+        reg.upsert_message("s1", "m3", "user", &text_blocks("msg-3-updated"), 3, 99)
+            .unwrap();
+        let (page, _, _) = reg.history_page("s1", 3, 0).unwrap();
+        assert_eq!(page.len(), 3);
+        assert_eq!(item_text(&page[1]), "msg-3-updated");
+        assert_eq!(item_text(&page[2]), "msg-4");
+
         let _ = std::fs::remove_file(&db);
     }
 

@@ -557,7 +557,7 @@ async fn prompt_writes_history_and_activities_with_title() {
     assert!(items.iter().any(|i| matches!(i, HistoryItem::AgentMessage { content, .. }
         if content.iter().any(|c| matches!(c, ContentBlock::Text { text } if text.contains("完成"))))));
     assert!(!page.has_more);
-    assert_eq!(page.next_before, None);
+    assert_eq!(page.next_offset, None);
 
     let acts = env
         .manager

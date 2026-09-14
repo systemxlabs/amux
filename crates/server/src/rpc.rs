@@ -227,7 +227,7 @@ impl Handlers {
                 let p: SessionPageParams = parse(params)?;
                 to_value(
                     self.manager
-                        .history(&p.session_id, p.limit, p.before)
+                        .history(&p.session_id, p.limit, p.offset)
                         .await
                         .map_err(map_session_err)?,
                 )
@@ -237,7 +237,7 @@ impl Handlers {
                 let p: SessionPageParams = parse(params)?;
                 to_value(
                     self.manager
-                        .activities(&p.session_id, p.limit, p.before)
+                        .activities(&p.session_id, p.limit, p.offset)
                         .await
                         .map_err(map_session_err)?,
                 )

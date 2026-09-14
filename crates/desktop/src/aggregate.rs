@@ -12,9 +12,9 @@ pub struct SessionView {
     pub dialog: Vec<DialogMsg>,
     pub activities: Vec<Activity>,
     pub history_has_more: bool,
-    pub history_next_before: Option<usize>,
+    pub history_next_offset: Option<usize>,
     pub activities_has_more: bool,
-    pub activities_next_before: Option<usize>,
+    pub activities_next_offset: Option<usize>,
     /// 当前实时活动（进行中；空闲 None）。忙碌即 live.is_some()。
     pub live: Option<Activity>,
     /// agent 计划（`session.plan` 查询结果，全量替换）。
@@ -33,25 +33,25 @@ impl SessionView {
     /// 增量合并最新一窗：
     /// 新窗与已渲染内容的尾部按（类别，时间戳）序列对齐，只追加真正新增的条目——
     /// 原实现整页替换，既破坏增量语义，还会在下次 10s 轮询时冲掉用户
-    /// 「加载更早」载入的旧消息。保留旧前缀时沿用旧分页游标。
+    /// 「加载更早」载入的旧消息。保留旧前缀时沿用旧分页偏移。
     pub fn set_history_page(
         &mut self,
         items: &[HistoryItem],
         has_more: bool,
-        next_before: Option<usize>,
+        next_offset: Option<usize>,
     ) {
         let fresh = history_to_dialog(items);
         if self.dialog.is_empty() || fresh.is_empty() {
             self.dialog = fresh;
             self.history_has_more = has_more;
-            self.history_next_before = next_before;
+            self.history_next_offset = next_offset;
             return;
         }
         if merge_tail(&mut self.dialog, fresh, dialog_key) {
             return;
         }
         self.history_has_more = has_more;
-        self.history_next_before = next_before;
+        self.history_next_offset = next_offset;
     }
 
     /// 前插更早一窗历史（惰性加载"更早消息"，保持时间正序）。
@@ -86,11 +86,11 @@ impl SessionView {
         &mut self,
         earlier: &[HistoryItem],
         has_more: bool,
-        next_before: Option<usize>,
+        next_offset: Option<usize>,
     ) {
         self.prepend_history(earlier);
         self.history_has_more = has_more;
-        self.history_next_before = next_before;
+        self.history_next_offset = next_offset;
     }
 
     /// 增量合并最新一窗活动（同 set_history_page 的对齐策略）。
@@ -98,19 +98,19 @@ impl SessionView {
         &mut self,
         activities: Vec<Activity>,
         has_more: bool,
-        next_before: Option<usize>,
+        next_offset: Option<usize>,
     ) {
         if self.activities.is_empty() || activities.is_empty() {
             self.activities = activities;
             self.activities_has_more = has_more;
-            self.activities_next_before = next_before;
+            self.activities_next_offset = next_offset;
             return;
         }
         if merge_tail(&mut self.activities, activities, activity_key) {
             return;
         }
         self.activities_has_more = has_more;
-        self.activities_next_before = next_before;
+        self.activities_next_offset = next_offset;
     }
 
     /// 前插更早一窗活动。
@@ -127,11 +127,11 @@ impl SessionView {
         &mut self,
         earlier: Vec<Activity>,
         has_more: bool,
-        next_before: Option<usize>,
+        next_offset: Option<usize>,
     ) {
         self.prepend_activities(earlier);
         self.activities_has_more = has_more;
-        self.activities_next_before = next_before;
+        self.activities_next_offset = next_offset;
     }
 }
 
@@ -180,7 +180,7 @@ pub(crate) fn activity_key(a: &Activity) -> (&'static str, u64) {
 /// 把 `fresh` 作为尾部合并进 `current`：
 /// 在 fresh 中找到与 current 尾部键序列匹配的最长对齐点，
 /// 其后的条目追加到 current。返回 true 表示 current 保留了
-/// 更早的前缀（调用方应保留旧分页游标）；false 表示
+/// 更早的前缀（调用方应保留旧分页偏移）；false 表示
 /// current 未含更早内容（调用方采用新窗游标）。
 fn merge_tail<T: Clone>(
     current: &mut Vec<T>,
@@ -310,7 +310,7 @@ mod tests {
         let d = &view.dialog;
         assert_eq!(d.len(), 3, "加载更早的内容应在轮询后保留");
         assert_eq!(
-            (view.history_has_more, view.history_next_before),
+            (view.history_has_more, view.history_next_offset),
             (true, Some(1)),
             "保留了更早前缀时应沿用旧游标"
         );

@@ -50,8 +50,8 @@ async fn request_session_page<R, T>(
     client: crate::ws::WsClient,
     kind: crate::aggregate::SessionPageKind,
     session_id: String,
-    before: Option<u64>,
-    decode: impl FnOnce(R) -> (Vec<T>, bool, Option<u64>),
+    offset: Option<usize>,
+    decode: impl FnOnce(R) -> (Vec<T>, bool, Option<usize>),
 ) -> Result<(Vec<T>, bool, Option<usize>), crate::ws::RpcError>
 where
     R: serde::de::DeserializeOwned,
@@ -62,12 +62,12 @@ where
             Some(SessionPageParams {
                 session_id,
                 limit: Some(PAGE_LIMIT),
-                before,
+                offset,
             }),
         )
         .await?;
-    let (items, has_more, next_before) = decode(response);
-    Ok((items, has_more, next_before.map(|value| value as usize)))
+    let (items, has_more, next_offset) = decode(response);
+    Ok((items, has_more, next_offset))
 }
 
 /// 实时活动条的展示文本（None 即无进行中活动）。内容只折叠空白、不做字符
@@ -317,18 +317,12 @@ impl AmuxApp {
                         Some(SessionPageParams {
                             session_id,
                             limit: Some(PAGE_LIMIT),
-                            before: None,
+                            offset: None,
                         }),
                     )
                     .await
             },
-            |v, res: HistoryResult| {
-                v.set_history_page(
-                    &res.items,
-                    res.has_more,
-                    res.next_before.map(|x| x as usize),
-                )
-            },
+            |v, res: HistoryResult| v.set_history_page(&res.items, res.has_more, res.next_offset),
         );
     }
 
@@ -357,17 +351,13 @@ impl AmuxApp {
                         Some(SessionPageParams {
                             session_id,
                             limit: Some(PAGE_LIMIT),
-                            before: None,
+                            offset: None,
                         }),
                     )
                     .await
             },
             |v, res: ActivitiesResult| {
-                v.set_activities_page(
-                    res.activities,
-                    res.has_more,
-                    res.next_before.map(|x| x as usize),
-                )
+                v.set_activities_page(res.activities, res.has_more, res.next_offset)
             },
         );
     }
@@ -467,8 +457,8 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
         kind: crate::aggregate::SessionPageKind,
-        next_before: fn(&crate::aggregate::SessionView) -> Option<usize>,
-        decode: impl FnOnce(R) -> (Vec<T>, bool, Option<u64>) + 'static,
+        next_offset: fn(&crate::aggregate::SessionView) -> Option<usize>,
+        decode: impl FnOnce(R) -> (Vec<T>, bool, Option<usize>) + 'static,
         apply: impl FnOnce(&mut crate::aggregate::SessionView, Vec<T>, bool, Option<usize>) + 'static,
     ) where
         R: serde::de::DeserializeOwned + 'static,
@@ -487,7 +477,7 @@ impl AmuxApp {
         let Some(view) = m.views.get_mut(&id) else {
             return;
         };
-        let Some(before) = next_before(view) else {
+        let Some(offset) = next_offset(view) else {
             return;
         };
         let request_id = {
@@ -497,8 +487,8 @@ impl AmuxApp {
         };
         let client = m.client.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
-            if let Ok((items, has_more, next_before)) =
-                request_session_page(client, kind, id.clone(), Some(before as u64), decode).await
+            if let Ok((items, has_more, next_offset)) =
+                request_session_page(client, kind, id.clone(), Some(offset), decode).await
             {
                 let _ = this.update_in(cx, |this, _w, cx| {
                     let Some(idx) = this.machine_idx_by_name(&machine_name) else {
@@ -516,7 +506,7 @@ impl AmuxApp {
                     if *kind.request_slot()(view) != request_id {
                         return;
                     }
-                    apply(view, items, has_more, next_before);
+                    apply(view, items, has_more, next_offset);
                     cx.notify();
                 });
             }
@@ -529,10 +519,10 @@ impl AmuxApp {
             window,
             cx,
             crate::aggregate::SessionPageKind::History,
-            |view| view.history_next_before,
-            |res: HistoryResult| (res.items, res.has_more, res.next_before),
-            |view, items, has_more, next_before| {
-                view.prepend_history_page(&items, has_more, next_before)
+            |view| view.history_next_offset,
+            |res: HistoryResult| (res.items, res.has_more, res.next_offset),
+            |view, items, has_more, next_offset| {
+                view.prepend_history_page(&items, has_more, next_offset)
             },
         );
     }
@@ -542,10 +532,10 @@ impl AmuxApp {
             window,
             cx,
             crate::aggregate::SessionPageKind::Activities,
-            |view| view.activities_next_before,
-            |res: ActivitiesResult| (res.activities, res.has_more, res.next_before),
-            |view, activities, has_more, next_before| {
-                view.prepend_activities_page(activities, has_more, next_before)
+            |view| view.activities_next_offset,
+            |res: ActivitiesResult| (res.activities, res.has_more, res.next_offset),
+            |view, activities, has_more, next_offset| {
+                view.prepend_activities_page(activities, has_more, next_offset)
             },
         );
     }

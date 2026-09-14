@@ -197,9 +197,9 @@ pub struct SessionPageParams {
     pub session_id: String,
     #[serde(default)]
     pub limit: Option<usize>,
-    /// 独占上界游标：只返回该下标之前的条目（None = 从最新一窗开始）
+    /// LIMIT/OFFSET 分页偏移：从最新一条算起跳过 offset 条（None = 首页最新一窗）
     #[serde(default)]
-    pub before: Option<u64>,
+    pub offset: Option<usize>,
 }
 
 /// `session.new` 结果。
@@ -386,8 +386,8 @@ pub enum HistoryItem {
 pub struct HistoryResult {
     pub items: Vec<HistoryItem>,
     pub has_more: bool,
-    /// 更早一窗的独占上界游标；无更早时为 None。
-    pub next_before: Option<u64>,
+    /// 下一页的偏移（= 本页 offset + 本页条数）；无更早时为 None。
+    pub next_offset: Option<usize>,
 }
 
 /// 会话活动：turn 过程中的详细活动（thinking / tool_call / error）。
@@ -419,8 +419,8 @@ pub enum Activity {
 pub struct ActivitiesResult {
     pub activities: Vec<Activity>,
     pub has_more: bool,
-    /// 更早一窗的独占上界游标；无更早时为 None。
-    pub next_before: Option<u64>,
+    /// 下一页的偏移（= 本页 offset + 本页条数）；无更早时为 None。
+    pub next_offset: Option<usize>,
 }
 
 /// `session.ongoing_activity` 结果（进行中的活动；无则 None）。
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(p.limit, Some(10));
         let page: SessionPageParams = serde_json::from_str(r#"{"sessionId":"s1"}"#).unwrap();
         assert_eq!(page.session_id, "s1");
-        assert_eq!(page.before, None);
+        assert_eq!(page.offset, None);
     }
 
     #[test]

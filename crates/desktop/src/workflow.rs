@@ -1188,26 +1188,26 @@ fn tool_definitions() -> Vec<rig_core::completion::ToolDefinition> {
         },
         ToolDefinition {
             name: READ_SESSION_HISTORY.into(),
-            description: "按窗口 / 游标读取关联普通会话对话内容".into(),
+            description: "按窗口 / 偏移读取关联普通会话对话内容".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "session": { "type": "string" },
                     "limit": { "type": "integer" },
-                    "before": { "type": "integer" }
+                    "offset": { "type": "integer" }
                 },
                 "required": ["session"]
             }),
         },
         ToolDefinition {
             name: READ_SESSION_ACTIVITIES.into(),
-            description: "按窗口 / 游标读取关联普通会话活动内容".into(),
+            description: "按窗口 / 偏移读取关联普通会话活动内容".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "session": { "type": "string" },
                     "limit": { "type": "integer" },
-                    "before": { "type": "integer" }
+                    "offset": { "type": "integer" }
                 },
                 "required": ["session"]
             }),
@@ -1896,7 +1896,7 @@ struct SessionPageArgs {
     #[serde(default)]
     limit: Option<u64>,
     #[serde(default)]
-    before: Option<u64>,
+    offset: Option<usize>,
 }
 
 /// 分页读取的两个目标（对话 / 活动）：内部判别用枚举，仅在请求边界
@@ -1926,7 +1926,7 @@ async fn read_session_page<R: serde::de::DeserializeOwned + serde::Serialize>(
     let params = SessionPageParams {
         session_id: args.session.clone(),
         limit: args.limit.map(|l| l as usize),
-        before: args.before,
+        offset: args.offset,
     };
     let r: R = client
         .request::<_, R>(kind.method(), Some(params))
