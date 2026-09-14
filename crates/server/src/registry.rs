@@ -58,7 +58,7 @@ struct StoredRow {
 }
 
 /// 组装分页窗口：`has_more` 由是否多取一条决定；`next_offset` 为下一页
-/// 的 LIMIT/OFFSET 偏移（= 本页 offset + 已返回条数），窗口按 rowid 升序返回。
+/// 的 LIMIT/OFFSET 偏移（= 本页 offset + 已返回条数），窗口按 updated_at 升序返回。
 fn finish_page<T>(
     rows: &[StoredRow],
     has_more: bool,
@@ -128,7 +128,7 @@ impl SessionRegistry {
                 last_active_at INTEGER NOT NULL
             );
             -- 对话历史：消息内容按 (session_id, message_id) upsert（v2 流式 update
-            -- 的 upsert 语义）；LIMIT/OFFSET 分页按 rowid（首次插入顺序）倒序取窗。
+            -- 的 upsert 语义）；LIMIT/OFFSET 分页按 updated_at（最后更新时间）倒序取窗。
             CREATE TABLE IF NOT EXISTS messages (
                 session_id TEXT NOT NULL,
                 message_id TEXT NOT NULL,
@@ -350,7 +350,7 @@ impl SessionRegistry {
     }
 
     /// LIMIT/OFFSET 分页读取对话历史尾部：`offset` 从最新一条算起跳过条数
-    /// （0 = 最新一窗），返回按 rowid 升序的窗口。
+    /// （0 = 最新一窗），返回按 updated_at 升序的窗口。
     pub fn history_page(
         &self,
         session_id: &str,
@@ -419,7 +419,7 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// 按首次插入顺序（rowid）倒序取一窗（多取一条判断 has_more），返回升序窗口。
+    /// 按最后更新时间（updated_at）倒序取一窗（多取一条判断 has_more），返回升序窗口。
     /// 每行：`(role/kind, content, created_at)`。
     fn page_rows(
         &self,
@@ -433,7 +433,7 @@ impl SessionRegistry {
         let sql = format!(
             "SELECT {kind}, content, created_at FROM {table}
              WHERE session_id = ?1
-             ORDER BY rowid DESC LIMIT ?2 OFFSET ?3",
+             ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3",
             kind = if table == "messages" { "role" } else { "kind" },
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -731,7 +731,7 @@ mod tests {
         let (m, aid) = meta("s1", 100);
         reg.upsert(&m, Some(&aid)).unwrap();
 
-        // 连续写入 5 条消息：rowid 即插入顺序，created_at 单调递增
+        // 连续写入 5 条消息：updated_at 单调递增，按更新时间倒序分页
         for i in 0..5 {
             reg.upsert_message(
                 "s1",
@@ -761,13 +761,18 @@ mod tests {
         assert!(!has_more);
         assert_eq!(next_offset, None);
 
-        // upsert 不改变 rowid 位置：覆盖 msg-3 后首页 3 条仍为 msg-2/3/4（msg-4 位于末尾）
+        // upsert 刷新 updated_at 会把该条提升到最新位置：更新 msg-3 后它变为首页最末（最新）一条
         reg.upsert_message("s1", "m3", "user", &text_blocks("msg-3-updated"), 3, 99)
             .unwrap();
         let (page, _, _) = reg.history_page("s1", 3, 0).unwrap();
         assert_eq!(page.len(), 3);
-        assert_eq!(item_text(&page[1]), "msg-3-updated");
-        assert_eq!(item_text(&page[2]), "msg-4");
+        assert_eq!(item_text(&page[0]), "msg-2");
+        assert_eq!(item_text(&page[1]), "msg-4");
+        assert_eq!(
+            item_text(&page[2]),
+            "msg-3-updated",
+            "updated_at 最新的 msg-3 应排到窗口末尾（最新位置）"
+        );
 
         let _ = std::fs::remove_file(&db);
     }
