@@ -641,11 +641,17 @@ impl SessionManager {
     }
 
     /// 查询正在进行中的活动；无则 None。
+    /// 以会话状态为权威：只有 Busy 才会上报 ongoing。idle 会话即使内存中残留
+    /// 未清空的条目（`finalize_turn` 清理与状态推送存在时序窗口）也不会返回，
+    /// 避免 GUI 在会话已 idle 时仍展示进行中活动。
     pub async fn ongoing_activity(
         &self,
         session_id: &str,
     ) -> Result<Option<Activity>, SessionError> {
-        self.get_entry(session_id)?;
+        let entry = self.get_entry(session_id)?;
+        if entry.meta.state != SessionState::Busy {
+            return Ok(None);
+        }
         Ok(self.ongoing.lock().get(session_id).cloned())
     }
 
@@ -1430,6 +1436,41 @@ mod tests {
         let (full, _) = mgr.push_thinking_text(id, tid, None, false);
         assert_eq!(full, "");
         assert!(first_ts > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn idle_session_hides_stale_ongoing() {
+        // 回归：turn 收尾清理 ongoing 与状态推送之间存在时序窗口，
+        // idle 会话即使内存中残留进行中活动也不得上报。
+        let dir = std::env::temp_dir().join(format!(
+            "amux-ongoing-idle-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let (mgr, _registry, _rx) = manager_at(&dir);
+        let sid = mgr.create("mock", "/tmp/ongoing-idle", false).await.unwrap().id;
+        mgr.ongoing.lock().insert(
+            sid.clone(),
+            Activity::Thinking {
+                timestamp: now(),
+                thinking: "残留".into(),
+            },
+        );
+        // 新建会话为 idle：即使有残留条目，ongoing 也必须为空。
+        assert!(mgr.ongoing_activity(&sid).await.unwrap().is_none());
+        // 置回 Busy 后正常上报。
+        let control = mgr.controls.lock().get(&sid).cloned().unwrap();
+        mgr.set_state(
+            &sid,
+            SessionState::Busy,
+            protocol::StateChangeReason::Completed,
+            &control,
+        );
+        assert!(matches!(
+            mgr.ongoing_activity(&sid).await.unwrap(),
+            Some(Activity::Thinking { .. })
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
