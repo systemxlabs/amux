@@ -812,6 +812,7 @@ impl AmuxApp {
                 .await;
             // 定时刷新统一走 refresh_sessions（含滚动查询 N 页与工作流
             // 关联会话补齐）；按机器名定位，重连和机器列表变化均安全。
+            // 活动/计划/上下文与文档一致保持 10s，与对话消息（5s）解耦。
             let _ = this.update_in(cx, |this, window, cx| {
                 let machine_names: Vec<String> = this
                     .machines
@@ -821,26 +822,29 @@ impl AmuxApp {
                 for machine_name in machine_names {
                     this.refresh_sessions(&machine_name, window, cx);
                 }
+                if let Some((machine, id)) = this.open_session_target() {
+                    this.refresh_activities(window, cx, &machine, id.clone());
+                    this.refresh_plan(window, cx, &machine, id.clone());
+                    this.refresh_context(window, cx, &machine, id);
+                }
             });
         });
         self._tasks.push(t);
 
         let t = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
+            // 对话消息定时刷新 5s（DESIGN「对话视图」）；已打开才刷新。
             let target = this
                 .update_in(cx, |this, _w, _cx| this.open_session_target())
                 .ok()
                 .flatten();
             if let Some((machine, id)) = target {
                 let _ = this.update_in(cx, |this, window, cx| {
-                    this.refresh_dialog(window, cx, &machine, id.clone());
-                    this.refresh_activities(window, cx, &machine, id.clone());
-                    this.refresh_plan(window, cx, &machine, id.clone());
-                    this.refresh_context(window, cx, &machine, id);
+                    this.refresh_dialog(window, cx, &machine, id);
                     cx.notify();
                 });
             }
             cx.background_executor()
-                .timer(Duration::from_secs(10))
+                .timer(Duration::from_secs(5))
                 .await;
         });
         self._tasks.push(t);
