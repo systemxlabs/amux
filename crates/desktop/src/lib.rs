@@ -22,18 +22,3 @@ pub mod wfstore;
 pub mod workflow;
 pub mod workflow_view;
 pub mod ws;
-
-#[cfg(test)]
-mod floating_rail_dialog_scroll_test;
-#[cfg(test)]
-mod new_session_view_test;
-#[cfg(test)]
-mod orchestrator_settings_test;
-#[cfg(test)]
-mod panels_workspace_scroll_test;
-#[cfg(test)]
-mod terminal_tab_test;
-#[cfg(test)]
-mod workflow_detail_panel_test;
-#[cfg(test)]
-mod workflow_row_toggle_test;
