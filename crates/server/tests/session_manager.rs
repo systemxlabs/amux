@@ -1,5 +1,5 @@
 //! 普通会话管理集成测试：全部走真实路径——`AcpConnection` 子进程对接
-//! `mock_acp`（与 codex / kimi 同为 ACP v1 agent），不再使用进程内连接替身。
+//! `mock_acp`（模拟 ACP v2 agent），不再使用进程内连接替身。
 //! 时序控制经 mock 的跨进程协调机制（闸门/步骤/阻塞 session/new），测试以
 //! server 侧可观察状态（注册表、ongoing、落盘文件、calls 记录）为同步点。
 
@@ -36,7 +36,7 @@ where
     panic!("等待超时：{desc}");
 }
 
-/// 一个测试环境：mock_acp 子进程（AcpConnection 经真实 ACP v1 stdio 对接）+
+/// 一个测试环境：mock_acp 子进程（AcpConnection 经真实 ACP v2 stdio 对接）+
 /// 独立数据目录的 SessionManager。`prepare` 在临时目录里生成场景文件并返回
 /// 传给 mock 的环境变量。
 struct Env {

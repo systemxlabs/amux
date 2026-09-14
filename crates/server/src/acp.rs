@@ -5,7 +5,7 @@
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨
 //! runtime 嵌套的 tokio 问题（调用方可能处于任意 tokio runtime 上下文）。
 //!
-//! v2 与 v1 的关键差异：
+//! v2 语义要点：
 //! - `session/prompt` 响应只表示**已受理**，前台工作结束由 `state_update` 的 `idle` 报告；
 //! - `session/cancel` 是通知；
 //! - 消息、工具调用、思考均按 `messageId` / `toolCallId` 的 upsert 语义增量下发。

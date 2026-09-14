@@ -1,13 +1,13 @@
 //! Agent 连接：server 与 agent 的唯一接口。
-//! `AcpConnection` 经官方 SDK `agent-client-protocol` 对接真实 ACP v1
-//! （`AcpAgent` stdio 传输 + typed 请求/通知，`grok agent`、`codex-acp` /
-//! `claude-acp` / `kimi acp`）；测试经 `mock_acp` 子进程走同一真实路径。
+//! `AcpConnection` 经官方 SDK `agent-client-protocol` 以 Client 角色对接 ACP v2
+//! （stdio 传输 + typed 请求/通知）；测试经 `mock_acp` 子进程走同一真实路径。
 //! `AgentRegistry` 按 agent 名解析连接——`AMUX_AGENT_BIN` 配置的连接 +
 //! PATH 自动发现的 agent（启动即拉起并复用；拉起失败标记不可用；
 //! 运行期新发现的惰性拉起）。
 //!
-//! ACP v1 语义：session/new、resume、prompt、cancel、close 等
-//! 方法；session/update 事件流聚合；session/request_permission 自动批准（yolo）。
+//! ACP v2 语义：session/new、resume、prompt、cancel、close、delete、
+//! set_config_option 等请求/通知；session/update 事件流聚合；
+//! session/request_permission 自动批准（yolo）。
 //!
 //! AcpConnection 使用**专用 exec 线程**承载全部异步 IO（官方 SDK 连接、子进程 stdio、
 //! 通知路由、权限自动批准），主线程方法调用经 std 同步通道往返——避免跨线程/跨 runtime
@@ -24,11 +24,9 @@ use protocol::AgentInfo;
 
 /// agent 注册表（自动发现可执行路径，不要求手动指定）：
 ///
-/// - `AMUX_AGENT_BIN` 指定的连接（agent 名 = 可执行文件名，如 `mock_acp` / `kimi acp`）为显式覆盖
+/// - `AMUX_AGENT_BIN` 指定的连接（agent 名 = 可执行文件名，如 `mock_acp` / `codex`）为显式覆盖
 /// - 自动发现（无需显式配置）：
-///   - 已知 CLI 的 `acp` 子命令探测（如 `kimi acp`，ACP 原生）
-///   - 已知 CLI 的 `agent` 子命令探测（如 `grok agent --always-approve stdio`）
-///   - 已知 CLI（`claude` / `codex`）经 npx 启动官方 ACP 包装器（`npx -y @agentclientprotocol/...`）
+///   - codex：装有 `codex` CLI 且 npx 可用 → `npx -y @nyssance/codex-acp-v2@<version>`
 ///   - 发现的 agent 在 server 启动时**直接拉起**（`launch_discovered`，后续
 ///     `connection_for` 复用缓存连接）；
 ///     **拉起失败的 agent 标记为不可用**（agent.list 的 status 反映；使用时报明确错误）；
