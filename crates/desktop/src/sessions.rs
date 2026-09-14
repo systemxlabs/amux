@@ -664,22 +664,10 @@ impl AmuxApp {
                 let generation = m.connection_generation;
                 let params = SessionPromptParams {
                     session_id: id.clone(),
-                    input: blocks.clone(),
+                    input: blocks,
                 };
-                let optimistic_timestamp = now();
-                if let Some(m) = self.machine_mut(idx) {
-                    // 本地仅缓存对话视图；会话状态由服务端权威维护，
-                    // 经 state_change 推送 / 会话列表轮询同步，应用侧不做乐观改写
-                    let v = m.views.entry(id.clone()).or_default();
-                    v.dialog.push(DialogMsg::UserMessage {
-                        content: blocks.clone(),
-                        timestamp: optimistic_timestamp,
-                    });
-                }
-                self.dialog_scroll.scroll_to_bottom();
                 let original_text = text.clone();
-                let optimistic_blocks = blocks;
-                let optimistic_id = id.clone();
+                let session_id = id.clone();
                 cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
                     let result = client
                         .request_ok(protocol::method::SESSION_PROMPT, Some(params))
@@ -692,30 +680,12 @@ impl AmuxApp {
                             Some(Selected::Session {
                                 machine: ref selected_machine,
                                 ref id,
-                            }) if *selected_machine == machine && id == &optimistic_id
+                            }) if *selected_machine == machine && id == &session_id
                         );
                         match result {
                             Err(error) => {
-                                // 断连通知先于 pending RPC 的失败结果到达；即使旧代次
-                                // 已失效，也必须回收本次乐观消息，否则它会永久留在对话中。
-                                if let Some(view_idx) = this.machine_idx_by_name(&machine) {
-                                    if let Some(m) = this.machine_mut(view_idx) {
-                                        if let Some(v) = m.views.get_mut(&optimistic_id) {
-                                            if let Some(pos) = v.dialog.iter().rposition(|msg| {
-                                                matches!(
-                                                    msg,
-                                                    DialogMsg::UserMessage {
-                                                        content,
-                                                        timestamp,
-                                                    } if *timestamp == optimistic_timestamp
-                                                        && *content == optimistic_blocks
-                                                )
-                                            }) {
-                                                v.dialog.remove(pos);
-                                            }
-                                        }
-                                    }
-                                }
+                                // 无乐观更新：失败时用户消息尚未落盘，把输入内容
+                                // 恢复到输入框，便于重发。
                                 if selected_session
                                     && this.input_state.read(cx).value().trim().is_empty()
                                     && this.input_attachments.is_empty()
@@ -732,14 +702,14 @@ impl AmuxApp {
                                     );
                                 }
                             }
-                            // 发送用户消息后主动刷新会话列表。
+                            // 发送成功：由服务端权威落盘，主动刷新会话列表与对话。
                             Ok(()) if current_connection => {
                                 this.refresh_sessions(&machine, w, cx);
+                                this.refresh_dialog(w, cx, &machine, session_id);
                             }
                             Ok(()) => return,
                         }
                         if current_connection {
-                            this.refresh_dialog(w, cx, &machine, optimistic_id);
                             cx.notify();
                         }
                     });
@@ -792,7 +762,7 @@ impl AmuxApp {
         cmd: &QuickCommand,
     ) {
         // 快捷指令等价于把提示词填入输入框后走统一的发送链路
-        // （本地回显、贴底滚动、完成后的对话/列表刷新都由 send_prompt 承担）
+        // （发送完成后的对话/列表主动刷新由 send_prompt 承担）
         self.input_state
             .update(cx, |s, cx| s.set_value(&cmd.prompt, window, cx));
         self.send_prompt(window, cx);
