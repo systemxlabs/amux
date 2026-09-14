@@ -1381,22 +1381,6 @@ impl AmuxApp {
         } else {
             Vec::new()
         };
-        let agent_label: SharedString = if let Some((machine_name, id)) = self.open_session_target()
-        {
-            self.machine_idx_by_name(&machine_name)
-                .and_then(|idx| self.machine(idx))
-                .and_then(|m| {
-                    m.sessions
-                        .iter()
-                        .find(|s| s.id == id)
-                        .map(|s| format!("{}@{machine_name}", s.agent).into())
-                })
-                .unwrap_or_else(|| "Agent".into())
-        } else if matches!(self.selected, Some(Selected::Workflow { .. })) {
-            "编排".into()
-        } else {
-            "Agent".into()
-        };
         let primary = cx.theme().primary;
         let primary_foreground = cx.theme().primary_foreground;
         let popover = cx.theme().popover;
@@ -1409,7 +1393,7 @@ impl AmuxApp {
                     let text = block_text(content);
                     let images = crate::text::message_images(content);
                     // 气泡贴内容：按最长行估算宽度，短消息收拢；长消息触顶换行。
-                    // 下限需容纳「我 + 时间戳」头部行
+                    // 下限需容纳时间戳头部行
                     let mut bubble_w = crate::text::estimate_bubble_width(
                         &text,
                         crate::theme::FONT_BODY.as_f32(),
@@ -1433,12 +1417,6 @@ impl AmuxApp {
                             .rounded_md()
                             .bg(primary)
                             .shadow_sm()
-                            .child(
-                                Label::new("我")
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(primary_foreground),
-                            )
                             .child(
                                 Label::new(format_local_time(*timestamp, TimePrecision::Seconds))
                                     .text_xs()
@@ -1480,12 +1458,6 @@ impl AmuxApp {
                             .border_1()
                             .border_color(border)
                             .shadow_sm()
-                            .child(
-                                Label::new(agent_label.clone())
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(muted_foreground),
-                            )
                             .child(
                                 Label::new(format_local_time(*timestamp, TimePrecision::Seconds))
                                     .text_xs()
