@@ -319,26 +319,38 @@ impl SessionManager {
         session_id: &str,
     ) -> Result<Vec<protocol::SessionConfigOption>, SessionError> {
         let control = self.control(session_id)?;
-        let _lifecycle = control.lifecycle.lock();
-        if control.deleted.load(Ordering::SeqCst) {
-            return Err(SessionError::NotFound(session_id.to_string()));
-        }
-        let entry = match self.get_entry(session_id) {
-            Ok(entry) => entry,
-            Err(error) => {
-                self.remove_control_if_not_found(session_id, &control, &error);
-                return Err(error);
+        let (connection, agent_session_id, cwd) = {
+            let _lifecycle = control.lifecycle.lock();
+            if control.deleted.load(Ordering::SeqCst) {
+                return Err(SessionError::NotFound(session_id.to_string()));
             }
+            let entry = match self.get_entry(session_id) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    self.remove_control_if_not_found(session_id, &control, &error);
+                    return Err(error);
+                }
+            };
+            let (connection, agent_session_id) = self.ensure_agent_session(
+                session_id,
+                &entry.meta,
+                entry.agent_session_id.as_deref(),
+            )?;
+            let meta = entry.meta;
+            // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
+            // 最新选项全量覆盖内存存储；幂等 resume 返回空集合时保持既有选项。
+            (
+                connection,
+                agent_session_id,
+                self.resolve_cwd(session_id, &meta)?,
+            )
         };
-        let (connection, agent_session_id) =
-            self.ensure_agent_session(session_id, &entry.meta, entry.agent_session_id.as_deref())?;
-        let meta = entry.meta;
-        // 已有 agent 侧会话：先经 ACP `session/resume` 恢复（幂等），响应携带的
-        // 最新选项全量覆盖内存存储；幂等 resume 返回空集合时保持既有选项。
-        let cwd = self.resolve_cwd(session_id, &meta)?;
-        match connection.resume_session(&agent_session_id, &cwd) {
+        // resume 可能为等待 agent 会话恢复而短暂重试：parking_lot 守卫非 Send，
+        // 不能跨 await 持有；恢复完成后再回拿锁写配置（delete 竞态下跳过写）。
+        match connection.resume_session(&agent_session_id, &cwd).await {
             Ok(options) => {
-                if !options.is_empty() {
+                let _lifecycle = control.lifecycle.lock();
+                if !control.deleted.load(Ordering::SeqCst) && !options.is_empty() {
                     self.store_config_options(session_id, options);
                 }
             }
@@ -702,7 +714,7 @@ impl SessionManager {
 
         // 继续既有会话：先经 ACP `session/resume` 恢复 agent 自身上下文（幂等）。
         // 恢复响应携带的最新配置选项（幂等 resume 返回空）全量覆盖内存存储。
-        match connection.resume_session(&agent_session_id, &cwd) {
+        match connection.resume_session(&agent_session_id, &cwd).await {
             Ok(options) => {
                 if !options.is_empty() {
                     self.store_config_options(session_id, options);
@@ -1449,7 +1461,11 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let (mgr, _registry, _rx) = manager_at(&dir);
-        let sid = mgr.create("mock", "/tmp/ongoing-idle", false).await.unwrap().id;
+        let sid = mgr
+            .create("mock", "/tmp/ongoing-idle", false)
+            .await
+            .unwrap()
+            .id;
         mgr.ongoing.lock().insert(
             sid.clone(),
             Activity::Thinking {

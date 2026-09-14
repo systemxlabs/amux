@@ -31,6 +31,7 @@ async fn acp_client_full_flow() {
     assert_eq!(model_current, "gpt-4o");
     connection
         .resume_session("mock_s_restored", "/tmp/work")
+        .await
         .expect("restore");
 
     // 设置会话选项：返回更新后的完整选项集合

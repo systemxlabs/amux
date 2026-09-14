@@ -462,7 +462,7 @@ impl AcpConnection {
     /// 恢复 agent 自身上下文（ACP `session/resume`，不带 `replayFrom`：只恢复上下文、
     /// 不重放历史——历史以 server 本地存储为权威。
     /// 同一进程内对同一会话幂等（已恢复过则直接成功），返回会话配置选项。
-    pub fn resume_session(
+    pub async fn resume_session(
         &self,
         agent_session_id: &str,
         cwd: &str,
@@ -473,17 +473,28 @@ impl AcpConnection {
                 return Ok(Vec::new());
             }
         }
-        let result = self.call(AcpCall::Resume {
-            sid: agent_session_id.to_string(),
-            cwd: cwd.to_string(),
-        });
-        if result.is_ok() {
-            self.resumed.lock().insert(agent_session_id.to_string());
+        // agent 刚重启时会话可能仍在做生命周期/配置恢复，`session/resume` 临时返回
+        // “Session lifecycle or configuration work is in progress; retry when it finishes”。
+        // 做有限重试，避免把瞬时状态误判成恢复失败直接 abort 本应当成功的 prompt。
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            let result = self.call(AcpCall::Resume {
+                sid: agent_session_id.to_string(),
+                cwd: cwd.to_string(),
+            });
+            let transient = matches!(&result, Err(e) if is_transient_resume_error(e));
+            if !transient || attempts >= RESUME_RETRY_ATTEMPTS {
+                if result.is_ok() {
+                    self.resumed.lock().insert(agent_session_id.to_string());
+                }
+                return result.map(|res| match res {
+                    AcpResponse::ConfigOptions(options) => options,
+                    _ => Vec::new(),
+                });
+            }
+            tokio::time::sleep(RESUME_RETRY_DELAY).await;
         }
-        result.map(|res| match res {
-            AcpResponse::ConfigOptions(options) => options,
-            _ => Vec::new(),
-        })
     }
 
     pub fn prompt(&self, agent_session_id: &str, input: Vec<ContentBlock>) -> PromptStream {
@@ -1051,6 +1062,17 @@ fn stop_reason_reason(reason: Option<&StopReason>) -> protocol::StateChangeReaso
 /// agent 以错误结束前台工作时上报的 stopReason（实现自定义值）。
 const ERROR_STOP_REASON: &str = "_error";
 
+/// `session/resume` 遇到“会话生命周期/配置工作仍在进行”时的有限重试参数：
+/// agent 要求 retry when it finishes，短窗口内重放可把瞬时繁忙与真正失败分开。
+const RESUME_RETRY_ATTEMPTS: u32 = 5;
+const RESUME_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// resume 是否为可重试的瞬时错误（agent 刚重启、会话仍在恢复时的临时拒绝）。
+fn is_transient_resume_error(e: &str) -> bool {
+    e.contains("retry when it finishes")
+        || e.contains("Session lifecycle or configuration work is in progress")
+}
+
 /// 把 ACP `session/update` 通知映射为 AgentEvent 并路由。
 /// `state_update(idle)` 表示前台工作结束：事件送达后回收该会话的全部路由，
 /// 使各在途 turn 的事件流随之结束。
@@ -1456,6 +1478,17 @@ mod tests {
             })
         ));
         assert!(caches.routes.lock().is_empty());
+    }
+
+    #[test]
+    fn transient_resume_error_matching() {
+        assert!(is_transient_resume_error(
+            "session/resume 失败: Session lifecycle or configuration work is in progress; retry when it finishes"
+        ));
+        assert!(is_transient_resume_error("... retry when it finishes"));
+        assert!(!is_transient_resume_error(
+            "session/resume 失败: session not found"
+        ));
     }
 
     #[test]
