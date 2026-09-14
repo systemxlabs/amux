@@ -871,14 +871,14 @@ impl SessionManager {
                     }
                 }
                 AgentEvent::AgentMessageChunk { message_id, text } => {
-                    let full = self.push_message_text(session_id, &message_id, Some(text));
+                    let full = self.push_message_text(session_id, &message_id, Some(text), true);
                     if let Err(e) = self.store_message_text(session_id, &message_id, "agent", &full)
                     {
                         storage_error = Some(e);
                     }
                 }
                 AgentEvent::AgentMessageSnapshot { message_id, text } => {
-                    let full = self.push_message_text(session_id, &message_id, text);
+                    let full = self.push_message_text(session_id, &message_id, text, false);
                     if let Err(e) = self.store_message_text(session_id, &message_id, "agent", &full)
                     {
                         storage_error = Some(e);
@@ -886,7 +886,7 @@ impl SessionManager {
                 }
                 AgentEvent::ThinkingChunk { message_id, text } => {
                     let (accumulated, first_ts) =
-                        self.push_thinking_text(session_id, &message_id, Some(text));
+                        self.push_thinking_text(session_id, &message_id, Some(text), true);
                     if let Err(e) =
                         self.store_thinking(session_id, &message_id, accumulated, first_ts)
                     {
@@ -895,7 +895,7 @@ impl SessionManager {
                 }
                 AgentEvent::ThinkingSnapshot { message_id, text } => {
                     let (accumulated, first_ts) =
-                        self.push_thinking_text(session_id, &message_id, text);
+                        self.push_thinking_text(session_id, &message_id, text, false);
                     if let Err(e) =
                         self.store_thinking(session_id, &message_id, accumulated, first_ts)
                     {
@@ -966,17 +966,28 @@ impl SessionManager {
     }
 
     /// 追加/替换 agent 消息的累积文本；返回替换后的完整文本。
+    /// `append = true` 表示 `agent_message_chunk`（追加增量）；
+    /// `append = false` 表示 `agent_message` 整条快照（全量替换，避免把
+    /// 完整文本叠到已流出的 chunk 上造成重复）。
     /// `text = None` 表示整条清空（`agent_message` 的 `null`）。
     fn push_message_text(
         &self,
         session_id: &str,
         message_id: &str,
         text: Option<String>,
+        append: bool,
     ) -> String {
         let key = (session_id.to_string(), message_id.to_string());
         let mut buffers = self.message_buf.lock();
         match text {
-            Some(chunk) => buffers.entry(key).or_default().push_str(&chunk),
+            Some(text) => {
+                let slot = buffers.entry(key).or_default();
+                if append {
+                    slot.push_str(&text);
+                } else {
+                    *slot = text;
+                }
+            }
             None => {
                 buffers.insert(key, String::new());
             }
@@ -988,11 +999,13 @@ impl SessionManager {
     }
 
     /// 追加/替换思考块的累积文本；返回（累积文本，首块时间戳）。
+    /// `append` 语义同 [`Self::push_message_text`]：chunk 追加、快照全量替换。
     fn push_thinking_text(
         &self,
         session_id: &str,
         message_id: &str,
         text: Option<String>,
+        append: bool,
     ) -> (String, u64) {
         let ts = now();
         let key = (session_id.to_string(), message_id.to_string());
@@ -1002,7 +1015,13 @@ impl SessionManager {
             first_timestamp: Some(ts),
         });
         match text {
-            Some(chunk) => entry.content.push_str(&chunk),
+            Some(text) => {
+                if append {
+                    entry.content.push_str(&text);
+                } else {
+                    entry.content = text;
+                }
+            }
             None => entry.content.clear(),
         }
         (entry.content.clone(), entry.first_timestamp.unwrap_or(ts))
@@ -1362,6 +1381,56 @@ mod tests {
         let registry = Arc::new(SessionRegistry::open(&dir.join("session.sqlite")).unwrap());
         let (mgr, rx) = SessionManager::new(test_agents(), registry.clone(), dir.to_path_buf());
         (Arc::new(mgr), registry, rx)
+    }
+
+    #[test]
+    fn message_snapshot_replaces_chunk_accumulation() {
+        let dir = std::env::temp_dir().join(format!(
+            "amux-msg-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let (mgr, _registry, _rx) = manager_at(&dir);
+        let id = "s1";
+        let mid = "a1";
+
+        // agent_message_chunk：增量追加
+        let full = mgr.push_message_text(id, mid, Some("你好！".into()), true);
+        assert_eq!(full, "你好！");
+        let full = mgr.push_message_text(id, mid, Some("我是 Codex。".into()), true);
+        assert_eq!(full, "你好！我是 Codex。");
+
+        // agent_message 整条快照：全量替换，而不是把完整文本再追加一次
+        let full = mgr.push_message_text(id, mid, Some("完整问候。".into()), false);
+        assert_eq!(full, "完整问候。");
+
+        // agent_message null：清空
+        let full = mgr.push_message_text(id, mid, None, false);
+        assert_eq!(full, "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thinking_snapshot_replaces_chunk_accumulation() {
+        let dir = std::env::temp_dir().join(format!(
+            "amux-think-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let (mgr, _registry, _rx) = manager_at(&dir);
+        let id = "s1";
+        let tid = "t1";
+
+        let (full, _) = mgr.push_thinking_text(id, tid, Some("逐步".into()), true);
+        assert_eq!(full, "逐步");
+        let (full, _) = mgr.push_thinking_text(id, tid, Some("思考".into()), true);
+        assert_eq!(full, "逐步思考");
+        let (full, first_ts) = mgr.push_thinking_text(id, tid, Some("完整思考内容".into()), false);
+        assert_eq!(full, "完整思考内容");
+        let (full, _) = mgr.push_thinking_text(id, tid, None, false);
+        assert_eq!(full, "");
+        assert!(first_ts > 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
