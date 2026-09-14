@@ -741,6 +741,13 @@ impl AmuxApp {
         if idle {
             let selected_matches = this.is_selected_session(&machine_name, &sid);
             if selected_matches {
+                // 立即清除实时活动，避免会话已 idle 仍展示最后的进行中活动
+                //（实时活动条依赖 2s 轮询，idle 后不主动清会残留一个轮询周期）。
+                if let Some(m) = this.machines.get_mut(idx) {
+                    if let Some(v) = m.views.get_mut(&sid) {
+                        v.live = None;
+                    }
+                }
                 this.refresh_config_options(cx, &machine_name, sid.clone());
                 this.refresh_slash_commands(cx, &machine_name, sid.clone());
             }
