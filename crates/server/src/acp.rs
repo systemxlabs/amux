@@ -155,16 +155,7 @@ impl PromptStream {
 
     /// 注销本 turn 的路由条目（turn 结束时调用；幂等）。
     pub fn close(self) {
-        let mut routes = self.routes.lock();
-        let Some(txs) = routes.get_mut(&self.agent_session_id) else {
-            return;
-        };
-        if let Some(index) = txs.iter().position(|s| s.same_channel(&self.tx)) {
-            txs.remove(index);
-        }
-        if txs.is_empty() {
-            routes.remove(&self.agent_session_id);
-        }
+        remove_route(&self.routes, &self.agent_session_id, &self.tx);
     }
 }
 
@@ -276,6 +267,24 @@ impl SessionCaches {
         self.caps.lock().clear();
         *self.default_caps.lock() = AgentSessionCaps::default();
     }
+}
+
+/// 按通道身份从会话路由表中移除本次 turn 的发送端，返回被移除的 sender。
+/// 与 `state_update(idle)` 广播式回收不同：同会话并发的多个 prompt 互不影响；
+/// 移除后该会话路由为空时删除整条路由（幂等）。
+fn remove_route(
+    routes: &Mutex<HashMap<String, Vec<mpsc::Sender<AgentEvent>>>>,
+    session_id: &str,
+    tx: &mpsc::Sender<AgentEvent>,
+) -> Option<mpsc::Sender<AgentEvent>> {
+    let mut routes = routes.lock();
+    let txs = routes.get_mut(session_id)?;
+    let idx = txs.iter().position(|s| s.same_channel(tx))?;
+    let removed = txs.remove(idx);
+    if txs.is_empty() {
+        routes.remove(session_id);
+    }
+    Some(removed)
 }
 
 fn send_disconnect_events(tx: mpsc::Sender<AgentEvent>) {
@@ -515,18 +524,7 @@ impl AcpConnection {
             .and_then(|sender| sender.send(req).map_err(|_| "agent 已关闭".to_string()))
         {
             // 只回收本次 prompt 自己的路由条目；同会话其他在途 prompt 不受影响
-            let removed = {
-                let mut routes = self.caches.routes.lock();
-                routes
-                    .get_mut(agent_session_id)
-                    .and_then(|txs| {
-                        txs.iter()
-                            .position(|s| s.same_channel(&tx))
-                            .map(|idx| txs.remove(idx))
-                    })
-                    .is_some()
-            };
-            if removed {
+            if let Some(tx) = remove_route(&self.caches.routes, agent_session_id, &tx) {
                 let _ = tx.try_send(AgentEvent::Error(error));
                 let _ = tx.try_send(AgentEvent::StateUpdate {
                     state: SessionState::Idle,
@@ -904,21 +902,7 @@ async fn connect_main(
                                     Err(e) => {
                                         log::error!("prompt 调用失败 {sid}: {e}");
                                         // 路由回收沿用它自己的通道身份：同会话其他在途 prompt 不受影响
-                                        let removed = {
-                                            let mut routes = routes.lock();
-                                            let mut found = None;
-                                            if let Some(txs) = routes.get_mut(&sid) {
-                                                if let Some(idx) =
-                                                    txs.iter().position(|s| s.same_channel(&tx))
-                                                {
-                                                    found = Some(txs.remove(idx));
-                                                }
-                                                if txs.is_empty() {
-                                                    routes.remove(&sid);
-                                                }
-                                            }
-                                            found
-                                        };
+                                        let removed = remove_route(&routes, &sid, &tx);
                                         if let Some(tx) = removed {
                                             let _ = tx
                                                 .send(AgentEvent::PromptFailed(format!(
@@ -1085,44 +1069,22 @@ async fn route_update(
         SessionUpdate::UserMessageChunk(_) | SessionUpdate::UserMessage(_) => {}
         SessionUpdate::AgentMessageChunk(chunk) => {
             if let Some(text) = text_of(&chunk.content) {
-                evs.push(AgentEvent::AgentMessageChunk {
-                    message_id: chunk.message_id.to_string(),
-                    text,
-                });
+                evs.push(InlineEventKind::Message.chunk(&chunk.message_id, text));
             }
         }
         SessionUpdate::AgentMessage(message) => {
-            let text = match &message.content {
-                MaybeUndefined::Undefined => None,
-                MaybeUndefined::Null => Some(None),
-                MaybeUndefined::Value(blocks) => Some(join_text(blocks)),
-            };
-            if let Some(text) = text {
-                evs.push(AgentEvent::AgentMessageSnapshot {
-                    message_id: message.message_id.to_string(),
-                    text,
-                });
+            if let Some(text) = snapshot_text(&message.content) {
+                evs.push(InlineEventKind::Message.snapshot(&message.message_id, text));
             }
         }
         SessionUpdate::AgentThoughtChunk(chunk) => {
             if let Some(text) = text_of(&chunk.content) {
-                evs.push(AgentEvent::ThinkingChunk {
-                    message_id: chunk.message_id.to_string(),
-                    text,
-                });
+                evs.push(InlineEventKind::Thinking.chunk(&chunk.message_id, text));
             }
         }
         SessionUpdate::AgentThought(thought) => {
-            let text = match &thought.content {
-                MaybeUndefined::Undefined => None,
-                MaybeUndefined::Null => Some(None),
-                MaybeUndefined::Value(blocks) => Some(join_text(blocks)),
-            };
-            if let Some(text) = text {
-                evs.push(AgentEvent::ThinkingSnapshot {
-                    message_id: thought.message_id.to_string(),
-                    text,
-                });
+            if let Some(text) = snapshot_text(&thought.content) {
+                evs.push(InlineEventKind::Thinking.snapshot(&thought.message_id, text));
             }
         }
         SessionUpdate::StateUpdate(state) => match state {
@@ -1248,6 +1210,52 @@ fn join_text(blocks: &[AcpContentBlock]) -> Option<String> {
         None
     } else {
         Some(text)
+    }
+}
+
+/// 消息/思考的整条内容：`Undefined` 表示不上报；`Null` 表示清空（`Some(None)`）；
+/// `Value` 拼接多块文本。
+fn snapshot_text(content: &MaybeUndefined<Vec<AcpContentBlock>>) -> Option<Option<String>> {
+    match content {
+        MaybeUndefined::Undefined => None,
+        MaybeUndefined::Null => Some(None),
+        MaybeUndefined::Value(blocks) => Some(join_text(blocks)),
+    }
+}
+
+/// 消息/思考的 chunk/snapshot 事件构造复用（两者字段一致，仅变体不同）。
+#[derive(Clone, Copy)]
+enum InlineEventKind {
+    Message,
+    Thinking,
+}
+
+impl InlineEventKind {
+    fn chunk(self, message_id: impl ToString, text: String) -> AgentEvent {
+        match self {
+            InlineEventKind::Message => AgentEvent::AgentMessageChunk {
+                message_id: message_id.to_string(),
+                text,
+            },
+            InlineEventKind::Thinking => AgentEvent::ThinkingChunk {
+                message_id: message_id.to_string(),
+                text,
+            },
+        }
+    }
+
+    /// 整条快照事件（`text: None` 表示清空）。
+    fn snapshot(self, message_id: impl ToString, text: Option<String>) -> AgentEvent {
+        match self {
+            InlineEventKind::Message => AgentEvent::AgentMessageSnapshot {
+                message_id: message_id.to_string(),
+                text,
+            },
+            InlineEventKind::Thinking => AgentEvent::ThinkingSnapshot {
+                message_id: message_id.to_string(),
+                text,
+            },
+        }
     }
 }
 

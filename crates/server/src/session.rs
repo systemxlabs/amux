@@ -702,19 +702,13 @@ impl SessionManager {
             }
             Err(e) => {
                 log::error!("resume 失败 {session_id}: {e}");
-                let ts = now();
-                let activity = Activity::Error {
-                    timestamp: ts,
-                    error: format!("恢复 agent 上下文失败: {e}"),
-                };
-                let activity_id = format!("a_{}", uuid::Uuid::new_v4());
                 let _lifecycle = control.lifecycle.lock();
-                if !control.deleted.load(Ordering::SeqCst) {
-                    if let Err(log_error) =
-                        self.upsert_activity(session_id, &activity_id, &activity, ts)
-                    {
-                        log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
-                    }
+                if let Err(log_error) = self.write_error_activity(
+                    session_id,
+                    format!("恢复 agent 上下文失败: {e}"),
+                    &control.deleted,
+                ) {
+                    log::error!("resume 错误活动落盘失败 {session_id}: {log_error}");
                 }
                 drop(_lifecycle);
                 self.finalize_turn(session_id, &control, protocol::StateChangeReason::Aborted);
@@ -733,13 +727,9 @@ impl SessionManager {
             match stream.recv().await {
                 Some(AgentEvent::PromptAccepted) => break,
                 Some(AgentEvent::PromptFailed(detail)) => {
-                    let ts = now();
-                    let activity = Activity::Error {
-                        timestamp: ts,
-                        error: detail.clone(),
-                    };
-                    let activity_id = format!("a_{}", uuid::Uuid::new_v4());
-                    if let Err(e) = self.upsert_activity(session_id, &activity_id, &activity, ts) {
+                    if let Err(e) =
+                        self.write_error_activity(session_id, detail.clone(), &control.deleted)
+                    {
                         log::error!("prompt 失败活动落盘失败 {session_id}: {e}");
                     }
                     self.ongoing.lock().remove(session_id);
@@ -921,13 +911,9 @@ impl SessionManager {
                     }
                 }
                 AgentEvent::Error(detail) => {
-                    let ts = now();
-                    let activity = Activity::Error {
-                        timestamp: ts,
-                        error: detail.clone(),
-                    };
-                    let activity_id = format!("a_{}", uuid::Uuid::new_v4());
-                    if let Err(e) = self.upsert_activity(session_id, &activity_id, &activity, ts) {
+                    if let Err(e) =
+                        self.write_error_activity(session_id, detail.clone(), &control.deleted)
+                    {
                         storage_error = Some(e);
                     }
                     // 错误定稿当前思考块：后续思考开启新的进行中条目
@@ -935,13 +921,9 @@ impl SessionManager {
                     log::error!("agent turn 失败 {session_id}: {detail}");
                 }
                 AgentEvent::PromptFailed(detail) => {
-                    let ts = now();
-                    let activity = Activity::Error {
-                        timestamp: ts,
-                        error: detail.clone(),
-                    };
-                    let activity_id = format!("a_{}", uuid::Uuid::new_v4());
-                    if let Err(e) = self.upsert_activity(session_id, &activity_id, &activity, ts) {
+                    if let Err(e) =
+                        self.write_error_activity(session_id, detail.clone(), &control.deleted)
+                    {
                         storage_error = Some(e);
                     }
                     self.ongoing.lock().remove(session_id);
@@ -962,16 +944,14 @@ impl SessionManager {
                 }
             }
         }
-        // 连接中断或异常终止的 turn 也要留下可见错误活动。
-        // 会话已删除时不写：删除是终态，旧 turn 不得重新创建数据。
-        if !turn_completed && !control.deleted.load(Ordering::SeqCst) {
-            let ts = now();
-            let activity = Activity::Error {
-                timestamp: ts,
-                error: "agent turn 未正常结束（连接中断或 turn 被异常终止）".into(),
-            };
-            let activity_id = format!("a_{}", uuid::Uuid::new_v4());
-            if let Err(e) = self.upsert_activity(session_id, &activity_id, &activity, ts) {
+        // 连接中断或异常终止的 turn 也要留下可见错误活动
+        //（`write_error_activity` 内处理已删除会话不写的终态）。
+        if !turn_completed {
+            if let Err(e) = self.write_error_activity(
+                session_id,
+                "agent turn 未正常结束（连接中断或 turn 被异常终止）".into(),
+                &control.deleted,
+            ) {
                 storage_error = Some(e);
             }
         }
@@ -1157,6 +1137,26 @@ impl SessionManager {
         self.registry
             .upsert_activity(session_id, activity_id, kind, &json, created_at, now())
             .map_err(|e| SessionError::Storage(format!("活动落盘失败: {e}")))
+    }
+
+    /// 写一条可见错误活动（生成时间戳/ID）。删除是终态：`deleted` 为 true 时不写，
+    /// 旧 turn 不得重新创建数据。返回落盘错误，由调用方记录或传播。
+    fn write_error_activity(
+        &self,
+        session_id: &str,
+        detail: String,
+        deleted: &AtomicBool,
+    ) -> Result<(), SessionError> {
+        if deleted.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let ts = now();
+        let activity = Activity::Error {
+            timestamp: ts,
+            error: detail,
+        };
+        let activity_id = format!("a_{}", uuid::Uuid::new_v4());
+        self.upsert_activity(session_id, &activity_id, &activity, ts)
     }
 
     /// 会话状态变更：以注册表元数据为权威，变化时立即落盘并广播
