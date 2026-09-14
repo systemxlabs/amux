@@ -206,7 +206,9 @@ fn merge_tail<T: Clone>(
         *current = fresh;
         return false;
     };
-    // 从 anchor 向前验证对齐长度
+    // 从 anchor 向前验证对齐长度；对齐区以 fresh 为权威整体替换，
+    // 使同键条目的内容更新（如 agent 消息流式 upsert 补全、活动增量更新）
+    // 能反映到 current，而不是只追加 fresh 在 anchor 之后的条目。
     let mut matched = 0usize;
     while matched < cur_keys.len()
         && matched <= anchor
@@ -215,6 +217,12 @@ fn merge_tail<T: Clone>(
         matched += 1;
     }
     let kept_older = matched < cur_keys.len();
+    let align_start = cur_keys.len() - matched;
+    let fresh_align_start = anchor + 1 - matched;
+    current.splice(
+        align_start..,
+        fresh[fresh_align_start..=anchor].iter().cloned(),
+    );
     current.extend_from_slice(&fresh[anchor + 1..]);
     kept_older
 }
@@ -246,6 +254,50 @@ mod tests {
         view.set_history_page(&[agent("新回复", 3)], false, None);
         assert_eq!(view.dialog.len(), 1);
         assert!(matches!(&view.dialog[0], DialogMsg::AgentMessage { .. }));
+    }
+
+    #[test]
+    fn set_history_updates_modified_message_in_place() {
+        // 回归：agent 消息流式 upsert 补全时 created_at 不变、content 变化，
+        // 增量合并必须就地位更新同键（类别+时间戳）消息，而不是保留旧 partial。
+        let mut view = SessionView::default();
+        view.set_history_page(&[user("你好", 1), agent("部分", 2)], false, None);
+        view.set_history_page(
+            &[user("你好", 1), agent("部分完整回复", 2), user("下一条", 3)],
+            false,
+            None,
+        );
+        assert_eq!(view.dialog.len(), 3);
+        match &view.dialog[1] {
+            DialogMsg::AgentMessage { content, .. } => {
+                assert_eq!(crate::text::block_text(content), "部分完整回复");
+            }
+            other => panic!("应保留该 agent 消息并更新内容: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_activities_updates_modified_activity_in_place() {
+        // 回归：thinking 活动同键增量更新（流式不断追加内容）应就地位替换。
+        use protocol::Activity;
+        fn thinking(text: &str, ts: u64) -> Activity {
+            Activity::Thinking {
+                timestamp: ts,
+                thinking: text.into(),
+            }
+        }
+        let mut view = SessionView::default();
+        view.set_activities_page(vec![thinking("想", 1), thinking("法", 2)], false, None);
+        view.set_activities_page(
+            vec![thinking("想法", 1), thinking("法", 2), thinking("新", 3)],
+            false,
+            None,
+        );
+        assert_eq!(view.activities.len(), 3);
+        match &view.activities[0] {
+            Activity::Thinking { thinking, .. } => assert_eq!(thinking, "想法"),
+            other => panic!("应更新已有 activity: {other:?}"),
+        }
     }
 
     #[test]
