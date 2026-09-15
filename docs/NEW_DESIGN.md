@@ -22,7 +22,7 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 
 | 方法 | 描述 |
 |---|---|
-| `agent.discover` | 发现当前机器已安装的 agents |
+| `agent.list` | 发现当前机器已安装的 agents，以及每个 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
 | `git.diff` | 查询指定仓库改动 diff |
 | `git.restore` | 可按文件或代码块撤销指定仓库的改动 |
@@ -189,11 +189,15 @@ Server 启动和关闭由用户手动执行，启动参数包括
 
 ### ACP Server 生命周期
 
-当 Daemon 与 Server 建立好连接后，Server 应发送命令让 Daemon 发现机器上已安装的 agents，然后并行启动已发现的 ACP Server，通过 Daemon 与已启动的 ACP Server 建立 ACP 连接和初始化，如果失败则 agent 状态为不可用。
+当 Daemon 与 Server 建立好连接后
+1. Server 发送命令让 Daemon 发现机器上已安装的 agents
+2. 如果 agent 未启动，则进行重新启动
+3. 如果 agent 已启动但 Server 内无记录，则关闭该 agent，进行重新启动
+3. 通过 Daemon 与已启动的 ACP Server 建立 ACP 连接和初始化
 
-Server 可重启某一 ACP Server（无论是否已启动）。
+Server 可中途重启某一 ACP Server（无论是否已启动）。
 
-当 Daemon 与 Server 断线重连后，Server 会启动新的 ACP Server，旧的 ACP Server 会被覆盖。
+Server 关闭时，可发送指令关闭所有机器上的 ACP Servers。
 
 ### ACP 通信
 
