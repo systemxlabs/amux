@@ -90,7 +90,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/diff` | 查询普通会话工作目录改动 diff |
 | POST `/sessions/<session_id>/restore` | 可按文件或代码块撤销普通会话工作目录的改动 |
 | POST `/workflows` | 新建一个工作流会话 |
-| GET `/workflows` | 分页查询最近活跃的工作流会话列表 |
+| GET `/workflows` | 分页查询最近活跃的工作流会话列表，包含关联普通会话 |
 | GET `/workflows/<workflow_id>` | 查询指定工作流会话 |
 | POST `/workflows/<workflow_id>` | 往指定工作流会话发送指令 |
 | DELETE `/workflows/<workflow_id>` | 删除指定工作流会话 |
@@ -188,7 +188,6 @@ Daemon 在内存中存储终端元信息，终端历史输出由 Server 侧缓�
 - SQLite：`rusqlite`
 - 编排智能体：`rig`
 - ACP：`agent-client-protocol` 官方 SDK
-- PTY：`portable-pty`
 - CLI: `clap`
 
 ### Server 启动
@@ -295,9 +294,9 @@ Server 作为 ACP client 与 ACP servers 通信
 
 Server 在接收到流式内容后，应按 ACP V2 流式传输的 upsert 语义立即落盘。
 
-### 终端
+### 终端存储
 
-TODO
+Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的输出。
 
 ### 编排智能体
 
