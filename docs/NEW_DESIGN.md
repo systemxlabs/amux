@@ -67,12 +67,6 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | POST `/machines/<machine_name>/agents/<agent_name>/restart` | 重启指定 agent |
 | GET `/machines/<machine_name>/list_dir` | 分页查看指定路径文件夹列表 |
 | GET `/machines/<machine_name>/read_file` | 分页查看指定路径文本文件内容 |
-| POST `/machines/<machine_name>/terminals` | 打开一个终端，指定 cwd 和 size 等，返回终端 ID |
-| GET `/machines/<machine_name>/terminals` | 查询所有打开的终端 |
-| POST `/machines/<machine_name>/terminals/<terminal_id>` | 向指定终端输入内容 |
-| GET `/machines/<machine_name>/terminals/<terminal_id>` | 读取指定终端输出内容 |
-| DELETE `/machines/<machine_name>/terminals/<terminal_id>` | 关闭指定终端 |
-| POST `/machines/<machine_name>/terminals/<terminal_id>/resize` | 调整指定终端窗口大小 |
 | POST `/sessions` | 新建一个普通会话 |
 | GET `/sessions` | 分页查询最近活跃的普通会话列表 |
 | GET `/sessions/<session_id>` | 查询指定普通会话 |
@@ -89,6 +83,12 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/ongoing_activity` | 查询指定普通会话正在进行中的活动 |
 | GET `/sessions/<session_id>/diff` | 查询普通会话工作目录改动 diff |
 | POST `/sessions/<session_id>/restore` | 可按文件或代码块撤销普通会话工作目录的改动 |
+| POST `/sessions/<session_id>/terminals` | 打开指定普通会话一个终端 |
+| GET `/sessions/<session_id>/terminals` | 查询指定普通会话所有打开的终端 |
+| POST `/sessions/<session_id>/terminals/<terminal_id>` | 向指定终端输入内容 |
+| GET `/sessions/<session_id>/terminals/<terminal_id>` | 读取指定终端输出内容 |
+| DELETE `/sessions/<session_id>/terminals/<terminal_id>` | 关闭指定终端 |
+| POST `/sessions/<session_id>/terminals/<terminal_id>/resize` | 调整指定终端窗口大小 |
 | POST `/workflows` | 新建一个工作流会话 |
 | GET `/workflows` | 分页查询最近活跃的工作流会话列表，包含关联普通会话 |
 | GET `/workflows/<workflow_id>` | 查询指定工作流会话 |
@@ -160,11 +160,13 @@ Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 
 
 ### 终端存储
 
-Daemon 在内存中存储终端元信息，终端历史输出由 Server 侧缓存。当 Daemon 与 Server 连接断开，其关联的终端资源被释放。
+Daemon 在内存中仅存储终端元信息，终端输出由 Server 侧缓存。
 
 ### 断线重连
 
-当 Server 不在线，每隔 1 分支重连一次。当与 Server 连接断开后，应优雅关闭 ACP Servers，然后每隔 1 分钟重连一次。
+当无法与 Server 建立连接时，每隔 1 分钟主动重连一次。
+
+当与 Server 连接断开后，在内存中缓存终端输出和 ACP Server 发出的消息，待与 Server 重连后，将缓存发送给 Server。
 
 ## Server
 
@@ -288,7 +290,7 @@ Server 在接收到流式内容后，应按 ACP V2 流式传输的 upsert 语义
 
 ### 终端存储
 
-Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的输出。
+Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的输出。终端跟普通会话绑定，每个普通会话可以有多个终端。普通会话删除时，需要删除对应终端。
 
 ### 编排智能体
 
@@ -438,6 +440,10 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 ### 计划视图
 
 会话的计划视图未打开时，不主动刷新。打开后，立即刷新一次，然后采用定时刷新机制，每隔 10s 刷新一次。
+
+### 技能操作
+
+当用户安装、更新或卸载技能时，由应用侧发起对应 agent 的普通会话，并发送相关指令到普通会话。
 
 ### 桌面应用
 
