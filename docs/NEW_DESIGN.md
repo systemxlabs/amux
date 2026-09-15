@@ -22,6 +22,7 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 
 | 方法 | 描述 |
 |---|---|
+| `machine.info` | 获取当前机器信息，包含操作系统等 |
 | `agent.list` | 发现当前机器已安装的 agents，以及每个 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
 | `git.diff` | 查询指定仓库改动 diff |
@@ -61,7 +62,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 
 | 方法 | 描述 |
 |---|---|
-| GET `/machines` | 查询所有机器 |
+| GET `/machines` | 查询所有已连接机器，包含机器信息 |
 | GET `/machines/<machine_name>/agents` | 查询当前机器的 agents，包含名称和可用性 |
 | POST `/machines/<machine_name>/agents/rediscover` | 重新发现 agents |
 | POST `/machines/<machine_name>/agents/<agent_name>/restart` | 重启指定 agent |
@@ -116,7 +117,6 @@ Daemon 常驻于每个机器上，主要负责 ACP 多路复用和执行与机�
 
 - 基础库：`tokio` / `serde` / `serde_json`
 - WebSocket：`tokio-tungstenite`
-- ACP：`agent-client-protocol` 官方 SDK
 - Git：`gitoxide` / git CLI
 - PTY：`portable-pty`
 - CLI: `clap`
@@ -168,7 +168,7 @@ Daemon 在内存中仅存储终端元信息，终端输出由 Server 侧缓存�
 
 当无法与 Server 建立连接时，每隔 1 分钟主动重连一次。
 
-当与 Server 连接断开后，在内存中缓存终端输出和 Agent 发出的消息，缓存设定上限，超过上限则丢弃消息，待与 Server 重连后，将缓存消息发送给 Server。
+当与 Server 连接断开后，在内存中缓存终端输出和 Agent 发出的消息，缓存设定上限，超过上限则丢弃最早的消息，待与 Server 重连后，将缓存消息发送给 Server。
 
 ## Server
 
@@ -194,13 +194,11 @@ Server 启动和关闭由用户手动执行，启动参数包括
 当 Daemon 与 Server 建立好连接后
 1. Server 发送命令让 Daemon 发现机器上已安装的 agents
 2. 如果 agent 未启动，则进行重新启动
-3. 如果 agent 已启动但 Server 内无记录，则关闭该 agent，进行重新启动
-4. 如果 agent 已启动且 Server 内有记录，则无需重新启动
+3. 如果 agent 已启动但 Server 内无该 agent 活跃 ACP 连接记录，则关闭该 agent，进行重新启动
+4. 如果 agent 已启动且 Server 内有该 agent 活跃 ACP 连接记录，则无需重新启动
 5. 通过 Daemon 与重新启动的 Agent 建立 ACP 连接和初始化
 
 Server 可中途重启某一 Agent（无论是否已启动）。
-
-Server 关闭时，可发送指令关闭所有机器上的 Agent。
 
 ### ACP 通信
 
@@ -455,9 +453,19 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 会话的计划视图未打开时，不主动刷新。打开后，立即刷新一次，然后采用定时刷新机制，每隔 10s 刷新一次。
 
+### 终端视图
+
+终端视图首次打开时，应从头拉取终端完整输出内容。随后再次拉取时，传入游标，只拉取游标之后的增量内容。
+
+终端视图未打开时，不主动拉取终端输出内容。终端视图打开时，每隔 500ms 拉取一次更新。
+
 ### 技能操作
 
-当用户安装、更新或卸载技能时，由应用侧发起对应 agent 的普通会话，并发送相关指令到普通会话。
+当用户安装、更新或卸载技能时，由应用侧发起对应 agent 的普通会话，工作目录指定系统临时目录，并发送指令到普通会话
+```
+以下是技能 <skill_name> 的描述，请安装/更新/卸载此技能
+> <skill_description>
+```
 
 ### 桌面应用
 
