@@ -16,21 +16,20 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 
 #### 认证
 
-每个 Daemon 启动时需要指定连接认证 Token，在 Daemon 与 Server 建立 WebSocket 连接握手期间，Daemon 发送的握手请求需携带头部 `Authorization: Bearer <token>`，Server 需要校验 token 是否正确，如不正确则握手失败。
+在 Daemon 与 Server 建立 WebSocket 连接握手期间，Daemon 发送的握手请求需携带头部 `Authorization: Bearer <token>` 和 `amux-machine: <machine_name>`，Server 需要校验 token 是否正确，如不正确则握手失败。
 
 #### 协议
 
 | 方法 | 描述 |
 |---|---|
 | `agent.discover` | 发现当前机器已安装的 agents |
-| `agent.start` | 启动指定 agent |
 | `agent.restart` | 重启指定 agent |
 | `git.diff` | 查询指定仓库改动 diff |
 | `git.restore` | 可按文件或代码块撤销指定仓库的改动 |
 | `git.worktree.new` | 从指定仓库创建一个 worktree |
 | `git.worktree.resume` | 从指定仓库指定路径恢复 worktree |
 | `git.worktree.list` | 查询指定仓库所有 worktrees |
-| `git.worktree.delete` | 删除指定 worktree |
+| `git.worktree.remove` | 删除指定 worktree |
 | `fs.list` | 分页查看指定路径文件夹列表 |
 | `fs.read` | 分页查看指定路径文本文件内容 |
 | `terminal.open` | 打开一个终端，指定 cwd 和 size 等，返回终端 ID |
@@ -117,6 +116,7 @@ Daemon 常驻于每个机器上，主要负责 ACP Servers 多路复用、生命
 ### Daemon 启动
 
 Daemon 启动和关闭由用户手动执行，启动参数包括
+- `--machine`：机器名称
 - `--server`: Server 的 WebSocket 地址
 - `--token`：认证 token
 
@@ -153,7 +153,7 @@ Daemon 本身不与 ACP Server 进行任何通信，只作为 Server 与 ACP Ser
   "method": "acp", 
   "params": {
     "agent": "xxx",
-    "message": "..."
+    "raw": "..."
   }
 }
 ```
@@ -166,3 +166,127 @@ Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 
 ### 终端存储
 
 Daemon 在内存中存储终端元信息，终端历史由 Server 侧维护。当 Daemon 与 Server 连接断开，其关联的终端资源被释放。
+
+### 自动重连
+
+当 Server 不在线或连接断开，每隔 1 分钟重连一次。
+
+## Server
+
+### 技术栈
+
+- 基础库：`tokio` / `serde` / `serde_json`
+- WebSocket：`tokio-tungstenite`
+- SQLite：`rusqlite`
+- ACP：`agent-client-protocol` 官方 SDK
+- Git：`gitoxide` / git CLI
+- PTY：`portable-pty`
+- CLI: `clap`
+
+### Server 启动
+
+Server 启动和关闭由用户手动执行，启动参数包括
+- `--host`: 监听地址，默认为 `0.0.0.0`
+- `--port`: 监听端口，默认为 `34567`
+- `--token`：指定认证 token，必传
+
+### Daemon 连接
+
+当 Daemon 与 Server 建立好连接后，Server 应发送命令查询 Daemon 机器已安装 agents 并并行启动已发现的 ACP Server，然后通过 Daemon 与已启动的 ACP Server 建立 ACP 连接和初始化。
+
+### ACP 通信
+
+Server 作为 ACP client 与 ACP servers 通信
+- 采用 ACP V2 协议通信，不支持 V1 协议
+- 权限自动审批
+- Client 能力支持：空
+- 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送指令或查询会话选项时，才向 ACP Server 发送 `session/new` 请求创建 agent 侧会话
+- 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 ACP Server 发送 `session/resume` 请求恢复 agent 侧已有会话
+- 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 ACP Server 发送 `session/set_config_option` 请求进行设置
+- 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
+- 取消会话：当用户取消会话时，向 ACP Server 发送 `session/cancel` 通知来取消会话执行
+- 删除会话：当用户删除会话时，如果会话已打开，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
+
+### 普通会话状态
+
+普通会话状态以 Server 端会话元数据存储为权威，任何状态变更需立即落盘。
+
+普通会话状态变更
+- 新建会话时，会话状态为空闲
+- Server 重启后，其上所有普通会话状态应置为空闲
+- 当接收 `session/update` ACP 通知的 `state_update` 类型时
+  - 若状态为 `running` 或 `requires_action` 则为工作中
+  - 若状态为 `idle` 则为空闲
+
+### 普通会话选项
+
+普通会话选项存储在内存中，以 Agent 侧数据为权威
+- 新建或恢复 ACP 会话时，存储其会话选项在内存中
+- 当发送 `session/set_config_option` ACP 请求时，其响应中的会话选项全量覆盖内存存储
+- 当接收 `session/update` ACP 通知的 `config_option_update` 类型时，其通知中的会话选项全量覆盖内存存储
+
+### 普通会话斜杠命令
+
+普通会话斜杠命令存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `available_commands_update` 类型时，其通知中的斜杠命令全量覆盖内存存储。
+
+### 普通会话计划
+
+普通会话计划存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `plan_update` 类型时，其通知中的计划全量覆盖内存存储。
+
+### 普通会话上下文信息
+
+普通会话上下文信息存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `usage_update` 类型时，其通知中的上下文窗口总大小和当前上下文大小全量覆盖内存存储。
+
+### 普通会话删除
+
+当用户请求删除普通会话时，立即从元数据中删除该普通会话，然后发起异步任务清理相关资源（如关闭或删除 agent 侧会话，清理关联的 worktree），随后返回响应。异步清理资源采用尽力而为的方式，不无限重试。
+
+### 普通会话存储
+
+普通会话数据包含三部分
+- 元数据：存储在 `~/.amux/session.sqlite` 文件中
+  ```SQL
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,             -- 会话 ID
+    state TEXT NOT NULL,             -- 会话状态
+    title TEXT,                      -- 会话标题
+    workspace TEXT NOT NULL,         -- 工作目录
+    worktree_dir TEXT,               -- worktree 目录
+    machine TEXT NOT NULL,           -- 所属机器
+    agent TEXT NOT NULL,             -- 所属 Agent
+    agent_session_id TEXT,           -- Agent 会话 ID
+    created_at INTEGER NOT NULL,     -- 创建时间
+    updated_at INTEGER NOT NULL  -- 最近活跃时间
+  );
+  ```
+- 对话历史：存储在 `~/.amux/session.sqlite` 文件中
+  - Server 在往 ACP Server 发送 `session/prompt` 成功后，应立即给用户消息赋予消息 ID 并落盘，忽略 ACP Server 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
+  ```SQL
+  CREATE TABLE IF NOT EXISTS messages (
+      session_id TEXT NOT NULL,      -- Amux 普通会话 ID
+      message_id TEXT NOT NULL,      -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 ACP Server 提供
+      role TEXT NOT NULL,            -- user / agent
+      content TEXT NOT NULL,         -- 消息内容，以 json 格式存放
+      created_at INTEGER NOT NULL,   -- 创建时间
+      updated_at INTEGER NOT NULL,   -- 更新时间
+      PRIMARY KEY (session_id, message_id)
+  );
+  ```
+- 活动历史：存储在 `~/.amux/session.sqlite` 文件中
+  ```
+  CREATE TABLE IF NOT EXISTS activities (
+      session_id TEXT NOT NULL,      -- Amux 普通会话 ID
+      activity_id TEXT NOT NULL,     -- toolCallId / thought message id / 本地生成的唯一 ID
+      kind TEXT NOT NULL,            -- 类别：tool_call / thinking / error
+      content TEXT,                  -- 活动内容，以 json 格式存放
+      created_at INTEGER NOT NULL,   -- 创建时间
+      updated_at INTEGER NOT NULL,   -- 更新时间
+      PRIMARY KEY (session_id, activity_id)
+  );
+  ```
+
+Server 在接收到流式内容后，应按 ACP V2 流式传输的 upsert 语义立即落盘。
+
+### 终端
+
+TODO
