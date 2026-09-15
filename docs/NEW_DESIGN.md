@@ -4,7 +4,7 @@
 
 ## 总体架构
 
-采用三级架构：Daemon 常驻在各个机器上，Server 常驻在公网服务器上，应用运行在客户端。Server 与各机器上的 Daemon 进程通过 WebSocket 通信，应用与 Server 进行 HTTPS 通信。
+采用三级架构：Daemon 常驻在各个机器上，Server 常驻在公网服务器上，应用运行在客户端。Daemon 通过 stdio 与各 Agents 通信，Server 与各机器上的 Daemon 进程通过 WebSocket 通信，应用与 Server 进行 HTTPS 通信。
 
 TODO 架构图
 
@@ -110,7 +110,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 
 ## Daemon
 
-Daemon 常驻于每个机器上，主要负责 ACP Servers 多路复用、生命周期管理和执行与机器绑定的功能。
+Daemon 常驻于每个机器上，主要负责 ACP 多路复用和执行与机器绑定的功能。
 
 ### 技术栈
 
@@ -128,21 +128,23 @@ Daemon 启动和关闭由用户手动执行，启动参数包括
 - `--server`: Server 的 WebSocket 地址
 - `--token`：认证 token
 
-### ACP Server 发现
+Daemon 关闭时，关闭所有已启动的 Agents。
+
+### Agent 发现
 
 | agent | 发现方式 |
 |---|---|
 | codex | 本机装有 `codex` CLI 且 npx 可用 |
 
-### ACP Server 启动
+### Agent 启动
 
 | agent | 启动方式 |
 |---|---|
 | codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @nyssance/codex-acp-v2` |
 
-### ACP Server 多路复用
+### ACP 多路复用
 
-Daemon 作为 Server 与 ACP Servers 之间的桥梁进行消息转发，由于共享一个 WebSocket 连接，需要进行多路复用，转发的 ACP 消息格式如下
+Daemon 作为 Server 与 Agent 之间的桥梁进行消息转发，由于共享一个 WebSocket 连接，需要进行多路复用，转发的 ACP 消息格式如下
 ```json
 {
   "jsonrpc": "2.0", 
@@ -166,7 +168,7 @@ Daemon 在内存中仅存储终端元信息，终端输出由 Server 侧缓存�
 
 当无法与 Server 建立连接时，每隔 1 分钟主动重连一次。
 
-当与 Server 连接断开后，在内存中缓存终端输出和 ACP Server 发出的消息，待与 Server 重连后，将缓存发送给 Server。
+当与 Server 连接断开后，在内存中缓存终端输出和 Agent 发出的消息，缓存设定上限，超过上限则丢弃消息，待与 Server 重连后，将缓存消息发送给 Server。
 
 ## Server
 
@@ -187,30 +189,31 @@ Server 启动和关闭由用户手动执行，启动参数包括
 - `--port`: 监听端口，默认为 `34567`
 - `--token`：指定认证 token，必传
 
-### ACP Server 生命周期
+### Agent 生命周期
 
 当 Daemon 与 Server 建立好连接后
 1. Server 发送命令让 Daemon 发现机器上已安装的 agents
 2. 如果 agent 未启动，则进行重新启动
 3. 如果 agent 已启动但 Server 内无记录，则关闭该 agent，进行重新启动
-3. 通过 Daemon 与已启动的 ACP Server 建立 ACP 连接和初始化
+4. 如果 agent 已启动且 Server 内有记录，则无需重新启动
+5. 通过 Daemon 与重新启动的 Agent 建立 ACP 连接和初始化
 
-Server 可中途重启某一 ACP Server（无论是否已启动）。
+Server 可中途重启某一 Agent（无论是否已启动）。
 
-Server 关闭时，可发送指令关闭所有机器上的 ACP Servers。
+Server 关闭时，可发送指令关闭所有机器上的 Agent。
 
 ### ACP 通信
 
-Server 作为 ACP client 与 ACP servers 通信
+Server 作为 ACP client 与 Agents 通信
 - 采用 ACP V2 协议通信，不支持 V1 协议
 - 权限自动审批
 - Client 能力支持：空
-- 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送指令或查询会话选项时，才向 ACP Server 发送 `session/new` 请求创建 agent 侧会话
-- 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 ACP Server 发送 `session/resume` 请求恢复 agent 侧已有会话
-- 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 ACP Server 发送 `session/set_config_option` 请求进行设置
-- 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，释放资源
-- 取消会话：当用户取消会话时，向 ACP Server 发送 `session/cancel` 通知来取消会话执行
-- 删除会话：当用户删除会话时，如果会话已打开，向 ACP Server 发送 `session/close` 请求关闭 agent 侧会话，如果 ACP Server 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
+- 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送指令或查询会话选项时，才向 Agent 发送 `session/new` 请求创建 agent 侧会话
+- 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 Agent 发送 `session/resume` 请求恢复 agent 侧已有会话
+- 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 Agent 发送 `session/set_config_option` 请求进行设置
+- 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，释放资源
+- 取消会话：当用户取消会话时，向 Agent 发送 `session/cancel` 通知来取消会话执行
+- 删除会话：当用户删除会话时，如果会话已打开，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，如果 Agent 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
 
 ### 普通会话状态
 
@@ -219,6 +222,7 @@ Server 作为 ACP client 与 ACP servers 通信
 普通会话状态变更
 - 新建会话时，会话状态为空闲
 - Server 重启后，其上所有普通会话状态应置为空闲
+- Agent 重启后，其上所有普通会话状态置为空闲
 - 当接收 `session/update` ACP 通知的 `state_update` 类型时
   - 若状态为 `running` 或 `requires_action` 则为工作中
   - 若状态为 `idle` 则为空闲
@@ -265,11 +269,11 @@ Server 作为 ACP client 与 ACP servers 通信
   );
   ```
 - 对话历史：存储在 `~/.amux/session.sqlite` 文件中
-  - Server 在往 ACP Server 发送 `session/prompt` 成功后，应立即给用户消息赋予消息 ID 并落盘，忽略 ACP Server 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
+  - Server 在往 Agent 发送 `session/prompt` 成功后，应立即给用户消息赋予消息 ID 并落盘，忽略 Agent 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
   ```SQL
   CREATE TABLE IF NOT EXISTS messages (
       session_id TEXT NOT NULL,      -- Amux 普通会话 ID
-      message_id TEXT NOT NULL,      -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 ACP Server 提供
+      message_id TEXT NOT NULL,      -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 Agent 提供
       role TEXT NOT NULL,            -- user / agent
       content TEXT NOT NULL,         -- 消息内容，以 json 格式存放
       created_at INTEGER NOT NULL,   -- 创建时间
@@ -295,6 +299,12 @@ Server 在接收到流式内容后，应按 ACP V2 流式传输的 upsert 语义
 ### 终端存储
 
 Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的输出。终端跟普通会话绑定，每个普通会话可以有多个终端。普通会话删除时，需要删除对应终端。
+
+### 工作树管理
+
+普通会话创建时若指定了 worktree 方式，则创建 worktree，普通会话被删除时，其关联的 worktree 也应一并删除。
+
+当普通会话超过 7 天不活跃时，自动清理其关联的 worktree，但不要清理其会话的 worktree 相关元数据，后续可按需（如用户向该会话输入新指令、查看会话工作目录）在同一目录重建 worktree。
 
 ### 编排智能体
 
