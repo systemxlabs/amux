@@ -1,0 +1,13 @@
+[package]
+name = "amux-common"
+description = "共享代码：Daemon/Server 协议类型、Client API 类型、领域类型与日志初始化"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+logforth.workspace = true

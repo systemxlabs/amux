@@ -69,7 +69,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/machines/<machine_name>/list_dir` | 分页查看指定路径文件夹列表 |
 | GET `/machines/<machine_name>/read_file` | 分页查看指定路径文本文件内容 |
 | POST `/sessions` | 新建一个普通会话 |
-| GET `/sessions` | 分页查询最近活跃的普通会话列表 |
+| GET `/sessions` | 分页查询最近活跃的非关联普通会话列表 |
 | GET `/sessions/<session_id>` | 查询指定普通会话 |
 | POST `/sessions/<session_id>` | 往指定普通会话发送指令 |
 | DELETE `/sessions/<session_id>` | 删除指定普通会话 |
@@ -474,6 +474,23 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 - GUI：`gpui` + `gpui-component`
 - HTTP: `reqwest`
 - 终端：`alacritty_terminal`
+
+#### 连接视图
+
+当 Server 连接没有配置时，应用启动后展示连接视图，包含
+- Server 地址输入框
+- 认证 token 输入框
+- 保存按钮
+
+#### 连接存储
+
+Server 连接信息存储在 `~/.amux/app/server.json` 中，格式为
+```json
+{
+  "server": "xxx",
+  "token": "xxx"
+}
+```
 
 ### Web 应用
 待定
