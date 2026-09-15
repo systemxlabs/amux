@@ -16,7 +16,7 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 
 #### 认证
 
-在 Daemon 与 Server 建立 WebSocket 连接握手期间，Daemon 发送的握手请求需携带头部 `Authorization: Bearer <token>` 和 `amux-machine: <machine_name>`，Server 需要校验 token 是否正确，如不正确则握手失败。
+在 Daemon 与 Server 建立 WebSocket 连接握手期间，Daemon 发送的握手请求需携带头部 `Authorization: Bearer <token>` 和 `amux-machine: <machine_name>`，Server 需要校验 token 是否正确，如不正确则握手失败，还需校验机器是否重名，若重名则握手失败。
 
 #### 协议
 
@@ -94,11 +94,10 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/workflows/<workflow_id>` | 查询指定工作流会话 |
 | POST `/workflows/<workflow_id>` | 往指定工作流会话发送指令 |
 | DELETE `/workflows/<workflow_id>` | 删除指定工作流会话 |
-| POST `/workflows/<workflow_id>/cancel` | 取消指定工作流会话 |
 | POST `/workflows/<workflow_id>/configure` | 配置指定工作流会话：会话标题等 |
-| GET `/workflows/<workflow_id>/history` | 分页查询指定普通会话的对话历史 |
-| GET `/workflows/<workflow_id>/activities` | 分页查询指定普通会话的活动历史 |
-| GET `/workflows/<workflow_id>/ongoing_activity` | 查询指定普通会话正在进行中的活动 |
+| GET `/workflows/<workflow_id>/history` | 分页查询指定工作流会话的对话历史 |
+| GET `/workflows/<workflow_id>/activities` | 分页查询指定工作流会话的活动历史 |
+| GET `/workflows/<workflow_id>/ongoing_activity` | 查询指定工作流会话正在进行中的活动 |
 | GET `/config/skills/` | 查询所有配置的技能 |
 | PUT `/config/skills/` | 全量更新所有技能 |
 | GET `/config/workflows/` | 查询所有配置的工作流计划 |
@@ -155,7 +154,7 @@ Daemon 关闭时会同时关闭所有已启动的 ACP Servers，释放相应资�
 
 ### ACP Server 多路复用
 
-Daemon 本身不与 ACP Server 进行任何通信，只作为 Server 与 ACP Servers 之间的桥梁进行消息转发，由于共享一个 WebSocket 连接，需要进行多路复用，转发的 ACP 消息格式如下
+Daemon 作为 Server 与 ACP Servers 之间的桥梁进行消息转发，由于共享一个 WebSocket 连接，需要进行多路复用，转发的 ACP 消息格式如下
 ```json
 {
   "jsonrpc": "2.0", 
@@ -171,10 +170,9 @@ Daemon 本身不与 ACP Server 进行任何通信，只作为 Server 与 ACP Ser
 
 Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 内。Git worktree 生命周期由 Server 进行管理。
 
-
 ### 终端存储
 
-Daemon 在内存中存储终端元信息，终端历史由 Server 侧维护。当 Daemon 与 Server 连接断开，其关联的终端资源被释放。
+Daemon 在内存中存储终端元信息，终端历史输出由 Server 侧缓存。当 Daemon 与 Server 连接断开，其关联的终端资源被释放。
 
 ### 自动重连
 
@@ -186,9 +184,10 @@ Daemon 在内存中存储终端元信息，终端历史由 Server 侧维护。�
 
 - 基础库：`tokio` / `serde` / `serde_json`
 - WebSocket：`tokio-tungstenite`
+- HTTP: `axum`
 - SQLite：`rusqlite`
+- 编排智能体：`rig`
 - ACP：`agent-client-protocol` 官方 SDK
-- Git：`gitoxide` / git CLI
 - PTY：`portable-pty`
 - CLI: `clap`
 
@@ -326,6 +325,17 @@ TODO
 
 > 关联普通会话 `<session_id>@<机器名称>` 检测到状态变更：<旧状态> -> <新状态>，变更原因为 <变更原因>
 
+### 工作流会话状态
+
+工作流会话状态以 Server 端会话元数据存储为权威，任何状态变更需立即落盘。
+
+工作流会话状态变更
+- 新建会话时，会话状态为空闲
+- Server 重启后，其上所有工作流会话状态应置为空闲
+- 当编排智能体开始运行时，将状态置为工作中
+- 当编排智能体结束运行时，重新计算工作流会话状态
+- 当接收关联普通会话的 `session/update` ACP 通知的 `state_update` 类型时，重新计算工作流会话状态
+
 ### 工作流会话存储
 
 工作流会话数据包含如下部分
@@ -443,7 +453,7 @@ TODO
 #### 技术栈
 
 - GUI：`gpui` + `gpui-component`
-- 编排智能体：`rig`
+- HTTP: `reqwest`
 - 终端：`alacritty_terminal`
 
 ### Web 应用
