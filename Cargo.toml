@@ -4,9 +4,8 @@ members = [
     "amux-common",
     "amux-daemon",
     "amux-server",
+    "amux-desktop",
 ]
-# 旧组件（crates/）在重写期间移出工作区，待新组件完成后删除。
-exclude = ["crates"]
 
 [workspace.package]
 version = "0.1.0"
@@ -48,3 +47,6 @@ lto = "thin"
 # 在内存紧张的机器上链接抖动近停滞；行号表足以支撑 panic 回溯定位。
 [profile.dev]
 debug = "line-tables-only"
+
+# zed 的 git 依赖在 gpui-component 中未固定 rev：显式 patch 到与 gpui/gpui_platform
+# 相同的提交，避免依赖图里出现两份 gpui（类型不互通）。
