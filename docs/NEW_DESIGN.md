@@ -87,7 +87,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | POST `/sessions/<session_id>/terminals` | 打开指定普通会话一个终端 |
 | GET `/sessions/<session_id>/terminals` | 查询指定普通会话所有打开的终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>` | 向指定终端输入内容 |
-| GET `/sessions/<session_id>/terminals/<terminal_id>` | 读取指定终端输出内容 |
+| GET `/sessions/<session_id>/terminals/<terminal_id>` | 读取指定终端输出内容，支持根据游标读取增量内容 |
 | DELETE `/sessions/<session_id>/terminals/<terminal_id>` | 关闭指定终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>/resize` | 调整指定终端窗口大小 |
 | POST `/workflows` | 新建一个工作流会话 |
@@ -263,7 +263,7 @@ Server 作为 ACP client 与 Agents 通信
     agent TEXT NOT NULL,             -- 所属 Agent
     agent_session_id TEXT,           -- Agent 会话 ID
     created_at INTEGER NOT NULL,     -- 创建时间
-    updated_at INTEGER NOT NULL  -- 最近活跃时间
+    updated_at INTEGER NOT NULL      -- 更新时间
   );
   ```
 - 对话历史：存储在 `~/.amux/session.sqlite` 文件中
