@@ -99,6 +99,15 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/workflows/<workflow_id>/history` | 分页查询指定普通会话的对话历史 |
 | GET `/workflows/<workflow_id>/activities` | 分页查询指定普通会话的活动历史 |
 | GET `/workflows/<workflow_id>/ongoing_activity` | 查询指定普通会话正在进行中的活动 |
+| GET `/config/skills/` | 查询所有配置的技能 |
+| PUT `/config/skills/` | 全量更新所有技能 |
+| GET `/config/workflows/` | 查询所有配置的工作流计划 |
+| PUT `/config/workflows/` | 全量更新所有工作流计划 |
+| GET `/config/recent_workspaces/` | 查询所有配置的常用工作目录 |
+| GET `/config/quick_commands/` | 查询所有配置的快捷指令 |
+| PUT `/config/quick_commands/` | 全量更新所有快捷指令 |
+| GET `/config/agent/` | 查询编排智能体配置 |
+| PUT `/config/agent/` | 更新编排智能体配置 |
 
 ## Daemon
 
@@ -290,3 +299,165 @@ Server 在接收到流式内容后，应按 ACP V2 流式传输的 upsert 语义
 ### 终端
 
 TODO
+
+### 编排智能体
+
+系统提示词应包括
+- 角色，工作方式，行为约束
+- 工作流计划
+
+| 工具 | 用途 |
+|---|---|
+| `list_agents` | 已连接机器及各机器的 agent 列表 |
+| `list_sessions` | 本工作流的关联普通会话列表，会话包含标题、状态等尽可能多的信息 |
+| `create_session` | 创建关联普通会话 |
+| `prompt_session` | 向指定关联普通会话下发指令 |
+| `cancel_session` | 取消指定关联普通会话进行中的工作 |
+| `configure_session` | 配置指定关联普通会话：会话标题，会话选项等 |
+| `get_session_config_options` | 获取指定关联普通会话的会话选项 |
+| `read_session_history` | 分页读取关联普通会话对话内容 |
+| `read_session_activities` | 分页读取关联普通会话活动内容 |
+
+编排智能体实现应支持 steer，当工作流会话处于工作中时，接收的用户消息以 steer 方式注入。
+
+### 工作流会话驱动
+
+当收到关联普通会话的 其他状态->`idle` 且 `stopReason` != `cancelled` 的 ACP 的 `session/update` 通知的 `state_update` 类型时，系统往工作流会话以用户消息方式注入如下内容
+
+> 关联普通会话 `<session_id>@<机器名称>` 检测到状态变更：<旧状态> -> <新状态>，变更原因为 <变更原因>
+
+### 工作流会话存储
+
+工作流会话数据包含如下部分
+- 元数据：存储在 `~/.amux/workflow.sqlite` 文件中
+  ```SQL
+  CREATE TABLE IF NOT EXISTS workflows (
+    id TEXT PRIMARY KEY,              -- 工作流会话 ID
+    title TEXT,                       -- 会话标题
+    state TEXT NOT NULL,              -- 会话状态
+    plan TEXT NOT NULL,               -- 执行计划
+    created_at INTEGER NOT NULL,      -- 创建时间
+    updated_at INTEGER NOT NULL       -- 更新时间
+  );
+
+  CREATE TABLE IF NOT EXISTS workflow_linked_sessions (
+    workflow_id TEXT NOT NULL,         -- 工作流会话 ID
+    session_id TEXT NOT NULL,          -- 关联普通会话 ID
+    PRIMARY KEY (workflow_id, session_id)
+  );
+  ```
+- 对话历史：存储在 `~/.amux/workflows/<workflow_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出
+  ```json
+  {"role": "user", "content": [ ... ], "timestamp": 1725800000000}
+  {"role": "agent", "content": [ ... ], "timestamp": 1725800001000}
+  ```
+- 活动历史：存储在 `~/.amux/workflows/<workflow_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等
+  ```json
+  {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
+  {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "title": "读 src/lib.rs", "parameters": "..."}
+  {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
+  ```
+
+流式输出合并后写入：编排智能体输出、thinking、工具调用等等流式传输均在内存中进行合并，合并成完整条目后立即进行追加写入磁盘。
+
+### 工作流计划存储
+
+存储在 `~/.amux/config/workflows.json` 路径，格式为
+```json
+[{ "name": "amux开发工作流", "plan": "xxx" }]
+```
+注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
+
+### 技能存储
+
+存储在 `~/.amux/config/skills.json` 路径，格式为
+```json
+[{ "name": "opencli", "description": "位于 https://github.com/jackwener/OpenCLI/tree/main/skills，包含多个 skills" }]
+```
+注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
+
+### 常用工作目录存储
+
+存储在 `~/.amux/config/recent_workspaces.json` 路径，格式为
+```json
+[{ "machine": "localpc", "workspace": "/home/linwei/workspace/amux", "lastUsed": 1729000000000 }]
+```
+注意 (machine, workspace) 组合必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
+
+### 快捷指令存储
+
+存储在 `~/.amux/config/quick_commands.json` 路径，格式为
+```json
+[
+  {
+    "name": "Commit & Push",
+    "prompt": "提交并推送当前工作区的更改：为改动写一条简洁的 commit message，commit 后 push。"
+  }
+]
+```
+注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
+
+### 编排智能体配置存储
+
+存储在 `~/.amux/config/agent.json` 路径，格式为
+```json
+{
+  "apiFormat": "responses",
+  "baseUrl": "https://api.deepseek.com/v1",
+  "apiKey": "sk-xxx",
+  "model": "deepseek-v4-flash",
+  "effort": "high"
+}
+```
+读写为低频操作，无需考虑并发和原子写入问题。
+
+## 应用
+
+### 会话列表
+
+会话列表刷新机制
+- 定时刷新：每隔 10s 刷新一次会话列表
+- 主动刷新：当创建新会话、删除会话、重命名会话、用户或系统往会话发送用户消息时，主动触发会话列表刷新
+
+### 对话视图
+
+会话的对话视图未打开时，不主动刷新，打开后才进行刷新。
+
+对话消息刷新机制为
+- 会话打开后立即刷新一次
+- 定时刷新：每隔 5s 刷新一次，如有新增或修改对话消息，增量渲染
+- 主动刷新：当用户输入消息后，主动触发刷新
+
+实时活动刷新机制为每隔 2s 刷新一次。
+
+### 活动视图
+
+会话的活动视图未打开时，不主动刷新。打开后，立即刷新一次，然后采用定时刷新机制，每隔 10s 刷新一次，如有新增或修改活动，增量渲染。
+
+### 计划视图
+
+会话的计划视图未打开时，不主动刷新。打开后，立即刷新一次，然后采用定时刷新机制，每隔 10s 刷新一次。
+
+### 桌面应用
+
+#### 技术栈
+
+- GUI：`gpui` + `gpui-component`
+- 编排智能体：`rig`
+- 终端：`alacritty_terminal`
+
+### Web 应用
+待定
+
+## 可观测性
+
+Daemon、Server 和应用在实现时，均需埋点丰富的日志。日志按天切片，存储最近 7 天的日志。
+
+日志级别默认为 info，依赖库日志级别默认为 warn，支持通过 RUST_LOG 环境变量调整。
+
+日志库采用 `logforth`。
+
+日志存储
+- Daemon：存放在 `~/.amux/logs/daemon.log`
+- Server：存放在 `~/.amux/logs/server.log`
+- 桌面应用：存放在 `~/.amux/logs/desktop.log`
