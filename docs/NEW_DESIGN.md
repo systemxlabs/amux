@@ -130,27 +130,15 @@ Daemon 启动和关闭由用户手动执行，启动参数包括
 
 ### ACP Server 发现
 
-Server 会发送指令让 Daemon 从本机发现当前已安装的 Agent。
-
 | agent | 发现方式 |
 |---|---|
 | codex | 本机装有 `codex` CLI 且 npx 可用 |
 
 ### ACP Server 启动
 
-Server 会发送指令让 Daemon 启动某个 ACP Server。
-
 | agent | 启动方式 |
 |---|---|
 | codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @nyssance/codex-acp-v2` |
-
-### ACP Server 生命周期
-
-Server 会发送指令让 Daemon 启动某个 ACP Servers，如果 ACP Server 启动失败，则返回错误。
-
-Server 可重启某一 ACP Server（无论是否已启动）。
-
-Daemon 关闭时会同时关闭所有已启动的 ACP Servers，释放相应资源。
 
 ### ACP Server 多路复用
 
@@ -174,9 +162,9 @@ Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 
 
 Daemon 在内存中存储终端元信息，终端历史输出由 Server 侧缓存。当 Daemon 与 Server 连接断开，其关联的终端资源被释放。
 
-### 自动重连
+### 断线重连
 
-当 Server 不在线或连接断开，每隔 1 分钟重连一次。
+当 Server 不在线，每隔 1 分支重连一次。当与 Server 连接断开后，应优雅关闭 ACP Servers，然后每隔 1 分钟重连一次。
 
 ## Server
 
@@ -197,9 +185,13 @@ Server 启动和关闭由用户手动执行，启动参数包括
 - `--port`: 监听端口，默认为 `34567`
 - `--token`：指定认证 token，必传
 
-### Daemon 连接
+### ACP Server 生命周期
 
-当 Daemon 与 Server 建立好连接后，Server 应发送命令查询 Daemon 机器已安装 agents 并并行启动已发现的 ACP Server，然后通过 Daemon 与已启动的 ACP Server 建立 ACP 连接和初始化。
+当 Daemon 与 Server 建立好连接后，Server 应发送命令让 Daemon 发现机器上已安装的 agents，然后并行启动已发现的 ACP Server，通过 Daemon 与已启动的 ACP Server 建立 ACP 连接和初始化，如果失败则 agent 状态为不可用。
+
+Server 可重启某一 ACP Server（无论是否已启动）。
+
+当 Daemon 与 Server 断线重连后，Server 会启动新的 ACP Server，旧的 ACP Server 会被覆盖。
 
 ### ACP 通信
 
