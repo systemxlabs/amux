@@ -35,3 +35,9 @@ rig-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+reqwest.workspace = true
+
+# 测试用模拟 ACP v2 agent（真实 stdio 路径，与 codex-acp-v2 等真实 agent 交互一致）
+[[bin]]
+name = "mock_acp"
+path = "tests/support/mock_acp.rs"

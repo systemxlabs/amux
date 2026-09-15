@@ -111,7 +111,9 @@ async fn connect_once(
     daemon: &Arc<Daemon>,
     outbox: &Arc<Outbox>,
 ) -> Result<(), String> {
+    let server = with_daemon_path(server);
     let mut request = server
+        .as_str()
         .into_client_request()
         .map_err(|error| format!("Server 地址非法: {error}"))?;
     {
@@ -140,6 +142,19 @@ async fn connect_once(
     result
 }
 
+/// Server 的 Daemon 接入端点：`--server` 未指定路径时补 `/daemon`。
+fn with_daemon_path(server: &str) -> String {
+    let after_scheme = server
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(server);
+    if after_scheme.contains('/') {
+        server.to_string()
+    } else {
+        format!("{}/daemon", server.trim_end_matches('/'))
+    }
+}
+
 /// 出站泵：把缓存中的帧按序发送，发送成功后才从缓存移除。
 async fn drain_outbox<S>(outbox: Arc<Outbox>, mut sink: S) -> Result<(), String>
 where
@@ -147,6 +162,7 @@ where
 {
     loop {
         let (seq, frame) = outbox.peek().await;
+        log::debug!("发送帧: {}", amux_common::text::truncate(&frame, 400));
         sink.send(Message::text(frame))
             .await
             .map_err(|_| "发送失败".to_string())?;
@@ -174,6 +190,7 @@ async fn receive_loop(
 }
 
 fn dispatch(text: &str, daemon: &Arc<Daemon>, outbox: &Arc<Outbox>) {
+    log::debug!("收到帧: {}", amux_common::text::truncate(text, 400));
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         log::warn!("收到非法 JSON 帧");
         return;
@@ -206,6 +223,7 @@ async fn handle_request(request: JsonRpcRequest, daemon: &Arc<Daemon>, outbox: &
             frames::error_response(id, error.code, &error.message)
         }
     };
+    log::debug!("应答帧已入队: {}", amux_common::text::truncate(&frame, 400));
     outbox.push(frame);
 }
 
@@ -333,4 +351,25 @@ fn decode<T: DeserializeOwned>(params: serde_json::Value) -> RpcResult<T> {
 
 fn to_value<T: Serialize>(value: T) -> RpcResult<serde_json::Value> {
     serde_json::to_value(value).map_err(|error| RpcError::internal(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_url_defaults_to_daemon_endpoint() {
+        assert_eq!(
+            with_daemon_path("ws://127.0.0.1:34567"),
+            "ws://127.0.0.1:34567/daemon"
+        );
+        assert_eq!(
+            with_daemon_path("wss://example.com:443/"),
+            "wss://example.com:443/"
+        );
+        assert_eq!(
+            with_daemon_path("ws://example.com/custom"),
+            "ws://example.com/custom"
+        );
+    }
 }

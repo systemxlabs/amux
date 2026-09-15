@@ -332,23 +332,32 @@ impl MachineHub {
         let (mut sink, mut stream) = socket.split();
         let writer = tokio::spawn(async move {
             while let Some(frame) = outgoing_rx.recv().await {
+                log::debug!("下行帧: {}", amux_common::text::truncate(&frame, 200));
                 if sink.send(Message::Text(frame.into())).await.is_err() {
                     break;
                 }
             }
         });
 
-        match machine
-            .request::<_, MachineInfo>(method::MACHINE_INFO, ())
-            .await
-        {
-            Ok(info) => *machine.info.lock() = Some(info),
-            Err(error) => log::warn!("machine.info 失败（{machine_name}）: {error}"),
-        }
-        // Agent 生命周期：发现 → 启动/重启 → 建立 ACP 连接与 initialize
-        if let Err(error) = self.start_agents(&machine).await {
-            log::warn!("Agent 生命周期处理失败（{machine_name}）: {error}");
-        }
+        // 就绪流程必须在读循环之外单独跑：请求的应答要由读循环投递，
+        // 在读循环启动前 await 请求会自锁（直到请求超时）。
+        tokio::spawn({
+            let hub = self.clone();
+            let machine = Arc::clone(&machine);
+            async move {
+                match machine
+                    .request::<_, MachineInfo>(method::MACHINE_INFO, ())
+                    .await
+                {
+                    Ok(info) => *machine.info.lock() = Some(info),
+                    Err(error) => log::warn!("machine.info 失败（{}）: {error}", machine.name),
+                }
+                // Agent 生命周期：发现 → 启动/重启 → 建立 ACP 连接与 initialize
+                if let Err(error) = hub.start_agents(&machine).await {
+                    log::warn!("Agent 生命周期处理失败（{}）: {error}", machine.name);
+                }
+            }
+        });
 
         while let Some(message) = stream.next().await {
             let Ok(message) = message else { break };
@@ -370,6 +379,7 @@ impl MachineHub {
     }
 
     fn dispatch(&self, machine: &Arc<Machine>, text: &str) {
+        log::debug!("上行帧: {}", amux_common::text::truncate(text, 200));
         let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
             log::warn!("收到非法 JSON 帧");
             return;
@@ -474,15 +484,31 @@ impl MachineHub {
         agent: &str,
     ) -> Result<Arc<AgentConnection>, String> {
         let (inbound_tx, inbound_rx) = mpsc::channel::<String>(256);
+        // 先登记入站通道：initialize 的应答可能在连接建立完成前就到达，
+        // 未登记就会被当作「未连接 agent 的消息」丢弃，握手随之超时。
+        machine.agents.lock().insert(
+            agent.to_string(),
+            AgentSlot {
+                conn: None,
+                inbound: inbound_tx.clone(),
+            },
+        );
         let outgoing = machine.agent_outgoing(agent);
-        let conn = acp::connect(
+        let conn = match acp::connect(
             &machine.name,
             agent,
             outgoing,
             inbound_rx,
             self.events.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(conn) => conn,
+            Err(error) => {
+                machine.drop_agent(agent);
+                return Err(error);
+            }
+        };
         machine.agents.lock().insert(
             agent.to_string(),
             AgentSlot {
