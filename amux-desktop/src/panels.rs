@@ -1063,7 +1063,7 @@ fn terminal_tab(
 
 // ---------- 改动审查视图 ----------
 
-/// 改动审查视图：工具栏 + 文件树 + inline 改动 + 选中后发送指令。
+/// 改动审查视图：工具栏 + 文件树 + inline 改动 + 选中后引用到会话输入框。
 fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let files = core
@@ -1146,7 +1146,6 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
             .child(diff_inline(&files, this, cx))
             .into_any_element()
     };
-    let selected = !this.diff_selected_files.is_empty() || !this.diff_selected_hunks.is_empty();
     let mut view = v_flex()
         .flex_1()
         .min_h_0()
@@ -1156,7 +1155,7 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
         .pb_3()
         .child(toolbar)
         .child(body);
-    if selected && !not_repo && !files.is_empty() {
+    if has_selection && !not_repo && !files.is_empty() {
         view = view.child(diff_footer(this, cx));
     }
     view.into_any_element()
@@ -1462,11 +1461,12 @@ fn number_gutter(number: Option<usize>, theme: &ui::Colors) -> AnyElement {
         .into_any_element()
 }
 
-/// 审查视图底部：选中统计、指令输入与发送。
+/// 审查视图底部：选中统计与引用到会话输入框。
+///
+/// 引用而非直接发送：被引用的改动挂到会话输入区，用户补充指令后用输入框发送
+/// （docs/PRD.md「改动审查」）。
 fn diff_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
-    let has_selection =
-        !this.diff_selected_files.is_empty() || !this.diff_selected_hunks.is_empty();
     let selected_files = this.diff_selected_files.len();
     let selected_hunks = this.diff_selected_hunks.len();
     h_flex()
@@ -1479,19 +1479,16 @@ fn diff_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
             .text_xs()
             .text_color(theme.muted_foreground),
         )
+        .child(div().flex_1())
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(this.diff_instruction.clone()),
-        )
-        .child(
-            Button::new("diff-send-selected")
+            Button::new("diff-reference-selected")
                 .small()
                 .primary()
-                .label("发送给 agent")
-                .disabled(!has_selection)
-                .on_click(cx.listener(|this, _, window, cx| this.send_diff_review(window, cx))),
+                .label("引用到输入框")
+                .tooltip("引用到会话输入框，补充指令后发送")
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.reference_diff_selection(window, cx)),
+                ),
         )
         .into_any_element()
 }

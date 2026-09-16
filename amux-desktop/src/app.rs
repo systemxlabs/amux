@@ -26,6 +26,7 @@ use parking_lot::Mutex;
 
 use crate::config::{self, Connection};
 use crate::dialog::{self, FormTarget};
+use crate::diff;
 use crate::panels;
 use crate::poll;
 use crate::sessions;
@@ -93,7 +94,7 @@ pub struct AmuxApp {
     pub terminal: terminal_view::TerminalScreen,
     /// 终端焦点：按键经它派发（Tab/Shift+Tab 走 action，其余走 key_down）
     pub terminal_focus: FocusHandle,
-    /// 待发送附件（拖拽/粘贴产生）
+    /// 待发送附件（拖拽/粘贴/引用改动产生）
     pub attachments: Vec<Attachment>,
     /// 斜杠命令上拉框中高亮项
     pub slash_selected: usize,
@@ -109,8 +110,6 @@ pub struct AmuxApp {
     pub diff_selected_files: HashSet<String>,
     /// 改动审查：已选中的代码块（文件路径, hunk 头）
     pub diff_selected_hunks: HashSet<(String, String)>,
-    /// 改动审查：给 agent 的指令输入
-    pub diff_instruction: Entity<InputState>,
     /// 改动审查：改动区域滚动句柄（点击文件时定位）
     pub diff_scroll: ScrollHandle,
     /// 对话历史滚动句柄（贴底判断）
@@ -275,23 +274,6 @@ impl AmuxApp {
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
-        let diff_instruction = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("对选中的改动说明指令，发送给 agent")
-                .auto_grow(1, 4)
-                .submit_on_enter(true)
-        });
-        let diff_instruction_entity = diff_instruction.clone();
-        cx.subscribe_in(
-            &diff_instruction_entity,
-            window,
-            |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.send_diff_review(window, cx);
-                }
-            },
-        )
-        .detach();
 
         Self {
             core,
@@ -326,7 +308,6 @@ impl AmuxApp {
             diff_tree_visible: true,
             diff_selected_files: HashSet::new(),
             diff_selected_hunks: HashSet::new(),
-            diff_instruction,
             diff_scroll: ScrollHandle::new(),
             dialog_scroll: ScrollHandle::new(),
             activities_scroll: ScrollHandle::new(),
@@ -1471,14 +1452,11 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 把选中的文件与代码块连同指令发送给 agent（docs/PRD.md「改动审查」）。
-    pub fn send_diff_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let instruction = self.diff_instruction.read(cx).value().trim().to_string();
-        if instruction.is_empty()
-            || (self.diff_selected_files.is_empty() && self.diff_selected_hunks.is_empty())
-        {
-            return;
-        }
+    /// 把改动审查中选中的文件与代码块引用到会话输入框（docs/PRD.md「改动审查」）。
+    ///
+    /// 引用与拖拽/粘贴的附件同属待发送内容：在输入区可逐个移除，随用户消息一并发出；
+    /// 引用后把焦点交给输入框，用户可直接补充指令再发送。
+    pub fn reference_diff_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let files = self.with_core(|core| {
             core.view
                 .detail
@@ -1487,33 +1465,26 @@ impl AmuxApp {
                 .map(|diff| diff.files.clone())
                 .unwrap_or_default()
         });
-        let mut sections = Vec::new();
-        for file in &files {
-            if self.diff_selected_files.contains(&file.path) {
-                sections.push(format!("// {}\n{}", file.path, file.patch));
-                continue;
-            }
-            for hunk in &file.hunks {
-                if self
-                    .diff_selected_hunks
-                    .contains(&(file.path.clone(), hunk.header.clone()))
-                {
-                    sections.push(format!("// {}\n{}", file.path, hunk.patch));
-                }
-            }
-        }
-        if sections.is_empty() {
+        let references =
+            diff::selected_references(&files, &self.diff_selected_files, &self.diff_selected_hunks);
+        if references.is_empty() {
             return;
         }
-        let text = format!(
-            "{instruction}\n\n改动内容：\n```diff\n{}\n```",
-            sections.join("\n")
-        );
-        self.diff_instruction
-            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        self.diff_selected_files.clear();
-        self.diff_selected_hunks.clear();
-        self.send_blocks(vec![ContentBlock::Text { text }], cx);
+        for reference in references {
+            self.attachments.push(Attachment {
+                block: ContentBlock::Text {
+                    text: format!(
+                        "引用改动 {}：\n\n```diff\n{}\n```",
+                        reference.label,
+                        reference.patch.trim_end()
+                    ),
+                },
+                label: format!("引用 {}", reference.label),
+            });
+        }
+        self.clear_diff_selection(cx);
+        self.input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
     }
 
     /// 当前改动列表中的文件路径。
