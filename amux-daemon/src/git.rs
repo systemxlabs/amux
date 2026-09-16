@@ -1,10 +1,19 @@
-//! git 能力：diff 查询与改动撤销（git CLI）。
-//!
-//! `git diff` 的 unified diff 输出天然按 hunk 组织，可直接拆分为按块反向应用的
-//! patch（`git apply --reverse`）；untracked 文件的 patch 由本模块按其内容合成。
+//! git 能力：
+//! - diff 查询、untracked 判定：gitoxide（gix）结构化实现，不依赖 git 二进制、
+//!   无本地化输出解析
+//! - gitoxide 无等价能力处保留 git CLI：patch 应用（`git apply --reverse`）、
+//!   索引+工作区整体恢复（`git restore` / `git clean`）、
+//!   worktree 增删查（`git worktree add/remove/list/prune`）
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use gix::bstr::{BStr, BString, ByteSlice};
+use gix::diff::blob::pipeline::{Mode, WorktreeRoots};
+use gix::diff::blob::platform::prepare_diff::Operation;
+use gix::diff::blob::unified_diff::{ConsumeHunk, ContextSize, DiffLineKind, HunkHeader};
+use gix::diff::blob::{ResourceKind, UnifiedDiff};
 
 use amux_common::domain::{
     GitChangeStatus, GitDiffFile, GitDiffHunk, GitDiffLine, GitDiffLineKind, GitDiffResult,
@@ -16,7 +25,7 @@ use crate::fs::canonical_workspace_root;
 #[derive(Default)]
 pub struct GitRunner;
 
-/// git CLI 输出错误。
+/// git CLI 输出错误（`run` 执行失败时携带 stderr，restore 与 worktree 调用方共用）。
 #[derive(Debug)]
 pub struct GitError {
     pub message: String,
@@ -46,7 +55,7 @@ fn run(cwd: &str, args: &[&str]) -> Result<String, GitError> {
     }
 }
 
-/// 构造失败的 `OpResult`（restore 的 CLI/文件操作错误路径共用）。
+/// 构造成功的 `OpResult`。
 fn op_ok() -> OpResult {
     OpResult {
         ok: true,
@@ -54,18 +63,12 @@ fn op_ok() -> OpResult {
     }
 }
 
+/// 构造失败的 `OpResult`（restore 的 CLI/文件操作错误路径共用）。
 fn op_err(message: impl Into<String>) -> OpResult {
     OpResult {
         ok: false,
         message: Some(message.into()),
     }
-}
-
-/// 仓库根目录（worktree 根）；非仓库与 bare 仓库返回 None。
-fn repo_root(cwd: &str) -> Option<PathBuf> {
-    let out = run(cwd, &["rev-parse", "--show-toplevel"]).ok()?;
-    let root = out.trim();
-    (!root.is_empty()).then(|| PathBuf::from(root))
 }
 
 /// 把相对 cwd 的路径换算为仓库根相对路径（cwd 通常即仓库根，映射为恒等）。
@@ -77,7 +80,7 @@ fn repo_relative_path(workdir: &Path, cwd: &str, p: &str) -> String {
 }
 
 /// 把仓库根相对路径换算为相对 cwd 的路径——diff 结果的 path 与
-/// `workspace.restore` 的 path 同基准（相对 cwd）。
+/// `git.restore` 的 path 同基准（相对 cwd）。
 fn cwd_relative_path(workdir: &Path, cwd: &str, repo_path: &str) -> String {
     match Path::new(cwd).strip_prefix(workdir) {
         Ok(rel) if !rel.as_os_str().is_empty() => {
@@ -89,6 +92,14 @@ fn cwd_relative_path(workdir: &Path, cwd: &str, repo_path: &str) -> String {
         }
         _ => repo_path.to_string(),
     }
+}
+
+/// 单文件 unified diff 汇总：完整 patch 文本 + 按 hunk 拆分的可独立反向应用 patch。
+struct FilePatch {
+    patch: String,
+    hunks: Vec<GitDiffHunk>,
+    additions: u32,
+    deletions: u32,
 }
 
 /// 读取工作区条目时不跟随符号链接。Git 将符号链接内容定义为其目标路径，
@@ -106,124 +117,206 @@ fn worktree_bytes(path: &Path) -> Option<Vec<u8>> {
         .flatten()
 }
 
-/// 按行数（以 `\n` 计）与每行内容构造整文件新增 patch（untracked 文件用）。
-fn whole_file_patch(path: &str, bytes: &[u8]) -> (String, Vec<GitDiffHunk>, u32) {
+fn worktree_entry_kind(path: &Path) -> Option<gix::object::tree::EntryKind> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() {
+        Some(gix::object::tree::EntryKind::Link)
+    } else if metadata.is_file() {
+        Some(gix::object::tree::EntryKind::Blob)
+    } else {
+        None
+    }
+}
+
+/// 统一 diff 渲染收集器：UnifiedDiff 逐个 hunk 回调，收集行级数据用于自拼 patch 文本。
+type HunkLines = Vec<(DiffLineKind, Vec<u8>)>;
+
+#[derive(Default)]
+struct HunkCollector {
+    hunks: Vec<(HunkHeader, HunkLines)>,
+}
+
+impl ConsumeHunk for HunkCollector {
+    type Out = Vec<(HunkHeader, HunkLines)>;
+
+    fn consume_hunk(
+        &mut self,
+        header: HunkHeader,
+        lines: &[(DiffLineKind, &[u8])],
+    ) -> std::io::Result<()> {
+        self.hunks.push((
+            header,
+            lines.iter().map(|(k, l)| (*k, l.to_vec())).collect(),
+        ));
+        Ok(())
+    }
+
+    fn finish(self) -> Self::Out {
+        self.hunks
+    }
+}
+
+/// git 风格的 hunk 头：`@@ -a,b +c,d @@`，行数为 1 时省略 `,1`（与 git 输出一致）。
+fn hunk_header_text(h: &HunkHeader) -> String {
+    let before = if h.before_hunk_len == 1 {
+        format!("{}", h.before_hunk_start)
+    } else {
+        format!("{},{}", h.before_hunk_start, h.before_hunk_len)
+    };
+    let after = if h.after_hunk_len == 1 {
+        format!("{}", h.after_hunk_start)
+    } else {
+        format!("{},{}", h.after_hunk_start, h.after_hunk_len)
+    };
+    format!("@@ -{before} +{after} @@")
+}
+
+fn diff_line_kind(kind: DiffLineKind) -> GitDiffLineKind {
+    match kind {
+        DiffLineKind::Context => GitDiffLineKind::Context,
+        DiffLineKind::Add => GitDiffLineKind::Add,
+        DiffLineKind::Remove => GitDiffLineKind::Remove,
+    }
+}
+
+/// 逐行渲染 hunk 体（前缀 + 行内容 + 换行）。
+fn hunk_body_text(lines: &[GitDiffLine]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        out.push(line.kind.prefix());
+        out.push_str(&line.text);
+        out.push('\n');
+    }
+    out
+}
+
+/// 按行数（以 `\n` 计）与每行内容构造整文件新增/删除 patch（空的一侧只有一个 hunk）。
+fn whole_file_patch(path: &str, bytes: &[u8], added: bool) -> FilePatch {
     let text = String::from_utf8_lossy(bytes);
     let mut lines: Vec<&str> = text.split('\n').collect();
     if lines.last() == Some(&"") {
         lines.pop();
     }
     let n = lines.len() as u32;
-    let header = format!("diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n");
-    let hunk_hdr = format!("@@ -0,0 +1,{n} @@\n");
-    let body: String = lines.iter().map(|l| format!("+{l}\n")).collect();
+    let header = if added {
+        format!("diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n")
+    } else {
+        format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ /dev/null\n")
+    };
+    let hunk_hdr = if added {
+        format!("@@ -0,0 +1,{n} @@\n")
+    } else {
+        format!("@@ -1,{n} +0,0 @@\n")
+    };
+    let kind = if added {
+        GitDiffLineKind::Add
+    } else {
+        GitDiffLineKind::Remove
+    };
+    let lines: Vec<GitDiffLine> = lines
+        .into_iter()
+        .map(|line| GitDiffLine {
+            kind,
+            text: line.to_string(),
+        })
+        .collect();
+    let body = hunk_body_text(&lines);
     let patch = format!("{header}{hunk_hdr}{body}");
+    let hunk_patch = patch.clone();
     let hunks = vec![GitDiffHunk {
         header: hunk_hdr.trim_end().to_string(),
-        patch: patch.clone(),
-        lines: lines
-            .iter()
-            .map(|l| GitDiffLine {
-                kind: GitDiffLineKind::Add,
-                text: (*l).to_string(),
-            })
-            .collect(),
+        patch: hunk_patch,
+        lines,
     }];
-    (patch, hunks, n)
-}
-
-/// hunk 体行 → 行数组（前缀 ` `/`+`/`-`；`\` 换行标记行跳过）。
-fn hunk_lines<'a>(body: impl Iterator<Item = &'a str>) -> Vec<GitDiffLine> {
-    body
-        .filter_map(|line| {
-            let (prefix, text) = line.split_at(line.len().min(1));
-            let kind = match prefix {
-                " " => GitDiffLineKind::Context,
-                "+" => GitDiffLineKind::Add,
-                "-" => GitDiffLineKind::Remove,
-                _ => return None,
-            };
-            Some(GitDiffLine {
-                kind,
-                text: text.to_string(),
-            })
-        })
-        .collect()
-}
-
-/// 把 `git diff` 单文件输出拆分为按 hunk 可独立反向应用的 patch，并统计 +/- 行数。
-/// 一个路径可能对应多个 `diff --git` 区段（文件↔符号链接的替换产生删除+新增两段），
-/// 各 hunk 的 patch 取所属区段的 header。
-fn parse_file_patch(raw: &str) -> (Vec<GitDiffHunk>, u32, u32) {
-    // 区段边界（"diff --git " 行）与 hunk 边界（"@@ " 行）的字节偏移
-    let mut boundaries = Vec::new();
-    let mut off = 0;
-    for line in raw.split_inclusive('\n') {
-        if line.starts_with("diff --git ") {
-            boundaries.push((off, false));
-        } else if line.starts_with("@@ ") {
-            boundaries.push((off, true));
-        }
-        off += line.len();
+    FilePatch {
+        patch,
+        hunks,
+        additions: if added { n } else { 0 },
+        deletions: if added { 0 } else { n },
     }
+}
 
+/// 修改文件：HEAD blob vs 工作区文件，经 gix blob diff + 统一 diff 渲染得到 hunk 结构。
+fn modified_patch(
+    repo: &gix::Repository,
+    cache: &mut gix::diff::blob::Platform,
+    old_id: gix::hash::ObjectId,
+    old_mode: gix::object::tree::EntryKind,
+    new_mode: gix::object::tree::EntryKind,
+    path: &BStr,
+) -> Option<FilePatch> {
+    let new_id = gix::hash::ObjectId::null(repo.object_hash());
+    cache
+        .set_resource(
+            old_id,
+            old_mode,
+            path,
+            ResourceKind::OldOrSource,
+            &repo.objects,
+        )
+        .ok()?;
+    cache
+        .set_resource(
+            new_id,
+            new_mode,
+            path,
+            ResourceKind::NewOrDestination,
+            &repo.objects,
+        )
+        .ok()?;
+    let prep = cache.prepare_diff().ok()?;
+    let hunks_data = match prep.operation {
+        Operation::InternalDiff { algorithm } => {
+            let input = prep.interned_input();
+            let diff = gix::diff::blob::diff_with_slider_heuristics(algorithm, &input);
+            let ud = UnifiedDiff::new(
+                &diff,
+                &input,
+                HunkCollector::default(),
+                ContextSize::symmetrical(3),
+            );
+            ud.consume().ok()?
+        }
+        // 二进制等不可行内 diff 的资源：无 hunk，仅文件头（与 `git diff` 无内容时的表现一致）。
+        Operation::SourceOrDestinationIsBinary => Vec::new(),
+        Operation::ExternalCommand { .. } => unreachable!("内部 diff 选项已强制，不应走外部命令"),
+    };
+    let header = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n");
+    let mut patch = header;
     let mut hunks = Vec::new();
-    let (mut additions, mut deletions) = (0u32, 0u32);
-    // 当前区段的 header 区间：首 hunk 出现时确定为 [区段起点, 首个 @@ 起点)
-    let mut header: Option<(usize, usize)> = None;
-    for (i, &(off, is_hunk)) in boundaries.iter().enumerate() {
-        if !is_hunk {
-            header = None;
-            continue;
-        }
-        let end = boundaries
-            .get(i + 1)
-            .map(|(o, _)| *o)
-            .unwrap_or(raw.len());
-        let (hs, he) = match header {
-            Some(range) => range,
-            None => {
-                let sec_off = boundaries[..i]
-                    .iter()
-                    .rev()
-                    .find(|(_, hunk)| !*hunk)
-                    .map(|(o, _)| *o)
-                    .unwrap_or(0);
-                let range = (sec_off, off);
-                header = Some(range);
-                range
-            }
-        };
-        let body = &raw[off..end];
-        let title = body.lines().next().unwrap_or_default().to_string();
-        // skip(1)：@@ 头行之后，仅 +/- 行计入增删统计
-        let lines = hunk_lines(body.lines().skip(1));
-        for line in &lines {
-            match line.kind {
-                GitDiffLineKind::Add => additions += 1,
-                GitDiffLineKind::Remove => deletions += 1,
-                GitDiffLineKind::Context => {}
-            }
-        }
+    let mut additions = 0u32;
+    let mut deletions = 0u32;
+    for (h, lines) in hunks_data {
+        additions += lines
+            .iter()
+            .filter(|(k, _)| *k == DiffLineKind::Add)
+            .count() as u32;
+        deletions += lines
+            .iter()
+            .filter(|(k, _)| *k == DiffLineKind::Remove)
+            .count() as u32;
+        let header = hunk_header_text(&h);
+        let lines: Vec<GitDiffLine> = lines
+            .iter()
+            .map(|(kind, content)| GitDiffLine {
+                kind: diff_line_kind(*kind),
+                text: String::from_utf8_lossy(content).into_owned(),
+            })
+            .collect();
+        let hunk_text = format!("{header}\n{}", hunk_body_text(&lines));
         hunks.push(GitDiffHunk {
-            header: title,
-            patch: format!("{}{}", &raw[hs..he], body),
+            header: header.clone(),
+            patch: format!("{}{}", patch, hunk_text),
             lines,
         });
+        patch.push_str(&hunk_text);
     }
-    (hunks, additions, deletions)
-}
-
-/// 文件改动状态：patch 中 `--- /dev/null` 为新增，`+++ /dev/null` 且文件已不存在为删除。
-fn patch_status(raw: &str, on_disk: bool) -> GitChangeStatus {
-    let has = |marker: &str| raw.lines().any(|line| line.starts_with(marker));
-    if has("+++ /dev/null") && !on_disk {
-        GitChangeStatus::Deleted
-    } else if has("--- /dev/null") && !has("--- a/") {
-        GitChangeStatus::Added
-    } else {
-        GitChangeStatus::Modified
-    }
+    Some(FilePatch {
+        patch,
+        hunks,
+        additions,
+        deletions,
+    })
 }
 
 impl GitRunner {
@@ -231,79 +324,162 @@ impl GitRunner {
         GitRunner
     }
 
-    /// 结构化 diff（git CLI）。
+    /// 结构化 diff：gitoxide 实现。
     /// cwd 非 git 仓库时返回 `not_repo` 标记。
-    /// 重命名检测关闭：重命名显示为删除+新增（`git diff --no-renames` 语义）。
     pub fn diff(&self, cwd: &str, path: Option<&str>) -> GitDiffResult {
         let empty = || GitDiffResult {
             files: Vec::new(),
             not_repo: false,
         };
-        let Some(root) = repo_root(cwd) else {
+        let repo = match gix::discover(cwd) {
+            Ok(r) => r,
+            // 非仓库（向上查找无 .git）或仓库不可用时，按 `git.diff` 协议返回 not_repo。
+            Err(_) => {
+                return GitDiffResult {
+                    files: Vec::new(),
+                    not_repo: true,
+                };
+            }
+        };
+        // bare 仓库没有工作区，diff 无意义（`git diff` 同场景报错）
+        let Some(workdir) = repo.workdir() else {
             return GitDiffResult {
                 files: Vec::new(),
                 not_repo: true,
             };
         };
-        let root_str = root.to_string_lossy().into_owned();
-        // 无提交（unborn HEAD）时 diff 无基准 → 空结果
-        if run(&root_str, &["rev-parse", "--verify", "HEAD"]).is_err() {
+        // 无提交（unborn HEAD）时 `git diff HEAD` 失败 → 空结果
+        let Ok(head_tree) = repo.head_tree() else {
             return empty();
-        }
-        // path 过滤：参数以 cwd 为基准，换算为仓库根相对路径
-        let filter = path.map(|p| repo_relative_path(&root, cwd, p));
-        let mut files = Vec::new();
+        };
 
-        // tracked 变更：`git diff HEAD` 覆盖 staged + unstaged（含删除）
-        let mut query = vec!["diff", "HEAD", "--no-renames", "-z", "--name-only"];
-        if let Some(f) = &filter {
-            query.extend(["--", f.as_str()]);
-        }
-        if let Ok(out) = run(&root_str, &query) {
-            for name in out.split('\0').filter(|name| !name.is_empty()) {
-                let Ok(patch) = run(&root_str, &["diff", "HEAD", "--no-renames", "--", name])
-                else {
-                    continue;
-                };
-                if patch.is_empty() {
-                    continue;
+        // 收集变更路径：TreeIndex（HEAD vs index，staged）+ IndexWorktree（index vs 工作区，unstaged）。
+        // 重命名检测关闭：重命名显示为删除+新增（`git diff --no-renames` 语义）。
+        let mut paths = BTreeSet::<BString>::new();
+        let status = match repo.status(gix::progress::Discard).map(|s| {
+            s.untracked_files(gix::status::UntrackedFiles::Files)
+                .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
+                .index_worktree_rewrites(None)
+        }) {
+            Ok(s) => s,
+            Err(_) => return empty(),
+        };
+        let iter = match status.into_iter(Vec::<BString>::new()) {
+            Ok(i) => i,
+            Err(_) => return empty(),
+        };
+        for item in iter {
+            match item {
+                Ok(gix::status::Item::TreeIndex(change)) => match change {
+                    gix::diff::index::ChangeRef::Addition { location, .. }
+                    | gix::diff::index::ChangeRef::Deletion { location, .. }
+                    | gix::diff::index::ChangeRef::Modification { location, .. } => {
+                        paths.insert(location.into_owned());
+                    }
+                    gix::diff::index::ChangeRef::Rewrite { .. } => {}
+                },
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::Modification { rela_path, .. },
+                )) => {
+                    paths.insert(rela_path);
                 }
-                let on_disk = std::fs::symlink_metadata(root.join(name)).is_ok();
-                let (hunks, additions, deletions) = parse_file_patch(&patch);
-                files.push(GitDiffFile {
-                    path: cwd_relative_path(&root, cwd, name),
-                    status: patch_status(&patch, on_disk),
-                    additions,
-                    deletions,
-                    patch,
-                    hunks,
-                });
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::DirectoryContents { entry, .. },
+                )) => {
+                    if matches!(
+                        entry.disk_kind,
+                        Some(gix::dir::entry::Kind::File | gix::dir::entry::Kind::Symlink)
+                    ) {
+                        paths.insert(entry.rela_path);
+                    }
+                }
+                Ok(gix::status::Item::IndexWorktree(
+                    gix::status::index_worktree::Item::Rewrite { dirwalk_entry, .. },
+                )) => {
+                    if matches!(
+                        dirwalk_entry.disk_kind,
+                        Some(gix::dir::entry::Kind::File | gix::dir::entry::Kind::Symlink)
+                    ) {
+                        paths.insert(dirwalk_entry.rela_path);
+                    }
+                }
+                Err(_) => return empty(),
             }
         }
 
-        // untracked：`git diff` 不覆盖，按其内容合成整文件新增 patch
-        let mut query = vec!["ls-files", "--others", "--exclude-standard", "-z"];
-        if let Some(f) = &filter {
-            query.extend(["--", f.as_str()]);
-        }
-        if let Ok(out) = run(&root_str, &query) {
-            for name in out.split('\0').filter(|name| !name.is_empty()) {
-                let Some(bytes) = worktree_bytes(&root.join(name)) else {
-                    continue;
-                };
-                let (patch, hunks, additions) = whole_file_patch(name, &bytes);
-                files.push(GitDiffFile {
-                    path: cwd_relative_path(&root, cwd, name),
-                    status: GitChangeStatus::Added,
-                    additions,
-                    deletions: 0,
-                    patch,
-                    hunks,
-                });
-            }
+        if let Some(f) = path.map(|p| repo_relative_path(workdir, cwd, p)) {
+            let f = BString::from(f);
+            let prefix = format!("{f}/");
+            paths.retain(|p| p == &f || p.as_bytes().starts_with(prefix.as_bytes()));
         }
 
-        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut cache = match repo.diff_resource_cache(
+            Mode::ToGit,
+            WorktreeRoots {
+                old_root: None,
+                new_root: Some(workdir.to_path_buf()),
+            },
+        ) {
+            Ok(c) => c,
+            Err(_) => return empty(),
+        };
+
+        let mut files = Vec::new();
+        for p in &paths {
+            let p_str = p.to_str_lossy().into_owned();
+            let old = head_tree
+                .lookup_entry_by_path(gix::path::from_bstr(p))
+                .ok()
+                .flatten()
+                .map(|e| (e.object_id(), e.mode()));
+            let abs = workdir.join(PathBuf::from(p_str.clone()));
+            let new_mode = worktree_entry_kind(&abs);
+            let fp = match (&old, new_mode) {
+                (Some((old_id, old_mode)), Some(new_mode)) => {
+                    let fp = modified_patch(
+                        &repo,
+                        &mut cache,
+                        *old_id,
+                        old_mode.kind(),
+                        new_mode,
+                        p.as_ref(),
+                    );
+                    // blob diff 资源缓存只增不减，逐文件释放以免大 diff 时内存无界增长
+                    cache.clear_resource_cache_keep_allocation();
+                    match fp {
+                        Some(fp) => fp,
+                        None => continue,
+                    }
+                }
+                (None, Some(_)) => {
+                    let Some(bytes) = worktree_bytes(&abs) else {
+                        continue;
+                    };
+                    whole_file_patch(&p_str, &bytes, true)
+                }
+                (Some((old_id, _)), None) => {
+                    let bytes = repo
+                        .find_blob(*old_id)
+                        .map(|b| b.data.to_vec())
+                        .unwrap_or_default();
+                    whole_file_patch(&p_str, &bytes, false)
+                }
+                (None, None) => continue,
+            };
+            let status = match (&old, new_mode) {
+                (None, Some(_)) => GitChangeStatus::Added,
+                (Some(_), None) => GitChangeStatus::Deleted,
+                _ => GitChangeStatus::Modified,
+            };
+            files.push(GitDiffFile {
+                path: cwd_relative_path(workdir, cwd, &p_str),
+                status,
+                additions: fp.additions,
+                deletions: fp.deletions,
+                patch: fp.patch,
+                hunks: fp.hunks,
+            });
+        }
         GitDiffResult {
             files,
             not_repo: false,
@@ -311,7 +487,7 @@ impl GitRunner {
     }
 
     /// 撤销工作区变更。
-    /// - `patch`：单 hunk/单文件 patch 反向应用——`git apply --reverse`
+    /// - `patch`：单 hunk/单文件 patch 反向应用——gitoxide 无 patch 应用引擎，保留 `git apply --reverse`
     ///   （diff patch 的 a/ b/ 头为仓库根相对路径，故从仓库根执行 apply，cwd 为子目录时同样正确）
     /// - `path`：单文件——tracked 用 `git restore`；untracked 直接删除（从未提交，revert = 移除）
     /// - 都不给：全部变更——`git restore` 全部 tracked 变更 + `git clean` 全部 untracked
@@ -331,7 +507,10 @@ impl GitRunner {
                 return op_err("写入 patch 失败");
             }
             // patch 路径以仓库根为基准：从仓库根应用（cwd 为其子目录时也正确）
-            let apply_dir = repo_root(cwd).unwrap_or_else(|| PathBuf::from(cwd));
+            let apply_dir = gix::discover(cwd)
+                .ok()
+                .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                .unwrap_or_else(|| std::path::PathBuf::from(cwd));
             let result = match run(
                 apply_dir.to_string_lossy().as_ref(),
                 &["apply", "--reverse", patch_file.to_string_lossy().as_ref()],
@@ -371,11 +550,34 @@ impl GitRunner {
         }
     }
 
-    /// 目标路径是否 untracked（`git status` 输出 `??` 前缀：既不在 HEAD 也不在索引中）。
+    /// 目标路径是否 untracked（gitoxide 判定：既不在 HEAD 树也不在索引中）。
     fn is_untracked(&self, cwd: &str, target: &str) -> bool {
-        run(cwd, &["status", "--porcelain", "-z", "--", target])
-            .map(|out| out.starts_with("??"))
-            .unwrap_or(false)
+        let Ok(repo) = gix::discover(cwd) else {
+            return false;
+        };
+        let Some(workdir) = repo.workdir() else {
+            return false;
+        };
+        let full = BString::from(repo_relative_path(workdir, cwd, target));
+        let in_head = repo
+            .head_tree()
+            .ok()
+            .and_then(|t| {
+                t.lookup_entry_by_path(gix::path::from_bstr(&full))
+                    .ok()
+                    .flatten()
+            })
+            .is_some();
+        if in_head {
+            return false;
+        }
+        let in_index = repo
+            .index_or_empty()
+            .ok()
+            // worktree::Index = Arc<SharedFileSnapshot<File>>，方法解析自动解引用到 State
+            .map(|idx| idx.entry_by_path(full.as_bytes().as_bstr()).is_some())
+            .unwrap_or(false);
+        !in_index
     }
 
     /// 新建 worktree：目录约定 `<amux_home>/worktrees/<仓库目录名>-<随机串>/`。
@@ -431,7 +633,7 @@ impl GitRunner {
     /// repo 已不存在时退化为直接删目录。
     fn remove_worktree(&self, repo_cwd: &str, target: &Path) {
         let target_str = target.to_string_lossy().into_owned();
-        if repo_root(repo_cwd).is_some() {
+        if gix::discover(repo_cwd).is_ok() {
             if let Err(e) = run(
                 repo_cwd,
                 &["worktree", "remove", "--force", target_str.as_str()],
@@ -451,7 +653,10 @@ impl GitRunner {
 
 /// worktree 目标目录：`<root>/<仓库目录名>-<随机串>`。
 fn worktree_dir_for(repo: &str, root: &Path) -> Result<PathBuf, String> {
-    let workdir = repo_root(repo).ok_or_else(|| format!("不是 git 仓库: {repo}"))?;
+    let workdir = gix::discover(repo)
+        .ok()
+        .and_then(|r| r.workdir().map(|p| p.to_path_buf()))
+        .ok_or_else(|| format!("不是 git 仓库: {repo}"))?;
     let name = workdir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
