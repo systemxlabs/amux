@@ -218,6 +218,37 @@ pub struct GitDiffHunk {
     pub header: String,
     /// 完整可应用的 patch（含文件头 + 该 hunk），可直接用于 `git apply --reverse`
     pub patch: String,
+    /// hunk 行，供 inline 展示
+    pub lines: Vec<GitDiffLine>,
+}
+
+/// diff 行类别（统一 diff 的前缀）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitDiffLineKind {
+    Context,
+    Add,
+    Remove,
+}
+
+impl GitDiffLineKind {
+    /// 统一 diff 的行前缀。
+    pub fn prefix(self) -> char {
+        match self {
+            GitDiffLineKind::Context => ' ',
+            GitDiffLineKind::Add => '+',
+            GitDiffLineKind::Remove => '-',
+        }
+    }
+}
+
+/// 一行 diff 内容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffLine {
+    pub kind: GitDiffLineKind,
+    /// 行内容（不含前导前缀与行尾换行）
+    pub text: String,
 }
 
 /// 单文件 diff。

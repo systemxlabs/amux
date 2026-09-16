@@ -1,23 +1,35 @@
 //! 三面板渲染：左侧会话列表、中间会话交互、右侧辅助面板。
 
 use amux_common::api::TerminalState;
-use amux_common::domain::SessionState;
+use amux_common::domain::{
+    GitDiffFile, GitDiffHunk, SessionConfigKind, SessionConfigOptionValue, SessionState,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::*;
+use gpui_component::checkbox::Checkbox;
 use gpui_component::label::Label;
+use gpui_component::select::Select;
 use gpui_component::spinner::Spinner;
+use gpui_component::switch::Switch;
 use gpui_component::*;
 use gpui_component::{h_flex, v_flex, ActiveTheme, IconName, Sizable};
 
 use crate::app::{text_input, AmuxApp};
+use crate::difftree::{self, DiffNode};
 use crate::state::{ListEntry, OpenTarget, SettingsTab, SidePanel, WorkspaceNode};
 use crate::ui;
 
-/// 左侧面板宽度。
-const LEFT_WIDTH: f32 = 260.0;
-/// 右侧面板宽度。
-const RIGHT_WIDTH: f32 = 380.0;
+/// 左侧面板宽度与可拖拽范围。
+pub const LEFT_WIDTH: f32 = 260.0;
+pub const LEFT_MIN_WIDTH: f32 = 180.0;
+pub const LEFT_MAX_WIDTH: f32 = 420.0;
+/// 右侧面板宽度与可拖拽范围。
+pub const RIGHT_WIDTH: f32 = 400.0;
+pub const RIGHT_MIN_WIDTH: f32 = 280.0;
+pub const RIGHT_MAX_WIDTH: f32 = 900.0;
+/// 改动审查视图左侧文件树宽度。
+const DIFF_TREE_WIDTH: f32 = 180.0;
 
 /// 终端尺寸调整步长与下限。
 const TERMINAL_COL_STEP: u16 = 10;
@@ -105,8 +117,7 @@ pub fn render_left(
         );
 
     v_flex()
-        .w(px(LEFT_WIDTH))
-        .h_full()
+        .size_full()
         .bg(cx.theme().sidebar)
         .border_r_1()
         .border_color(cx.theme().border)
@@ -698,6 +709,7 @@ fn interaction_view(
         .map(ui::activity_line)
         .unwrap_or_default();
 
+    // 快捷指令：点击直接作为用户输入发送（docs/PRD.md「快捷指令」）
     let mut quick = h_flex().gap_2().flex_wrap().px_3();
     for command in core.settings.quick_commands.clone() {
         quick = quick.child(
@@ -707,31 +719,94 @@ fn interaction_view(
                 .label(ui::truncate(&command.name, 12))
                 .on_click(cx.listener({
                     let prompt = command.prompt.clone();
-                    move |this, _, window, cx| {
-                        this.input
-                            .update(cx, |state, cx| state.set_value(prompt.clone(), window, cx));
-                        cx.notify();
-                    }
+                    move |this, _, _, cx| this.send_quick_command(prompt.clone(), cx)
                 })),
         );
     }
 
-    let mut options = h_flex().gap_2().flex_wrap().px_3();
-    for option in core.view.detail.config_options.clone() {
-        let current = match &option.kind {
-            amux_common::domain::SessionConfigKind::Select { current_value, .. } => {
-                current_value.clone()
-            }
-            amux_common::domain::SessionConfigKind::Boolean { current_value } => {
-                current_value.to_string()
-            }
-        };
-        options = options.child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(format!("{}：{}", option.name, current)),
+    let options = session_options(core, this, cx);
+
+    // 输入区：附件、斜杠命令上拉框、多行输入（Enter 发送 / Shift+Enter 换行）、发送与取消
+    let row = h_flex()
+        .gap_2()
+        .items_center()
+        .child(div().flex_1().child(text_input(&this.input)))
+        .child(
+            Button::new("send")
+                .small()
+                .primary()
+                .label("发送")
+                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+        )
+        .child(
+            Button::new("cancel-work")
+                .small()
+                .label("取消")
+                .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
         );
+    let mut composer = v_flex().gap_2();
+    if !this.attachments.is_empty() {
+        let mut attachments = h_flex().gap_2().flex_wrap();
+        for (ix, attachment) in this.attachments.iter().enumerate() {
+            attachments = attachments.child(
+                h_flex()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(cx.theme().secondary)
+                    .child(div().text_xs().child(ui::truncate(&attachment.label, 24)))
+                    .child(
+                        Button::new(format!("drop-attachment-{ix}"))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("移除附件")
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx)),
+                            ),
+                    ),
+            );
+        }
+        composer = composer.child(attachments);
+    }
+    let candidates = this.slash_candidates(cx);
+    if !candidates.is_empty() {
+        let selected = this.slash_selected.min(candidates.len() - 1);
+        let mut list = v_flex()
+            .id("slash-commands")
+            .max_h(rems(12.))
+            .overflow_y_scroll()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover);
+        for (ix, command) in candidates.iter().enumerate() {
+            list = list.child(
+                div()
+                    .id(format!("slash-{}", command.name))
+                    .px_2()
+                    .py_1()
+                    .when(ix == selected, |row| row.bg(cx.theme().accent))
+                    .hover(|row| row.bg(cx.theme().accent))
+                    .on_click(cx.listener({
+                        let command = command.clone();
+                        move |this, _, window, cx| this.apply_slash_command(&command, window, cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().text_sm().child(format!("/{}", command.name)))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(ui::truncate(&command.description, 32)),
+                            ),
+                    ),
+            );
+        }
+        composer = composer.child(list);
     }
 
     let footer = v_flex()
@@ -750,37 +825,40 @@ fn interaction_view(
                 }),
         )
         .child(quick)
-        .child(options)
+        .when(!core.view.detail.config_options.is_empty(), |footer| {
+            footer.child(options)
+        })
         .child(
-            h_flex()
+            // 输入区整体接收粘贴与拖拽：图片/文件成为附件，文本交给输入框
+            v_flex()
+                .id("composer")
                 .gap_2()
-                .items_center()
-                .child(div().flex_1().child(text_input(&this.input)))
-                .child(
-                    Button::new("send")
-                        .small()
-                        .primary()
-                        .label("发送")
-                        .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-                )
-                .child(
-                    Button::new("cancel-work")
-                        .small()
-                        .label("取消")
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
-                ),
+                .capture_action(cx.listener(
+                    |this, action: &gpui_component::input::Paste, _window, cx| {
+                        this.paste_into_composer(action, cx)
+                    },
+                ))
+                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.composer_key_down(event, window, cx)
+                }))
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                    this.attach_paths(paths.paths(), cx)
+                }))
+                .child(composer)
+                .child(row),
         );
 
     let floating = v_flex().absolute().top_12().right_3().gap_1().children(
-        crate::state::SidePanel::ALL.iter().map(|panel| {
-            let label = panel.label();
-            let panel = *panel;
-            Button::new(format!("panel-{}", label))
-                .xsmall()
-                .ghost()
-                .label(label)
-                .on_click(cx.listener(move |this, _, _, cx| this.open_side_panel(panel, cx)))
-        }),
+        SidePanel::for_session(core.is_workflow())
+            .into_iter()
+            .map(|panel| {
+                let label = panel.label();
+                Button::new(format!("panel-{}", label))
+                    .xsmall()
+                    .ghost()
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_side_panel(panel, cx)))
+            }),
     );
 
     v_flex()
@@ -820,12 +898,17 @@ pub fn render_right(
                 })),
         );
 
+    // 改动审查视图自带工具栏与滚动区域，交由它自己管理内边距与溢出
     let mut body = v_flex()
         .id("side-body")
         .flex_1()
+        .min_h_0()
         .gap_2()
         .p_3()
-        .overflow_y_scroll();
+        .overflow_y_scroll()
+        .when(panel == SidePanel::Diff, |body| {
+            body.p_0().overflow_hidden()
+        });
     match panel {
         SidePanel::Detail => {
             if let Some(session) = &core.view.session {
@@ -894,93 +977,7 @@ pub fn render_right(
             }
         }
         SidePanel::Diff => {
-            body = body.child(
-                Button::new("refresh-diff")
-                    .xsmall()
-                    .ghost()
-                    .label("刷新改动")
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_diff(cx))),
-            );
-            match &core.view.detail.diff {
-                Some(diff) if diff.not_repo => {
-                    body = body.child(ui::empty_hint("工作目录不是 git 仓库", cx.theme()));
-                }
-                Some(diff) => {
-                    for file in &diff.files {
-                        let mut file_block =
-                            v_flex()
-                                .gap_1()
-                                .p_2()
-                                .rounded_md()
-                                .bg(cx.theme().secondary)
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(file.path.clone()),
-                                        )
-                                        .child(div().text_xs().child(format!(
-                                            "+{} -{}",
-                                            file.additions, file.deletions
-                                        )))
-                                        .child(div().flex_1())
-                                        .child(
-                                            Button::new(format!("restore-file-{}", file.path))
-                                                .xsmall()
-                                                .ghost()
-                                                .label("撤销文件")
-                                                .on_click(cx.listener({
-                                                    let path = file.path.clone();
-                                                    move |this, _, _, cx| {
-                                                        this.restore(Some(path.clone()), None, cx)
-                                                    }
-                                                })),
-                                        ),
-                                );
-                        for hunk in &file.hunks {
-                            file_block =
-                                file_block.child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(hunk.header.clone()),
-                                        )
-                                        .child(
-                                            Button::new(format!(
-                                                "restore-hunk-{}-{}",
-                                                file.path, hunk.header
-                                            ))
-                                            .xsmall()
-                                            .ghost()
-                                            .label("撤销代码块")
-                                            .on_click(cx.listener({
-                                                let path = file.path.clone();
-                                                let patch = hunk.patch.clone();
-                                                move |this, _, _, cx| {
-                                                    this.restore(
-                                                        Some(path.clone()),
-                                                        Some(patch.clone()),
-                                                        cx,
-                                                    )
-                                                }
-                                            })),
-                                        ),
-                                );
-                        }
-                        body = body.child(file_block);
-                    }
-                    if diff.files.is_empty() {
-                        body = body.child(ui::empty_hint("没有改动", cx.theme()));
-                    }
-                }
-                None => body = body.child(ui::empty_hint("点击「刷新改动」加载", cx.theme())),
-            }
+            body = body.child(diff_review(core, this, cx));
         }
         SidePanel::Workspace => {
             let target = core
@@ -1118,8 +1115,7 @@ pub fn render_right(
     }
 
     v_flex()
-        .w(px(RIGHT_WIDTH))
-        .h_full()
+        .size_full()
         .bg(cx.theme().popover)
         .border_l_1()
         .border_color(cx.theme().border)
@@ -1200,7 +1196,391 @@ fn workspace_nodes(
 fn detail_row(label: &str, value: &str) -> AnyElement {
     h_flex()
         .gap_2()
-        .child(div().w(px(84.0)).text_xs().child(label.to_string()))
+        .child(div().w(rems(5.25)).text_xs().child(label.to_string()))
         .child(div().flex_1().text_sm().child(value.to_string()))
+        .into_any()
+}
+
+/// 会话选项控件：按选项类型渲染下拉框或开关（docs/PRD.md「会话选项」）。
+fn session_options(
+    core: &crate::state::Core,
+    this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let mut row = h_flex().gap_3().flex_wrap().px_3();
+    for option in core.view.detail.config_options.clone() {
+        let label = div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(option.name.clone());
+        match &option.kind {
+            SessionConfigKind::Boolean { current_value } => {
+                let id = option.id.clone();
+                let checked = *current_value;
+                row = row.child(
+                    h_flex().gap_2().items_center().child(label).child(
+                        Switch::new(format!("config-{}", option.id))
+                            .checked(checked)
+                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                this.apply_config_option(
+                                    id.clone(),
+                                    SessionConfigOptionValue::Boolean { value: *checked },
+                                    cx,
+                                )
+                            })),
+                    ),
+                );
+            }
+            SessionConfigKind::Select { .. } => {
+                // 选项值由轮询周期同步（app.rs sync_config_options）
+                let Some(select) = this.config_select(&option.id).cloned() else {
+                    continue;
+                };
+                row = row.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(label)
+                        .child(Select::new(&select).small()),
+                );
+            }
+        }
+    }
+    row.into_any()
+}
+
+/// 文件改动审查视图：顶部工具栏、左侧文件树、右侧 inline 改动、选择后发送给 agent
+/// （docs/PRD.md「文件改动审查视图」）。
+fn diff_review(
+    core: &crate::state::Core,
+    this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let mut view = v_flex().flex_1().h_full().gap_2();
+    let all_collapsed = core.view.detail.diff.as_ref().is_some_and(|diff| {
+        !diff.files.is_empty()
+            && diff
+                .files
+                .iter()
+                .all(|file| this.diff_collapsed_files.contains(&file.path))
+    });
+    view = view.child(
+        h_flex()
+            .px_3()
+            .pt_3()
+            .gap_2()
+            .items_center()
+            .flex_wrap()
+            .child(
+                Button::new("toggle-diff-tree")
+                    .xsmall()
+                    .ghost()
+                    .label(if this.diff_tree_visible {
+                        "折叠文件树"
+                    } else {
+                        "展开文件树"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx))),
+            )
+            .child(
+                Button::new("toggle-diff-all")
+                    .xsmall()
+                    .ghost()
+                    .label(if all_collapsed {
+                        "展开改动"
+                    } else {
+                        "折叠改动"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_all_diffs(cx))),
+            )
+            .child(
+                Button::new("refresh-diff")
+                    .xsmall()
+                    .ghost()
+                    .label("刷新改动")
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_diff(cx))),
+            ),
+    );
+
+    match &core.view.detail.diff {
+        Some(diff) if diff.not_repo => {
+            view = view.child(ui::empty_hint("工作目录不是 git 仓库", cx.theme()));
+        }
+        Some(diff) if diff.files.is_empty() => {
+            view = view.child(ui::empty_hint("没有改动", cx.theme()));
+        }
+        Some(diff) => {
+            let files = diff.files.clone();
+            let mut content = h_flex().flex_1().min_h_0().gap_2();
+            if this.diff_tree_visible {
+                content = content.child(diff_tree_pane(&files, this, cx));
+            }
+            content = content.child(diff_inline_pane(&files, this, cx));
+            view = view.child(content).child(diff_review_footer(this, cx));
+        }
+        None => {
+            view = view.child(ui::empty_hint("点击「刷新改动」加载", cx.theme()));
+        }
+    }
+    view.into_any()
+}
+
+/// 左侧文件树：只含改动文件，点击文件滚动到对应改动。
+fn diff_tree_pane(
+    files: &[GitDiffFile],
+    this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let nodes = difftree::build(files);
+    let mut pane = v_flex()
+        .id("diff-tree")
+        .w(px(DIFF_TREE_WIDTH))
+        .h_full()
+        .gap_1()
+        .overflow_y_scroll();
+    let mut rows = Vec::new();
+    for node in &nodes {
+        push_tree_rows(node, 0, this, cx, &mut rows);
+    }
+    pane = pane.children(rows);
+    pane.into_any()
+}
+
+/// 文件树节点入列：目录可整体折叠/展开，合并节点作为一个节点处理。
+fn push_tree_rows(
+    node: &DiffNode,
+    depth: usize,
+    this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+    rows: &mut Vec<AnyElement>,
+) {
+    let indent = rems(0.75 * depth as f32);
+    if let Some(ix) = node.file_ix {
+        rows.push(
+            h_flex()
+                .pl(indent)
+                .child(
+                    Button::new(format!("diff-file-{}", node.key))
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::File)
+                        .label(ui::truncate(&node.name, 24))
+                        .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx))),
+                )
+                .into_any(),
+        );
+        return;
+    }
+
+    let collapsed = this.diff_collapsed_dirs.contains(&node.key);
+    rows.push(
+        h_flex()
+            .pl(indent)
+            .child(
+                Button::new(format!("diff-dir-{}", node.key))
+                    .xsmall()
+                    .ghost()
+                    .icon(if collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .label(ui::truncate(&node.name, 22))
+                    .on_click(cx.listener({
+                        let key = node.key.clone();
+                        move |this, _, _, cx| this.toggle_diff_dir(key.clone(), cx)
+                    })),
+            )
+            .into_any(),
+    );
+    if collapsed {
+        return;
+    }
+    for child in &node.children {
+        push_tree_rows(child, depth + 1, this, cx, rows);
+    }
+}
+
+/// 右侧 inline 改动：文件名 + 可折叠的 hunk 行内容 + 文件/代码块撤销与选择。
+fn diff_inline_pane(
+    files: &[GitDiffFile],
+    this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let mut pane = v_flex()
+        .id("diff-inline")
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .gap_3()
+        .overflow_y_scroll()
+        .track_scroll(&this.diff_scroll);
+
+    for file in files {
+        let collapsed = this.diff_collapsed_files.contains(&file.path);
+        let selected = this.diff_selected_files.contains(&file.path);
+        let mut block = v_flex()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .bg(cx.theme().secondary)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Checkbox::new(format!("diff-select-file-{}", file.path))
+                            .checked(selected)
+                            .on_click(cx.listener({
+                                let path = file.path.clone();
+                                move |this, checked: &bool, _, cx| {
+                                    if *checked != this.diff_selected_files.contains(&path) {
+                                        this.toggle_diff_file_selected(path.clone(), cx);
+                                    }
+                                }
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(file.path.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .child(format!("+{} -{}", file.additions, file.deletions)),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(format!("diff-toggle-file-{}", file.path))
+                            .xsmall()
+                            .ghost()
+                            .label(if collapsed { "展开" } else { "折叠" })
+                            .on_click(cx.listener({
+                                let path = file.path.clone();
+                                move |this, _, _, cx| this.toggle_diff_file(path.clone(), cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("restore-file-{}", file.path))
+                            .xsmall()
+                            .ghost()
+                            .label("撤销文件")
+                            .on_click(cx.listener({
+                                let path = file.path.clone();
+                                move |this, _, _, cx| this.restore(Some(path.clone()), None, cx)
+                            })),
+                    ),
+            );
+        if !collapsed {
+            for hunk in &file.hunks {
+                block = block.child(hunk_view(file, hunk, this, cx));
+            }
+        }
+        pane = pane.child(block);
+    }
+    pane.into_any()
+}
+
+/// 单个代码块：@@ 头、行内容、选择与撤销。
+fn hunk_view(
+    file: &GitDiffFile,
+    hunk: &GitDiffHunk,
+    this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let key = (file.path.clone(), hunk.header.clone());
+    let selected = this.diff_selected_hunks.contains(&key);
+    let mut lines = v_flex().gap_0p5();
+    for line in &hunk.lines {
+        let text = if line.text.is_empty() {
+            format!("{}\u{00a0}", line.kind.prefix())
+        } else {
+            format!("{}{}", line.kind.prefix(), line.text)
+        };
+        lines = lines.child(
+            div()
+                .text_xs()
+                .text_color(ui::diff_line_color(line.kind, cx.theme()))
+                .child(text),
+        );
+    }
+    v_flex()
+        .gap_1()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    Checkbox::new(format!("diff-select-hunk-{}-{}", file.path, hunk.header))
+                        .checked(selected)
+                        .on_click(cx.listener({
+                            let path = file.path.clone();
+                            let header = hunk.header.clone();
+                            move |this, checked: &bool, _, cx| {
+                                let key = (path.clone(), header.clone());
+                                if *checked != this.diff_selected_hunks.contains(&key) {
+                                    this.toggle_diff_hunk_selected(
+                                        path.clone(),
+                                        header.clone(),
+                                        cx,
+                                    );
+                                }
+                            }
+                        })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(hunk.header.clone()),
+                )
+                .child(div().flex_1())
+                .child(
+                    Button::new(format!("restore-hunk-{}-{}", file.path, hunk.header))
+                        .xsmall()
+                        .ghost()
+                        .label("撤销代码块")
+                        .on_click(cx.listener({
+                            let path = file.path.clone();
+                            let patch = hunk.patch.clone();
+                            move |this, _, _, cx| {
+                                this.restore(Some(path.clone()), Some(patch.clone()), cx)
+                            }
+                        })),
+                ),
+        )
+        .child(lines)
+        .into_any()
+}
+
+/// 审查视图底部：选中统计、指令输入与发送。
+fn diff_review_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let has_selection =
+        !this.diff_selected_files.is_empty() || !this.diff_selected_hunks.is_empty();
+    let selected_hunks = this.diff_selected_hunks.len();
+    let selected_files = this.diff_selected_files.len();
+    h_flex()
+        .px_3()
+        .pb_3()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!(
+                    "已选 {selected_files} 个文件 · {selected_hunks} 个代码块"
+                )),
+        )
+        .child(div().flex_1().child(text_input(&this.diff_instruction)))
+        .child(
+            Button::new("send-diff-review")
+                .small()
+                .label("发送给 agent")
+                .disabled(!has_selection)
+                .on_click(cx.listener(|this, _, window, cx| this.send_diff_review(window, cx))),
+        )
         .into_any()
 }

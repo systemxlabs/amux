@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use amux_common::api::*;
 use amux_common::domain::{
-    Activity, FsEntry, GitDiffResult, HistoryItem, SessionConfigOption, SessionPlanEntry,
-    SlashCommand,
+    Activity, ContentBlock, FsEntry, GitDiffResult, HistoryItem, SessionConfigOption,
+    SessionPlanEntry, SlashCommand,
 };
 
 use crate::client::Client;
@@ -196,6 +196,14 @@ impl DirectoryCache {
     }
 }
 
+/// 待发送附件：拖拽或粘贴得到的文件/图片，随消息一并作为内容块发送。
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub block: ContentBlock,
+    /// 输入区展示用的短标签
+    pub label: String,
+}
+
 /// 右侧面板分类（PRD 右侧面板）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidePanel {
@@ -216,6 +224,18 @@ impl SidePanel {
         SidePanel::Plan,
         SidePanel::Terminal,
     ];
+
+    /// 当前会话类型下可用的面板：工作目录/文件改动/会话计划/终端仅普通会话展示（docs/PRD.md）。
+    pub fn for_session(is_workflow: bool) -> Vec<SidePanel> {
+        SidePanel::ALL
+            .into_iter()
+            .filter(|panel| panel.is_available(is_workflow))
+            .collect()
+    }
+
+    pub fn is_available(self, is_workflow: bool) -> bool {
+        !is_workflow || matches!(self, SidePanel::Detail | SidePanel::Activities)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -352,6 +372,11 @@ impl Core {
 
     pub fn due(&self, last: Option<Instant>, interval: Duration) -> bool {
         last.map(|at| at.elapsed() >= interval).unwrap_or(true)
+    }
+
+    /// 当前打开的是否为工作流会话。
+    pub fn is_workflow(&self) -> bool {
+        matches!(self.open, Some(OpenTarget::Workflow(_)))
     }
 
     pub fn note(&mut self, message: impl Into<String>) {

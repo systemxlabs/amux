@@ -343,11 +343,12 @@ pub fn open_workflow(core: &mut Core, id: &str) {
     core.last = Default::default();
 }
 
-/// 发送指令（普通会话或工作流会话）。
-pub async fn send_prompt(client: &Client, target: &OpenTarget, text: &str) -> Result<(), String> {
-    let input = vec![ContentBlock::Text {
-        text: text.to_string(),
-    }];
+/// 发送指令（普通会话或工作流会话）：文本与附件内容块一并作为用户输入。
+pub async fn send_prompt(
+    client: &Client,
+    target: &OpenTarget,
+    input: Vec<ContentBlock>,
+) -> Result<(), String> {
     match target {
         OpenTarget::Session(id) => client.prompt(id, input).await,
         OpenTarget::Workflow(id) => client.prompt_workflow(id, input).await,

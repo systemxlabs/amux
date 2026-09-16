@@ -15,7 +15,10 @@ use gix::diff::blob::platform::prepare_diff::Operation;
 use gix::diff::blob::unified_diff::{ConsumeHunk, ContextSize, DiffLineKind, HunkHeader};
 use gix::diff::blob::{ResourceKind, UnifiedDiff};
 
-use amux_common::domain::{GitChangeStatus, GitDiffFile, GitDiffHunk, GitDiffResult, OpResult};
+use amux_common::domain::{
+    GitChangeStatus, GitDiffFile, GitDiffHunk, GitDiffLine, GitDiffLineKind, GitDiffResult,
+    OpResult,
+};
 
 use crate::fs::canonical_workspace_root;
 
@@ -168,17 +171,20 @@ fn hunk_header_text(h: &HunkHeader) -> String {
     format!("@@ -{before} +{after} @@")
 }
 
+fn diff_line_kind(kind: DiffLineKind) -> GitDiffLineKind {
+    match kind {
+        DiffLineKind::Context => GitDiffLineKind::Context,
+        DiffLineKind::Add => GitDiffLineKind::Add,
+        DiffLineKind::Remove => GitDiffLineKind::Remove,
+    }
+}
+
 /// 逐行渲染 hunk 体（前缀 + 行内容 + 换行）。
-fn hunk_body_text(lines: &[(DiffLineKind, Vec<u8>)]) -> String {
+fn hunk_body_text(lines: &[GitDiffLine]) -> String {
     let mut out = String::new();
-    for (kind, content) in lines {
-        let prefix = match kind {
-            DiffLineKind::Context => ' ',
-            DiffLineKind::Add => '+',
-            DiffLineKind::Remove => '-',
-        };
-        out.push(prefix);
-        out.push_str(&String::from_utf8_lossy(content));
+    for line in lines {
+        out.push(line.kind.prefix());
+        out.push_str(&line.text);
         out.push('\n');
     }
     out
@@ -202,13 +208,25 @@ fn whole_file_patch(path: &str, bytes: &[u8], added: bool) -> FilePatch {
     } else {
         format!("@@ -1,{n} +0,0 @@\n")
     };
-    let prefix = if added { '+' } else { '-' };
-    let body: String = lines.iter().map(|l| format!("{prefix}{l}\n")).collect();
+    let kind = if added {
+        GitDiffLineKind::Add
+    } else {
+        GitDiffLineKind::Remove
+    };
+    let lines: Vec<GitDiffLine> = lines
+        .into_iter()
+        .map(|line| GitDiffLine {
+            kind,
+            text: line.to_string(),
+        })
+        .collect();
+    let body = hunk_body_text(&lines);
     let patch = format!("{header}{hunk_hdr}{body}");
     let hunk_patch = patch.clone();
     let hunks = vec![GitDiffHunk {
         header: hunk_hdr.trim_end().to_string(),
         patch: hunk_patch,
+        lines,
     }];
     FilePatch {
         patch,
@@ -278,10 +296,18 @@ fn modified_patch(
             .filter(|(k, _)| *k == DiffLineKind::Remove)
             .count() as u32;
         let header = hunk_header_text(&h);
+        let lines: Vec<GitDiffLine> = lines
+            .iter()
+            .map(|(kind, content)| GitDiffLine {
+                kind: diff_line_kind(*kind),
+                text: String::from_utf8_lossy(content).into_owned(),
+            })
+            .collect();
         let hunk_text = format!("{header}\n{}", hunk_body_text(&lines));
         hunks.push(GitDiffHunk {
             header: header.clone(),
             patch: format!("{}{}", patch, hunk_text),
+            lines,
         });
         patch.push_str(&hunk_text);
     }

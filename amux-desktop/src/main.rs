@@ -4,6 +4,7 @@ mod app;
 mod client;
 mod config;
 mod dialog;
+mod difftree;
 mod panels;
 mod poll;
 mod settings;

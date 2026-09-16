@@ -1,13 +1,21 @@
 //! 根视图：三面板布局、设置浮窗与轮询节拍。
 
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use amux_common::api::{
-    ApiFormat, CreateSessionRequest, OrchestratorConfig, QuickCommand, Skill, WorkflowPlanItem,
+    ApiFormat, CreateSessionRequest, OrchestratorConfig, QuickCommand, SessionConfigSetting, Skill,
+    WorkflowPlanItem,
+};
+use amux_common::domain::{
+    ContentBlock, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SlashCommand,
 };
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Paste};
+use gpui_component::resizable::{h_resizable, resizable_panel};
+use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::*;
 use parking_lot::Mutex;
 
@@ -17,11 +25,15 @@ use crate::panels;
 use crate::poll;
 use crate::settings;
 use crate::state::{
-    Core, DirectoryCache, ListEntry, OpenTarget, SharedCore, SidePanel, WorkspaceNode,
+    Attachment, Core, DirectoryCache, ListEntry, OpenTarget, SharedCore, SidePanel, WorkspaceNode,
 };
+use crate::ui;
 
 /// UI 轮询节拍：驱动后台刷新与重绘。
 const TICK: Duration = Duration::from_millis(250);
+
+/// 会话选项下拉框的条目类型（选项值为字符串）。
+pub type ConfigSelect = Entity<SelectState<Vec<SharedString>>>;
 
 pub struct AmuxApp {
     pub core: SharedCore,
@@ -56,6 +68,34 @@ pub struct AmuxApp {
     pub plan_plan: Entity<InputState>,
     /// 终端命令行输入
     pub terminal_input: Entity<InputState>,
+    /// 待发送附件（拖拽/粘贴产生）
+    pub attachments: Vec<Attachment>,
+    /// 斜杠命令上拉框中高亮项
+    pub slash_selected: usize,
+    /// 斜杠命令上拉框是否被 Esc 收起
+    pub slash_dismissed: bool,
+    /// 会话选项下拉框：按选项 id 保留实体
+    config_selects: HashMap<String, ConfigSelect>,
+    /// 选项实体对应的会话 id
+    config_selects_session: Option<String>,
+    /// 选项实体已同步的（选项 id, 当前值）快照
+    config_selects_snapshot: Vec<(String, String)>,
+    /// 选项下拉框的事件订阅
+    config_subscriptions: Vec<Subscription>,
+    /// 改动审查：已折叠的文件
+    pub diff_collapsed_files: HashSet<String>,
+    /// 改动审查：文件树中已折叠的目录
+    pub diff_collapsed_dirs: HashSet<String>,
+    /// 改动审查：整个文件树区域是否展开
+    pub diff_tree_visible: bool,
+    /// 改动审查：已选中的文件
+    pub diff_selected_files: HashSet<String>,
+    /// 改动审查：已选中的代码块（文件路径, hunk 头）
+    pub diff_selected_hunks: HashSet<(String, String)>,
+    /// 改动审查：给 agent 的指令输入
+    pub diff_instruction: Entity<InputState>,
+    /// 改动审查：改动区域滚动句柄（点击文件时定位）
+    pub diff_scroll: ScrollHandle,
 }
 
 impl AmuxApp {
@@ -69,7 +109,12 @@ impl AmuxApp {
 
         let server = connection.server.clone();
         let token = connection.token.clone();
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("输入指令，Enter 发送"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("输入指令，Enter 发送，Shift+Enter 换行")
+                .auto_grow(1, 8)
+                .submit_on_enter(true)
+        });
         let plan_input = cx.new(|cx| InputState::new(window, cx).placeholder("工作流计划"));
         let workspace_input = cx.new(|cx| InputState::new(window, cx).placeholder("工作目录"));
         let server_input =
@@ -108,16 +153,40 @@ impl AmuxApp {
         )
         .detach();
 
-        // 轮询节拍：后台刷新 + 重绘
+        // 轮询节拍：后台刷新 + 同步视图状态 + 重绘
         let tick_core = Arc::clone(&core);
         let tick_runtime = runtime.handle().clone();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(TICK).await;
             tick_runtime.spawn(poll::tick(tick_core.clone()));
-            if this.update(cx, |_, cx| cx.notify()).is_err() {
+            // 同步会话选项控件（下拉框需要 Window）后重绘
+            if this
+                .update_in(cx, |this, window, cx| {
+                    this.sync_config_options(window, cx);
+                    cx.notify();
+                })
+                .is_err()
+            {
+                // 视图已销毁或窗口已关闭：结束刷新任务
                 break;
             }
         })
+        .detach();
+
+        // 输入框：回车发送、内容变化时重置斜杠命令上拉框
+        cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.send(window, cx),
+                InputEvent::Change => {
+                    this.slash_selected = 0;
+                    this.slash_dismissed = false;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )
         .detach();
 
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
@@ -133,6 +202,23 @@ impl AmuxApp {
         let plan_plan = cx.new(|cx| InputState::new(window, cx).placeholder("计划内容"));
         let terminal_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("终端命令，回车发送"));
+        let diff_instruction = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("对选中的改动说明指令，发送给 agent")
+                .auto_grow(1, 4)
+                .submit_on_enter(true)
+        });
+        let diff_instruction_entity = diff_instruction.clone();
+        cx.subscribe_in(
+            &diff_instruction_entity,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.send_diff_review(window, cx);
+                }
+            },
+        )
+        .detach();
 
         Self {
             core,
@@ -157,6 +243,20 @@ impl AmuxApp {
             plan_name,
             plan_plan,
             terminal_input,
+            attachments: Vec::new(),
+            slash_selected: 0,
+            slash_dismissed: false,
+            config_selects: HashMap::new(),
+            config_selects_session: None,
+            config_selects_snapshot: Vec::new(),
+            config_subscriptions: Vec::new(),
+            diff_collapsed_files: HashSet::new(),
+            diff_collapsed_dirs: HashSet::new(),
+            diff_tree_visible: true,
+            diff_selected_files: HashSet::new(),
+            diff_selected_hunks: HashSet::new(),
+            diff_instruction,
+            diff_scroll: ScrollHandle::new(),
         }
     }
 
@@ -280,6 +380,20 @@ impl AmuxApp {
                 poll::open_session(&mut core, id);
             }
         }
+        // 视图按会话隔离：切换会话时收起不适用或有残留内容的面板与状态
+        self.with_core(|core| {
+            if core
+                .side_panel
+                .is_some_and(|panel| !panel.is_available(is_workflow))
+            {
+                core.side_panel = None;
+            }
+        });
+        self.attachments.clear();
+        self.diff_collapsed_files.clear();
+        self.diff_collapsed_dirs.clear();
+        self.diff_selected_files.clear();
+        self.diff_selected_hunks.clear();
         cx.notify();
     }
 
@@ -515,21 +629,41 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 发送输入框内容。
+    /// 发送输入框内容：文本与附件一并作为用户输入发出。
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && self.attachments.is_empty() {
             return;
         }
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        if !text.is_empty() {
+            blocks.push(ContentBlock::Text { text });
+        }
+        blocks.extend(
+            std::mem::take(&mut self.attachments)
+                .into_iter()
+                .map(|attachment| attachment.block),
+        );
+        self.input
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.slash_selected = 0;
+        self.send_blocks(blocks, cx);
+    }
+
+    /// 快捷指令：把预设提示词直接作为用户输入发送（docs/PRD.md「快捷指令」）。
+    pub fn send_quick_command(&mut self, prompt: String, cx: &mut Context<Self>) {
+        self.send_blocks(vec![ContentBlock::Text { text: prompt }], cx);
+    }
+
+    /// 内容块作为用户输入发往当前会话。
+    fn send_blocks(&mut self, blocks: Vec<ContentBlock>, cx: &mut Context<Self>) {
         let target = self.with_core(|core| core.open.clone());
         let Some(target) = target else { return };
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
-        self.input
-            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            match poll::send_prompt(&client, &target, &text).await {
+            match poll::send_prompt(&client, &target, blocks).await {
                 Ok(()) => {
                     let mut core = core.lock();
                     core.last.list = None;
@@ -539,6 +673,288 @@ impl AmuxApp {
             }
         });
         cx.notify();
+    }
+
+    /// 拖入的文件作为资源链接附件。
+    pub fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            self.attachments.push(Attachment {
+                block: ContentBlock::ResourceLink {
+                    uri: format!("file://{}", path.display()),
+                    name: name.clone(),
+                    mime_type: None,
+                    title: None,
+                    description: None,
+                },
+                label: name,
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn remove_attachment(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix < self.attachments.len() {
+            self.attachments.remove(ix);
+        }
+        cx.notify();
+    }
+
+    /// 粘贴：图片作为内容块附件、文件路径作为资源链接，其余交给输入框处理文本。
+    pub fn paste_into_composer(&mut self, _: &Paste, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        let mut attached = false;
+        for entry in clipboard.entries() {
+            match entry {
+                ClipboardEntry::Image(image) if !image.bytes.is_empty() => {
+                    self.attachments.push(Attachment {
+                        block: ContentBlock::Resource {
+                            mime_type: image.format.mime_type().to_string(),
+                            uri: None,
+                            text: None,
+                            blob: Some(base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &image.bytes,
+                            )),
+                        },
+                        label: "粘贴的图片".to_string(),
+                    });
+                    attached = true;
+                }
+                ClipboardEntry::ExternalPaths(paths) => {
+                    self.attach_paths(paths.paths(), cx);
+                    attached = true;
+                }
+                _ => {}
+            }
+        }
+        if attached {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    /// 斜杠命令上拉框候选：输入 `/前缀` 时按前缀匹配（docs/PRD.md 输入区）。
+    pub fn slash_candidates(&self, cx: &App) -> Vec<SlashCommand> {
+        if self.slash_dismissed {
+            return Vec::new();
+        }
+        let value = self.input.read(cx).value();
+        let Some(query) = value.strip_prefix('/') else {
+            return Vec::new();
+        };
+        if query.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let query = query.to_lowercase();
+        self.with_core(|core| core.view.detail.slash_commands.clone())
+            .into_iter()
+            .filter(|command| command.name.to_lowercase().starts_with(&query))
+            .collect()
+    }
+
+    /// 采纳斜杠命令：输入替换为 `/命令名 `。
+    pub fn apply_slash_command(
+        &mut self,
+        command: &SlashCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = format!("/{} ", command.name);
+        self.input
+            .update(cx, |state, cx| state.set_value(value, window, cx));
+        self.slash_selected = 0;
+        cx.notify();
+    }
+
+    /// 输入区按键：上拉框打开时上下选择、回车采纳、Esc 收起。
+    pub fn composer_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let candidates = self.slash_candidates(cx);
+        if candidates.is_empty() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "up" => {
+                self.slash_selected = self.slash_selected.saturating_sub(1);
+                cx.stop_propagation();
+            }
+            "down" => {
+                self.slash_selected = (self.slash_selected + 1).min(candidates.len() - 1);
+                cx.stop_propagation();
+            }
+            "enter" => {
+                let selected = self.slash_selected.min(candidates.len() - 1);
+                self.apply_slash_command(&candidates[selected], window, cx);
+                cx.stop_propagation();
+            }
+            "escape" => {
+                self.slash_dismissed = true;
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// 会话选项：调用 configure 端点设置选项值。
+    pub fn apply_config_option(
+        &mut self,
+        config_id: String,
+        value: SessionConfigOptionValue,
+        cx: &mut Context<Self>,
+    ) {
+        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
+        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
+            return;
+        };
+        // 立即反映到本地选项（下一次轮询确认；失败时由轮询回滚）
+        self.with_core(|core| {
+            let Some(option) = core
+                .view
+                .detail
+                .config_options
+                .iter_mut()
+                .find(|option| option.id == config_id)
+            else {
+                return;
+            };
+            match (&mut option.kind, &value) {
+                (
+                    SessionConfigKind::Boolean { current_value },
+                    SessionConfigOptionValue::Boolean { value },
+                ) => *current_value = *value,
+                (
+                    SessionConfigKind::Select { current_value, .. },
+                    SessionConfigOptionValue::ValueId { value },
+                ) => *current_value = value.clone(),
+                _ => {}
+            }
+        });
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let setting = SessionConfigSetting { config_id, value };
+            if let Err(error) = client.configure_session(&id, None, Some(setting)).await {
+                core.lock().note(format!("设置会话选项失败：{error}"));
+            }
+        });
+        cx.notify();
+    }
+
+    /// 同步会话选项控件：选项集合变化时重建下拉框，仅在当前值变化时就地更新。
+    fn sync_config_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (session, options) = self.with_core(|core| match core.open.clone() {
+            Some(OpenTarget::Session(id)) => (Some(id), core.view.detail.config_options.clone()),
+            _ => (None, Vec::new()),
+        });
+        let snapshot: Vec<(String, String)> = options
+            .iter()
+            .map(|option| (option.id.clone(), ui::config_value(option)))
+            .collect();
+        if session == self.config_selects_session && snapshot == self.config_selects_snapshot {
+            return;
+        }
+        let same_options = session == self.config_selects_session
+            && snapshot
+                .iter()
+                .map(|(id, _)| id)
+                .eq(self.config_selects_snapshot.iter().map(|(id, _)| id));
+        if same_options {
+            for option in &options {
+                let SessionConfigKind::Select {
+                    options: values,
+                    current_value,
+                } = &option.kind
+                else {
+                    continue;
+                };
+                let Some(select) = self.config_selects.get(&option.id).cloned() else {
+                    continue;
+                };
+                let items: Vec<SharedString> = values
+                    .iter()
+                    .map(|entry| SharedString::from(entry.name.clone()))
+                    .collect();
+                let selected = values
+                    .iter()
+                    .position(|entry| &entry.value == current_value);
+                select.update(cx, |state, cx| {
+                    state.set_items(items, window, cx);
+                    state.set_selected_index(selected.map(IndexPath::new), window, cx);
+                });
+            }
+        } else {
+            self.rebuild_config_selects(&options, window, cx);
+            self.config_selects_session = session;
+        }
+        self.config_selects_snapshot = snapshot;
+    }
+
+    /// 重建会话选项下拉框：每个 select 选项一个实体，确认后写回 Server。
+    fn rebuild_config_selects(
+        &mut self,
+        options: &[SessionConfigOption],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.config_selects.clear();
+        self.config_subscriptions.clear();
+        for option in options {
+            let SessionConfigKind::Select {
+                options: values,
+                current_value,
+            } = &option.kind
+            else {
+                continue;
+            };
+            let items: Vec<SharedString> = values
+                .iter()
+                .map(|entry| SharedString::from(entry.name.clone()))
+                .collect();
+            let selected = values
+                .iter()
+                .position(|entry| &entry.value == current_value);
+            let entity = cx.new(|cx| {
+                SelectState::new(
+                    items,
+                    selected.map(|row| IndexPath::default().row(row)),
+                    window,
+                    cx,
+                )
+            });
+            let config_id = option.id.clone();
+            let subscription = cx.subscribe_in(
+                &entity,
+                window,
+                move |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _window, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event {
+                        this.apply_config_option(
+                            config_id.clone(),
+                            SessionConfigOptionValue::ValueId {
+                                value: value.to_string(),
+                            },
+                            cx,
+                        );
+                    }
+                },
+            );
+            self.config_subscriptions.push(subscription);
+            self.config_selects.insert(option.id.clone(), entity);
+        }
+    }
+
+    /// 当前会话选项下拉框（无对应选项时为空）。
+    pub fn config_select(&self, id: &str) -> Option<&ConfigSelect> {
+        self.config_selects.get(id)
     }
 
     /// 取消进行中的工作。
@@ -749,6 +1165,120 @@ impl AmuxApp {
             }
         });
         cx.notify();
+    }
+
+    /// 折叠/展开单个文件的 diff。
+    pub fn toggle_diff_file(&mut self, path: String, cx: &mut Context<Self>) {
+        toggle_set(&mut self.diff_collapsed_files, path);
+        cx.notify();
+    }
+
+    /// 折叠/展开文件树中的目录。
+    pub fn toggle_diff_dir(&mut self, key: String, cx: &mut Context<Self>) {
+        toggle_set(&mut self.diff_collapsed_dirs, key);
+        cx.notify();
+    }
+
+    /// 折叠/展开整个文件树区域。
+    pub fn toggle_diff_tree(&mut self, cx: &mut Context<Self>) {
+        self.diff_tree_visible = !self.diff_tree_visible;
+        cx.notify();
+    }
+
+    /// 折叠/展开全部文件改动（折叠后仅显示文件名）。
+    pub fn toggle_all_diffs(&mut self, cx: &mut Context<Self>) {
+        let paths = self.diff_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let collapse = !paths
+            .iter()
+            .all(|path| self.diff_collapsed_files.contains(path));
+        for path in paths {
+            if collapse {
+                self.diff_collapsed_files.insert(path);
+            } else {
+                self.diff_collapsed_files.remove(&path);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 改动审查：选中/取消选中整个文件。
+    pub fn toggle_diff_file_selected(&mut self, path: String, cx: &mut Context<Self>) {
+        toggle_set(&mut self.diff_selected_files, path);
+        cx.notify();
+    }
+
+    /// 改动审查：选中/取消选中代码块。
+    pub fn toggle_diff_hunk_selected(
+        &mut self,
+        path: String,
+        header: String,
+        cx: &mut Context<Self>,
+    ) {
+        toggle_set(&mut self.diff_selected_hunks, (path, header));
+        cx.notify();
+    }
+
+    /// 点击文件：右侧改动区域滚动到该文件。
+    pub fn scroll_to_file(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.diff_scroll.scroll_to_top_of_item(ix);
+        cx.notify();
+    }
+
+    /// 把选中的文件与代码块连同指令发送给 agent（docs/PRD.md「改动审查」）。
+    pub fn send_diff_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let instruction = self.diff_instruction.read(cx).value().trim().to_string();
+        if instruction.is_empty()
+            || (self.diff_selected_files.is_empty() && self.diff_selected_hunks.is_empty())
+        {
+            return;
+        }
+        let files = self.with_core(|core| {
+            core.view
+                .detail
+                .diff
+                .as_ref()
+                .map(|diff| diff.files.clone())
+                .unwrap_or_default()
+        });
+        let mut sections = Vec::new();
+        for file in &files {
+            if self.diff_selected_files.contains(&file.path) {
+                sections.push(format!("{}（整个文件）\n{}", file.path, file.patch));
+                continue;
+            }
+            for hunk in &file.hunks {
+                if self
+                    .diff_selected_hunks
+                    .contains(&(file.path.clone(), hunk.header.clone()))
+                {
+                    sections.push(format!("{}（{}）\n{}", file.path, hunk.header, hunk.patch));
+                }
+            }
+        }
+        if sections.is_empty() {
+            return;
+        }
+        let text = format!("{instruction}\n\n改动内容：\n{}", sections.join("\n"));
+        self.diff_instruction
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.diff_selected_files.clear();
+        self.diff_selected_hunks.clear();
+        self.send_blocks(vec![ContentBlock::Text { text }], cx);
+    }
+
+    /// 当前改动列表中的文件路径。
+    fn diff_paths(&self) -> Vec<String> {
+        self.with_core(|core| {
+            core.view
+                .detail
+                .diff
+                .as_ref()
+                .map(|diff| diff.files.iter().map(|file| file.path.clone()).collect())
+                .unwrap_or_default()
+        })
     }
 
     /// 撤销指定文件或代码块改动。
@@ -1173,17 +1703,33 @@ impl Render for AmuxApp {
             .side_panel
             .map(|panel| panels::render_right(&core, panel, self, cx));
 
+        // 三栏可拖拽调整宽度（docs/PRD.md 右侧面板）
+        let mut shell = h_resizable("shell")
+            .child(
+                resizable_panel()
+                    .size(px(panels::LEFT_WIDTH))
+                    .size_range(px(panels::LEFT_MIN_WIDTH)..px(panels::LEFT_MAX_WIDTH))
+                    .flex_none()
+                    .child(left),
+            )
+            .child(resizable_panel().child(middle));
+        if let Some(right) = right {
+            shell = shell.child(
+                resizable_panel()
+                    .size(px(panels::RIGHT_WIDTH))
+                    .size_range(px(panels::RIGHT_MIN_WIDTH)..px(panels::RIGHT_MAX_WIDTH))
+                    .flex_none()
+                    .child(right),
+            );
+        }
+
         let mut root = div()
             .size_full()
             .flex()
             .flex_row()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(left)
-            .child(div().flex_1().h_full().child(middle));
-        if let Some(right) = right {
-            root = root.child(right);
-        }
+            .child(shell);
         if core.settings_open {
             root = root.child(settings::render_overlay(&core, self, cx));
         }
@@ -1210,4 +1756,11 @@ impl Render for AmuxApp {
 /// 输入框 → 便于在面板中复用。
 pub fn text_input(state: &Entity<InputState>) -> Input {
     Input::new(state)
+}
+
+/// 集合中已存在则移除，否则插入（折叠/选中状态切换）。
+fn toggle_set<T: std::hash::Hash + Eq>(set: &mut HashSet<T>, value: T) {
+    if !set.remove(&value) {
+        set.insert(value);
+    }
 }

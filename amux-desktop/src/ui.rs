@@ -1,6 +1,8 @@
 //! 共享渲染辅助：可用状态徽章、时间、内容块文本、活动文案。
 
-use amux_common::domain::{Activity, ContentBlock, HistoryItem};
+use amux_common::domain::{
+    Activity, ContentBlock, GitDiffLineKind, HistoryItem, SessionConfigKind, SessionConfigOption,
+};
 use gpui::*;
 use gpui_component::badge::Badge;
 use gpui_component::Theme;
@@ -35,10 +37,11 @@ pub fn blocks_text(blocks: &[ContentBlock]) -> String {
         .iter()
         .map(|block| match block {
             ContentBlock::Text { text } => text.clone(),
-            ContentBlock::Resource { uri, .. } => {
-                format!("[资源 {}]", uri.clone().unwrap_or_default())
+            ContentBlock::Resource { mime_type, .. } if mime_type.starts_with("image/") => {
+                "[图片]".to_string()
             }
-            ContentBlock::ResourceLink { name, uri, .. } => format!("[链接 {name} {uri}]"),
+            ContentBlock::Resource { mime_type, .. } => format!("[资源 {mime_type}]"),
+            ContentBlock::ResourceLink { name, .. } => format!("[文件 {name}]"),
         })
         .collect::<Vec<_>>()
         .join("")
@@ -57,6 +60,14 @@ pub fn history_timestamp(item: &HistoryItem) -> u64 {
     match item {
         HistoryItem::UserMessage { timestamp, .. } => *timestamp,
         HistoryItem::AgentMessage { timestamp, .. } => *timestamp,
+    }
+}
+
+/// 会话选项当前值的文案。
+pub fn config_value(option: &SessionConfigOption) -> String {
+    match &option.kind {
+        SessionConfigKind::Select { current_value, .. } => current_value.clone(),
+        SessionConfigKind::Boolean { current_value } => current_value.to_string(),
     }
 }
 
@@ -84,6 +95,15 @@ pub fn activity_timestamp(activity: &Activity) -> u64 {
         Activity::Thinking { timestamp, .. } => *timestamp,
         Activity::ToolCall { timestamp, .. } => *timestamp,
         Activity::Error { timestamp, .. } => *timestamp,
+    }
+}
+
+/// 一行 diff 的展示颜色：新增/删除用语义色，上下文用弱化色。
+pub fn diff_line_color(kind: GitDiffLineKind, theme: &Theme) -> Hsla {
+    match kind {
+        GitDiffLineKind::Add => theme.success_foreground,
+        GitDiffLineKind::Remove => theme.danger_foreground,
+        GitDiffLineKind::Context => theme.muted_foreground,
     }
 }
 
