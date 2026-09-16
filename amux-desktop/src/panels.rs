@@ -57,7 +57,7 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         .min_h_0()
         .track_scroll(&this.list_scroll)
         .overflow_y_scroll()
-        .gap_2();
+        .gap_1();
     for entry in core.entries.clone() {
         match &entry {
             ListEntry::Session(session) => {
