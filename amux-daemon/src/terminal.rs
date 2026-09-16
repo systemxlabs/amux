@@ -25,6 +25,7 @@ use crate::frames;
 use crate::outbox::Outbox;
 use crate::rpc::{RpcError, RpcResult};
 
+#[derive(Clone)]
 struct TerminalHandle {
     /// 输入字节流送专职写线程：PTY master write 可能阻塞，不能占用分发任务
     input_tx: std::sync::mpsc::Sender<Vec<u8>>,
@@ -285,17 +286,6 @@ fn not_found() -> RpcError {
     RpcError {
         code: amux_common::jsonrpc::server_error::TERMINAL_NOT_FOUND,
         message: "终端不存在或已关闭".into(),
-    }
-}
-
-impl Clone for TerminalHandle {
-    fn clone(&self) -> Self {
-        Self {
-            input_tx: self.input_tx.clone(),
-            master: Arc::clone(&self.master),
-            killer: Arc::clone(&self.killer),
-            wait_thread: Arc::clone(&self.wait_thread),
-        }
     }
 }
 

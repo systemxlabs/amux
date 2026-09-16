@@ -69,43 +69,10 @@ fn apply(builder: logforth::starter_log::LogStarterBuilder) {
     }
 }
 
-/// JSON 参数摘要：只保留指定字段，长文本截断（日志可读性）。
-pub fn params_summary(params: &serde_json::Value, keys: &[&str], max_text: usize) -> String {
-    use serde_json::Value;
-
-    let Some(obj) = params.as_object() else {
-        return String::new();
-    };
-    let mut parts = Vec::new();
-    for key in keys {
-        if let Some(value) = obj.get(*key) {
-            let value = match value {
-                Value::String(value) => crate::text::truncate(value, max_text),
-                value => value.to_string(),
-            };
-            parts.push(format!("{key}={value}"));
-        }
-    }
-    parts.join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use logforth::Filter;
-
-    #[test]
-    fn params_summary_keeps_requested_fields_and_truncates_text() {
-        let params = serde_json::json!({
-            "sessionId": "s1",
-            "input": "0123456789",
-            "ignored": true
-        });
-        assert_eq!(
-            params_summary(&params, &["sessionId", "input"], 5),
-            "sessionId=s1 input=01234…"
-        );
-    }
 
     #[test]
     fn default_filter_prioritizes_amux_logs_over_dependencies() {

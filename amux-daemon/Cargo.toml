@@ -29,7 +29,6 @@ uuid.workspace = true
 base64.workspace = true
 libc.workspace = true
 portable-pty.workspace = true
-gix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

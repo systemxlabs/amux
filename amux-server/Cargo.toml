@@ -16,11 +16,8 @@ tokio = { workspace = true, features = [
     "macros",
     "rt-multi-thread",
     "net",
-    "process",
-    "io-util",
     "sync",
     "time",
-    "signal",
 ] }
 axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true

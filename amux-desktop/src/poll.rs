@@ -18,13 +18,11 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 单次节拍：按需刷新各视图。
 pub async fn tick(core: SharedCore) {
-    let (client, status, last_list, last_settings, open, settings_open, settings_tab, side_panel) = {
+    let (client, status, open, settings_open, settings_tab, side_panel) = {
         let core = core.lock();
         (
             core.client.clone(),
             core.status.clone(),
-            core.last.list,
-            core.last.settings,
             core.open.clone(),
             core.settings_open,
             core.settings_tab,
@@ -37,11 +35,7 @@ pub async fn tick(core: SharedCore) {
 
     // 连接检查
     if status != ConnectionStatus::Online {
-        let due = {
-            let core = core.lock();
-            core.due(core.last.list, RECONNECT_INTERVAL)
-        };
-        if due {
+        if core_due(&core, |last| last.list, RECONNECT_INTERVAL) {
             match client.ping().await {
                 Ok(()) => {
                     let mut core = core.lock();
@@ -58,16 +52,11 @@ pub async fn tick(core: SharedCore) {
         return;
     }
 
-    if core_due(&core, |last| last.list, SESSION_LIST_INTERVAL, last_list) {
+    if core_due(&core, |last| last.list, SESSION_LIST_INTERVAL) {
         refresh_list(&client, &core).await;
     }
     // 机器/agent 与列表类配置：新建会话视图与交互视图常驻需要，按周期节流刷新
-    if core_due(
-        &core,
-        |last| last.settings,
-        SETTINGS_INTERVAL,
-        last_settings,
-    ) {
+    if core_due(&core, |last| last.settings, SETTINGS_INTERVAL) {
         refresh_config(&client, &core).await;
         if settings_open {
             refresh_settings(&client, &core, settings_tab).await;
@@ -82,22 +71,17 @@ fn core_due(
     core: &SharedCore,
     pick: impl Fn(&crate::state::Ticks) -> Option<Instant>,
     interval: Duration,
-    cached: Option<Instant>,
 ) -> bool {
     let core = core.lock();
-    let last = pick(&core.last).or(cached);
+    let last = pick(&core.last);
     core.due(last, interval)
 }
 
 /// 会话列表：普通会话 + 工作流会话（工作流会话内含关联普通会话），按最近活跃排序。
 async fn refresh_list(client: &Client, core: &SharedCore) {
-    let (limit, offset) = {
-        let core = core.lock();
-        (core.list_limit.max(20), 0usize)
-    };
-    let _ = offset;
-    let sessions = client.sessions(limit, offset).await;
-    let workflows = client.workflows(limit, offset).await;
+    let limit = core.lock().list_limit.max(20);
+    let sessions = client.sessions(limit, 0).await;
+    let workflows = client.workflows(limit, 0).await;
     let recent = client.recent_workspaces().await.ok();
     let (sessions, workflows) = match (sessions, workflows) {
         (Ok(sessions), Ok(workflows)) => (sessions, workflows),

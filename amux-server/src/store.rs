@@ -19,8 +19,8 @@ pub struct Store {
 impl Store {
     pub fn open(home: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(home).map_err(|e| format!("创建 {} 失败: {e}", home.display()))?;
-        let sessions = open_db(&home.join("session.sqlite"))?;
-        let workflows = open_db(&home.join("workflow.sqlite"))?;
+        let sessions = open_db(&home.join("session.sqlite"), SESSION_SCHEMA)?;
+        let workflows = open_db(&home.join("workflow.sqlite"), WORKFLOW_SCHEMA)?;
         // Server 重启后残留的「工作中」不再有 agent 侧 turn 支撑，统一回到空闲
         sessions
             .execute(
@@ -93,22 +93,30 @@ impl Store {
     }
 
     /// 会话列表：排除被工作流关联的会话（docs/DESIGN.md：`GET /sessions` 只出非关联会话）。
+    /// 会话量级小，关联标记在 Rust 侧过滤。
     pub fn sessions_page(&self, limit: usize, offset: usize) -> (Vec<Session>, bool) {
-        let conn = self.sessions.lock();
-        let mut stmt = match conn.prepare(
-            "SELECT id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
-             FROM sessions
-             WHERE id NOT IN (SELECT session_id FROM linked_sessions)
-             ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
-        ) {
+        let linked: std::collections::HashSet<String> =
+            self.linked_session_ids().into_iter().collect();
+        let all: Vec<Session> = self
+            .sessions_all()
+            .into_iter()
+            .filter(|session| !linked.contains(&session.id))
+            .collect();
+        let has_more = all.len() > offset + limit;
+        let page = all.into_iter().skip(offset).take(limit).collect();
+        (page, has_more)
+    }
+
+    /// 所有被工作流关联的会话 id。
+    fn linked_session_ids(&self) -> Vec<String> {
+        let conn = self.workflows.lock();
+        let mut stmt = match conn.prepare("SELECT DISTINCT session_id FROM workflow_linked_sessions")
+        {
             Ok(stmt) => stmt,
-            Err(_) => return (Vec::new(), false),
+            Err(_) => return Vec::new(),
         };
-        let rows = stmt.query_map(params![(limit + 1) as i64, offset as i64], row_to_session);
-        let mut sessions = collect(rows);
-        let has_more = sessions.len() > limit;
-        sessions.truncate(limit);
-        (sessions, has_more)
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0));
+        collect(rows)
     }
 
     pub fn sessions_of_agent(&self, machine: &str, agent: &str) -> Vec<Session> {
@@ -186,24 +194,14 @@ impl Store {
         let _ = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]);
         let _ = conn.execute("DELETE FROM messages WHERE session_id = ?1", params![id]);
         let _ = conn.execute("DELETE FROM activities WHERE session_id = ?1", params![id]);
-        let _ = conn.execute(
-            "DELETE FROM linked_sessions WHERE session_id = ?1",
-            params![id],
-        );
         let _ = self.workflows.lock().execute(
             "DELETE FROM workflow_linked_sessions WHERE session_id = ?1",
             params![id],
         );
     }
 
-    /// 标记关联会话：session 库打标供 `GET /sessions` 排除，workflow 库记录关联关系。
+    /// 标记关联会话（供 `GET /sessions` 排除）。
     pub fn link_session(&self, workflow_id: &str, session_id: &str) {
-        let conn = self.sessions.lock();
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO linked_sessions (session_id, workflow_id) VALUES (?1, ?2)",
-            params![session_id, workflow_id],
-        );
-        drop(conn);
         let _ = self.workflows.lock().execute(
             "INSERT OR REPLACE INTO workflow_linked_sessions (workflow_id, session_id) VALUES (?1, ?2)",
             params![workflow_id, session_id],
@@ -481,60 +479,59 @@ pub struct WorkflowRow {
     pub updated_at: u64,
 }
 
-fn open_db(path: &Path) -> Result<Connection, String> {
+/// `session.sqlite` 表结构。
+const SESSION_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        title TEXT,
+        workspace TEXT NOT NULL,
+        worktree_dir TEXT,
+        machine TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        agent_session_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, message_id)
+    );
+    CREATE TABLE IF NOT EXISTS activities (
+        session_id TEXT NOT NULL,
+        activity_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        content TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, activity_id)
+    );";
+
+/// `workflow.sqlite` 表结构。
+const WORKFLOW_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS workflows (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        state TEXT NOT NULL,
+        plan TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workflow_linked_sessions (
+        workflow_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        PRIMARY KEY (workflow_id, session_id)
+    );";
+
+fn open_db(path: &Path, schema: &str) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("打开 {} 失败: {e}", path.display()))?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         CREATE TABLE IF NOT EXISTS sessions (
-             id TEXT PRIMARY KEY,
-             state TEXT NOT NULL,
-             title TEXT,
-             workspace TEXT NOT NULL,
-             worktree_dir TEXT,
-             machine TEXT NOT NULL,
-             agent TEXT NOT NULL,
-             agent_session_id TEXT,
-             created_at INTEGER NOT NULL,
-             updated_at INTEGER NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS messages (
-             session_id TEXT NOT NULL,
-             message_id TEXT NOT NULL,
-             role TEXT NOT NULL,
-             content TEXT NOT NULL,
-             created_at INTEGER NOT NULL,
-             updated_at INTEGER NOT NULL,
-             PRIMARY KEY (session_id, message_id)
-         );
-         CREATE TABLE IF NOT EXISTS activities (
-             session_id TEXT NOT NULL,
-             activity_id TEXT NOT NULL,
-             kind TEXT NOT NULL,
-             content TEXT,
-             created_at INTEGER NOT NULL,
-             updated_at INTEGER NOT NULL,
-             PRIMARY KEY (session_id, activity_id)
-         );
-         -- 关联会话标记：GET /sessions 据此排除工作流关联会话
-         CREATE TABLE IF NOT EXISTS linked_sessions (
-             session_id TEXT PRIMARY KEY,
-             workflow_id TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS workflows (
-             id TEXT PRIMARY KEY,
-             title TEXT,
-             state TEXT NOT NULL,
-             plan TEXT NOT NULL,
-             created_at INTEGER NOT NULL,
-             updated_at INTEGER NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS workflow_linked_sessions (
-             workflow_id TEXT NOT NULL,
-             session_id TEXT NOT NULL,
-             PRIMARY KEY (workflow_id, session_id)
-         );",
-    )
-    .map_err(|e| format!("初始化表失败: {e}"))?;
+    conn.execute_batch(&format!("PRAGMA journal_mode = WAL;\n{schema}"))
+        .map_err(|e| format!("初始化表失败: {e}"))?;
     Ok(conn)
 }
 

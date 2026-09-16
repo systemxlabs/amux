@@ -209,17 +209,13 @@ impl Client {
         cols: u16,
         rows: u16,
     ) -> Result<String, String> {
-        let response: serde_json::Value = self
+        let response: amux_common::domain::TerminalOpenResult = self
             .post_json(
                 &format!("/sessions/{id}/terminals"),
                 &OpenTerminalRequest { cwd, cols, rows },
             )
             .await?;
-        response
-            .get("terminalId")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| "终端响应缺少 terminalId".to_string())
+        Ok(response.terminal_id)
     }
 
     pub async fn terminals(&self, id: &str) -> Result<Vec<Terminal>, String> {

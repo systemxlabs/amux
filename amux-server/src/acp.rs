@@ -571,14 +571,12 @@ fn replace(
     message_id: &str,
     text: Option<String>,
 ) -> String {
-    let mut buffers = buffers.lock();
-    buffers
-        .insert(
-            (session_id.to_string(), message_id.to_string()),
-            text.clone().unwrap_or_default(),
-        )
-        .unwrap_or_default();
-    text.unwrap_or_default()
+    let text = text.unwrap_or_default();
+    buffers.lock().insert(
+        (session_id.to_string(), message_id.to_string()),
+        text.clone(),
+    );
+    text
 }
 
 fn tool_call_event(session_id: &str, update: &ToolCallUpdate) -> Option<AcpEvent> {

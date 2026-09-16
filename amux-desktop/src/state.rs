@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use amux_common::api::*;
 use amux_common::domain::{
     Activity, ContentBlock, FsEntry, GitDiffResult, HistoryItem, SessionConfigOption,
-    SessionPlanEntry, SlashCommand,
+    SessionPlanEntry, SessionState, SlashCommand,
 };
 
 use crate::client::Client;
@@ -62,6 +62,13 @@ impl ListEntry {
         match self {
             ListEntry::Session(session) => session.updated_at,
             ListEntry::Workflow(workflow) => workflow.updated_at,
+        }
+    }
+
+    pub fn state(&self) -> SessionState {
+        match self {
+            ListEntry::Session(session) => session.state,
+            ListEntry::Workflow(workflow) => workflow.state,
         }
     }
 

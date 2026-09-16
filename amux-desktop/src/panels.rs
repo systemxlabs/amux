@@ -52,29 +52,16 @@ pub fn render_left(
 
     for entry in core.entries.clone() {
         match &entry {
-            ListEntry::Session(session) => {
-                list = list.child(session_row(
-                    &session.id,
-                    &session.title,
-                    session.state,
-                    session.updated_at,
-                    false,
-                    core,
-                    this,
-                    cx,
-                ));
+            ListEntry::Session(_) => {
+                list = list.child(session_row(&entry, core, this, cx));
             }
             ListEntry::Workflow(workflow) => {
                 let expanded = core.expanded_workflows.contains(&workflow.id);
-                list = list.child(workflow_row(workflow, expanded, core, this, cx));
+                list = list.child(workflow_row(&entry, expanded, core, this, cx));
                 if expanded {
                     for linked in &workflow.linked_sessions {
                         list = list.child(div().pl_6().child(session_row(
-                            &linked.id,
-                            &linked.title,
-                            linked.state,
-                            linked.updated_at,
-                            false,
+                            &ListEntry::Session(linked.clone()),
                             core,
                             this,
                             cx,
@@ -170,26 +157,26 @@ pub fn render_left(
 }
 
 /// 单条会话行：标题（或重命名输入框）、状态徽章、操作按钮。
-#[allow(clippy::too_many_arguments)]
 fn session_row(
-    id: &str,
-    title: &str,
-    state: SessionState,
-    updated_at: u64,
-    is_workflow: bool,
+    entry: &ListEntry,
     core: &crate::state::Core,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let open = match (is_workflow, core.open.as_ref()) {
-        (true, Some(OpenTarget::Workflow(current))) => current == id,
-        (false, Some(OpenTarget::Session(current))) => current == id,
+    let id = entry.id();
+    let state = entry.state();
+    let open = match (entry, core.open.as_ref()) {
+        (ListEntry::Workflow(_), Some(OpenTarget::Workflow(current))) => current == id,
+        (ListEntry::Session(_), Some(OpenTarget::Session(current))) => current == id,
         _ => false,
     };
-    let title = if title.trim().is_empty() {
-        "未命名会话".to_string()
-    } else {
-        title.to_string()
+    let title = {
+        let title = entry.title();
+        if title.trim().is_empty() {
+            "未命名会话".to_string()
+        } else {
+            title
+        }
     };
     let renaming = this.renaming_id.as_deref() == Some(id);
 
@@ -234,7 +221,7 @@ fn session_row(
         div()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child(ui::timestamp(updated_at)),
+            .child(ui::timestamp(entry.updated_at())),
     );
     row = row.child(
         Button::new(format!("rename-{id}"))
@@ -254,29 +241,7 @@ fn session_row(
             .ghost()
             .label("删除")
             .on_click(cx.listener({
-                let entry = if is_workflow {
-                    ListEntry::Workflow(amux_common::api::Workflow {
-                        id: id.to_string(),
-                        title: title.clone(),
-                        state,
-                        plan: String::new(),
-                        created_at: 0,
-                        updated_at,
-                        linked_sessions: Vec::new(),
-                    })
-                } else {
-                    ListEntry::Session(amux_common::api::Session {
-                        id: id.to_string(),
-                        title: title.clone(),
-                        state,
-                        machine: String::new(),
-                        agent: String::new(),
-                        workspace: String::new(),
-                        worktree_dir: String::new(),
-                        created_at: 0,
-                        updated_at,
-                    })
-                };
+                let entry = entry.clone();
                 move |this, _, window, cx| {
                     this.confirm_delete(entry.clone(), window, cx);
                 }
@@ -287,23 +252,14 @@ fn session_row(
 
 /// 工作流会话行（标题带「工作流」标记，可展开/折叠关联普通会话）。
 fn workflow_row(
-    workflow: &amux_common::api::Workflow,
+    entry: &ListEntry,
     expanded: bool,
     core: &crate::state::Core,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let row = session_row(
-        &workflow.id,
-        &workflow.title,
-        workflow.state,
-        workflow.updated_at,
-        true,
-        core,
-        this,
-        cx,
-    );
-    let toggle = Button::new(format!("toggle-{}", workflow.id))
+    let row = session_row(entry, core, this, cx);
+    let toggle = Button::new(format!("toggle-{}", entry.id()))
         .xsmall()
         .ghost()
         .icon(if expanded {
@@ -312,7 +268,7 @@ fn workflow_row(
             IconName::ChevronRight
         })
         .on_click(cx.listener({
-            let id = workflow.id.clone();
+            let id = entry.id().to_string();
             move |this, _, _, cx| {
                 this.with_core(|core| {
                     if core.expanded_workflows.contains(&id) {

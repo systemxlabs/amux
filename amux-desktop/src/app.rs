@@ -407,7 +407,6 @@ impl AmuxApp {
                 .map(|entry| entry.title())
                 .unwrap_or_default()
         });
-        let _ = window;
         self.renaming_id = Some(id.to_string());
         let input = self.rename_input.clone();
         input.update(cx, |state, cx| state.set_value(current, window, cx));
