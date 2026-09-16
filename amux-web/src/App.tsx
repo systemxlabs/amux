@@ -17,10 +17,10 @@ export function App() {
     void start(core);
   }, [core]);
 
-  if (state.status === "online") return <Main />;
   return (
     <>
-      <Login />
+      {state.status === "online" ? <Main /> : <Login />}
       <Notice />
     </>
-  );}
+  );
+}
