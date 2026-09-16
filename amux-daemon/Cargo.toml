@@ -30,7 +30,6 @@ base64.workspace = true
 libc.workspace = true
 portable-pty.workspace = true
 gix.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

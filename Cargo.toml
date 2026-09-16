@@ -29,7 +29,6 @@ uuid = { version = "1.26.0", features = ["v4"] }
 parking_lot = "=0.12.5"
 tempfile = "=3.27.0"
 futures-util = "0.3.34"
-thiserror = "2.0.20"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 gix = { version = "0.87.1", default-features = false, features = ["basic", "status", "sha1"] }
 portable-pty = "0.9.0"
