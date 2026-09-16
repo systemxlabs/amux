@@ -388,6 +388,25 @@ impl Core {
         last.map(|at| at.elapsed() >= interval).unwrap_or(true)
     }
 
+    /// 按 id 查找列表条目：普通会话与工作流会话之外，工作流会话内关联的普通会话也是列表中的一行。
+    pub fn entry(&self, id: &str) -> Option<ListEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id() == id)
+            .cloned()
+            .or_else(|| {
+                self.entries.iter().find_map(|entry| match entry {
+                    ListEntry::Workflow(workflow) => workflow
+                        .linked_sessions
+                        .iter()
+                        .find(|session| session.id == id)
+                        .cloned()
+                        .map(ListEntry::Session),
+                    ListEntry::Session(_) => None,
+                })
+            })
+    }
+
     /// 当前打开的是否为工作流会话。
     pub fn is_workflow(&self) -> bool {
         matches!(self.open, Some(OpenTarget::Workflow(_)))

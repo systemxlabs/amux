@@ -368,11 +368,8 @@ impl AmuxApp {
 
     /// 打开列表条目（普通会话或工作流会话）。
     pub fn open_entry(&mut self, id: &str, cx: &mut Context<Self>) {
-        let is_workflow = self.with_core(|core| {
-            core.entries
-                .iter()
-                .any(|entry| matches!(entry, ListEntry::Workflow(workflow) if workflow.id == id))
-        });
+        let is_workflow =
+            self.with_core(|core| matches!(core.entry(id), Some(ListEntry::Workflow(_))));
         {
             let mut core = self.core.lock();
             if is_workflow {
@@ -400,13 +397,7 @@ impl AmuxApp {
 
     /// 开始行内重命名。
     pub fn begin_rename(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.with_core(|core| {
-            core.entries
-                .iter()
-                .find(|entry| entry.id() == id)
-                .map(|entry| entry.title())
-                .unwrap_or_default()
-        });
+        let current = self.with_core(|core| core.entry(id).map_or(String::new(), |e| e.title()));
         self.renaming_id = Some(id.to_string());
         let input = self.rename_input.clone();
         input.update(cx, |state, cx| state.set_value(current, window, cx));
@@ -425,13 +416,10 @@ impl AmuxApp {
             return;
         }
         let target = self.with_core(|core| {
-            core.entries
-                .iter()
-                .find(|entry| entry.id() == id)
-                .map(|entry| match entry {
-                    ListEntry::Session(_) => OpenTarget::Session(id.clone()),
-                    ListEntry::Workflow(_) => OpenTarget::Workflow(id.clone()),
-                })
+            core.entry(&id).map(|entry| match entry {
+                ListEntry::Session(_) => OpenTarget::Session(id.clone()),
+                ListEntry::Workflow(_) => OpenTarget::Workflow(id.clone()),
+            })
         });
         if let Some(target) = target {
             self.rename(target, title, cx);
