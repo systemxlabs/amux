@@ -26,7 +26,6 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 | `agent.list` | 发现当前机器已安装的 agents，以及每个 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
 | `git.diff` | 查询指定仓库改动 diff |
-| `git.restore` | 可按文件或代码块撤销指定仓库的改动 |
 | `git.worktree.new` | 从指定仓库创建一个 worktree |
 | `git.worktree.resume` | 从指定仓库指定路径恢复 worktree |
 | `git.worktree.list` | 查询指定仓库所有 worktrees |
@@ -83,7 +82,6 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/activities` | 分页查询指定普通会话的活动历史 |
 | GET `/sessions/<session_id>/ongoing_activity` | 查询指定普通会话正在进行中的活动 |
 | GET `/sessions/<session_id>/diff` | 查询普通会话工作目录改动 diff |
-| POST `/sessions/<session_id>/restore` | 可按文件或代码块撤销普通会话工作目录的改动 |
 | POST `/sessions/<session_id>/terminals` | 打开指定普通会话一个终端 |
 | GET `/sessions/<session_id>/terminals` | 查询指定普通会话所有打开的终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>` | 向指定终端输入内容 |
