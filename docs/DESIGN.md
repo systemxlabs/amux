@@ -117,7 +117,7 @@ Daemon 常驻于每个机器上，主要负责 ACP 多路复用和执行与机�
 
 - 基础库：`tokio` / `serde` / `serde_json`
 - WebSocket：`tokio-tungstenite`
-- Git：`gitoxide` / git CLI
+- Git：`gix-diff` / `gix-worktree` 等，gix 功能不足则用 git CLI
 - PTY：`portable-pty`
 - CLI: `clap`
 
