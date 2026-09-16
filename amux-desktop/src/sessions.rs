@@ -131,23 +131,20 @@ fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
     }
 
     let machine = core.new_session.machine.clone();
-    let mut fields = h_flex().flex_wrap().gap_6().items_start();
-    fields = fields.child(field(
-        "机器",
-        machine_selector(core, cx),
-        cx,
-    ));
+    // 机器与 agent 同一行；工作目录另起一行（其输入框占满整行）
+    let mut row = h_flex().flex_wrap().gap_6().items_start();
+    row = row.child(field("机器", machine_selector(core, cx), cx));
     if let Some(machine) = &machine {
-        fields = fields.child(field("Agent", agent_selector(core, machine, cx), cx));
+        row = row.child(field("Agent", agent_selector(core, machine, cx), cx));
     }
-    fields = fields.child(workspace_picker(core, this, cx));
 
     let workspace = this.workspace_input.read(cx).value().trim().to_string();
     let can_create = !workspace.is_empty() && selected_agent_available(core);
 
     v_flex()
         .gap_3()
-        .child(fields)
+        .child(row)
+        .child(workspace_picker(core, this, cx))
         .child(
             Checkbox::new("ns-worktree-toggle")
                 .label("使用 worktree")
@@ -333,7 +330,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         .relative()
         .gap_1()
         .items_center()
-        .w(rems(24.))
+        .w_full()
         .min_w_0()
         .child(Input::new(&this.workspace_input).w_full());
     if !recent.is_empty() {
