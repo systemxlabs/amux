@@ -1463,7 +1463,7 @@ fn number_gutter(number: Option<usize>, theme: &ui::Colors) -> AnyElement {
 
 /// 审查视图底部：选中统计与引用到会话输入框。
 ///
-/// 引用而非直接发送：被引用的改动挂到会话输入区，用户补充指令后用输入框发送
+/// 引用而非直接发送：文件引用复制文件路径、代码块引用复制代码块内容到会话输入框
 /// （docs/PRD.md「改动审查」）。
 fn diff_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());

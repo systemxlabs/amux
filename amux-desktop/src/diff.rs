@@ -65,18 +65,28 @@ pub fn line_numbers(header: &str, lines: &[GitDiffLine]) -> Vec<LineNumbers> {
         .collect()
 }
 
-/// 引用到会话输入框的一段改动。
+/// 引用到会话输入框的一段内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reference {
-    /// 输入区展示用的标签：整文件为路径，代码块为 `路径:起始行`
-    pub label: String,
-    /// 该段改动的完整 patch 文本
-    pub patch: String,
+    /// 改动所属文件路径
+    pub path: String,
+    /// 代码块内容（hunk 头 + 各行前缀与内容）；文件引用为 `None`
+    pub hunk: Option<String>,
 }
 
-/// 把改动审查中的选中项折算为引用片段，顺序与改动列表一致。
+impl Reference {
+    /// 插入会话输入框的文本：文件引用为文件路径，代码块引用为代码块内容。
+    pub fn text(&self) -> String {
+        match &self.hunk {
+            Some(hunk) => format!("{}\n```diff\n{hunk}```", self.path),
+            None => self.path.clone(),
+        }
+    }
+}
+
+/// 把改动审查中的选中项折算为引用内容，顺序与改动列表一致（文件在其代码块之前）。
 ///
-/// 整文件被选中时只引用该文件：其代码块不再单列，同一段改动不重复引用。
+/// 文件引用与代码块引用的内容不同（路径 / 代码块内容），两者不互相排斥。
 pub fn selected_references(
     files: &[GitDiffFile],
     selected_files: &HashSet<String>,
@@ -86,16 +96,15 @@ pub fn selected_references(
     for file in files {
         if selected_files.contains(&file.path) {
             references.push(Reference {
-                label: file.path.clone(),
-                patch: file.patch.clone(),
+                path: file.path.clone(),
+                hunk: None,
             });
-            continue;
         }
         for hunk in &file.hunks {
             if selected_hunks.contains(&(file.path.clone(), hunk.header.clone())) {
                 references.push(Reference {
-                    label: hunk_label(&file.path, hunk),
-                    patch: hunk.patch.clone(),
+                    path: file.path.clone(),
+                    hunk: Some(hunk_content(hunk)),
                 });
             }
         }
@@ -103,16 +112,17 @@ pub fn selected_references(
     references
 }
 
-/// 代码块引用标签：新文件起始行（纯删除的代码块回落到旧文件行号）；
-/// 代码块无行内容时无从推算行号，回落到 hunk 头。
-fn hunk_label(path: &str, hunk: &GitDiffHunk) -> String {
-    let start = line_numbers(&hunk.header, &hunk.lines)
-        .first()
-        .and_then(|numbers| numbers.new.or(numbers.old));
-    match start {
-        Some(line) => format!("{path}:{line}"),
-        None => format!("{path} {}", hunk.header),
+/// 代码块内容：hunk 头 + 各行（前缀 + 内容），与 inline 展示的形状一致。
+fn hunk_content(hunk: &GitDiffHunk) -> String {
+    let mut content = String::new();
+    content.push_str(&hunk.header);
+    content.push('\n');
+    for line in &hunk.lines {
+        content.push(line.kind.prefix());
+        content.push_str(&line.text);
+        content.push('\n');
     }
+    content
 }
 
 #[cfg(test)]
@@ -121,15 +131,17 @@ mod tests {
 
     use super::*;
 
-    /// 带一行新增内容的代码块（起始行号可由 hunk 头推算）。
-    fn hunk(header: &str) -> GitDiffHunk {
+    fn line(kind: GitDiffLineKind, text: &str) -> GitDiffLine {
+        GitDiffLine {
+            kind,
+            text: text.to_string(),
+        }
+    }
+
+    fn hunk(header: &str, lines: Vec<GitDiffLine>) -> GitDiffHunk {
         GitDiffHunk {
             header: header.to_string(),
-            patch: format!("patch {header}"),
-            lines: vec![GitDiffLine {
-                kind: GitDiffLineKind::Add,
-                text: "added".to_string(),
-            }],
+            lines,
         }
     }
 
@@ -139,74 +151,87 @@ mod tests {
             status: GitChangeStatus::Modified,
             additions: 1,
             deletions: 0,
-            patch: format!("patch of {path}"),
             hunks,
         }
     }
 
-    /// 整文件被选中时只引用该文件，其代码块不再单列。
+    /// 文件引用为文件路径本身。
     #[test]
-    fn file_selection_suppresses_its_hunks() {
-        let files = [file("src/a.rs", vec![hunk("@@ -1,2 +1,3 @@")])];
+    fn file_reference_is_its_path() {
+        let files = [file("src/a.rs", vec![hunk("@@ -1,2 +1,2 @@", Vec::new())])];
         let selected_files = HashSet::from(["src/a.rs".to_string()]);
-        let selected_hunks =
-            HashSet::from([("src/a.rs".to_string(), "@@ -1,2 +1,3 @@".to_string())]);
 
-        assert_eq!(
-            selected_references(&files, &selected_files, &selected_hunks),
-            [Reference {
-                label: "src/a.rs".to_string(),
-                patch: "patch of src/a.rs".to_string(),
-            }]
-        );
+        let references = selected_references(&files, &selected_files, &HashSet::new());
+
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].text(), "src/a.rs");
     }
 
-    /// 只选代码块时逐个引用，标签带路径与起始行，顺序与改动列表一致。
+    /// 代码块引用为代码块内容：hunk 头 + 各行前缀与内容。
     #[test]
-    fn hunk_selection_carries_hunk_patch() {
-        let files = [
-            file("src/a.rs", vec![hunk("@@ -1,2 +1,3 @@")]),
-            file("src/b.rs", vec![hunk("@@ -9,2 +9,2 @@")]),
-        ];
-        let selected_hunks = HashSet::from([
-            ("src/b.rs".to_string(), "@@ -9,2 +9,2 @@".to_string()),
-            ("src/a.rs".to_string(), "@@ -1,2 +1,3 @@".to_string()),
-        ]);
-
-        assert_eq!(
-            selected_references(&files, &HashSet::new(), &selected_hunks),
-            [
-                Reference {
-                    label: "src/a.rs:1".to_string(),
-                    patch: "patch @@ -1,2 +1,3 @@".to_string(),
-                },
-                Reference {
-                    label: "src/b.rs:9".to_string(),
-                    patch: "patch @@ -9,2 +9,2 @@".to_string(),
-                },
-            ]
-        );
-    }
-
-    /// 无行内容的代码块无从推算行号，标签回落到 hunk 头。
-    #[test]
-    fn hunk_without_lines_labels_with_header() {
+    fn hunk_reference_is_its_content() {
         let files = [file(
             "src/a.rs",
-            vec![GitDiffHunk {
-                header: "@@ -1 +1 @@".to_string(),
-                patch: "patch".to_string(),
-                lines: Vec::new(),
-            }],
+            vec![hunk(
+                "@@ -12,3 +12,3 @@ fn main()",
+                vec![
+                    line(GitDiffLineKind::Context, "let a = 1;"),
+                    line(GitDiffLineKind::Remove, "let b = 2;"),
+                    line(GitDiffLineKind::Add, "let b = 3;"),
+                ],
+            )],
         )];
-        let selected_hunks = HashSet::from([("src/a.rs".to_string(), "@@ -1 +1 @@".to_string())]);
+        let selected_hunks = HashSet::from([(
+            "src/a.rs".to_string(),
+            "@@ -12,3 +12,3 @@ fn main()".to_string(),
+        )]);
+
+        let references = selected_references(&files, &HashSet::new(), &selected_hunks);
 
         assert_eq!(
-            selected_references(&files, &HashSet::new(), &selected_hunks),
-            [Reference {
-                label: "src/a.rs @@ -1 +1 @@".to_string(),
-                patch: "patch".to_string(),
-            }]
+            references[0].text(),
+            "src/a.rs\n```diff\n@@ -12,3 +12,3 @@ fn main()\n let a = 1;\n-let b = 2;\n+let b = 3;\n```"
+        );
+    }
+
+    /// 同一文件的文件引用与代码块引用内容不同，同时选中时两者都引用；
+    /// 顺序与改动列表一致（文件在其代码块之前）。
+    #[test]
+    fn file_and_its_hunks_are_both_referenced_in_diff_order() {
+        let files = [
+            file(
+                "src/a.rs",
+                vec![
+                    hunk("@@ -1,1 +1,1 @@", vec![line(GitDiffLineKind::Add, "a1")]),
+                    hunk("@@ -9,1 +9,1 @@", vec![line(GitDiffLineKind::Add, "a2")]),
+                ],
+            ),
+            file("src/b.rs", vec![hunk("@@ -5,1 +5,1 @@", Vec::new())]),
+        ];
+        let selected_files = HashSet::from(["src/a.rs".to_string()]);
+        let selected_hunks = HashSet::from([
+            ("src/b.rs".to_string(), "@@ -5,1 +5,1 @@".to_string()),
+            ("src/a.rs".to_string(), "@@ -9,1 +9,1 @@".to_string()),
+        ]);
+
+        let references = selected_references(&files, &selected_files, &selected_hunks);
+
+        assert_eq!(
+            references,
+            [
+                Reference {
+                    path: "src/a.rs".to_string(),
+                    hunk: None,
+                },
+                Reference {
+                    path: "src/a.rs".to_string(),
+                    hunk: Some("@@ -9,1 +9,1 @@\n+a2\n".to_string()),
+                },
+                Reference {
+                    path: "src/b.rs".to_string(),
+                    hunk: Some("@@ -5,1 +5,1 @@\n".to_string()),
+                },
+            ]
         );
     }
 }

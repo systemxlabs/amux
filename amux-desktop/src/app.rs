@@ -94,7 +94,7 @@ pub struct AmuxApp {
     pub terminal: terminal_view::TerminalScreen,
     /// 终端焦点：按键经它派发（Tab/Shift+Tab 走 action，其余走 key_down）
     pub terminal_focus: FocusHandle,
-    /// 待发送附件（拖拽/粘贴/引用改动产生）
+    /// 待发送附件（拖拽/粘贴产生）
     pub attachments: Vec<Attachment>,
     /// 斜杠命令上拉框中高亮项
     pub slash_selected: usize,
@@ -1454,8 +1454,8 @@ impl AmuxApp {
 
     /// 把改动审查中选中的文件与代码块引用到会话输入框（docs/PRD.md「改动审查」）。
     ///
-    /// 引用与拖拽/粘贴的附件同属待发送内容：在输入区可逐个移除，随用户消息一并发出；
-    /// 引用后把焦点交给输入框，用户可直接补充指令再发送。
+    /// 文件引用为文件路径，代码块引用为代码块内容，均插入输入框当前光标处；
+    /// 插入后焦点交给输入框，用户可接着补充指令再发送。
     pub fn reference_diff_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let files = self.with_core(|core| {
             core.view
@@ -1470,20 +1470,31 @@ impl AmuxApp {
         if references.is_empty() {
             return;
         }
-        for reference in references {
-            self.attachments.push(Attachment {
-                block: ContentBlock::Text {
-                    text: format!(
-                        "引用改动 {}：\n\n```diff\n{}\n```",
-                        reference.label,
-                        reference.patch.trim_end()
-                    ),
-                },
-                label: format!("引用 {}", reference.label),
-            });
-        }
+        let text = references
+            .iter()
+            .map(|reference| reference.text())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.insert_composer_text(text, window, cx);
         self.clear_diff_selection(cx);
-        self.input.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// 把文本插入会话输入框当前光标处（剪贴板粘贴的语义）。
+    ///
+    /// 光标不在行首时先换行、内容末尾补一个换行：多行内容不会与已有草稿粘在一行，
+    /// 用户也能直接接着写自己的指令。
+    fn insert_composer_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |state, cx| {
+            let value = state.value().to_string();
+            let cursor = state.cursor().min(value.len());
+            let separator = match value.get(..cursor) {
+                None | Some("") => "",
+                Some(before) if before.ends_with('\n') => "",
+                Some(_) => "\n",
+            };
+            state.insert(format!("{separator}{text}\n"), window, cx);
+            state.focus(window, cx);
+        });
         cx.notify();
     }
 

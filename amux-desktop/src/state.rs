@@ -247,8 +247,7 @@ impl DirectoryCache {
     }
 }
 
-/// 待发送附件：拖拽/粘贴得到的文件或图片，以及在改动审查中引用的文件或代码块，
-/// 随消息一并作为内容块发送。
+/// 待发送附件：拖拽或粘贴得到的文件/图片，随消息一并作为内容块发送。
 #[derive(Debug, Clone)]
 pub struct Attachment {
     pub block: ContentBlock,
