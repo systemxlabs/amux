@@ -1,9 +1,8 @@
 //! git 能力：
 //! - diff 查询、untracked 判定：gitoxide（gix）结构化实现，不依赖 git 二进制、
 //!   无本地化输出解析
-//! - gitoxide 无等价能力处保留 git CLI：patch 应用（`git apply --reverse`）、
-//!   索引+工作区整体恢复（`git restore` / `git clean`）、
-//!   worktree 新增/删除/重建（gix-worktree 仅有列出能力，无增删管理）
+//! - gitoxide 无等价能力处保留 git CLI：worktree 新增/删除/重建（gix-worktree
+//!   仅有列出能力，无增删管理）
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -17,15 +16,12 @@ use gix::diff::blob::{ResourceKind, UnifiedDiff};
 
 use amux_common::domain::{
     GitChangeStatus, GitDiffFile, GitDiffHunk, GitDiffLine, GitDiffLineKind, GitDiffResult,
-    OpResult,
 };
-
-use crate::fs::canonical_workspace_root;
 
 #[derive(Default)]
 pub struct GitRunner;
 
-/// git CLI 输出错误（`run` 执行失败时携带 stderr，restore 与 worktree 调用方共用）。
+/// git CLI 输出错误（`run` 执行失败时携带 stderr）。
 #[derive(Debug)]
 pub struct GitError {
     pub message: String,
@@ -55,22 +51,6 @@ fn run(cwd: &str, args: &[&str]) -> Result<String, GitError> {
     }
 }
 
-/// 构造成功的 `OpResult`。
-fn op_ok() -> OpResult {
-    OpResult {
-        ok: true,
-        message: None,
-    }
-}
-
-/// 构造失败的 `OpResult`（restore 的 CLI/文件操作错误路径共用）。
-fn op_err(message: impl Into<String>) -> OpResult {
-    OpResult {
-        ok: false,
-        message: Some(message.into()),
-    }
-}
-
 /// 把相对 cwd 的路径换算为仓库根相对路径（cwd 通常即仓库根，映射为恒等）。
 fn repo_relative_path(workdir: &Path, cwd: &str, p: &str) -> String {
     match Path::new(cwd).strip_prefix(workdir) {
@@ -79,8 +59,7 @@ fn repo_relative_path(workdir: &Path, cwd: &str, p: &str) -> String {
     }
 }
 
-/// 把仓库根相对路径换算为相对 cwd 的路径——diff 结果的 path 与
-/// `git.restore` 的 path 同基准（相对 cwd）。
+/// 把仓库根相对路径换算为相对 cwd 的路径（diff 结果的 path 以 cwd 为基准）。
 fn cwd_relative_path(workdir: &Path, cwd: &str, repo_path: &str) -> String {
     match Path::new(cwd).strip_prefix(workdir) {
         Ok(rel) if !rel.as_os_str().is_empty() => {
@@ -486,100 +465,6 @@ impl GitRunner {
         }
     }
 
-    /// 撤销工作区变更。
-    /// - `patch`：单 hunk/单文件 patch 反向应用——gitoxide 无 patch 应用引擎，保留 `git apply --reverse`
-    ///   （diff patch 的 a/ b/ 头为仓库根相对路径，故从仓库根执行 apply，cwd 为子目录时同样正确）
-    /// - `path`：单文件——tracked 用 `git restore`；untracked 直接删除（从未提交，revert = 移除）
-    /// - 都不给：全部变更——`git restore` 全部 tracked 变更 + `git clean` 全部 untracked
-    pub fn restore(&self, cwd: &str, path: Option<&str>, patch: Option<&str>) -> OpResult {
-        if let Some(p) = patch {
-            // 唯一临时目录（并发 revert 不互相覆盖；uuid v4），apply 后立即清理
-            let dir = std::env::temp_dir().join(format!("amux-revert-{}", uuid::Uuid::new_v4()));
-            if std::fs::create_dir_all(&dir).is_err() {
-                return op_err("创建临时目录失败");
-            }
-            let cleanup = || {
-                let _ = std::fs::remove_dir_all(&dir);
-            };
-            let patch_file = dir.join("revert.patch");
-            if std::fs::write(&patch_file, p).is_err() {
-                cleanup();
-                return op_err("写入 patch 失败");
-            }
-            // patch 路径以仓库根为基准：从仓库根应用（cwd 为其子目录时也正确）
-            let apply_dir = gix::discover(cwd)
-                .ok()
-                .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
-                .unwrap_or_else(|| std::path::PathBuf::from(cwd));
-            let result = match run(
-                apply_dir.to_string_lossy().as_ref(),
-                &["apply", "--reverse", patch_file.to_string_lossy().as_ref()],
-            ) {
-                Ok(_) => op_ok(),
-                Err(e) => op_err(e.stderr.trim()),
-            };
-            cleanup();
-            return result;
-        }
-        if let Some(target) = path {
-            let target = match validate_restore_path(cwd, target) {
-                Ok(target) => target,
-                Err(error) => return error,
-            };
-            // untracked：从未提交，revert = 删除工作区文件
-            if self.is_untracked(cwd, &target) {
-                return match std::fs::remove_file(std::path::Path::new(cwd).join(&target)) {
-                    Ok(_) => op_ok(),
-                    Err(e) => op_err(format!("删除 untracked 文件失败: {e}")),
-                };
-            }
-            return match run(cwd, &["restore", "--staged", "--worktree", "--", &target]) {
-                Ok(_) => op_ok(),
-                Err(e) => op_err(e.stderr.trim()),
-            };
-        }
-        if let Err(e) = run(cwd, &["restore", "--staged", "--worktree", "--", "."]) {
-            return op_err(e.stderr.trim());
-        }
-        match run(cwd, &["clean", "-fd"]) {
-            Ok(_) => op_ok(),
-            Err(e) => OpResult {
-                ok: false,
-                message: Some(e.stderr.trim().to_string()),
-            },
-        }
-    }
-
-    /// 目标路径是否 untracked（gitoxide 判定：既不在 HEAD 树也不在索引中）。
-    fn is_untracked(&self, cwd: &str, target: &str) -> bool {
-        let Ok(repo) = gix::discover(cwd) else {
-            return false;
-        };
-        let Some(workdir) = repo.workdir() else {
-            return false;
-        };
-        let full = BString::from(repo_relative_path(workdir, cwd, target));
-        let in_head = repo
-            .head_tree()
-            .ok()
-            .and_then(|t| {
-                t.lookup_entry_by_path(gix::path::from_bstr(&full))
-                    .ok()
-                    .flatten()
-            })
-            .is_some();
-        if in_head {
-            return false;
-        }
-        let in_index = repo
-            .index_or_empty()
-            .ok()
-            // worktree::Index = Arc<SharedFileSnapshot<File>>，方法解析自动解引用到 State
-            .map(|idx| idx.entry_by_path(full.as_bytes().as_bstr()).is_some())
-            .unwrap_or(false);
-        !in_index
-    }
-
     /// 新建 worktree：目录约定 `<amux_home>/worktrees/<仓库目录名>-<随机串>/`。
     pub fn worktree_new(&self, repo: &str) -> Result<String, String> {
         let target = worktree_dir_for(repo, &amux_common::paths::worktrees_dir())?;
@@ -699,45 +584,6 @@ fn worktree_dir_for(repo: &str, root: &Path) -> Result<PathBuf, String> {
     Ok(root.join(format!("{name}-{}", uuid::Uuid::new_v4())))
 }
 
-fn validate_restore_path(cwd: &str, target: &str) -> Result<String, OpResult> {
-    let root = match canonical_workspace_root(cwd) {
-        Ok(root) => root,
-        Err(message) => return Err(op_err(message)),
-    };
-    let relative = Path::new(target);
-    if target.is_empty()
-        || relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(op_err("工作目录路径非法"));
-    }
-
-    // 逐个检查已存在的组件，而不是只 canonicalize 最终路径。最终目标可能是
-    // 尚不存在的 untracked 文件；此时若父目录是指向工作区外的 symlink，
-    // remove_file 会跟随它并误删工作区之外的文件。
-    let mut current = root.clone();
-    for component in relative.components() {
-        let std::path::Component::Normal(name) = component else {
-            continue;
-        };
-        current.push(name);
-        let metadata = match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(op_err(format!("工作目录路径不可访问: {error}"))),
-        };
-        if metadata.file_type().is_symlink() {
-            return Err(op_err("工作目录路径包含符号链接"));
-        }
-        if !current.starts_with(&root) {
-            return Err(op_err("工作目录路径超出工作目录范围"));
-        }
-    }
-    Ok(relative.to_string_lossy().replace('\\', "/"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,27 +693,6 @@ mod tests {
         assert!(st);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn restore_rejects_symlink_parent() {
-        // 目标父目录是指向工作区外的 symlink 时，restore 必须拒绝，
-        // 否则 remove_file 会跟随链接误删工作区之外的文件。
-        let dir = unique_dir("amux-restore-symlink");
-        std::fs::create_dir_all(&dir).unwrap();
-        let outside = unique_dir("amux-restore-outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("to-delete.txt"), "must remain").unwrap();
-        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
-
-        let result =
-            GitRunner::new().restore(dir.to_str().unwrap(), Some("link/to-delete.txt"), None);
-        assert!(!result.ok, "符号链接父目录下的路径必须被拒绝");
-        assert!(
-            outside.join("to-delete.txt").exists(),
-            "工作区外文件不得被删除"
-        );
-    }
-
     #[test]
     fn diff_returns_structured_files() {
         let dir = init_repo();
@@ -891,84 +716,6 @@ mod tests {
             .expect("new.txt");
         assert!(matches!(n.status, GitChangeStatus::Added));
         assert_eq!(n.additions, 2);
-    }
-
-    #[test]
-    fn revert_single_file_restores_workspace() {
-        let dir = init_repo();
-        std::fs::write(dir.join("a.txt"), "line1\nCHANGED\n").unwrap();
-        let r = GitRunner::new();
-        let res = r.restore(dir.to_str().unwrap(), Some("a.txt"), None);
-        assert!(res.ok, "revert 失败: {:?}", res.message);
-        let content = std::fs::read_to_string(dir.join("a.txt")).unwrap();
-        assert_eq!(content, "line1\nline2\n", "工作区应恢复到 HEAD");
-        let res = r.restore(dir.to_str().unwrap(), Some("a.txt"), None);
-        assert!(res.ok, "幂等 revert 应成功: {:?}", res.message);
-    }
-
-    #[test]
-    fn revert_single_hunk_via_patch() {
-        let dir = unique_dir("amux-git-hunk");
-        std::fs::create_dir_all(&dir).unwrap();
-        git(&dir, &["init", "-b", "main", "-q"]);
-        git(&dir, &["config", "user.email", "t@t"]);
-        git(&dir, &["config", "user.name", "t"]);
-        let base: Vec<String> = (1..=20).map(|i| format!("line{i}")).collect();
-        std::fs::write(dir.join("a.txt"), base.join("\n") + "\n").unwrap();
-        git(&dir, &["add", "."]);
-        git(&dir, &["commit", "-m", "init", "-q"]);
-
-        let mut lines = base.clone();
-        lines[2] = "CHANGED1".into();
-        lines[17] = "CHANGED2".into();
-        std::fs::write(dir.join("a.txt"), lines.join("\n") + "\n").unwrap();
-        let d = GitRunner::new().diff(dir.to_str().unwrap(), Some("a.txt"));
-        assert_eq!(d.files[0].hunks.len(), 2, "两处改动应为两个 hunk");
-        let hunk = &d.files[0].hunks[0];
-        let res = GitRunner::new().restore(dir.to_str().unwrap(), None, Some(&hunk.patch));
-        assert!(res.ok, "hunk revert 失败: {:?}", res.message);
-        let content = std::fs::read_to_string(dir.join("a.txt")).unwrap();
-        let expected: Vec<String> = (1..=20)
-            .map(|i| {
-                if i == 18 {
-                    "CHANGED2".into()
-                } else {
-                    format!("line{i}")
-                }
-            })
-            .collect();
-        assert_eq!(
-            content,
-            expected.join("\n") + "\n",
-            "只应还原第一个 hunk（第 18 行仍为 CHANGED2）"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn revert_untracked_file_removes_it() {
-        let dir = init_repo();
-        std::fs::write(dir.join("scratch.txt"), "temp\n").unwrap();
-        let res = GitRunner::new().restore(dir.to_str().unwrap(), Some("scratch.txt"), None);
-        assert!(res.ok, "untracked revert 失败: {:?}", res.message);
-        assert!(!dir.join("scratch.txt").exists(), "untracked 应被删除");
-    }
-
-    #[test]
-    fn restore_rejects_paths_outside_workspace() {
-        let dir = init_repo();
-        let outside = dir.parent().unwrap().join("amux-restore-outside.txt");
-        std::fs::write(&outside, "must remain").unwrap();
-
-        let result = GitRunner::new().restore(
-            dir.to_str().unwrap(),
-            Some("../amux-restore-outside.txt"),
-            None,
-        );
-        assert!(!result.ok);
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "must remain");
-
-        let _ = std::fs::remove_file(outside);
     }
 
     /// 目录约定：`<worktrees 根>/<仓库目录名>-<随机串>`，且每次不同。

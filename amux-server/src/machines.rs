@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use amux_common::api::Agent;
 use amux_common::daemon::{
-    header, method, notify, AcpForward, AgentListResult, AgentParams, GitRepoParams,
-    GitRestoreParams, MachineInfo, WorktreePathParams, WorktreeResult,
+    header, method, notify, AcpForward, AgentListResult, AgentParams, GitRepoParams, MachineInfo,
+    WorktreePathParams, WorktreeResult,
 };
 use amux_common::domain::{
     FsListParams, FsListResult, FsReadParams, FsReadResult, GitDiffResult, OpResult,
@@ -149,25 +149,6 @@ impl MachineHub {
                 method::GIT_DIFF,
                 GitRepoParams {
                     repo: repo.to_string(),
-                },
-            )
-            .await
-    }
-
-    pub async fn git_restore(
-        &self,
-        machine: &str,
-        repo: &str,
-        path: Option<String>,
-        patch: Option<String>,
-    ) -> Result<OpResult, String> {
-        self.machine(machine)?
-            .request(
-                method::GIT_RESTORE,
-                GitRestoreParams {
-                    repo: repo.to_string(),
-                    path,
-                    patch,
                 },
             )
             .await

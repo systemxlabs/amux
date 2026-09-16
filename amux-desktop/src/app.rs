@@ -1528,30 +1528,6 @@ impl AmuxApp {
         })
     }
 
-    /// 撤销指定文件或代码块改动。
-    pub fn restore(&mut self, path: Option<String>, patch: Option<String>, cx: &mut Context<Self>) {
-        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
-        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
-            return;
-        };
-        let core = Arc::clone(&self.core);
-        self.runtime.spawn(async move {
-            match client.restore(&id, path, patch).await {
-                Ok(result) => {
-                    if !result.ok {
-                        core.lock()
-                            .error(format!("撤销失败：{}", result.message.unwrap_or_default()));
-                    }
-                    if let Ok(diff) = client.diff(&id).await {
-                        core.lock().view.detail.diff = Some(diff);
-                    }
-                }
-                Err(error) => core.lock().error(format!("撤销失败：{error}")),
-            }
-        });
-        cx.notify();
-    }
-
     /// 技能安装/更新/卸载：先选目标机器与 agent（docs/PRD.md「技能管理设置」）。
     ///
     /// 目标列表与设置项一样在打开时实时获取，弹窗内容每帧按最新数据重建。

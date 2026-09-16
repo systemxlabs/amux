@@ -175,16 +175,6 @@ pub struct ContextInfo {
     pub context_window_size: u64,
 }
 
-/// `POST /sessions/<id>/restore` 请求：给 patch 按块撤销，否则整文件撤销。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestoreRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub patch: Option<String>,
-}
-
 /// `GET /sessions/<id>/diff` 响应。
 pub type DiffResponse = GitDiffResult;
 

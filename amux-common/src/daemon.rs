@@ -13,7 +13,6 @@ pub mod method {
     /// 启动（未启动）或重启（已启动）指定 agent
     pub const AGENT_RESTART: &str = "agent.restart";
     pub const GIT_DIFF: &str = "git.diff";
-    pub const GIT_RESTORE: &str = "git.restore";
     pub const GIT_WORKTREE_NEW: &str = "git.worktree.new";
     pub const GIT_WORKTREE_RESUME: &str = "git.worktree.resume";
     pub const GIT_WORKTREE_LIST: &str = "git.worktree.list";
@@ -113,17 +112,6 @@ pub struct AcpForward {
 #[serde(rename_all = "camelCase")]
 pub struct GitRepoParams {
     pub repo: String,
-}
-
-/// `git.restore` 参数：仅给文件路径时整文件撤销，给 patch 时按块撤销。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitRestoreParams {
-    pub repo: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub patch: Option<String>,
 }
 
 /// `git.worktree.new` / `git.worktree.resume` 结果。

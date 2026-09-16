@@ -136,7 +136,7 @@ pub fn render_sidebar(
         )
         .child(list)
         .child(
-            h_flex().justify_end().child(
+            h_flex().child(
                 Button::new("open-settings")
                     .small()
                     .ghost()
@@ -1259,7 +1259,7 @@ fn push_tree_rows(
     }
 }
 
-/// 右侧 inline 改动：文件头 + hunk（行内容）+ 选择与撤销。
+/// 右侧 inline 改动：文件头 + hunk（行内容）+ 选择。
 fn diff_inline(files: &[GitDiffFile], this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let mut pane = v_flex()
         .id("diff-inline")
@@ -1293,7 +1293,7 @@ fn diff_inline(files: &[GitDiffFile], this: &mut AmuxApp, cx: &mut Context<AmuxA
         .into_any_element()
 }
 
-/// 单文件区块：文件头（选择/撤销/折叠）+ 各 hunk。
+/// 单文件区块：文件头（选择/折叠）+ 各 hunk。
 fn diff_file_block(
     file: &GitDiffFile,
     collapsed: bool,
@@ -1368,20 +1368,6 @@ fn diff_file_block(
                     .small()
                     .rounded_full()
                     .child(Label::new(status.0).text_xs()),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("restore-file-{}", file.path)))
-                        .small()
-                        .ghost()
-                        .icon(IconName::Undo)
-                        .tooltip("撤销该文件全部改动")
-                        .on_click(cx.listener({
-                            let path = file.path.clone();
-                            let patch = file.patch.clone();
-                            move |this, _, _, cx| {
-                                this.restore(Some(path.clone()), Some(patch.clone()), cx)
-                            }
-                        })),
                 ),
         );
 
@@ -1423,24 +1409,6 @@ fn diff_file_block(
                             .text_xs()
                             .font_family(theme.mono_font_family.clone())
                             .text_color(theme.primary),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(SharedString::from(format!(
-                            "restore-hunk-{}-{}",
-                            file.path, hunk.header
-                        )))
-                        .small()
-                        .ghost()
-                        .icon(IconName::Undo)
-                        .tooltip("撤销此块改动")
-                        .on_click(cx.listener({
-                            let path = file.path.clone();
-                            let patch = hunk.patch.clone();
-                            move |this, _, _, cx| {
-                                this.restore(Some(path.clone()), Some(patch.clone()), cx)
-                            }
-                        })),
                     ),
             );
             let numbers = diff::line_numbers(&hunk.header, &hunk.lines);

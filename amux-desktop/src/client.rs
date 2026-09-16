@@ -2,7 +2,7 @@
 
 use amux_common::api::*;
 use amux_common::domain::{
-    Activity, ContentBlock, FsListResult, FsReadResult, GitDiffResult, HistoryItem, OpResult,
+    Activity, ContentBlock, FsListResult, FsReadResult, GitDiffResult, HistoryItem,
     SessionConfigOption, SessionPlanEntry, SlashCommand,
 };
 use serde::de::DeserializeOwned;
@@ -185,19 +185,6 @@ impl Client {
 
     pub async fn diff(&self, id: &str) -> Result<GitDiffResult, String> {
         self.get_json(&format!("/sessions/{id}/diff")).await
-    }
-
-    pub async fn restore(
-        &self,
-        id: &str,
-        path: Option<String>,
-        patch: Option<String>,
-    ) -> Result<OpResult, String> {
-        self.post_json(
-            &format!("/sessions/{id}/restore"),
-            &RestoreRequest { path, patch },
-        )
-        .await
     }
 
     // ---------- 终端 ----------

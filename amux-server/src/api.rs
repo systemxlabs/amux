@@ -87,7 +87,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sessions/{id}/activities", get(session_activities))
         .route("/sessions/{id}/ongoing_activity", get(session_ongoing))
         .route("/sessions/{id}/diff", get(session_diff))
-        .route("/sessions/{id}/restore", post(session_restore))
         .route(
             "/sessions/{id}/terminals",
             post(open_terminal).get(list_terminals),
@@ -415,19 +414,6 @@ async fn session_diff(
     state
         .sessions
         .diff(&id)
-        .await
-        .map(Json)
-        .map_err(bad_request)
-}
-
-async fn session_restore(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(request): Json<RestoreRequest>,
-) -> ApiResult<amux_common::domain::OpResult> {
-    state
-        .sessions
-        .restore(&id, request.path, request.patch)
         .await
         .map(Json)
         .map_err(bad_request)

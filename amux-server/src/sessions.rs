@@ -295,18 +295,6 @@ impl SessionService {
             .await
     }
 
-    pub async fn restore(
-        &self,
-        id: &str,
-        path: Option<String>,
-        patch: Option<String>,
-    ) -> Result<amux_common::domain::OpResult, String> {
-        let session = self.get(id)?;
-        self.machines
-            .git_restore(&session.machine, &self.work_dir(&session), path, patch)
-            .await
-    }
-
     // ---------- 终端 ----------
 
     pub async fn terminal_open(

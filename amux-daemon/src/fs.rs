@@ -2,7 +2,6 @@
 //!
 //! 浏览本身只用 `std::fs`，不依赖 git，也不要求路径在会话工作目录内——
 //! 调用方直接给绝对路径（文档约定 `fs.*` 范围是「指定路径」）。
-//! 会话工作目录的 diff/restore 安全模型留在 `git.rs`。
 
 use std::path::{Path, PathBuf};
 
@@ -102,11 +101,6 @@ pub(crate) fn canonical_path(path: &str) -> Result<PathBuf, String> {
     };
     path.canonicalize()
         .map_err(|e| format!("路径不可访问: {e}"))
-}
-
-/// 规范化工作区根（会话 cwd/worktree）：git diff/restore 以它为基准目录。
-pub(crate) fn canonical_workspace_root(cwd: &str) -> Result<PathBuf, String> {
-    canonical_dir(cwd)
 }
 
 #[cfg(test)]
