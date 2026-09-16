@@ -22,7 +22,7 @@ use crate::acp::AcpEvent;
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
 use crate::store::Store;
-use crate::terminals::TerminalCache;
+use crate::terminals::{TerminalCache, IDLE_EXPIRE_MS};
 use crate::timestamps::now_ms;
 
 /// 会话长时间无活动后关闭 agent 侧会话的阈值。
@@ -341,6 +341,7 @@ impl SessionService {
         data: String,
     ) -> Result<(), String> {
         let machine = self.terminal_machine(id, terminal_id)?;
+        self.terminals.touch(terminal_id);
         self.machines
             .terminal_input(
                 &machine,
@@ -672,7 +673,7 @@ impl SessionService {
         self.caches.contexts.lock().remove(session_id);
     }
 
-    /// 后台维护：关闭长时间无活动的 agent 会话、清理过期 worktree。
+    /// 后台维护：关闭长时间无活动的 agent 会话、清理过期 worktree、删除长期无输入输出的终端。
     pub async fn maintain(&self) {
         let now = now_ms();
         for session in self.store.sessions_all() {
@@ -698,6 +699,15 @@ impl SessionService {
                     .await;
                 log::info!("会话 worktree 过期清理: {}", session.id);
             }
+        }
+        // 终端超过 1 天没有输入输出即删除，并通知机器关闭对应 PTY（docs/DESIGN.md「终端存储」）
+        for (session_id, terminal_id) in self.terminals.sweep_idle(now, IDLE_EXPIRE_MS) {
+            if let Ok(session) = self.get(&session_id) {
+                self.machines
+                    .terminal_close(&session.machine, &terminal_id)
+                    .await;
+            }
+            log::info!("终端长时间无输入输出，已删除: {terminal_id}");
         }
     }
 }

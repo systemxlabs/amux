@@ -162,6 +162,30 @@ impl TerminalBuffer {
     }
 }
 
+/// 用 Server 的终端列表替换本地列表：不在列表中的终端从应用中移除
+/// （docs/DESIGN.md「终端视图」）；当前选中项若已被移除，则改选首个并重置输出。
+pub fn set_terminals(core: &mut Core, terminals: Vec<Terminal>) {
+    let still_present = core
+        .view
+        .detail
+        .active_terminal
+        .as_deref()
+        .is_some_and(|id| terminals.iter().any(|terminal| terminal.id == id));
+    core.view.detail.terminals = terminals;
+    if still_present {
+        return;
+    }
+    core.view.detail.active_terminal = core
+        .view
+        .detail
+        .terminals
+        .first()
+        .map(|terminal| terminal.id.clone());
+    core.view.detail.terminal_output.reset();
+    core.last.terminal_cursor = 0;
+    core.last.terminal = None;
+}
+
 /// 列表分页：窗口贴着「最新」一端，随滚动向更早方向按页扩展
 /// （docs/DESIGN.md「会话列表滚动机制」「对话滚动机制」「活动列表滚动机制」）。
 #[derive(Debug, Clone, PartialEq)]

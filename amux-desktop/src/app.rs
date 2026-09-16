@@ -1434,7 +1434,7 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             if let Ok(terminals) = client.terminals(&id).await {
-                core.lock().view.detail.terminals = terminals;
+                crate::state::set_terminals(&mut core.lock(), terminals);
             }
             if core.lock().view.detail.active_terminal.is_some() {
                 return;
@@ -2475,7 +2475,7 @@ async fn create_terminal(client: &crate::client::Client, core: &SharedCore, sess
                 core.last.terminal = None;
             }
             if let Ok(terminals) = client.terminals(session).await {
-                core.lock().view.detail.terminals = terminals;
+                crate::state::set_terminals(&mut core.lock(), terminals);
             }
         }
         Err(error) => core.lock().error(format!("打开终端失败：{error}")),

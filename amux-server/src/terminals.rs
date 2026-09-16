@@ -10,8 +10,13 @@ use amux_common::api::{Terminal, TerminalOutput, TerminalState};
 use base64::Engine as _;
 use parking_lot::Mutex;
 
+use crate::timestamps::now_ms;
+
 /// 单终端缓存上限（字节）。
 const BUFFER_LIMIT: usize = 256 * 1024;
+
+/// 终端空闲删除阈值：超过该时长没有任何输入输出即删除（docs/DESIGN.md「终端存储」）。
+pub const IDLE_EXPIRE_MS: u64 = 24 * 60 * 60 * 1000;
 
 struct Entry {
     session_id: String,
@@ -24,6 +29,8 @@ struct Entry {
     start: u64,
     /// 已产生的总字节数（= 下次读取游标）
     total: u64,
+    /// 最近一次输入或输出的时间（毫秒时间戳）
+    last_active: u64,
 }
 
 #[derive(Default)]
@@ -48,6 +55,7 @@ impl TerminalCache {
                 buffer: VecDeque::new(),
                 start: 0,
                 total: 0,
+                last_active: now_ms(),
             },
         );
     }
@@ -59,15 +67,24 @@ impl TerminalCache {
         };
         entry.buffer.extend(data.iter().copied());
         entry.total += data.len() as u64;
+        entry.last_active = now_ms();
         while entry.buffer.len() > BUFFER_LIMIT {
             entry.buffer.pop_front();
             entry.start += 1;
         }
     }
 
+    /// 记录一次输入（终端空闲删除以「最近一次输入或输出」为基准）。
+    pub fn touch(&self, terminal_id: &str) {
+        if let Some(entry) = self.terminals.lock().get_mut(terminal_id) {
+            entry.last_active = now_ms();
+        }
+    }
+
     pub fn exit(&self, terminal_id: &str) {
         if let Some(entry) = self.terminals.lock().get_mut(terminal_id) {
             entry.state = TerminalState::Exited;
+            entry.last_active = now_ms();
         }
     }
 
@@ -75,7 +92,23 @@ impl TerminalCache {
         if let Some(entry) = self.terminals.lock().get_mut(terminal_id) {
             entry.cols = cols;
             entry.rows = rows;
+            entry.last_active = now_ms();
         }
+    }
+
+    /// 删除超过 `expire_ms` 没有输入输出的终端，返回被删终端的（会话 id, 终端 id）。
+    pub fn sweep_idle(&self, now: u64, expire_ms: u64) -> Vec<(String, String)> {
+        let mut terminals = self.terminals.lock();
+        let mut expired: Vec<String> = terminals
+            .iter()
+            .filter(|(_, entry)| now.saturating_sub(entry.last_active) > expire_ms)
+            .map(|(id, _)| id.clone())
+            .collect();
+        expired.sort();
+        expired
+            .into_iter()
+            .filter_map(|id| terminals.remove(&id).map(|entry| (entry.session_id, id)))
+            .collect()
     }
 
     /// 读取游标之后的增量输出。
@@ -194,5 +227,27 @@ mod tests {
         assert_eq!(cache.remove_session("s1"), ["t1"]);
         assert!(!cache.contains("t1"));
         assert!(cache.contains("t2"));
+    }
+
+    /// 超过阈值没有输入输出的终端被删除；期间有输入输出的保留。
+    #[test]
+    fn sweep_idle_removes_only_expired_terminals() {
+        let cache = TerminalCache::new();
+        let opened_at = now_ms();
+        cache.open("s1", "idle", "/w", 80, 24);
+        cache.open("s1", "used", "/w", 80, 24);
+        // 等毫秒时钟前进后再让 used 有一次输入：两者的活跃时间因此相差 2ms
+        while now_ms() < opened_at + 2 {}
+        cache.touch("used");
+
+        // idle 的年龄是 阈值+2，used 恰好是阈值：只删 idle
+        let removed = cache.sweep_idle(opened_at + 2 + IDLE_EXPIRE_MS, IDLE_EXPIRE_MS);
+        assert_eq!(removed, [("s1".to_string(), "idle".to_string())]);
+        assert!(cache.contains("used"), "刚有输入的终端不应被删除");
+
+        // used 之后再无输入输出，到点同样被删除
+        let removed = cache.sweep_idle(opened_at + 2 + IDLE_EXPIRE_MS * 2, IDLE_EXPIRE_MS);
+        assert_eq!(removed, [("s1".to_string(), "used".to_string())]);
+        assert!(!cache.contains("used"));
     }
 }

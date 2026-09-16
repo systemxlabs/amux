@@ -10,9 +10,9 @@ use amux_common::domain::{Activity, ContentBlock, HistoryItem};
 
 use crate::client::Client;
 use crate::state::{
-    ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SettingsTab, SharedCore, SidePanel,
-    ACTIVITIES_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, OPTIONS_INTERVAL, PLAN_INTERVAL,
-    SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
+    set_terminals, ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SettingsTab, SharedCore,
+    SidePanel, ACTIVITIES_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, OPTIONS_INTERVAL,
+    PLAN_INTERVAL, SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
 };
 
 /// 连接重试间隔。
@@ -234,7 +234,7 @@ async fn refresh_open(
                 if let Ok(terminals) = client.terminals(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
-                        core.view.detail.terminals = terminals;
+                        set_terminals(&mut core, terminals);
                     }
                 }
                 if let Some(terminal_id) = terminal {
