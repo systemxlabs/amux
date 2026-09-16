@@ -1756,13 +1756,13 @@ impl AmuxApp {
             };
             match result {
                 Ok(()) => {
+                    // 保存成功不弹提示：列表内容与表单关闭即是反馈（失败才提示）
                     let mut core = core.lock();
                     match request {
                         SettingsList::Skills(list) => core.settings.skills = list,
                         SettingsList::QuickCommands(list) => core.settings.quick_commands = list,
                         SettingsList::Plans(list) => core.settings.plans = list,
                     }
-                    core.success("设置已保存");
                 }
                 Err(error) => core.lock().error(format!("保存失败：{error}")),
             }
@@ -2089,9 +2089,8 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             match client.set_orchestrator(&config).await {
                 Ok(()) => {
-                    let mut core = core.lock();
-                    core.settings.orchestrator = Some(config);
-                    core.alert("保存成功", "编排智能体设置已保存。");
+                    // 保存成功不弹提示：表单状态与内容本身即是反馈（失败才提示）
+                    core.lock().settings.orchestrator = Some(config);
                 }
                 Err(error) => core.lock().alert("保存失败", error),
             }
