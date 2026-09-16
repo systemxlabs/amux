@@ -425,7 +425,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             );
         }
         wrap = wrap.child(deferred(
-            div()
+            v_flex()
                 .id("ns-workspace-recent-panel")
                 .absolute()
                 .top(relative(1.0))
@@ -499,7 +499,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             );
         }
         wrap = wrap.child(deferred(
-            div()
+            v_flex()
                 .id("ns-workspace-suggest-panel")
                 .absolute()
                 .top(relative(1.0))
