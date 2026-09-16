@@ -22,7 +22,7 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 
 | 方法 | 描述 |
 |---|---|
-| `machine.info` | 获取当前机器信息，包含操作系统等 |
+| `machine.info` | 获取当前机器信息，包含操作系统、临时目录等 |
 | `agent.list` | 发现当前机器已安装的 agents，以及每个 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
 | `git.diff` | 查询指定仓库改动 diff |
