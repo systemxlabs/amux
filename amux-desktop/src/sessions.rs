@@ -8,7 +8,6 @@ use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
-use gpui_component::popover::Popover;
 use gpui_component::scroll::Scrollbar;
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
@@ -60,9 +59,8 @@ const SUGGEST_ROW_HEIGHT: f32 = 28.0;
 const SUGGEST_MAX_ROWS: usize = 8;
 /// 联想列表的上下内边距。
 const SUGGEST_PADDING: f32 = 4.0;
-/// 最近工作目录下拉：展示上限与列表宽度。
+/// 最近工作目录下拉的展示上限。
 const RECENT_WORKSPACE_LIMIT: usize = 20;
-const RECENT_MENU_WIDTH: Rems = rems(26.);
 
 fn new_session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let workflow_mode = core.new_session.workflow_mode;
@@ -321,7 +319,7 @@ fn agent_selector(core: &Core, machine: &str, cx: &mut Context<AmuxApp>) -> AnyE
 
 /// 工作目录：可手动输入（前缀联想）或从最近目录中选择。
 ///
-/// 该机器有最近目录时，输入框本身是下拉触发器（尾部下拉箭头），点击展开最近目录列表
+/// 该机器有最近目录时，输入框尾部带下拉箭头，点击输入框即在其下方展开最近目录列表
 /// （行内展示完整路径、溢出从头部截断）；没有最近目录时就是普通输入框
 /// （docs/PRD.md「新建会话视图」，交互参考旧桌面应用）。
 fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
@@ -335,112 +333,120 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
 
     let theme = ui::Colors::of(cx.theme());
     let app = cx.entity();
-    let open = this.workspace_recent_open;
+    let has_recent = !recent.is_empty();
+    let open = has_recent && this.workspace_recent_open;
     let scroll = this.workspace_recent_scroll.clone();
     let scroll_suggest = this.workspace_suggest_scroll.clone();
-    let picker = if recent.is_empty() {
-        div()
+
+    let mut input_row =
+        h_flex()
             .w_full()
-            .child(Input::new(&this.workspace_input).w_full())
-            .into_any_element()
-    } else {
-        let hover_bg = theme.accent;
-        let rows = recent.clone();
-        div()
-            .w_full()
+            .min_w_0()
             .child(
-                Popover::new("ns-workspace-recent")
-                    .anchor(Anchor::BottomLeft)
-                    .open(open)
-                    .on_open_change({
-                        let app = app.clone();
-                        move |is_open, _window, cx| {
-                            let is_open = *is_open;
-                            app.update(cx, |this, cx| {
-                                this.workspace_recent_open = is_open;
-                                cx.notify();
-                            });
-                        }
-                    })
-                    .trigger(
-                        Input::new(&this.workspace_input).w_full().suffix(
+                Input::new(&this.workspace_input)
+                    .w_full()
+                    .when(has_recent, |input| {
+                        input.suffix(
                             Icon::new(IconName::ChevronDown)
                                 .small()
                                 .text_color(theme.muted_foreground),
-                        ),
-                    )
-                    .content(move |_, _window, _cx| {
-                        let visible = rows.len().min(SUGGEST_MAX_ROWS);
-                        let height =
-                            px(SUGGEST_PADDING * 2.0 + SUGGEST_ROW_HEIGHT * visible as f32);
-                        let mut list = v_flex()
-                            .id("ns-workspace-recent-list")
-                            .w_full()
-                            .flex_1()
-                            .min_h_0()
-                            .p(px(SUGGEST_PADDING))
-                            .track_scroll(&scroll)
-                            .overflow_y_scroll();
-                        for path in rows.clone() {
-                            let app = app.clone();
-                            let value = path.clone();
-                            list = list.child(
-                                div()
-                                    .id(SharedString::from(format!("ns-workspace-recent-{path}")))
-                                    .w_full()
-                                    .h(px(SUGGEST_ROW_HEIGHT))
-                                    .flex()
-                                    .items_center()
-                                    .px_2()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .overflow_hidden()
-                                    .hover(move |row| row.bg(hover_bg))
-                                    .on_click(move |_, window, cx| {
-                                        let value = value.clone();
-                                        app.update(cx, |this, cx| {
-                                            this.set_workspace(value.clone(), window, cx);
-                                            this.workspace_recent_open = false;
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(
-                                        Label::new(path.clone())
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis_start(),
-                                    ),
-                            );
-                        }
-                        h_flex()
-                            .w(RECENT_MENU_WIDTH)
-                            .h(height)
-                            .relative()
-                            .overflow_hidden()
-                            .child(list)
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .right_0()
-                                    .bottom_0()
-                                    .child(
-                                        Scrollbar::vertical(&scroll)
-                                            .id("ns-workspace-recent-scrollbar"),
-                                    ),
-                            )
+                        )
                     }),
-            )
-            .into_any_element()
-    };
-
+            );
+    if has_recent {
+        // 点击输入框切换最近目录列表（鼠标事件先到输入框自身，再冒泡到这里，不影响编辑；
+        // 列表项挂在输入行之外，点选项不会经过这里）
+        let app = app.clone();
+        input_row = input_row.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            app.update(cx, |this, cx| {
+                this.workspace_recent_open = !this.workspace_recent_open;
+                cx.notify();
+            });
+        });
+    }
     let mut wrap = h_flex()
         .id("ns-workspace-wrap")
         .relative()
         .w_full()
         .min_w_0()
-        .child(picker);
+        .child(input_row);
+
+    // 最近目录：贴输入框下方展开（deferred 以免撑开表单），高度按条目数自适应、
+    // 超过上限时列表内滚动查看（带滚动条）
+    if open {
+        let hover_bg = theme.accent;
+        let visible = recent.len().min(SUGGEST_MAX_ROWS);
+        let height = px(SUGGEST_PADDING * 2.0 + SUGGEST_ROW_HEIGHT * visible as f32);
+        let mut rows = v_flex()
+            .id("ns-workspace-recent")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .p(px(SUGGEST_PADDING))
+            .track_scroll(&scroll)
+            .overflow_y_scroll();
+        for path in recent {
+            let app = app.clone();
+            let value = path.clone();
+            rows = rows.child(
+                div()
+                    .id(SharedString::from(format!("ns-workspace-recent-{path}")))
+                    .w_full()
+                    .h(px(SUGGEST_ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .overflow_hidden()
+                    .hover(move |row| row.bg(hover_bg))
+                    .on_click(move |_, window, cx| {
+                        let value = value.clone();
+                        app.update(cx, |this, cx| {
+                            this.set_workspace(value.clone(), window, cx);
+                            this.workspace_recent_open = false;
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        Label::new(path.clone())
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis_start(),
+                    ),
+            );
+        }
+        wrap = wrap.child(deferred(
+            div()
+                .id("ns-workspace-recent-panel")
+                .absolute()
+                .top(relative(1.0))
+                .left_0()
+                .right_0()
+                .h(height)
+                .overflow_hidden()
+                .relative()
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .rounded_lg()
+                .shadow_lg()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.workspace_recent_open = false;
+                    cx.notify();
+                }))
+                .child(rows)
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .child(Scrollbar::vertical(&scroll).id("ns-workspace-recent-scrollbar")),
+                ),
+        ));
+    }
 
     // 前缀联想：贴输入框下方展开（deferred 以免撑开表单）；高度按条目数自适应，
     // 超过上限时列表内滚动查看（带滚动条）
