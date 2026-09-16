@@ -151,8 +151,14 @@ impl WorkflowService {
         let lines = read_lines(&self.history_path(id));
         let mut items: Vec<HistoryItem> = lines
             .iter()
-            .filter_map(|line| serde_json::from_str::<HistoryLine>(line).ok())
-            .map(|line| HistoryItem::from(&line))
+            .enumerate()
+            .filter_map(|(index, line)| {
+                serde_json::from_str::<HistoryLine>(line)
+                    .ok()
+                    .map(|line| (index, line))
+            })
+            // 文件只追加：行号即条目标识，分页刷新时用它识别同一条消息
+            .map(|(index, line)| history_item(index, &line))
             .collect();
         items.reverse();
         let window: Vec<HistoryItem> = items.into_iter().skip(offset).take(limit + 1).collect();
@@ -167,7 +173,15 @@ impl WorkflowService {
         let lines = read_lines(&self.activities_path(id));
         let mut activities: Vec<Activity> = lines
             .iter()
-            .filter_map(|line| serde_json::from_str::<Activity>(line).ok())
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let mut activity: Activity = serde_json::from_str(line).ok()?;
+                // 文件只追加：没有自带标识的历史行（旧数据）用行号充当标识
+                if activity.id().is_empty() {
+                    activity.set_id(format!("line-{index}"));
+                }
+                Some(activity)
+            })
             .collect();
         activities.reverse();
         let window: Vec<Activity> = activities
@@ -284,6 +298,7 @@ impl WorkflowService {
                 self.record_activity(
                     workflow_id,
                     &Activity::Error {
+                        id: format!("err-{}", Uuid::new_v4()),
                         timestamp: now_ms(),
                         error: error.clone(),
                     },
@@ -415,6 +430,7 @@ impl Tools for WorkflowTools {
         self.service.record_activity(
             &self.workflow_id,
             &Activity::Thinking {
+                id: format!("think-{}", Uuid::new_v4()),
                 timestamp: now_ms(),
                 thinking: text.to_string(),
             },
@@ -425,6 +441,7 @@ impl Tools for WorkflowTools {
         self.service.record_activity(
             &self.workflow_id,
             &Activity::ToolCall {
+                id: call.id.to_string(),
                 timestamp: now_ms(),
                 tool_call_id: call.id.to_string(),
                 tool_name: call.function.name.clone(),
@@ -760,17 +777,25 @@ struct HistoryLine {
 
 impl From<&HistoryLine> for HistoryItem {
     fn from(line: &HistoryLine) -> Self {
-        let content = line.content.clone();
-        if line.role == "user" {
-            HistoryItem::UserMessage {
-                content,
-                timestamp: line.timestamp,
-            }
-        } else {
-            HistoryItem::AgentMessage {
-                content,
-                timestamp: line.timestamp,
-            }
+        history_item(0, line)
+    }
+}
+
+/// JSONL 行转历史条目：行号即标识（文件只追加，行号稳定）。
+fn history_item(index: usize, line: &HistoryLine) -> HistoryItem {
+    let id = format!("line-{index}");
+    let content = line.content.clone();
+    if line.role == "user" {
+        HistoryItem::UserMessage {
+            id,
+            content,
+            timestamp: line.timestamp,
+        }
+    } else {
+        HistoryItem::AgentMessage {
+            id,
+            content,
+            timestamp: line.timestamp,
         }
     }
 }
@@ -878,6 +903,7 @@ mod tests {
         assert_eq!(
             HistoryItem::from(&parsed),
             HistoryItem::UserMessage {
+                id: "line-0".to_string(),
                 content: vec![ContentBlock::Text {
                     text: "你好".into()
                 }],

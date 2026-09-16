@@ -6,11 +6,11 @@
 
 use std::time::{Duration, Instant};
 
-use amux_common::domain::ContentBlock;
+use amux_common::domain::{Activity, ContentBlock, HistoryItem};
 
 use crate::client::Client;
 use crate::state::{
-    ConnectionStatus, Core, ListEntry, OpenTarget, SettingsTab, SharedCore, SidePanel,
+    ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SettingsTab, SharedCore, SidePanel,
     ACTIVITIES_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, OPTIONS_INTERVAL, PLAN_INTERVAL,
     SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
 };
@@ -71,15 +71,17 @@ fn core_due(
     core.due(pick(&core.last), interval)
 }
 
-/// 会话列表：普通会话 + 工作流会话（工作流会话内含关联普通会话），按最近活跃排序。
+/// 会话列表刷新：重取已加载窗口（普通会话与工作流会话各 `list_loaded` 条）。
+///
+/// 窗口贴着最新一端，删改与排序变化都在整窗重取后自然生效（docs/DESIGN.md
+/// 「会话列表刷新机制」）。
 async fn refresh_list(client: &Client, core: &SharedCore) {
-    let (limit, offset) = {
+    let limit = {
         let core = core.lock();
-        (core.list_limit.max(20), 0usize)
+        core.list_loaded.max(core.list_paging.page_size)
     };
-    let _ = offset;
-    let sessions = client.sessions(limit, offset).await;
-    let workflows = client.workflows(limit, offset).await;
+    let sessions = client.sessions(limit, 0).await;
+    let workflows = client.workflows(limit, 0).await;
     let (sessions, workflows) = match (sessions, workflows) {
         (Ok(sessions), Ok(workflows)) => (sessions, workflows),
         (Err(error), _) | (_, Err(error)) => {
@@ -89,6 +91,7 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
             return;
         }
     };
+    let has_older = sessions.has_more || workflows.has_more;
     let mut entries: Vec<ListEntry> = Vec::new();
     entries.extend(sessions.sessions.into_iter().map(ListEntry::Session));
     entries.extend(workflows.workflows.into_iter().map(ListEntry::Workflow));
@@ -96,6 +99,49 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
     let mut core = core.lock();
     core.last.list = Some(Instant::now());
     core.entries = entries;
+    core.list_loaded = limit;
+    core.list_paging.has_older = has_older;
+}
+
+/// 会话列表更早一页：两个来源各取一页并合并到窗口（docs/DESIGN.md「会话列表滚动机制」）。
+pub async fn load_older_sessions(client: &Client, core: &SharedCore) {
+    let (offset, limit) = {
+        let mut core = core.lock();
+        let loaded = core.list_loaded;
+        match begin_older_page(&mut core.list_paging, loaded) {
+            Some(page) => page,
+            None => return,
+        }
+    };
+    let sessions = client.sessions(limit, offset).await;
+    let workflows = client.workflows(limit, offset).await;
+    let (sessions, workflows) = match (sessions, workflows) {
+        (Ok(sessions), Ok(workflows)) => (sessions, workflows),
+        _ => {
+            core.lock().list_paging.loading_older = false;
+            return;
+        }
+    };
+    let has_older = sessions.has_more || workflows.has_more;
+    let page: Vec<ListEntry> = sessions
+        .sessions
+        .into_iter()
+        .map(ListEntry::Session)
+        .chain(workflows.workflows.into_iter().map(ListEntry::Workflow))
+        .collect();
+    let mut core = core.lock();
+    core.list_paging.loading_older = false;
+    core.list_paging.has_older = has_older;
+    core.list_loaded = offset + limit;
+    for entry in page {
+        // 已加载过的条目（翻页之间发生更新或位移）按 id 覆盖，避免重复
+        match core.entries.iter_mut().find(|item| item.id() == entry.id()) {
+            Some(existing) => *existing = entry,
+            None => core.entries.push(entry),
+        }
+    }
+    core.entries
+        .sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
 }
 
 /// 打开会话的视图数据：按各自周期刷新（会话详情与工作目录视图只在打开时刷新一次，
@@ -142,22 +188,11 @@ async fn refresh_open(
                         core.view.session = Some(session);
                     }
                 }
-                if let Ok(page) = client.history(id, 200, 0).await {
-                    let mut core = core.lock();
-                    if core.open.as_ref() == Some(target) {
-                        core.view.detail.history = page.items;
-                        core.view.detail.history_has_more = page.has_more;
-                    }
-                }
+                refresh_history(client, core, target).await;
                 core.lock().last.history = Some(Instant::now());
             }
             if due_activities && activities_open {
-                if let Ok(page) = client.activities(id, 200, 0).await {
-                    let mut core = core.lock();
-                    if core.open.as_ref() == Some(target) {
-                        core.view.detail.activities = page.activities;
-                    }
-                }
+                refresh_activities(client, core, target).await;
                 core.lock().last.activities = Some(Instant::now());
             }
             if due_plan && plan_open {
@@ -235,21 +270,11 @@ async fn refresh_open(
                         core.view.workflow = Some(workflow);
                     }
                 }
-                if let Ok(items) = client.workflow_history(id, 200, 0).await {
-                    let mut core = core.lock();
-                    if core.open.as_ref() == Some(target) {
-                        core.view.detail.history = items;
-                    }
-                }
+                refresh_history(client, core, target).await;
                 core.lock().last.history = Some(Instant::now());
             }
             if due_activities && activities_open {
-                if let Ok(activities) = client.workflow_activities(id, 200, 0).await {
-                    let mut core = core.lock();
-                    if core.open.as_ref() == Some(target) {
-                        core.view.detail.activities = activities;
-                    }
-                }
+                refresh_activities(client, core, target).await;
                 core.lock().last.activities = Some(Instant::now());
             }
             if due_ongoing {
@@ -263,6 +288,175 @@ async fn refresh_open(
             }
         }
     }
+}
+
+// ---------- 滚动分页 ----------
+//
+// 三个列表（会话列表 / 对话历史 / 活动列表）共用同一套分页模型：窗口贴着「最新」一端，
+// 页大小由视图按面板可视高度写入，随滚动向更早方向按页扩展，并预取相邻一页作为缓冲
+// （docs/DESIGN.md「会话列表滚动机制」「对话滚动机制」「活动列表滚动机制」）。
+// 刷新只针对最新一段：更早的已加载条目不再改动。
+
+/// 开始拉取更早一页：返回（偏移, 条数）；没有更早条目或已有在途拉取时为 None。
+fn begin_older_page(paging: &mut Paging, loaded: usize) -> Option<(usize, usize)> {
+    if !paging.has_older || paging.loading_older {
+        return None;
+    }
+    paging.loading_older = true;
+    Some((loaded, paging.page_size.max(1)))
+}
+
+/// 刷新时的拉取条数：至少覆盖已加载窗口，保证刷新后窗口仍是连续的一段。
+fn refresh_limit(loaded: usize, page_size: usize) -> usize {
+    loaded.max(page_size).max(1)
+}
+
+/// 把最新一页并入窗口（升序展示、最新在末尾）。
+///
+/// 页里的条目按标识替换窗口中的同一条目（流式输出会改内容，同一条目的位置也可能变到最新端），
+/// 其余条目保持不动、且都排在页之前：页是「最新的一段」，窗口只向更新的一端扩展，不会出现缺口。
+pub fn merge_newest<T>(
+    items: &mut Vec<T>,
+    paging: &mut Paging,
+    page: Vec<T>,
+    page_has_more: bool,
+    id: fn(&T) -> &str,
+) {
+    paging.has_older = page_has_more;
+    if items.is_empty() {
+        *items = page;
+        return;
+    }
+    let page_ids: Vec<String> = page.iter().map(|item| id(item).to_string()).collect();
+    items.retain(|item| !page_ids.iter().any(|page_id| page_id == id(item)));
+    items.extend(page);
+}
+
+/// 更早一页插到窗口前面（升序展示、最新在末尾）。
+///
+/// 插入会让可视内容整体下移，因此记下插入条数为位移量，
+/// 由视图在下一节拍把首条目滚回原位（docs/DESIGN.md 各滚动机制小节）。
+pub fn prepend_older<T>(items: &mut Vec<T>, paging: &mut Paging, page: Vec<T>) {
+    paging.shift = Some(page.len());
+    let mut merged = page;
+    merged.append(items);
+    *items = merged;
+}
+
+/// 对话历史刷新：拉取最新一段并与窗口合并（普通会话与工作流会话）。
+async fn refresh_history(client: &Client, core: &SharedCore, target: &OpenTarget) {
+    let limit = {
+        let core = core.lock();
+        refresh_limit(
+            core.view.detail.history.len(),
+            core.view.detail.history_paging.page_size,
+        )
+    };
+    let page = match target {
+        OpenTarget::Session(id) => client.history(id, limit, 0).await,
+        OpenTarget::Workflow(id) => client.workflow_history(id, limit, 0).await,
+    };
+    let Ok(page) = page else { return };
+    let mut core = core.lock();
+    if core.open.as_ref() != Some(target) {
+        return;
+    }
+    let detail = &mut core.view.detail;
+    merge_newest(
+        &mut detail.history,
+        &mut detail.history_paging,
+        page.items,
+        page.has_more,
+        HistoryItem::id,
+    );
+}
+
+/// 活动历史刷新：拉取最新一段并与窗口合并（普通会话与工作流会话）。
+async fn refresh_activities(client: &Client, core: &SharedCore, target: &OpenTarget) {
+    let limit = {
+        let core = core.lock();
+        refresh_limit(
+            core.view.detail.activities.len(),
+            core.view.detail.activities_paging.page_size,
+        )
+    };
+    let page = match target {
+        OpenTarget::Session(id) => client.activities(id, limit, 0).await,
+        OpenTarget::Workflow(id) => client.workflow_activities(id, limit, 0).await,
+    };
+    let Ok(page) = page else { return };
+    let mut core = core.lock();
+    if core.open.as_ref() != Some(target) {
+        return;
+    }
+    let detail = &mut core.view.detail;
+    merge_newest(
+        &mut detail.activities,
+        &mut detail.activities_paging,
+        page.activities,
+        page.has_more,
+        Activity::id,
+    );
+}
+
+/// 对话历史更早一页：插到窗口前面，并锚定滚动位置。
+pub async fn load_older_history(client: &Client, core: &SharedCore, target: &OpenTarget) {
+    let (offset, limit) = {
+        let mut core = core.lock();
+        let loaded = core.view.detail.history.len();
+        match begin_older_page(&mut core.view.detail.history_paging, loaded) {
+            Some(page) => page,
+            None => return,
+        }
+    };
+    let page = match target {
+        OpenTarget::Session(id) => client.history(id, limit, offset).await,
+        OpenTarget::Workflow(id) => client.workflow_history(id, limit, offset).await,
+    };
+    let Ok(page) = page else {
+        core.lock().view.detail.history_paging.loading_older = false;
+        return;
+    };
+    let mut core = core.lock();
+    core.view.detail.history_paging.loading_older = false;
+    if core.open.as_ref() != Some(target) {
+        return;
+    }
+    let detail = &mut core.view.detail;
+    detail.history_paging.has_older = page.has_more;
+    prepend_older(&mut detail.history, &mut detail.history_paging, page.items);
+}
+
+/// 活动历史更早一页：插到窗口前面，并锚定滚动位置。
+pub async fn load_older_activities(client: &Client, core: &SharedCore, target: &OpenTarget) {
+    let (offset, limit) = {
+        let mut core = core.lock();
+        let loaded = core.view.detail.activities.len();
+        match begin_older_page(&mut core.view.detail.activities_paging, loaded) {
+            Some(page) => page,
+            None => return,
+        }
+    };
+    let page = match target {
+        OpenTarget::Session(id) => client.activities(id, limit, offset).await,
+        OpenTarget::Workflow(id) => client.workflow_activities(id, limit, offset).await,
+    };
+    let Ok(page) = page else {
+        core.lock().view.detail.activities_paging.loading_older = false;
+        return;
+    };
+    let mut core = core.lock();
+    core.view.detail.activities_paging.loading_older = false;
+    if core.open.as_ref() != Some(target) {
+        return;
+    }
+    let detail = &mut core.view.detail;
+    detail.activities_paging.has_older = page.has_more;
+    prepend_older(
+        &mut detail.activities,
+        &mut detail.activities_paging,
+        page.activities,
+    );
 }
 
 // ---------- 视图打开时的实时拉取 ----------

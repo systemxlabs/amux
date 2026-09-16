@@ -241,7 +241,7 @@ impl Store {
     ) -> (Vec<HistoryItem>, bool) {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT role, content, created_at, updated_at FROM messages
+            "SELECT message_id, role, content, created_at, updated_at FROM messages
              WHERE session_id = ?1 ORDER BY updated_at DESC, message_id DESC LIMIT ?2 OFFSET ?3",
         ) {
             Ok(stmt) => stmt,
@@ -250,24 +250,33 @@ impl Store {
         let rows = stmt.query_map(
             params![session_id, (limit + 1) as i64, offset as i64],
             |row| {
-                let role: String = row.get(0)?;
-                let content: String = row.get(1)?;
-                let created_at: i64 = row.get(2)?;
-                let updated_at: i64 = row.get(3)?;
-                Ok((role, content, created_at as u64, updated_at as u64))
+                let message_id: String = row.get(0)?;
+                let role: String = row.get(1)?;
+                let content: String = row.get(2)?;
+                let created_at: i64 = row.get(3)?;
+                let updated_at: i64 = row.get(4)?;
+                Ok((
+                    message_id,
+                    role,
+                    content,
+                    created_at as u64,
+                    updated_at as u64,
+                ))
             },
         );
         let mut items: Vec<HistoryItem> = match rows {
             Ok(rows) => rows
                 .flatten()
-                .map(|(role, content, created_at, updated_at)| {
+                .map(|(id, role, content, created_at, updated_at)| {
                     let blocks = serde_json::from_str(&content).unwrap_or_default();
                     match role.as_str() {
                         "user" => HistoryItem::UserMessage {
+                            id,
                             content: blocks,
                             timestamp: created_at,
                         },
                         _ => HistoryItem::AgentMessage {
+                            id,
                             content: blocks,
                             timestamp: updated_at,
                         },
@@ -315,7 +324,7 @@ impl Store {
     ) -> (Vec<Activity>, bool) {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT content FROM activities WHERE session_id = ?1
+            "SELECT activity_id, content FROM activities WHERE session_id = ?1
              ORDER BY updated_at DESC, activity_id DESC LIMIT ?2 OFFSET ?3",
         ) {
             Ok(stmt) => stmt,
@@ -323,12 +332,17 @@ impl Store {
         };
         let rows = stmt.query_map(
             params![session_id, (limit + 1) as i64, offset as i64],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         );
         let mut activities: Vec<Activity> = match rows {
             Ok(rows) => rows
                 .flatten()
-                .filter_map(|content| serde_json::from_str(&content).ok())
+                .filter_map(|(id, content)| {
+                    let mut activity: Activity = serde_json::from_str(&content).ok()?;
+                    // 标识以 activity_id 列为准（列即身份，内容里的标识仅作冗余）
+                    activity.set_id(id);
+                    Some(activity)
+                })
                 .collect(),
             Err(_) => Vec::new(),
         };

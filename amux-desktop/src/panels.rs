@@ -54,6 +54,8 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
     let mut list = v_flex()
         .id("sidebar-sessions")
         .flex_1()
+        .min_h_0()
+        .track_scroll(&this.list_scroll)
         .overflow_y_scroll()
         .gap_2();
     for entry in core.entries.clone() {
@@ -73,36 +75,6 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                 .text_color(theme.muted_foreground),
         );
     }
-    list = list.child(
-        h_flex()
-            .gap_1()
-            .when(core.list_limit > 20, |row| {
-                row.child(
-                    Button::new("sessions-collapse")
-                        .small()
-                        .label("收起")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.with_core(|core| {
-                                core.list_limit = 20;
-                                core.last.list = None;
-                            });
-                            cx.notify();
-                        })),
-                )
-            })
-            .child(
-                Button::new("sessions-more")
-                    .small()
-                    .label("加载更多")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.with_core(|core| {
-                            core.list_limit += 20;
-                            core.last.list = None;
-                        });
-                        cx.notify();
-                    })),
-            ),
-    );
 
     v_flex()
         .flex_1()
@@ -825,10 +797,19 @@ fn detail_panel(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     body.into_any_element()
 }
 
-/// 会话活动面板：条目默认折叠为一行，点击展开详情。
+/// 会话活动面板：条目默认折叠为一行，点击展开详情；滚动分页见 docs/DESIGN.md「活动列表滚动机制」。
 fn activities_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
-    let mut rows = v_flex().w_full().gap_2();
+    let mut rows = v_flex()
+        .id("activities-panel")
+        .w_full()
+        .flex_1()
+        .min_h_0()
+        .gap_2()
+        .p_3()
+        .pt_0()
+        .track_scroll(&this.activities_scroll)
+        .overflow_y_scroll();
     for activity in &core.view.detail.activities {
         rows = rows.child(activity_row(activity, this, cx));
     }
@@ -839,18 +820,7 @@ fn activities_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                 .text_color(theme.muted_foreground),
         );
     }
-    v_flex()
-        .id("activities-panel")
-        .w_full()
-        .flex_1()
-        .min_h_0()
-        .gap_2()
-        .p_3()
-        .pt_0()
-        .track_scroll(&this.activities_scroll)
-        .overflow_y_scroll()
-        .child(rows)
-        .into_any_element()
+    rows.into_any_element()
 }
 
 /// 活动卡片：时间 + 种类 + 详情（折叠时单行截断）。

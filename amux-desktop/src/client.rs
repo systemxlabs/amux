@@ -2,8 +2,8 @@
 
 use amux_common::api::*;
 use amux_common::domain::{
-    Activity, ContentBlock, FsListResult, FsReadResult, GitDiffResult, HistoryItem,
-    SessionConfigOption, SessionPlanEntry, SlashCommand,
+    Activity, ContentBlock, FsListResult, FsReadResult, GitDiffResult, SessionConfigOption,
+    SessionPlanEntry, SlashCommand,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -302,13 +302,11 @@ impl Client {
         id: &str,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<HistoryItem>, String> {
-        let page: HistoryPage = self
-            .get_json(&format!(
-                "/workflows/{id}/history?limit={limit}&offset={offset}"
-            ))
-            .await?;
-        Ok(page.items)
+    ) -> Result<HistoryPage, String> {
+        self.get_json(&format!(
+            "/workflows/{id}/history?limit={limit}&offset={offset}"
+        ))
+        .await
     }
 
     pub async fn workflow_activities(
@@ -316,13 +314,11 @@ impl Client {
         id: &str,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<Activity>, String> {
-        let page: ActivitiesPage = self
-            .get_json(&format!(
-                "/workflows/{id}/activities?limit={limit}&offset={offset}"
-            ))
-            .await?;
-        Ok(page.activities)
+    ) -> Result<ActivitiesPage, String> {
+        self.get_json(&format!(
+            "/workflows/{id}/activities?limit={limit}&offset={offset}"
+        ))
+        .await
     }
 
     pub async fn workflow_ongoing_activity(&self, id: &str) -> Result<Option<Activity>, String> {

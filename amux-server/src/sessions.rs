@@ -476,18 +476,15 @@ impl SessionService {
     }
 
     pub fn record_error(&self, session_id: &str, message: &str) {
+        let id = format!("err-{}", Uuid::new_v4());
         let activity = Activity::Error {
+            id: id.clone(),
             timestamp: now_ms(),
             error: message.to_string(),
         };
         let content = serde_json::to_string(&activity).unwrap_or_default();
-        self.store.upsert_activity(
-            session_id,
-            &format!("err-{}", Uuid::new_v4()),
-            "error",
-            &content,
-            now_ms(),
-        );
+        self.store
+            .upsert_activity(session_id, &id, "error", &content, now_ms());
     }
 
     /// 应用 ACP 事件：状态、消息、活动、选项/命令/计划/上下文缓存。
@@ -528,18 +525,15 @@ impl SessionService {
                 text,
             } => {
                 let session = self.session_of_agent(&agent_session_id)?;
+                let id = format!("think-{message_id}");
                 let activity = Activity::Thinking {
+                    id: id.clone(),
                     timestamp: now_ms(),
                     thinking: text,
                 };
                 let content = serde_json::to_string(&activity).unwrap_or_default();
-                self.store.upsert_activity(
-                    &session.id,
-                    &format!("think-{message_id}"),
-                    "thinking",
-                    &content,
-                    now_ms(),
-                );
+                self.store
+                    .upsert_activity(&session.id, &id, "thinking", &content, now_ms());
                 None
             }
             AcpEvent::ToolCall {
@@ -555,6 +549,7 @@ impl SessionService {
                     let entry = tool_calls
                         .entry((session.id.clone(), tool_call_id.clone()))
                         .or_insert_with(|| Activity::ToolCall {
+                            id: tool_call_id.clone(),
                             timestamp: now_ms(),
                             tool_call_id: tool_call_id.clone(),
                             tool_name: String::new(),

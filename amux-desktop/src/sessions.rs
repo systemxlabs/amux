@@ -462,30 +462,19 @@ fn session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> A
         .into_any_element()
 }
 
-/// 对话历史：气泡列表 + 覆盖式滚动条（滚动容器右侧预留滚动条沟槽）。
+/// 对话历史：气泡列表 + 覆盖式滚动条（滚动容器右侧预留滚动条沟槽），
+/// 滚动到顶部一页之内时自动加载更早一页（docs/DESIGN.md「对话滚动机制」）。
 fn dialog(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let mut rows: Vec<AnyElement> = Vec::new();
     for item in &core.view.detail.history {
         rows.push(match item {
-            HistoryItem::UserMessage { content, timestamp } => user_bubble(content, *timestamp, cx),
-            HistoryItem::AgentMessage { content, timestamp } => {
-                agent_bubble(content, *timestamp, cx)
-            }
+            HistoryItem::UserMessage {
+                content, timestamp, ..
+            } => user_bubble(content, *timestamp, cx),
+            HistoryItem::AgentMessage {
+                content, timestamp, ..
+            } => agent_bubble(content, *timestamp, cx),
         });
-    }
-    if core.view.detail.history_has_more {
-        rows.insert(
-            0,
-            Button::new("load-more-history")
-                .small()
-                .ghost()
-                .label("加载更早消息")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.with_core(|core| core.last.history = None);
-                    cx.notify();
-                }))
-                .into_any_element(),
-        );
     }
     if rows.is_empty() {
         return div()

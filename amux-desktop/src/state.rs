@@ -162,6 +162,36 @@ impl TerminalBuffer {
     }
 }
 
+/// 列表分页：窗口贴着「最新」一端，随滚动向更早方向按页扩展
+/// （docs/DESIGN.md「会话列表滚动机制」「对话滚动机制」「活动列表滚动机制」）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Paging {
+    /// 页大小：面板可视高度能容纳的条目数，由视图按滚动句柄计算并写入
+    pub page_size: usize,
+    /// 更早一端是否还有服务端条目
+    pub has_older: bool,
+    /// 是否有在途的更早一页拉取（避免同一页重复拉取）
+    pub loading_older: bool,
+    /// 更早一页插入后在窗口头部产生的位移（条目数）：视图据此把原首条目保持在原位置
+    pub shift: Option<usize>,
+}
+
+impl Default for Paging {
+    fn default() -> Self {
+        Self {
+            page_size: DEFAULT_PAGE_SIZE,
+            has_older: false,
+            loading_older: false,
+            shift: None,
+        }
+    }
+}
+
+/// 默认页大小（尚未布局、拿不到可视高度时使用）。
+pub const DEFAULT_PAGE_SIZE: usize = 20;
+/// 页大小上限：面板很高时不至于一次拉取过多。
+pub const MAX_PAGE_SIZE: usize = 200;
+
 /// 打开的会话明细视图数据（普通会话与工作流会话共用）。
 #[derive(Default, Clone)]
 pub struct SessionView {
@@ -176,7 +206,10 @@ pub struct SessionView {
     pub diff: Option<GitDiffResult>,
     pub terminals: Vec<Terminal>,
     pub active_terminal: Option<String>,
-    pub history_has_more: bool,
+    /// 对话历史分页（窗口为最新的若干条）
+    pub history_paging: Paging,
+    /// 活动历史分页（窗口为最新的若干条）
+    pub activities_paging: Paging,
     /// 终端输出字节（按游标增量累积；truncated 时整体替换）
     pub terminal_output: TerminalBuffer,
     /// 工作目录树的根节点（懒加载子目录）
@@ -413,7 +446,10 @@ pub struct Core {
     pub notes: VecDeque<Note>,
     /// 待投递的结果弹窗（同上）
     pub alerts: VecDeque<Alert>,
-    pub list_limit: usize,
+    /// 会话列表分页：每页从普通会话与工作流会话各拉取的条目数
+    pub list_loaded: usize,
+    /// 会话列表分页状态
+    pub list_paging: Paging,
     /// 当前打开的右侧面板
     pub side_panel: Option<SidePanel>,
     /// 工作流会话展开的关联普通会话列表
@@ -451,7 +487,8 @@ impl Default for Core {
             loaded_view: None,
             notes: VecDeque::new(),
             alerts: VecDeque::new(),
-            list_limit: 20,
+            list_loaded: DEFAULT_PAGE_SIZE,
+            list_paging: Paging::default(),
             side_panel: None,
             expanded_workflows: HashSet::new(),
             last: Ticks::default(),

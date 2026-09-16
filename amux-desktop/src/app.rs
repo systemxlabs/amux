@@ -33,8 +33,8 @@ use crate::poll;
 use crate::sessions;
 use crate::settings;
 use crate::state::{
-    Attachment, ConnectionStatus, Core, DirectoryCache, ListEntry, OpenTarget, SharedCore,
-    SidePanel, WorkspaceNode,
+    Attachment, ConnectionStatus, Core, DirectoryCache, ListEntry, OpenTarget, Paging, SharedCore,
+    SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
 };
 use crate::terminal_view;
 use crate::theme::SIDEBAR_WIDTH;
@@ -114,7 +114,9 @@ pub struct AmuxApp {
     pub diff_selected_hunks: HashSet<(String, String)>,
     /// 改动审查：改动区域滚动句柄（点击文件时定位）
     pub diff_scroll: ScrollHandle,
-    /// 对话历史滚动句柄（贴底判断）
+    /// 会话列表滚动句柄（滚动分页）
+    pub list_scroll: ScrollHandle,
+    /// 对话历史滚动句柄（贴底判断与滚动分页）
     pub dialog_scroll: ScrollHandle,
     /// 活动历史滚动句柄
     pub activities_scroll: ScrollHandle,
@@ -216,6 +218,7 @@ impl AmuxApp {
             if this
                 .update_in(cx, |this, window, cx| {
                     this.sync_view_data();
+                    this.sync_paging();
                     this.sync_orchestrator_form(window, cx);
                     this.flush_notes(window, cx);
                     cx.notify();
@@ -311,6 +314,7 @@ impl AmuxApp {
             diff_selected_files: HashSet::new(),
             diff_selected_hunks: HashSet::new(),
             diff_scroll: ScrollHandle::new(),
+            list_scroll: ScrollHandle::new(),
             dialog_scroll: ScrollHandle::new(),
             activities_scroll: ScrollHandle::new(),
             plan_scroll: ScrollHandle::new(),
@@ -420,6 +424,82 @@ impl AmuxApp {
             return;
         }
         self.load_view_data();
+    }
+
+    /// 滚动分页：按各列表的滚动位置写入页大小并预取相邻一页，插入更早一页后锚定滚动位置
+    /// （docs/DESIGN.md「会话列表滚动机制」「对话滚动机制」「活动列表滚动机制」）。
+    fn sync_paging(&mut self) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+
+        let handle = self.list_scroll.clone();
+        let loaded = self.with_core(|core| core.entries.len());
+        if self.sync_list_paging(&handle, loaded, false, |core| &mut core.list_paging) {
+            let core = Arc::clone(&self.core);
+            let client = client.clone();
+            self.runtime
+                .spawn(async move { poll::load_older_sessions(&client, &core).await });
+        }
+
+        let Some(target) = self.with_core(|core| core.open.clone()) else {
+            return;
+        };
+        let handle = self.dialog_scroll.clone();
+        let loaded = self.with_core(|core| core.view.detail.history.len());
+        if self.sync_list_paging(&handle, loaded, true, |core| {
+            &mut core.view.detail.history_paging
+        }) {
+            let core = Arc::clone(&self.core);
+            let client = client.clone();
+            let target = target.clone();
+            self.runtime
+                .spawn(async move { poll::load_older_history(&client, &core, &target).await });
+        }
+
+        if self.with_core(|core| core.side_panel == Some(SidePanel::Activities)) {
+            let handle = self.activities_scroll.clone();
+            let loaded = self.with_core(|core| core.view.detail.activities.len());
+            if self.sync_list_paging(&handle, loaded, true, |core| {
+                &mut core.view.detail.activities_paging
+            }) {
+                let core = Arc::clone(&self.core);
+                self.runtime.spawn(async move {
+                    poll::load_older_activities(&client, &core, &target).await
+                });
+            }
+        }
+    }
+
+    /// 单个列表的分页推进：写入页大小，并在视口贴近已加载窗口的「更早」一侧时返回 true
+    /// 让调用方拉取更早一页；`older_at_top` 表示更早的条目显示在顶部。
+    fn sync_list_paging(
+        &mut self,
+        handle: &ScrollHandle,
+        loaded: usize,
+        older_at_top: bool,
+        pick: fn(&mut Core) -> &mut Paging,
+    ) -> bool {
+        let top = handle.top_item();
+        let bottom = handle.bottom_item();
+        let page_size = page_size(handle, loaded);
+        self.with_core(|core| {
+            let paging = pick(core);
+            paging.page_size = page_size;
+            // 更早一页已插入：按位移量把原首条目滚回视口顶部，保持阅读位置不动
+            if !paging.loading_older {
+                if let Some(shift) = paging.shift.take() {
+                    handle.scroll_to_top_of_item(top + shift);
+                }
+            }
+            // 预取相邻一页：视口进入窗口「更早」一侧的一页之内即拉取
+            let near_older_edge = loaded > 0
+                && if older_at_top {
+                    top <= page_size
+                } else {
+                    bottom + page_size >= loaded
+                };
+            paging.has_older && !paging.loading_older && near_older_edge
+        })
     }
 
     /// 拉取设置分类的数据（打开浮窗或切换分类时触发）。
@@ -2355,4 +2435,15 @@ fn toggle_set<T: std::hash::Hash + Eq>(set: &mut HashSet<T>, value: T) {
     if !set.remove(&value) {
         set.insert(value);
     }
+}
+
+/// 页大小：面板可视高度大致能容纳的条目数，随可视高度自适应（docs/DESIGN.md 各滚动机制小节）。
+fn page_size(handle: &ScrollHandle, loaded: usize) -> usize {
+    let viewport = handle.bounds().size.height.as_f32();
+    let content = viewport + handle.max_offset().y.as_f32();
+    if loaded == 0 || viewport <= 0.0 || content <= 0.0 {
+        return DEFAULT_PAGE_SIZE;
+    }
+    let visible = (viewport / (content / loaded as f32)).round();
+    (visible as usize).clamp(1, MAX_PAGE_SIZE)
 }

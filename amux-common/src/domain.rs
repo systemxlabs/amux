@@ -84,14 +84,35 @@ pub enum ContentBlock {
 pub enum HistoryItem {
     #[serde(rename = "user")]
     UserMessage {
+        /// 条目标识（分页刷新时用于识别同一消息）
+        id: String,
         content: Vec<ContentBlock>,
         timestamp: u64,
     },
     #[serde(rename = "agent")]
     AgentMessage {
+        /// 条目标识（分页刷新时用于识别同一消息）
+        id: String,
         content: Vec<ContentBlock>,
         timestamp: u64,
     },
+}
+
+impl HistoryItem {
+    /// 条目标识。
+    pub fn id(&self) -> &str {
+        match self {
+            HistoryItem::UserMessage { id, .. } | HistoryItem::AgentMessage { id, .. } => id,
+        }
+    }
+
+    /// 消息时间戳（各变体均带）。
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            HistoryItem::UserMessage { timestamp, .. }
+            | HistoryItem::AgentMessage { timestamp, .. } => *timestamp,
+        }
+    }
 }
 
 /// 会话活动：turn 过程中的详细活动（thinking / tool_call / error）。
@@ -99,10 +120,14 @@ pub enum HistoryItem {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
     Thinking {
+        #[serde(default)]
+        id: String,
         timestamp: u64,
         thinking: String,
     },
     ToolCall {
+        #[serde(default)]
+        id: String,
         timestamp: u64,
         tool_call_id: String,
         tool_name: String,
@@ -112,9 +137,40 @@ pub enum Activity {
         parameters: Option<String>,
     },
     Error {
+        #[serde(default)]
+        id: String,
         timestamp: u64,
         error: String,
     },
+}
+
+impl Activity {
+    /// 活动标识（分页刷新时用于识别同一活动）。
+    pub fn id(&self) -> &str {
+        match self {
+            Activity::Thinking { id, .. }
+            | Activity::ToolCall { id, .. }
+            | Activity::Error { id, .. } => id,
+        }
+    }
+
+    /// 写入活动标识（读历史时补齐）。
+    pub fn set_id(&mut self, value: String) {
+        match self {
+            Activity::Thinking { id, .. }
+            | Activity::ToolCall { id, .. }
+            | Activity::Error { id, .. } => *id = value,
+        }
+    }
+
+    /// 活动时间戳（各变体均带）。
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Activity::Thinking { timestamp, .. }
+            | Activity::ToolCall { timestamp, .. }
+            | Activity::Error { timestamp, .. } => *timestamp,
+        }
+    }
 }
 
 /// 会话配置选项（ACP `configOptions` 的投影）。
