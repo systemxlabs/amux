@@ -92,7 +92,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/workflows` | 分页查询最近活跃的工作流会话列表，包含关联普通会话 |
 | GET `/workflows/<workflow_id>` | 查询指定工作流会话 |
 | POST `/workflows/<workflow_id>` | 往指定工作流会话发送指令 |
-| DELETE `/workflows/<workflow_id>` | 删除指定工作流会话 |
+| DELETE `/workflows/<workflow_id>` | 删除指定工作流会话，级联删除关联普通会话 |
 | POST `/workflows/<workflow_id>/configure` | 配置指定工作流会话：会话标题等 |
 | GET `/workflows/<workflow_id>/history` | 分页查询指定工作流会话的对话历史 |
 | GET `/workflows/<workflow_id>/activities` | 分页查询指定工作流会话的活动历史 |
@@ -245,7 +245,7 @@ Server 作为 ACP client 与 Agents 通信
 
 ### 普通会话删除
 
-当用户请求删除普通会话时，立即从元数据中删除该普通会话，然后发起异步任务清理相关资源（如关闭或删除 agent 侧会话，清理关联的 worktree），随后返回响应。异步清理资源采用尽力而为的方式，不无限重试。
+当用户请求删除普通会话时，立即从元数据中删除该普通会话，然后发起异步任务清理相关资源（如关闭或删除 agent 侧会话，清理关联的 worktree），随后立即返回响应。异步清理资源采用尽力而为的方式，不无限重试。
 
 ### 普通会话存储
 
