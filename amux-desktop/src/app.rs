@@ -900,10 +900,19 @@ impl AmuxApp {
     }
 
     /// 填入工作目录（最近目录或前缀联想项）。
+    ///
+    /// 联想项以 `/` 结尾：填入后继续列出该目录下的条目，用户可一路点选下钻
+    /// （docs/DESIGN.md「新建会话视图」：输入以 `/` 结尾时列出该目录全部条目）；
+    /// 最近目录是选定项，填入后收起列表。
     pub fn set_workspace(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let drill_down = path.ends_with('/');
         self.workspace_input
             .update(cx, |state, cx| state.set_value(path, window, cx));
-        self.with_core(|core| core.new_session.suggestions.clear());
+        if drill_down {
+            self.refresh_workspace_suggestions(cx);
+        } else {
+            self.with_core(|core| core.new_session.suggestions.clear());
+        }
         cx.notify();
     }
 
