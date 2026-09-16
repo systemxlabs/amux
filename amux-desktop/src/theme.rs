@@ -81,7 +81,8 @@ pub fn apply(cx: &mut App) {
         theme.warning_foreground = color(0x2a2105);
         theme.overlay = gpui::hsla(0.0, 0.0, 0.0, 0.45);
     } else {
-        theme.background = color(0xf1f1ef);
+        // 内容区背景为纯白（其余令牌保持暖色），侧栏与标题栏仍靠色差区分
+        theme.background = color(0xffffff);
         theme.foreground = color(0x1d1d1f);
         theme.border = color(0xe3e3df);
         theme.ring = color(0x0a84ff);
