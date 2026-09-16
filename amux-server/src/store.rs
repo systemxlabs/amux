@@ -338,6 +338,21 @@ impl Store {
         (activities, has_more)
     }
 
+    /// 会话最近一次活动时间（`activities` 表最新一条；从未有活动时为 `None`）。
+    pub fn last_activity_at(&self, session_id: &str) -> Option<u64> {
+        let at: Option<i64> = self
+            .sessions
+            .lock()
+            .query_row(
+                "SELECT MAX(updated_at) FROM activities WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        at.map(|at| at as u64)
+    }
+
     /// 最近一条活动（进行中活动展示用）。
     pub fn latest_activity(&self, session_id: &str) -> Option<Activity> {
         self.sessions

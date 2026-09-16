@@ -683,7 +683,12 @@ impl SessionService {
     pub async fn maintain(&self) {
         let now = now_ms();
         for session in self.store.sessions_all() {
-            if idle_expired(&session, now) {
+            // 从未有活动的会话以创建时间为基准，避免会话刚建好就被关闭
+            let last_activity = self
+                .store
+                .last_activity_at(&session.id)
+                .unwrap_or(session.created_at);
+            if idle_expired(&session, last_activity, now) {
                 if let Some(agent_session_id) = self.store.agent_session_id(&session.id) {
                     if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
                         conn.close(&agent_session_id).await;
@@ -706,18 +711,17 @@ impl SessionService {
 
 /// 是否关闭 agent 侧会话：会话空闲且长时间无新活动（docs/DESIGN.md「ACP 通信」）。
 ///
-/// 工作中的 turn 可能长时间没有 agent 消息，thinking/tool_call 活动只写 activities 表、
-/// 不刷新会话活跃时间，因此必须同时要求空闲，否则长 turn 会被中途关闭。
-fn idle_expired(session: &Session, now: u64) -> bool {
-    session.state == SessionState::Idle
-        && now.saturating_sub(session.updated_at) > IDLE_CLOSE_AFTER_MS
+/// 活动时间取自 `activities` 表：会话元数据的 `updated_at` 只随用户指令、agent 消息与状态
+/// 变更更新，thinking/tool_call 不写它，长 turn 会因此被误判为无活动。
+fn idle_expired(session: &Session, last_activity: u64, now: u64) -> bool {
+    session.state == SessionState::Idle && now.saturating_sub(last_activity) > IDLE_CLOSE_AFTER_MS
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn session(state: SessionState, updated_at: u64) -> Session {
+    fn session(state: SessionState) -> Session {
         Session {
             id: "s1".into(),
             machine: "pc".into(),
@@ -727,25 +731,27 @@ mod tests {
             workspace: "/tmp".into(),
             worktree_dir: String::new(),
             created_at: 1,
-            updated_at,
+            updated_at: 1,
         }
     }
 
     #[test]
     fn busy_session_is_never_closed() {
         let now = 10 * IDLE_CLOSE_AFTER_MS;
-        assert!(!idle_expired(&session(SessionState::Busy, 0), now));
+        assert!(!idle_expired(&session(SessionState::Busy), 0, now));
     }
 
     #[test]
-    fn idle_session_closed_after_one_hour() {
+    fn idle_session_closed_after_one_hour_without_activity() {
         let now = 10 * IDLE_CLOSE_AFTER_MS;
         assert!(!idle_expired(
-            &session(SessionState::Idle, now - IDLE_CLOSE_AFTER_MS),
+            &session(SessionState::Idle),
+            now - IDLE_CLOSE_AFTER_MS,
             now
         ));
         assert!(idle_expired(
-            &session(SessionState::Idle, now - IDLE_CLOSE_AFTER_MS - 1),
+            &session(SessionState::Idle),
+            now - IDLE_CLOSE_AFTER_MS - 1,
             now
         ));
     }
