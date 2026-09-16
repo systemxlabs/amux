@@ -134,6 +134,8 @@ pub struct AmuxApp {
     pub workspace_file: Option<String>,
     /// 工作目录面板中文件树区域是否展开
     pub workspace_tree_visible: bool,
+    /// 工作目录面板中文件内容区域是否展开
+    pub workspace_content_visible: bool,
     /// 左侧面板宽度（逻辑像素）
     sidebar_width: f32,
     /// 侧栏拖拽起点（指针 x, 起始宽度）
@@ -321,6 +323,7 @@ impl AmuxApp {
             workspace_suggest_scroll: ScrollHandle::new(),
             workspace_file: None,
             workspace_tree_visible: true,
+            workspace_content_visible: true,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_drag: None,
             panel_width: 0.0,
@@ -1546,6 +1549,12 @@ impl AmuxApp {
     }
 
     /// 折叠/展开整个文件树区域。
+    /// 折叠/展开工作目录视图的文件内容区域（docs/PRD.md「工作目录视图」）。
+    pub fn toggle_workspace_content(&mut self, cx: &mut Context<Self>) {
+        self.workspace_content_visible = !self.workspace_content_visible;
+        cx.notify();
+    }
+
     pub fn toggle_diff_tree(&mut self, cx: &mut Context<Self>) {
         self.diff_tree_visible = !self.diff_tree_visible;
         cx.notify();

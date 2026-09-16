@@ -442,7 +442,7 @@ pub fn render_panel(
         .bg(theme.popover)
         .border_l_1()
         .border_color(theme.border)
-        .child(panel_header(panel, this.workspace_tree_visible, cx))
+        .child(panel_header(panel, cx))
         .child(match panel {
             SidePanel::Workspace => workspace_panel(core, this, cx),
             SidePanel::Diff => diff_review(core, this, cx),
@@ -454,10 +454,10 @@ pub fn render_panel(
         .into_any_element()
 }
 
-/// 面板标题栏（标题 + 关闭按钮）；改动面板的工具栏由它自己渲染。
-fn panel_header(panel: SidePanel, tree_visible: bool, cx: &mut Context<AmuxApp>) -> AnyElement {
+/// 面板标题栏（标题 + 关闭按钮）；改动面板与工作目录面板的工具栏由各自视图渲染。
+fn panel_header(panel: SidePanel, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
-    let mut header = h_flex()
+    let header = h_flex()
         .items_center()
         .gap_2()
         .px_3()
@@ -472,19 +472,6 @@ fn panel_header(panel: SidePanel, tree_visible: bool, cx: &mut Context<AmuxApp>)
             .text_color(theme.foreground),
         )
         .child(div().flex_1());
-    if panel == SidePanel::Workspace {
-        header = header.child(
-            Button::new("workspace-toggle-tree")
-                .small()
-                .ghost()
-                .label(if tree_visible {
-                    "折叠文件树"
-                } else {
-                    "展开文件树"
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_workspace_tree(cx))),
-        );
-    }
     header
         .child(
             Button::new("close-panel")
@@ -556,11 +543,51 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
         }
     }
 
+    // 工具栏（docs/PRD.md「工作目录视图」）：折叠/展开文件树按钮左对齐，折叠/展开内容
+    // 区域按钮右对齐
+    let toolbar = h_flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .pb_2()
+        .child(
+            Button::new("workspace-toggle-tree")
+                .small()
+                .ghost()
+                .label(if this.workspace_tree_visible {
+                    "折叠文件树"
+                } else {
+                    "展开文件树"
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_workspace_tree(cx))),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new("workspace-toggle-content")
+                .small()
+                .ghost()
+                .label(if this.workspace_content_visible {
+                    "折叠内容"
+                } else {
+                    "展开内容"
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_workspace_content(cx))),
+        );
+
     let mut body = h_flex().flex_1().min_h_0().gap_2().px_3().pb_3();
     if this.workspace_tree_visible {
         body = body.child(tree);
     }
-    body.child(content).into_any_element()
+    if this.workspace_content_visible {
+        body = body.child(content);
+    }
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .child(toolbar)
+        .child(body)
+        .into_any_element()
 }
 
 /// 工作目录树行：目录可折叠/展开（首次展开拉取子目录），文件可查看内容。
