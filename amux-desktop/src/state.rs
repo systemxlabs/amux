@@ -246,27 +246,18 @@ pub struct NewSessionForm {
     pub use_worktree: bool,
     /// 工作目录输入框的前缀匹配目录项
     pub suggestions: Vec<FsEntry>,
-    /// 前缀联想的目录缓存：同一目录只拉取一次，前缀变化时在本地过滤
-    pub suggestion_cache: Option<DirectoryCache>,
+    /// 当前联想请求的目录（实时拉取，不做缓存；应答回来时目录已变则丢弃）
+    pub suggestion_dir: Option<String>,
+    /// 当前联想请求的前缀（应答回来时按最新前缀过滤）
+    pub suggestion_prefix: String,
 }
 
-/// 已拉取的目录条目，用于工作目录输入框的本地前缀过滤。
-#[derive(Debug, Clone)]
-pub struct DirectoryCache {
-    pub machine: String,
-    pub dir: String,
-    pub entries: Vec<FsEntry>,
-}
-
-impl DirectoryCache {
-    /// 目录中名称以 `prefix` 开头的子目录。
-    pub fn matching(&self, prefix: &str) -> Vec<FsEntry> {
-        self.entries
-            .iter()
-            .filter(|entry| entry.is_dir && entry.name.starts_with(prefix))
-            .cloned()
-            .collect()
-    }
+/// 目录条目中名称以 `prefix` 开头的子目录（工作目录联想项）。
+pub fn matching_dirs(entries: Vec<FsEntry>, prefix: &str) -> Vec<FsEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| entry.is_dir && entry.name.starts_with(prefix))
+        .collect()
 }
 
 /// 待发送附件：拖拽或粘贴得到的文件/图片，随消息一并作为内容块发送。

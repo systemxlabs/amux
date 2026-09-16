@@ -33,7 +33,7 @@ use crate::poll;
 use crate::sessions;
 use crate::settings;
 use crate::state::{
-    Attachment, ConnectionStatus, Core, DirectoryCache, ListEntry, OpenTarget, Paging, SharedCore,
+    matching_dirs, Attachment, ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SharedCore,
     SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
 };
 use crate::terminal_view;
@@ -931,26 +931,27 @@ impl AmuxApp {
 
     /// 刷新前缀匹配的目录项（docs/DESIGN.md「新建会话视图」）：输入 `…/tom/` 列出该目录下
     /// 全部条目；输入 `…/tom` 列出其父目录下与 `tom` 前缀匹配的条目。
+    ///
+    /// 每次输入都实时拉取该目录的条目（不按目录缓存，目录内的增删要立刻反映）；
+    /// 应答回来时若目录已变则丢弃，否则按最新前缀过滤。
     fn refresh_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
         let text = self.workspace_input.read(cx).value().to_string();
         let machine = self.with_core(|core| core.new_session.machine.clone());
         let parsed = ui::split_dir_query(&text);
         let (Some((dir, prefix)), Some(machine)) = (parsed, machine) else {
-            self.with_core(|core| core.new_session.suggestions.clear());
+            self.with_core(|core| {
+                core.new_session.suggestions.clear();
+                core.new_session.suggestion_dir = None;
+            });
             cx.notify();
             return;
         };
         let dir = dir.to_string();
         let prefix = prefix.to_string();
-        let cached = self.with_core(|core| {
-            let cache = core.new_session.suggestion_cache.as_ref()?;
-            (cache.machine == machine && cache.dir == dir).then(|| cache.matching(&prefix))
+        self.with_core(|core| {
+            core.new_session.suggestion_dir = Some(dir.clone());
+            core.new_session.suggestion_prefix = prefix.clone();
         });
-        if let Some(suggestions) = cached {
-            self.with_core(|core| core.new_session.suggestions = suggestions);
-            cx.notify();
-            return;
-        }
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let core = Arc::clone(&self.core);
@@ -959,14 +960,13 @@ impl AmuxApp {
                 Ok(result) => result.entries,
                 Err(_) => Vec::new(),
             };
-            let cache = DirectoryCache {
-                machine,
-                dir,
-                entries,
-            };
             let mut core = core.lock();
-            core.new_session.suggestions = cache.matching(&prefix);
-            core.new_session.suggestion_cache = Some(cache);
+            // 用户可能已经继续输入或换了目录：过期应答不落地
+            if core.new_session.suggestion_dir.as_deref() != Some(dir.as_str()) {
+                return;
+            }
+            let prefix = core.new_session.suggestion_prefix.clone();
+            core.new_session.suggestions = matching_dirs(entries, &prefix);
         });
         cx.notify();
     }
