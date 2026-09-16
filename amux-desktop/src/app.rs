@@ -124,6 +124,8 @@ pub struct AmuxApp {
     pub plan_scroll: ScrollHandle,
     /// 已展开的活动条目（key = 时间戳 + 文案，跨帧稳定）
     pub expanded_activities: HashSet<String>,
+    /// 工作目录联想的滚动句柄（列表内滚动与滚动条）
+    pub workspace_suggest_scroll: ScrollHandle,
     /// 工作目录面板当前查看的文件路径
     pub workspace_file: Option<String>,
     /// 工作目录面板中文件树区域是否展开
@@ -310,6 +312,7 @@ impl AmuxApp {
             activities_scroll: ScrollHandle::new(),
             plan_scroll: ScrollHandle::new(),
             expanded_activities: HashSet::new(),
+            workspace_suggest_scroll: ScrollHandle::new(),
             workspace_file: None,
             workspace_tree_visible: true,
             sidebar_width: SIDEBAR_WIDTH,

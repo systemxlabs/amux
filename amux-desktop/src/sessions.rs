@@ -55,6 +55,12 @@ pub fn render_main(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
 
 // ---------- 新建会话视图 ----------
 
+/// 工作目录联想的选项行高与最多同时展示的行数（更多靠列表内滚动查看）。
+const SUGGEST_ROW_HEIGHT: f32 = 28.0;
+const SUGGEST_MAX_ROWS: usize = 8;
+/// 联想列表的上下内边距。
+const SUGGEST_PADDING: f32 = 4.0;
+
 fn new_session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let workflow_mode = core.new_session.workflow_mode;
     let card = v_flex()
@@ -349,31 +355,27 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         );
     }
 
-    // 前缀联想：贴输入框下方展开（deferred 以免撑开表单）
+    // 前缀联想：贴输入框下方展开（deferred 以免撑开表单）；高度按条目数自适应，
+    // 超过上限时列表内滚动查看（带滚动条）
     if !core.new_session.suggestions.is_empty() {
-        let mut suggestions = v_flex()
+        let visible = core.new_session.suggestions.len().min(SUGGEST_MAX_ROWS);
+        let height = px(SUGGEST_PADDING * 2.0 + SUGGEST_ROW_HEIGHT * visible as f32);
+        let mut rows = v_flex()
             .id("ns-workspace-suggest")
-            .absolute()
-            .top(relative(1.0))
-            .left_0()
-            .right_0()
-            .max_h(rems(16.))
-            .overflow_y_scroll()
-            .p_1()
-            .gap_0p5()
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
-            .rounded_lg()
-            .shadow_lg();
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .p(px(SUGGEST_PADDING))
+            .track_scroll(&this.workspace_suggest_scroll)
+            .overflow_y_scroll();
         for entry in core.new_session.suggestions.clone() {
             let path = entry.path.clone();
             let value = format!("{}/", path.trim_end_matches('/'));
-            suggestions = suggestions.child(
+            rows = rows.child(
                 div()
                     .id(SharedString::from(format!("ns-suggest-{path}")))
                     .w_full()
-                    .h_6()
+                    .h(px(SUGGEST_ROW_HEIGHT))
                     .flex()
                     .items_center()
                     .px_2()
@@ -389,14 +391,41 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     }))
                     .child(
                         Label::new(path.clone())
-                            .text_sm()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis_start(),
                     ),
             );
         }
-        input = input.child(deferred(suggestions));
+        input = input.child(deferred(
+            div()
+                .id("ns-workspace-suggest-panel")
+                .absolute()
+                .top(relative(1.0))
+                .left_0()
+                .right_0()
+                .h(height)
+                .overflow_hidden()
+                .relative()
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .rounded_lg()
+                .shadow_lg()
+                .child(rows)
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .child(
+                            Scrollbar::vertical(&this.workspace_suggest_scroll)
+                                .id("ns-suggest-scrollbar"),
+                        ),
+                ),
+        ));
     }
 
     field("工作目录", input.into_any_element(), cx)
