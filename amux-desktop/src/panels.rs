@@ -1081,9 +1081,9 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
                 .small()
                 .ghost()
                 .label(if all_collapsed {
-                    "展开改动"
+                    "展开 diff"
                 } else {
-                    "折叠改动"
+                    "折叠 diff"
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_all_diffs(cx))),
         )
