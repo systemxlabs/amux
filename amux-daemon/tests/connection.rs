@@ -54,6 +54,8 @@ struct FakeServer {
 }
 
 impl FakeServer {
+    // accept_hdr_async 回调的 Result<Response, ErrorResponse> 签名由 tungstenite 固定
+    #[allow(clippy::result_large_err)]
     async fn accept(listener: &TcpListener) -> (Self, Option<String>, Option<String>) {
         let (stream, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept())
             .await
@@ -222,6 +224,8 @@ async fn invalid_acp_notification_does_not_break_connection() {
 }
 
 #[tokio::test]
+// accept_hdr_async 回调的 Result<Response, ErrorResponse> 签名由 tungstenite 固定
+#[allow(clippy::result_large_err)]
 async fn rejected_handshake_keeps_daemon_alive() {
     let home = temp_home();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

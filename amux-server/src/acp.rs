@@ -344,11 +344,10 @@ impl ConnectTo<Client> for DaemonTransport {
         let mut incoming = self.incoming;
         let incoming = stream::poll_fn(move |cx| {
             incoming.poll_recv(cx).map(|item| {
-                item.map(|line| Ok::<_, io::Error>(line))
-                    .or(Some(Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "Daemon 连接已关闭",
-                    ))))
+                item.map(Ok::<_, io::Error>).or(Some(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Daemon 连接已关闭",
+                ))))
             })
         });
         ConnectTo::<Client>::connect_to(Lines::new(outgoing, incoming), client).await
@@ -868,13 +867,10 @@ mod tests {
     }
 
     fn permission(kind: PermissionOptionKind) -> PermissionOption {
-        let id = format!(
-            "{}",
-            serde_json::to_value(&kind)
-                .ok()
-                .and_then(|value| value.as_str().map(|text| text.replace('_', "-")))
-                .unwrap_or_else(|| "x".to_string())
-        );
+        let id = serde_json::to_value(&kind)
+            .ok()
+            .and_then(|value| value.as_str().map(|text| text.replace('_', "-")))
+            .unwrap_or_else(|| "x".to_string());
         PermissionOption::new(PermissionOptionId::new(id), "label", kind)
     }
 }
