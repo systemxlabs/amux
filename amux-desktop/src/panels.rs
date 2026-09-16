@@ -554,7 +554,12 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
             Button::new("workspace-toggle-tree")
                 .small()
                 .ghost()
-                .label(if this.workspace_tree_visible {
+                .icon(if this.workspace_tree_visible {
+                    IconName::PanelLeftClose
+                } else {
+                    IconName::PanelLeftOpen
+                })
+                .tooltip(if this.workspace_tree_visible {
                     "折叠文件树"
                 } else {
                     "展开文件树"
@@ -566,7 +571,12 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
             Button::new("workspace-toggle-content")
                 .small()
                 .ghost()
-                .label(if this.workspace_content_visible {
+                .icon(if this.workspace_content_visible {
+                    IconName::PanelRightClose
+                } else {
+                    IconName::PanelRightOpen
+                })
+                .tooltip(if this.workspace_content_visible {
                     "折叠内容"
                 } else {
                     "展开内容"
@@ -1089,7 +1099,12 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
             Button::new("diff-toggle-tree")
                 .small()
                 .ghost()
-                .label(if this.diff_tree_visible {
+                .icon(if this.diff_tree_visible {
+                    IconName::PanelLeftClose
+                } else {
+                    IconName::PanelLeftOpen
+                })
+                .tooltip(if this.diff_tree_visible {
                     "折叠文件树"
                 } else {
                     "展开文件树"
@@ -1101,7 +1116,12 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
             Button::new("diff-toggle-changes")
                 .small()
                 .ghost()
-                .label(if all_collapsed {
+                .icon(if all_collapsed {
+                    IconName::PanelRightOpen
+                } else {
+                    IconName::PanelRightClose
+                })
+                .tooltip(if all_collapsed {
                     "展开 diff"
                 } else {
                     "折叠 diff"
