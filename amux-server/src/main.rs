@@ -15,6 +15,7 @@ mod state;
 mod store;
 mod terminals;
 mod timestamps;
+mod web;
 mod workflows;
 
 use std::sync::Arc;
@@ -53,6 +54,9 @@ struct Args {
     /// 认证 token（Client 与 Daemon 共用）
     #[arg(long)]
     token: String,
+    /// web 静态文件目录；未传则静态资源请求返回 404
+    #[arg(long)]
+    web: Option<String>,
 }
 
 #[tokio::main]
@@ -110,10 +114,14 @@ async fn run(args: Args) -> Result<(), String> {
         sessions,
         workflows,
     });
-    let app = api::router(Arc::clone(&state)).layer(middleware::from_fn_with_state(
+    // 鉴权只对命中 API 路由的请求生效：浏览器加载页面时无法携带 Authorization 头，
+    // 静态资源与未命中路径必须免鉴权，否则 Web 应用无法加载、
+    // 未传 --web 时的 404 也会被鉴权中间件改写成 401（docs/DESIGN.md「Web 应用」）。
+    let api = api::router(Arc::clone(&state)).route_layer(middleware::from_fn_with_state(
         Arc::clone(&state),
         authorize,
     ));
+    let app = web::routes(api, args.web.as_deref());
 
     let listener = tokio::net::TcpListener::bind((args.host.as_str(), args.port))
         .await

@@ -24,6 +24,8 @@ logforth = { version = "0.30", features = ["starter-log"] }
 tokio = { version = "1" }
 tokio-tungstenite = "0.30"
 axum = "0.8"
+# 只开 fs：Server 需要按 `--web` 目录托管 Web 应用的构建产物（docs/DESIGN.md「Server 启动」）
+tower-http = { version = "0.6.8", default-features = false, features = ["fs"] }
 agent-client-protocol = "2.1.0"
 uuid = { version = "1.26.0", features = ["v4"] }
 parking_lot = "=0.12.5"

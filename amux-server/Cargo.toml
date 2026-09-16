@@ -20,6 +20,7 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 axum = { workspace = true, features = ["ws"] }
+tower-http = { workspace = true, features = ["fs"] }
 futures-util.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true

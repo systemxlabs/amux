@@ -3,3 +3,7 @@
 **/*.rs.bk
 
 .claude/
+
+# Web 应用
+/amux-web/node_modules
+/amux-web/dist

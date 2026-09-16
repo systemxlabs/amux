@@ -1,0 +1,72 @@
+// 消息与活动展示格式化（PRD「会话交互视图」「会话活动」）。
+
+import { describe, expect, it } from "vitest";
+
+import { activitySummary, blocksText, formatTime, oneLine, truncate } from "./format";
+
+describe("formatTime", () => {
+  it("按本地时间输出到秒", () => {
+    const ms = new Date(2026, 0, 2, 3, 4, 5).getTime();
+    expect(formatTime(ms)).toBe("2026-01-02 03:04:05");
+  });
+
+  it("非法时间戳返回空串", () => {
+    expect(formatTime(Number.NaN)).toBe("");
+  });
+});
+
+describe("blocksText", () => {
+  it("拼接文本块并对非文本块给出标签", () => {
+    expect(
+      blocksText([
+        { type: "text", text: "看这个 " },
+        { type: "resource_link", uri: "file:///a.rs", name: "a.rs", title: "a.rs" },
+        { type: "resource", mimeType: "text/plain", uri: "file:///b.rs" },
+      ]),
+    ).toBe("看这个 [引用 a.rs][资源 file:///b.rs]");
+  });
+});
+
+describe("activitySummary", () => {
+  it("工具调用优先展示标题，换行折叠为一行", () => {
+    expect(
+      activitySummary({
+        kind: "tool_call",
+        id: "a1",
+        timestamp: 1,
+        tool_call_id: "tc1",
+        tool_name: "read_file",
+        title: "读取\nsrc/lib.rs",
+      }),
+    ).toBe("读取 src/lib.rs");
+  });
+
+  it("无标题时退回工具名；思考与错误取各自内容", () => {
+    expect(
+      activitySummary({
+        kind: "tool_call",
+        id: "a1",
+        timestamp: 1,
+        tool_call_id: "tc1",
+        tool_name: "read_file",
+      }),
+    ).toBe("read_file");
+    expect(activitySummary({ kind: "thinking", id: "a2", timestamp: 1, thinking: "先看看" })).toBe(
+      "先看看",
+    );
+    expect(activitySummary({ kind: "error", id: "a3", timestamp: 1, error: "调用失败" })).toBe(
+      "调用失败",
+    );
+  });
+});
+
+describe("oneLine 与 truncate", () => {
+  it("压缩空白", () => {
+    expect(oneLine(" a\n\n b  c ")).toBe("a b c");
+  });
+
+  it("按字符截断（中文按字符计）", () => {
+    expect(truncate("中文内容", 3)).toBe("中文内…");
+    expect(truncate("短", 3)).toBe("短");
+  });
+});

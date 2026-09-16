@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+/*
+ * shadcn/ui 令牌（Tailwind v4 CSS-first 配置）：应用为单一深色主题，
+ * 组件按 shadcn 约定引用 background/foreground/muted/primary/destructive 等语义色。
+ */
+@theme inline {
+  --color-background: #16181d;
+  --color-foreground: #e6e8ec;
+  --color-card: #1c1f26;
+  --color-card-foreground: #e6e8ec;
+  --color-popover: #22262e;
+  --color-popover-foreground: #e6e8ec;
+  --color-primary: #4a86d8;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #262b34;
+  --color-secondary-foreground: #d7dbe2;
+  --color-muted: #22262e;
+  --color-muted-foreground: #8b93a1;
+  --color-accent: #2b313b;
+  --color-accent-foreground: #e6e8ec;
+  --color-destructive: #d8564a;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #2c313b;
+  --color-input: #2c313b;
+  --color-ring: #4a86d8;
+  --color-diff-add: #16351f;
+  --color-diff-remove: #3a1c1c;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3a404c;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
