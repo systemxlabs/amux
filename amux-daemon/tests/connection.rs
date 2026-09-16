@@ -37,8 +37,12 @@ impl DaemonProcess {
 }
 
 fn spawn_daemon(server: String, home: &std::path::Path) -> DaemonProcess {
+    spawn_daemon_named(MACHINE, server, home)
+}
+
+fn spawn_daemon_named(machine: &str, server: String, home: &std::path::Path) -> DaemonProcess {
     let child = Command::new(env!("CARGO_BIN_EXE_amux-daemon"))
-        .args(["--machine", MACHINE, "--server", &server, "--token", TOKEN])
+        .args(["--machine", machine, "--server", &server, "--token", TOKEN])
         .env("AMUX_HOME", home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -192,6 +196,25 @@ async fn daemon_authenticates_and_serves_requests() {
         .await;
     assert_eq!(bad["error"]["code"], -32602, "{bad}");
 
+    assert!(daemon.alive(), "daemon 应保持运行");
+}
+
+/// 机器名以 URL 编码放入 `amux-machine` 头（docs/DESIGN.md「认证」）：头值只能是可见
+/// ASCII，非 ASCII 机器名此前会被 `HeaderValue::from_str` 直接拒绝。
+#[tokio::test]
+async fn machine_header_is_url_encoded() {
+    let home = temp_home();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut daemon = spawn_daemon_named("开发机 A", format!("ws://{addr}"), home.path());
+
+    let (mut server, authorization, machine) = FakeServer::accept(&listener).await;
+    assert_eq!(authorization.as_deref(), Some("Bearer test-token"));
+    assert_eq!(machine.as_deref(), Some("%E5%BC%80%E5%8F%91%E6%9C%BA%20A"));
+
+    // 机器名本身不编码：machine.info 返回原文
+    let info = server.request(1, "machine.info", serde_json::json!({})).await;
+    assert_eq!(info["result"]["name"], "开发机 A");
     assert!(daemon.alive(), "daemon 应保持运行");
 }
 

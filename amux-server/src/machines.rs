@@ -293,12 +293,8 @@ impl MachineHub {
             log::warn!("Daemon 握手被拒：token 不正确");
             return StatusCode::UNAUTHORIZED.into_response();
         }
-        let Some(machine_name) = headers
-            .get(header::MACHINE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
-        else {
-            log::warn!("Daemon 握手被拒：缺少机器名");
+        let Some(machine_name) = machine_from_headers(headers) else {
+            log::warn!("Daemon 握手被拒：缺少机器名或机器名编码非法");
             return StatusCode::BAD_REQUEST.into_response();
         };
         if self.machines.lock().contains_key(&machine_name) {
@@ -609,5 +605,26 @@ fn decode<T: DeserializeOwned>(params: Option<serde_json::Value>) -> Option<T> {
             log::warn!("通知负载非法: {error}");
             None
         }
+    }
+}
+
+/// 握手请求中的机器名：`amux-machine` 头值为 URL 编码（docs/DESIGN.md「认证」）。
+fn machine_from_headers(headers: &HeaderMap) -> Option<String> {
+    header::decode_machine(headers.get(header::MACHINE)?.to_str().ok()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn machine_name_is_decoded_from_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::MACHINE,
+            header::encode_machine("开发机 A").parse().unwrap(),
+        );
+        assert_eq!(machine_from_headers(&headers).as_deref(), Some("开发机 A"));
+        assert_eq!(machine_from_headers(&HeaderMap::new()), None);
     }
 }

@@ -125,8 +125,8 @@ async fn connect_once(
         );
         headers.insert(
             HeaderName::from_static(header::MACHINE),
-            HeaderValue::from_str(&daemon.machine)
-                .map_err(|error| format!("机器名含非法字符: {error}"))?,
+            HeaderValue::from_str(&header::encode_machine(&daemon.machine))
+                .map_err(|error| format!("机器名编码失败: {error}"))?,
         );
     }
 

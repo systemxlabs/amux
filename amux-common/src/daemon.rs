@@ -38,8 +38,31 @@ pub mod notify {
 
 /// 认证握手用的请求头名（HTTP 头名大小写不敏感，统一小写以便 `HeaderName::from_static`）。
 pub mod header {
+    use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+
     pub const AUTHORIZATION: &str = "authorization";
     pub const MACHINE: &str = "amux-machine";
+
+    /// 头值转义集：保留 URL 非保留字符，其余按 UTF-8 字节转义
+    /// （HTTP 头值只允许可见 ASCII，机器名可以含非 ASCII）。
+    const MACHINE_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+
+    /// 机器名编码为 `amux-machine` 头值（docs/DESIGN.md「认证」）。
+    pub fn encode_machine(name: &str) -> String {
+        utf8_percent_encode(name, MACHINE_ENCODE_SET).to_string()
+    }
+
+    /// 解析 `amux-machine` 头值；转义结果不是合法 UTF-8 时返回 `None`。
+    pub fn decode_machine(value: &str) -> Option<String> {
+        percent_decode_str(value)
+            .decode_utf8()
+            .ok()
+            .map(|name| name.into_owned())
+    }
 }
 
 /// `machine.info` 结果。
@@ -151,5 +174,23 @@ mod tests {
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["agents"][0]["name"], "codex");
         assert_eq!(json["agents"][0]["running"], true);
+    }
+
+    #[test]
+    fn machine_header_round_trips_non_ascii_names() {
+        let name = "开发机 A";
+        let encoded = header::encode_machine(name);
+        assert!(
+            encoded.is_ascii() && !encoded.contains(' '),
+            "头值必须是可见 ASCII: {encoded}"
+        );
+        assert_eq!(
+            encoded,
+            "%E5%BC%80%E5%8F%91%E6%9C%BA%20A",
+            "非保留字符保持原样，其余按 UTF-8 转义"
+        );
+        assert_eq!(header::decode_machine(&encoded).as_deref(), Some(name));
+        assert_eq!(header::decode_machine("pc-1.local").as_deref(), Some("pc-1.local"));
+        assert_eq!(header::decode_machine("%FF"), None, "非法 UTF-8 应被拒绝");
     }
 }
