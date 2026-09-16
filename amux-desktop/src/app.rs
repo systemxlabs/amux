@@ -1,6 +1,6 @@
-//! 根视图：三面板布局、设置浮窗与轮询节拍。
+//! 根视图：窗口外壳（标题栏、三栏与拖拽调宽）、设置浮窗与轮询节拍。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,11 +12,13 @@ use amux_common::api::{
 use amux_common::domain::{
     ContentBlock, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SlashCommand,
 };
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState, Paste};
-use gpui_component::resizable::{h_resizable, resizable_panel};
-use gpui_component::select::{SelectEvent, SelectState};
-use gpui_component::*;
+use gpui_component::button::*;
+use gpui_component::input::{InputEvent, InputState, Paste};
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::label::Label;
+use gpui_component::{h_flex, v_flex, ActiveTheme, GlobalState, Root, Sizable, TitleBar, WindowExt as _};
 use parking_lot::Mutex;
 
 use crate::config::{self, Connection};
@@ -24,16 +26,31 @@ use crate::dialog::{self, FormTarget};
 use crate::panels;
 use crate::poll;
 use crate::settings;
+use crate::sessions;
 use crate::state::{
     Attachment, Core, DirectoryCache, ListEntry, OpenTarget, SharedCore, SidePanel, WorkspaceNode,
 };
+use crate::theme::SIDEBAR_WIDTH;
 use crate::ui;
 
-/// UI 轮询节拍：驱动后台刷新与重绘。
+/// UI 轮询节拍：驱动后台刷新、通知投递与重绘。
 const TICK: Duration = Duration::from_millis(250);
 
-/// 会话选项下拉框的条目类型（选项值为字符串）。
-pub type ConfigSelect = Entity<SelectState<Vec<SharedString>>>;
+/// 面板拖拽手柄宽度。
+pub const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
+/// 左侧面板拖拽下限。
+const SIDEBAR_MIN_WIDTH: f32 = 180.0;
+/// 右侧面板拖拽下限。
+const PANEL_MIN_WIDTH: f32 = 300.0;
+/// 中间列最小宽度：左/右面板的拖拽上限都据此计算。
+const MIN_CONTENT_COL_WIDTH: f32 = 320.0;
+
+actions!(amux, [CloseSettingsOverlay]);
+
+/// 侧栏调宽拖拽载荷（与面板载荷分开，避免全局拖拽事件互相触发）。
+struct SidebarResizeDrag;
+/// 右侧面板调宽拖拽载荷。
+struct PanelResizeDrag;
 
 pub struct AmuxApp {
     pub core: SharedCore,
@@ -74,14 +91,6 @@ pub struct AmuxApp {
     pub slash_selected: usize,
     /// 斜杠命令上拉框是否被 Esc 收起
     pub slash_dismissed: bool,
-    /// 会话选项下拉框：按选项 id 保留实体
-    config_selects: HashMap<String, ConfigSelect>,
-    /// 选项实体对应的会话 id
-    config_selects_session: Option<String>,
-    /// 选项实体已同步的（选项 id, 当前值）快照
-    config_selects_snapshot: Vec<(String, String)>,
-    /// 选项下拉框的事件订阅
-    config_subscriptions: Vec<Subscription>,
     /// 改动审查：已折叠的文件
     pub diff_collapsed_files: HashSet<String>,
     /// 改动审查：文件树中已折叠的目录
@@ -96,6 +105,28 @@ pub struct AmuxApp {
     pub diff_instruction: Entity<InputState>,
     /// 改动审查：改动区域滚动句柄（点击文件时定位）
     pub diff_scroll: ScrollHandle,
+    /// 对话历史滚动句柄（贴底判断）
+    pub dialog_scroll: ScrollHandle,
+    /// 活动历史滚动句柄
+    pub activities_scroll: ScrollHandle,
+    /// 计划面板滚动句柄
+    pub plan_scroll: ScrollHandle,
+    /// 已展开的活动条目（key = 时间戳 + 文案，跨帧稳定）
+    pub expanded_activities: HashSet<String>,
+    /// 工作目录面板当前查看的文件路径
+    pub workspace_file: Option<String>,
+    /// 工作目录面板中文件树区域是否展开
+    pub workspace_tree_visible: bool,
+    /// 左侧面板宽度（逻辑像素）
+    sidebar_width: f32,
+    /// 侧栏拖拽起点（指针 x, 起始宽度）
+    sidebar_drag: Option<(f32, f32)>,
+    /// 右侧面板宽度（逻辑像素，不含手柄）
+    panel_width: f32,
+    /// 面板拖拽起点（指针 x, 起始宽度）
+    panel_drag: Option<(f32, f32)>,
+    /// 设置浮窗的焦点锚点（Esc 关闭依赖焦点在浮窗内）
+    pub settings_focus: FocusHandle,
 }
 
 impl AmuxApp {
@@ -107,15 +138,27 @@ impl AmuxApp {
             .build()
             .expect("构建 tokio runtime 失败");
 
+        // Esc 关闭设置浮窗：仅在浮窗持有焦点（SettingsOverlay 上下文）时生效
+        cx.bind_keys([KeyBinding::new(
+            "escape",
+            CloseSettingsOverlay,
+            Some("SettingsOverlay"),
+        )]);
+
         let server = connection.server.clone();
         let token = connection.token.clone();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("输入指令，Enter 发送，Shift+Enter 换行")
-                .auto_grow(1, 8)
+                .placeholder("输入消息，Enter 发送；Shift+Enter 换行")
+                .auto_grow(3, 8)
                 .submit_on_enter(true)
         });
-        let plan_input = cx.new(|cx| InputState::new(window, cx).placeholder("工作流计划"));
+        let plan_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("工作计划")
+                .multi_line(true)
+                .auto_grow(3, 10)
+        });
         let workspace_input = cx.new(|cx| InputState::new(window, cx).placeholder("工作目录"));
         let server_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://amux.example.com:34567"));
@@ -153,16 +196,15 @@ impl AmuxApp {
         )
         .detach();
 
-        // 轮询节拍：后台刷新 + 同步视图状态 + 重绘
+        // 轮询节拍：后台刷新 + 投递通知 + 同步视图状态 + 重绘
         let tick_core = Arc::clone(&core);
         let tick_runtime = runtime.handle().clone();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(TICK).await;
             tick_runtime.spawn(poll::tick(tick_core.clone()));
-            // 同步会话选项控件（下拉框需要 Window）后重绘
             if this
                 .update_in(cx, |this, window, cx| {
-                    this.sync_config_options(window, cx);
+                    this.flush_notes(window, cx);
                     cx.notify();
                 })
                 .is_err()
@@ -190,18 +232,51 @@ impl AmuxApp {
         .detach();
 
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
-        let orch_base_url = cx.new(|cx| InputState::new(window, cx).placeholder("Base URL"));
-        let orch_api_key = cx.new(|cx| InputState::new(window, cx).placeholder("API Key"));
+        let orch_base_url = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Base URL（如 https://api.openai.com/v1）")
+        });
+        let orch_api_key = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("API Key")
+                .masked(true)
+        });
         let orch_model = cx.new(|cx| InputState::new(window, cx).placeholder("模型名称"));
         let orch_effort = cx.new(|cx| InputState::new(window, cx).placeholder("推理级别"));
         let quick_name = cx.new(|cx| InputState::new(window, cx).placeholder("指令名称"));
-        let quick_prompt = cx.new(|cx| InputState::new(window, cx).placeholder("指令内容"));
+        let quick_prompt = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("指令内容（点击后作为用户输入发送的一段提示词）")
+                .multi_line(true)
+                .auto_grow(3, 8)
+        });
         let skill_name = cx.new(|cx| InputState::new(window, cx).placeholder("技能名称"));
-        let skill_desc = cx.new(|cx| InputState::new(window, cx).placeholder("技能描述"));
+        let skill_desc = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("技能描述（仓库 / 资源 URL 或安装方法说明）")
+                .multi_line(true)
+                .auto_grow(3, 8)
+        });
         let plan_name = cx.new(|cx| InputState::new(window, cx).placeholder("计划名称"));
-        let plan_plan = cx.new(|cx| InputState::new(window, cx).placeholder("计划内容"));
+        let plan_plan = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("计划内容（自然语言描述）")
+                .multi_line(true)
+                .auto_grow(3, 8)
+        });
         let terminal_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("终端命令，回车发送"));
+        let terminal_input_entity = terminal_input.clone();
+        // 终端命令行：回车发送（补换行由 send_terminal_line 负责）
+        cx.subscribe_in(
+            &terminal_input_entity,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.send_terminal_line(window, cx);
+                }
+            },
+        )
+        .detach();
         let diff_instruction = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("对选中的改动说明指令，发送给 agent")
@@ -246,10 +321,6 @@ impl AmuxApp {
             attachments: Vec::new(),
             slash_selected: 0,
             slash_dismissed: false,
-            config_selects: HashMap::new(),
-            config_selects_session: None,
-            config_selects_snapshot: Vec::new(),
-            config_subscriptions: Vec::new(),
             diff_collapsed_files: HashSet::new(),
             diff_collapsed_dirs: HashSet::new(),
             diff_tree_visible: true,
@@ -257,7 +328,81 @@ impl AmuxApp {
             diff_selected_hunks: HashSet::new(),
             diff_instruction,
             diff_scroll: ScrollHandle::new(),
+            dialog_scroll: ScrollHandle::new(),
+            activities_scroll: ScrollHandle::new(),
+            plan_scroll: ScrollHandle::new(),
+            expanded_activities: HashSet::new(),
+            workspace_file: None,
+            workspace_tree_visible: true,
+            sidebar_width: SIDEBAR_WIDTH,
+            sidebar_drag: None,
+            panel_width: 0.0,
+            panel_drag: None,
+            settings_focus: cx.focus_handle(),
         }
+    }
+
+    pub fn with_core<R>(&self, f: impl FnOnce(&mut Core) -> R) -> R {
+        let mut core = self.core.lock();
+        f(&mut core)
+    }
+
+    /// 把后台排队的提示投递为通知（后台任务无窗口，只能在有窗口的节拍里投递）。
+    fn flush_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        loop {
+            let Some(note) = self.with_core(|core| core.notes.pop_front()) else {
+                return;
+            };
+            window.push_notification(dialog::note_notification(note), cx);
+        }
+    }
+
+    /// 打开设置浮窗；`tab` 为 `None` 时保持当前分类。
+    pub fn open_settings(
+        &mut self,
+        tab: Option<crate::state::SettingsTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let switched = self.with_core(|core| {
+            let switched = tab.is_some() && core.settings_tab != tab.unwrap();
+            if let Some(tab) = tab {
+                core.settings_tab = tab;
+            }
+            core.settings_open = true;
+            switched
+        });
+        if switched && self.with_core(|core| core.settings_tab) == crate::state::SettingsTab::Orchestrator
+        {
+            self.load_orchestrator_form(window, cx);
+        }
+        // 焦点落在浮窗上，Esc（SettingsOverlay 上下文）才能被浮窗接收
+        window.focus(&self.settings_focus, cx);
+        cx.notify();
+    }
+
+    /// 关闭设置浮窗。
+    pub fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.with_core(|core| core.settings_open = false);
+        cx.notify();
+    }
+
+    /// 设置分类切换：切到编排智能体分类时预填已保存配置。
+    pub fn select_settings_tab(
+        &mut self,
+        tab: crate::state::SettingsTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let switched = self.with_core(|core| {
+            let switched = core.settings_tab != tab;
+            core.settings_tab = tab;
+            switched
+        });
+        if switched && tab == crate::state::SettingsTab::Orchestrator {
+            self.load_orchestrator_form(window, cx);
+        }
+        cx.notify();
     }
 
     /// 重新发现机器上的 agents。
@@ -272,7 +417,7 @@ impl AmuxApp {
                     core.settings.agents.retain(|(name, _)| name != &machine);
                     core.settings.agents.push((machine, agents));
                 }
-                Err(error) => core.lock().note(format!("重新发现失败：{error}")),
+                Err(error) => core.lock().error(format!("重新发现失败：{error}")),
             }
         });
         cx.notify();
@@ -285,8 +430,8 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match client.restart_agent(&machine, &agent).await {
-                Ok(()) => core.lock().note(format!("已重启 {agent}@{machine}")),
-                Err(error) => core.lock().note(format!("重启失败：{error}")),
+                Ok(()) => core.lock().success(format!("已重启 {agent}@{machine}")),
+                Err(error) => core.lock().error(format!("重启失败：{error}")),
             }
         });
         cx.notify();
@@ -309,11 +454,12 @@ impl AmuxApp {
     pub fn read_file(&mut self, machine: String, path: String, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
+        self.workspace_file = Some(path.clone());
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match client.read_file(&machine, &path, 400, 0).await {
                 Ok(result) => core.lock().view.detail.file_content = Some(result.content),
-                Err(error) => core.lock().note(format!("读取文件失败：{error}")),
+                Err(error) => core.lock().error(format!("读取文件失败：{error}")),
             }
         });
         cx.notify();
@@ -328,7 +474,7 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             if let Err(error) = client.close_terminal(&id, &terminal).await {
-                core.lock().note(format!("关闭终端失败：{error}"));
+                core.lock().error(format!("关闭终端失败：{error}"));
             }
             let mut core = core.lock();
             if core.view.detail.active_terminal.as_deref() == Some(terminal.as_str()) {
@@ -337,6 +483,28 @@ impl AmuxApp {
             }
         });
         cx.notify();
+    }
+
+    /// 终端可视区尺寸变化时同步 PTY 行列（尺寸未变则不发请求）。
+    pub fn sync_terminal_size(&mut self, cols: u16, rows: u16, cx: &mut Context<Self>) {
+        let (active, current) = self.with_core(|core| {
+            let active = core.view.detail.active_terminal.clone();
+            let current = active.as_ref().and_then(|id| {
+                core.view
+                    .detail
+                    .terminals
+                    .iter()
+                    .find(|terminal| &terminal.id == id)
+                    .map(|terminal| (terminal.cols, terminal.rows))
+            });
+            (active, current)
+        });
+        let (Some(terminal), Some(current)) = (active, current) else {
+            return;
+        };
+        if current != (cols, rows) {
+            self.resize_terminal(terminal, cols, rows, cx);
+        }
     }
 
     /// 调整终端行列。
@@ -354,7 +522,7 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             if let Err(error) = client.resize_terminal(&id, &terminal, cols, rows).await {
-                core.lock().note(format!("调整终端尺寸失败：{error}"));
+                core.lock().error(format!("调整终端尺寸失败：{error}"));
             }
         });
         cx.notify();
@@ -394,6 +562,10 @@ impl AmuxApp {
         self.diff_collapsed_dirs.clear();
         self.diff_selected_files.clear();
         self.diff_selected_hunks.clear();
+        self.expanded_activities.clear();
+        self.workspace_file = None;
+        self.workspace_tree_visible = true;
+        self.dialog_scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -406,10 +578,15 @@ impl AmuxApp {
                 .map(|entry| entry.title())
                 .unwrap_or_default()
         });
-        let _ = window;
         self.renaming_id = Some(id.to_string());
         let input = self.rename_input.clone();
         input.update(cx, |state, cx| state.set_value(current, window, cx));
+        cx.notify();
+    }
+
+    /// 取消行内重命名。
+    pub fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        self.renaming_id = None;
         cx.notify();
     }
 
@@ -456,15 +633,21 @@ impl AmuxApp {
         dialog::confirm(
             window,
             cx,
-            format!("删除「{label}」？"),
             if matches!(entry, ListEntry::Workflow(_)) {
-                "工作流会话及其关联的普通会话都会被删除。"
+                "删除工作流会话"
             } else {
-                "会话记录与其 worktree 会被清理。"
-            }
-            .to_string(),
+                "删除会话"
+            },
+            format!(
+                "「{label}」将被删除，{}",
+                if matches!(entry, ListEntry::Workflow(_)) {
+                    "其关联的普通会话也会一并删除，此操作不可撤销。"
+                } else {
+                    "会话记录与其 worktree 会被清理，此操作不可撤销。"
+                }
+            ),
             "删除",
-            true,
+            ButtonVariant::Danger,
             move |this, cx| this.delete_entry(entry.clone(), cx),
         );
     }
@@ -497,11 +680,11 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             match client.list_dir(&machine, Some(&path), 500, 0).await {
                 Ok(result) => {
-                    let mut core = core.lock();
+                                let mut core = core.lock();
                     core.view.detail.workspace_tree =
                         result.entries.into_iter().map(WorkspaceNode::new).collect();
                 }
-                Err(error) => core.lock().note(format!("读取工作目录失败：{error}")),
+                Err(error) => core.lock().error(format!("读取工作目录失败：{error}")),
             }
         });
         cx.notify();
@@ -538,7 +721,7 @@ impl AmuxApp {
                             Some(result.entries.into_iter().map(WorkspaceNode::new).collect());
                     }
                 }
-                Err(error) => core.lock().note(format!("读取目录失败：{error}")),
+                Err(error) => core.lock().error(format!("读取目录失败：{error}")),
             }
         });
         cx.notify();
@@ -556,6 +739,12 @@ impl AmuxApp {
     pub fn set_plan(&mut self, plan: String, window: &mut Window, cx: &mut Context<Self>) {
         self.plan_input
             .update(cx, |state, cx| state.set_value(plan, window, cx));
+        cx.notify();
+    }
+
+    /// 收起工作目录前缀联想（点击联想区之外）。
+    pub fn dismiss_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
+        self.with_core(|core| core.new_session.suggestions.clear());
         cx.notify();
     }
 
@@ -602,31 +791,26 @@ impl AmuxApp {
         cx.notify();
     }
 
-    pub fn with_core<R>(&self, f: impl FnOnce(&mut Core) -> R) -> R {
-        let mut core = self.core.lock();
-        f(&mut core)
-    }
-
-    /// 连接状态（设置面板展示）。
-    pub fn status_label(&self) -> String {
-        self.with_core(|core| core.status.label())
-    }
-
     /// 保存连接设置：写入 `~/.amux/app/server.json` 并重建客户端。
-    pub fn save_connection(&mut self, cx: &mut Context<Self>) {
+    pub fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let server = self.server_input.read(cx).value().to_string();
         let token = self.token_input.read(cx).value().to_string();
         let connection = Connection { server, token };
         let message = match config::save(&config::connection_path(), &connection) {
             Ok(()) => {
                 self.with_core(|core| core.apply_connection(connection));
-                "连接设置已保存".to_string()
+                dialog::alert(
+                    window,
+                    cx,
+                    "保存成功",
+                    "连接设置已保存。".to_string(),
+                );
+                self.settings_dirty = false;
+                return;
             }
             Err(error) => error,
         };
-        self.settings_dirty = false;
-        self.with_core(|core| core.note(message));
-        cx.notify();
+        dialog::alert(window, cx, "保存失败", message);
     }
 
     /// 发送输入框内容：文本与附件一并作为用户输入发出。
@@ -661,6 +845,7 @@ impl AmuxApp {
         let Some(target) = target else { return };
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
+        self.dialog_scroll.scroll_to_bottom();
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match poll::send_prompt(&client, &target, blocks).await {
@@ -669,7 +854,7 @@ impl AmuxApp {
                     core.last.list = None;
                     core.last.history = None;
                 }
-                Err(error) => core.lock().note(format!("发送失败：{error}")),
+                Err(error) => core.lock().error(format!("消息未发送：{error}")),
             }
         });
         cx.notify();
@@ -700,6 +885,11 @@ impl AmuxApp {
         if ix < self.attachments.len() {
             self.attachments.remove(ix);
         }
+        cx.notify();
+    }
+
+    pub fn clear_attachments(&mut self, cx: &mut Context<Self>) {
+        self.attachments.clear();
         cx.notify();
     }
 
@@ -844,117 +1034,10 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             let setting = SessionConfigSetting { config_id, value };
             if let Err(error) = client.configure_session(&id, None, Some(setting)).await {
-                core.lock().note(format!("设置会话选项失败：{error}"));
+                core.lock().error(format!("会话选项设置失败：{error}"));
             }
         });
         cx.notify();
-    }
-
-    /// 同步会话选项控件：选项集合变化时重建下拉框，仅在当前值变化时就地更新。
-    fn sync_config_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (session, options) = self.with_core(|core| match core.open.clone() {
-            Some(OpenTarget::Session(id)) => (Some(id), core.view.detail.config_options.clone()),
-            _ => (None, Vec::new()),
-        });
-        let snapshot: Vec<(String, String)> = options
-            .iter()
-            .map(|option| (option.id.clone(), ui::config_value(option)))
-            .collect();
-        if session == self.config_selects_session && snapshot == self.config_selects_snapshot {
-            return;
-        }
-        let same_options = session == self.config_selects_session
-            && snapshot
-                .iter()
-                .map(|(id, _)| id)
-                .eq(self.config_selects_snapshot.iter().map(|(id, _)| id));
-        if same_options {
-            for option in &options {
-                let SessionConfigKind::Select {
-                    options: values,
-                    current_value,
-                } = &option.kind
-                else {
-                    continue;
-                };
-                let Some(select) = self.config_selects.get(&option.id).cloned() else {
-                    continue;
-                };
-                let items: Vec<SharedString> = values
-                    .iter()
-                    .map(|entry| SharedString::from(entry.name.clone()))
-                    .collect();
-                let selected = values
-                    .iter()
-                    .position(|entry| &entry.value == current_value);
-                select.update(cx, |state, cx| {
-                    state.set_items(items, window, cx);
-                    state.set_selected_index(selected.map(IndexPath::new), window, cx);
-                });
-            }
-        } else {
-            self.rebuild_config_selects(&options, window, cx);
-            self.config_selects_session = session;
-        }
-        self.config_selects_snapshot = snapshot;
-    }
-
-    /// 重建会话选项下拉框：每个 select 选项一个实体，确认后写回 Server。
-    fn rebuild_config_selects(
-        &mut self,
-        options: &[SessionConfigOption],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.config_selects.clear();
-        self.config_subscriptions.clear();
-        for option in options {
-            let SessionConfigKind::Select {
-                options: values,
-                current_value,
-            } = &option.kind
-            else {
-                continue;
-            };
-            let items: Vec<SharedString> = values
-                .iter()
-                .map(|entry| SharedString::from(entry.name.clone()))
-                .collect();
-            let selected = values
-                .iter()
-                .position(|entry| &entry.value == current_value);
-            let entity = cx.new(|cx| {
-                SelectState::new(
-                    items,
-                    selected.map(|row| IndexPath::default().row(row)),
-                    window,
-                    cx,
-                )
-            });
-            let config_id = option.id.clone();
-            let subscription = cx.subscribe_in(
-                &entity,
-                window,
-                move |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _window, cx| {
-                    if let SelectEvent::Confirm(Some(value)) = event {
-                        this.apply_config_option(
-                            config_id.clone(),
-                            SessionConfigOptionValue::ValueId {
-                                value: value.to_string(),
-                            },
-                            cx,
-                        );
-                    }
-                },
-            );
-            self.config_subscriptions.push(subscription);
-            self.config_selects.insert(option.id.clone(), entity);
-        }
-    }
-
-    /// 当前会话选项下拉框（无对应选项时为空）。
-    pub fn config_select(&self, id: &str) -> Option<&ConfigSelect> {
-        self.config_selects.get(id)
     }
 
     /// 取消进行中的工作。
@@ -966,7 +1049,7 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             if let Err(error) = poll::cancel(&client, &target).await {
-                core.lock().note(format!("取消失败：{error}"));
+                core.lock().error(format!("取消失败：{error}"));
             }
         });
         cx.notify();
@@ -991,7 +1074,7 @@ impl AmuxApp {
                         core.last.list = None;
                         poll::open_workflow(&mut core, &workflow.id);
                     }
-                    Err(error) => core.lock().note(format!("创建失败：{error}")),
+                    Err(error) => core.lock().error(format!("创建会话失败：{error}")),
                 }
             });
         } else {
@@ -1012,10 +1095,10 @@ impl AmuxApp {
                     Ok(session) => {
                         let mut core = core.lock();
                         core.last.list = None;
-                        core.note("会话已创建");
+                        core.success("会话已创建");
                         poll::open_session(&mut core, &session.id);
                     }
-                    Err(error) => core.lock().note(format!("创建失败：{error}")),
+                    Err(error) => core.lock().error(format!("创建会话失败：{error}")),
                 }
             });
         }
@@ -1039,9 +1122,9 @@ impl AmuxApp {
                         core.open = None;
                     }
                     core.last.list = None;
-                    core.note("已删除");
+                    core.success("已删除");
                 }
-                Err(error) => core.lock().note(format!("删除失败：{error}")),
+                Err(error) => core.lock().error(format!("删除失败：{error}")),
             }
         });
         cx.notify();
@@ -1059,14 +1142,27 @@ impl AmuxApp {
             };
             match result {
                 Ok(()) => core.lock().last.list = None,
-                Err(error) => core.lock().note(format!("重命名失败：{error}")),
+                Err(error) => core.lock().error(format!("重命名失败：{error}")),
             }
         });
         cx.notify();
     }
 
+    /// 切换右侧面板：已打开则收起，否则打开并加载（docs/PRD.md 右侧面板）。
+    pub fn toggle_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
+        let current = self.with_core(|core| core.side_panel);
+        if current == Some(panel) {
+            self.with_core(|core| core.side_panel = None);
+            self.panel_width = 0.0;
+            cx.notify();
+            return;
+        }
+        self.open_side_panel(panel, cx);
+    }
+
     /// 打开右侧面板：面板数据立即刷新，工作目录与终端在首次打开时加载。
     pub fn open_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
+        let previous = self.with_core(|core| core.side_panel);
         self.with_core(|core| {
             core.side_panel = Some(panel);
             match panel {
@@ -1075,6 +1171,10 @@ impl AmuxApp {
                 _ => {}
             }
         });
+        // 在已打开的面板之间切换时保留用户调整后的宽度；首次打开用默认宽度
+        if previous.is_none() || previous == Some(panel) {
+            self.panel_width = panel.default_width();
+        }
         match panel {
             SidePanel::Workspace => {
                 let loaded = self.with_core(|core| !core.view.detail.workspace_tree.is_empty());
@@ -1101,7 +1201,6 @@ impl AmuxApp {
         let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
             return;
         };
-        self.with_core(|core| core.side_panel = Some(SidePanel::Terminal));
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match existing {
@@ -1112,7 +1211,7 @@ impl AmuxApp {
                     core.last.terminal_cursor = 0;
                     core.last.terminal = None;
                 }
-                None => match client.open_terminal(&id, None, 100, 30).await {
+                None => match client.open_terminal(&id, None, 68, 24).await {
                     Ok(terminal) => {
                         let mut core = core.lock();
                         core.view.detail.terminal_output.clear();
@@ -1120,7 +1219,7 @@ impl AmuxApp {
                         core.last.terminal_cursor = 0;
                         core.last.terminal = None;
                     }
-                    Err(error) => core.lock().note(format!("打开终端失败：{error}")),
+                    Err(error) => core.lock().error(format!("打开终端失败：{error}")),
                 },
             }
         });
@@ -1145,7 +1244,7 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             if let Err(error) = client.terminal_input(&id, &terminal, data).await {
-                core.lock().note(format!("终端输入失败：{error}"));
+                core.lock().error(format!("终端输入失败：{error}"));
             }
         });
         cx.notify();
@@ -1161,21 +1260,21 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             match client.diff(&id).await {
                 Ok(diff) => core.lock().view.detail.diff = Some(diff),
-                Err(error) => core.lock().note(format!("读取改动失败：{error}")),
+                Err(error) => core.lock().error(format!("无法加载改动：{error}")),
             }
         });
-        cx.notify();
-    }
-
-    /// 折叠/展开单个文件的 diff。
-    pub fn toggle_diff_file(&mut self, path: String, cx: &mut Context<Self>) {
-        toggle_set(&mut self.diff_collapsed_files, path);
         cx.notify();
     }
 
     /// 折叠/展开文件树中的目录。
     pub fn toggle_diff_dir(&mut self, key: String, cx: &mut Context<Self>) {
         toggle_set(&mut self.diff_collapsed_dirs, key);
+        cx.notify();
+    }
+
+    /// 折叠/展开工作目录面板的文件树区域。
+    pub fn toggle_workspace_tree(&mut self, cx: &mut Context<Self>) {
+        self.workspace_tree_visible = !self.workspace_tree_visible;
         cx.notify();
     }
 
@@ -1221,6 +1320,13 @@ impl AmuxApp {
         cx.notify();
     }
 
+    /// 清空改动选择。
+    pub fn clear_diff_selection(&mut self, cx: &mut Context<Self>) {
+        self.diff_selected_files.clear();
+        self.diff_selected_hunks.clear();
+        cx.notify();
+    }
+
     /// 点击文件：右侧改动区域滚动到该文件。
     pub fn scroll_to_file(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.diff_scroll.scroll_to_top_of_item(ix);
@@ -1246,7 +1352,7 @@ impl AmuxApp {
         let mut sections = Vec::new();
         for file in &files {
             if self.diff_selected_files.contains(&file.path) {
-                sections.push(format!("{}（整个文件）\n{}", file.path, file.patch));
+                sections.push(format!("// {}\n{}", file.path, file.patch));
                 continue;
             }
             for hunk in &file.hunks {
@@ -1254,14 +1360,17 @@ impl AmuxApp {
                     .diff_selected_hunks
                     .contains(&(file.path.clone(), hunk.header.clone()))
                 {
-                    sections.push(format!("{}（{}）\n{}", file.path, hunk.header, hunk.patch));
+                    sections.push(format!("// {}\n{}", file.path, hunk.patch));
                 }
             }
         }
         if sections.is_empty() {
             return;
         }
-        let text = format!("{instruction}\n\n改动内容：\n{}", sections.join("\n"));
+        let text = format!(
+            "{instruction}\n\n改动内容：\n```diff\n{}\n```",
+            sections.join("\n")
+        );
         self.diff_instruction
             .update(cx, |state, cx| state.set_value(String::new(), window, cx));
         self.diff_selected_files.clear();
@@ -1293,13 +1402,13 @@ impl AmuxApp {
                 Ok(result) => {
                     if !result.ok {
                         core.lock()
-                            .note(format!("撤销失败：{}", result.message.unwrap_or_default()));
+                            .error(format!("撤销失败：{}", result.message.unwrap_or_default()));
                     }
                     if let Ok(diff) = client.diff(&id).await {
                         core.lock().view.detail.diff = Some(diff);
                     }
                 }
-                Err(error) => core.lock().note(format!("撤销失败：{error}")),
+                Err(error) => core.lock().error(format!("撤销失败：{error}")),
             }
         });
         cx.notify();
@@ -1338,9 +1447,9 @@ impl AmuxApp {
                         SettingsList::QuickCommands(list) => core.settings.quick_commands = list,
                         SettingsList::Plans(list) => core.settings.plans = list,
                     }
-                    core.note("设置已保存");
+                    core.success("设置已保存");
                 }
-                Err(error) => core.lock().note(format!("保存失败：{error}")),
+                Err(error) => core.lock().error(format!("保存失败：{error}")),
             }
         });
         cx.notify();
@@ -1382,7 +1491,9 @@ impl AmuxApp {
         dialog::form(
             window,
             cx,
-            title.to_string(),
+            title,
+            "保存",
+            32.5,
             vec![
                 ("指令名称", self.quick_name.clone()),
                 ("指令内容", self.quick_prompt.clone()),
@@ -1391,12 +1502,17 @@ impl AmuxApp {
         );
     }
 
-    /// 保存快捷指令（新增或编辑）；名称为空时保留弹窗。
+    /// 保存快捷指令（新增或编辑）；校验未通过时保留弹窗。
     pub fn save_quick_command(&mut self, target: FormTarget, cx: &mut Context<Self>) -> bool {
         let name = self.quick_name.read(cx).value().trim().to_string();
         let prompt = self.quick_prompt.read(cx).value().to_string();
         if name.is_empty() {
-            self.with_core(|core| core.note("请填写指令名称"));
+            self.with_core(|core| core.warning("请输入指令名称"));
+            cx.notify();
+            return false;
+        }
+        if prompt.trim().is_empty() {
+            self.with_core(|core| core.warning("请输入指令内容"));
             cx.notify();
             return false;
         }
@@ -1424,10 +1540,10 @@ impl AmuxApp {
         dialog::confirm(
             window,
             cx,
-            format!("删除快捷指令「{name}」？"),
-            "删除后无法恢复。".to_string(),
+            "删除快捷指令",
+            format!("快捷指令「{name}」将被删除，此操作不可撤销。"),
             "删除",
-            true,
+            ButtonVariant::Danger,
             move |this, cx| {
                 let list = this.with_core(|core| {
                     core.settings
@@ -1479,7 +1595,9 @@ impl AmuxApp {
         dialog::form(
             window,
             cx,
-            title.to_string(),
+            title,
+            "保存",
+            32.5,
             vec![
                 ("技能名称", self.skill_name.clone()),
                 ("技能描述", self.skill_desc.clone()),
@@ -1493,7 +1611,7 @@ impl AmuxApp {
         let name = self.skill_name.read(cx).value().trim().to_string();
         let description = self.skill_desc.read(cx).value().to_string();
         if name.is_empty() {
-            self.with_core(|core| core.note("请填写技能名称"));
+            self.with_core(|core| core.warning("请输入技能名称"));
             cx.notify();
             return false;
         }
@@ -1516,10 +1634,10 @@ impl AmuxApp {
         dialog::confirm(
             window,
             cx,
-            format!("删除技能「{name}」？"),
-            "删除后无法恢复。".to_string(),
+            "删除技能",
+            format!("技能「{name}」将被删除，此操作不可撤销。"),
             "删除",
-            true,
+            ButtonVariant::Danger,
             move |this, cx| {
                 let list = this.with_core(|core| {
                     core.settings
@@ -1570,7 +1688,9 @@ impl AmuxApp {
         dialog::form(
             window,
             cx,
-            title.to_string(),
+            title,
+            "保存",
+            35.0,
             vec![
                 ("计划名称", self.plan_name.clone()),
                 ("计划内容", self.plan_plan.clone()),
@@ -1584,7 +1704,12 @@ impl AmuxApp {
         let name = self.plan_name.read(cx).value().trim().to_string();
         let plan = self.plan_plan.read(cx).value().to_string();
         if name.is_empty() {
-            self.with_core(|core| core.note("请填写计划名称"));
+            self.with_core(|core| core.warning("请输入计划名称"));
+            cx.notify();
+            return false;
+        }
+        if plan.trim().is_empty() {
+            self.with_core(|core| core.warning("请输入计划内容"));
             cx.notify();
             return false;
         }
@@ -1607,10 +1732,10 @@ impl AmuxApp {
         dialog::confirm(
             window,
             cx,
-            format!("删除工作流计划「{name}」？"),
-            "删除后无法恢复。".to_string(),
+            "删除工作流计划",
+            format!("工作流计划「{name}」将被删除，此操作不可撤销。"),
             "删除",
-            true,
+            ButtonVariant::Danger,
             move |this, cx| {
                 let list = this.with_core(|core| {
                     core.settings
@@ -1625,8 +1750,8 @@ impl AmuxApp {
         );
     }
 
-    /// 保存编排智能体配置。
-    pub fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
+    /// 保存编排智能体配置；保存结果以弹窗反馈（docs/DESIGN.md 连接/编排设置）。
+    pub fn save_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let config = OrchestratorConfig {
@@ -1637,8 +1762,12 @@ impl AmuxApp {
             effort: self.orch_effort.read(cx).value().trim().to_string(),
         };
         if config.base_url.is_empty() || config.api_key.is_empty() || config.model.is_empty() {
-            self.with_core(|core| core.note("请填写 Base URL、API Key 与模型名称"));
-            cx.notify();
+            dialog::alert(
+                window,
+                cx,
+                "保存失败",
+                "请填写 Base URL、API Key 与模型名称。".to_string(),
+            );
             return;
         }
         let core = Arc::clone(&self.core);
@@ -1647,12 +1776,32 @@ impl AmuxApp {
                 Ok(()) => {
                     let mut core = core.lock();
                     core.settings.orchestrator = Some(config);
-                    core.note("设置已保存");
+                    core.success("编排智能体设置已保存。");
                 }
-                Err(error) => core.lock().note(format!("保存失败：{error}")),
+                Err(error) => core.lock().error(format!("保存失败：{error}")),
             }
         });
         cx.notify();
+    }
+
+    /// 编排智能体表单是否与已保存配置不同（决定「保存」是否可点）。
+    /// 尚未保存过配置时以空配置为基准，表单未填写则不视为改动。
+    pub fn orchestrator_dirty(&self, cx: &App) -> bool {
+        let saved = self
+            .with_core(|core| core.settings.orchestrator.clone())
+            .unwrap_or_else(empty_orchestrator_config);
+        saved != self.orchestrator_form(cx)
+    }
+
+    /// 表单当前值。
+    fn orchestrator_form(&self, cx: &App) -> OrchestratorConfig {
+        OrchestratorConfig {
+            api_format: self.current_orchestrator_format(),
+            base_url: self.orch_base_url.read(cx).value().trim().to_string(),
+            api_key: self.orch_api_key.read(cx).value().trim().to_string(),
+            model: self.orch_model.read(cx).value().trim().to_string(),
+            effort: self.orch_effort.read(cx).value().trim().to_string(),
+        }
     }
 
     /// 编排智能体 API 格式：用户已选择则用其选择，否则用已保存配置的格式。
@@ -1666,14 +1815,9 @@ impl AmuxApp {
 
     /// 打开编排智能体设置页时预填已保存的配置。
     pub fn load_orchestrator_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let stored = self.with_core(|core| core.settings.orchestrator.clone());
-        let config = stored.unwrap_or(OrchestratorConfig {
-            api_format: ApiFormat::ChatCompletions,
-            base_url: String::new(),
-            api_key: String::new(),
-            model: String::new(),
-            effort: String::new(),
-        });
+        let config = self
+            .with_core(|core| core.settings.orchestrator.clone())
+            .unwrap_or_else(empty_orchestrator_config);
         self.orchestrator_format = Some(config.api_format);
         self.orch_base_url
             .update(cx, |state, cx| state.set_value(config.base_url, window, cx));
@@ -1683,6 +1827,59 @@ impl AmuxApp {
             .update(cx, |state, cx| state.set_value(config.model, window, cx));
         self.orch_effort
             .update(cx, |state, cx| state.set_value(config.effort, window, cx));
+        cx.notify();
+    }
+
+    /// 会话选项下拉框：单个 select 选项。
+    pub fn config_option_menu(
+        &self,
+        option: &SessionConfigOption,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let SessionConfigKind::Select { options, .. } = &option.kind else {
+            return div().into_any_element();
+        };
+        let current = ui::config_value_label(option);
+        let app = cx.entity();
+        let id = format!("cfg-select-{}", option.id);
+        let entries: Vec<(String, String)> = options
+            .iter()
+            .map(|entry| (entry.value.clone(), entry.name.clone()))
+            .collect();
+        let selected = match &option.kind {
+            SessionConfigKind::Select { current_value, .. } => current_value.clone(),
+            SessionConfigKind::Boolean { .. } => String::new(),
+        };
+        let config_id = option.id.clone();
+        Button::new(id)
+            .small()
+            .outline()
+            .label(current)
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                let mut menu = menu;
+                for (value, name) in entries.clone() {
+                    let config_id = config_id.clone();
+                    let app = app.clone();
+                    let checked = value == selected;
+                    menu = menu.item(
+                        PopupMenuItem::new(name)
+                            .checked(checked)
+                            .on_click(move |_, _, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.apply_config_option(
+                                        config_id.clone(),
+                                        SessionConfigOptionValue::ValueId {
+                                            value: value.clone(),
+                                        },
+                                        cx,
+                                    )
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
     }
 }
 
@@ -1693,69 +1890,188 @@ pub enum SettingsList {
     Plans(Vec<WorkflowPlanItem>),
 }
 
+impl AmuxApp {
+    /// 标题栏：拖拽/双击最大化与窗口控制按钮由组件负责。
+    fn render_title_bar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let foreground = cx.theme().foreground;
+        div()
+            .id("title-bar-wrap")
+            .w_full()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                GlobalState::suppress_text_selection(cx);
+            })
+            .child(
+                TitleBar::new().child(
+                    Label::new("amux")
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(foreground),
+                ),
+            )
+    }
+
+    /// 左侧面板：内容 + 右侧拖拽手柄（手柄含在面板宽度内）。
+    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = self.sidebar_width;
+        let core = self.core.lock().clone();
+        let theme = cx.theme();
+        let handle_color = theme.sidebar_border;
+        let primary = theme.primary;
+        let handle = div()
+            .id("sidebar-resize-handle")
+            .w(px(PANEL_RESIZE_HANDLE_WIDTH))
+            .h_full()
+            .bg(handle_color.opacity(0.6))
+            .hover(move |handle| handle.bg(primary))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, _| {
+                    this.sidebar_drag = Some((event.position.x.as_f32(), this.sidebar_width));
+                }),
+            )
+            .on_drag(SidebarResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<SidebarResizeDrag>, window, cx| {
+                    let Some((origin, initial)) = this.sidebar_drag else {
+                        return;
+                    };
+                    let max = (window.bounds().size.width.as_f32() - MIN_CONTENT_COL_WIDTH)
+                        .max(SIDEBAR_MIN_WIDTH);
+                    this.sidebar_width = (initial + (event.event.position.x.as_f32() - origin))
+                        .clamp(SIDEBAR_MIN_WIDTH, max);
+                    cx.notify();
+                },
+            ));
+        h_flex()
+            .w(px(width))
+            .h_full()
+            .child(panels::render_sidebar(&core, self, cx))
+            .child(handle)
+    }
+
+    /// 右侧面板：左侧拖拽手柄 + 面板内容（手柄不计入面板宽度）。
+    fn render_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let core = self.core.lock().clone();
+        let panel = core.side_panel?;
+        let theme = cx.theme();
+        let border = theme.border;
+        let primary = theme.primary;
+        let handle = div()
+            .id("panel-resize-handle")
+            .w(px(PANEL_RESIZE_HANDLE_WIDTH))
+            .h_full()
+            .bg(border.opacity(0.35))
+            .hover(move |handle| handle.bg(primary))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, _| {
+                    this.panel_drag = Some((event.position.x.as_f32(), this.panel_width));
+                }),
+            )
+            .on_drag(PanelResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<PanelResizeDrag>, window, cx| {
+                    let Some((origin, initial)) = this.panel_drag else {
+                        return;
+                    };
+                    // 向左拖（x 变小）即面板变宽；上限 = 窗口宽 − 侧栏宽 − 中间列最小宽
+                    let max = (window.bounds().size.width.as_f32()
+                        - this.sidebar_width
+                        - MIN_CONTENT_COL_WIDTH)
+                        .max(PANEL_MIN_WIDTH);
+                    this.panel_width = (initial + (origin - event.event.position.x.as_f32()))
+                        .clamp(PANEL_MIN_WIDTH, max);
+                    cx.notify();
+                }),
+            );
+        Some(
+            h_flex()
+                .h_full()
+                .child(handle)
+                .child(
+                    div()
+                        .w(px(self.panel_width))
+                        .h_full()
+                        .min_w_0()
+                        .child(panels::render_panel(&core, panel, self, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 中间面板右缘的悬浮按钮栏（展开右侧面板）。
+    fn render_rail(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let core = self.core.lock().clone();
+        panels::render_rail(&core, self, cx)
+    }
+}
+
 impl Render for AmuxApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_open = self.with_core(|core| core.open.is_some());
+        let settings_open = self.with_core(|core| core.settings_open);
         let core = self.core.lock().clone();
 
-        let left = panels::render_left(&core, self, cx);
-        let middle = panels::render_middle(&core, self, cx);
-        let right = core
-            .side_panel
-            .map(|panel| panels::render_right(&core, panel, self, cx));
+        let title_bar = self.render_title_bar(cx);
+        let panel = self.render_panel(cx);
+        let sidebar = self.render_sidebar(cx);
+        let main = sessions::render_main(&core, self, cx);
+        let rail = self.render_rail(cx);
 
-        // 三栏可拖拽调整宽度（docs/PRD.md 右侧面板）
-        let mut shell = h_resizable("shell")
+        let mut main_row = h_flex()
+            .flex_1()
+            .min_h_0()
+            .items_stretch()
+            .child(sidebar)
+            // 中间面板：悬浮按钮叠加在其右缘之上（不占布局空间），
+            // 面板向左展开时随中列右缘移动，始终可见
             .child(
-                resizable_panel()
-                    .size(px(panels::LEFT_WIDTH))
-                    .size_range(px(panels::LEFT_MIN_WIDTH)..px(panels::LEFT_MAX_WIDTH))
-                    .flex_none()
-                    .child(left),
-            )
-            .child(resizable_panel().child(middle));
-        if let Some(right) = right {
-            shell = shell.child(
-                resizable_panel()
-                    .size(px(panels::RIGHT_WIDTH))
-                    .size_range(px(panels::RIGHT_MIN_WIDTH)..px(panels::RIGHT_MAX_WIDTH))
-                    .flex_none()
-                    .child(right),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .child(main)
+                    .when(has_open, |wrapper| {
+                        wrapper.child(div().absolute().top_2().right_1().child(rail))
+                    }),
             );
+        if let Some(panel) = panel {
+            main_row = main_row.child(panel);
         }
 
-        let mut root = div()
+        let mut root = v_flex()
             .size_full()
-            .flex()
-            .flex_row()
+            .relative()
             .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(shell);
-        if core.settings_open {
+            .child(title_bar)
+            .child(main_row);
+        if settings_open {
             root = root.child(settings::render_overlay(&core, self, cx));
         }
-        if let Some(toast) = core.toast.clone() {
-            root = root.child(
-                div()
-                    .absolute()
-                    .bottom_3()
-                    .left_3()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(cx.theme().popover)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .text_sm()
-                    .child(toast),
-            );
+        // 组件层（sheet / dialog / 通知）必须由根视图渲染：Root 自身只渲染子视图
+        if let Some(layer) = Root::render_sheet_layer(window, cx) {
+            root = root.child(layer);
+        }
+        if let Some(layer) = Root::render_dialog_layer(window, cx) {
+            root = root.child(layer);
+        }
+        if let Some(layer) = Root::render_notification_layer(window, cx) {
+            root = root.child(layer);
         }
         root
     }
 }
 
-/// 输入框 → 便于在面板中复用。
-pub fn text_input(state: &Entity<InputState>) -> Input {
-    Input::new(state)
+/// 未保存过编排智能体配置时的空基准。
+fn empty_orchestrator_config() -> OrchestratorConfig {
+    OrchestratorConfig {
+        api_format: ApiFormat::ChatCompletions,
+        base_url: String::new(),
+        api_key: String::new(),
+        model: String::new(),
+        effort: String::new(),
+    }
 }
 
 /// 集合中已存在则移除，否则插入（折叠/选中状态切换）。

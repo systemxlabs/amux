@@ -1,505 +1,744 @@
-//! 设置浮窗：连接设置、机器管理、编排智能体、快捷指令、技能、工作流计划。
+//! 设置浮窗：分类导航 + 连接设置 / 机器管理 / 编排智能体 / 快捷指令 / 技能 / 工作流计划。
 
-use amux_common::api::{ApiFormat, Skill};
+use amux_common::api::{ApiFormat, Machine, Skill};
 use amux_common::domain::ContentBlock;
 use gpui::*;
 use gpui_component::button::*;
+use gpui_component::input::Input;
 use gpui_component::label::Label;
-use gpui_component::*;
-use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable};
+use gpui_component::radio::RadioGroup;
+use gpui_component::{
+    h_flex, v_flex, ActiveTheme, Disableable as _, FocusTrapElement as _, Icon, IconName,
+    Selectable, Sizable,
+};
 
-use crate::app::{text_input, AmuxApp};
+use crate::app::{AmuxApp, CloseSettingsOverlay};
 use crate::client::Client;
 use crate::dialog::{self, FormTarget};
 use crate::state::{Core, SettingsTab, SharedCore};
 use crate::ui;
 
-/// 覆盖整个窗口的设置浮窗。
-pub fn render_overlay(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    let mut sidebar = v_flex().w(px(150.0)).h_full().gap_1().p_2();
-    for tab in SettingsTab::ALL {
-        let selected = core.settings_tab == tab;
-        sidebar = sidebar.child(
-            {
-                let button = Button::new(format!("settings-{}", tab.label()))
-                    .small()
-                    .label(tab.label());
-                if selected {
-                    button.primary()
-                } else {
-                    button
-                }
-            }
-            .on_click(cx.listener(move |this, _, window, cx| {
-                // 仅切换分类时重新预填表单，避免重复点击同一分类覆盖未保存的编辑
-                let switched = this.with_core(|core| {
-                    let switched = core.settings_tab != tab;
-                    core.settings_tab = tab;
-                    switched
-                });
-                if switched && tab == SettingsTab::Orchestrator {
-                    this.load_orchestrator_form(window, cx);
-                }
-                cx.notify();
-            })),
-        );
-    }
+/// 编排智能体 API 格式的顺序（索引与单选组一一对应）。
+const API_FORMATS: [ApiFormat; 3] = [
+    ApiFormat::ChatCompletions,
+    ApiFormat::Responses,
+    ApiFormat::Messages,
+];
 
-    let content = match core.settings_tab {
-        SettingsTab::Connection => connection_tab(core, this, cx),
-        SettingsTab::Machines => machines_tab(core, this, cx),
-        SettingsTab::Orchestrator => orchestrator_tab(core, this, cx),
-        SettingsTab::QuickCommands => quick_commands_tab(core, this, cx),
-        SettingsTab::Skills => skills_tab(core, this, cx),
-        SettingsTab::WorkflowPlans => plans_tab(core, this, cx),
-    };
+/// 设置浮窗：半透明遮罩 + 分类导航侧边栏 + 右侧内容（类似系统设置）。
+pub fn render_overlay(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let overlay = theme.overlay;
+    let popover = theme.popover;
+    let border = theme.border;
+    let focus = this.settings_focus.clone();
 
     div()
-        .id("settings-backdrop")
+        .id("settings-overlay")
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
-        .bg(gpui::black().opacity(0.35))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.with_core(|core| core.settings_open = false);
-            cx.notify();
+        .child(
+            div()
+                .id("settings-backdrop")
+                .absolute()
+                .inset_0()
+                .bg(overlay)
+                .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx))),
+        )
+        .child(
+            h_flex()
+                .id("settings-card")
+                .w_full()
+                .max_w(rems(55.))
+                .h_full()
+                .max_h(rems(38.75))
+                .overflow_hidden()
+                .bg(popover)
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .shadow_lg()
+                // 遮罩点击关闭：卡片内的点击不穿透到遮罩
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .track_focus(&focus)
+                .focus_trap("settings-trap", &focus)
+                .key_context("SettingsOverlay")
+                .on_action(cx.listener(|this, _: &CloseSettingsOverlay, _, cx| {
+                    this.close_settings(cx)
+                }))
+                .child(render_nav(core, this, cx))
+                .child(render_content(core, this, cx)),
+        )
+        .into_any_element()
+}
+
+/// 左侧分类导航：标题 + 关闭、分类项、底部关闭按钮。
+fn render_nav(core: &Core, _this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let mut nav = v_flex()
+        .id("settings-nav")
+        .w(rems(11.875))
+        .h_full()
+        .gap_2()
+        .p_2()
+        .bg(theme.sidebar)
+        .child(
+            h_flex()
+                .items_center()
+                .px_1()
+                .py_1()
+                .child(
+                    Label::new("设置")
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground),
+                )
+                .child(div().flex_1())
+                .child(
+                    Button::new("settings-close")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Close)
+                        .tooltip("关闭设置")
+                        .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx))),
+                ),
+        );
+    for tab in SettingsTab::ALL {
+        nav = nav.child(nav_item(tab, core.settings_tab == tab, cx));
+    }
+    nav.child(div().flex_1())
+        .child(
+            Button::new("settings-back")
+                .small()
+                .label("关闭")
+                .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx))),
+        )
+        .into_any_element()
+}
+
+/// 单个分类项：图标 + 名称，选中态用 ghost+selected（弱于实心主色按钮）。
+fn nav_item(tab: SettingsTab, selected: bool, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let icon_color = if selected {
+        theme.primary
+    } else {
+        theme.muted_foreground
+    };
+    Button::new(SharedString::from(format!("settings-{}", tab.label())))
+        .w_full()
+        .ghost()
+        .selected(selected)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.select_settings_tab(tab, window, cx)
         }))
         .child(
             h_flex()
-                .id("settings-panel")
-                .w(px(860.0))
-                .h(px(600.0))
-                .rounded_lg()
-                .overflow_hidden()
-                .bg(cx.theme().popover)
-                .border_1()
-                .border_color(cx.theme().border)
-                .child(sidebar)
-                .child(
-                    v_flex()
-                        .id("settings-content")
-                        .flex_1()
-                        .h_full()
-                        .p_3()
-                        .gap_3()
-                        .overflow_y_scroll()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    Label::new(core.settings_tab.label())
-                                        .font_weight(FontWeight::SEMIBOLD),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    Button::new("close-settings")
-                                        .small()
-                                        .ghost()
-                                        .label("关闭")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.with_core(|core| core.settings_open = false);
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(content),
-                ),
-        )
-        .into_any()
-}
-
-/// 连接设置（docs/DESIGN.md「连接设置」「连接存储」）。
-fn connection_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    let status_color = match core.status {
-        crate::state::ConnectionStatus::Online => cx.theme().success,
-        crate::state::ConnectionStatus::Failed(_) => cx.theme().danger,
-        _ => cx.theme().muted_foreground,
-    };
-    v_flex()
-        .gap_3()
-        .child(
-            h_flex()
+                .w_full()
+                .justify_start()
                 .gap_2()
                 .items_center()
-                .child(Label::new("连接状态"))
-                .child(div().text_color(status_color).child(core.status.label())),
-        )
-        .child(Label::new("Server 地址"))
-        .child(text_input(&this.server_input))
-        .child(Label::new("认证 token"))
-        .child(text_input(&this.token_input))
-        .child(
-            h_flex()
-                .gap_2()
+                .child(Icon::new(tab.icon()).small().text_color(icon_color))
                 .child(
-                    Button::new("save-connection")
-                        .small()
-                        .primary()
-                        .disabled(!this.settings_dirty)
-                        .label("保存")
-                        .on_click(cx.listener(|this, _, _, cx| this.save_connection(cx))),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "存储位置：{}",
-                            crate::config::connection_path().display()
-                        )),
+                    Label::new(tab.label())
+                        .text_base()
+                        .font_weight(FontWeight::MEDIUM)
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
                 ),
         )
-        .into_any()
+        .into_any_element()
 }
 
-/// 机器管理：机器卡片（名称 + 重新发现）与 agent 行（状态 + 重启），两个操作都需弹窗确认。
-fn machines_tab(_core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+/// 右侧内容区：分类标题 + 分类页面。
+fn render_content(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let (title, subtitle) = tab_heading(core.settings_tab);
+    let page = match core.settings_tab {
+        SettingsTab::Connection => connection_tab(core, this, cx),
+        SettingsTab::Machines => machines_tab(this, cx),
+        SettingsTab::Orchestrator => orchestrator_tab(this, cx),
+        SettingsTab::QuickCommands => quick_commands_tab(core, cx),
+        SettingsTab::Skills => skills_tab(core, cx),
+        SettingsTab::WorkflowPlans => plans_tab(core, cx),
+    };
+    v_flex()
+        .id("settings-content")
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .gap_2()
+        .p_4()
+        .overflow_y_scroll()
+        .child(
+            v_flex()
+                .gap_0p5()
+                .child(
+                    Label::new(title)
+                        .text_lg()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.foreground),
+                )
+                .child(
+                    Label::new(subtitle)
+                        .text_sm()
+                        .text_color(theme.muted_foreground),
+                ),
+        )
+        .child(page)
+        .into_any_element()
+}
+
+/// 分类标题与说明。
+fn tab_heading(tab: SettingsTab) -> (&'static str, &'static str) {
+    match tab {
+        SettingsTab::Connection => ("连接设置", "配置 Server 地址与认证 token"),
+        SettingsTab::Machines => ("机器管理", "查看已接入机器与其 agent，可重启 / 重新发现"),
+        SettingsTab::Orchestrator => ("编排智能体", "配置工作流编排使用的大模型供应商连接信息"),
+        SettingsTab::QuickCommands => ("快捷指令", "自定义快捷指令，在会话输入区上方一键发送"),
+        SettingsTab::Skills => ("技能管理", "集中管理各机器各 agent 上的技能"),
+        SettingsTab::WorkflowPlans => ("工作流计划", "可复用的工作流计划，发起工作流会话时选用"),
+    }
+}
+
+/// 连接设置：连接状态 + Server 地址 / token，改动后才可保存（docs/DESIGN.md）。
+fn connection_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let status_color = match core.status {
+        crate::state::ConnectionStatus::Online => theme.success,
+        crate::state::ConnectionStatus::Failed(_) => theme.danger,
+        _ => theme.muted_foreground,
+    };
+    v_flex()
+        .gap_2()
+        .child(
+            v_flex()
+                .gap_1()
+                .p_3()
+                .bg(theme.muted)
+                .rounded_md()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Label::new("连接状态")
+                                .text_sm()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            Label::new(core.status.label())
+                                .text_sm()
+                                .text_color(status_color),
+                        ),
+                )
+                .child(
+                    Label::new("Server 地址")
+                        .text_sm()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(Input::new(&this.server_input).w_full())
+                .child(
+                    Label::new("认证 token")
+                        .text_sm()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(Input::new(&this.token_input).w_full())
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("save-connection")
+                            .small()
+                            .primary()
+                            .label("保存")
+                            .disabled(!this.settings_dirty)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_connection(window, cx)
+                            })),
+                    ),
+                ),
+        )
+        .child(
+            Label::new(format!(
+                "连接信息存储于 {}",
+                crate::config::connection_path().display()
+            ))
+            .text_xs()
+            .text_color(theme.muted_foreground),
+        )
+        .into_any_element()
+}
+
+/// 机器管理：每台机器一张卡片（名称 + 重新发现、机器信息、agent 行）。
+fn machines_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
     let (machines, agents_by_machine) = {
         let core = this.core.lock();
         (core.settings.machines.clone(), core.settings.agents.clone())
     };
-    let mut body = v_flex().gap_3();
-    let mut has_machine = false;
-    for machine in machines {
-        has_machine = true;
+    let mut cards = v_flex().gap_2();
+    for machine in &machines {
         let agents = agents_by_machine
             .iter()
             .find(|(name, _)| name == &machine.name)
             .map(|(_, agents)| agents.clone())
             .unwrap_or_default();
-        let mut card = v_flex()
-            .gap_2()
-            .p_3()
-            .rounded_md()
-            .bg(cx.theme().secondary)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(Label::new(machine.name.clone()).font_weight(FontWeight::SEMIBOLD))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(format!("rediscover-{}", machine.name))
-                            .xsmall()
-                            .ghost()
-                            .label("重新发现")
-                            .on_click(cx.listener({
-                                let name = machine.name.clone();
-                                move |_, _, window, cx| {
-                                    dialog::confirm(
-                                        window,
-                                        cx,
-                                        format!("重新发现「{name}」上的 agent？"),
-                                        "将重新扫描该机器上已安装的 agent。".to_string(),
-                                        "重新发现",
-                                        false,
-                                        {
-                                            let name = name.clone();
-                                            move |this, cx| this.rediscover(name.clone(), cx)
-                                        },
-                                    )
-                                }
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{} {} {}",
-                        machine.os, machine.arch, machine.hostname
-                    )),
-            );
-        for agent in agents {
-            card = card.child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().text_sm().child(agent.name.clone()))
-                    .child(div().text_xs().child(if agent.available {
-                        "可用"
-                    } else {
-                        "不可用"
-                    }))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(format!("restart-{}-{}", machine.name, agent.name))
-                            .xsmall()
-                            .ghost()
-                            .label("重启")
-                            .on_click(cx.listener({
-                                let machine = machine.name.clone();
-                                let agent = agent.name.clone();
-                                move |_, _, window, cx| {
-                                    dialog::confirm(
-                                        window,
-                                        cx,
-                                        format!("重启 {agent}@{machine}？"),
-                                        "该 agent 上正在进行的会话会被中断。".to_string(),
-                                        "重启",
-                                        false,
-                                        {
-                                            let machine = machine.clone();
-                                            let agent = agent.clone();
-                                            move |this, cx| {
-                                                this.restart_agent(
-                                                    machine.clone(),
-                                                    agent.clone(),
-                                                    cx,
-                                                )
-                                            }
-                                        },
-                                    )
-                                }
-                            })),
-                    ),
-            );
-        }
-        body = body.child(card);
+        cards = cards.child(machine_card(machine, agents, this, cx));
     }
-    if !has_machine {
-        body = body.child(ui::empty_hint("暂无已连接机器", cx.theme()));
-    }
-    body.into_any()
-}
-
-/// 编排智能体设置。
-fn orchestrator_tab(_core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    let format = this.current_orchestrator_format();
-    let mut formats = h_flex().gap_2();
-    for (value, label) in [
-        (ApiFormat::ChatCompletions, "chat_completions"),
-        (ApiFormat::Responses, "responses"),
-        (ApiFormat::Messages, "messages"),
-    ] {
-        formats = formats.child(
-            {
-                let button = Button::new(format!("format-{label}")).small().label(label);
-                if format == value {
-                    button.primary()
-                } else {
-                    button
-                }
-            }
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.orchestrator_format = Some(value);
-                cx.notify();
-            })),
+    if machines.is_empty() {
+        cards = cards.child(
+            Label::new("还没有已接入的机器。请在机器上启动 daemon 并连接到 Server。")
+                .text_sm()
+                .text_color(theme.muted_foreground),
         );
     }
-
-    v_flex()
-        .gap_3()
-        .child(Label::new("API 格式"))
-        .child(formats)
-        .child(Label::new("Base URL"))
-        .child(text_input(&this.orch_base_url))
-        .child(Label::new("API Key"))
-        .child(text_input(&this.orch_api_key))
-        .child(Label::new("模型名称"))
-        .child(text_input(&this.orch_model))
-        .child(Label::new("推理级别"))
-        .child(text_input(&this.orch_effort))
-        .child(
-            Button::new("save-orchestrator")
-                .small()
-                .primary()
-                .label("保存")
-                .on_click(cx.listener(|this, _, _, cx| this.save_orchestrator(cx))),
-        )
-        .into_any()
+    cards.into_any_element()
 }
 
-/// 快捷指令设置：卡片（名称 + 内容 + 编辑/删除），右上方「+」弹窗新增。
-fn quick_commands_tab(core: &Core, _this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+fn machine_card(
+    machine: &Machine,
+    agents: Vec<amux_common::api::Agent>,
+    _this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let name = machine.name.clone();
+    let mut card = v_flex()
+        .gap_1()
+        .p_2()
+        .bg(theme.muted)
+        .rounded_md()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    Label::new(name.clone())
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.foreground),
+                )
+                .child(div().flex_1())
+                .child(
+                    Button::new(SharedString::from(format!("rediscover-{name}")))
+                        .small()
+                        .label("重新发现")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |_, _, window, cx| {
+                                dialog::confirm(
+                                    window,
+                                    cx,
+                                    "重新发现 agents",
+                                    format!("确定重新扫描机器「{name}」上的 agent 吗？"),
+                                    "重新发现",
+                                    ButtonVariant::Primary,
+                                    {
+                                        let name = name.clone();
+                                        move |this, cx| this.rediscover(name.clone(), cx)
+                                    },
+                                )
+                            }
+                        })),
+                ),
+        )
+        .child(
+            v_flex()
+                .gap_0p5()
+                .child(
+                    Label::new(format!("{} {}", machine.os, machine.arch))
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    Label::new(format!("{} · amux {}", machine.hostname, machine.version))
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                ),
+        );
+    for agent in agents {
+        let machine_name = name.clone();
+        let agent_name = agent.name.clone();
+        card = card.child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    Label::new(agent_name.clone())
+                        .text_sm()
+                        .text_color(theme.foreground),
+                )
+                .child(ui::availability_tag(agent.available))
+                .child(div().flex_1())
+                .child(
+                    Button::new(SharedString::from(format!(
+                        "restart-agent-{machine_name}-{agent_name}"
+                    )))
+                    .small()
+                    .label("重启")
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        dialog::confirm(
+                            window,
+                            cx,
+                            "重启 agent",
+                            format!("确定重启 agent「{agent_name}」吗？"),
+                            "重启",
+                            ButtonVariant::Primary,
+                            {
+                                let machine = machine_name.clone();
+                                let agent = agent_name.clone();
+                                move |this, cx| {
+                                    this.restart_agent(machine.clone(), agent.clone(), cx)
+                                }
+                            },
+                        )
+                    })),
+                ),
+        );
+    }
+    card.into_any_element()
+}
+
+/// 编排智能体：API 格式单选 + 连接信息表单，改动后才可保存。
+fn orchestrator_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let selected = API_FORMATS
+        .iter()
+        .position(|format| *format == this.current_orchestrator_format());
+    let radio = RadioGroup::horizontal("orch-api-format")
+        .children(["chat_completions", "responses", "messages"])
+        .selected_index(selected)
+        .on_click(cx.listener(move |this, index: &usize, _, cx| {
+            let Some(format) = API_FORMATS.get(*index) else {
+                return;
+            };
+            this.orchestrator_format = Some(*format);
+            cx.notify();
+        }));
+    let muted = theme.muted_foreground;
+    v_flex()
+        .gap_2()
+        .child(
+            v_flex()
+                .gap_1()
+                .p_3()
+                .bg(theme.muted)
+                .rounded_md()
+                .child(
+                    Label::new("API 格式")
+                        .text_sm()
+                        .text_color(muted),
+                )
+                .child(radio)
+                .child(
+                    Label::new("Base URL")
+                        .text_sm()
+                        .text_color(muted),
+                )
+                .child(Input::new(&this.orch_base_url).w_full())
+                .child(
+                    Label::new("API Key")
+                        .text_sm()
+                        .text_color(muted),
+                )
+                .child(Input::new(&this.orch_api_key).w_full())
+                .child(
+                    Label::new("模型名称")
+                        .text_sm()
+                        .text_color(muted),
+                )
+                .child(Input::new(&this.orch_model).w_full())
+                .child(
+                    Label::new("推理级别")
+                        .text_sm()
+                        .text_color(muted),
+                )
+                .child(Input::new(&this.orch_effort).w_full())
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("orch-save")
+                            .small()
+                            .primary()
+                            .label("保存")
+                            .disabled(!this.orchestrator_dirty(cx))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_orchestrator(window, cx)
+                            })),
+                    ),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 快捷指令：卡片列表（名称 + 内容 + 编辑/删除），右上角「+」新增。
+fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
     let mut list = v_flex().gap_2();
     for command in &core.settings.quick_commands {
         let name = command.name.clone();
-        list = list.child(card(
-            &command.name,
-            &command.prompt,
-            vec![
-                Button::new(format!("quick-edit-{}", command.name))
-                    .xsmall()
-                    .ghost()
-                    .label("编辑")
-                    .on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, window, cx| {
-                            this.open_quick_command_form(FormTarget::Edit(name.clone()), window, cx)
-                        }
-                    }))
-                    .into_any_element(),
-                Button::new(format!("quick-remove-{}", command.name))
-                    .xsmall()
-                    .ghost()
-                    .label("删除")
-                    .on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, window, cx| {
-                            this.delete_quick_command(name.clone(), window, cx)
-                        }
-                    }))
-                    .into_any_element(),
-            ],
-            cx,
-        ));
+        list = list.child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .p_2()
+                .bg(theme.muted)
+                .rounded_md()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            Label::new(name.clone())
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground),
+                        )
+                        .child(
+                            Label::new(command.prompt.clone())
+                                .text_xs()
+                                .line_clamp(2)
+                                .text_color(theme.muted_foreground),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("qc-edit-{name}")))
+                        .small()
+                        .label("编辑")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| {
+                                this.open_quick_command_form(
+                                    FormTarget::Edit(name.clone()),
+                                    window,
+                                    cx,
+                                )
+                            }
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("qc-del-{name}")))
+                        .small()
+                        .label("删除")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| {
+                                this.delete_quick_command(name.clone(), window, cx)
+                            }
+                        })),
+                ),
+        );
     }
     if core.settings.quick_commands.is_empty() {
-        list = list.child(ui::empty_hint("暂无快捷指令", cx.theme()));
+        list = list.child(
+            Label::new("还没有快捷指令。添加后会显示在会话输入区上方。")
+                .text_sm()
+                .text_color(theme.muted_foreground),
+        );
     }
     v_flex()
-        .gap_3()
-        .child(card_header("快捷指令", cx, |this, window, cx| {
-            this.open_quick_command_form(FormTarget::New, window, cx)
-        }))
+        .gap_2()
+        .child(
+            h_flex()
+                .items_center()
+                .child(div().flex_1())
+                .child(
+                    Button::new("qc-add")
+                        .small()
+                        .primary()
+                        .icon(IconName::Plus)
+                        .tooltip("添加快捷指令")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_quick_command_form(FormTarget::New, window, cx)
+                        })),
+                ),
+        )
         .child(list)
-        .into_any()
+        .into_any_element()
 }
 
-/// 技能设置：卡片（安装/更新/卸载 + 编辑/删除），右上方「+」弹窗新增。
-fn skills_tab(core: &Core, _this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+/// 技能：卡片两层（名称/描述 + 编辑/删除，安装/更新/卸载），右上角「+」新增。
+fn skills_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
     let mut list = v_flex().gap_2();
     for skill in &core.settings.skills {
         let name = skill.name.clone();
-        let mut actions: Vec<AnyElement> = Vec::new();
+        let mut actions = h_flex().gap_1().flex_wrap();
         for action in ["安装", "更新", "卸载"] {
-            actions.push(
-                Button::new(format!("{action}-{}", skill.name))
-                    .xsmall()
-                    .ghost()
+            actions = actions.child(
+                Button::new(SharedString::from(format!("skill-action-{action}-{name}")))
+                    .small()
                     .label(action)
                     .on_click(cx.listener({
                         let skill = skill.clone();
                         move |this, _, _, cx| this.apply_skill(skill.clone(), action, cx)
-                    }))
-                    .into_any_element(),
+                    })),
             );
         }
-        actions.push(
-            Button::new(format!("skill-edit-{}", skill.name))
-                .xsmall()
-                .ghost()
-                .label("编辑")
-                .on_click(cx.listener({
-                    let name = name.clone();
-                    move |this, _, window, cx| {
-                        this.open_skill_form(FormTarget::Edit(name.clone()), window, cx)
-                    }
-                }))
-                .into_any_element(),
+        list = list.child(
+            v_flex()
+                .gap_2()
+                .p_2()
+                .bg(theme.muted)
+                .rounded_md()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    Label::new(name.clone())
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.foreground),
+                                )
+                                .child(
+                                    Label::new(skill.description.clone())
+                                        .text_xs()
+                                        .line_clamp(2)
+                                        .text_color(theme.muted_foreground),
+                                ),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("skill-edit-{name}")))
+                                .small()
+                                .label("编辑")
+                                .on_click(cx.listener({
+                                    let name = name.clone();
+                                    move |this, _, window, cx| {
+                                        this.open_skill_form(
+                                            FormTarget::Edit(name.clone()),
+                                            window,
+                                            cx,
+                                        )
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("skill-del-{name}")))
+                                .small()
+                                .label("删除")
+                                .on_click(cx.listener({
+                                    let name = name.clone();
+                                    move |this, _, window, cx| {
+                                        this.delete_skill(name.clone(), window, cx)
+                                    }
+                                })),
+                        ),
+                )
+                .child(actions),
         );
-        actions.push(
-            Button::new(format!("skill-remove-{}", skill.name))
-                .xsmall()
-                .ghost()
-                .label("删除")
-                .on_click(cx.listener({
-                    let name = name.clone();
-                    move |this, _, window, cx| this.delete_skill(name.clone(), window, cx)
-                }))
-                .into_any_element(),
-        );
-        list = list.child(card(&skill.name, &skill.description, actions, cx));
     }
     if core.settings.skills.is_empty() {
-        list = list.child(ui::empty_hint("暂无技能", cx.theme()));
+        list = list.child(
+            Label::new("还没有技能。点击右上角 + 添加技能说明。")
+                .text_sm()
+                .text_color(theme.muted_foreground),
+        );
     }
     v_flex()
-        .gap_3()
-        .child(card_header("技能", cx, |this, window, cx| {
-            this.open_skill_form(FormTarget::New, window, cx)
-        }))
+        .gap_2()
+        .child(
+            h_flex()
+                .items_center()
+                .child(div().flex_1())
+                .child(
+                    Button::new("skill-add")
+                        .small()
+                        .primary()
+                        .icon(IconName::Plus)
+                        .tooltip("添加技能")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_skill_form(FormTarget::New, window, cx)
+                        })),
+                ),
+        )
         .child(list)
-        .into_any()
+        .into_any_element()
 }
 
-/// 工作流计划设置：卡片（名称 + 内容 + 编辑/删除），右上方「+」弹窗新增。
-fn plans_tab(core: &Core, _this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+/// 工作流计划：卡片列表（名称 + 内容 + 编辑/删除），右上角「+」新增。
+fn plans_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
     let mut list = v_flex().gap_2();
     for plan in &core.settings.plans {
         let name = plan.name.clone();
-        list = list.child(card(
-            &plan.name,
-            &plan.plan,
-            vec![
-                Button::new(format!("plan-edit-{}", plan.name))
-                    .xsmall()
-                    .ghost()
-                    .label("编辑")
-                    .on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, window, cx| {
-                            this.open_plan_form(FormTarget::Edit(name.clone()), window, cx)
-                        }
-                    }))
-                    .into_any_element(),
-                Button::new(format!("plan-remove-{}", plan.name))
-                    .xsmall()
-                    .ghost()
-                    .label("删除")
-                    .on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, window, cx| this.delete_plan(name.clone(), window, cx)
-                    }))
-                    .into_any_element(),
-            ],
-            cx,
-        ));
+        list = list.child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .p_2()
+                .bg(theme.muted)
+                .rounded_md()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            Label::new(name.clone())
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground),
+                        )
+                        .child(
+                            Label::new(plan.plan.clone())
+                                .text_xs()
+                                .line_clamp(2)
+                                .text_color(theme.muted_foreground),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("plan-edit-{name}")))
+                        .small()
+                        .label("编辑")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| {
+                                this.open_plan_form(FormTarget::Edit(name.clone()), window, cx)
+                            }
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("plan-del-{name}")))
+                        .small()
+                        .label("删除")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| this.delete_plan(name.clone(), window, cx)
+                        })),
+                ),
+        );
     }
     if core.settings.plans.is_empty() {
-        list = list.child(ui::empty_hint("暂无工作流计划", cx.theme()));
+        list = list.child(
+            Label::new("还没有工作流计划。点击右上角 + 创建一个可复用计划。")
+                .text_sm()
+                .text_color(theme.muted_foreground),
+        );
     }
     v_flex()
-        .gap_3()
-        .child(card_header("工作流计划", cx, |this, window, cx| {
-            this.open_plan_form(FormTarget::New, window, cx)
-        }))
-        .child(list)
-        .into_any()
-}
-
-/// 卡片区头部：标题 + 右上角「+」按钮（点击弹出表单）。
-fn card_header(
-    title: &str,
-    cx: &mut Context<AmuxApp>,
-    add: impl Fn(&mut AmuxApp, &mut Window, &mut Context<AmuxApp>) + 'static,
-) -> AnyElement {
-    h_flex()
-        .items_center()
         .gap_2()
-        .child(Label::new(title.to_string()).font_weight(FontWeight::SEMIBOLD))
-        .child(div().flex_1())
         .child(
-            Button::new(format!("add-{title}"))
-                .small()
-                .ghost()
-                .label("+")
-                .on_click(cx.listener(move |this, _, window, cx| add(this, window, cx))),
+            h_flex()
+                .items_center()
+                .child(div().flex_1())
+                .child(
+                    Button::new("plan-add")
+                        .small()
+                        .primary()
+                        .icon(IconName::Plus)
+                        .tooltip("添加计划")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_plan_form(FormTarget::New, window, cx)
+                        })),
+                ),
         )
-        .into_any()
-}
-
-/// 卡片：名称、截断展示的内容与操作按钮。
-fn card(name: &str, detail: &str, actions: Vec<AnyElement>, cx: &Context<AmuxApp>) -> AnyElement {
-    v_flex()
-        .gap_1()
-        .p_2()
-        .rounded_md()
-        .bg(cx.theme().secondary)
-        .child(Label::new(name.to_string()))
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(ui::truncate(detail, 120)),
-        )
-        .child(h_flex().gap_2().children(actions))
-        .into_any()
+        .child(list)
+        .into_any_element()
 }
 
 /// 技能安装/更新/卸载：创建临时目录普通会话并发送指令（docs/DESIGN.md「技能操作」）。
@@ -514,7 +753,7 @@ pub fn install_skill(
         let machines = match client.machines().await {
             Ok(machines) => machines,
             Err(error) => {
-                core.lock().note(format!("读取机器失败：{error}"));
+                core.lock().error(format!("读取机器失败：{error}"));
                 return;
             }
         };
@@ -527,7 +766,7 @@ pub fn install_skill(
             }
         }
         let Some((machine, agent)) = target else {
-            core.lock().note("没有可用的机器与 agent");
+            core.lock().warning("没有可用的机器与 agent");
             return;
         };
         let workspace = std::env::temp_dir().to_string_lossy().to_string();
@@ -542,7 +781,7 @@ pub fn install_skill(
         {
             Ok(session) => session,
             Err(error) => {
-                core.lock().note(format!("创建技能会话失败：{error}"));
+                core.lock().error(format!("创建技能会话失败：{error}"));
                 return;
             }
         };
@@ -554,12 +793,12 @@ pub fn install_skill(
             .prompt(&session.id, vec![ContentBlock::Text { text: prompt }])
             .await
         {
-            core.lock().note(format!("发送技能指令失败：{error}"));
+            core.lock().error(format!("发送技能指令失败：{error}"));
             return;
         }
         {
             let mut core = core.lock();
-            core.note(format!("已发起技能{action}会话"));
+            core.success(format!("已发起技能{action}会话"));
             crate::poll::open_session(&mut core, &session.id);
         }
     });

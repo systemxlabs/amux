@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+name = "amux_desktop"
+path = "src/lib.rs"
+
 [[bin]]
 name = "amux-desktop"
 path = "src/main.rs"

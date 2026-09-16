@@ -10,7 +10,7 @@ use crate::client::Client;
 use crate::state::{
     ConnectionStatus, Core, ListEntry, OpenTarget, SharedCore, SidePanel, ACTIVITIES_INTERVAL,
     HISTORY_INTERVAL, ONGOING_INTERVAL, PLAN_INTERVAL, SESSION_LIST_INTERVAL, SETTINGS_INTERVAL,
-    TERMINAL_INTERVAL,
+    TERMINAL_INTERVAL, WORKSPACE_INTERVAL,
 };
 
 /// 连接重试间隔。
@@ -128,11 +128,12 @@ async fn refresh_open(
     side_panel: Option<SidePanel>,
 ) {
     let activities_open = side_panel == Some(SidePanel::Activities);
+    let workspace_open = side_panel == Some(SidePanel::Workspace);
     let plan_open = side_panel == Some(SidePanel::Plan);
     let detail_open = side_panel == Some(SidePanel::Detail);
     let terminal_open = side_panel == Some(SidePanel::Terminal);
 
-    let (due_history, due_ongoing, due_activities, due_plan, due_terminal, terminal, cursor) = {
+    let (due_history, due_ongoing, due_activities, due_plan, due_terminal, due_workspace, terminal, cursor) = {
         let core = core.lock();
         (
             core.due(core.last.history, HISTORY_INTERVAL),
@@ -140,6 +141,7 @@ async fn refresh_open(
             core.due(core.last.activities, ACTIVITIES_INTERVAL),
             core.due(core.last.plan, PLAN_INTERVAL),
             core.due(core.last.terminal, TERMINAL_INTERVAL),
+            core.due(core.last.workspace, WORKSPACE_INTERVAL),
             core.view.detail.active_terminal.clone(),
             core.last.terminal_cursor,
         )
@@ -170,6 +172,30 @@ async fn refresh_open(
                         core.view.detail.activities = page.activities;
                         core.last.activities = Some(Instant::now());
                     }
+                }
+            }
+            // 工作目录树按需加载：打开面板时根目录可能尚未拉取（或会话数据后到）
+            if due_workspace && workspace_open {
+                let target_dir = {
+                    let core = core.lock();
+                    core.view
+                        .session
+                        .as_ref()
+                        .filter(|_| core.view.detail.workspace_tree.is_empty())
+                        .map(|session| (session.machine.clone(), session.root_dir().to_string()))
+                };
+                if let Some((machine, root)) = target_dir {
+                    if let Ok(result) = client.list_dir(&machine, Some(&root), 500, 0).await {
+                        let mut core = core.lock();
+                        if core.open.as_ref() == Some(target) {
+                            core.view.detail.workspace_tree = result
+                                .entries
+                                .into_iter()
+                                .map(crate::state::WorkspaceNode::new)
+                                .collect();
+                        }
+                    }
+                    core.lock().last.workspace = Some(Instant::now());
                 }
             }
             if due_plan && plan_open {

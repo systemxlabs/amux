@@ -1,1352 +1,1196 @@
-//! 三面板渲染：左侧会话列表、中间会话交互、右侧辅助面板。
+//! 左侧面板（会话列表）、中间面板右缘的悬浮按钮栏、右侧面板（工作目录 / 文件改动 /
+//! 会话详情 / 会话活动 / 会话计划 / 终端）。
 
-use amux_common::api::TerminalState;
-use amux_common::domain::{
-    GitDiffFile, GitDiffHunk, SessionConfigKind, SessionConfigOptionValue, SessionState,
-};
-use gpui::prelude::FluentBuilder;
+use amux_common::api::{Session, Terminal, TerminalState, Workflow};
+use amux_common::domain::{Activity, GitDiffFile, GitDiffLineKind, SessionState};
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::label::Label;
-use gpui_component::select::Select;
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::scroll::{Scrollbar, ScrollableElement as _};
 use gpui_component::spinner::Spinner;
-use gpui_component::switch::Switch;
-use gpui_component::*;
-use gpui_component::{h_flex, v_flex, ActiveTheme, IconName, Sizable};
+use gpui_component::text::TextView;
+use gpui_component::{
+    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, IconNamed, Selectable,
+    Sizable,
+};
 
-use crate::app::{text_input, AmuxApp};
+use crate::app::AmuxApp;
+use crate::diff;
 use crate::difftree::{self, DiffNode};
-use crate::state::{ListEntry, OpenTarget, SettingsTab, SidePanel, WorkspaceNode};
+use crate::sessions;
+use crate::state::{Core, ListEntry, OpenTarget, SidePanel, WorkspaceNode};
+use crate::terminal_view;
 use crate::ui;
 
-/// 左侧面板宽度与可拖拽范围。
-pub const LEFT_WIDTH: f32 = 260.0;
-pub const LEFT_MIN_WIDTH: f32 = 180.0;
-pub const LEFT_MAX_WIDTH: f32 = 420.0;
-/// 右侧面板宽度与可拖拽范围。
-pub const RIGHT_WIDTH: f32 = 400.0;
-pub const RIGHT_MIN_WIDTH: f32 = 280.0;
-pub const RIGHT_MAX_WIDTH: f32 = 900.0;
 /// 改动审查视图左侧文件树宽度。
-const DIFF_TREE_WIDTH: f32 = 180.0;
+const DIFF_TREE_WIDTH: f32 = 168.0;
+/// 工作目录树宽度。
+const WORKSPACE_TREE_WIDTH: f32 = 196.0;
+/// 工作目录树中每层缩进。
+const TREE_INDENT: f32 = 14.0;
 
-/// 终端尺寸调整步长与下限。
-const TERMINAL_COL_STEP: u16 = 10;
-const TERMINAL_ROW_STEP: u16 = 5;
-const TERMINAL_MIN_COLS: u16 = 20;
-const TERMINAL_MIN_ROWS: u16 = 5;
+/// 改动面板图标：文件 diff（文件轮廓内含 +/−）。gpui-component 默认图标集无
+/// 对应图标，SVG 由应用自有资产提供（main.rs `AmuxAssets`）。
+struct FileDiffIcon;
 
-/// 左侧面板：新建会话、会话列表（普通会话 + 工作流会话）、设置入口。
-pub fn render_left(
-    core: &crate::state::Core,
+impl IconNamed for FileDiffIcon {
+    fn path(self) -> SharedString {
+        "icons/file-diff.svg".into()
+    }
+}
+
+// ---------- 左侧面板 ----------
+
+/// 左侧面板内容：标题与新建入口、会话列表、设置入口。
+pub fn render_sidebar(
+    core: &Core,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let mut list = v_flex()
-        .id("session-list")
-        .flex_1()
-        .w_full()
-        .gap_1()
-        .overflow_y_scroll();
+    let theme = ui::Colors::of(cx.theme());
+    let sidebar = theme.sidebar;
+    let sidebar_border = theme.sidebar_border;
+    let foreground = theme.foreground;
+    let primary = theme.primary;
 
+    let mut list = v_flex().id("sidebar-sessions").flex_1().overflow_y_scroll().gap_2();
     for entry in core.entries.clone() {
         match &entry {
             ListEntry::Session(session) => {
-                list = list.child(session_row(
-                    &session.id,
-                    &session.title,
-                    session.state,
-                    session.updated_at,
-                    false,
-                    core,
-                    this,
-                    cx,
-                ));
+                list = list.child(session_row(session, core, this, cx));
             }
             ListEntry::Workflow(workflow) => {
-                let expanded = core.expanded_workflows.contains(&workflow.id);
-                list = list.child(workflow_row(workflow, expanded, core, this, cx));
-                if expanded {
-                    for linked in &workflow.linked_sessions {
-                        list = list.child(div().pl_6().child(session_row(
-                            &linked.id,
-                            &linked.title,
-                            linked.state,
-                            linked.updated_at,
-                            false,
-                            core,
-                            this,
-                            cx,
-                        )));
-                    }
-                }
+                list = list.child(workflow_row(workflow, core, this, cx));
             }
         }
     }
     if core.entries.is_empty() {
-        list = list.child(ui::empty_hint("暂无会话", cx.theme()));
-    }
-
-    let paging = h_flex()
-        .gap_2()
-        .p_2()
-        .child(
-            Button::new("load-more")
-                .small()
-                .ghost()
-                .label("加载更多")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.with_core(|core| core.list_limit += 20);
-                    this.with_core(|core| core.last.list = None);
-                    cx.notify();
-                })),
-        )
-        .child(
-            Button::new("collapse")
-                .small()
-                .ghost()
-                .label("收起")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.with_core(|core| {
-                        core.list_limit = 20;
-                        core.last.list = None;
-                    });
-                    cx.notify();
-                })),
+        list = list.child(
+            Label::new("暂无会话")
+                .text_sm()
+                .text_color(theme.muted_foreground),
         );
+    }
+    list = list.child(
+        h_flex()
+            .gap_1()
+            .when(core.list_limit > 20, |row| {
+                row.child(
+                    Button::new("sessions-collapse")
+                        .small()
+                        .label("收起")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.with_core(|core| {
+                                core.list_limit = 20;
+                                core.last.list = None;
+                            });
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                Button::new("sessions-more")
+                    .small()
+                    .label("加载更多")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.with_core(|core| {
+                            core.list_limit += 20;
+                            core.last.list = None;
+                        });
+                        cx.notify();
+                    })),
+            ),
+    );
 
     v_flex()
-        .size_full()
-        .bg(cx.theme().sidebar)
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .gap_2()
+        .p_3()
+        .bg(sidebar)
         .border_r_1()
-        .border_color(cx.theme().border)
+        .border_color(sidebar_border)
         .child(
             h_flex()
-                .p_2()
                 .gap_2()
                 .items_center()
-                .child(Label::new("amux").font_weight(FontWeight::SEMIBOLD))
+                .child(div().size_2().rounded_full().bg(primary))
+                .child(
+                    Label::new("会话")
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(foreground),
+                )
                 .child(div().flex_1())
                 .child(
-                    Button::new("new-session")
+                    Button::new("goto-new-session")
                         .small()
-                        .primary()
-                        .label("+")
+                        .icon(IconName::Plus)
+                        .tooltip("新会话 / 工作流")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.with_core(|core| {
                                 core.open = None;
                                 core.view = Default::default();
-                                core.new_session.workflow_mode = false;
                             });
                             cx.notify();
                         })),
                 ),
         )
         .child(list)
-        .child(paging)
         .child(
-            h_flex().px_2().gap_2().items_center().child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(this.status_label()),
-            ),
-        )
-        .child(
-            h_flex().p_2().child(
+            h_flex().justify_end().child(
                 Button::new("open-settings")
                     .small()
                     .ghost()
-                    .icon(IconName::Settings)
                     .label("设置")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.with_core(|core| core.settings_open = true);
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(None, window, cx))),
             ),
         )
-        .into_any()
+        .into_any_element()
 }
 
-/// 单条会话行：标题（或重命名输入框）、状态徽章、操作按钮。
-#[allow(clippy::too_many_arguments)]
+/// 普通会话行：状态图标、标题、活跃时间、工作中转圈；右键菜单重命名/删除。
 fn session_row(
-    id: &str,
-    title: &str,
-    state: SessionState,
-    updated_at: u64,
-    is_workflow: bool,
-    core: &crate::state::Core,
+    session: &Session,
+    core: &Core,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let open = match (is_workflow, core.open.as_ref()) {
-        (true, Some(OpenTarget::Workflow(current))) => current == id,
-        (false, Some(OpenTarget::Session(current))) => current == id,
-        _ => false,
-    };
-    let title = if title.trim().is_empty() {
-        "未命名会话".to_string()
-    } else {
-        title.to_string()
-    };
-    let renaming = this.renaming_id.as_deref() == Some(id);
-
-    let mut row = h_flex()
-        .id(format!("session-{id}"))
-        .w_full()
-        .px_2()
-        .py_1()
-        .gap_2()
-        .items_center()
-        .rounded_md()
-        .when(open, |row| row.bg(cx.theme().accent))
-        .hover(|row| row.bg(cx.theme().accent))
-        .on_click(cx.listener({
-            let id = id.to_string();
-            move |this, _, _, cx| {
-                this.open_entry(&id, cx);
-            }
-        }));
-
-    if renaming {
-        row = row.child(text_input(&this.rename_input));
-        row = row.child(
-            Button::new(format!("rename-ok-{id}"))
-                .xsmall()
-                .primary()
-                .label("确定")
-                .on_click(cx.listener(|this, _, _, cx| this.commit_rename(cx))),
-        );
-    } else {
-        row = row.child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .child(Label::new(ui::truncate(&title, 28)).text_sm()),
-        );
+    let id = session.id.clone();
+    let title = session_title(&session.title, &session.workspace);
+    if this.renaming_id.as_deref() == Some(id.as_str()) {
+        return rename_form(&id, this, cx);
     }
-    if state == SessionState::Busy {
-        row = row.child(Spinner::new().xsmall().color(cx.theme().primary));
-    }
-    row = row.child(
-        div()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(ui::timestamp(updated_at)),
-    );
-    row = row.child(
-        Button::new(format!("rename-{id}"))
-            .xsmall()
-            .ghost()
-            .label("改名")
-            .on_click(cx.listener({
-                let id = id.to_string();
-                move |this, _, window, cx| {
-                    this.begin_rename(&id, window, cx);
-                }
-            })),
-    );
-    row = row.child(
-        Button::new(format!("delete-{id}"))
-            .xsmall()
-            .ghost()
-            .label("删除")
-            .on_click(cx.listener({
-                let entry = if is_workflow {
-                    ListEntry::Workflow(amux_common::api::Workflow {
-                        id: id.to_string(),
-                        title: title.clone(),
-                        state,
-                        plan: String::new(),
-                        created_at: 0,
-                        updated_at,
-                        linked_sessions: Vec::new(),
-                    })
-                } else {
-                    ListEntry::Session(amux_common::api::Session {
-                        id: id.to_string(),
-                        title: title.clone(),
-                        state,
-                        machine: String::new(),
-                        agent: String::new(),
-                        workspace: String::new(),
-                        worktree_dir: String::new(),
-                        created_at: 0,
-                        updated_at,
-                    })
-                };
-                move |this, _, window, cx| {
-                    this.confirm_delete(entry.clone(), window, cx);
-                }
-            })),
-    );
-    row.into_any()
-}
+    let selected = matches!(&core.open, Some(OpenTarget::Session(open)) if open == &id);
+    let theme = ui::Colors::of(cx.theme());
+    let entry = ListEntry::Session(session.clone());
 
-/// 工作流会话行（标题带「工作流」标记，可展开/折叠关联普通会话）。
-fn workflow_row(
-    workflow: &amux_common::api::Workflow,
-    expanded: bool,
-    core: &crate::state::Core,
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
-    let row = session_row(
-        &workflow.id,
-        &workflow.title,
-        workflow.state,
-        workflow.updated_at,
-        true,
-        core,
-        this,
-        cx,
-    );
-    let toggle = Button::new(format!("toggle-{}", workflow.id))
-        .xsmall()
-        .ghost()
-        .icon(if expanded {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronRight
-        })
-        .on_click(cx.listener({
-            let id = workflow.id.clone();
-            move |this, _, _, cx| {
-                this.with_core(|core| {
-                    if core.expanded_workflows.contains(&id) {
-                        core.expanded_workflows.remove(&id);
-                    } else {
-                        core.expanded_workflows.insert(id.clone());
-                    }
-                });
-                cx.notify();
-            }
-        }));
-    h_flex()
-        .w_full()
-        .gap_1()
-        .items_center()
-        .child(toggle)
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().primary)
-                .child("工作流"),
-        )
-        .child(div().flex_1().child(row))
-        .into_any()
-}
-
-/// 指定机器上某 agent 是否可用。
-fn machine_agent_available(core: &crate::state::Core, machine: &str, agent: &str) -> bool {
-    core.settings
-        .agents
-        .iter()
-        .find(|(name, _)| name == machine)
-        .is_some_and(|(_, agents)| {
-            agents
-                .iter()
-                .any(|item| item.name == agent && item.available)
-        })
-}
-
-/// 新建会话表单已选中的 agent 是否可用。
-fn selected_agent_available(core: &crate::state::Core) -> bool {
-    match (
-        core.new_session.machine.as_deref(),
-        core.new_session.agent.as_deref(),
-    ) {
-        (Some(machine), Some(agent)) => machine_agent_available(core, machine, agent),
-        _ => false,
-    }
-}
-
-/// 当前视图的 agent 可用状态：普通会话为其所属 agent，工作流会话为编排智能体。
-fn view_agent_available(core: &crate::state::Core) -> bool {
-    match &core.view.session {
-        Some(session) => machine_agent_available(core, &session.machine, &session.agent),
-        None => core.settings.orchestrator.is_some(),
-    }
-}
-
-/// 中间面板：新建会话视图或会话交互视图。
-pub fn render_middle(
-    core: &crate::state::Core,
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
-    match core.open.clone() {
-        None => new_session_view(core, this, cx),
-        Some(_) => interaction_view(core, this, cx),
-    }
-}
-
-/// 新建会话视图：普通 / 工作流模式。
-fn new_session_view(
-    core: &crate::state::Core,
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
-    let workflow_mode = core.new_session.workflow_mode;
-    let mut mode_row = h_flex().gap_2().p_3().child(
-        {
-            let button = Button::new("mode-session").small().label("普通会话");
-            if workflow_mode {
-                button
-            } else {
-                button.primary()
-            }
-        }
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.with_core(|core| core.new_session.workflow_mode = false);
-            cx.notify();
-        })),
-    );
-    let workflow_button = {
-        let button = Button::new("mode-workflow").small().label("工作流会话");
-        if workflow_mode {
-            button.primary()
-        } else {
-            button
-        }
-    };
-    mode_row = mode_row.child(workflow_button.on_click(cx.listener(|this, _, _, cx| {
-        this.with_core(|core| core.new_session.workflow_mode = true);
-        cx.notify();
-    })));
-
-    let mut body = v_flex().flex_1().gap_3().p_3();
-    if workflow_mode {
-        if core.settings.orchestrator.is_none() {
-            body = body
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().warning)
-                        .child("编排智能体未配置，请先在设置中完成配置"),
-                )
-                .child(
-                    Button::new("goto-orchestrator")
-                        .small()
-                        .primary()
-                        .label("前往设置")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.with_core(|core| {
-                                core.settings_open = true;
-                                core.settings_tab = SettingsTab::Orchestrator;
-                            });
-                            this.load_orchestrator_form(window, cx);
-                            cx.notify();
-                        })),
-                );
-        } else {
-            let plan = this.plan_input.read(cx).value().trim().to_string();
-            body = body.child(Label::new("工作计划（选择已保存计划或直接输入）"));
-            if !core.settings.plans.is_empty() {
-                let mut plans = h_flex().gap_2().flex_wrap();
-                for plan in core.settings.plans.clone() {
-                    plans = plans.child(
-                        Button::new(format!("plan-{}", plan.name))
-                            .small()
-                            .ghost()
-                            .label(ui::truncate(&plan.name, 18))
-                            .on_click(cx.listener({
-                                let text = plan.plan.clone();
-                                move |this, _, window, cx| this.set_plan(text.clone(), window, cx)
-                            })),
-                    );
-                }
-                body = body.child(plans);
-            }
-            body = body.child(text_input(&this.plan_input));
-            body = body.child(
-                Button::new("create-workflow")
-                    .small()
-                    .primary()
-                    .disabled(plan.is_empty())
-                    .label("创建工作流会话")
-                    .on_click(cx.listener(|this, _, _, cx| this.create_session(cx))),
-            );
-        }
-    } else {
-        body = body.child(Label::new("机器与 agent"));
-        let mut agents_row = h_flex().gap_2().flex_wrap();
-        for machine in core.settings.machines.clone() {
-            let selected = core.new_session.machine.as_deref() == Some(machine.name.as_str());
-            agents_row = agents_row.child(
-                Button::new(format!("machine-{}", machine.name))
-                    .small()
-                    .when(selected, |button| button.primary())
-                    .label(machine.name.clone())
-                    .on_click(cx.listener({
-                        let name = machine.name.clone();
-                        move |this, _, _, cx| {
-                            this.with_core(|core| {
-                                core.new_session.machine = Some(name.clone());
-                                core.new_session.agent = None;
-                                core.new_session.suggestions.clear();
-                            });
-                            cx.notify();
-                        }
-                    })),
-            );
-        }
-        if core.settings.machines.is_empty() {
-            agents_row = agents_row.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("暂无已连接机器"),
-            );
-        }
-        body = body.child(agents_row);
-
-        if let Some(machine) = core.new_session.machine.clone() {
-            let agents = core
-                .settings
-                .agents
-                .iter()
-                .find(|(name, _)| name == &machine)
-                .map(|(_, agents)| agents.clone())
-                .unwrap_or_default();
-            let mut row = h_flex().gap_2().flex_wrap();
-            for agent in agents {
-                let selected = core.new_session.agent.as_deref() == Some(agent.name.as_str());
-                let button = Button::new(format!("agent-{}", agent.name))
-                    .small()
-                    .disabled(!agent.available)
-                    .label(format!(
-                        "{}{}",
-                        agent.name,
-                        if agent.available {
-                            ""
-                        } else {
-                            "（不可用）"
-                        }
-                    ))
-                    .on_click(cx.listener({
-                        let name = agent.name.clone();
-                        move |this, _, _, cx| {
-                            this.with_core(|core| core.new_session.agent = Some(name.clone()));
-                            cx.notify();
-                        }
-                    }));
-                let button = if selected { button.primary() } else { button };
-                row = row.child(button);
-            }
-            body = body.child(row);
-        }
-
-        body = body.child(Label::new("工作目录"));
-        body = body.child(text_input(&this.workspace_input));
-        let workspace = this.workspace_input.read(cx).value().trim().to_string();
-        if !core.new_session.suggestions.is_empty() {
-            let mut suggestions = v_flex().gap_1();
-            for entry in &core.new_session.suggestions {
-                suggestions = suggestions.child(
-                    Button::new(format!("suggest-{}", entry.path))
-                        .small()
-                        .ghost()
-                        .label(ui::truncate(&entry.path, 48))
-                        .on_click(cx.listener({
-                            let path = entry.path.clone();
-                            move |this, _, window, cx| this.set_workspace(path.clone(), window, cx)
-                        })),
-                );
-            }
-            body = body.child(suggestions);
-        }
-        if !core.recent_workspaces.is_empty() {
-            let mut recent = h_flex().gap_2().flex_wrap();
-            for workspace in core
-                .recent_workspaces
-                .iter()
-                .filter(|workspace| {
-                    core.new_session.machine.as_deref() == Some(workspace.machine.as_str())
-                })
-                .take(8)
-            {
-                recent = recent.child(
-                    Button::new(format!("recent-{}", workspace.workspace))
-                        .small()
-                        .ghost()
-                        .label(ui::truncate(&workspace.workspace, 24))
-                        .on_click(cx.listener({
-                            let path = workspace.workspace.clone();
-                            move |this, _, window, cx| this.set_workspace(path.clone(), window, cx)
-                        })),
-                );
-            }
-            body = body.child(recent);
-        }
-        let can_create = !workspace.is_empty() && selected_agent_available(core);
-        body = body.child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child({
-                    let button = Button::new("worktree-toggle").small().label(format!(
-                        "worktree：{}",
-                        if core.new_session.use_worktree {
-                            "开"
-                        } else {
-                            "关"
-                        }
-                    ));
-                    let button = if core.new_session.use_worktree {
-                        button.primary()
-                    } else {
-                        button
-                    };
-                    button.on_click(cx.listener(|this, _, _, cx| {
-                        this.with_core(|core| {
-                            core.new_session.use_worktree = !core.new_session.use_worktree
-                        });
-                        cx.notify();
-                    }))
-                })
-                .child(
-                    Button::new("create-session")
-                        .small()
-                        .primary()
-                        .disabled(!can_create)
-                        .label("创建会话")
-                        .on_click(cx.listener(|this, _, _, cx| this.create_session(cx))),
-                ),
-        );
-    }
-
-    v_flex()
-        .flex_1()
-        .h_full()
-        .child(mode_row)
-        .child(body)
-        .into_any()
-}
-
-/// 会话交互视图：标题栏、对话历史、实时活动、输入区、会话选项、悬浮按钮。
-fn interaction_view(
-    core: &crate::state::Core,
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
-    let title = core.view.title();
-    let title = if title.trim().is_empty() {
-        "未命名会话".to_string()
-    } else {
-        title
-    };
-    let header = h_flex()
-        .p_2()
-        .gap_2()
-        .items_center()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .child(Label::new(ui::truncate(&title, 40)))
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(core.view.subtitle()),
-        )
-        .child(ui::availability_badge(
-            view_agent_available(core),
-            cx.theme(),
-        ))
-        .child(div().flex_1());
-
-    let mut history = v_flex()
-        .id("history")
-        .flex_1()
-        .gap_2()
-        .p_3()
-        .overflow_y_scroll();
-    for item in &core.view.detail.history {
-        let (bubble_bg, role) = match item {
-            amux_common::domain::HistoryItem::UserMessage { .. } => (cx.theme().accent, "我"),
-            amux_common::domain::HistoryItem::AgentMessage { .. } => {
-                (cx.theme().secondary, "agent")
-            }
-        };
-        history = history.child(
-            v_flex()
-                .max_w(relative(0.8))
-                .gap_1()
-                .p_2()
-                .rounded_md()
-                .bg(bubble_bg)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(role),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(ui::timestamp(ui::history_timestamp(item))),
-                        ),
-                )
-                .child(div().text_sm().child(ui::history_text(item))),
-        );
-    }
-    if core.view.detail.history.is_empty() {
-        history = history.child(ui::empty_hint("暂无对话", cx.theme()));
-    }
-
-    let ongoing = core
-        .view
-        .detail
-        .ongoing
-        .as_ref()
-        .map(ui::activity_line)
-        .unwrap_or_default();
-
-    // 快捷指令：点击直接作为用户输入发送（docs/PRD.md「快捷指令」）
-    let mut quick = h_flex().gap_2().flex_wrap().px_3();
-    for command in core.settings.quick_commands.clone() {
-        quick = quick.child(
-            Button::new(format!("quick-{}", command.name))
-                .xsmall()
-                .ghost()
-                .label(ui::truncate(&command.name, 12))
-                .on_click(cx.listener({
-                    let prompt = command.prompt.clone();
-                    move |this, _, _, cx| this.send_quick_command(prompt.clone(), cx)
-                })),
-        );
-    }
-
-    let options = session_options(core, this, cx);
-
-    // 输入区：附件、斜杠命令上拉框、多行输入（Enter 发送 / Shift+Enter 换行）、发送与取消
     let row = h_flex()
-        .gap_2()
+        .w_full()
+        .h_8()
+        .px_1()
+        .gap_1p5()
         .items_center()
-        .child(div().flex_1().child(text_input(&this.input)))
         .child(
-            Button::new("send")
+            Icon::new(IconName::SquareTerminal)
                 .small()
-                .primary()
-                .label("发送")
-                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-        )
-        .child(
-            Button::new("cancel-work")
-                .small()
-                .label("取消")
-                .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
-        );
-    let mut composer = v_flex().gap_2();
-    if !this.attachments.is_empty() {
-        let mut attachments = h_flex().gap_2().flex_wrap();
-        for (ix, attachment) in this.attachments.iter().enumerate() {
-            attachments = attachments.child(
-                h_flex()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(cx.theme().secondary)
-                    .child(div().text_xs().child(ui::truncate(&attachment.label, 24)))
-                    .child(
-                        Button::new(format!("drop-attachment-{ix}"))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Close)
-                            .tooltip("移除附件")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx)),
-                            ),
-                    ),
-            );
-        }
-        composer = composer.child(attachments);
-    }
-    let candidates = this.slash_candidates(cx);
-    if !candidates.is_empty() {
-        let selected = this.slash_selected.min(candidates.len() - 1);
-        let mut list = v_flex()
-            .id("slash-commands")
-            .max_h(rems(12.))
-            .overflow_y_scroll()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover);
-        for (ix, command) in candidates.iter().enumerate() {
-            list = list.child(
-                div()
-                    .id(format!("slash-{}", command.name))
-                    .px_2()
-                    .py_1()
-                    .when(ix == selected, |row| row.bg(cx.theme().accent))
-                    .hover(|row| row.bg(cx.theme().accent))
-                    .on_click(cx.listener({
-                        let command = command.clone();
-                        move |this, _, window, cx| this.apply_slash_command(&command, window, cx)
-                    }))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().text_sm().child(format!("/{}", command.name)))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(ui::truncate(&command.description, 32)),
-                            ),
-                    ),
-            );
-        }
-        composer = composer.child(list);
-    }
-
-    let footer = v_flex()
-        .gap_2()
-        .p_3()
-        .border_t_1()
-        .border_color(cx.theme().border)
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(if ongoing.is_empty() {
-                    String::new()
+                .text_color(if selected {
+                    theme.primary
                 } else {
-                    format!("实时活动：{ongoing}")
+                    theme.muted_foreground
                 }),
         )
-        .child(quick)
-        .when(!core.view.detail.config_options.is_empty(), |footer| {
-            footer.child(options)
-        })
         .child(
-            // 输入区整体接收粘贴与拖拽：图片/文件成为附件，文本交给输入框
-            v_flex()
-                .id("composer")
-                .gap_2()
-                .capture_action(cx.listener(
-                    |this, action: &gpui_component::input::Paste, _window, cx| {
-                        this.paste_into_composer(action, cx)
-                    },
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .items_center()
+                .child(
+                    Label::new(title)
+                        .text_sm()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
+                ),
+        )
+        .when(session.updated_at > 0, |row| {
+            row.child(
+                Label::new(ui::format_local_time(
+                    session.updated_at,
+                    ui::TimePrecision::Compact,
                 ))
-                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    this.composer_key_down(event, window, cx)
-                }))
-                .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
-                    this.attach_paths(paths.paths(), cx)
-                }))
-                .child(composer)
-                .child(row),
-        );
+                .text_xs()
+                .flex_none()
+                .text_color(theme.muted_foreground),
+            )
+        })
+        .child(busy_indicator(session.state, theme.primary));
 
-    let floating = v_flex().absolute().top_12().right_3().gap_1().children(
-        SidePanel::for_session(core.is_workflow())
-            .into_iter()
-            .map(|panel| {
-                let label = panel.label();
-                Button::new(format!("panel-{}", label))
-                    .xsmall()
-                    .ghost()
-                    .label(label)
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_side_panel(panel, cx)))
-            }),
-    );
-
-    v_flex()
-        .relative()
-        .flex_1()
-        .h_full()
-        .child(header)
-        .child(history)
-        .child(footer)
-        .child(floating)
-        .into_any()
+    list_row(row, &id, selected, Some(entry), cx).into_any_element()
 }
 
-/// 右侧面板：工作目录 / 改动 / 详情 / 活动 / 计划 / 终端。
-pub fn render_right(
-    core: &crate::state::Core,
+/// 工作流会话行：标题 + 展开开关 + 关联普通会话（展开时按自身活跃排序）。
+fn workflow_row(
+    workflow: &Workflow,
+    core: &Core,
+    this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let id = workflow.id.clone();
+    let title = if workflow.title.trim().is_empty() {
+        "未命名工作流".to_string()
+    } else {
+        workflow.title.clone()
+    };
+    if this.renaming_id.as_deref() == Some(id.as_str()) {
+        return rename_form(&id, this, cx);
+    }
+    let selected = matches!(&core.open, Some(OpenTarget::Workflow(open)) if open == &id);
+    let expanded = core.expanded_workflows.contains(&id);
+    let theme = ui::Colors::of(cx.theme());
+    let entry = ListEntry::Workflow(workflow.clone());
+
+    let header = h_flex()
+        .w_full()
+        .h_8()
+        .px_1()
+        .gap_1()
+        .items_center()
+        .child(
+            Icon::new(IconName::Network)
+                .small()
+                .text_color(if selected {
+                    theme.primary
+                } else {
+                    theme.muted_foreground
+                }),
+        )
+        .child(
+            Label::new(title)
+                .text_sm()
+                .flex_1()
+                .min_w_0()
+                .truncate(),
+        )
+        .when(workflow.updated_at > 0, |row| {
+            row.child(
+                Label::new(ui::format_local_time(
+                    workflow.updated_at,
+                    ui::TimePrecision::Compact,
+                ))
+                .text_xs()
+                .flex_none()
+                .text_color(theme.muted_foreground),
+            )
+        })
+        .child(busy_indicator(workflow.state, theme.primary))
+        .child(
+            Button::new(format!("wf-toggle-{id}"))
+                .xsmall()
+                .ghost()
+                .icon(if expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .tooltip("展开/折叠关联会话")
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _, _, cx| {
+                        this.with_core(|core| {
+                            if !core.expanded_workflows.remove(&id) {
+                                core.expanded_workflows.insert(id.clone());
+                            }
+                        });
+                        cx.notify();
+                    }
+                })),
+        );
+
+    let mut children = v_flex().gap_1();
+    if expanded {
+        for linked in &workflow.linked_sessions {
+            children = children.child(
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .items_center()
+                    .px_1()
+                    .child(
+                        Label::new("↳")
+                            .text_sm()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        Label::new(session_title(&linked.title, &linked.workspace))
+                        .text_sm()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
+                    )
+                    .child(busy_indicator(linked.state, theme.primary)),
+            );
+        }
+    }
+
+    v_flex()
+        .gap_1()
+        .p_1()
+        .child(list_row(header, &id, selected, Some(entry), cx))
+        .child(children)
+        .into_any_element()
+}
+
+/// 行内重命名表单：输入框 + 保存/取消。
+fn rename_form(id: &str, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    v_flex()
+        .gap_1()
+        .p_1()
+        .child(this.rename_input.clone())
+        .child(
+            h_flex()
+                .gap_1()
+                .child(
+                    Button::new(format!("rename-save-{id}"))
+                        .small()
+                        .primary()
+                        .flex_1()
+                        .label("保存")
+                        .on_click(cx.listener(|this, _, _, cx| this.commit_rename(cx))),
+                )
+                .child(
+                    Button::new(format!("rename-cancel-{id}"))
+                        .small()
+                        .ghost()
+                        .flex_1()
+                        .label("取消")
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 会话行外壳：选中/悬停样式 + 右键菜单（重命名 / 删除，docs/PRD.md 会话列表视图）。
+fn list_row(
+    row: impl IntoElement,
+    id: &str,
+    selected: bool,
+    entry: Option<ListEntry>,
+    cx: &mut Context<AmuxApp>,
+) -> impl IntoElement {
+    let theme = ui::Colors::of(cx.theme());
+    let active = theme.list_active;
+    let active_border = theme.list_active_border;
+    let hover = theme.list_hover;
+    let row_id = format!("sess-row-{id}");
+    let open_id = id.to_string();
+    let entry = entry.clone();
+    let app = cx.entity();
+    div()
+        .id(SharedString::from(row_id))
+        .relative()
+        .w_full()
+        .rounded_md()
+        .bg(active.opacity(if selected { 1.0 } else { 0.0 }))
+        .when(selected, |row| row.border_1().border_color(active_border))
+        .hover(move |row| row.bg(hover))
+        .on_click(cx.listener(move |this, _, _, cx| this.open_entry(&open_id, cx)))
+        .context_menu(move |menu, _, _| {
+            let Some(entry) = &entry else {
+                return menu;
+            };
+            let rename_id = entry.id().to_string();
+            let rename_app = app.clone();
+            let delete_entry = entry.clone();
+            let delete_app = app.clone();
+            menu.item(
+                PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
+                    let rename_id = rename_id.clone();
+                    rename_app.update(cx, |this, cx| this.begin_rename(&rename_id, window, cx));
+                }),
+            )
+            .item(PopupMenuItem::new("删除会话").on_click(move |_, window, cx| {
+                delete_app.update(cx, |this, cx| {
+                    this.confirm_delete(delete_entry.clone(), window, cx)
+                });
+            }))
+        })
+        .child(row)
+}
+
+/// 会话标题：未命名时回退到工作目录短名，避免空行难以辨识。
+fn session_title(title: &str, workspace: &str) -> String {
+    if !title.trim().is_empty() {
+        return title.to_string();
+    }
+    if workspace.trim().is_empty() {
+        return "未命名会话".to_string();
+    }
+    format!("（未命名）{}", ui::short_cwd(workspace))
+}
+
+/// 工作中转圈；空闲用等宽占位保持列宽稳定。
+fn busy_indicator(state: SessionState, color: Hsla) -> AnyElement {
+    if sessions::is_busy(state) {
+        Spinner::new().xsmall().color(color).into_any_element()
+    } else {
+        div().size_2().into_any_element()
+    }
+}
+
+// ---------- 悬浮按钮栏 ----------
+
+/// 中间面板右缘的竖排悬浮按钮：点击展开对应的右侧面板。
+pub fn render_rail(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let mut rail = v_flex()
+        .gap_0p5()
+        .p_1()
+        .justify_center()
+        .bg(theme.popover)
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.border)
+        .shadow_sm()
+        // 点击按钮不应被下方对话区的点击处理捕获
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+    let is_workflow = core.is_workflow();
+    for panel in SidePanel::for_session(is_workflow) {
+        rail = rail.child(rail_button(panel, core.side_panel == Some(panel), this, cx));
+    }
+    rail.into_any_element()
+}
+
+fn rail_button(
+    panel: SidePanel,
+    active: bool,
+    _this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let label = panel.short_label();
+    let icon: Icon = match panel {
+        SidePanel::Workspace => IconName::FolderOpen.into(),
+        SidePanel::Diff => FileDiffIcon.into(),
+        SidePanel::Detail => IconName::Info.into(),
+        SidePanel::Activities => IconName::Inbox.into(),
+        SidePanel::Plan => IconName::Map.into(),
+        SidePanel::Terminal => IconName::SquareTerminal.into(),
+    };
+    let color = if active {
+        cx.theme().primary
+    } else {
+        cx.theme().muted_foreground
+    };
+    Button::new(format!("rail-{}", panel.label()))
+        .small()
+        .ghost()
+        .icon(icon.text_color(color))
+        .selected(active)
+        .tooltip(label)
+        .on_click(cx.listener(move |this, _, _, cx| this.toggle_side_panel(panel, cx)))
+        .into_any_element()
+}
+
+// ---------- 右侧面板 ----------
+
+/// 右侧面板外壳与内容。
+pub fn render_panel(
+    core: &Core,
     panel: SidePanel,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let header = h_flex()
-        .p_2()
-        .gap_2()
+    let theme = ui::Colors::of(cx.theme());
+    v_flex()
+        .w_full()
+        .h_full()
+        .min_w_0()
+        .bg(theme.popover)
+        .border_l_1()
+        .border_color(theme.border)
+        .child(panel_header(panel, this.workspace_tree_visible, cx))
+        .child(match panel {
+            SidePanel::Workspace => workspace_panel(core, this, cx),
+            SidePanel::Diff => diff_review(core, this, cx),
+            SidePanel::Detail => detail_panel(core, cx),
+            SidePanel::Activities => activities_panel(core, this, cx),
+            SidePanel::Plan => plan_panel(core, this, cx),
+            SidePanel::Terminal => terminal_panel(core, this, cx),
+        })
+        .into_any_element()
+}
+
+/// 面板标题栏（标题 + 关闭按钮）；改动面板的工具栏由它自己渲染。
+fn panel_header(panel: SidePanel, tree_visible: bool, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let mut header = h_flex()
         .items_center()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .child(Label::new(panel.label()))
-        .child(div().flex_1())
+        .gap_2()
+        .px_3()
+        .py_2()
+        .child(
+            Label::new(match panel {
+                SidePanel::Activities => "会话活动历史",
+                SidePanel::Diff => "改动审查",
+                other => other.label(),
+            })
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.foreground),
+        )
+        .child(div().flex_1());
+    if panel == SidePanel::Workspace {
+        header = header.child(
+            Button::new("workspace-toggle-tree")
+                .small()
+                .ghost()
+                .label(if tree_visible {
+                    "折叠文件树"
+                } else {
+                    "展开文件树"
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_workspace_tree(cx))),
+        );
+    }
+    header
         .child(
             Button::new("close-panel")
-                .xsmall()
+                .small()
                 .ghost()
                 .icon(IconName::Close)
+                .tooltip("关闭面板")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.with_core(|core| core.side_panel = None);
                     cx.notify();
                 })),
-        );
+        )
+        .into_any_element()
+}
 
-    // 改动审查视图自带工具栏与滚动区域，交由它自己管理内边距与溢出
-    let mut body = v_flex()
-        .id("side-body")
-        .flex_1()
+/// 工作目录面板：左侧文件树 + 右侧文件内容。
+fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let root = core
+        .view
+        .session
+        .as_ref()
+        .map(|session| (session.machine.clone(), session.root_dir().to_string()));
+    let mut tree = v_flex()
+        .id("workspace-tree")
+        .w(px(WORKSPACE_TREE_WIDTH))
+        .h_full()
         .min_h_0()
-        .gap_2()
-        .p_3()
-        .overflow_y_scroll()
-        .when(panel == SidePanel::Diff, |body| {
-            body.p_0().overflow_hidden()
-        });
-    match panel {
-        SidePanel::Detail => {
-            if let Some(session) = &core.view.session {
-                body = body
-                    .child(detail_row("会话 ID", &session.id))
-                    .child(detail_row("所属机器", &session.machine))
-                    .child(detail_row("所属 agent", &session.agent))
-                    .child(detail_row("工作目录", &session.workspace))
-                    .child(detail_row("worktree", &session.worktree_dir))
-                    .child(detail_row("创建时间", &ui::timestamp(session.created_at)))
-                    .child(detail_row("最近活跃", &ui::timestamp(session.updated_at)))
-                    .child(detail_row(
-                        "上下文",
-                        &format!(
-                            "{} / {} tokens",
-                            core.view.detail.context_size, core.view.detail.context_window_size
-                        ),
-                    ));
-            } else if let Some(workflow) = &core.view.workflow {
-                body = body
-                    .child(detail_row("工作流 ID", &workflow.id))
-                    .child(detail_row("计划", &workflow.plan))
-                    .child(detail_row("创建时间", &ui::timestamp(workflow.created_at)))
-                    .child(detail_row("最近活跃", &ui::timestamp(workflow.updated_at)));
-            } else {
-                body = body.child(ui::empty_hint("未选择会话", cx.theme()));
-            }
+        .gap_1()
+        .p_1()
+        .bg(theme.muted.opacity(0.35))
+        .rounded_md()
+        .overflow_y_scroll();
+    match &root {
+        Some((machine, _)) => {
+            tree = tree.children(workspace_nodes(
+                &core.view.detail.workspace_tree,
+                machine,
+                0,
+                this,
+                cx,
+            ));
         }
-        SidePanel::Activities => {
-            for activity in core.view.detail.activities.iter().rev() {
-                body = body.child(
-                    v_flex()
-                        .gap_1()
-                        .p_2()
-                        .rounded_md()
-                        .bg(cx.theme().secondary)
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(ui::timestamp(ui::activity_timestamp(activity))),
-                        )
-                        .child(div().text_sm().child(ui::activity_line(activity))),
-                );
-            }
-            if core.view.detail.activities.is_empty() {
-                body = body.child(ui::empty_hint("暂无活动", cx.theme()));
-            }
-        }
-        SidePanel::Plan => {
-            for entry in &core.view.detail.plan {
-                let glyph = match entry.status {
-                    amux_common::domain::SessionPlanStatus::Completed => "✓",
-                    amux_common::domain::SessionPlanStatus::InProgress => "●",
-                    amux_common::domain::SessionPlanStatus::Pending => "○",
-                };
-                body = body.child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().child(glyph))
-                        .child(div().text_sm().child(entry.content.clone())),
-                );
-            }
-            if core.view.detail.plan.is_empty() {
-                body = body.child(ui::empty_hint("暂无计划", cx.theme()));
-            }
-        }
-        SidePanel::Diff => {
-            body = body.child(diff_review(core, this, cx));
-        }
-        SidePanel::Workspace => {
-            let target = core
-                .view
-                .session
-                .as_ref()
-                .map(|session| (session.machine.clone(), session.root_dir().to_string()));
-            match target {
-                Some((machine, path)) => {
-                    body = body.child(detail_row("路径", &path));
-                    body = body.children(workspace_nodes(
-                        &core.view.detail.workspace_tree,
-                        &machine,
-                        0,
-                        cx,
-                    ));
-                    if let Some(content) = core.view.detail.file_content.clone() {
-                        body = body.child(
-                            v_flex()
-                                .gap_1()
-                                .p_2()
-                                .rounded_md()
-                                .bg(cx.theme().secondary)
-                                .child(div().text_xs().child("文件内容"))
-                                .child(div().text_xs().child(ui::truncate(&content, 4000))),
-                        );
-                    }
-                    if core.view.detail.workspace_tree.is_empty() {
-                        body = body.child(
-                            Button::new("load-workspace")
-                                .xsmall()
-                                .ghost()
-                                .label("加载工作目录")
-                                .on_click(cx.listener(|this, _, _, cx| this.load_workspace(cx))),
-                        );
-                    }
-                }
-                None => body = body.child(ui::empty_hint("未选择会话", cx.theme())),
-            }
-        }
-        SidePanel::Terminal => {
-            body = body.child(
-                Button::new("open-terminal")
-                    .xsmall()
-                    .ghost()
-                    .label("新建终端")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx))),
+        None => {
+            tree = tree.child(
+                Label::new("未选择会话")
+                    .text_sm()
+                    .text_color(theme.muted_foreground),
             );
-            let active = core.view.detail.active_terminal.clone();
-            for terminal in &core.view.detail.terminals {
-                let id = terminal.id.clone();
-                body = body.child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().text_xs().child(ui::truncate(&id, 12)))
-                        .child(div().text_xs().child(format!(
-                            "{}×{} {}",
-                            terminal.cols,
-                            terminal.rows,
-                            match terminal.state {
-                                TerminalState::Running => "运行中",
-                                TerminalState::Exited => "已退出",
-                            }
-                        )))
-                        .text_color(if active.as_deref() == Some(id.as_str()) {
-                            cx.theme().primary
-                        } else {
-                            cx.theme().foreground
-                        })
-                        .child(div().flex_1())
-                        .child(
-                            Button::new(format!("select-terminal-{id}"))
-                                .xsmall()
-                                .ghost()
-                                .label("切换")
-                                .on_click(cx.listener({
-                                    let id = id.clone();
-                                    move |this, _, _, cx| {
-                                        this.select_terminal(id.clone(), cx);
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("shrink-terminal-{id}"))
-                                .xsmall()
-                                .ghost()
-                                .label("尺寸 -")
-                                .on_click(cx.listener({
-                                    let id = id.clone();
-                                    let (cols, rows) = (terminal.cols, terminal.rows);
-                                    move |this, _, _, cx| {
-                                        this.resize_terminal(
-                                            id.clone(),
-                                            cols.saturating_sub(TERMINAL_COL_STEP)
-                                                .max(TERMINAL_MIN_COLS),
-                                            rows.saturating_sub(TERMINAL_ROW_STEP)
-                                                .max(TERMINAL_MIN_ROWS),
-                                            cx,
-                                        )
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("grow-terminal-{id}"))
-                                .xsmall()
-                                .ghost()
-                                .label("尺寸 +")
-                                .on_click(cx.listener({
-                                    let id = id.clone();
-                                    let (cols, rows) = (terminal.cols, terminal.rows);
-                                    move |this, _, _, cx| {
-                                        this.resize_terminal(
-                                            id.clone(),
-                                            cols.saturating_add(TERMINAL_COL_STEP),
-                                            rows.saturating_add(TERMINAL_ROW_STEP),
-                                            cx,
-                                        )
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("close-terminal-{id}"))
-                                .xsmall()
-                                .ghost()
-                                .label("关闭")
-                                .on_click(cx.listener({
-                                    let id = id.clone();
-                                    move |this, _, _, cx| this.close_terminal(id.clone(), cx)
-                                })),
-                        ),
-                );
-            }
-            body = body.child(crate::terminal_view::render(core, this, cx));
         }
     }
 
-    v_flex()
-        .size_full()
-        .bg(cx.theme().popover)
-        .border_l_1()
-        .border_color(cx.theme().border)
-        .child(header)
-        .child(body)
-        .into_any()
+    let mut content = v_flex().flex_1().min_w_0().h_full().gap_2();
+    if let Some(path) = &this.workspace_file {
+        content = content.child(
+            Label::new(path.clone())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.foreground),
+        );
+    }
+    let mut body = v_flex().flex_1().min_h_0().overflow_y_scrollbar();
+    match &core.view.detail.file_content {
+        // 文本文件内容以围栏块渲染（等宽、保留空白）
+        Some(text) => {
+            body = body.child(
+                TextView::markdown("workspace-file-content", format!("```text\n{text}\n```"))
+                    .selectable(true),
+            );
+        }
+        None => {
+            body = body.child(
+                Label::new("在左侧选择文件查看内容")
+                    .text_sm()
+                    .text_color(theme.muted_foreground),
+            );
+        }
+    }
+    content = content.child(body);
+
+    let mut body = h_flex().flex_1().min_h_0().gap_2().px_3().pb_3();
+    if this.workspace_tree_visible {
+        body = body.child(tree);
+    }
+    body.child(content).into_any_element()
 }
 
-/// 工作目录树：目录行可折叠/展开（未加载的子目录在展开时拉取），文件行可查看内容。
+/// 工作目录树行：目录可折叠/展开（首次展开拉取子目录），文件可查看内容。
 fn workspace_nodes(
     nodes: &[WorkspaceNode],
     machine: &str,
     depth: usize,
+    this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
 ) -> Vec<AnyElement> {
-    let indent = px(depth as f32 * 12.0);
+    let theme = ui::Colors::of(cx.theme());
     let mut rows = Vec::new();
     for node in nodes {
         let entry = &node.entry;
-        if !entry.is_dir {
+        let indent = rems(0.5 + depth as f32 * (TREE_INDENT / 16.0));
+        if entry.is_dir {
             rows.push(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().w(indent))
-                    .child(div().text_sm().child(entry.name.clone()))
-                    .child(div().flex_1())
+                Button::new(SharedString::from(format!("workspace-entry-{}", entry.path)))
+                    .small()
+                    .ghost()
+                    .w_full()
+                    .on_click(cx.listener({
+                        let path = entry.path.clone();
+                        move |this, _, _, cx| this.toggle_workspace_dir(path.clone(), cx)
+                    }))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{}", entry.size)),
+                        h_flex()
+                            .w_full()
+                            .justify_start()
+                            .gap_1p5()
+                            .pl(indent)
+                            .child(
+                                Icon::new(if node.expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall()
+                                .flex_none()
+                                .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                Label::new(entry.name.clone())
+                                    .text_sm()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate(),
+                            ),
                     )
-                    .child(
-                        Button::new(format!("read-{}", entry.path))
-                            .xsmall()
-                            .ghost()
-                            .label("查看")
-                            .on_click(cx.listener({
-                                let machine = machine.to_string();
-                                let path = entry.path.clone();
-                                move |this, _, _, cx| {
-                                    this.read_file(machine.clone(), path.clone(), cx)
-                                }
-                            })),
-                    )
-                    .into_any(),
+                    .into_any_element(),
             );
+            if node.expanded {
+                match &node.children {
+                    Some(children) => {
+                        rows.extend(workspace_nodes(children, machine, depth + 1, this, cx))
+                    }
+                    None => rows.push(
+                        Label::new("加载中…")
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .into_any_element(),
+                    ),
+                }
+            }
             continue;
         }
+        let selected = this.workspace_file.as_deref() == Some(entry.path.as_str());
         rows.push(
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(div().w(indent))
+            Button::new(SharedString::from(format!("workspace-file-{}", entry.path)))
+                .small()
+                .ghost()
+                .w_full()
+                .selected(selected)
+                .on_click(cx.listener({
+                    let machine = machine.to_string();
+                    let path = entry.path.clone();
+                    move |this, _, _, cx| this.read_file(machine.clone(), path.clone(), cx)
+                }))
                 .child(
-                    Button::new(format!("toggle-{}", entry.path))
-                        .xsmall()
-                        .ghost()
-                        .label(if node.expanded { "▾" } else { "▸" })
-                        .on_click(cx.listener({
-                            let path = entry.path.clone();
-                            move |this, _, _, cx| this.toggle_workspace_dir(path.clone(), cx)
-                        })),
+                    h_flex()
+                        .w_full()
+                        .justify_start()
+                        .gap_1p5()
+                        .pl(indent)
+                        .child(
+                            Icon::new(IconName::File)
+                                .xsmall()
+                                .flex_none()
+                                .text_color(if selected {
+                                    theme.primary
+                                } else {
+                                    theme.muted_foreground
+                                }),
+                        )
+                        .child(
+                            Label::new(entry.name.clone())
+                                .text_sm()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate(),
+                        ),
                 )
-                .child(div().text_sm().child(entry.name.clone()))
-                .into_any(),
+                .into_any_element(),
         );
-        if node.expanded {
-            if let Some(children) = &node.children {
-                rows.extend(workspace_nodes(children, machine, depth + 1, cx));
-            }
-        }
     }
     rows
 }
 
-fn detail_row(label: &str, value: &str) -> AnyElement {
-    h_flex()
-        .gap_2()
-        .child(div().w(rems(5.25)).text_xs().child(label.to_string()))
-        .child(div().flex_1().text_sm().child(value.to_string()))
-        .into_any()
-}
-
-/// 会话选项控件：按选项类型渲染下拉框或开关（docs/PRD.md「会话选项」）。
-fn session_options(
-    core: &crate::state::Core,
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
-    let mut row = h_flex().gap_3().flex_wrap().px_3();
-    for option in core.view.detail.config_options.clone() {
-        let label = div()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(option.name.clone());
-        match &option.kind {
-            SessionConfigKind::Boolean { current_value } => {
-                let id = option.id.clone();
-                let checked = *current_value;
-                row = row.child(
-                    h_flex().gap_2().items_center().child(label).child(
-                        Switch::new(format!("config-{}", option.id))
-                            .checked(checked)
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                this.apply_config_option(
-                                    id.clone(),
-                                    SessionConfigOptionValue::Boolean { value: *checked },
-                                    cx,
-                                )
-                            })),
-                    ),
-                );
-            }
-            SessionConfigKind::Select { .. } => {
-                // 选项值由轮询周期同步（app.rs sync_config_options）
-                let Some(select) = this.config_select(&option.id).cloned() else {
-                    continue;
-                };
-                row = row.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(label)
-                        .child(Select::new(&select).small()),
-                );
-            }
+/// 会话详情面板：会话元信息（工作流会话额外展示关联普通会话）。
+fn detail_panel(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let mut body = v_flex().flex_1().min_h_0().gap_2().p_3().overflow_y_scrollbar();
+    if let Some(session) = &core.view.session {
+        body = body
+            .child(ui::info_row("会话 ID", &session.id, &theme))
+            .child(ui::info_row("Agent", &session.agent, &theme))
+            .child(ui::info_row("工作目录", &session.workspace, &theme));
+        if !session.worktree_dir.is_empty() {
+            body = body.child(ui::info_row("worktree", &session.worktree_dir, &theme));
         }
+        body = body
+            .child(ui::info_row(
+                "状态",
+                if sessions::is_busy(session.state) {
+                    "工作中"
+                } else {
+                    "空闲"
+                },
+                &theme,
+            ))
+            .children(
+                ui::context_usage_text(
+                    core.view.detail.context_size,
+                    core.view.detail.context_window_size,
+                )
+                .map(|text| ui::info_row("上下文", &text, &theme)),
+            )
+            .child(ui::info_row(
+                "创建时间",
+                &ui::format_local_time(session.created_at, ui::TimePrecision::Seconds),
+                &theme,
+            ))
+            .child(ui::info_row("机器", &session.machine, &theme))
+            .child(ui::info_row("最近活跃", &ui::format_local_time(session.updated_at, ui::TimePrecision::Seconds), &theme));
+    } else if let Some(workflow) = &core.view.workflow {
+        body = body
+            .child(ui::info_row("工作流 ID", &workflow.id, &theme))
+            .child(ui::info_row("状态", if sessions::is_busy(workflow.state) { "工作中" } else { "空闲" }, &theme))
+            .child(ui::info_row("创建时间", &ui::format_local_time(workflow.created_at, ui::TimePrecision::Seconds), &theme))
+            .child(ui::info_row("最近活跃", &ui::format_local_time(workflow.updated_at, ui::TimePrecision::Seconds), &theme))
+            .child(ui::info_row("计划", &workflow.plan, &theme))
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Label::new("关联普通会话").font_weight(FontWeight::SEMIBOLD),
+                            )
+                            .child(
+                                Label::new(format!("{}", workflow.linked_sessions.len()))
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    )
+                    .children(workflow.linked_sessions.iter().map(|linked| {
+                        h_flex()
+                            .w_full()
+                            .gap_1p5()
+                            .items_center()
+                            .child(
+                                Icon::new(IconName::SquareTerminal)
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                Label::new(if linked.title.trim().is_empty() {
+                                    linked.id.clone()
+                                } else {
+                                    linked.title.clone()
+                                })
+                                .text_sm()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate(),
+                            )
+                            .child(
+                                Label::new(linked.machine.clone())
+                                    .text_xs()
+                                    .flex_none()
+                                    .text_color(theme.muted_foreground),
+                            )
+                    })),
+            );
+    } else {
+        body = body.child(
+            Label::new("未选择会话")
+                .text_sm()
+                .text_color(theme.muted_foreground),
+        );
     }
-    row.into_any()
+    body.into_any_element()
 }
 
-/// 文件改动审查视图：顶部工具栏、左侧文件树、右侧 inline 改动、选择后发送给 agent
-/// （docs/PRD.md「文件改动审查视图」）。
-fn diff_review(
-    core: &crate::state::Core,
+/// 会话活动面板：条目默认折叠为一行，点击展开详情。
+fn activities_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let mut rows = v_flex().w_full().gap_2();
+    for activity in &core.view.detail.activities {
+        rows = rows.child(activity_row(activity, this, cx));
+    }
+    if core.view.detail.activities.is_empty() {
+        rows = rows.child(
+            Label::new("暂无活动")
+                .text_sm()
+                .text_color(theme.muted_foreground),
+        );
+    }
+    v_flex()
+        .id("activities-panel")
+        .w_full()
+        .flex_1()
+        .min_h_0()
+        .gap_2()
+        .p_3()
+        .pt_0()
+        .track_scroll(&this.activities_scroll)
+        .overflow_y_scroll()
+        .child(rows)
+        .into_any_element()
+}
+
+/// 活动卡片：时间 + 种类 + 详情（折叠时单行截断）。
+fn activity_row(
+    activity: &Activity,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let mut view = v_flex().flex_1().h_full().gap_2();
-    let all_collapsed = core.view.detail.diff.as_ref().is_some_and(|diff| {
-        !diff.files.is_empty()
-            && diff
-                .files
-                .iter()
-                .all(|file| this.diff_collapsed_files.contains(&file.path))
-    });
-    view = view.child(
-        h_flex()
-            .px_3()
-            .pt_3()
-            .gap_2()
-            .items_center()
-            .flex_wrap()
-            .child(
-                Button::new("toggle-diff-tree")
-                    .xsmall()
-                    .ghost()
-                    .label(if this.diff_tree_visible {
-                        "折叠文件树"
+    let theme = ui::Colors::of(cx.theme());
+    let timestamp = ui::activity_timestamp(activity);
+    let key = format!("{timestamp}-{}", ui::activity_kind_detail(activity).0);
+    let expanded = this.expanded_activities.contains(&key);
+    let (kind, detail) = ui::activity_kind_detail(activity);
+    let toggle_key = key.clone();
+    div()
+        .id(SharedString::from(format!("activity-{key}")))
+        .w_full()
+        .p_2()
+        .bg(theme.muted.opacity(0.55))
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|card| card.bg(theme.muted))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if !this.expanded_activities.remove(&toggle_key) {
+                this.expanded_activities.insert(toggle_key.clone());
+            }
+            cx.notify();
+        }))
+        .child(
+            h_flex()
+                .w_full()
+                .gap_1p5()
+                .items_start()
+                .child(
+                    Label::new(ui::format_local_time(timestamp, ui::TimePrecision::Seconds))
+                        .text_xs()
+                        .flex_none()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
                     } else {
-                        "展开文件树"
+                        IconName::ChevronRight
                     })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx))),
-            )
-            .child(
-                Button::new("toggle-diff-all")
                     .xsmall()
-                    .ghost()
-                    .label(if all_collapsed {
-                        "展开改动"
+                    .flex_none()
+                    .text_color(theme.muted_foreground),
+                )
+                .child(
+                    Label::new(kind)
+                        .text_xs()
+                        .flex_none()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    Label::new(if expanded {
+                        detail.clone()
                     } else {
-                        "折叠改动"
+                        ui::one_line(&detail)
                     })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_all_diffs(cx))),
-            )
-            .child(
-                Button::new("refresh-diff")
-                    .xsmall()
-                    .ghost()
-                    .label("刷新改动")
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_diff(cx))),
-            ),
+                    .text_sm()
+                    .flex_1()
+                    .min_w_0()
+                    .when(!expanded, |label| label.truncate()),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 会话计划面板：`✓ / ● / ○` 标记 + 计划内容（无计划则空白）。
+fn plan_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let mut rows = v_flex().gap_1();
+    for entry in &core.view.detail.plan {
+        let (glyph, color) = match entry.status {
+            amux_common::domain::SessionPlanStatus::Completed => ("✓", theme.muted_foreground),
+            amux_common::domain::SessionPlanStatus::InProgress => ("●", theme.primary),
+            amux_common::domain::SessionPlanStatus::Pending => ("○", theme.muted_foreground),
+        };
+        let done = entry.status == amux_common::domain::SessionPlanStatus::Completed;
+        rows = rows.child(
+            h_flex()
+                .items_start()
+                .gap_1p5()
+                .py_0p5()
+                .child(Label::new(glyph).text_sm().text_color(color).w(px(14.0)))
+                .child(
+                    Label::new(entry.content.clone())
+                        .text_sm()
+                        .when(done, |label| label.text_color(theme.muted_foreground))
+                        .flex_1(),
+                ),
+        );
+    }
+    div()
+        .id("plan-panel")
+        .w_full()
+        .flex_1()
+        .min_h_0()
+        .p_3()
+        .pt_0()
+        .child(
+            v_flex()
+                .id("plan-scroll")
+                .w_full()
+                .h_full()
+                .track_scroll(&this.plan_scroll)
+                .overflow_y_scroll()
+                .child(rows),
+        )
+        .into_any_element()
+}
+
+/// 终端面板：标签栏（可切换/关闭/新建）+ 终端视图。
+fn terminal_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let session = core.view.session.as_ref();
+    let online = session.is_some();
+    let active = core.view.detail.active_terminal.clone();
+
+    let mut tabs = h_flex().flex_wrap().gap_1().px_3().pb_2();
+    for terminal in &core.view.detail.terminals {
+        tabs = tabs.child(terminal_tab(terminal, active.as_deref(), cx));
+    }
+    tabs = tabs.child(
+        Button::new("terminal-new")
+            .small()
+            .ghost()
+            .icon(IconName::Plus)
+            .tooltip("新建终端")
+            .disabled(!online)
+            .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx))),
     );
 
-    match &core.view.detail.diff {
-        Some(diff) if diff.not_repo => {
-            view = view.child(ui::empty_hint("工作目录不是 git 仓库", cx.theme()));
-        }
-        Some(diff) if diff.files.is_empty() => {
-            view = view.child(ui::empty_hint("没有改动", cx.theme()));
-        }
-        Some(diff) => {
-            let files = diff.files.clone();
-            let mut content = h_flex().flex_1().min_h_0().gap_2();
-            if this.diff_tree_visible {
-                content = content.child(diff_tree_pane(&files, this, cx));
-            }
-            content = content.child(diff_inline_pane(&files, this, cx));
-            view = view.child(content).child(diff_review_footer(this, cx));
-        }
-        None => {
-            view = view.child(ui::empty_hint("点击「刷新改动」加载", cx.theme()));
-        }
-    }
-    view.into_any()
+    let body = if core.view.detail.terminals.is_empty() {
+        v_flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .child(
+                Label::new(if online {
+                    "暂无终端，点击 + 新建"
+                } else {
+                    "未选择会话"
+                })
+                .text_sm()
+                .text_color(theme.muted_foreground),
+            )
+            .into_any_element()
+    } else {
+        terminal_view::render(core, this, cx)
+    };
+
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .child(tabs)
+        .child(body)
+        .into_any_element()
 }
 
-/// 左侧文件树：只含改动文件，点击文件滚动到对应改动。
-fn diff_tree_pane(
-    files: &[GitDiffFile],
-    this: &mut AmuxApp,
+fn terminal_tab(
+    terminal: &Terminal,
+    active: Option<&str>,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let nodes = difftree::build(files);
-    let mut pane = v_flex()
-        .id("diff-tree")
-        .w(px(DIFF_TREE_WIDTH))
-        .h_full()
+    let theme = ui::Colors::of(cx.theme());
+    let id = terminal.id.clone();
+    let selected = active == Some(id.as_str());
+    let title = format!(
+        "{} {}",
+        ui::truncate(&id, 12),
+        match terminal.state {
+            TerminalState::Running => "运行中",
+            TerminalState::Exited => "已退出",
+        }
+    );
+    h_flex()
+        .id(SharedString::from(format!("terminal-tab-{id}")))
+        .items_center()
         .gap_1()
-        .overflow_y_scroll();
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(if selected {
+            theme.list_active
+        } else {
+            theme.muted.opacity(0.35)
+        })
+        .cursor_pointer()
+        .on_click(cx.listener({
+            let id = id.clone();
+            move |this, _, _, cx| this.select_terminal(id.clone(), cx)
+        }))
+        .child(
+            Label::new(title)
+                .text_xs()
+                .max_w_24()
+                .truncate(),
+        )
+        .child(
+            Button::new(SharedString::from(format!("terminal-tab-close-{id}")))
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
+                .tooltip("关闭终端")
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _, _, cx| this.close_terminal(id.clone(), cx)
+                })),
+        )
+        .into_any_element()
+}
+
+// ---------- 改动审查视图 ----------
+
+/// 改动审查视图：工具栏 + 文件树 + inline 改动 + 选中后发送指令。
+fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let files = core
+        .view
+        .detail
+        .diff
+        .as_ref()
+        .map(|diff| diff.files.clone())
+        .unwrap_or_default();
+    let not_repo = core
+        .view
+        .detail
+        .diff
+        .as_ref()
+        .is_some_and(|diff| diff.not_repo);
+    let loaded = core.view.detail.diff.is_some();
+    let has_selection =
+        !this.diff_selected_files.is_empty() || !this.diff_selected_hunks.is_empty();
+    let all_collapsed = !files.is_empty()
+        && files
+            .iter()
+            .all(|file| this.diff_collapsed_files.contains(&file.path));
+
+    let toolbar = h_flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .pb_2()
+        .child(div().flex_1())
+        .when(has_selection, |row| {
+            row.child(
+                Button::new("diff-clear-selection")
+                    .small()
+                    .label("清空选择")
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_diff_selection(cx))),
+            )
+        })
+        .child(
+            Button::new("diff-toggle-tree")
+                .small()
+                .ghost()
+                .label(if this.diff_tree_visible {
+                    "折叠文件树"
+                } else {
+                    "展开文件树"
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx))),
+        )
+        .child(
+            Button::new("diff-toggle-changes")
+                .small()
+                .ghost()
+                .label(if all_collapsed {
+                    "展开改动"
+                } else {
+                    "折叠改动"
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_all_diffs(cx))),
+        )
+        .child(
+            Button::new("diff-refresh")
+                .small()
+                .ghost()
+                .label("刷新改动")
+                .on_click(cx.listener(|this, _, _, cx| this.refresh_diff(cx))),
+        );
+
+    let body = if not_repo {
+        ui::empty_hint("当前工作目录不是 git 仓库", &theme).into_any_element()
+    } else if !loaded {
+        ui::empty_hint("点击「刷新改动」加载改动", &theme).into_any_element()
+    } else if files.is_empty() {
+        ui::empty_hint("暂无改动", &theme).into_any_element()
+    } else {
+        let mut content = h_flex().flex_1().min_h_0().min_w_0().gap_2();
+        if this.diff_tree_visible {
+            content = content.child(diff_tree(&files, this, cx));
+        }
+        content
+            .child(diff_inline(&files, this, cx))
+            .into_any_element()
+    };
+    let selected = !this.diff_selected_files.is_empty() || !this.diff_selected_hunks.is_empty();
+    let mut view = v_flex()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .gap_2()
+        .px_3()
+        .pb_3()
+        .child(toolbar)
+        .child(body);
+    if selected && !not_repo && !files.is_empty() {
+        view = view.child(diff_footer(this, cx));
+    }
+    view.into_any_element()
+}
+
+/// 左侧文件树：仅包含改动文件，点击文件滚动到对应改动。
+fn diff_tree(files: &[GitDiffFile], this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let nodes = difftree::build(files);
     let mut rows = Vec::new();
     for node in &nodes {
         push_tree_rows(node, 0, this, cx, &mut rows);
     }
-    pane = pane.children(rows);
-    pane.into_any()
+    v_flex()
+        .id("diff-tree")
+        .w(px(DIFF_TREE_WIDTH))
+        .h_full()
+        .min_h_0()
+        .gap_1()
+        .p_1()
+        .bg(theme.muted)
+        .rounded_md()
+        .overflow_y_scroll()
+        .children(rows)
+        .into_any_element()
 }
 
-/// 文件树节点入列：目录可整体折叠/展开，合并节点作为一个节点处理。
 fn push_tree_rows(
     node: &DiffNode,
     depth: usize,
@@ -1354,44 +1198,68 @@ fn push_tree_rows(
     cx: &mut Context<AmuxApp>,
     rows: &mut Vec<AnyElement>,
 ) {
-    let indent = rems(0.75 * depth as f32);
+    let theme = ui::Colors::of(cx.theme());
+    let indent = rems(0.5 + depth as f32 * (TREE_INDENT / 16.0));
     if let Some(ix) = node.file_ix {
         rows.push(
-            h_flex()
-                .pl(indent)
+            Button::new(SharedString::from(format!("diff-tree-{}", node.key)))
+                .xsmall()
+                .ghost()
+                .w_full()
+                .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx)))
                 .child(
-                    Button::new(format!("diff-file-{}", node.key))
-                        .xsmall()
-                        .ghost()
-                        .icon(IconName::File)
-                        .label(ui::truncate(&node.name, 24))
-                        .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx))),
+                    h_flex()
+                        .w_full()
+                        .justify_start()
+                        .gap_1()
+                        .pl(indent)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    Label::new(node.name.clone())
+                                        .text_xs()
+                                        .truncate()
+                                        .text_color(theme.foreground),
+                                ),
+                        ),
                 )
-                .into_any(),
+                .into_any_element(),
         );
         return;
     }
 
     let collapsed = this.diff_collapsed_dirs.contains(&node.key);
     rows.push(
-        h_flex()
-            .pl(indent)
+        Button::new(SharedString::from(format!("diff-dir-{}", node.key)))
+            .xsmall()
+            .ghost()
+            .w_full()
+            .on_click(cx.listener({
+                let key = node.key.clone();
+                move |this, _, _, cx| this.toggle_diff_dir(key.clone(), cx)
+            }))
             .child(
-                Button::new(format!("diff-dir-{}", node.key))
-                    .xsmall()
-                    .ghost()
-                    .icon(if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .label(ui::truncate(&node.name, 22))
-                    .on_click(cx.listener({
-                        let key = node.key.clone();
-                        move |this, _, _, cx| this.toggle_diff_dir(key.clone(), cx)
-                    })),
+                h_flex()
+                    .w_full()
+                    .justify_start()
+                    .gap_1()
+                    .pl(indent)
+                    .child(
+                        Label::new(if collapsed { "▸" } else { "▾" })
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        Label::new(node.name.clone())
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .text_color(theme.muted_foreground),
+                    ),
             )
-            .into_any(),
+            .into_any_element(),
     );
     if collapsed {
         return;
@@ -1401,120 +1269,150 @@ fn push_tree_rows(
     }
 }
 
-/// 右侧 inline 改动：文件名 + 可折叠的 hunk 行内容 + 文件/代码块撤销与选择。
-fn diff_inline_pane(
-    files: &[GitDiffFile],
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
+/// 右侧 inline 改动：文件头 + hunk（行内容）+ 选择与撤销。
+fn diff_inline(files: &[GitDiffFile], this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let mut pane = v_flex()
         .id("diff-inline")
         .flex_1()
         .min_w_0()
-        .h_full()
-        .gap_3()
+        .min_h_0()
+        .pr_4()
         .overflow_y_scroll()
         .track_scroll(&this.diff_scroll);
 
     for file in files {
         let collapsed = this.diff_collapsed_files.contains(&file.path);
-        let selected = this.diff_selected_files.contains(&file.path);
-        let mut block = v_flex()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .bg(cx.theme().secondary)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Checkbox::new(format!("diff-select-file-{}", file.path))
-                            .checked(selected)
-                            .on_click(cx.listener({
-                                let path = file.path.clone();
-                                move |this, checked: &bool, _, cx| {
-                                    if *checked != this.diff_selected_files.contains(&path) {
-                                        this.toggle_diff_file_selected(path.clone(), cx);
-                                    }
-                                }
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(file.path.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .child(format!("+{} -{}", file.additions, file.deletions)),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(format!("diff-toggle-file-{}", file.path))
-                            .xsmall()
-                            .ghost()
-                            .label(if collapsed { "展开" } else { "折叠" })
-                            .on_click(cx.listener({
-                                let path = file.path.clone();
-                                move |this, _, _, cx| this.toggle_diff_file(path.clone(), cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(format!("restore-file-{}", file.path))
-                            .xsmall()
-                            .ghost()
-                            .label("撤销文件")
-                            .on_click(cx.listener({
-                                let path = file.path.clone();
-                                move |this, _, _, cx| this.restore(Some(path.clone()), None, cx)
-                            })),
-                    ),
-            );
-        if !collapsed {
-            for hunk in &file.hunks {
-                block = block.child(hunk_view(file, hunk, this, cx));
-            }
-        }
-        pane = pane.child(block);
+        pane = pane.child(diff_file_block(file, collapsed, this, cx));
     }
-    pane.into_any()
+    div()
+        .id("diff-scroll-wrap")
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .child(pane)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .child(Scrollbar::vertical(&this.diff_scroll).id("diff-scrollbar")),
+        )
+        .into_any_element()
 }
 
-/// 单个代码块：@@ 头、行内容、选择与撤销。
-fn hunk_view(
+/// 单文件区块：文件头（选择/撤销/折叠）+ 各 hunk。
+fn diff_file_block(
     file: &GitDiffFile,
-    hunk: &GitDiffHunk,
+    collapsed: bool,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let key = (file.path.clone(), hunk.header.clone());
-    let selected = this.diff_selected_hunks.contains(&key);
-    let mut lines = v_flex().gap_0p5();
-    for line in &hunk.lines {
-        let text = if line.text.is_empty() {
-            format!("{}\u{00a0}", line.kind.prefix())
-        } else {
-            format!("{}{}", line.kind.prefix(), line.text)
-        };
-        lines = lines.child(
-            div()
-                .text_xs()
-                .text_color(ui::diff_line_color(line.kind, cx.theme()))
-                .child(text),
-        );
-    }
-    v_flex()
-        .gap_1()
+    let theme = ui::Colors::of(cx.theme());
+    let selected = this.diff_selected_files.contains(&file.path);
+    let status = match file.status {
+        amux_common::domain::GitChangeStatus::Added => ("A", theme.success),
+        amux_common::domain::GitChangeStatus::Deleted => ("D", theme.danger),
+        amux_common::domain::GitChangeStatus::Modified => ("M", theme.warning),
+    };
+    let mut block = v_flex()
+        .w_full()
         .child(
             h_flex()
+                .w_full()
+                .h(rems(2.5))
+                .px_2()
                 .gap_2()
                 .items_center()
+                .bg(theme.muted.opacity(0.35))
+                .border_t_1()
+                .border_color(theme.border)
                 .child(
-                    Checkbox::new(format!("diff-select-hunk-{}-{}", file.path, hunk.header))
+                    Checkbox::new(SharedString::from(format!("diff-sel-file-{}", file.path)))
                         .checked(selected)
+                        .on_click(cx.listener({
+                            let path = file.path.clone();
+                            move |this, checked: &bool, _, cx| {
+                                if *checked != this.diff_selected_files.contains(&path) {
+                                    this.toggle_diff_file_selected(path.clone(), cx);
+                                }
+                            }
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .child(
+                            Label::new(file.path.clone())
+                                .text_sm()
+                                .font_family(theme.mono_font_family.clone())
+                                .font_weight(FontWeight::MEDIUM)
+                                .whitespace_nowrap()
+                                .flex_shrink_0(),
+                        ),
+                )
+                .child(
+                    Label::new(format!("+{}", file.additions))
+                        .text_xs()
+                        .text_color(theme.success),
+                )
+                .child(
+                    Label::new(format!("-{}", file.deletions))
+                        .text_xs()
+                        .text_color(theme.danger),
+                )
+                .child(
+                    gpui_component::tag::Tag::custom(
+                        status.1.opacity(0.14),
+                        status.1,
+                        status.1.opacity(0.35),
+                    )
+                    .small()
+                    .rounded_full()
+                    .child(Label::new(status.0).text_xs()),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("restore-file-{}", file.path)))
+                        .small()
+                        .ghost()
+                        .icon(IconName::Undo)
+                        .tooltip("撤销该文件全部改动")
+                        .on_click(cx.listener({
+                            let path = file.path.clone();
+                            let patch = file.patch.clone();
+                            move |this, _, _, cx| {
+                                this.restore(Some(path.clone()), Some(patch.clone()), cx)
+                            }
+                        })),
+                ),
+        );
+
+    if !collapsed {
+        for hunk in &file.hunks {
+            let key = (file.path.clone(), hunk.header.clone());
+            let hunk_selected = this.diff_selected_hunks.contains(&key);
+            block = block.child(
+                h_flex()
+                    .w_full()
+                    .h(rems(1.75))
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .bg(theme.primary.opacity(0.12))
+                    .child(
+                        Checkbox::new(SharedString::from(format!(
+                            "diff-sel-hunk-{}-{}",
+                            file.path, hunk.header
+                        )))
+                        .checked(hunk_selected)
                         .on_click(cx.listener({
                             let path = file.path.clone();
                             let header = hunk.header.clone();
@@ -1529,19 +1427,23 @@ fn hunk_view(
                                 }
                             }
                         })),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(hunk.header.clone()),
-                )
-                .child(div().flex_1())
-                .child(
-                    Button::new(format!("restore-hunk-{}-{}", file.path, hunk.header))
-                        .xsmall()
+                    )
+                    .child(
+                        Label::new(hunk.header.clone())
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.primary),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "restore-hunk-{}-{}",
+                            file.path, hunk.header
+                        )))
+                        .small()
                         .ghost()
-                        .label("撤销代码块")
+                        .icon(IconName::Undo)
+                        .tooltip("撤销此块改动")
                         .on_click(cx.listener({
                             let path = file.path.clone();
                             let patch = hunk.patch.clone();
@@ -1549,38 +1451,89 @@ fn hunk_view(
                                 this.restore(Some(path.clone()), Some(patch.clone()), cx)
                             }
                         })),
-                ),
+                    ),
+            );
+            let numbers = diff::line_numbers(&hunk.header, &hunk.lines);
+            for (index, line) in hunk.lines.iter().enumerate() {
+                let (background, marker, marker_color) = match line.kind {
+                    GitDiffLineKind::Add => (theme.success.opacity(0.16), "+", theme.success),
+                    GitDiffLineKind::Remove => (theme.danger.opacity(0.16), "-", theme.danger),
+                    GitDiffLineKind::Context => (theme.popover, " ", theme.muted_foreground),
+                };
+                let numbers = numbers[index];
+                block = block.child(
+                    h_flex()
+                        .w_full()
+                        .h(rems(1.375))
+                        .items_center()
+                        .bg(background)
+                        .child(number_gutter(numbers.old, &theme))
+                        .child(number_gutter(numbers.new, &theme))
+                        .child(
+                            div().w(rems(1.5)).h_full().flex().justify_center().child(
+                                Label::new(marker)
+                                    .text_xs()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(marker_color),
+                            ),
+                        )
+                        .child(
+                            Label::new(line.text.clone())
+                                .text_xs()
+                                .font_family(theme.mono_font_family.clone())
+                                .whitespace_nowrap()
+                                .flex_shrink_0(),
+                        ),
+                );
+            }
+        }
+    }
+    block.into_any_element()
+}
+
+/// diff 行号栏（该侧无行号时留空）。
+fn number_gutter(number: Option<usize>, theme: &ui::Colors) -> AnyElement {
+    div()
+        .w(rems(3.))
+        .h_full()
+        .px_2()
+        .flex()
+        .justify_end()
+        .border_r_1()
+        .border_color(theme.border.opacity(0.45))
+        .child(
+            Label::new(number.map(|n| n.to_string()).unwrap_or_default())
+                .text_xs()
+                .font_family(theme.mono_font_family.clone())
+                .text_color(theme.muted_foreground),
         )
-        .child(lines)
-        .into_any()
+        .into_any_element()
 }
 
 /// 审查视图底部：选中统计、指令输入与发送。
-fn diff_review_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+fn diff_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
     let has_selection =
         !this.diff_selected_files.is_empty() || !this.diff_selected_hunks.is_empty();
-    let selected_hunks = this.diff_selected_hunks.len();
     let selected_files = this.diff_selected_files.len();
+    let selected_hunks = this.diff_selected_hunks.len();
     h_flex()
-        .px_3()
-        .pb_3()
         .gap_2()
         .items_center()
         .child(
-            div()
+            Label::new(format!("已选 {selected_files} 文件 · {selected_hunks} 代码块"))
                 .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(format!(
-                    "已选 {selected_files} 个文件 · {selected_hunks} 个代码块"
-                )),
+                .text_color(theme.muted_foreground),
         )
-        .child(div().flex_1().child(text_input(&this.diff_instruction)))
+        .child(div().flex_1().min_w_0().child(this.diff_instruction.clone()))
         .child(
-            Button::new("send-diff-review")
+            Button::new("diff-send-selected")
                 .small()
+                .primary()
                 .label("发送给 agent")
                 .disabled(!has_selection)
                 .on_click(cx.listener(|this, _, window, cx| this.send_diff_review(window, cx))),
         )
-        .into_any()
+        .into_any_element()
 }

@@ -1,6 +1,6 @@
 //! 应用状态：连接、会话列表、当前会话视图、设置面板与轮询节拍。
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,8 @@ pub const ONGOING_INTERVAL: Duration = Duration::from_secs(2);
 pub const ACTIVITIES_INTERVAL: Duration = Duration::from_secs(10);
 pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
 pub const TERMINAL_INTERVAL: Duration = Duration::from_millis(500);
+/// 工作目录树：仅在面板打开且根目录尚未加载时拉取。
+pub const WORKSPACE_INTERVAL: Duration = Duration::from_secs(5);
 /// 机器/agent 列表与编排智能体配置：新建会话视图常驻需要，按设置浮窗的周期刷新。
 pub const SETTINGS_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -145,16 +147,7 @@ pub struct OpenView {
 }
 
 impl OpenView {
-    pub fn title(&self) -> String {
-        if let Some(session) = &self.session {
-            session.title.clone()
-        } else if let Some(workflow) = &self.workflow {
-            workflow.title.clone()
-        } else {
-            String::new()
-        }
-    }
-
+    /// 会话交互视图标题：`agent@机器` 或编排智能体（docs/PRD.md 会话交互视图）。
     pub fn subtitle(&self) -> String {
         if let Some(session) = &self.session {
             format!("{}@{}", session.agent, session.machine)
@@ -247,6 +240,45 @@ impl SidePanel {
             SidePanel::Terminal => "终端",
         }
     }
+
+    /// 悬浮按钮栏上的短标签。
+    pub fn short_label(self) -> &'static str {
+        match self {
+            SidePanel::Workspace => "目录",
+            SidePanel::Diff => "改动",
+            SidePanel::Detail => "详情",
+            SidePanel::Activities => "活动",
+            SidePanel::Plan => "计划",
+            SidePanel::Terminal => "终端",
+        }
+    }
+
+    /// 面板默认宽度（逻辑像素）；改动与终端需要横向空间，故更宽。
+    pub fn default_width(self) -> f32 {
+        match self {
+            SidePanel::Workspace => 520.0,
+            SidePanel::Diff => 560.0,
+            SidePanel::Detail => 360.0,
+            SidePanel::Activities => 400.0,
+            SidePanel::Plan => 360.0,
+            SidePanel::Terminal => 560.0,
+        }
+    }
+}
+
+/// 提示级别（决定通知颜色）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteLevel {
+    Success,
+    Warning,
+    Error,
+}
+
+/// 后台任务排队的一条提示；由节拍在有窗口时投递为通知。
+#[derive(Debug, Clone)]
+pub struct Note {
+    pub message: String,
+    pub level: NoteLevel,
 }
 
 /// 设置面板分类（PRD 设置页面）。
@@ -280,6 +312,19 @@ impl SettingsTab {
             SettingsTab::WorkflowPlans => "工作流计划",
         }
     }
+
+    /// 分类导航图标。
+    pub fn icon(self) -> gpui_component::IconName {
+        use gpui_component::IconName;
+        match self {
+            SettingsTab::Connection => IconName::Globe,
+            SettingsTab::Machines => IconName::HardDrive,
+            SettingsTab::Orchestrator => IconName::Bot,
+            SettingsTab::QuickCommands => IconName::Play,
+            SettingsTab::Skills => IconName::BookOpen,
+            SettingsTab::WorkflowPlans => IconName::File,
+        }
+    }
 }
 
 /// 设置面板数据（按需加载）。
@@ -307,7 +352,8 @@ pub struct Core {
     pub settings_open: bool,
     pub settings_tab: SettingsTab,
     pub settings: SettingsData,
-    pub toast: Option<String>,
+    /// 待投递的提示（后台任务无窗口，只能排队等节拍投递）
+    pub notes: VecDeque<Note>,
     pub list_limit: usize,
     /// 当前打开的右侧面板
     pub side_panel: Option<SidePanel>,
@@ -324,6 +370,7 @@ pub struct Ticks {
     pub ongoing: Option<Instant>,
     pub activities: Option<Instant>,
     pub plan: Option<Instant>,
+    pub workspace: Option<Instant>,
     pub terminal: Option<Instant>,
     pub terminal_cursor: u64,
     pub settings: Option<Instant>,
@@ -343,7 +390,7 @@ impl Default for Core {
             settings_open: false,
             settings_tab: SettingsTab::Connection,
             settings: SettingsData::default(),
-            toast: None,
+            notes: VecDeque::new(),
             list_limit: 20,
             side_panel: None,
             expanded_workflows: HashSet::new(),
@@ -379,8 +426,28 @@ impl Core {
         matches!(self.open, Some(OpenTarget::Workflow(_)))
     }
 
-    pub fn note(&mut self, message: impl Into<String>) {
-        self.toast = Some(message.into());
+    /// 排队一条成功提示。
+    pub fn success(&mut self, message: impl Into<String>) {
+        self.notes.push_back(Note {
+            message: message.into(),
+            level: NoteLevel::Success,
+        });
+    }
+
+    /// 排队一条校验类警示。
+    pub fn warning(&mut self, message: impl Into<String>) {
+        self.notes.push_back(Note {
+            message: message.into(),
+            level: NoteLevel::Warning,
+        });
+    }
+
+    /// 排队一条错误提示。
+    pub fn error(&mut self, message: impl Into<String>) {
+        self.notes.push_back(Note {
+            message: message.into(),
+            level: NoteLevel::Error,
+        });
     }
 }
 
