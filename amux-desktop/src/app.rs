@@ -27,12 +27,14 @@ use parking_lot::Mutex;
 use crate::config::{self, Connection};
 use crate::dialog::{self, FormTarget};
 use crate::diff;
+use crate::login;
 use crate::panels;
 use crate::poll;
 use crate::sessions;
 use crate::settings;
 use crate::state::{
-    Attachment, Core, DirectoryCache, ListEntry, OpenTarget, SharedCore, SidePanel, WorkspaceNode,
+    Attachment, ConnectionStatus, Core, DirectoryCache, ListEntry, OpenTarget, SharedCore,
+    SidePanel, WorkspaceNode,
 };
 use crate::terminal_view;
 use crate::theme::SIDEBAR_WIDTH;
@@ -889,19 +891,33 @@ impl AmuxApp {
 
     /// 保存连接设置：写入 `~/.amux/app/server.json` 并重建客户端。
     pub fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let server = self.server_input.read(cx).value().to_string();
-        let token = self.token_input.read(cx).value().to_string();
-        let connection = Connection { server, token };
-        let message = match config::save(&config::connection_path(), &connection) {
-            Ok(()) => {
-                self.with_core(|core| core.apply_connection(connection));
-                dialog::alert(window, cx, "保存成功", "连接设置已保存。");
-                self.settings_dirty = false;
-                return;
-            }
-            Err(error) => error,
+        match self.save_input_connection(cx) {
+            Ok(()) => dialog::alert(window, cx, "保存成功", "连接设置已保存。"),
+            Err(error) => dialog::alert(window, cx, "保存失败", error),
+        }
+    }
+
+    /// 登录页「进入」：写入连接信息并立即尝试连接；连接成功后由连接状态切到主页面
+    /// （docs/PRD.md「登录页面」）。
+    pub fn login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(error) = self.save_input_connection(cx) {
+            dialog::alert(window, cx, "保存失败", error);
+        }
+    }
+
+    /// 落盘输入框中的连接信息并重建客户端；下一次连接检查立即进行（连接检查本身按周期节流）。
+    fn save_input_connection(&mut self, cx: &App) -> Result<(), String> {
+        let connection = Connection {
+            server: self.server_input.read(cx).value().trim().to_string(),
+            token: self.token_input.read(cx).value().trim().to_string(),
         };
-        dialog::alert(window, cx, "保存失败", message);
+        config::save(&config::connection_path(), &connection)?;
+        self.with_core(|core| {
+            core.apply_connection(connection);
+            core.last.list = None;
+        });
+        self.settings_dirty = false;
+        Ok(())
     }
 
     /// 发送输入框内容：文本与附件一并作为用户输入发出。
@@ -2074,6 +2090,38 @@ pub enum SettingsList {
 }
 
 impl AmuxApp {
+    /// 主页面：会话列表 + 中间面板 + 悬浮按钮 + 右侧面板。
+    fn render_main_page(&mut self, core: &Core, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_open = core.open.is_some();
+        let panel = self.render_panel(cx);
+        let sidebar = self.render_sidebar(cx);
+        let main = sessions::render_main(core, self, cx);
+        let rail = self.render_rail(cx);
+
+        let mut main_row = h_flex()
+            .flex_1()
+            .min_h_0()
+            .items_stretch()
+            .child(sidebar)
+            // 中间面板：悬浮按钮叠加在其右缘之上（不占布局空间），
+            // 面板向左展开时随中列右缘移动，始终可见
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .child(main)
+                    .when(has_open, |wrapper| {
+                        wrapper.child(div().absolute().top_2().right_1().child(rail))
+                    }),
+            );
+        if let Some(panel) = panel {
+            main_row = main_row.child(panel);
+        }
+        main_row
+    }
+
     /// 标题栏：拖拽/双击最大化与窗口控制按钮由组件负责。
     fn render_title_bar(&self, cx: &Context<Self>) -> impl IntoElement {
         let foreground = cx.theme().foreground;
@@ -2191,46 +2239,22 @@ impl AmuxApp {
 
 impl Render for AmuxApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_open = self.with_core(|core| core.open.is_some());
-        let settings_open = self.with_core(|core| core.settings_open);
         let core = self.core.lock().clone();
-
-        let title_bar = self.render_title_bar(cx);
-        let panel = self.render_panel(cx);
-        let sidebar = self.render_sidebar(cx);
-        let main = sessions::render_main(&core, self, cx);
-        let rail = self.render_rail(cx);
-
-        let mut main_row = h_flex()
-            .flex_1()
-            .min_h_0()
-            .items_stretch()
-            .child(sidebar)
-            // 中间面板：悬浮按钮叠加在其右缘之上（不占布局空间），
-            // 面板向左展开时随中列右缘移动，始终可见
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .child(main)
-                    .when(has_open, |wrapper| {
-                        wrapper.child(div().absolute().top_2().right_1().child(rail))
-                    }),
-            );
-        if let Some(panel) = panel {
-            main_row = main_row.child(panel);
-        }
 
         let mut root = v_flex()
             .size_full()
             .relative()
             .bg(cx.theme().background)
-            .child(title_bar)
-            .child(main_row);
-        if settings_open {
-            root = root.child(settings::render_overlay(&core, self, cx));
+            .child(self.render_title_bar(cx));
+        // 无法成功连接 Server 时进入登录页面，连接成功后由连接状态切到主页面
+        // （docs/PRD.md「登录页面」）
+        if core.status == ConnectionStatus::Online {
+            root = root.child(self.render_main_page(&core, cx));
+            if core.settings_open {
+                root = root.child(settings::render_overlay(&core, self, cx));
+            }
+        } else {
+            root = root.child(login::render(&core, self, cx));
         }
         // 组件层（sheet / dialog / 通知）必须由根视图渲染：Root 自身只渲染子视图
         if let Some(layer) = Root::render_sheet_layer(window, cx) {

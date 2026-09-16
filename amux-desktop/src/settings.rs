@@ -1,4 +1,4 @@
-//! 设置浮窗：分类导航 + 连接设置 / 机器管理 / 编排智能体 / 快捷指令 / 技能 / 工作流计划。
+//! 设置浮窗：分类导航 + 连接设置 / 机器管理 / 编排智能体 / 快捷指令 / 技能管理 / 工作流计划。
 
 use amux_common::api::{ApiFormat, Machine, Skill};
 use amux_common::domain::ContentBlock;
@@ -156,7 +156,7 @@ fn render_content(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
     let theme = ui::Colors::of(cx.theme());
     let (title, subtitle) = tab_heading(core.settings_tab);
     let page = match core.settings_tab {
-        SettingsTab::Connection => connection_tab(core, this, cx),
+        SettingsTab::Connection => connection_tab(this, cx),
         SettingsTab::Machines => machines_tab(this, cx),
         SettingsTab::Orchestrator => orchestrator_tab(this, cx),
         SettingsTab::QuickCommands => quick_commands_tab(core, cx),
@@ -202,14 +202,9 @@ fn tab_heading(tab: SettingsTab) -> (&'static str, &'static str) {
     }
 }
 
-/// 连接设置：连接状态 + Server 地址 / token，改动后才可保存（docs/DESIGN.md）。
-fn connection_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+/// 连接设置：Server 地址 / token，改动后才可保存（docs/PRD.md「连接设置」）。
+fn connection_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
-    let status_color = match core.status {
-        crate::state::ConnectionStatus::Online => theme.success,
-        crate::state::ConnectionStatus::Failed(_) => theme.danger,
-        _ => theme.muted_foreground,
-    };
     v_flex()
         .gap_2()
         .child(
@@ -218,21 +213,6 @@ fn connection_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
                 .p_3()
                 .bg(theme.muted)
                 .rounded_md()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            Label::new("连接状态")
-                                .text_sm()
-                                .text_color(theme.muted_foreground),
-                        )
-                        .child(
-                            Label::new(core.status.label())
-                                .text_sm()
-                                .text_color(status_color),
-                        ),
-                )
                 .child(
                     Label::new("Server 地址")
                         .text_sm()

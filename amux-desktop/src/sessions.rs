@@ -116,28 +116,6 @@ fn mode_switch(workflow_mode: bool, cx: &mut Context<AmuxApp>) -> impl IntoEleme
 
 /// 普通模式：机器 / agent / 工作目录 / worktree / 创建。
 fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    if core.settings.machines.is_empty() {
-        return v_flex()
-            .gap_2()
-            .child(
-                Alert::warning(
-                    "ns-no-machines-alert",
-                    "请先在设置 → 机器管理中确认已接入的机器。",
-                )
-                .title("尚未注册机器"),
-            )
-            .child(
-                Button::new("ns-goto-machine-settings")
-                    .small()
-                    .primary()
-                    .label("去查看机器")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_settings(Some(SettingsTab::Machines), window, cx)
-                    })),
-            )
-            .into_any_element();
-    }
-
     let machine = core.new_session.machine.clone();
     // 机器与 agent 同一行；工作目录另起一行（其输入框占满整行）
     let mut row = h_flex().flex_wrap().gap_6().items_start();
@@ -259,7 +237,7 @@ fn field(label: &str, control: AnyElement, cx: &mut Context<AmuxApp>) -> AnyElem
         .into_any_element()
 }
 
-/// 机器选择：一行按钮，离线的机器置灰。
+/// 机器选择：一行按钮，无已接入机器时给出提示。
 fn machine_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     let selected = core.new_session.machine.clone();
     let mut row = h_flex().flex_wrap().gap_1();
@@ -278,6 +256,13 @@ fn machine_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                     });
                     cx.notify();
                 })),
+        );
+    }
+    if core.settings.machines.is_empty() {
+        row = row.child(
+            Label::new("（未接入机器）")
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
         );
     }
     row.into_any_element()

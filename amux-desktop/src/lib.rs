@@ -6,6 +6,7 @@ pub mod config;
 pub mod dialog;
 pub mod diff;
 pub mod difftree;
+pub mod login;
 pub mod panels;
 pub mod poll;
 pub mod sessions;

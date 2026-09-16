@@ -24,24 +24,13 @@ pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
 pub const OPTIONS_INTERVAL: Duration = Duration::from_secs(5);
 pub const TERMINAL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 连接状态（设置面板展示）。
+/// 连接状态（决定进入登录页面还是主页面）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionStatus {
     Unconfigured,
     Connecting,
     Online,
     Failed(String),
-}
-
-impl ConnectionStatus {
-    pub fn label(&self) -> String {
-        match self {
-            ConnectionStatus::Unconfigured => "未配置".to_string(),
-            ConnectionStatus::Connecting => "连接中…".to_string(),
-            ConnectionStatus::Online => "已连接".to_string(),
-            ConnectionStatus::Failed(error) => format!("连接失败：{error}"),
-        }
-    }
 }
 
 /// 会话列表条目：普通会话或工作流会话（含其关联普通会话）。
@@ -374,7 +363,7 @@ impl SettingsTab {
             SettingsTab::Machines => "机器管理",
             SettingsTab::Orchestrator => "编排智能体",
             SettingsTab::QuickCommands => "快捷指令",
-            SettingsTab::Skills => "技能",
+            SettingsTab::Skills => "技能管理",
             SettingsTab::WorkflowPlans => "工作流计划",
         }
     }
