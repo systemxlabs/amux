@@ -450,9 +450,7 @@ fn orchestrator_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement
                             .primary()
                             .label("保存")
                             .disabled(!this.orchestrator_dirty(cx))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_orchestrator(window, cx)
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.save_orchestrator(cx))),
                     ),
                 ),
         )

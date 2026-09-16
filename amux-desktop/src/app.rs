@@ -2066,7 +2066,7 @@ impl AmuxApp {
     }
 
     /// 保存编排智能体配置；保存结果以弹窗反馈（docs/DESIGN.md 连接/编排设置）。
-    pub fn save_orchestrator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let config = OrchestratorConfig {
@@ -2077,22 +2077,18 @@ impl AmuxApp {
             effort: self.orch_effort.read(cx).value().trim().to_string(),
         };
         if config.base_url.is_empty() || config.api_key.is_empty() || config.model.is_empty() {
-            dialog::alert(
-                window,
-                cx,
-                "保存失败",
-                "请填写 Base URL、API Key 与模型名称。",
-            );
+            self.with_core(|core| core.error("保存失败：请填写 Base URL、API Key 与模型名称。"));
+            cx.notify();
             return;
         }
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match client.set_orchestrator(&config).await {
                 Ok(()) => {
-                    // 保存成功不弹提示：表单状态与内容本身即是反馈（失败才提示）
+                    // 保存成功不提示：表单状态与内容本身即是反馈
                     core.lock().settings.orchestrator = Some(config);
                 }
-                Err(error) => core.lock().alert("保存失败", error),
+                Err(error) => core.lock().error(format!("保存失败：{error}")),
             }
         });
         cx.notify();
