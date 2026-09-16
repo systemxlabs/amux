@@ -348,6 +348,9 @@ pub struct FsListParams {
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
+    /// 只列目录（工作目录前缀匹配用；分页也只计目录）
+    #[serde(default)]
+    pub dirs_only: bool,
 }
 
 /// `fs.list` 结果。

@@ -49,6 +49,9 @@ pub struct ListDir {
     pub limit: Option<usize>,
     #[serde(default)]
     pub offset: Option<usize>,
+    /// 只列目录（工作目录前缀匹配用）
+    #[serde(default)]
+    pub dirs_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +209,7 @@ async fn list_dir(
                     .limit
                     .unwrap_or(amux_common::domain::FS_LIST_PAGE_LIMIT),
                 offset: query.offset.unwrap_or(0),
+                dirs_only: query.dirs_only,
             },
         )
         .await

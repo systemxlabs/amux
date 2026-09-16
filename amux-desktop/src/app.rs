@@ -33,7 +33,7 @@ use crate::poll;
 use crate::sessions;
 use crate::settings;
 use crate::state::{
-    matching_dirs, Attachment, ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SharedCore,
+    matching_prefix, Attachment, ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SharedCore,
     SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
 };
 use crate::terminal_view;
@@ -844,7 +844,7 @@ impl AmuxApp {
         };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            match client.list_dir(&machine, Some(&path), 500, 0).await {
+            match client.list_dir(&machine, Some(&path), 500, 0, false).await {
                 Ok(result) => {
                     let mut core = core.lock();
                     core.view.detail.workspace_tree =
@@ -883,7 +883,7 @@ impl AmuxApp {
         }
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            match client.list_dir(&machine, Some(&path), 500, 0).await {
+            match client.list_dir(&machine, Some(&path), 500, 0, false).await {
                 Ok(result) => {
                     let mut core = core.lock();
                     if let Some(node) =
@@ -956,7 +956,7 @@ impl AmuxApp {
         let Some(client) = client else { return };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            let entries = match client.list_dir(&machine, Some(&dir), 500, 0).await {
+            let entries = match client.list_dir(&machine, Some(&dir), 500, 0, true).await {
                 Ok(result) => result.entries,
                 Err(_) => Vec::new(),
             };
@@ -966,7 +966,7 @@ impl AmuxApp {
                 return;
             }
             let prefix = core.new_session.suggestion_prefix.clone();
-            core.new_session.suggestions = matching_dirs(entries, &prefix);
+            core.new_session.suggestions = matching_prefix(entries, &prefix);
         });
         cx.notify();
     }

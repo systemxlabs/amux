@@ -58,16 +58,18 @@ impl Client {
         .await
     }
 
+    /// 列目录；`dirs_only` 只返回子目录（工作目录前缀匹配用）。
     pub async fn list_dir(
         &self,
         machine: &str,
         path: Option<&str>,
         limit: usize,
         offset: usize,
+        dirs_only: bool,
     ) -> Result<FsListResult, String> {
         let path = path.unwrap_or_default();
         self.get_json(&format!(
-            "/machines/{machine}/list_dir?path={}&limit={limit}&offset={offset}",
+            "/machines/{machine}/list_dir?path={}&limit={limit}&offset={offset}&dirs_only={dirs_only}",
             urlencode(path)
         ))
         .await

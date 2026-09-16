@@ -22,6 +22,7 @@ impl FsBrowser {
         path: Option<&str>,
         limit: usize,
         offset: usize,
+        dirs_only: bool,
     ) -> Result<FsListResult, String> {
         let dir = canonical_dir(path.unwrap_or(""))?;
 
@@ -40,6 +41,10 @@ impl FsBrowser {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        // 只列目录时在分页前过滤：页大小只计目录，避免被同目录下的大量文件挤掉
+        if dirs_only {
+            entries.retain(|entry| entry.is_dir);
+        }
         entries.sort_by(|a, b| {
             a.is_dir
                 .cmp(&b.is_dir)
@@ -119,7 +124,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "a").unwrap();
 
         let result = FsBrowser::new()
-            .list(Some(dir.to_str().unwrap()), 2, 0)
+            .list(Some(dir.to_str().unwrap()), 2, 0, false)
             .unwrap();
         assert_eq!(result.path, dir.to_str().unwrap());
         assert_eq!(result.entries.len(), 2);
@@ -131,7 +136,7 @@ mod tests {
         assert_eq!(result.next_offset, 2);
 
         let next = FsBrowser::new()
-            .list(Some(dir.to_str().unwrap()), 2, result.next_offset)
+            .list(Some(dir.to_str().unwrap()), 2, result.next_offset, false)
             .unwrap();
         assert_eq!(
             next.entries
@@ -143,18 +148,57 @@ mod tests {
         assert!(!next.has_more);
     }
 
+    /// 只列目录时在分页前过滤：页大小只计目录，不被同目录下的大量文件挤掉
+    /// （docs/DESIGN.md「新建会话视图」：拉取全部目录项（不包括文件））。
+    #[test]
+    fn list_dirs_only_filters_before_paging() {
+        let dir = unique_dir("amux-fs-dirs-only");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        for name in ["f1.txt", "f2.txt", "f3.txt"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+
+        let first = FsBrowser::new()
+            .list(Some(dir.to_str().unwrap()), 1, 0, true)
+            .unwrap();
+        assert_eq!(
+            first
+                .entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
+        assert!(first.entries[0].is_dir);
+        assert!(first.has_more, "还有目录 b 未返回");
+
+        let second = FsBrowser::new()
+            .list(Some(dir.to_str().unwrap()), 1, first.next_offset, true)
+            .unwrap();
+        assert_eq!(
+            second
+                .entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert!(!second.has_more);
+    }
+
     #[test]
     fn list_accepts_any_absolute_path() {
         let dir = unique_dir("amux-fs-anywhere");
         std::fs::create_dir_all(&dir).unwrap();
         let result = FsBrowser::new()
-            .list(Some(dir.to_str().unwrap()), 10, 0)
+            .list(Some(dir.to_str().unwrap()), 10, 0, false)
             .unwrap();
         assert!(result.entries.is_empty());
         // 任意绝对路径（如 /etc）也可列目录
         #[cfg(unix)]
         {
-            let etc = FsBrowser::new().list(Some("/etc"), 500, 0).unwrap();
+            let etc = FsBrowser::new().list(Some("/etc"), 500, 0, false).unwrap();
             assert!(etc.entries.iter().any(|e| e.name == "passwd"));
         }
     }

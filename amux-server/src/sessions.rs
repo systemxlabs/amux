@@ -457,6 +457,7 @@ impl SessionService {
                     path: Some(session.worktree_dir.clone()),
                     limit: 1,
                     offset: 0,
+                    dirs_only: false,
                 },
             )
             .await

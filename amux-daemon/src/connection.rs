@@ -282,7 +282,12 @@ async fn execute(
             let params: FsListParams = decode(params)?;
             let result = daemon
                 .fs
-                .list(params.path.as_deref(), params.limit, params.offset)
+                .list(
+                    params.path.as_deref(),
+                    params.limit,
+                    params.offset,
+                    params.dirs_only,
+                )
                 .map_err(RpcError::fs)?;
             to_value(result)
         }

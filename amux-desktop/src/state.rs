@@ -252,11 +252,11 @@ pub struct NewSessionForm {
     pub suggestion_prefix: String,
 }
 
-/// 目录条目中名称以 `prefix` 开头的子目录（工作目录联想项）。
-pub fn matching_dirs(entries: Vec<FsEntry>, prefix: &str) -> Vec<FsEntry> {
+/// 目录条目中名称以 `prefix` 开头的项（工作目录联想项；服务端已只返回目录）。
+pub fn matching_prefix(entries: Vec<FsEntry>, prefix: &str) -> Vec<FsEntry> {
     entries
         .into_iter()
-        .filter(|entry| entry.is_dir && entry.name.starts_with(prefix))
+        .filter(|entry| entry.name.starts_with(prefix))
         .collect()
 }
 
