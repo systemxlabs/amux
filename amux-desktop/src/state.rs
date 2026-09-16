@@ -19,6 +19,11 @@ pub const HISTORY_INTERVAL: Duration = Duration::from_secs(5);
 pub const ONGOING_INTERVAL: Duration = Duration::from_secs(2);
 pub const ACTIVITIES_INTERVAL: Duration = Duration::from_secs(10);
 pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
+/// 会话选项与斜杠命令：无独立视图，交互视图常驻需要（输入框下方的选项控件与斜杠命令补全）。
+/// 两者由 agent 侧异步推送，取与对话视图相同的周期。
+pub const OPTIONS_INTERVAL: Duration = Duration::from_secs(5);
+/// 会话上下文信息（会话详情面板）。
+pub const CONTEXT_INTERVAL: Duration = Duration::from_secs(10);
 pub const TERMINAL_INTERVAL: Duration = Duration::from_millis(500);
 /// 机器/agent 列表与编排智能体配置：新建会话视图常驻需要，按设置浮窗的周期刷新。
 pub const SETTINGS_INTERVAL: Duration = Duration::from_secs(10);
@@ -331,6 +336,8 @@ pub struct Ticks {
     pub ongoing: Option<Instant>,
     pub activities: Option<Instant>,
     pub plan: Option<Instant>,
+    pub options: Option<Instant>,
+    pub context: Option<Instant>,
     pub terminal: Option<Instant>,
     pub terminal_cursor: u64,
     pub settings: Option<Instant>,

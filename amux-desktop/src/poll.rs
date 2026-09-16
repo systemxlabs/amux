@@ -9,8 +9,8 @@ use amux_common::domain::ContentBlock;
 use crate::client::Client;
 use crate::state::{
     ConnectionStatus, Core, ListEntry, OpenTarget, SharedCore, SidePanel, ACTIVITIES_INTERVAL,
-    HISTORY_INTERVAL, ONGOING_INTERVAL, PLAN_INTERVAL, SESSION_LIST_INTERVAL, SETTINGS_INTERVAL,
-    TERMINAL_INTERVAL,
+    CONTEXT_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, OPTIONS_INTERVAL, PLAN_INTERVAL,
+    SESSION_LIST_INTERVAL, SETTINGS_INTERVAL, TERMINAL_INTERVAL,
 };
 
 /// 连接重试间隔。
@@ -116,13 +116,25 @@ async fn refresh_open(
     let detail_open = side_panel == Some(SidePanel::Detail);
     let terminal_open = side_panel == Some(SidePanel::Terminal);
 
-    let (due_history, due_ongoing, due_activities, due_plan, due_terminal, terminal, cursor) = {
+    let (
+        due_history,
+        due_ongoing,
+        due_activities,
+        due_plan,
+        due_options,
+        due_context,
+        due_terminal,
+        terminal,
+        cursor,
+    ) = {
         let core = core.lock();
         (
             core.due(core.last.history, HISTORY_INTERVAL),
             core.due(core.last.ongoing, ONGOING_INTERVAL),
             core.due(core.last.activities, ACTIVITIES_INTERVAL),
             core.due(core.last.plan, PLAN_INTERVAL),
+            core.due(core.last.options, OPTIONS_INTERVAL),
+            core.due(core.last.context, CONTEXT_INTERVAL),
             core.due(core.last.terminal, TERMINAL_INTERVAL),
             core.view.detail.active_terminal.clone(),
             core.last.terminal_cursor,
@@ -143,29 +155,30 @@ async fn refresh_open(
                     if core.open.as_ref() == Some(target) {
                         core.view.detail.history = page.items;
                         core.view.detail.history_has_more = page.has_more;
-                        core.last.history = Some(Instant::now());
                     }
                 }
+                core.lock().last.history = Some(Instant::now());
             }
             if due_activities && activities_open {
                 if let Ok(page) = client.activities(id, 200, 0).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
                         core.view.detail.activities = page.activities;
-                        core.last.activities = Some(Instant::now());
                     }
                 }
+                core.lock().last.activities = Some(Instant::now());
             }
             if due_plan && plan_open {
                 if let Ok(entries) = client.plan(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
                         core.view.detail.plan = entries;
-                        core.last.plan = Some(Instant::now());
                     }
                 }
+                core.lock().last.plan = Some(Instant::now());
             }
-            if due_plan {
+            // 会话选项与斜杠命令随交互视图常驻：与计划面板是否打开无关，按自身周期节流
+            if due_options {
                 if let Ok(options) = client.config_options(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
@@ -178,8 +191,9 @@ async fn refresh_open(
                         core.view.detail.slash_commands = commands;
                     }
                 }
+                core.lock().last.options = Some(Instant::now());
             }
-            if due_plan && detail_open {
+            if due_context && detail_open {
                 if let Ok(info) = client.context(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
@@ -187,15 +201,16 @@ async fn refresh_open(
                         core.view.detail.context_window_size = info.context_window_size;
                     }
                 }
+                core.lock().last.context = Some(Instant::now());
             }
             if due_ongoing {
                 if let Ok(activity) = client.ongoing_activity(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
                         core.view.detail.ongoing = activity;
-                        core.last.ongoing = Some(Instant::now());
                     }
                 }
+                core.lock().last.ongoing = Some(Instant::now());
             }
             if due_terminal && terminal_open {
                 // 终端列表无活动终端时也要刷新（重开会话后列出已有终端、退出状态等）
@@ -241,27 +256,27 @@ async fn refresh_open(
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
                         core.view.detail.history = items;
-                        core.last.history = Some(Instant::now());
                     }
                 }
+                core.lock().last.history = Some(Instant::now());
             }
             if due_activities && activities_open {
                 if let Ok(activities) = client.workflow_activities(id, 200, 0).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
                         core.view.detail.activities = activities;
-                        core.last.activities = Some(Instant::now());
                     }
                 }
+                core.lock().last.activities = Some(Instant::now());
             }
             if due_ongoing {
                 if let Ok(activity) = client.workflow_ongoing_activity(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
                         core.view.detail.ongoing = activity;
-                        core.last.ongoing = Some(Instant::now());
                     }
                 }
+                core.lock().last.ongoing = Some(Instant::now());
             }
         }
     }
@@ -365,5 +380,106 @@ pub async fn delete(client: &Client, entry: &ListEntry) -> Result<(), String> {
     match entry {
         ListEntry::Session(session) => client.delete_session(&session.id).await,
         ListEntry::Workflow(workflow) => client.delete_workflow(&workflow.id).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// 端点桩的响应体：只覆盖会话视图用到的端点，其余端点返回空对象（调用方按错误忽略）。
+    fn stub(path: &str) -> &'static str {
+        match path {
+            "/sessions" => r#"{"sessions":[],"hasMore":false}"#,
+            "/workflows" => r#"{"workflows":[],"hasMore":false}"#,
+            "/sessions/s1" => {
+                r#"{"id":"s1","machine":"pc","agent":"codex","title":"t","state":"idle","workspace":"/tmp","worktreeDir":"","createdAt":1,"updatedAt":1}"#
+            }
+            "/sessions/s1/history" => r#"{"items":[],"hasMore":false}"#,
+            "/sessions/s1/plan" => r#"{"entries":[]}"#,
+            "/sessions/s1/context" => r#"{"contextSize":1,"contextWindowSize":2}"#,
+            "/sessions/s1/config_options" => {
+                r#"{"options":[{"id":"model","name":"模型","type":"select","current_value":"a","options":[{"value":"a","name":"A"}]}]}"#
+            }
+            "/sessions/s1/slash_commands" => {
+                r#"{"commands":[{"name":"goal","description":"目标"}]}"#
+            }
+            _ => "{}",
+        }
+    }
+
+    /// 启动记录请求路径的端点桩，返回 Server 地址与请求记录。
+    async fn start_stub() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::http::StatusCode;
+        use axum::Router;
+
+        let hits: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let recorded = Arc::clone(&hits);
+        let app = Router::new().fallback(move |request: axum::extract::Request| {
+            let hits = Arc::clone(&recorded);
+            async move {
+                let path = request.uri().path().to_string();
+                let body = stub(&path);
+                hits.lock().unwrap().push(path);
+                (StatusCode::OK, body)
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), hits)
+    }
+
+    /// 打开会话 s1 的 Core：状态置为在线（跳过连接检查），所有节拍自零开始。
+    fn opened_core(server: String) -> SharedCore {
+        let connection = crate::config::Connection {
+            server,
+            token: "tk".into(),
+        };
+        let mut core = Core::new(connection);
+        core.status = ConnectionStatus::Online;
+        core.open = Some(OpenTarget::Session("s1".to_string()));
+        Arc::new(parking_lot::Mutex::new(core))
+    }
+
+    fn hit_count(hits: &Arc<std::sync::Mutex<Vec<String>>>, path: &str) -> usize {
+        hits.lock()
+            .unwrap()
+            .iter()
+            .filter(|hit| *hit == path)
+            .count()
+    }
+
+    /// 计划面板未打开时会话选项与斜杠命令也必须按自身周期节流（回归：曾随 250ms 节拍重发）。
+    #[tokio::test]
+    async fn options_and_slash_commands_are_throttled() {
+        let (server, hits) = start_stub().await;
+        let core = opened_core(server);
+        for _ in 0..3 {
+            tick(Arc::clone(&core)).await;
+        }
+
+        assert_eq!(hit_count(&hits, "/sessions/s1/config_options"), 1);
+        assert_eq!(hit_count(&hits, "/sessions/s1/slash_commands"), 1);
+        assert_eq!(hit_count(&hits, "/sessions/s1/plan"), 0, "计划面板未打开");
+
+        let core = core.lock();
+        assert_eq!(core.view.detail.config_options.len(), 1);
+        assert_eq!(core.view.detail.slash_commands.len(), 1);
+    }
+
+    /// 详情面板打开后上下文信息同样按自身周期节流。
+    #[tokio::test]
+    async fn context_is_throttled_when_detail_panel_open() {
+        let (server, hits) = start_stub().await;
+        let core = opened_core(server);
+        core.lock().side_panel = Some(SidePanel::Detail);
+        for _ in 0..3 {
+            tick(Arc::clone(&core)).await;
+        }
+
+        assert_eq!(hit_count(&hits, "/sessions/s1/context"), 1);
+        assert_eq!(core.lock().view.detail.context_size, 1);
     }
 }

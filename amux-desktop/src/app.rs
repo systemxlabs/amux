@@ -1071,7 +1071,8 @@ impl AmuxApp {
             core.side_panel = Some(panel);
             match panel {
                 SidePanel::Activities => core.last.activities = None,
-                SidePanel::Plan | SidePanel::Detail => core.last.plan = None,
+                SidePanel::Plan => core.last.plan = None,
+                SidePanel::Detail => core.last.context = None,
                 _ => {}
             }
         });
