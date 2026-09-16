@@ -281,8 +281,8 @@ impl MachineHub {
 
     // ---------- Daemon 连接 ----------
 
-    /// Daemon 握手与接入：校验 token 与机器重名后升级为长连接
-    /// （docs/DESIGN.md「认证」：两者任一不满足即握手失败）。
+    /// Daemon 握手与接入：校验 token、机器名与机器重名后升级为长连接
+    /// （docs/DESIGN.md「认证」：任一不满足即握手失败）。
     pub fn upgrade(&self, headers: &HeaderMap, ws: WebSocketUpgrade) -> Response {
         let token = headers
             .get(header::AUTHORIZATION)

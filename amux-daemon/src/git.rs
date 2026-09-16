@@ -2,7 +2,8 @@
 //! - diff 查询、untracked 判定：gitoxide（gix）结构化实现，不依赖 git 二进制、
 //!   无本地化输出解析
 //! - gitoxide 无等价能力处保留 git CLI：patch 应用（`git apply --reverse`）、
-//!   索引+工作区整体恢复（`git restore` / `git clean`）
+//!   索引+工作区整体恢复（`git restore` / `git clean`）、
+//!   worktree 增删查（`git worktree add/remove/list/prune`）
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ use crate::fs::canonical_workspace_root;
 #[derive(Default)]
 pub struct GitRunner;
 
-/// git CLI 输出错误（restore 的 CLI 兜底路径用）。
+/// git CLI 输出错误（`run` 执行失败时携带 stderr，restore 与 worktree 调用方共用）。
 #[derive(Debug)]
 pub struct GitError {
     pub message: String,
@@ -51,7 +52,7 @@ fn run(cwd: &str, args: &[&str]) -> Result<String, GitError> {
     }
 }
 
-/// 构造失败的 `OpResult`（restore 的 CLI/文件操作错误路径共用）。
+/// 构造成功的 `OpResult`。
 fn op_ok() -> OpResult {
     OpResult {
         ok: true,
@@ -59,6 +60,7 @@ fn op_ok() -> OpResult {
     }
 }
 
+/// 构造失败的 `OpResult`（restore 的 CLI/文件操作错误路径共用）。
 fn op_err(message: impl Into<String>) -> OpResult {
     OpResult {
         ok: false,
@@ -75,7 +77,7 @@ fn repo_relative_path(workdir: &Path, cwd: &str, p: &str) -> String {
 }
 
 /// 把仓库根相对路径换算为相对 cwd 的路径——diff 结果的 path 与
-/// `workspace.restore` 的 path 同基准（相对 cwd）。
+/// `git.restore` 的 path 同基准（相对 cwd）。
 fn cwd_relative_path(workdir: &Path, cwd: &str, repo_path: &str) -> String {
     match Path::new(cwd).strip_prefix(workdir) {
         Ok(rel) if !rel.as_os_str().is_empty() => {
@@ -305,7 +307,7 @@ impl GitRunner {
         };
         let repo = match gix::discover(cwd) {
             Ok(r) => r,
-            // 非仓库（向上查找无 .git）或仓库不可用时，按 workspace.diff 协议返回 not_repo。
+            // 非仓库（向上查找无 .git）或仓库不可用时，按 `git.diff` 协议返回 not_repo。
             Err(_) => {
                 return GitDiffResult {
                     files: Vec::new(),

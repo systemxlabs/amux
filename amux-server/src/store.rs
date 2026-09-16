@@ -196,7 +196,7 @@ impl Store {
         );
     }
 
-    /// 标记关联会话（供 `GET /sessions` 排除）。
+    /// 标记关联会话：session 库打标供 `GET /sessions` 排除，workflow 库记录关联关系。
     pub fn link_session(&self, workflow_id: &str, session_id: &str) {
         let conn = self.sessions.lock();
         let _ = conn.execute(

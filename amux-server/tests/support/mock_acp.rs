@@ -5,7 +5,7 @@
 //!
 //! 行为要点（与 v2 语义对齐）：
 //! - `session/new` 返回自增的唯一 sessionId（mock_s_1、mock_s_2、…），响应携带
-//!   model select 会话选项；`session/resume` 为空响应（server 不带 replayFrom）
+//!   model select 会话选项；`session/resume` 返回当前 model 选项（server 不带 replayFrom）
 //! - `session/prompt` 立即响应（受理），随后在后台任务里发
 //!   `state_update` running → 思考/工具调用/输出 update → `state_update` idle（stopReason）
 //! - 权限请求用 allow-once 选项，期望 server 自动批准；`AMUX_MOCK_WAIT_FOR_CANCEL=1`
@@ -13,7 +13,7 @@
 //!   确定性协调点
 //! - 把收到的**方法名**追加到 `<state_file>.calls`（含 cancel 通知；供测试断言
 //!   server 的 ACP 调用面，如 close/delete、resume 幂等只调一次）
-//! - 把收到的权限批准记录追加到状态文件（第二个参数，或 `AMUX_MOCK_STATE`）
+//! - 把收到的权限批准记录追加到状态文件（第一个参数，或 `AMUX_MOCK_STATE`）
 //!
 //! 场景机制（全部经环境变量开启，供跨进程时序协调）：
 //! - `AMUX_MOCK_TURN_GATES=f1,f2,…`：prompt 序号 n 等待文件 f_n 出现才继续
@@ -329,7 +329,7 @@ async fn run(state_file: &str) -> Result<()> {
         .await
 }
 
-/// 单个 turn 的前台工作：权限 → 闸门 → 事件流 → idle。
+/// 单个 turn 的前台工作：running → 闸门 → 权限 → 事件流 → idle。
 async fn run_turn(
     cx: V2ConnectionTo<Client>,
     sid: SessionId,

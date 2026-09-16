@@ -36,7 +36,7 @@ pub struct AmuxApp {
     /// 连接设置输入框
     pub server_input: Entity<InputState>,
     pub token_input: Entity<InputState>,
-    /// 设置面板的「保存」是否可点（任一配置修改过）
+    /// 连接设置的「保存」是否可点（server/token 输入变更后置位）
     pub settings_dirty: bool,
     /// 编排智能体 API 格式的当前选择（文本项直接取输入框）
     pub orchestrator_format: Option<ApiFormat>,
@@ -631,7 +631,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 重命名会话（普通会话走 configure，工作流会话走 configure）。
+    /// 重命名会话（经 configure 接口更新标题）。
     pub fn rename(&mut self, target: OpenTarget, title: String, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };

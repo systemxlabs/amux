@@ -83,7 +83,7 @@ impl SessionService {
             .ok_or_else(|| "会话不存在".to_string())
     }
 
-    /// 活动中的（未关联工作流的）会话。
+    /// 会话列表分页：最近活跃的非关联普通会话（`GET /sessions`）。
     pub fn list(&self, limit: usize, offset: usize) -> (Vec<Session>, bool) {
         self.store.sessions_page(limit, offset)
     }
@@ -133,7 +133,7 @@ impl SessionService {
         Ok(session)
     }
 
-    /// 发送指令：惰性创建/恢复 agent 会话，落盘用户消息，转发 prompt。
+    /// 发送指令：惰性创建/恢复 agent 会话，prompt 受理后立即落盘用户消息。
     pub async fn prompt(&self, id: &str, input: Vec<ContentBlock>) -> Result<(), String> {
         let session = self.get(id)?;
         self.ensure_agent_session(&session).await?;

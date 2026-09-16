@@ -6,6 +6,7 @@
 //! - [`domain`]：两侧共享的领域类型（会话、对话内容、活动、终端、diff 等）
 //! - [`paths`]：运行目录（默认 `~/.amux`）
 //! - [`log`]：统一日志初始化
+//! - [`text`]：文本工具（截断等）
 
 pub mod api;
 pub mod daemon;

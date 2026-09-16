@@ -48,5 +48,6 @@ lto = "thin"
 [profile.dev]
 debug = "line-tables-only"
 
-# zed 的 git 依赖在 gpui-component 中未固定 rev：显式 patch 到与 gpui/gpui_platform
-# 相同的提交，避免依赖图里出现两份 gpui（类型不互通）。
+# zed 的 git 依赖在 gpui-component 中未固定 rev，与本项目的 gpui/gpui_platform
+# 同源同分支，cargo 会统一解析到同一提交；若未来依赖图里出现两份 gpui
+#（类型不互通），需显式 [patch] 钉到相同提交。

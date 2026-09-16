@@ -254,7 +254,7 @@ pub struct FsEntry {
     pub size: u64,
 }
 
-/// `fs.list` 参数。`path` 为目标目录绝对路径，缺省为调用方约定的根。
+/// `fs.list` 参数。`path` 为目标目录绝对路径，缺省按 daemon 当前目录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsListParams {

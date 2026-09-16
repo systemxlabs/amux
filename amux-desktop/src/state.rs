@@ -113,7 +113,7 @@ impl WorkspaceNode {
     }
 }
 
-/// 打开的普通会话视图数据。
+/// 打开的会话明细视图数据（普通会话与工作流会话共用）。
 #[derive(Default, Clone)]
 pub struct SessionView {
     pub history: Vec<HistoryItem>,

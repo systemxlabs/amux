@@ -28,7 +28,7 @@ pub mod method {
     pub const TERMINAL_CLOSE: &str = "terminal.close";
 }
 
-/// 通知名（两个方向共用同一方法名，靠方向区分语义）。
+/// 通知名（`acp` 双向复用，`terminal.*` 仅 Daemon → Server 上行）。
 pub mod notify {
     /// ACP 消息转发：Server → Daemon 下行、Daemon → Server 上行
     pub const ACP: &str = "acp";
@@ -87,7 +87,7 @@ pub struct AcpForward {
     pub raw: String,
 }
 
-/// 以仓库根目录为目标的 git 参数（diff / worktree 创建）。
+/// 以仓库根目录为目标的 git 参数（`git.diff` / `git.worktree.new` / `git.worktree.list`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitRepoParams {

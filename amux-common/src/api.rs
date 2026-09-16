@@ -9,7 +9,7 @@ use crate::domain::{
     SessionConfigOptionValue, SessionPlanEntry, SessionState, SlashCommand,
 };
 
-/// 端点路径片段（Server 路由与应用侧请求共用，避免字面量漂移）。
+/// 端点路径片段（应用侧请求共用，避免字面量漂移）。
 pub mod path {
     pub const MACHINES: &str = "/machines";
     pub const SESSIONS: &str = "/sessions";
@@ -98,7 +98,7 @@ pub struct PromptRequest {
     pub input: Vec<ContentBlock>,
 }
 
-/// `session/configure` 中的会话选项设置。
+/// `POST /sessions/<id>/configure` 中的会话选项设置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionConfigSetting {
