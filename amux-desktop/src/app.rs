@@ -168,18 +168,13 @@ impl AmuxApp {
         });
         let plan_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("工作计划")
                 .multi_line(true)
                 .auto_grow(3, 10)
         });
-        let workspace_input = cx.new(|cx| InputState::new(window, cx).placeholder("工作目录"));
+        let workspace_input = cx.new(|cx| InputState::new(window, cx));
         let server_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://amux.example.com:34567"));
-        let token_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("认证 token")
-                .masked(true)
-        });
+        let token_input = cx.new(|cx| InputState::new(window, cx).masked(true));
         if !server.is_empty() {
             server_input.update(cx, |state, cx| state.set_value(server.clone(), window, cx));
         }
@@ -247,35 +242,31 @@ impl AmuxApp {
         )
         .detach();
 
+        // 输入框的提示只补充 label 之外的信息：label 已说明字段含义时不再重复
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
-        let orch_base_url = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Base URL（如 https://api.openai.com/v1）")
-        });
-        let orch_api_key = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("API Key")
-                .masked(true)
-        });
-        let orch_model = cx.new(|cx| InputState::new(window, cx).placeholder("模型名称"));
-        let orch_effort = cx.new(|cx| InputState::new(window, cx).placeholder("推理级别"));
-        let quick_name = cx.new(|cx| InputState::new(window, cx).placeholder("指令名称"));
+        let orch_base_url =
+            cx.new(|cx| InputState::new(window, cx).placeholder("https://api.openai.com/v1"));
+        let orch_api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let orch_model = cx.new(|cx| InputState::new(window, cx));
+        let orch_effort = cx.new(|cx| InputState::new(window, cx));
+        let quick_name = cx.new(|cx| InputState::new(window, cx));
         let quick_prompt = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("指令内容（点击后作为用户输入发送的一段提示词）")
+                .placeholder("点击后作为用户输入发送的一段提示词")
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
-        let skill_name = cx.new(|cx| InputState::new(window, cx).placeholder("技能名称"));
+        let skill_name = cx.new(|cx| InputState::new(window, cx));
         let skill_desc = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("技能描述（仓库 / 资源 URL 或安装方法说明）")
+                .placeholder("仓库 / 资源 URL 或安装方法说明")
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
-        let plan_name = cx.new(|cx| InputState::new(window, cx).placeholder("计划名称"));
+        let plan_name = cx.new(|cx| InputState::new(window, cx));
         let plan_plan = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("计划内容（自然语言描述）")
+                .placeholder("自然语言描述")
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
