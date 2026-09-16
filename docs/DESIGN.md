@@ -175,8 +175,7 @@ Daemon 在内存中仅存储终端元信息，终端输出由 Server 侧缓存�
 ### 技术栈
 
 - 基础库：`tokio` / `serde` / `serde_json`
-- WebSocket：`tokio-tungstenite`
-- HTTP: `axum`
+- HTTP & WebSocket: `axum`
 - SQLite：`rusqlite`
 - 编排智能体：`rig`
 - ACP：`agent-client-protocol` 官方 SDK
