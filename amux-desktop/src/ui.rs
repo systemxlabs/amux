@@ -1,15 +1,16 @@
-//! 共享渲染辅助：状态徽章、时间、内容块文本、活动文案。
+//! 共享渲染辅助：可用状态徽章、时间、内容块文本、活动文案。
 
-use amux_common::domain::{Activity, ContentBlock, HistoryItem, SessionState};
+use amux_common::domain::{Activity, ContentBlock, HistoryItem};
 use gpui::*;
 use gpui_component::badge::Badge;
 use gpui_component::Theme;
 
-/// 会话状态徽章。
-pub fn state_badge(state: SessionState, theme: &Theme) -> impl IntoElement {
-    let (text, color) = match state {
-        SessionState::Idle => ("空闲", theme.muted_foreground),
-        SessionState::Busy => ("工作中", theme.primary),
+/// agent 可用状态徽章。
+pub fn availability_badge(available: bool, theme: &Theme) -> impl IntoElement {
+    let (text, color) = if available {
+        ("可用", theme.success)
+    } else {
+        ("不可用", theme.danger)
     };
     Badge::new()
         .color(color)
@@ -48,6 +49,14 @@ pub fn history_text(item: &HistoryItem) -> String {
     match item {
         HistoryItem::UserMessage { content, .. } => blocks_text(content),
         HistoryItem::AgentMessage { content, .. } => blocks_text(content),
+    }
+}
+
+/// 对话历史条目的时间戳。
+pub fn history_timestamp(item: &HistoryItem) -> u64 {
+    match item {
+        HistoryItem::UserMessage { timestamp, .. } => *timestamp,
+        HistoryItem::AgentMessage { timestamp, .. } => *timestamp,
     }
 }
 

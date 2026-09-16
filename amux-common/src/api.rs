@@ -61,6 +61,17 @@ pub struct Session {
     pub updated_at: u64,
 }
 
+impl Session {
+    /// 会话实际使用的根目录：启用 worktree 时为 worktree 目录，否则为工作目录。
+    pub fn root_dir(&self) -> &str {
+        if self.worktree_dir.is_empty() {
+            &self.workspace
+        } else {
+            &self.worktree_dir
+        }
+    }
+}
+
 /// `GET /sessions` 响应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -6,17 +6,24 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::*;
 use gpui_component::label::Label;
+use gpui_component::spinner::Spinner;
 use gpui_component::*;
 use gpui_component::{h_flex, v_flex, ActiveTheme, IconName, Sizable};
 
 use crate::app::{text_input, AmuxApp};
-use crate::state::{ListEntry, OpenTarget, SidePanel};
+use crate::state::{ListEntry, OpenTarget, SettingsTab, SidePanel, WorkspaceNode};
 use crate::ui;
 
 /// 左侧面板宽度。
 const LEFT_WIDTH: f32 = 260.0;
 /// 右侧面板宽度。
 const RIGHT_WIDTH: f32 = 380.0;
+
+/// 终端尺寸调整步长与下限。
+const TERMINAL_COL_STEP: u16 = 10;
+const TERMINAL_ROW_STEP: u16 = 5;
+const TERMINAL_MIN_COLS: u16 = 20;
+const TERMINAL_MIN_ROWS: u16 = 5;
 
 /// 左侧面板：新建会话、会话列表（普通会话 + 工作流会话）、设置入口。
 pub fn render_left(
@@ -209,7 +216,9 @@ fn session_row(
                 .child(Label::new(ui::truncate(&title, 28)).text_sm()),
         );
     }
-    row = row.child(ui::state_badge(state, cx.theme()));
+    if state == SessionState::Busy {
+        row = row.child(Spinner::new().xsmall().color(cx.theme().primary));
+    }
     row = row.child(
         div()
             .text_xs()
@@ -319,6 +328,38 @@ fn workflow_row(
         .into_any()
 }
 
+/// 指定机器上某 agent 是否可用。
+fn machine_agent_available(core: &crate::state::Core, machine: &str, agent: &str) -> bool {
+    core.settings
+        .agents
+        .iter()
+        .find(|(name, _)| name == machine)
+        .is_some_and(|(_, agents)| {
+            agents
+                .iter()
+                .any(|item| item.name == agent && item.available)
+        })
+}
+
+/// 新建会话表单已选中的 agent 是否可用。
+fn selected_agent_available(core: &crate::state::Core) -> bool {
+    match (
+        core.new_session.machine.as_deref(),
+        core.new_session.agent.as_deref(),
+    ) {
+        (Some(machine), Some(agent)) => machine_agent_available(core, machine, agent),
+        _ => false,
+    }
+}
+
+/// 当前视图的 agent 可用状态：普通会话为其所属 agent，工作流会话为编排智能体。
+fn view_agent_available(core: &crate::state::Core) -> bool {
+    match &core.view.session {
+        Some(session) => machine_agent_available(core, &session.machine, &session.agent),
+        None => core.settings.orchestrator.is_some(),
+    }
+}
+
 /// 中间面板：新建会话视图或会话交互视图。
 pub fn render_middle(
     core: &crate::state::Core,
@@ -367,45 +408,57 @@ fn new_session_view(
 
     let mut body = v_flex().flex_1().gap_3().p_3();
     if workflow_mode {
-        let configured = core.settings.orchestrator.is_some();
-        body = body.child(Label::new("工作计划（选择已保存计划或直接输入）"));
-        if !core.settings.plans.is_empty() {
-            let mut plans = h_flex().gap_2().flex_wrap();
-            for plan in core.settings.plans.clone() {
-                plans = plans.child(
-                    Button::new(format!("plan-{}", plan.name))
+        if core.settings.orchestrator.is_none() {
+            body = body
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child("编排智能体未配置，请先在设置中完成配置"),
+                )
+                .child(
+                    Button::new("goto-orchestrator")
                         .small()
-                        .ghost()
-                        .label(ui::truncate(&plan.name, 18))
-                        .on_click(cx.listener({
-                            let text = plan.plan.clone();
-                            move |this, _, window, cx| {
-                                this.plan_input.update(cx, |state, cx| {
-                                    state.set_value(text.clone(), window, cx)
-                                });
-                                cx.notify();
-                            }
+                        .primary()
+                        .label("前往设置")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.with_core(|core| {
+                                core.settings_open = true;
+                                core.settings_tab = SettingsTab::Orchestrator;
+                            });
+                            this.load_orchestrator_form(window, cx);
+                            cx.notify();
                         })),
                 );
+        } else {
+            let plan = this.plan_input.read(cx).value().trim().to_string();
+            body = body.child(Label::new("工作计划（选择已保存计划或直接输入）"));
+            if !core.settings.plans.is_empty() {
+                let mut plans = h_flex().gap_2().flex_wrap();
+                for plan in core.settings.plans.clone() {
+                    plans = plans.child(
+                        Button::new(format!("plan-{}", plan.name))
+                            .small()
+                            .ghost()
+                            .label(ui::truncate(&plan.name, 18))
+                            .on_click(cx.listener({
+                                let text = plan.plan.clone();
+                                move |this, _, window, cx| this.set_plan(text.clone(), window, cx)
+                            })),
+                    );
+                }
+                body = body.child(plans);
             }
-            body = body.child(plans);
-        }
-        body = body.child(text_input(&this.plan_input));
-        if !configured {
+            body = body.child(text_input(&this.plan_input));
             body = body.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().warning)
-                    .child("编排智能体未配置，请在设置中配置后创建"),
+                Button::new("create-workflow")
+                    .small()
+                    .primary()
+                    .disabled(plan.is_empty())
+                    .label("创建工作流会话")
+                    .on_click(cx.listener(|this, _, _, cx| this.create_session(cx))),
             );
         }
-        body = body.child(
-            Button::new("create-workflow")
-                .small()
-                .primary()
-                .label("创建工作流会话")
-                .on_click(cx.listener(|this, _, _, cx| this.create_session(cx))),
-        );
     } else {
         body = body.child(Label::new("机器与 agent"));
         let mut agents_row = h_flex().gap_2().flex_wrap();
@@ -422,6 +475,7 @@ fn new_session_view(
                             this.with_core(|core| {
                                 core.new_session.machine = Some(name.clone());
                                 core.new_session.agent = None;
+                                core.new_session.suggestions.clear();
                             });
                             cx.notify();
                         }
@@ -476,6 +530,23 @@ fn new_session_view(
 
         body = body.child(Label::new("工作目录"));
         body = body.child(text_input(&this.workspace_input));
+        let workspace = this.workspace_input.read(cx).value().trim().to_string();
+        if !core.new_session.suggestions.is_empty() {
+            let mut suggestions = v_flex().gap_1();
+            for entry in &core.new_session.suggestions {
+                suggestions = suggestions.child(
+                    Button::new(format!("suggest-{}", entry.path))
+                        .small()
+                        .ghost()
+                        .label(ui::truncate(&entry.path, 48))
+                        .on_click(cx.listener({
+                            let path = entry.path.clone();
+                            move |this, _, window, cx| this.set_workspace(path.clone(), window, cx)
+                        })),
+                );
+            }
+            body = body.child(suggestions);
+        }
         if !core.recent_workspaces.is_empty() {
             let mut recent = h_flex().gap_2().flex_wrap();
             for workspace in core
@@ -493,17 +564,13 @@ fn new_session_view(
                         .label(ui::truncate(&workspace.workspace, 24))
                         .on_click(cx.listener({
                             let path = workspace.workspace.clone();
-                            move |this, _, window, cx| {
-                                this.workspace_input.update(cx, |state, cx| {
-                                    state.set_value(path.clone(), window, cx)
-                                });
-                                cx.notify();
-                            }
+                            move |this, _, window, cx| this.set_workspace(path.clone(), window, cx)
                         })),
                 );
             }
             body = body.child(recent);
         }
+        let can_create = !workspace.is_empty() && selected_agent_available(core);
         body = body.child(
             h_flex()
                 .gap_2()
@@ -533,6 +600,7 @@ fn new_session_view(
                     Button::new("create-session")
                         .small()
                         .primary()
+                        .disabled(!can_create)
                         .label("创建会话")
                         .on_click(cx.listener(|this, _, _, cx| this.create_session(cx))),
                 ),
@@ -572,7 +640,10 @@ fn interaction_view(
                 .text_color(cx.theme().muted_foreground)
                 .child(core.view.subtitle()),
         )
-        .child(ui::state_badge(core.view.state(), cx.theme()))
+        .child(ui::availability_badge(
+            view_agent_available(core),
+            cx.theme(),
+        ))
         .child(div().flex_1());
 
     let mut history = v_flex()
@@ -596,10 +667,21 @@ fn interaction_view(
                 .rounded_md()
                 .bg(bubble_bg)
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(role),
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(role),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(ui::timestamp(ui::history_timestamp(item))),
+                        ),
                 )
                 .child(div().text_sm().child(ui::history_text(item))),
         );
@@ -697,23 +779,7 @@ fn interaction_view(
                 .xsmall()
                 .ghost()
                 .label(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.with_core(|core| {
-                        core.side_panel = Some(panel);
-                        match panel {
-                            SidePanel::Activities => core.last.activities = None,
-                            SidePanel::Plan | SidePanel::Detail => core.last.plan = None,
-                            _ => {}
-                        }
-                    });
-                    if panel == SidePanel::Terminal {
-                        this.open_terminal(cx);
-                    }
-                    if panel == SidePanel::Diff {
-                        this.refresh_diff(cx);
-                    }
-                    cx.notify();
-                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_side_panel(panel, cx)))
         }),
     );
 
@@ -917,48 +983,20 @@ pub fn render_right(
             }
         }
         SidePanel::Workspace => {
-            let (machine, path) = core
+            let target = core
                 .view
                 .session
                 .as_ref()
-                .map(|session| {
-                    (
-                        session.machine.clone(),
-                        if session.worktree_dir.is_empty() {
-                            session.workspace.clone()
-                        } else {
-                            session.worktree_dir.clone()
-                        },
-                    )
-                })
-                .unzip();
-            match (machine, path) {
-                (Some(machine), Some(path)) => {
+                .map(|session| (session.machine.clone(), session.root_dir().to_string()));
+            match target {
+                Some((machine, path)) => {
                     body = body.child(detail_row("路径", &path));
-                    for entry in core.view.detail.workspace_entries.clone() {
-                        let mut row = h_flex()
-                            .gap_2()
-                            .child(div().child(if entry.is_dir { "📁" } else { "📄" }))
-                            .child(div().text_sm().child(entry.name.clone()))
-                            .child(div().flex_1())
-                            .child(div().text_xs().child(format!("{}", entry.size)));
-                        if !entry.is_dir {
-                            row = row.child(
-                                Button::new(format!("read-{}", entry.path))
-                                    .xsmall()
-                                    .ghost()
-                                    .label("查看")
-                                    .on_click(cx.listener({
-                                        let machine = machine.clone();
-                                        let path = entry.path.clone();
-                                        move |this, _, _, cx| {
-                                            this.read_file(machine.clone(), path.clone(), cx)
-                                        }
-                                    })),
-                            );
-                        }
-                        body = body.child(row);
-                    }
+                    body = body.children(workspace_nodes(
+                        &core.view.detail.workspace_tree,
+                        &machine,
+                        0,
+                        cx,
+                    ));
                     if let Some(content) = core.view.detail.file_content.clone() {
                         body = body.child(
                             v_flex()
@@ -970,22 +1008,17 @@ pub fn render_right(
                                 .child(div().text_xs().child(ui::truncate(&content, 4000))),
                         );
                     }
-                    if core.view.detail.workspace_entries.is_empty() {
+                    if core.view.detail.workspace_tree.is_empty() {
                         body = body.child(
                             Button::new("load-workspace")
                                 .xsmall()
                                 .ghost()
                                 .label("加载工作目录")
-                                .on_click(cx.listener({
-                                    let machine = machine.clone();
-                                    move |this, _, _, cx| {
-                                        this.load_workspace(machine.clone(), cx);
-                                    }
-                                })),
+                                .on_click(cx.listener(|this, _, _, cx| this.load_workspace(cx))),
                         );
                     }
                 }
-                _ => body = body.child(ui::empty_hint("未选择会话", cx.theme())),
+                None => body = body.child(ui::empty_hint("未选择会话", cx.theme())),
             }
         }
         SidePanel::Terminal => {
@@ -1031,14 +1064,40 @@ pub fn render_right(
                                 })),
                         )
                         .child(
-                            Button::new(format!("resize-terminal-{id}"))
+                            Button::new(format!("shrink-terminal-{id}"))
                                 .xsmall()
                                 .ghost()
                                 .label("尺寸 -")
                                 .on_click(cx.listener({
                                     let id = id.clone();
+                                    let (cols, rows) = (terminal.cols, terminal.rows);
                                     move |this, _, _, cx| {
-                                        this.resize_terminal(id.clone(), 80, 24, cx)
+                                        this.resize_terminal(
+                                            id.clone(),
+                                            cols.saturating_sub(TERMINAL_COL_STEP)
+                                                .max(TERMINAL_MIN_COLS),
+                                            rows.saturating_sub(TERMINAL_ROW_STEP)
+                                                .max(TERMINAL_MIN_ROWS),
+                                            cx,
+                                        )
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("grow-terminal-{id}"))
+                                .xsmall()
+                                .ghost()
+                                .label("尺寸 +")
+                                .on_click(cx.listener({
+                                    let id = id.clone();
+                                    let (cols, rows) = (terminal.cols, terminal.rows);
+                                    move |this, _, _, cx| {
+                                        this.resize_terminal(
+                                            id.clone(),
+                                            cols.saturating_add(TERMINAL_COL_STEP),
+                                            rows.saturating_add(TERMINAL_ROW_STEP),
+                                            cx,
+                                        )
                                     }
                                 })),
                         )
@@ -1067,6 +1126,75 @@ pub fn render_right(
         .child(header)
         .child(body)
         .into_any()
+}
+
+/// 工作目录树：目录行可折叠/展开（未加载的子目录在展开时拉取），文件行可查看内容。
+fn workspace_nodes(
+    nodes: &[WorkspaceNode],
+    machine: &str,
+    depth: usize,
+    cx: &mut Context<AmuxApp>,
+) -> Vec<AnyElement> {
+    let indent = px(depth as f32 * 12.0);
+    let mut rows = Vec::new();
+    for node in nodes {
+        let entry = &node.entry;
+        if !entry.is_dir {
+            rows.push(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().w(indent))
+                    .child(div().text_sm().child(entry.name.clone()))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{}", entry.size)),
+                    )
+                    .child(
+                        Button::new(format!("read-{}", entry.path))
+                            .xsmall()
+                            .ghost()
+                            .label("查看")
+                            .on_click(cx.listener({
+                                let machine = machine.to_string();
+                                let path = entry.path.clone();
+                                move |this, _, _, cx| {
+                                    this.read_file(machine.clone(), path.clone(), cx)
+                                }
+                            })),
+                    )
+                    .into_any(),
+            );
+            continue;
+        }
+        rows.push(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(div().w(indent))
+                .child(
+                    Button::new(format!("toggle-{}", entry.path))
+                        .xsmall()
+                        .ghost()
+                        .label(if node.expanded { "▾" } else { "▸" })
+                        .on_click(cx.listener({
+                            let path = entry.path.clone();
+                            move |this, _, _, cx| this.toggle_workspace_dir(path.clone(), cx)
+                        })),
+                )
+                .child(div().text_sm().child(entry.name.clone()))
+                .into_any(),
+        );
+        if node.expanded {
+            if let Some(children) = &node.children {
+                rows.extend(workspace_nodes(children, machine, depth + 1, cx));
+            }
+        }
+    }
+    rows
 }
 
 fn detail_row(label: &str, value: &str) -> AnyElement {

@@ -3,6 +3,7 @@
 mod app;
 mod client;
 mod config;
+mod dialog;
 mod panels;
 mod poll;
 mod settings;

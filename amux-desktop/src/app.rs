@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amux_common::api::{
-    CreateSessionRequest, OrchestratorConfig, QuickCommand, Skill, WorkflowPlanItem,
+    ApiFormat, CreateSessionRequest, OrchestratorConfig, QuickCommand, Skill, WorkflowPlanItem,
 };
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -12,18 +12,21 @@ use gpui_component::*;
 use parking_lot::Mutex;
 
 use crate::config::{self, Connection};
+use crate::dialog::{self, FormTarget};
 use crate::panels;
 use crate::poll;
 use crate::settings;
-use crate::state::{Core, ListEntry, OpenTarget, SettingsTab, SharedCore, SidePanel};
-use crate::ui;
+use crate::state::{
+    Core, DirectoryCache, ListEntry, OpenTarget, SharedCore, SidePanel, WorkspaceNode,
+};
 
 /// UI 轮询节拍：驱动后台刷新与重绘。
 const TICK: Duration = Duration::from_millis(250);
 
 pub struct AmuxApp {
     pub core: SharedCore,
-    pub runtime: tokio::runtime::Handle,
+    /// 后台任务运行时（须持有 Runtime，仅保留 Handle 会让任务无法被调度）
+    pub runtime: tokio::runtime::Runtime,
     /// 会话输入框
     pub input: Entity<InputState>,
     /// 工作流计划输入框（新建工作流会话）
@@ -35,11 +38,8 @@ pub struct AmuxApp {
     pub token_input: Entity<InputState>,
     /// 设置面板的「保存」是否可点（任一配置修改过）
     pub settings_dirty: bool,
-    /// 设置表单编辑缓冲（技能/快捷指令/工作流计划/编排智能体）
-    pub skill_form: (String, String),
-    pub quick_form: (String, String),
-    pub plan_form: (String, String),
-    pub orchestrator_form: Option<OrchestratorConfig>,
+    /// 编排智能体 API 格式的当前选择（文本项直接取输入框）
+    pub orchestrator_format: Option<ApiFormat>,
     /// 行内重命名的会话 id 与输入框
     pub renaming_id: Option<String>,
     pub rename_input: Entity<InputState>,
@@ -61,12 +61,11 @@ pub struct AmuxApp {
 impl AmuxApp {
     pub fn new(connection: Connection, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let core: SharedCore = Arc::new(Mutex::new(Core::new(connection.clone())));
+        // Runtime 必须由 AmuxApp 持有：drop 掉 Runtime 会终止其上所有后台任务
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .expect("构建 tokio runtime 失败")
-            .handle()
-            .clone();
+            .expect("构建 tokio runtime 失败");
 
         let server = connection.server.clone();
         let token = connection.token.clone();
@@ -98,9 +97,20 @@ impl AmuxApp {
             .detach();
         }
 
+        // 手动输入工作目录时刷新前缀匹配的目录项
+        cx.subscribe(
+            &workspace_input,
+            |this: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.refresh_workspace_suggestions(cx);
+                }
+            },
+        )
+        .detach();
+
         // 轮询节拍：后台刷新 + 重绘
         let tick_core = Arc::clone(&core);
-        let tick_runtime = runtime.clone();
+        let tick_runtime = runtime.handle().clone();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(TICK).await;
             tick_runtime.spawn(poll::tick(tick_core.clone()));
@@ -133,10 +143,7 @@ impl AmuxApp {
             server_input,
             token_input,
             settings_dirty: false,
-            skill_form: (String::new(), String::new()),
-            quick_form: (String::new(), String::new()),
-            plan_form: (String::new(), String::new()),
-            orchestrator_form: None,
+            orchestrator_format: None,
             renaming_id: None,
             rename_input,
             orch_base_url,
@@ -332,32 +339,20 @@ impl AmuxApp {
         } else {
             title
         };
-        let is_workflow = matches!(entry, ListEntry::Workflow(_));
-        let app = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let mut alert = alert
-                .title(format!("删除「{label}」？"))
-                .description(if is_workflow {
-                    "工作流会话及其关联的普通会话都会被删除。"
-                } else {
-                    "会话记录与其 worktree 会被清理。"
-                })
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text("删除")
-                        .show_cancel(true),
-                );
-            let app = app.clone();
-            let entry = entry.clone();
-            alert = alert.on_ok(move |_ev, _window, cx| {
-                let entry = entry.clone();
-                app.update(cx, |this, cx| {
-                    this.delete_entry(entry, cx);
-                });
-                true
-            });
-            alert
-        });
+        dialog::confirm(
+            window,
+            cx,
+            format!("删除「{label}」？"),
+            if matches!(entry, ListEntry::Workflow(_)) {
+                "工作流会话及其关联的普通会话都会被删除。"
+            } else {
+                "会话记录与其 worktree 会被清理。"
+            }
+            .to_string(),
+            "删除",
+            true,
+            move |this, cx| this.delete_entry(entry.clone(), cx),
+        );
     }
 
     /// 切换当前终端（重置游标与输出缓冲）。
@@ -371,30 +366,124 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 加载工作目录一页。
-    pub fn load_workspace(&mut self, machine: String, cx: &mut Context<Self>) {
-        let (client, path) = self.with_core(|core| {
-            let path = core
+    /// 加载工作目录树根节点。
+    pub fn load_workspace(&mut self, cx: &mut Context<Self>) {
+        let (client, target) = self.with_core(|core| {
+            let target = core
                 .view
                 .session
                 .as_ref()
-                .map(|session| {
-                    if session.worktree_dir.is_empty() {
-                        session.workspace.clone()
-                    } else {
-                        session.worktree_dir.clone()
-                    }
-                })
-                .unwrap_or_default();
-            (core.client.clone(), path)
+                .map(|session| (session.machine.clone(), session.root_dir().to_string()));
+            (core.client.clone(), target)
         });
+        let (Some(client), Some((machine, path))) = (client, target) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            match client.list_dir(&machine, Some(&path), 500, 0).await {
+                Ok(result) => {
+                    let mut core = core.lock();
+                    core.view.detail.workspace_tree =
+                        result.entries.into_iter().map(WorkspaceNode::new).collect();
+                }
+                Err(error) => core.lock().note(format!("读取工作目录失败：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
+    /// 展开/折叠工作目录树节点；子目录首次展开时拉取其内容。
+    pub fn toggle_workspace_dir(&mut self, path: String, cx: &mut Context<Self>) {
+        let (client, machine, loaded) = self.with_core(|core| {
+            let loaded = WorkspaceNode::find_mut(&mut core.view.detail.workspace_tree, &path)
+                .map(|node| {
+                    node.expanded = !node.expanded;
+                    node.children.is_some()
+                })
+                .unwrap_or(false);
+            let machine = core.view.session.as_ref().map(|s| s.machine.clone());
+            (core.client.clone(), machine, loaded)
+        });
+        if loaded {
+            cx.notify();
+            return;
+        }
+        let (Some(client), Some(machine)) = (client, machine) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            match client.list_dir(&machine, Some(&path), 500, 0).await {
+                Ok(result) => {
+                    let mut core = core.lock();
+                    if let Some(node) =
+                        WorkspaceNode::find_mut(&mut core.view.detail.workspace_tree, &path)
+                    {
+                        node.children =
+                            Some(result.entries.into_iter().map(WorkspaceNode::new).collect());
+                    }
+                }
+                Err(error) => core.lock().note(format!("读取目录失败：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
+    /// 填入工作目录（最近目录或前缀联想项）。
+    pub fn set_workspace(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_input
+            .update(cx, |state, cx| state.set_value(path, window, cx));
+        self.with_core(|core| core.new_session.suggestions.clear());
+        cx.notify();
+    }
+
+    /// 填入工作流计划（已保存计划）。
+    pub fn set_plan(&mut self, plan: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.plan_input
+            .update(cx, |state, cx| state.set_value(plan, window, cx));
+        cx.notify();
+    }
+
+    /// 刷新前缀匹配的目录项：取输入最后一段为前缀，列其所在目录的子目录。
+    fn refresh_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
+        let text = self.workspace_input.read(cx).value().to_string();
+        let machine = self.with_core(|core| core.new_session.machine.clone());
+        // 无目录分隔符或前缀为空时不联想（避免每次选中目录项都重新展开整目录）
+        let parsed = text
+            .rsplit_once('/')
+            .map(|(base, prefix)| (format!("{base}/"), prefix.to_string()))
+            .filter(|(_, prefix)| !prefix.is_empty());
+        let (Some((dir, prefix)), Some(machine)) = (parsed, machine) else {
+            self.with_core(|core| core.new_session.suggestions.clear());
+            cx.notify();
+            return;
+        };
+        let cached = self.with_core(|core| {
+            let cache = core.new_session.suggestion_cache.as_ref()?;
+            (cache.machine == machine && cache.dir == dir).then(|| cache.matching(&prefix))
+        });
+        if let Some(suggestions) = cached {
+            self.with_core(|core| core.new_session.suggestions = suggestions);
+            cx.notify();
+            return;
+        }
+        let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            match client.list_dir(&machine, Some(&path), 200, 0).await {
-                Ok(result) => core.lock().view.detail.workspace_entries = result.entries,
-                Err(error) => core.lock().note(format!("读取工作目录失败：{error}")),
-            }
+            let entries = match client.list_dir(&machine, Some(&dir), 500, 0).await {
+                Ok(result) => result.entries,
+                Err(_) => Vec::new(),
+            };
+            let cache = DirectoryCache {
+                machine,
+                dir,
+                entries,
+            };
+            let mut core = core.lock();
+            core.new_session.suggestions = cache.matching(&prefix);
+            core.new_session.suggestion_cache = Some(cache);
         });
         cx.notify();
     }
@@ -467,18 +556,16 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 新建会话（普通或工作流模式）。
+    /// 新建会话（普通或工作流模式）。按钮仅在表单完备时可点（docs/PRD.md「新建会话视图」）。
     pub fn create_session(&mut self, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let form = self.with_core(|core| core.new_session.clone());
-        let workspace = self.workspace_input.read(cx).value().to_string();
-        let plan = self.plan_input.read(cx).value().to_string();
+        let workspace = self.workspace_input.read(cx).value().trim().to_string();
+        let plan = self.plan_input.read(cx).value().trim().to_string();
         let core = Arc::clone(&self.core);
         if form.workflow_mode {
-            if plan.trim().is_empty() {
-                core.lock().note("请填写工作流计划");
-                cx.notify();
+            if plan.is_empty() {
                 return;
             }
             self.runtime.spawn(async move {
@@ -493,21 +580,17 @@ impl AmuxApp {
             });
         } else {
             let (Some(machine), Some(agent)) = (form.machine.clone(), form.agent.clone()) else {
-                core.lock().note("请选择机器与 agent");
-                cx.notify();
                 return;
             };
+            if workspace.is_empty() {
+                return;
+            }
             let request = CreateSessionRequest {
                 machine,
                 agent,
-                workspace: workspace.trim().to_string(),
+                workspace,
                 use_worktree: form.use_worktree,
             };
-            if request.workspace.is_empty() {
-                core.lock().note("请填写工作目录");
-                cx.notify();
-                return;
-            }
             self.runtime.spawn(async move {
                 match client.create_session(&request).await {
                     Ok(session) => {
@@ -563,6 +646,30 @@ impl AmuxApp {
                 Err(error) => core.lock().note(format!("重命名失败：{error}")),
             }
         });
+        cx.notify();
+    }
+
+    /// 打开右侧面板：面板数据立即刷新，工作目录与终端在首次打开时加载。
+    pub fn open_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
+        self.with_core(|core| {
+            core.side_panel = Some(panel);
+            match panel {
+                SidePanel::Activities => core.last.activities = None,
+                SidePanel::Plan | SidePanel::Detail => core.last.plan = None,
+                _ => {}
+            }
+        });
+        match panel {
+            SidePanel::Workspace => {
+                let loaded = self.with_core(|core| !core.view.detail.workspace_tree.is_empty());
+                if !loaded {
+                    self.load_workspace(cx);
+                }
+            }
+            SidePanel::Terminal => self.open_terminal(cx),
+            SidePanel::Diff => self.refresh_diff(cx),
+            _ => {}
+        }
         cx.notify();
     }
 
@@ -674,7 +781,7 @@ impl AmuxApp {
         let Some(client) = client else { return };
         crate::settings::install_skill(
             client,
-            self.runtime.clone(),
+            self.runtime.handle().clone(),
             Arc::clone(&self.core),
             skill,
             action.to_string(),
@@ -682,78 +789,383 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 保存设置里的列表类配置。
-    pub fn save_settings(&mut self, cx: &mut Context<Self>) {
-        let (client, tab, skills, plans, quick, orchestrator) = self.with_core(|core| {
-            (
-                core.client.clone(),
-                core.settings_tab,
-                core.settings.skills.clone(),
-                core.settings.plans.clone(),
-                core.settings.quick_commands.clone(),
-                core.settings
-                    .orchestrator
-                    .clone()
-                    .or_else(|| self.orchestrator_form.clone()),
-            )
-        });
+    /// 全量保存列表类配置（技能/快捷指令/工作流计划），成功后更新本地缓存。
+    pub fn save_list(&mut self, request: SettingsList, cx: &mut Context<Self>) {
+        let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
-        let skill_form = self.skill_form.clone();
-        let quick_form = self.quick_form.clone();
-        let plan_form = self.plan_form.clone();
-        let orchestrator = self.orchestrator_form.clone().or(orchestrator);
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            let result = match tab {
-                SettingsTab::Skills => {
-                    let mut next = skills;
-                    if !skill_form.0.trim().is_empty() {
-                        next.push(Skill {
-                            name: skill_form.0.trim().to_string(),
-                            description: skill_form.1.clone(),
-                        });
-                    }
-                    client.set_skills(&next).await
-                }
-                SettingsTab::WorkflowPlans => {
-                    let mut next: Vec<WorkflowPlanItem> = plans;
-                    if !plan_form.0.trim().is_empty() {
-                        next.push(WorkflowPlanItem {
-                            name: plan_form.0.trim().to_string(),
-                            plan: plan_form.1.clone(),
-                        });
-                    }
-                    client.set_workflow_plans(&next).await
-                }
-                SettingsTab::QuickCommands => {
-                    let mut next: Vec<QuickCommand> = quick;
-                    if !quick_form.0.trim().is_empty() {
-                        next.push(QuickCommand {
-                            name: quick_form.0.trim().to_string(),
-                            prompt: quick_form.1.clone(),
-                        });
-                    }
-                    client.set_quick_commands(&next).await
-                }
-                SettingsTab::Orchestrator => match orchestrator {
-                    Some(config) => client.set_orchestrator(&config).await,
-                    None => Err("请填写编排智能体配置".to_string()),
-                },
-                SettingsTab::Connection | SettingsTab::Machines => Ok(()),
+            let result = match &request {
+                SettingsList::Skills(list) => client.set_skills(list).await,
+                SettingsList::QuickCommands(list) => client.set_quick_commands(list).await,
+                SettingsList::Plans(list) => client.set_workflow_plans(list).await,
             };
             match result {
-                Ok(()) => core.lock().note("设置已保存"),
+                Ok(()) => {
+                    let mut core = core.lock();
+                    match request {
+                        SettingsList::Skills(list) => core.settings.skills = list,
+                        SettingsList::QuickCommands(list) => core.settings.quick_commands = list,
+                        SettingsList::Plans(list) => core.settings.plans = list,
+                    }
+                    core.note("设置已保存");
+                }
                 Err(error) => core.lock().note(format!("保存失败：{error}")),
             }
         });
         cx.notify();
     }
+
+    /// 打开快捷指令表单弹窗（新增或编辑）。
+    pub fn open_quick_command_form(
+        &mut self,
+        target: FormTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editing = match &target {
+            FormTarget::New => None,
+            FormTarget::Edit(name) => self.with_core(|core| {
+                core.settings
+                    .quick_commands
+                    .iter()
+                    .find(|item| &item.name == name)
+                    .cloned()
+            }),
+        };
+        if let FormTarget::Edit(_) = target {
+            let Some(command) = editing else { return };
+            self.quick_name
+                .update(cx, |state, cx| state.set_value(command.name, window, cx));
+            self.quick_prompt
+                .update(cx, |state, cx| state.set_value(command.prompt, window, cx));
+        } else {
+            self.quick_name
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+            self.quick_prompt
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        }
+        let title = match &target {
+            FormTarget::New => "新增快捷指令",
+            FormTarget::Edit(_) => "编辑快捷指令",
+        };
+        dialog::form(
+            window,
+            cx,
+            title.to_string(),
+            vec![
+                ("指令名称", self.quick_name.clone()),
+                ("指令内容", self.quick_prompt.clone()),
+            ],
+            move |this, cx| this.save_quick_command(target.clone(), cx),
+        );
+    }
+
+    /// 保存快捷指令（新增或编辑）；名称为空时保留弹窗。
+    pub fn save_quick_command(&mut self, target: FormTarget, cx: &mut Context<Self>) -> bool {
+        let name = self.quick_name.read(cx).value().trim().to_string();
+        let prompt = self.quick_prompt.read(cx).value().to_string();
+        if name.is_empty() {
+            self.with_core(|core| core.note("请填写指令名称"));
+            cx.notify();
+            return false;
+        }
+        let mut list = self.with_core(|core| core.settings.quick_commands.clone());
+        let command = QuickCommand { name, prompt };
+        match &target {
+            FormTarget::New => list.push(command),
+            FormTarget::Edit(old) => {
+                if let Some(item) = list.iter_mut().find(|item| &item.name == old) {
+                    *item = command;
+                }
+            }
+        }
+        self.save_list(SettingsList::QuickCommands(list), cx);
+        true
+    }
+
+    /// 删除快捷指令（弹窗确认）。
+    pub fn delete_quick_command(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        dialog::confirm(
+            window,
+            cx,
+            format!("删除快捷指令「{name}」？"),
+            "删除后无法恢复。".to_string(),
+            "删除",
+            true,
+            move |this, cx| {
+                let list = this.with_core(|core| {
+                    core.settings
+                        .quick_commands
+                        .iter()
+                        .filter(|item| item.name != name)
+                        .cloned()
+                        .collect()
+                });
+                this.save_list(SettingsList::QuickCommands(list), cx);
+            },
+        );
+    }
+
+    /// 打开技能表单弹窗（新增或编辑）。
+    pub fn open_skill_form(
+        &mut self,
+        target: FormTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editing = match &target {
+            FormTarget::New => None,
+            FormTarget::Edit(name) => self.with_core(|core| {
+                core.settings
+                    .skills
+                    .iter()
+                    .find(|item| &item.name == name)
+                    .cloned()
+            }),
+        };
+        if let FormTarget::Edit(_) = target {
+            let Some(skill) = editing else { return };
+            self.skill_name
+                .update(cx, |state, cx| state.set_value(skill.name, window, cx));
+            self.skill_desc.update(cx, |state, cx| {
+                state.set_value(skill.description, window, cx)
+            });
+        } else {
+            self.skill_name
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+            self.skill_desc
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        }
+        let title = match &target {
+            FormTarget::New => "新增技能",
+            FormTarget::Edit(_) => "编辑技能",
+        };
+        dialog::form(
+            window,
+            cx,
+            title.to_string(),
+            vec![
+                ("技能名称", self.skill_name.clone()),
+                ("技能描述", self.skill_desc.clone()),
+            ],
+            move |this, cx| this.save_skill(target.clone(), cx),
+        );
+    }
+
+    /// 保存技能（新增或编辑）；名称为空时保留弹窗。
+    pub fn save_skill(&mut self, target: FormTarget, cx: &mut Context<Self>) -> bool {
+        let name = self.skill_name.read(cx).value().trim().to_string();
+        let description = self.skill_desc.read(cx).value().to_string();
+        if name.is_empty() {
+            self.with_core(|core| core.note("请填写技能名称"));
+            cx.notify();
+            return false;
+        }
+        let mut list = self.with_core(|core| core.settings.skills.clone());
+        let skill = Skill { name, description };
+        match &target {
+            FormTarget::New => list.push(skill),
+            FormTarget::Edit(old) => {
+                if let Some(item) = list.iter_mut().find(|item| &item.name == old) {
+                    *item = skill;
+                }
+            }
+        }
+        self.save_list(SettingsList::Skills(list), cx);
+        true
+    }
+
+    /// 删除技能（弹窗确认）。
+    pub fn delete_skill(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        dialog::confirm(
+            window,
+            cx,
+            format!("删除技能「{name}」？"),
+            "删除后无法恢复。".to_string(),
+            "删除",
+            true,
+            move |this, cx| {
+                let list = this.with_core(|core| {
+                    core.settings
+                        .skills
+                        .iter()
+                        .filter(|item| item.name != name)
+                        .cloned()
+                        .collect()
+                });
+                this.save_list(SettingsList::Skills(list), cx);
+            },
+        );
+    }
+
+    /// 打开工作流计划表单弹窗（新增或编辑）。
+    pub fn open_plan_form(
+        &mut self,
+        target: FormTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editing = match &target {
+            FormTarget::New => None,
+            FormTarget::Edit(name) => self.with_core(|core| {
+                core.settings
+                    .plans
+                    .iter()
+                    .find(|item| &item.name == name)
+                    .cloned()
+            }),
+        };
+        if let FormTarget::Edit(_) = target {
+            let Some(plan) = editing else { return };
+            self.plan_name
+                .update(cx, |state, cx| state.set_value(plan.name, window, cx));
+            self.plan_plan
+                .update(cx, |state, cx| state.set_value(plan.plan, window, cx));
+        } else {
+            self.plan_name
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+            self.plan_plan
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        }
+        let title = match &target {
+            FormTarget::New => "新增工作流计划",
+            FormTarget::Edit(_) => "编辑工作流计划",
+        };
+        dialog::form(
+            window,
+            cx,
+            title.to_string(),
+            vec![
+                ("计划名称", self.plan_name.clone()),
+                ("计划内容", self.plan_plan.clone()),
+            ],
+            move |this, cx| this.save_plan(target.clone(), cx),
+        );
+    }
+
+    /// 保存工作流计划（新增或编辑）；名称为空时保留弹窗。
+    pub fn save_plan(&mut self, target: FormTarget, cx: &mut Context<Self>) -> bool {
+        let name = self.plan_name.read(cx).value().trim().to_string();
+        let plan = self.plan_plan.read(cx).value().to_string();
+        if name.is_empty() {
+            self.with_core(|core| core.note("请填写计划名称"));
+            cx.notify();
+            return false;
+        }
+        let mut list = self.with_core(|core| core.settings.plans.clone());
+        let item = WorkflowPlanItem { name, plan };
+        match &target {
+            FormTarget::New => list.push(item),
+            FormTarget::Edit(old) => {
+                if let Some(existing) = list.iter_mut().find(|existing| &existing.name == old) {
+                    *existing = item;
+                }
+            }
+        }
+        self.save_list(SettingsList::Plans(list), cx);
+        true
+    }
+
+    /// 删除工作流计划（弹窗确认）。
+    pub fn delete_plan(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        dialog::confirm(
+            window,
+            cx,
+            format!("删除工作流计划「{name}」？"),
+            "删除后无法恢复。".to_string(),
+            "删除",
+            true,
+            move |this, cx| {
+                let list = this.with_core(|core| {
+                    core.settings
+                        .plans
+                        .iter()
+                        .filter(|item| item.name != name)
+                        .cloned()
+                        .collect()
+                });
+                this.save_list(SettingsList::Plans(list), cx);
+            },
+        );
+    }
+
+    /// 保存编排智能体配置。
+    pub fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let config = OrchestratorConfig {
+            api_format: self.current_orchestrator_format(),
+            base_url: self.orch_base_url.read(cx).value().trim().to_string(),
+            api_key: self.orch_api_key.read(cx).value().trim().to_string(),
+            model: self.orch_model.read(cx).value().trim().to_string(),
+            effort: self.orch_effort.read(cx).value().trim().to_string(),
+        };
+        if config.base_url.is_empty() || config.api_key.is_empty() || config.model.is_empty() {
+            self.with_core(|core| core.note("请填写 Base URL、API Key 与模型名称"));
+            cx.notify();
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            match client.set_orchestrator(&config).await {
+                Ok(()) => {
+                    let mut core = core.lock();
+                    core.settings.orchestrator = Some(config);
+                    core.note("设置已保存");
+                }
+                Err(error) => core.lock().note(format!("保存失败：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
+    /// 编排智能体 API 格式：用户已选择则用其选择，否则用已保存配置的格式。
+    pub fn current_orchestrator_format(&self) -> ApiFormat {
+        self.orchestrator_format
+            .or_else(|| {
+                self.with_core(|core| core.settings.orchestrator.as_ref().map(|c| c.api_format))
+            })
+            .unwrap_or(ApiFormat::ChatCompletions)
+    }
+
+    /// 打开编排智能体设置页时预填已保存的配置。
+    pub fn load_orchestrator_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stored = self.with_core(|core| core.settings.orchestrator.clone());
+        let config = stored.unwrap_or(OrchestratorConfig {
+            api_format: ApiFormat::ChatCompletions,
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            effort: String::new(),
+        });
+        self.orchestrator_format = Some(config.api_format);
+        self.orch_base_url
+            .update(cx, |state, cx| state.set_value(config.base_url, window, cx));
+        self.orch_api_key
+            .update(cx, |state, cx| state.set_value(config.api_key, window, cx));
+        self.orch_model
+            .update(cx, |state, cx| state.set_value(config.model, window, cx));
+        self.orch_effort
+            .update(cx, |state, cx| state.set_value(config.effort, window, cx));
+    }
+}
+
+/// 设置页可全量保存的列表类配置。
+pub enum SettingsList {
+    Skills(Vec<Skill>),
+    QuickCommands(Vec<QuickCommand>),
+    Plans(Vec<WorkflowPlanItem>),
 }
 
 impl Render for AmuxApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let core = self.core.lock().clone();
-        let _ = ui::timestamp(0);
 
         let left = panels::render_left(&core, self, cx);
         let middle = panels::render_middle(&core, self, cx);

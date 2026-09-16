@@ -9,7 +9,8 @@ use amux_common::domain::ContentBlock;
 use crate::client::Client;
 use crate::state::{
     ConnectionStatus, Core, ListEntry, OpenTarget, SharedCore, SidePanel, ACTIVITIES_INTERVAL,
-    HISTORY_INTERVAL, ONGOING_INTERVAL, PLAN_INTERVAL, SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
+    HISTORY_INTERVAL, ONGOING_INTERVAL, PLAN_INTERVAL, SESSION_LIST_INTERVAL, SETTINGS_INTERVAL,
+    TERMINAL_INTERVAL,
 };
 
 /// 连接重试间隔。
@@ -17,14 +18,14 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 单次节拍：按需刷新各视图。
 pub async fn tick(core: SharedCore) {
-    let (client, status, last_list, open, _limit, settings_open, settings_tab, side_panel) = {
+    let (client, status, last_list, last_settings, open, settings_open, settings_tab, side_panel) = {
         let core = core.lock();
         (
             core.client.clone(),
             core.status.clone(),
             core.last.list,
+            core.last.settings,
             core.open.clone(),
-            core.list_limit,
             core.settings_open,
             core.settings_tab,
             core.side_panel,
@@ -60,8 +61,17 @@ pub async fn tick(core: SharedCore) {
     if core_due(&core, |last| last.list, SESSION_LIST_INTERVAL, last_list) {
         refresh_list(&client, &core).await;
     }
-    if settings_open {
-        refresh_settings(&client, &core, settings_tab).await;
+    // 机器/agent 与编排智能体配置：新建会话视图常驻需要，按周期节流刷新
+    if core_due(
+        &core,
+        |last| last.settings,
+        SETTINGS_INTERVAL,
+        last_settings,
+    ) {
+        refresh_config(&client, &core).await;
+        if settings_open {
+            refresh_settings(&client, &core, settings_tab).await;
+        }
     }
     if let Some(target) = open {
         refresh_open(&client, &core, &target, side_panel).await;
@@ -101,7 +111,7 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
     let mut entries: Vec<ListEntry> = Vec::new();
     entries.extend(sessions.sessions.into_iter().map(ListEntry::Session));
     entries.extend(workflows.workflows.into_iter().map(ListEntry::Workflow));
-    entries.sort_by_key(|b| std::cmp::Reverse(b.updated_at()));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
     let mut core = core.lock();
     core.last.list = Some(Instant::now());
     core.entries = entries;
@@ -272,22 +282,32 @@ async fn refresh_open(
     }
 }
 
-/// 设置面板数据：机器/技能/计划/快捷指令/编排智能体。
+/// 机器/agent 列表与编排智能体配置：新建会话视图与设置浮窗共用。
+async fn refresh_config(client: &Client, core: &SharedCore) {
+    let machines = client.machines().await.ok();
+    let orchestrator = client.orchestrator().await.ok();
+    let mut agents = Vec::new();
+    if let Some(machines) = &machines {
+        for machine in machines {
+            let list = client.agents(&machine.name).await.unwrap_or_default();
+            agents.push((machine.name.clone(), list));
+        }
+    }
+    let mut core = core.lock();
+    if let Some(machines) = machines {
+        core.settings.machines = machines;
+        core.settings.agents = agents;
+    }
+    if let Some(orchestrator) = orchestrator {
+        core.settings.orchestrator = orchestrator;
+    }
+    core.last.settings = Some(Instant::now());
+}
+
+/// 设置面板当前分类的列表类配置（机器/agent 与编排智能体配置由 `refresh_config` 刷新）。
 async fn refresh_settings(client: &Client, core: &SharedCore, tab: crate::state::SettingsTab) {
     use crate::state::SettingsTab;
     match tab {
-        SettingsTab::Machines | SettingsTab::Connection => {
-            if let Ok(machines) = client.machines().await {
-                let mut agents = Vec::new();
-                for machine in &machines {
-                    let list = client.agents(&machine.name).await.unwrap_or_default();
-                    agents.push((machine.name.clone(), list));
-                }
-                let mut core = core.lock();
-                core.settings.machines = machines;
-                core.settings.agents = agents;
-            }
-        }
         SettingsTab::Skills => {
             if let Ok(skills) = client.skills().await {
                 core.lock().settings.skills = skills;
@@ -303,11 +323,7 @@ async fn refresh_settings(client: &Client, core: &SharedCore, tab: crate::state:
                 core.lock().settings.quick_commands = commands;
             }
         }
-        SettingsTab::Orchestrator => {
-            if let Ok(config) = client.orchestrator().await {
-                core.lock().settings.orchestrator = config;
-            }
-        }
+        SettingsTab::Connection | SettingsTab::Machines | SettingsTab::Orchestrator => {}
     }
 }
 

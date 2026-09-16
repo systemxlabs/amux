@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use amux_common::api::*;
 use amux_common::domain::{
     Activity, FsEntry, GitDiffResult, HistoryItem, SessionConfigOption, SessionPlanEntry,
-    SessionState, SlashCommand,
+    SlashCommand,
 };
 
 use crate::client::Client;
@@ -20,6 +20,8 @@ pub const ONGOING_INTERVAL: Duration = Duration::from_secs(2);
 pub const ACTIVITIES_INTERVAL: Duration = Duration::from_secs(10);
 pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
 pub const TERMINAL_INTERVAL: Duration = Duration::from_millis(500);
+/// 机器/agent 列表与编排智能体配置：新建会话视图常驻需要，按设置浮窗的周期刷新。
+pub const SETTINGS_INTERVAL: Duration = Duration::from_secs(10);
 
 /// 连接状态（设置面板展示）。
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +80,39 @@ pub enum OpenTarget {
     Workflow(String),
 }
 
+/// 工作目录树节点：目录的子节点按需加载（`children` 为 `None` 表示尚未加载）。
+#[derive(Debug, Clone)]
+pub struct WorkspaceNode {
+    pub entry: FsEntry,
+    pub expanded: bool,
+    pub children: Option<Vec<WorkspaceNode>>,
+}
+
+impl WorkspaceNode {
+    pub fn new(entry: FsEntry) -> Self {
+        Self {
+            entry,
+            expanded: false,
+            children: None,
+        }
+    }
+
+    /// 按绝对路径查找节点，用于把异步加载结果回填到树上。
+    pub fn find_mut<'a>(nodes: &'a mut [WorkspaceNode], path: &str) -> Option<&'a mut Self> {
+        for node in nodes {
+            if node.entry.path == path {
+                return Some(node);
+            }
+            if let Some(children) = node.children.as_mut() {
+                if let Some(found) = Self::find_mut(children, path) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+}
+
 /// 打开的普通会话视图数据。
 #[derive(Default, Clone)]
 pub struct SessionView {
@@ -95,8 +130,8 @@ pub struct SessionView {
     pub history_has_more: bool,
     /// 终端输出字节（按游标增量累积；truncated 时整体替换）
     pub terminal_output: Vec<u8>,
-    /// 工作目录当前列出的一页条目
-    pub workspace_entries: Vec<FsEntry>,
+    /// 工作目录树的根节点（懒加载子目录）
+    pub workspace_tree: Vec<WorkspaceNode>,
     /// 最近查看的文件内容
     pub file_content: Option<String>,
 }
@@ -120,16 +155,6 @@ impl OpenView {
         }
     }
 
-    pub fn state(&self) -> SessionState {
-        if let Some(session) = &self.session {
-            session.state
-        } else if let Some(workflow) = &self.workflow {
-            workflow.state
-        } else {
-            SessionState::Idle
-        }
-    }
-
     pub fn subtitle(&self) -> String {
         if let Some(session) = &self.session {
             format!("{}@{}", session.agent, session.machine)
@@ -146,6 +171,29 @@ pub struct NewSessionForm {
     pub machine: Option<String>,
     pub agent: Option<String>,
     pub use_worktree: bool,
+    /// 工作目录输入框的前缀匹配目录项
+    pub suggestions: Vec<FsEntry>,
+    /// 前缀联想的目录缓存：同一目录只拉取一次，前缀变化时在本地过滤
+    pub suggestion_cache: Option<DirectoryCache>,
+}
+
+/// 已拉取的目录条目，用于工作目录输入框的本地前缀过滤。
+#[derive(Debug, Clone)]
+pub struct DirectoryCache {
+    pub machine: String,
+    pub dir: String,
+    pub entries: Vec<FsEntry>,
+}
+
+impl DirectoryCache {
+    /// 目录中名称以 `prefix` 开头的子目录。
+    pub fn matching(&self, prefix: &str) -> Vec<FsEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.is_dir && entry.name.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
 }
 
 /// 右侧面板分类（PRD 右侧面板）。
@@ -258,6 +306,7 @@ pub struct Ticks {
     pub plan: Option<Instant>,
     pub terminal: Option<Instant>,
     pub terminal_cursor: u64,
+    pub settings: Option<Instant>,
 }
 
 impl Default for Core {
