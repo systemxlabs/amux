@@ -41,7 +41,6 @@ export async function tick(core: Core): Promise<void> {
           state.status = "online";
           state.error = null;
         });
-        core.loaded = {};
         core.last = {};
       } catch (error) {
         core.update((state) => {

@@ -71,7 +71,6 @@ async function connect(core: Core, token: string, notify: boolean): Promise<bool
     state.error = null;
   });
   core.resetTicks();
-  core.loaded = {};
   await Promise.all([refreshList(core), refreshNewSession(core)]);
   return true;
 }
@@ -97,7 +96,6 @@ export async function saveConnection(core: Core, token: string): Promise<void> {
     state.error = null;
   });
   core.resetTicks();
-  core.loaded = {};
   core.success("连接设置已保存");
   await refreshList(core);
 }
@@ -109,10 +107,8 @@ export function showNewSession(core: Core): void {
     state.middle = "new";
     state.attachments = [];
   });
-  if (!core.loaded.newSession) {
-    core.loaded.newSession = true;
-    void refreshNewSession(core);
-  }
+  // DESIGN「新建会话视图」：打开视图时实时拉取机器、agents 与常用工作目录，不做定时刷新
+  void refreshNewSession(core);
 }
 
 export function toggleExpand(core: Core, workflowId: string): void {
@@ -443,7 +439,6 @@ export function openSettings(core: Core, tab?: Core["state"]["settings"]["tab"])
     if (tab) state.settings.tab = tab;
   });
   const current = core.state.settings.tab;
-  core.loaded.settings = current;
   void refreshSettings(core, current);
 }
 
@@ -457,7 +452,6 @@ export function selectSettingsTab(core: Core, tab: Core["state"]["settings"]["ta
   core.update((state) => {
     state.settings.tab = tab;
   });
-  core.loaded.settings = tab;
   void refreshSettings(core, tab);
 }
 

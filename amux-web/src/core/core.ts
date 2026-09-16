@@ -207,19 +207,11 @@ export type Ticks = {
   reconnect?: number;
 };
 
-/** 视图打开时实时拉取的数据是否已加载过（连接重建后重置）。 */
-export type LoadedViews = {
-  newSession?: boolean;
-  interaction?: string;
-  settings?: SettingsTab;
-};
-
 /** 应用状态容器：可变状态 + 版本号，React 通过 `useSyncExternalStore` 订阅。 */
 export class Core {
   state: CoreState = initialState();
   client: ApiClient | null = null;
   last: Ticks = {};
-  loaded: LoadedViews = {};
   version = 0;
   private listeners = new Set<() => void>();
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
