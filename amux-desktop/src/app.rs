@@ -1284,7 +1284,6 @@ impl AmuxApp {
                     Ok(session) => {
                         let mut core = core.lock();
                         core.last.list = None;
-                        core.success("会话已创建");
                         poll::open_session(&mut core, &session.id);
                     }
                     Err(error) => core.lock().error(format!("创建会话失败：{error}")),
