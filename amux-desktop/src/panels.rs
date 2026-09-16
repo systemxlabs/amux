@@ -131,13 +131,7 @@ pub fn render_sidebar(
                         .small()
                         .icon(IconName::Plus)
                         .tooltip("新会话 / 工作流")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.with_core(|core| {
-                                core.open = None;
-                                core.view = Default::default();
-                            });
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(|this, _, _, cx| this.open_new_session(cx))),
                 ),
         )
         .child(list)

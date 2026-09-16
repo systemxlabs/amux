@@ -1,6 +1,8 @@
 //! 后台轮询：按各视图的刷新周期拉取 Server 数据（docs/DESIGN.md「应用」）。
 //!
 //! 单任务节拍内按到期时间触发各视图刷新；网络请求期间不持状态锁。
+//! 设置类数据（机器/agents、编排智能体、计划、快捷指令、技能）不做定时刷新，
+//! 由视图打开时调用 [`refresh_new_session`] / [`refresh_interaction`] / [`refresh_settings`] 实时拉取。
 
 use std::time::{Duration, Instant};
 
@@ -8,9 +10,9 @@ use amux_common::domain::ContentBlock;
 
 use crate::client::Client;
 use crate::state::{
-    ConnectionStatus, Core, ListEntry, OpenTarget, SharedCore, SidePanel, ACTIVITIES_INTERVAL,
-    CONTEXT_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, OPTIONS_INTERVAL, PLAN_INTERVAL,
-    SESSION_LIST_INTERVAL, SETTINGS_INTERVAL, TERMINAL_INTERVAL, WORKSPACE_INTERVAL,
+    ConnectionStatus, Core, ListEntry, OpenTarget, SettingsTab, SharedCore, SidePanel,
+    ACTIVITIES_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, OPTIONS_INTERVAL, PLAN_INTERVAL,
+    SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
 };
 
 /// 连接重试间隔。
@@ -18,14 +20,12 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 单次节拍：按需刷新各视图。
 pub async fn tick(core: SharedCore) {
-    let (client, status, open, settings_open, settings_tab, side_panel) = {
+    let (client, status, open, side_panel) = {
         let core = core.lock();
         (
             core.client.clone(),
             core.status.clone(),
             core.open.clone(),
-            core.settings_open,
-            core.settings_tab,
             core.side_panel,
         )
     };
@@ -41,6 +41,8 @@ pub async fn tick(core: SharedCore) {
                     let mut core = core.lock();
                     core.status = ConnectionStatus::Online;
                     core.last.list = None;
+                    // 连接建立后重取当前视图的常驻数据（此前的拉取可能已失败）
+                    core.loaded_view = None;
                 }
                 Err(error) => {
                     let mut core = core.lock();
@@ -54,13 +56,6 @@ pub async fn tick(core: SharedCore) {
 
     if core_due(&core, |last| last.list, SESSION_LIST_INTERVAL) {
         refresh_list(&client, &core).await;
-    }
-    // 机器/agent 与编排智能体配置：新建会话视图常驻需要，按周期节流刷新
-    if core_due(&core, |last| last.settings, SETTINGS_INTERVAL) {
-        refresh_config(&client, &core).await;
-        if settings_open {
-            refresh_settings(&client, &core, settings_tab).await;
-        }
     }
     if let Some(target) = open {
         refresh_open(&client, &core, &target, side_panel).await;
@@ -85,7 +80,6 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
     let _ = offset;
     let sessions = client.sessions(limit, offset).await;
     let workflows = client.workflows(limit, offset).await;
-    let recent = client.recent_workspaces().await.ok();
     let (sessions, workflows) = match (sessions, workflows) {
         (Ok(sessions), Ok(workflows)) => (sessions, workflows),
         (Err(error), _) | (_, Err(error)) => {
@@ -102,12 +96,10 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
     let mut core = core.lock();
     core.last.list = Some(Instant::now());
     core.entries = entries;
-    if let Some(recent) = recent {
-        core.recent_workspaces = recent;
-    }
 }
 
-/// 打开会话的视图数据：按各自周期刷新。
+/// 打开会话的视图数据：按各自周期刷新（会话详情与工作目录视图只在打开时刷新一次，
+/// 由 UI 打开面板时直接拉取，见 docs/DESIGN.md「应用」）。
 async fn refresh_open(
     client: &Client,
     core: &SharedCore,
@@ -115,9 +107,7 @@ async fn refresh_open(
     side_panel: Option<SidePanel>,
 ) {
     let activities_open = side_panel == Some(SidePanel::Activities);
-    let workspace_open = side_panel == Some(SidePanel::Workspace);
     let plan_open = side_panel == Some(SidePanel::Plan);
-    let detail_open = side_panel == Some(SidePanel::Detail);
     let terminal_open = side_panel == Some(SidePanel::Terminal);
 
     let (
@@ -126,9 +116,7 @@ async fn refresh_open(
         due_activities,
         due_plan,
         due_options,
-        due_context,
         due_terminal,
-        due_workspace,
         terminal,
         cursor,
     ) = {
@@ -139,9 +127,7 @@ async fn refresh_open(
             core.due(core.last.activities, ACTIVITIES_INTERVAL),
             core.due(core.last.plan, PLAN_INTERVAL),
             core.due(core.last.options, OPTIONS_INTERVAL),
-            core.due(core.last.context, CONTEXT_INTERVAL),
             core.due(core.last.terminal, TERMINAL_INTERVAL),
-            core.due(core.last.workspace, WORKSPACE_INTERVAL),
             core.view.detail.active_terminal.clone(),
             core.last.terminal_cursor,
         )
@@ -174,30 +160,6 @@ async fn refresh_open(
                 }
                 core.lock().last.activities = Some(Instant::now());
             }
-            // 工作目录树按需加载：打开面板时根目录可能尚未拉取（或会话数据后到）
-            if due_workspace && workspace_open {
-                let target_dir = {
-                    let core = core.lock();
-                    core.view
-                        .session
-                        .as_ref()
-                        .filter(|_| core.view.detail.workspace_tree.is_empty())
-                        .map(|session| (session.machine.clone(), session.root_dir().to_string()))
-                };
-                if let Some((machine, root)) = target_dir {
-                    if let Ok(result) = client.list_dir(&machine, Some(&root), 500, 0).await {
-                        let mut core = core.lock();
-                        if core.open.as_ref() == Some(target) {
-                            core.view.detail.workspace_tree = result
-                                .entries
-                                .into_iter()
-                                .map(crate::state::WorkspaceNode::new)
-                                .collect();
-                        }
-                    }
-                    core.lock().last.workspace = Some(Instant::now());
-                }
-            }
             if due_plan && plan_open {
                 if let Ok(entries) = client.plan(id).await {
                     let mut core = core.lock();
@@ -222,16 +184,6 @@ async fn refresh_open(
                     }
                 }
                 core.lock().last.options = Some(Instant::now());
-            }
-            if due_context && detail_open {
-                if let Ok(info) = client.context(id).await {
-                    let mut core = core.lock();
-                    if core.open.as_ref() == Some(target) {
-                        core.view.detail.context_size = info.context_size;
-                        core.view.detail.context_window_size = info.context_window_size;
-                    }
-                }
-                core.lock().last.context = Some(Instant::now());
             }
             if due_ongoing {
                 if let Ok(activity) = client.ongoing_activity(id).await {
@@ -312,50 +264,76 @@ async fn refresh_open(
     }
 }
 
-/// 机器/agent、编排智能体、工作流计划与快捷指令：新建会话视图、交互视图与设置浮窗共用。
-async fn refresh_config(client: &Client, core: &SharedCore) {
-    let machines = client.machines().await.ok();
-    let orchestrator = client.orchestrator().await.ok();
-    let plans = client.workflow_plans().await.ok();
-    let quick_commands = client.quick_commands().await.ok();
-    let mut agents = Vec::new();
-    if let Some(machines) = &machines {
-        for machine in machines {
-            let list = client.agents(&machine.name).await.unwrap_or_default();
-            agents.push((machine.name.clone(), list));
-        }
+// ---------- 视图打开时的实时拉取 ----------
+//
+// 设置类数据不做定时刷新，由视图打开时拉取一次（docs/DESIGN.md「应用」各视图小节）。
+
+/// 新建会话视图：机器、agents、常用工作目录，以及工作流模式下用到的编排智能体配置与已保存计划。
+pub async fn refresh_new_session(client: &Client, core: &SharedCore) {
+    refresh_machines(client, core).await;
+    refresh_orchestrator(client, core).await;
+    refresh_plans(client, core).await;
+    if let Ok(recent) = client.recent_workspaces().await {
+        core.lock().recent_workspaces = recent;
     }
-    let mut core = core.lock();
-    if let Some(machines) = machines {
-        core.settings.machines = machines;
-        core.settings.agents = agents;
-    }
-    if let Some(orchestrator) = orchestrator {
-        core.settings.orchestrator = orchestrator;
-    }
-    if let Some(plans) = plans {
-        core.settings.plans = plans;
-    }
-    if let Some(commands) = quick_commands {
-        core.settings.quick_commands = commands;
-    }
-    core.last.settings = Some(Instant::now());
 }
 
-/// 设置面板当前分类的列表类配置（其余配置数据由 `refresh_config` 常驻刷新）。
-async fn refresh_settings(client: &Client, core: &SharedCore, tab: crate::state::SettingsTab) {
-    use crate::state::SettingsTab;
+/// 会话交互视图常驻数据：机器/agents（可用性标记）、编排智能体配置（工作流会话）
+/// 与快捷指令（输入区按钮）。
+pub async fn refresh_interaction(client: &Client, core: &SharedCore) {
+    refresh_machines(client, core).await;
+    refresh_orchestrator(client, core).await;
+    refresh_quick_commands(client, core).await;
+}
+
+/// 设置浮窗当前分类的配置数据。
+pub async fn refresh_settings(client: &Client, core: &SharedCore, tab: SettingsTab) {
     match tab {
-        SettingsTab::Skills => {
-            if let Ok(skills) = client.skills().await {
-                core.lock().settings.skills = skills;
-            }
-        }
-        SettingsTab::Connection
-        | SettingsTab::Machines
-        | SettingsTab::Orchestrator
-        | SettingsTab::WorkflowPlans
-        | SettingsTab::QuickCommands => {}
+        SettingsTab::Connection => {}
+        SettingsTab::Machines => refresh_machines(client, core).await,
+        SettingsTab::Orchestrator => refresh_orchestrator(client, core).await,
+        SettingsTab::QuickCommands => refresh_quick_commands(client, core).await,
+        SettingsTab::Skills => refresh_skills(client, core).await,
+        SettingsTab::WorkflowPlans => refresh_plans(client, core).await,
+    }
+}
+
+/// 机器与各机器上的 agents。
+async fn refresh_machines(client: &Client, core: &SharedCore) {
+    let Ok(machines) = client.machines().await else {
+        return;
+    };
+    let mut agents = Vec::new();
+    for machine in &machines {
+        let list = client.agents(&machine.name).await.unwrap_or_default();
+        agents.push((machine.name.clone(), list));
+    }
+    let mut core = core.lock();
+    core.settings.machines = machines;
+    core.settings.agents = agents;
+}
+
+async fn refresh_orchestrator(client: &Client, core: &SharedCore) {
+    if let Ok(orchestrator) = client.orchestrator().await {
+        core.lock().settings.orchestrator = orchestrator;
+    }
+}
+
+async fn refresh_plans(client: &Client, core: &SharedCore) {
+    if let Ok(plans) = client.workflow_plans().await {
+        core.lock().settings.plans = plans;
+    }
+}
+
+async fn refresh_quick_commands(client: &Client, core: &SharedCore) {
+    if let Ok(commands) = client.quick_commands().await {
+        core.lock().settings.quick_commands = commands;
+    }
+}
+
+async fn refresh_skills(client: &Client, core: &SharedCore) {
+    if let Ok(skills) = client.skills().await {
+        core.lock().settings.skills = skills;
     }
 }
 

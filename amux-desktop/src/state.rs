@@ -22,13 +22,7 @@ pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
 /// 会话选项与斜杠命令：无独立视图，交互视图常驻需要（输入框下方的选项控件与斜杠补全）；
 /// 两者由 agent 侧异步推送，取与对话视图相同的周期。
 pub const OPTIONS_INTERVAL: Duration = Duration::from_secs(5);
-/// 会话上下文信息（会话详情面板）。
-pub const CONTEXT_INTERVAL: Duration = Duration::from_secs(10);
 pub const TERMINAL_INTERVAL: Duration = Duration::from_millis(500);
-/// 工作目录树：仅在面板打开且根目录尚未加载时拉取。
-pub const WORKSPACE_INTERVAL: Duration = Duration::from_secs(5);
-/// 机器/agent 列表与编排智能体配置：新建会话视图常驻需要，按设置浮窗的周期刷新。
-pub const SETTINGS_INTERVAL: Duration = Duration::from_secs(10);
 
 /// 连接状态（设置面板展示）。
 #[derive(Debug, Clone, PartialEq)]
@@ -87,7 +81,19 @@ pub enum OpenTarget {
     Workflow(String),
 }
 
-/// 工作目录树节点：目录的子节点按需加载（`children` 为 `None` 表示尚未加载）。
+/// 当前视图：决定「打开时实时获取」该拉取哪一份配置数据（docs/DESIGN.md「应用」各视图小节）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewKey {
+    /// 新建会话视图
+    NewSession,
+    /// 会话交互视图
+    Interaction(OpenTarget),
+    /// 设置浮窗的某个分类
+    Settings(SettingsTab),
+}
+
+/// 工作目录树节点：目录项不缓存，展开时才拉取子节点
+/// （`children` 为 `None` 表示当前无内容，展开时需实时拉取）。
 #[derive(Debug, Clone)]
 pub struct WorkspaceNode {
     pub entry: FsEntry,
@@ -357,6 +363,8 @@ pub struct Core {
     pub settings_open: bool,
     pub settings_tab: SettingsTab,
     pub settings: SettingsData,
+    /// 已拉取过打开时数据的视图；与当前视图不同才重新拉取，不做定时刷新
+    pub loaded_view: Option<ViewKey>,
     /// 待投递的提示（后台任务无窗口，只能排队等节拍投递）
     pub notes: VecDeque<Note>,
     pub list_limit: usize,
@@ -376,11 +384,8 @@ pub struct Ticks {
     pub activities: Option<Instant>,
     pub plan: Option<Instant>,
     pub options: Option<Instant>,
-    pub context: Option<Instant>,
-    pub workspace: Option<Instant>,
     pub terminal: Option<Instant>,
     pub terminal_cursor: u64,
-    pub settings: Option<Instant>,
 }
 
 impl Default for Core {
@@ -397,6 +402,7 @@ impl Default for Core {
             settings_open: false,
             settings_tab: SettingsTab::Connection,
             settings: SettingsData::default(),
+            loaded_view: None,
             notes: VecDeque::new(),
             list_limit: 20,
             side_panel: None,
@@ -426,6 +432,17 @@ impl Core {
 
     pub fn due(&self, last: Option<Instant>, interval: Duration) -> bool {
         last.map(|at| at.elapsed() >= interval).unwrap_or(true)
+    }
+
+    /// 当前视图：设置浮窗优先，其次是打开的会话，否则为新建会话视图。
+    pub fn view_key(&self) -> ViewKey {
+        if self.settings_open {
+            return ViewKey::Settings(self.settings_tab);
+        }
+        match &self.open {
+            Some(target) => ViewKey::Interaction(target.clone()),
+            None => ViewKey::NewSession,
+        }
     }
 
     /// 当前打开的是否为工作流会话。

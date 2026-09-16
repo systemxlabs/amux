@@ -69,6 +69,8 @@ pub struct AmuxApp {
     pub settings_dirty: bool,
     /// 编排智能体 API 格式的当前选择（文本项直接取输入框）
     pub orchestrator_format: Option<ApiFormat>,
+    /// 编排智能体表单已预填的配置（分类打开时的拉取是异步的，落地后据此重填一次）
+    pub orchestrator_prefilled: Option<OrchestratorConfig>,
     /// 行内重命名的会话 id 与输入框
     pub renaming_id: Option<String>,
     pub rename_input: Entity<InputState>,
@@ -204,6 +206,8 @@ impl AmuxApp {
             tick_runtime.spawn(poll::tick(tick_core.clone()));
             if this
                 .update_in(cx, |this, window, cx| {
+                    this.sync_view_data();
+                    this.sync_orchestrator_form(window, cx);
                     this.flush_notes(window, cx);
                     cx.notify();
                 })
@@ -305,6 +309,7 @@ impl AmuxApp {
             token_input,
             settings_dirty: false,
             orchestrator_format: None,
+            orchestrator_prefilled: None,
             renaming_id: None,
             rename_input,
             orch_base_url,
@@ -376,6 +381,8 @@ impl AmuxApp {
         {
             self.load_orchestrator_form(window, cx);
         }
+        // 设置项在打开时实时获取，不做定时刷新（docs/DESIGN.md「设置页面」）
+        self.load_view_data();
         // 焦点落在浮窗上，Esc（SettingsOverlay 上下文）才能被浮窗接收
         window.focus(&self.settings_focus, cx);
         cx.notify();
@@ -399,10 +406,69 @@ impl AmuxApp {
             core.settings_tab = tab;
             switched
         });
-        if switched && tab == crate::state::SettingsTab::Orchestrator {
-            self.load_orchestrator_form(window, cx);
+        if switched {
+            if tab == crate::state::SettingsTab::Orchestrator {
+                self.load_orchestrator_form(window, cx);
+            }
+            self.load_view_data();
         }
         cx.notify();
+    }
+
+    /// 拉取当前视图的打开时数据（设置浮窗 / 会话交互 / 新建会话），并记为已拉取。
+    ///
+    /// 设置类数据不做定时刷新（docs/DESIGN.md「设置页面」），只在视图打开时拉取一次；
+    /// 视图切换与连接建立后重取由 [`Self::sync_view_data`] 补上。
+    fn load_view_data(&mut self) {
+        let (settings_open, tab, open) = self.with_core(|core| {
+            (core.settings_open, core.settings_tab, core.open.clone())
+        });
+        self.with_core(|core| core.loaded_view = Some(core.view_key()));
+        if settings_open {
+            self.load_settings(tab);
+        } else if open.is_some() {
+            self.load_interaction();
+        } else {
+            self.load_new_session();
+        }
+    }
+
+    /// 视图切换（或连接建立）后按当前视图重新拉取一次：视图打开时的拉取此时才可能成功
+    /// （应用启动即显示新建会话视图、设置浮窗关闭后回到下面的视图等）。
+    fn sync_view_data(&mut self) {
+        let key = self.with_core(|core| core.view_key());
+        let loaded = self.with_core(|core| core.loaded_view.clone());
+        if loaded.as_ref() == Some(&key) {
+            return;
+        }
+        self.load_view_data();
+    }
+
+    /// 拉取设置分类的数据（打开浮窗或切换分类时触发）。
+    fn load_settings(&mut self, tab: crate::state::SettingsTab) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let core = Arc::clone(&self.core);
+        self.runtime
+            .spawn(async move { poll::refresh_settings(&client, &core, tab).await });
+    }
+
+    /// 拉取新建会话视图的数据：机器、agents、常用工作目录（docs/DESIGN.md「新建会话视图」）。
+    fn load_new_session(&mut self) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let core = Arc::clone(&self.core);
+        self.runtime
+            .spawn(async move { poll::refresh_new_session(&client, &core).await });
+    }
+
+    /// 拉取会话交互视图的常驻数据：机器/agents、编排智能体配置与快捷指令。
+    fn load_interaction(&mut self) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let core = Arc::clone(&self.core);
+        self.runtime
+            .spawn(async move { poll::refresh_interaction(&client, &core).await });
     }
 
     /// 重新发现机器上的 agents。
@@ -533,6 +599,17 @@ impl AmuxApp {
         self.terminal_input(bytes.to_vec(), cx);
     }
 
+    /// 打开新建会话视图：实时拉取机器、agents 与常用工作目录
+    /// （docs/DESIGN.md「新建会话视图」）。
+    pub fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        self.with_core(|core| {
+            core.open = None;
+            core.view = Default::default();
+        });
+        self.load_view_data();
+        cx.notify();
+    }
+
     /// 打开列表条目（普通会话或工作流会话）。
     pub fn open_entry(&mut self, id: &str, cx: &mut Context<Self>) {
         let is_workflow =
@@ -563,6 +640,7 @@ impl AmuxApp {
         self.workspace_file = None;
         self.workspace_tree_visible = true;
         self.dialog_scroll.scroll_to_bottom();
+        self.load_view_data();
         cx.notify();
     }
 
@@ -651,7 +729,8 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 加载工作目录树根节点。
+    /// 加载工作目录树根节点；每次打开面板都实时拉取，不缓存
+    /// （docs/DESIGN.md「工作目录视图」）。
     pub fn load_workspace(&mut self, cx: &mut Context<Self>) {
         let (client, target) = self.with_core(|core| {
             let target = core
@@ -668,7 +747,7 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             match client.list_dir(&machine, Some(&path), 500, 0).await {
                 Ok(result) => {
-                                let mut core = core.lock();
+                    let mut core = core.lock();
                     core.view.detail.workspace_tree =
                         result.entries.into_iter().map(WorkspaceNode::new).collect();
                 }
@@ -678,25 +757,31 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 展开/折叠工作目录树节点；子目录首次展开时拉取其内容。
+    /// 展开/折叠工作目录树节点；展开时实时拉取子目录项，不缓存
+    /// （docs/DESIGN.md「工作目录视图」）。
     pub fn toggle_workspace_dir(&mut self, path: String, cx: &mut Context<Self>) {
-        let (client, machine, loaded) = self.with_core(|core| {
-            let loaded = WorkspaceNode::find_mut(&mut core.view.detail.workspace_tree, &path)
+        let (client, machine, expanded) = self.with_core(|core| {
+            let expanded = WorkspaceNode::find_mut(&mut core.view.detail.workspace_tree, &path)
                 .map(|node| {
                     node.expanded = !node.expanded;
-                    node.children.is_some()
+                    if !node.expanded {
+                        // 折叠即丢弃已拉取内容：目录项不缓存
+                        node.children = None;
+                    }
+                    node.expanded
                 })
                 .unwrap_or(false);
             let machine = core.view.session.as_ref().map(|s| s.machine.clone());
-            (core.client.clone(), machine, loaded)
+            (core.client.clone(), machine, expanded)
         });
-        if loaded {
+        let (Some(client), Some(machine)) = (client, machine) else {
+            cx.notify();
+            return;
+        };
+        if !expanded {
             cx.notify();
             return;
         }
-        let (Some(client), Some(machine)) = (client, machine) else {
-            return;
-        };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match client.list_dir(&machine, Some(&path), 500, 0).await {
@@ -1148,14 +1233,14 @@ impl AmuxApp {
         self.open_side_panel(panel, cx);
     }
 
-    /// 打开右侧面板：面板数据立即刷新，工作目录与终端在首次打开时加载。
+    /// 打开右侧面板：面板数据立即刷新，工作目录、会话详情与终端在打开时加载。
     pub fn open_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
         let previous = self.with_core(|core| core.side_panel);
         self.with_core(|core| {
             core.side_panel = Some(panel);
             match panel {
                 SidePanel::Activities => core.last.activities = None,
-                SidePanel::Plan | SidePanel::Detail => core.last.plan = None,
+                SidePanel::Plan => core.last.plan = None,
                 _ => {}
             }
         });
@@ -1164,14 +1249,10 @@ impl AmuxApp {
             self.panel_width = panel.default_width();
         }
         match panel {
-            SidePanel::Workspace => {
-                let loaded = self.with_core(|core| !core.view.detail.workspace_tree.is_empty());
-                if !loaded {
-                    self.load_workspace(cx);
-                }
-            }
+            SidePanel::Workspace => self.load_workspace(cx),
             SidePanel::Terminal => self.open_terminal(cx),
             SidePanel::Diff => self.refresh_diff(cx),
+            SidePanel::Detail => self.refresh_context(cx),
             _ => {}
         }
         cx.notify();
@@ -1247,6 +1328,24 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             if let Err(error) = client.terminal_input(&id, &terminal, data).await {
                 core.lock().error(format!("终端输入失败：{error}"));
+            }
+        });
+        cx.notify();
+    }
+
+    /// 刷新会话上下文用量；视图打开时刷新一次，不做定时刷新
+    /// （docs/DESIGN.md「会话详情视图」）。
+    pub fn refresh_context(&mut self, cx: &mut Context<Self>) {
+        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
+        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            if let Ok(info) = client.context(&id).await {
+                let mut core = core.lock();
+                core.view.detail.context_size = info.context_size;
+                core.view.detail.context_window_size = info.context_window_size;
             }
         });
         cx.notify();
@@ -1821,6 +1920,7 @@ impl AmuxApp {
             .with_core(|core| core.settings.orchestrator.clone())
             .unwrap_or_else(empty_orchestrator_config);
         self.orchestrator_format = Some(config.api_format);
+        self.orchestrator_prefilled = Some(config.clone());
         self.orch_base_url
             .update(cx, |state, cx| state.set_value(config.base_url, window, cx));
         self.orch_api_key
@@ -1830,6 +1930,23 @@ impl AmuxApp {
         self.orch_effort
             .update(cx, |state, cx| state.set_value(config.effort, window, cx));
         cx.notify();
+    }
+
+    /// 编排智能体分类打开时拉取的配置落地后重填一次表单（打开瞬间可能还是缓存或空）。
+    fn sync_orchestrator_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.with_core(|core| {
+            core.settings_open && core.settings_tab == crate::state::SettingsTab::Orchestrator
+        });
+        if !open {
+            return;
+        }
+        let saved = self
+            .with_core(|core| core.settings.orchestrator.clone())
+            .unwrap_or_else(empty_orchestrator_config);
+        if self.orchestrator_prefilled.as_ref() == Some(&saved) {
+            return;
+        }
+        self.load_orchestrator_form(window, cx);
     }
 
     /// 会话选项下拉框：单个 select 选项。
