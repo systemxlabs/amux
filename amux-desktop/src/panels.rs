@@ -9,12 +9,11 @@ use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::label::Label;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::scroll::{Scrollbar, ScrollableElement as _};
+use gpui_component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, IconNamed, Selectable,
-    Sizable,
+    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, IconNamed, Selectable, Sizable,
 };
 
 use crate::app::AmuxApp;
@@ -45,18 +44,18 @@ impl IconNamed for FileDiffIcon {
 // ---------- 左侧面板 ----------
 
 /// 左侧面板内容：标题与新建入口、会话列表、设置入口。
-pub fn render_sidebar(
-    core: &Core,
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
+pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let sidebar = theme.sidebar;
     let sidebar_border = theme.sidebar_border;
     let foreground = theme.foreground;
     let primary = theme.primary;
 
-    let mut list = v_flex().id("sidebar-sessions").flex_1().overflow_y_scroll().gap_2();
+    let mut list = v_flex()
+        .id("sidebar-sessions")
+        .flex_1()
+        .overflow_y_scroll()
+        .gap_2();
     for entry in core.entries.clone() {
         match &entry {
             ListEntry::Session(session) => {
@@ -141,7 +140,9 @@ pub fn render_sidebar(
                     .small()
                     .ghost()
                     .label("设置")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(None, window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_settings(None, window, cx)),
+                    ),
             ),
         )
         .into_any_element()
@@ -195,13 +196,7 @@ fn session_row(
                 .min_w_0()
                 .gap_1()
                 .items_center()
-                .child(
-                    Label::new(title)
-                        .text_sm()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate(),
-                ),
+                .child(Label::new(title).text_sm().flex_1().min_w_0().truncate()),
         )
         .when(session.updated_at > 0, |row| {
             row.child(
@@ -255,13 +250,7 @@ fn workflow_row(
                     theme.muted_foreground
                 }),
         )
-        .child(
-            Label::new(title)
-                .text_sm()
-                .flex_1()
-                .min_w_0()
-                .truncate(),
-        )
+        .child(Label::new(title).text_sm().flex_1().min_w_0().truncate())
         .when(workflow.updated_at > 0, |row| {
             row.child(
                 Label::new(ui::format_local_time(
@@ -374,17 +363,17 @@ fn list_row(
             let rename_app = app.clone();
             let delete_entry = entry.clone();
             let delete_app = app.clone();
-            menu.item(
-                PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
-                    let rename_id = rename_id.clone();
-                    rename_app.update(cx, |this, cx| this.begin_rename(&rename_id, window, cx));
+            menu.item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
+                let rename_id = rename_id.clone();
+                rename_app.update(cx, |this, cx| this.begin_rename(&rename_id, window, cx));
+            }))
+            .item(
+                PopupMenuItem::new("删除会话").on_click(move |_, window, cx| {
+                    delete_app.update(cx, |this, cx| {
+                        this.confirm_delete(delete_entry.clone(), window, cx)
+                    });
                 }),
             )
-            .item(PopupMenuItem::new("删除会话").on_click(move |_, window, cx| {
-                delete_app.update(cx, |this, cx| {
-                    this.confirm_delete(delete_entry.clone(), window, cx)
-                });
-            }))
         })
         .child(row)
 }
@@ -623,39 +612,42 @@ fn workspace_nodes(
         let indent = rems(0.5 + depth as f32 * (TREE_INDENT / 16.0));
         if entry.is_dir {
             rows.push(
-                Button::new(SharedString::from(format!("workspace-entry-{}", entry.path)))
-                    .small()
-                    .ghost()
-                    .w_full()
-                    .on_click(cx.listener({
-                        let path = entry.path.clone();
-                        move |this, _, _, cx| this.toggle_workspace_dir(path.clone(), cx)
-                    }))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_start()
-                            .gap_1p5()
-                            .pl(indent)
-                            .child(
-                                Icon::new(if node.expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .xsmall()
-                                .flex_none()
-                                .text_color(theme.muted_foreground),
-                            )
-                            .child(
-                                Label::new(entry.name.clone())
-                                    .text_sm()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate(),
-                            ),
-                    )
-                    .into_any_element(),
+                Button::new(SharedString::from(format!(
+                    "workspace-entry-{}",
+                    entry.path
+                )))
+                .small()
+                .ghost()
+                .w_full()
+                .on_click(cx.listener({
+                    let path = entry.path.clone();
+                    move |this, _, _, cx| this.toggle_workspace_dir(path.clone(), cx)
+                }))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_start()
+                        .gap_1p5()
+                        .pl(indent)
+                        .child(
+                            Icon::new(if node.expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .xsmall()
+                            .flex_none()
+                            .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            Label::new(entry.name.clone())
+                                .text_sm()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate(),
+                        ),
+                )
+                .into_any_element(),
             );
             if node.expanded {
                 match &node.children {
@@ -690,16 +682,13 @@ fn workspace_nodes(
                         .justify_start()
                         .gap_1p5()
                         .pl(indent)
-                        .child(
-                            Icon::new(IconName::File)
-                                .xsmall()
-                                .flex_none()
-                                .text_color(if selected {
-                                    theme.primary
-                                } else {
-                                    theme.muted_foreground
-                                }),
-                        )
+                        .child(Icon::new(IconName::File).xsmall().flex_none().text_color(
+                            if selected {
+                                theme.primary
+                            } else {
+                                theme.muted_foreground
+                            },
+                        ))
                         .child(
                             Label::new(entry.name.clone())
                                 .text_sm()
@@ -717,7 +706,12 @@ fn workspace_nodes(
 /// 会话详情面板：会话元信息（工作流会话额外展示关联普通会话）。
 fn detail_panel(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
-    let mut body = v_flex().flex_1().min_h_0().gap_2().p_3().overflow_y_scrollbar();
+    let mut body = v_flex()
+        .flex_1()
+        .min_h_0()
+        .gap_2()
+        .p_3()
+        .overflow_y_scrollbar();
     if let Some(session) = &core.view.session {
         body = body
             .child(ui::info_row("会话 ID", &session.id, &theme))
@@ -749,13 +743,33 @@ fn detail_panel(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 &theme,
             ))
             .child(ui::info_row("机器", &session.machine, &theme))
-            .child(ui::info_row("最近活跃", &ui::format_local_time(session.updated_at, ui::TimePrecision::Seconds), &theme));
+            .child(ui::info_row(
+                "最近活跃",
+                &ui::format_local_time(session.updated_at, ui::TimePrecision::Seconds),
+                &theme,
+            ));
     } else if let Some(workflow) = &core.view.workflow {
         body = body
             .child(ui::info_row("工作流 ID", &workflow.id, &theme))
-            .child(ui::info_row("状态", if sessions::is_busy(workflow.state) { "工作中" } else { "空闲" }, &theme))
-            .child(ui::info_row("创建时间", &ui::format_local_time(workflow.created_at, ui::TimePrecision::Seconds), &theme))
-            .child(ui::info_row("最近活跃", &ui::format_local_time(workflow.updated_at, ui::TimePrecision::Seconds), &theme))
+            .child(ui::info_row(
+                "状态",
+                if sessions::is_busy(workflow.state) {
+                    "工作中"
+                } else {
+                    "空闲"
+                },
+                &theme,
+            ))
+            .child(ui::info_row(
+                "创建时间",
+                &ui::format_local_time(workflow.created_at, ui::TimePrecision::Seconds),
+                &theme,
+            ))
+            .child(ui::info_row(
+                "最近活跃",
+                &ui::format_local_time(workflow.updated_at, ui::TimePrecision::Seconds),
+                &theme,
+            ))
             .child(ui::info_row("计划", &workflow.plan, &theme))
             .child(
                 v_flex()
@@ -765,9 +779,7 @@ fn detail_panel(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                         h_flex()
                             .items_center()
                             .gap_1()
-                            .child(
-                                Label::new("关联普通会话").font_weight(FontWeight::SEMIBOLD),
-                            )
+                            .child(Label::new("关联普通会话").font_weight(FontWeight::SEMIBOLD))
                             .child(
                                 Label::new(format!("{}", workflow.linked_sessions.len()))
                                     .text_xs()
@@ -842,11 +854,7 @@ fn activities_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
 }
 
 /// 活动卡片：时间 + 种类 + 详情（折叠时单行截断）。
-fn activity_row(
-    activity: &Activity,
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
+fn activity_row(activity: &Activity, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let timestamp = ui::activity_timestamp(activity);
     let key = format!("{timestamp}-{}", ui::activity_kind_detail(activity).0);
@@ -1038,12 +1046,7 @@ fn terminal_tab(
                 window.focus(&this.terminal_focus, cx);
             }
         }))
-        .child(
-            Label::new(title)
-                .text_xs()
-                .max_w_24()
-                .truncate(),
-        )
+        .child(Label::new(title).text_xs().max_w_24().truncate())
         .child(
             Button::new(SharedString::from(format!("terminal-tab-close-{id}")))
                 .xsmall()
@@ -1198,22 +1201,14 @@ fn push_tree_rows(
                 .w_full()
                 .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx)))
                 .child(
-                    h_flex()
-                        .w_full()
-                        .justify_start()
-                        .gap_1()
-                        .pl(indent)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    Label::new(node.name.clone())
-                                        .text_xs()
-                                        .truncate()
-                                        .text_color(theme.foreground),
-                                ),
+                    h_flex().w_full().justify_start().gap_1().pl(indent).child(
+                        div().flex_1().min_w_0().child(
+                            Label::new(node.name.clone())
+                                .text_xs()
+                                .truncate()
+                                .text_color(theme.foreground),
                         ),
+                    ),
                 )
                 .into_any_element(),
         );
@@ -1307,69 +1302,67 @@ fn diff_file_block(
         amux_common::domain::GitChangeStatus::Deleted => ("D", theme.danger),
         amux_common::domain::GitChangeStatus::Modified => ("M", theme.warning),
     };
-    let mut block = v_flex()
-        .w_full()
-        .child(
-            h_flex()
-                .w_full()
-                .h(rems(2.5))
-                .px_2()
-                .gap_2()
-                .items_center()
-                .bg(theme.muted.opacity(0.35))
-                .border_t_1()
-                .border_color(theme.border)
-                .child(
-                    Checkbox::new(SharedString::from(format!("diff-sel-file-{}", file.path)))
-                        .checked(selected)
-                        .on_click(cx.listener({
-                            let path = file.path.clone();
-                            move |this, checked: &bool, _, cx| {
-                                if *checked != this.diff_selected_files.contains(&path) {
-                                    this.toggle_diff_file_selected(path.clone(), cx);
-                                }
+    let mut block = v_flex().w_full().child(
+        h_flex()
+            .w_full()
+            .h(rems(2.5))
+            .px_2()
+            .gap_2()
+            .items_center()
+            .bg(theme.muted.opacity(0.35))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                Checkbox::new(SharedString::from(format!("diff-sel-file-{}", file.path)))
+                    .checked(selected)
+                    .on_click(cx.listener({
+                        let path = file.path.clone();
+                        move |this, checked: &bool, _, cx| {
+                            if *checked != this.diff_selected_files.contains(&path) {
+                                this.toggle_diff_file_selected(path.clone(), cx);
                             }
-                        })),
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .child(
+                        Label::new(file.path.clone())
+                            .text_sm()
+                            .font_family(theme.mono_font_family.clone())
+                            .font_weight(FontWeight::MEDIUM)
+                            .whitespace_nowrap()
+                            .flex_shrink_0(),
+                    ),
+            )
+            .child(
+                Label::new(format!("+{}", file.additions))
+                    .text_xs()
+                    .text_color(theme.success),
+            )
+            .child(
+                Label::new(format!("-{}", file.deletions))
+                    .text_xs()
+                    .text_color(theme.danger),
+            )
+            .child(
+                gpui_component::tag::Tag::custom(
+                    status.1.opacity(0.14),
+                    status.1,
+                    status.1.opacity(0.35),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .overflow_hidden()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .child(
-                            Label::new(file.path.clone())
-                                .text_sm()
-                                .font_family(theme.mono_font_family.clone())
-                                .font_weight(FontWeight::MEDIUM)
-                                .whitespace_nowrap()
-                                .flex_shrink_0(),
-                        ),
-                )
-                .child(
-                    Label::new(format!("+{}", file.additions))
-                        .text_xs()
-                        .text_color(theme.success),
-                )
-                .child(
-                    Label::new(format!("-{}", file.deletions))
-                        .text_xs()
-                        .text_color(theme.danger),
-                )
-                .child(
-                    gpui_component::tag::Tag::custom(
-                        status.1.opacity(0.14),
-                        status.1,
-                        status.1.opacity(0.35),
-                    )
-                    .small()
-                    .rounded_full()
-                    .child(Label::new(status.0).text_xs()),
-                ),
-        );
+                .small()
+                .rounded_full()
+                .child(Label::new(status.0).text_xs()),
+            ),
+    );
 
     if !collapsed {
         for hunk in &file.hunks {
@@ -1480,11 +1473,18 @@ fn diff_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
         .gap_2()
         .items_center()
         .child(
-            Label::new(format!("已选 {selected_files} 文件 · {selected_hunks} 代码块"))
-                .text_xs()
-                .text_color(theme.muted_foreground),
+            Label::new(format!(
+                "已选 {selected_files} 文件 · {selected_hunks} 代码块"
+            ))
+            .text_xs()
+            .text_color(theme.muted_foreground),
         )
-        .child(div().flex_1().min_w_0().child(this.diff_instruction.clone()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(this.diff_instruction.clone()),
+        )
         .child(
             Button::new("diff-send-selected")
                 .small()

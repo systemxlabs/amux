@@ -10,9 +10,7 @@ use std::sync::{Arc, Mutex};
 use amux_desktop::client::Client;
 use amux_desktop::config::Connection;
 use amux_desktop::poll;
-use amux_desktop::state::{
-    ConnectionStatus, Core, OpenTarget, SettingsTab, SharedCore, SidePanel,
-};
+use amux_desktop::state::{ConnectionStatus, Core, OpenTarget, SettingsTab, SharedCore, SidePanel};
 
 /// 端点桩的响应体：只覆盖视图用到的端点，其余端点返回空对象（调用方按错误忽略）。
 fn stub(path: &str) -> &'static str {

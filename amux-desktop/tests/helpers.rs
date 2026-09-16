@@ -9,7 +9,10 @@ use gpui::px;
 #[test]
 fn context_usage_text_hides_missing_and_formats_usage() {
     assert_eq!(ui::context_usage_text(0, 0), None);
-    assert_eq!(ui::context_usage_text(53000, 0), Some("53,000 token".into()));
+    assert_eq!(
+        ui::context_usage_text(53000, 0),
+        Some("53,000 token".into())
+    );
     assert_eq!(
         ui::context_usage_text(53000, 200000),
         Some("53,000 / 200,000 token（26.5%）".into())

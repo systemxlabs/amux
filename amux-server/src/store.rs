@@ -110,11 +110,11 @@ impl Store {
     /// 所有被工作流关联的会话 id。
     fn linked_session_ids(&self) -> Vec<String> {
         let conn = self.workflows.lock();
-        let mut stmt = match conn.prepare("SELECT DISTINCT session_id FROM workflow_linked_sessions")
-        {
-            Ok(stmt) => stmt,
-            Err(_) => return Vec::new(),
-        };
+        let mut stmt =
+            match conn.prepare("SELECT DISTINCT session_id FROM workflow_linked_sessions") {
+                Ok(stmt) => stmt,
+                Err(_) => return Vec::new(),
+            };
         let rows = stmt.query_map([], |row| row.get::<_, String>(0));
         collect(rows)
     }

@@ -32,23 +32,23 @@ pub fn line_numbers(header: &str, lines: &[GitDiffLine]) -> Vec<LineNumbers> {
     lines
         .iter()
         .map(|line| match line.kind {
-                GitDiffLineKind::Context => {
-                    let numbers = LineNumbers {
-                        old: Some(old),
-                        new: Some(new),
-                    };
-                    old += 1;
-                    new += 1;
-                    numbers
-                }
-                GitDiffLineKind::Remove => {
-                    let numbers = LineNumbers {
-                        old: Some(old),
-                        new: None,
-                    };
-                    old += 1;
-                    numbers
-                }
+            GitDiffLineKind::Context => {
+                let numbers = LineNumbers {
+                    old: Some(old),
+                    new: Some(new),
+                };
+                old += 1;
+                new += 1;
+                numbers
+            }
+            GitDiffLineKind::Remove => {
+                let numbers = LineNumbers {
+                    old: Some(old),
+                    new: None,
+                };
+                old += 1;
+                numbers
+            }
             GitDiffLineKind::Add => {
                 let numbers = LineNumbers {
                     old: None,

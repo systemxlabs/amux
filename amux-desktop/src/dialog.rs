@@ -10,8 +10,8 @@ use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputState};
 use gpui_component::label::Label;
-use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable, WindowExt};
 use gpui_component::notification::Notification;
+use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable, WindowExt};
 
 use crate::app::AmuxApp;
 
@@ -125,13 +125,17 @@ pub fn form(
                             .label(CANCEL_TEXT)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
-                    .child(Button::new("form-dialog-ok").small().primary().label(ok_label).on_click(
-                        move |_, window, cx| {
-                            if save_app.update(cx, |this, cx| save(this, cx)) {
-                                window.close_dialog(cx);
-                            }
-                        },
-                    )),
+                    .child(
+                        Button::new("form-dialog-ok")
+                            .small()
+                            .primary()
+                            .label(ok_label)
+                            .on_click(move |_, window, cx| {
+                                if save_app.update(cx, |this, cx| save(this, cx)) {
+                                    window.close_dialog(cx);
+                                }
+                            }),
+                    ),
             )
             // 回车确认（Esc 由 Dialog 自身处理）
             .on_ok(move |_, _, cx| ok_app.update(cx, |this, cx| ok_save(this, cx)))

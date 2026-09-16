@@ -6,7 +6,6 @@ use gpui_component::label::Label;
 use gpui_component::tag::Tag;
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable};
 
-
 /// 主题取色的值拷贝。
 ///
 /// 视图函数在同一个函数体内既要读主题、又要可变借用 `Context`（事件回调），
@@ -144,7 +143,9 @@ pub fn message_images(blocks: &[ContentBlock]) -> Vec<Image> {
                     "image/bmp" => ImageFormat::Bmp,
                     _ => return None,
                 };
-                let bytes = base64::engine::general_purpose::STANDARD.decode(blob).ok()?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(blob)
+                    .ok()?;
                 Some(Image::from_bytes(format, bytes))
             }
             _ => None,

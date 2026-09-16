@@ -66,9 +66,9 @@ pub fn render_overlay(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                 .track_focus(&focus)
                 .focus_trap("settings-trap", &focus)
                 .key_context("SettingsOverlay")
-                .on_action(cx.listener(|this, _: &CloseSettingsOverlay, _, cx| {
-                    this.close_settings(cx)
-                }))
+                .on_action(
+                    cx.listener(|this, _: &CloseSettingsOverlay, _, cx| this.close_settings(cx)),
+                )
                 .child(render_nav(core, this, cx))
                 .child(render_content(core, this, cx)),
         )
@@ -131,9 +131,7 @@ fn nav_item(tab: SettingsTab, selected: bool, cx: &mut Context<AmuxApp>) -> AnyE
         .w_full()
         .ghost()
         .selected(selected)
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.select_settings_tab(tab, window, cx)
-        }))
+        .on_click(cx.listener(move |this, _, window, cx| this.select_settings_tab(tab, window, cx)))
         .child(
             h_flex()
                 .w_full()
@@ -254,9 +252,9 @@ fn connection_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
                             .primary()
                             .label("保存")
                             .disabled(!this.settings_dirty)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_connection(window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_connection(window, cx)),
+                            ),
                     ),
                 ),
         )
@@ -426,35 +424,15 @@ fn orchestrator_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement
                 .p_3()
                 .bg(theme.muted)
                 .rounded_md()
-                .child(
-                    Label::new("API 格式")
-                        .text_sm()
-                        .text_color(muted),
-                )
+                .child(Label::new("API 格式").text_sm().text_color(muted))
                 .child(radio)
-                .child(
-                    Label::new("Base URL")
-                        .text_sm()
-                        .text_color(muted),
-                )
+                .child(Label::new("Base URL").text_sm().text_color(muted))
                 .child(Input::new(&this.orch_base_url).w_full())
-                .child(
-                    Label::new("API Key")
-                        .text_sm()
-                        .text_color(muted),
-                )
+                .child(Label::new("API Key").text_sm().text_color(muted))
                 .child(Input::new(&this.orch_api_key).w_full())
-                .child(
-                    Label::new("模型名称")
-                        .text_sm()
-                        .text_color(muted),
-                )
+                .child(Label::new("模型名称").text_sm().text_color(muted))
                 .child(Input::new(&this.orch_model).w_full())
-                .child(
-                    Label::new("推理级别")
-                        .text_sm()
-                        .text_color(muted),
-                )
+                .child(Label::new("推理级别").text_sm().text_color(muted))
                 .child(Input::new(&this.orch_effort).w_full())
                 .child(
                     h_flex().justify_end().child(
@@ -540,19 +518,16 @@ fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     v_flex()
         .gap_2()
         .child(
-            h_flex()
-                .items_center()
-                .child(div().flex_1())
-                .child(
-                    Button::new("qc-add")
-                        .small()
-                        .primary()
-                        .icon(IconName::Plus)
-                        .tooltip("添加快捷指令")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_quick_command_form(FormTarget::New, window, cx)
-                        })),
-                ),
+            h_flex().items_center().child(div().flex_1()).child(
+                Button::new("qc-add")
+                    .small()
+                    .primary()
+                    .icon(IconName::Plus)
+                    .tooltip("添加快捷指令")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_quick_command_form(FormTarget::New, window, cx)
+                    })),
+            ),
         )
         .child(list)
         .into_any_element()
@@ -645,19 +620,16 @@ fn skills_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     v_flex()
         .gap_2()
         .child(
-            h_flex()
-                .items_center()
-                .child(div().flex_1())
-                .child(
-                    Button::new("skill-add")
-                        .small()
-                        .primary()
-                        .icon(IconName::Plus)
-                        .tooltip("添加技能")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_skill_form(FormTarget::New, window, cx)
-                        })),
-                ),
+            h_flex().items_center().child(div().flex_1()).child(
+                Button::new("skill-add")
+                    .small()
+                    .primary()
+                    .icon(IconName::Plus)
+                    .tooltip("添加技能")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_skill_form(FormTarget::New, window, cx)
+                    })),
+            ),
         )
         .child(list)
         .into_any_element()
@@ -725,19 +697,16 @@ fn plans_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     v_flex()
         .gap_2()
         .child(
-            h_flex()
-                .items_center()
-                .child(div().flex_1())
-                .child(
-                    Button::new("plan-add")
-                        .small()
-                        .primary()
-                        .icon(IconName::Plus)
-                        .tooltip("添加计划")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_plan_form(FormTarget::New, window, cx)
-                        })),
-                ),
+            h_flex().items_center().child(div().flex_1()).child(
+                Button::new("plan-add")
+                    .small()
+                    .primary()
+                    .icon(IconName::Plus)
+                    .tooltip("添加计划")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_plan_form(FormTarget::New, window, cx)
+                    })),
+            ),
         )
         .child(list)
         .into_any_element()

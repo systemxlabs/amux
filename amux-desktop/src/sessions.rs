@@ -3,17 +3,19 @@
 use amux_common::domain::{HistoryItem, SessionConfigKind, SessionConfigOptionValue, SessionState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::alert::Alert;
 use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
+use gpui_component::input::Input;
 use gpui_component::label::Label;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::spinner::Spinner;
-use gpui_component::input::Input;
 use gpui_component::switch::Switch;
 use gpui_component::text::TextView;
-use gpui_component::{h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Selectable, Sizable};
-use gpui_component::alert::Alert;
+use gpui_component::{
+    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Selectable, Sizable,
+};
 
 use crate::app::AmuxApp;
 use crate::state::{Core, SettingsTab};
@@ -65,7 +67,11 @@ fn new_session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         .border_1()
         .border_color(cx.theme().border)
         .shadow_lg()
-        .child(Label::new("新会话").text_xl().font_weight(FontWeight::SEMIBOLD))
+        .child(
+            Label::new("新会话")
+                .text_xl()
+                .font_weight(FontWeight::SEMIBOLD),
+        )
         .child(mode_switch(workflow_mode, cx))
         .child(if workflow_mode {
             workflow_form(core, this, cx)
@@ -113,11 +119,13 @@ fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
     if core.settings.machines.is_empty() {
         return v_flex()
             .gap_2()
-            .child(Alert::warning(
-                "ns-no-machines-alert",
-                "请先在设置 → 机器管理中确认已接入的机器。",
+            .child(
+                Alert::warning(
+                    "ns-no-machines-alert",
+                    "请先在设置 → 机器管理中确认已接入的机器。",
+                )
+                .title("尚未注册机器"),
             )
-            .title("尚未注册机器"))
             .child(
                 Button::new("ns-goto-machine-settings")
                     .small()
@@ -317,9 +325,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
     let recent: Vec<String> = core
         .recent_workspaces
         .iter()
-        .filter(|workspace| {
-            core.new_session.machine.as_deref() == Some(workspace.machine.as_str())
-        })
+        .filter(|workspace| core.new_session.machine.as_deref() == Some(workspace.machine.as_str()))
         .take(20)
         .map(|workspace| workspace.workspace.clone())
         .collect();
@@ -347,10 +353,11 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     for path in recent.clone() {
                         let app = app.clone();
                         let value = path.clone();
-                        menu = menu.item(PopupMenuItem::new(path).on_click(move |_, window, cx| {
-                            let value = value.clone();
-                            app.update(cx, |this, cx| this.set_workspace(value, window, cx));
-                        }));
+                        menu =
+                            menu.item(PopupMenuItem::new(path).on_click(move |_, window, cx| {
+                                let value = value.clone();
+                                app.update(cx, |this, cx| this.set_workspace(value, window, cx));
+                            }));
                     }
                     menu
                 }),
@@ -427,7 +434,11 @@ pub fn machine_agent_available(core: &Core, machine: &str, agent: &str) -> bool 
         .agents
         .iter()
         .find(|(name, _)| name == machine)
-        .is_some_and(|(_, agents)| agents.iter().any(|item| item.name == agent && item.available))
+        .is_some_and(|(_, agents)| {
+            agents
+                .iter()
+                .any(|item| item.name == agent && item.available)
+        })
 }
 
 // ---------- 会话交互视图 ----------
@@ -456,7 +467,13 @@ fn session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> A
         .flex_1()
         .min_h_0()
         .child(header)
-        .child(h_flex().flex_1().min_h_0().items_stretch().child(dialog(core, this, cx)))
+        .child(
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .items_stretch()
+                .child(dialog(core, this, cx)),
+        )
         .into_any_element()
 }
 
@@ -465,9 +482,7 @@ fn dialog(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
     let mut rows: Vec<AnyElement> = Vec::new();
     for item in &core.view.detail.history {
         rows.push(match item {
-            HistoryItem::UserMessage { content, timestamp } => {
-                user_bubble(content, *timestamp, cx)
-            }
+            HistoryItem::UserMessage { content, timestamp } => user_bubble(content, *timestamp, cx),
             HistoryItem::AgentMessage { content, timestamp } => {
                 agent_bubble(content, *timestamp, cx)
             }
@@ -553,39 +568,42 @@ fn user_bubble(
         width = width.max(px(280.));
     }
     let theme = ui::Colors::of(cx.theme());
-    div().id(("user-row", timestamp)).w_full().child(
-        v_flex()
-            .ml_auto()
-            .flex_none()
-            .w(width)
-            .overflow_hidden()
-            .p_3()
-            .gap_1()
-            .rounded_md()
-            .bg(theme.primary)
-            .shadow_sm()
-            .child(
-                Label::new(ui::format_local_time(timestamp, ui::TimePrecision::Seconds))
-                    .text_xs()
-                    .text_color(theme.primary_foreground.opacity(0.78)),
-            )
-            .when(!text.is_empty(), |bubble| {
-                bubble.child(
-                    TextView::markdown(("umd", timestamp), text)
-                        .selectable(true)
-                        .text_color(theme.primary_foreground),
+    div()
+        .id(("user-row", timestamp))
+        .w_full()
+        .child(
+            v_flex()
+                .ml_auto()
+                .flex_none()
+                .w(width)
+                .overflow_hidden()
+                .p_3()
+                .gap_1()
+                .rounded_md()
+                .bg(theme.primary)
+                .shadow_sm()
+                .child(
+                    Label::new(ui::format_local_time(timestamp, ui::TimePrecision::Seconds))
+                        .text_xs()
+                        .text_color(theme.primary_foreground.opacity(0.78)),
                 )
-            })
-            .children(images.into_iter().map(|image| {
-                img(std::sync::Arc::new(image))
-                    .w_full()
-                    .max_h(px(240.))
-                    .object_fit(ObjectFit::Contain)
-                    .rounded_md()
-                    .overflow_hidden()
-            })),
-    )
-    .into_any_element()
+                .when(!text.is_empty(), |bubble| {
+                    bubble.child(
+                        TextView::markdown(("umd", timestamp), text)
+                            .selectable(true)
+                            .text_color(theme.primary_foreground),
+                    )
+                })
+                .children(images.into_iter().map(|image| {
+                    img(std::sync::Arc::new(image))
+                        .w_full()
+                        .max_h(px(240.))
+                        .object_fit(ObjectFit::Contain)
+                        .rounded_md()
+                        .overflow_hidden()
+                })),
+        )
+        .into_any_element()
 }
 
 /// agent 消息气泡：左对齐、弹出层底色 + 描边。
@@ -606,36 +624,39 @@ fn agent_bubble(
         width = width.max(px(280.));
     }
     let theme = ui::Colors::of(cx.theme());
-    div().id(("agent-row", timestamp)).w_full().child(
-        v_flex()
-            .flex_none()
-            .w(width)
-            .overflow_hidden()
-            .p_3()
-            .gap_1()
-            .rounded_md()
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
-            .shadow_sm()
-            .child(
-                Label::new(ui::format_local_time(timestamp, ui::TimePrecision::Seconds))
-                    .text_xs()
-                    .text_color(theme.muted_foreground),
-            )
-            .when(!text.is_empty(), |bubble| {
-                bubble.child(TextView::markdown(("amd", timestamp), text).selectable(true))
-            })
-            .children(images.into_iter().map(|image| {
-                img(std::sync::Arc::new(image))
-                    .w_full()
-                    .max_h(px(240.))
-                    .object_fit(ObjectFit::Contain)
-                    .rounded_md()
-                    .overflow_hidden()
-            })),
-    )
-    .into_any_element()
+    div()
+        .id(("agent-row", timestamp))
+        .w_full()
+        .child(
+            v_flex()
+                .flex_none()
+                .w(width)
+                .overflow_hidden()
+                .p_3()
+                .gap_1()
+                .rounded_md()
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_sm()
+                .child(
+                    Label::new(ui::format_local_time(timestamp, ui::TimePrecision::Seconds))
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+                .when(!text.is_empty(), |bubble| {
+                    bubble.child(TextView::markdown(("amd", timestamp), text).selectable(true))
+                })
+                .children(images.into_iter().map(|image| {
+                    img(std::sync::Arc::new(image))
+                        .w_full()
+                        .max_h(px(240.))
+                        .object_fit(ObjectFit::Contain)
+                        .rounded_md()
+                        .overflow_hidden()
+                })),
+        )
+        .into_any_element()
 }
 
 /// 输入区卡片：快捷指令 + 实时活动 + 输入框 + 会话选项。
@@ -816,14 +837,14 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     v_flex()
         .id("composer")
         .gap_2()
-        .capture_action(cx.listener(
-            |this, action: &gpui_component::input::Paste, _, cx| this.paste_into_composer(action, cx),
-        ))
-        .capture_key_down(
-            cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.composer_key_down(event, window, cx)
+        .capture_action(
+            cx.listener(|this, action: &gpui_component::input::Paste, _, cx| {
+                this.paste_into_composer(action, cx)
             }),
         )
+        .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            this.composer_key_down(event, window, cx)
+        }))
         .when(attachment_count > 0, |composer| composer.child(chips))
         .child(row)
         .into_any_element()
@@ -896,11 +917,7 @@ fn slash_menu(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> Option<AnyElemen
 }
 
 /// 会话选项行：select 用下拉按钮、boolean 用开关（docs/PRD.md「会话选项」）。
-fn config_options(
-    core: &Core,
-    this: &mut AmuxApp,
-    cx: &mut Context<AmuxApp>,
-) -> AnyElement {
+fn config_options(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     if core.view.detail.config_options.is_empty() {
         return div().id("config-options-empty").into_any_element();
     }

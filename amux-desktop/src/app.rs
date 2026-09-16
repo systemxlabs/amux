@@ -28,8 +28,8 @@ use crate::config::{self, Connection};
 use crate::dialog::{self, FormTarget};
 use crate::panels;
 use crate::poll;
-use crate::settings;
 use crate::sessions;
+use crate::settings;
 use crate::state::{
     Attachment, Core, DirectoryCache, ListEntry, OpenTarget, SharedCore, SidePanel, WorkspaceNode,
 };
@@ -372,7 +372,8 @@ impl AmuxApp {
             core.settings_open = true;
             switched
         });
-        if switched && self.with_core(|core| core.settings_tab) == crate::state::SettingsTab::Orchestrator
+        if switched
+            && self.with_core(|core| core.settings_tab) == crate::state::SettingsTab::Orchestrator
         {
             self.load_orchestrator_form(window, cx);
         }
@@ -415,9 +416,8 @@ impl AmuxApp {
     /// 设置类数据不做定时刷新（docs/DESIGN.md「设置页面」），只在视图打开时拉取一次；
     /// 视图切换与连接建立后重取由 [`Self::sync_view_data`] 补上。
     fn load_view_data(&mut self) {
-        let (settings_open, tab, open) = self.with_core(|core| {
-            (core.settings_open, core.settings_tab, core.open.clone())
-        });
+        let (settings_open, tab, open) =
+            self.with_core(|core| (core.settings_open, core.settings_tab, core.open.clone()));
         self.with_core(|core| core.loaded_view = Some(core.view_key()));
         if settings_open {
             self.load_settings(tab);
@@ -1947,7 +1947,12 @@ impl AmuxApp {
             effort: self.orch_effort.read(cx).value().trim().to_string(),
         };
         if config.base_url.is_empty() || config.api_key.is_empty() || config.model.is_empty() {
-            dialog::alert(window, cx, "保存失败", "请填写 Base URL、API Key 与模型名称。");
+            dialog::alert(
+                window,
+                cx,
+                "保存失败",
+                "请填写 Base URL、API Key 与模型名称。",
+            );
             return;
         }
         let core = Arc::clone(&self.core);
@@ -2059,21 +2064,19 @@ impl AmuxApp {
                     let config_id = config_id.clone();
                     let app = app.clone();
                     let checked = value == selected;
-                    menu = menu.item(
-                        PopupMenuItem::new(name)
-                            .checked(checked)
-                            .on_click(move |_, _, cx| {
-                                app.update(cx, |this, cx| {
-                                    this.apply_config_option(
-                                        config_id.clone(),
-                                        SessionConfigOptionValue::ValueId {
-                                            value: value.clone(),
-                                        },
-                                        cx,
-                                    )
-                                });
-                            }),
-                    );
+                    menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                        move |_, _, cx| {
+                            app.update(cx, |this, cx| {
+                                this.apply_config_option(
+                                    config_id.clone(),
+                                    SessionConfigOptionValue::ValueId {
+                                        value: value.clone(),
+                                    },
+                                    cx,
+                                )
+                            });
+                        },
+                    ));
                 }
                 menu
             })
@@ -2167,8 +2170,8 @@ impl AmuxApp {
                 }),
             )
             .on_drag(PanelResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<PanelResizeDrag>, window, cx| {
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<PanelResizeDrag>, window, cx| {
                     let Some((origin, initial)) = this.panel_drag else {
                         return;
                     };
@@ -2180,8 +2183,8 @@ impl AmuxApp {
                     this.panel_width = (initial + (origin - event.event.position.x.as_f32()))
                         .clamp(PANEL_MIN_WIDTH, max);
                     cx.notify();
-                }),
-            );
+                },
+            ));
         Some(
             h_flex()
                 .h_full()

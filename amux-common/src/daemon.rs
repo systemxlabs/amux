@@ -173,12 +173,14 @@ mod tests {
             "头值必须是可见 ASCII: {encoded}"
         );
         assert_eq!(
-            encoded,
-            "%E5%BC%80%E5%8F%91%E6%9C%BA%20A",
+            encoded, "%E5%BC%80%E5%8F%91%E6%9C%BA%20A",
             "非保留字符保持原样，其余按 UTF-8 转义"
         );
         assert_eq!(header::decode_machine(&encoded).as_deref(), Some(name));
-        assert_eq!(header::decode_machine("pc-1.local").as_deref(), Some("pc-1.local"));
+        assert_eq!(
+            header::decode_machine("pc-1.local").as_deref(),
+            Some("pc-1.local")
+        );
         assert_eq!(header::decode_machine("%FF"), None, "非法 UTF-8 应被拒绝");
     }
 }

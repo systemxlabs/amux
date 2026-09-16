@@ -213,7 +213,9 @@ async fn machine_header_is_url_encoded() {
     assert_eq!(machine.as_deref(), Some("%E5%BC%80%E5%8F%91%E6%9C%BA%20A"));
 
     // 机器名本身不编码：machine.info 返回原文
-    let info = server.request(1, "machine.info", serde_json::json!({})).await;
+    let info = server
+        .request(1, "machine.info", serde_json::json!({}))
+        .await;
     assert_eq!(info["result"]["name"], "开发机 A");
     assert!(daemon.alive(), "daemon 应保持运行");
 }
