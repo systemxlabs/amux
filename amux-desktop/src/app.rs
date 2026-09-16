@@ -124,6 +124,10 @@ pub struct AmuxApp {
     pub plan_scroll: ScrollHandle,
     /// 已展开的活动条目（key = 时间戳 + 文案，跨帧稳定）
     pub expanded_activities: HashSet<String>,
+    /// 工作目录最近目录下拉是否展开
+    pub workspace_recent_open: bool,
+    /// 最近目录下拉的滚动句柄（列表内滚动与滚动条）
+    pub workspace_recent_scroll: ScrollHandle,
     /// 工作目录联想的滚动句柄（列表内滚动与滚动条）
     pub workspace_suggest_scroll: ScrollHandle,
     /// 工作目录面板当前查看的文件路径
@@ -312,6 +316,8 @@ impl AmuxApp {
             activities_scroll: ScrollHandle::new(),
             plan_scroll: ScrollHandle::new(),
             expanded_activities: HashSet::new(),
+            workspace_recent_open: false,
+            workspace_recent_scroll: ScrollHandle::new(),
             workspace_suggest_scroll: ScrollHandle::new(),
             workspace_file: None,
             workspace_tree_visible: true,
@@ -949,7 +955,8 @@ impl AmuxApp {
     /// 全部条目；输入 `…/tom` 列出其父目录下与 `tom` 前缀匹配的条目。
     ///
     /// 每次输入都实时拉取该目录的条目（不按目录缓存，目录内的增删要立刻反映）；
-    /// 应答回来时若目录已变则丢弃，否则按最新前缀过滤。
+    /// 应答回来时若目录已变则丢弃，否则按最新前缀过滤。联想优先于最近目录下拉，
+    /// 避免两层浮层叠加；输入清空时恢复最近目录下拉（交互参考旧桌面应用）。
     fn refresh_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
         let text = self.workspace_input.read(cx).value().to_string();
         let machine = self.with_core(|core| core.new_session.machine.clone());
@@ -959,9 +966,18 @@ impl AmuxApp {
                 core.new_session.suggestions.clear();
                 core.new_session.suggestion_dir = None;
             });
+            if text.trim().is_empty() {
+                let has_recent = self.with_core(|core| {
+                    core.recent_workspaces.iter().any(|workspace| {
+                        core.new_session.machine.as_deref() == Some(workspace.machine.as_str())
+                    })
+                });
+                self.workspace_recent_open = has_recent;
+            }
             cx.notify();
             return;
         };
+        self.workspace_recent_open = false;
         let dir = dir.to_string();
         let prefix = prefix.to_string();
         self.with_core(|core| {
