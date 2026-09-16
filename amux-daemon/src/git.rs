@@ -73,9 +73,8 @@ fn cwd_relative_path(workdir: &Path, cwd: &str, repo_path: &str) -> String {
     }
 }
 
-/// 单文件 unified diff 汇总：完整 patch 文本 + 按 hunk 拆分的可独立反向应用 patch。
+/// 单文件 unified diff 汇总：按 hunk 拆分的改动内容。
 struct FilePatch {
-    patch: String,
     hunks: Vec<GitDiffHunk>,
     additions: u32,
     deletions: u32,
@@ -107,7 +106,7 @@ fn worktree_entry_kind(path: &Path) -> Option<gix::object::tree::EntryKind> {
     }
 }
 
-/// 统一 diff 渲染收集器：UnifiedDiff 逐个 hunk 回调，收集行级数据用于自拼 patch 文本。
+/// 统一 diff 渲染收集器：UnifiedDiff 逐个 hunk 回调，收集行级数据。
 type HunkLines = Vec<(DiffLineKind, Vec<u8>)>;
 
 #[derive(Default)]
@@ -158,30 +157,14 @@ fn diff_line_kind(kind: DiffLineKind) -> GitDiffLineKind {
     }
 }
 
-/// 逐行渲染 hunk 体（前缀 + 行内容 + 换行）。
-fn hunk_body_text(lines: &[GitDiffLine]) -> String {
-    let mut out = String::new();
-    for line in lines {
-        out.push(line.kind.prefix());
-        out.push_str(&line.text);
-        out.push('\n');
-    }
-    out
-}
-
-/// 按行数（以 `\n` 计）与每行内容构造整文件新增/删除 patch（空的一侧只有一个 hunk）。
-fn whole_file_patch(path: &str, bytes: &[u8], added: bool) -> FilePatch {
+/// 整文件新增/删除：整份文件内容为一个 hunk（空的一侧没有 hunk）。
+fn whole_file_patch(bytes: &[u8], added: bool) -> FilePatch {
     let text = String::from_utf8_lossy(bytes);
     let mut lines: Vec<&str> = text.split('\n').collect();
     if lines.last() == Some(&"") {
         lines.pop();
     }
     let n = lines.len() as u32;
-    let header = if added {
-        format!("diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n")
-    } else {
-        format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ /dev/null\n")
-    };
     let hunk_hdr = if added {
         format!("@@ -0,0 +1,{n} @@\n")
     } else {
@@ -199,16 +182,11 @@ fn whole_file_patch(path: &str, bytes: &[u8], added: bool) -> FilePatch {
             text: line.to_string(),
         })
         .collect();
-    let body = hunk_body_text(&lines);
-    let patch = format!("{header}{hunk_hdr}{body}");
-    let hunk_patch = patch.clone();
     let hunks = vec![GitDiffHunk {
         header: hunk_hdr.trim_end().to_string(),
-        patch: hunk_patch,
         lines,
     }];
     FilePatch {
-        patch,
         hunks,
         additions: if added { n } else { 0 },
         deletions: if added { 0 } else { n },
@@ -256,12 +234,10 @@ fn modified_patch(
             );
             ud.consume().ok()?
         }
-        // 二进制等不可行内 diff 的资源：无 hunk，仅文件头（与 `git diff` 无内容时的表现一致）。
+        // 二进制等不可行内 diff 的资源：无 hunk（与 `git diff` 无内容时的表现一致）。
         Operation::SourceOrDestinationIsBinary => Vec::new(),
         Operation::ExternalCommand { .. } => unreachable!("内部 diff 选项已强制，不应走外部命令"),
     };
-    let header = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n");
-    let mut patch = header;
     let mut hunks = Vec::new();
     let mut additions = 0u32;
     let mut deletions = 0u32;
@@ -282,16 +258,9 @@ fn modified_patch(
                 text: String::from_utf8_lossy(content).into_owned(),
             })
             .collect();
-        let hunk_text = format!("{header}\n{}", hunk_body_text(&lines));
-        hunks.push(GitDiffHunk {
-            header: header.clone(),
-            patch: format!("{}{}", patch, hunk_text),
-            lines,
-        });
-        patch.push_str(&hunk_text);
+        hunks.push(GitDiffHunk { header, lines });
     }
     Some(FilePatch {
-        patch,
         hunks,
         additions,
         deletions,
@@ -434,14 +403,14 @@ impl GitRunner {
                     let Some(bytes) = worktree_bytes(&abs) else {
                         continue;
                     };
-                    whole_file_patch(&p_str, &bytes, true)
+                    whole_file_patch(&bytes, true)
                 }
                 (Some((old_id, _)), None) => {
                     let bytes = repo
                         .find_blob(*old_id)
                         .map(|b| b.data.to_vec())
                         .unwrap_or_default();
-                    whole_file_patch(&p_str, &bytes, false)
+                    whole_file_patch(&bytes, false)
                 }
                 (None, None) => continue,
             };
@@ -455,7 +424,6 @@ impl GitRunner {
                 status,
                 additions: fp.additions,
                 deletions: fp.deletions,
-                patch: fp.patch,
                 hunks: fp.hunks,
             });
         }
@@ -640,6 +608,16 @@ mod tests {
             .any(|f| f.path == "new.txt" && matches!(f.status, GitChangeStatus::Added)));
     }
 
+    /// 文件各 hunk 的内容行（不含前缀），供断言改动文本。
+    fn content_of(file: &GitDiffFile) -> String {
+        file.hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn diff_includes_untracked_files() {
         let dir = init_repo();
@@ -651,7 +629,7 @@ mod tests {
             .find(|file| file.path == "untracked.txt")
             .expect("未跟踪文件应出现在 diff 中");
         assert!(matches!(file.status, GitChangeStatus::Added));
-        assert!(file.patch.contains("not staged"));
+        assert!(content_of(file).contains("not staged"));
     }
 
     #[cfg(unix)]
@@ -670,8 +648,8 @@ mod tests {
             .iter()
             .find(|file| file.path == "untracked-link")
             .expect("未跟踪符号链接应出现在 diff 中");
-        assert!(untracked.patch.contains("secret.txt"));
-        assert!(!untracked.patch.contains("must not leak"));
+        assert!(content_of(untracked).contains("secret.txt"));
+        assert!(!content_of(untracked).contains("must not leak"));
 
         std::fs::remove_file(dir.join("a.txt")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("a.txt")).unwrap();
@@ -681,8 +659,8 @@ mod tests {
             .iter()
             .find(|file| file.path == "a.txt")
             .expect("被符号链接替换的 tracked 文件应出现在 diff 中");
-        assert!(replaced.patch.contains("secret.txt"));
-        assert!(!replaced.patch.contains("must not leak"));
+        assert!(content_of(replaced).contains("secret.txt"));
+        assert!(!content_of(replaced).contains("must not leak"));
     }
 
     #[test]
@@ -705,10 +683,9 @@ mod tests {
         assert_eq!(a.additions, 2);
         assert_eq!(a.deletions, 1);
         assert!(matches!(a.status, GitChangeStatus::Modified));
-        assert!(a.patch.contains("diff --git a/a.txt b/a.txt"));
         assert_eq!(a.hunks.len(), 1);
         assert!(a.hunks[0].header.starts_with("@@ "));
-        assert!(a.hunks[0].patch.contains("diff --git"));
+        assert!(content_of(a).contains("CHANGED"));
         let n = d
             .files
             .iter()

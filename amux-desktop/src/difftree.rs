@@ -105,7 +105,6 @@ mod tests {
             status: GitChangeStatus::Modified,
             additions: 1,
             deletions: 1,
-            patch: String::new(),
             hunks: Vec::new(),
         }
     }

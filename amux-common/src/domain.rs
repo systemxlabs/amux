@@ -211,14 +211,12 @@ pub enum GitChangeStatus {
     Deleted,
 }
 
-/// 单个 diff hunk（改动审查中可选中的最小单位）。
+/// 单个 diff hunk（改动审查中可选中的最小单位；引用代码块时取它的内容）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitDiffHunk {
     pub header: String,
-    /// 完整 patch 文本（含文件头 + 该 hunk），作为选中内容发送给 agent
-    pub patch: String,
-    /// hunk 行，供 inline 展示
+    /// hunk 行，供 inline 展示与引用
     pub lines: Vec<GitDiffLine>,
 }
 
@@ -259,8 +257,6 @@ pub struct GitDiffFile {
     pub status: GitChangeStatus,
     pub additions: u32,
     pub deletions: u32,
-    /// 完整 patch 文本（含全部 hunk），作为选中内容发送给 agent
-    pub patch: String,
     pub hunks: Vec<GitDiffHunk>,
 }
 
