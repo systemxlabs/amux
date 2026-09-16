@@ -39,6 +39,7 @@ pub async fn run(
     history: Vec<Message>,
     tools: &dyn Tools,
 ) -> Result<String, String> {
+    let additional_params = effort_params(config);
     match config.api_format {
         ApiFormat::ChatCompletions => {
             let client = openai(config)?;
@@ -49,6 +50,7 @@ pub async fn run(
                 preamble,
                 history,
                 tools,
+                additional_params,
             )
             .await
         }
@@ -59,6 +61,7 @@ pub async fn run(
                 preamble,
                 history,
                 tools,
+                additional_params,
             )
             .await
         }
@@ -73,10 +76,25 @@ pub async fn run(
                 preamble,
                 history,
                 tools,
+                additional_params,
             )
             .await
         }
     }
+}
+
+/// 推理级别映射到各 API 线缆上的字段：chat_completions 为 `reasoning_effort`，
+/// responses 为 `reasoning.effort`，messages 为 `output_config.effort`；空串则不携带。
+fn effort_params(config: &OrchestratorConfig) -> Option<serde_json::Value> {
+    let effort = config.effort.trim();
+    if effort.is_empty() {
+        return None;
+    }
+    Some(match config.api_format {
+        ApiFormat::ChatCompletions => serde_json::json!({ "reasoning_effort": effort }),
+        ApiFormat::Responses => serde_json::json!({ "reasoning": { "effort": effort } }),
+        ApiFormat::Messages => serde_json::json!({ "output_config": { "effort": effort } }),
+    })
 }
 
 fn openai(config: &OrchestratorConfig) -> Result<rig_core::providers::openai::Client, String> {
@@ -92,6 +110,7 @@ async fn tool_loop<M>(
     preamble: &str,
     mut history: Vec<Message>,
     tools: &dyn Tools,
+    additional_params: Option<serde_json::Value>,
 ) -> Result<String, String>
 where
     M: CompletionModel + Clone + 'static,
@@ -104,6 +123,7 @@ where
             .preamble(preamble.to_string())
             .messages(history.iter().cloned())
             .tools(definitions.clone())
+            .additional_params_opt(additional_params.clone())
             .build();
         let response = model
             .completion(request)
@@ -236,13 +256,44 @@ mod tests {
             MockTurn::text("完成"),
         ]);
         let tools = RecordingTools::default();
-        let text = tool_loop(model, "系统提示词", vec![Message::user("开始")], &tools)
-            .await
-            .unwrap();
+        let text = tool_loop(
+            model,
+            "系统提示词",
+            vec![Message::user("开始")],
+            &tools,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(text, "完成");
         assert_eq!(
             tools.seen.lock().unwrap().as_slice(),
             ["thinking:先看关联会话", "tool_call:list_sessions"]
         );
+    }
+
+    #[test]
+    fn effort_maps_to_each_api_format() {
+        let config = |api_format, effort: &str| OrchestratorConfig {
+            api_format,
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            effort: effort.to_string(),
+        };
+        assert_eq!(
+            effort_params(&config(ApiFormat::ChatCompletions, "high")),
+            Some(serde_json::json!({ "reasoning_effort": "high" }))
+        );
+        assert_eq!(
+            effort_params(&config(ApiFormat::Responses, "high")),
+            Some(serde_json::json!({ "reasoning": { "effort": "high" } }))
+        );
+        assert_eq!(
+            effort_params(&config(ApiFormat::Messages, "high")),
+            Some(serde_json::json!({ "output_config": { "effort": "high" } }))
+        );
+        assert_eq!(effort_params(&config(ApiFormat::Responses, "")), None);
+        assert_eq!(effort_params(&config(ApiFormat::Responses, "  ")), None);
     }
 }

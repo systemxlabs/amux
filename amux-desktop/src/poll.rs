@@ -214,6 +214,13 @@ async fn refresh_open(
                 }
             }
             if due_terminal && terminal_open {
+                // 终端列表无活动终端时也要刷新（重开会话后列出已有终端、退出状态等）
+                if let Ok(terminals) = client.terminals(id).await {
+                    let mut core = core.lock();
+                    if core.open.as_ref() == Some(target) {
+                        core.view.detail.terminals = terminals;
+                    }
+                }
                 if let Some(terminal_id) = terminal {
                     if let Ok(output) = client.terminal_output(id, &terminal_id, Some(cursor)).await
                     {
@@ -231,12 +238,6 @@ async fn refresh_open(
                             }
                             core.view.detail.terminal_output.extend_from_slice(&bytes);
                             core.last.terminal_cursor = output.next_cursor;
-                        }
-                    }
-                    if let Ok(terminals) = client.terminals(id).await {
-                        let mut core = core.lock();
-                        if core.open.as_ref() == Some(target) {
-                            core.view.detail.terminals = terminals;
                         }
                     }
                 }

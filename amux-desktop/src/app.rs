@@ -19,6 +19,7 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::*;
 use parking_lot::Mutex;
 
+use crate::client::Client;
 use crate::config::{self, Connection};
 use crate::dialog::{self, FormTarget};
 use crate::panels;
@@ -1089,21 +1090,28 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 打开终端视图（首次打开时创建终端）。
+    /// 打开终端面板：刷新终端列表并选中当前（或首个）终端，没有则创建一个。
     pub fn open_terminal(&mut self, cx: &mut Context<Self>) {
-        let (client, open, existing) = self.with_core(|core| {
-            (
-                core.client.clone(),
-                core.open.clone(),
-                core.view.detail.active_terminal.clone(),
-            )
-        });
+        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
         let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
             return;
         };
         self.with_core(|core| core.side_panel = Some(SidePanel::Terminal));
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
+            if let Ok(terminals) = client.terminals(&id).await {
+                core.lock().view.detail.terminals = terminals;
+            }
+            if core.lock().view.detail.active_terminal.is_some() {
+                return;
+            }
+            let existing = core
+                .lock()
+                .view
+                .detail
+                .terminals
+                .first()
+                .map(|terminal| terminal.id.clone());
             match existing {
                 Some(terminal) => {
                     let mut core = core.lock();
@@ -1112,17 +1120,21 @@ impl AmuxApp {
                     core.last.terminal_cursor = 0;
                     core.last.terminal = None;
                 }
-                None => match client.open_terminal(&id, None, 100, 30).await {
-                    Ok(terminal) => {
-                        let mut core = core.lock();
-                        core.view.detail.terminal_output.clear();
-                        core.view.detail.active_terminal = Some(terminal);
-                        core.last.terminal_cursor = 0;
-                        core.last.terminal = None;
-                    }
-                    Err(error) => core.lock().note(format!("打开终端失败：{error}")),
-                },
+                None => create_terminal(&client, &core, &id).await,
             }
+        });
+        cx.notify();
+    }
+
+    /// 新建终端：无论已有多少终端都再创建一个（PRD「可创建多个终端」）。
+    pub fn new_terminal(&mut self, cx: &mut Context<Self>) {
+        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
+        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            create_terminal(&client, &core, &id).await;
         });
         cx.notify();
     }
@@ -1762,5 +1774,24 @@ pub fn text_input(state: &Entity<InputState>) -> Input {
 fn toggle_set<T: std::hash::Hash + Eq>(set: &mut HashSet<T>, value: T) {
     if !set.remove(&value) {
         set.insert(value);
+    }
+}
+
+/// 创建一个终端并设为当前终端。
+async fn create_terminal(client: &Client, core: &SharedCore, session: &str) {
+    match client.open_terminal(session, None, 100, 30).await {
+        Ok(terminal) => {
+            {
+                let mut core = core.lock();
+                core.view.detail.terminal_output.clear();
+                core.view.detail.active_terminal = Some(terminal);
+                core.last.terminal_cursor = 0;
+                core.last.terminal = None;
+            }
+            if let Ok(terminals) = client.terminals(session).await {
+                core.lock().view.detail.terminals = terminals;
+            }
+        }
+        Err(error) => core.lock().note(format!("打开终端失败：{error}")),
     }
 }

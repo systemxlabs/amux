@@ -1024,7 +1024,7 @@ pub fn render_right(
                     .xsmall()
                     .ghost()
                     .label("新建终端")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.new_terminal(cx))),
             );
             let active = core.view.detail.active_terminal.clone();
             for terminal in &core.view.detail.terminals {
