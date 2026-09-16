@@ -93,6 +93,10 @@ impl SessionService {
     }
 
     /// 新建会话：仅在 Server 侧写入；worktree 方式立即在机器上创建。
+    ///
+    /// 不再校验 agent 是否可用：新建会话视图只允许选择已发现的可用 agent，真正不可用
+    /// 时会在发送指令时暴露。落库与最近工作目录记录都是阻塞 I/O，放到阻塞线程池执行，
+    /// 不占用 async 执行器；仍在响应前完成，保证返回的会话立即可读。
     pub async fn create(
         &self,
         machine: &str,
@@ -100,16 +104,6 @@ impl SessionService {
         workspace: &str,
         use_worktree: bool,
     ) -> Result<Session, String> {
-        let available = self
-            .machines
-            .agents(machine)
-            .await
-            .map_err(|_| "机器未连接".to_string())?
-            .into_iter()
-            .any(|item| item.name == agent && item.available);
-        if !available {
-            return Err(format!("agent 不可用: {agent}@{machine}"));
-        }
         let worktree_dir = if use_worktree {
             self.machines.worktree_new(machine, workspace).await?
         } else {
@@ -127,9 +121,24 @@ impl SessionService {
             created_at: now,
             updated_at: now,
         };
-        self.store.insert_session(&session)?;
-        self.config.record_workspace(machine, workspace);
-        log::info!("会话已创建: {} ({}@{})", session.id, agent, machine);
+        let store = Arc::clone(&self.store);
+        let config = Arc::clone(&self.config);
+        let machine = machine.to_string();
+        let workspace = workspace.to_string();
+        let to_store = session.clone();
+        tokio::task::spawn_blocking(move || {
+            let stored = store.insert_session(&to_store);
+            config.record_workspace(&machine, &workspace);
+            stored
+        })
+        .await
+        .map_err(|error| format!("写入会话任务失败: {error}"))??;
+        log::info!(
+            "会话已创建: {} ({}@{})",
+            session.id,
+            session.agent,
+            session.machine
+        );
         Ok(session)
     }
 
