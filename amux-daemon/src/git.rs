@@ -3,6 +3,12 @@
 //!   无本地化输出解析
 //! - gitoxide 无等价能力处保留 git CLI：worktree 新增/删除/重建（gix-worktree
 //!   仅有列出能力，无增删管理）
+//!
+//! 依赖上用 `gix` 伞 crate（只开 status / sha1 两个特性）而非拼装细粒度子 crate：
+//! 这里需要的是「仓库访问 + status（含 dirwalk、忽略规则、attributes、过滤）」这一整
+//! 套跨子系统能力，正是伞 crate 的 status 特性所封装的部分；改用细粒度子 crate 得自己
+//! 复刻那几百行装配，收益仅是去掉伞 crate 作为非可选依赖带进来的 gix-protocol /
+//! gix-revision 等（本项目用不到），代价与收益不成比例，故保留伞 crate。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
