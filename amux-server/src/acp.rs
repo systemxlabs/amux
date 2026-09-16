@@ -134,6 +134,8 @@ enum Call {
 /// 一条 ACP 连接（`(machine, agent)` 维度）。
 pub struct AgentConnection {
     calls: mpsc::Sender<Call>,
+    /// Agent 是否在 initialize 时声明支持 `session/delete`。
+    supports_delete: bool,
 }
 
 impl AgentConnection {
@@ -190,6 +192,10 @@ impl AgentConnection {
     }
 
     pub async fn delete(&self, agent_session_id: &str) -> Result<(), String> {
+        if !self.supports_delete {
+            log::debug!("Agent 不支持 session/delete，跳过: {agent_session_id}");
+            return Ok(());
+        }
         let (tx, rx) = oneshot::channel();
         self.send(Call::Delete {
             agent_session_id: agent_session_id.to_string(),
@@ -221,6 +227,17 @@ impl AgentConnection {
     }
 }
 
+/// Agent 是否声明支持 `session/delete`（docs/DESIGN.md「普通会话删除」）。
+fn supports_session_delete(
+    capabilities: &agent_client_protocol::schema::v2::AgentCapabilities,
+) -> bool {
+    capabilities
+        .session
+        .as_ref()
+        .and_then(|session| session.delete.as_ref())
+        .is_some()
+}
+
 /// 建立与某 agent 的 ACP 连接：桥接 Daemon 通道、完成 initialize 后返回句柄。
 pub async fn connect(
     machine: &str,
@@ -230,7 +247,7 @@ pub async fn connect(
     events: mpsc::Sender<AcpEvent>,
 ) -> Result<Arc<AgentConnection>, String> {
     let (calls_tx, mut calls_rx) = mpsc::channel::<Call>(64);
-    let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, String>>();
     let machine_name = machine.to_string();
     let agent_name = agent.to_string();
     let buffers = Arc::new(Mutex::new(HashMap::<(String, String), String>::new()));
@@ -274,13 +291,18 @@ pub async fn connect(
                         Implementation::new("amux-server", env!("CARGO_PKG_VERSION")),
                     )
                     .capabilities(ClientCapabilities::default());
-                    if let Err(error) = cx.send_request(initialize).block_task().await {
-                        let message = format!("initialize 失败: {error}");
-                        let _ = ready_tx.send(Err(message.clone()));
-                        return Err(agent_client_protocol::util::internal_error(message));
+                    match cx.send_request(initialize).block_task().await {
+                        Ok(response) => {
+                            let supports_delete = supports_session_delete(&response.capabilities);
+                            let _ = ready_tx.send(Ok(supports_delete));
+                            log::info!("ACP 连接就绪: {agent_name}@{machine_name}");
+                        }
+                        Err(error) => {
+                            let message = format!("initialize 失败: {error}");
+                            let _ = ready_tx.send(Err(message.clone()));
+                            return Err(agent_client_protocol::util::internal_error(message));
+                        }
                     }
-                    let _ = ready_tx.send(Ok(()));
-                    log::info!("ACP 连接就绪: {agent_name}@{machine_name}");
 
                     while let Some(call) = calls_rx.recv().await {
                         handle_call(call, &cx).await;
@@ -292,10 +314,14 @@ pub async fn connect(
         log::info!("ACP 连接结束: {agent_name}@{machine_name} ({result:?})");
     });
 
-    ready_rx
+    let supports_delete = ready_rx
         .await
-        .map_err(|_| "ACP 连接启动失败".to_string())?
-        .map(|_| Arc::new(AgentConnection { calls: calls_tx }))
+        .map_err(|_| "ACP 连接启动失败".to_string())
+        .and_then(|result| result)?;
+    Ok(Arc::new(AgentConnection {
+        calls: calls_tx,
+        supports_delete,
+    }))
 }
 
 /// Daemon `acp` 通知 ↔ SDK `Lines` 传输的桥。
@@ -813,6 +839,18 @@ mod tests {
         assert_eq!(append(&buffers, "s1", "m2", "x"), "x");
         // 整条快照替换累积内容；清空后为空串
         assert_eq!(replace(&buffers, "s1", "m1", None), "");
+    }
+
+    #[test]
+    fn session_delete_supported_only_when_advertised() {
+        use agent_client_protocol::schema::v2::{
+            AgentCapabilities, SessionCapabilities, SessionDeleteCapabilities,
+        };
+        assert!(!supports_session_delete(&AgentCapabilities::new()));
+
+        let caps = AgentCapabilities::new()
+            .session(SessionCapabilities::new().delete(SessionDeleteCapabilities::new()));
+        assert!(supports_session_delete(&caps));
     }
 
     #[test]

@@ -550,13 +550,15 @@ impl WorkflowTools {
             "read_session_history" => {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
-                let (items, _) = services.sessions.history(&session_id, PAGE_LIMIT, 0);
+                let (limit, offset) = page_arg(&arguments);
+                let (items, _) = services.sessions.history(&session_id, limit, offset);
                 Ok(serde_json::to_string(&items).unwrap_or_default())
             }
             "read_session_activities" => {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
-                let (activities, _) = services.sessions.activities(&session_id, PAGE_LIMIT, 0);
+                let (limit, offset) = page_arg(&arguments);
+                let (activities, _) = services.sessions.activities(&session_id, limit, offset);
                 Ok(serde_json::to_string(&activities).unwrap_or_default())
             }
             other => Err(format!("未知工具: {other}")),
@@ -601,10 +603,28 @@ fn string_arg(arguments: &serde_json::Value, key: &str) -> Result<String, String
         .ok_or_else(|| format!("缺少参数 {key}"))
 }
 
+/// 分页参数（默认 limit = PAGE_LIMIT，offset = 0）。
+fn page_arg(arguments: &serde_json::Value) -> (usize, usize) {
+    let limit = arguments
+        .get("limit")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or(PAGE_LIMIT)
+        .max(1);
+    let offset = arguments
+        .get("offset")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or(0);
+    (limit, offset)
+}
+
 /// 编排工具清单（docs/DESIGN.md「编排智能体」工具表）。
 fn tool_definitions() -> Vec<ToolDefinition> {
     let string =
         |description: &str| serde_json::json!({ "type": "string", "description": description });
+    let integer =
+        |description: &str| serde_json::json!({ "type": "integer", "description": description });
     vec![
         ToolDefinition {
             name: "list_agents".into(),
@@ -688,7 +708,11 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             description: "分页读取指定关联普通会话的对话内容".into(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": { "session": string("关联普通会话 id") },
+                "properties": {
+                    "session": string("关联普通会话 id"),
+                    "limit": integer(&format!("每页条数，缺省 {PAGE_LIMIT}")),
+                    "offset": integer("跳过的条数，缺省 0")
+                },
                 "required": ["session"]
             }),
         },
@@ -697,7 +721,11 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             description: "分页读取指定关联普通会话的活动内容".into(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": { "session": string("关联普通会话 id") },
+                "properties": {
+                    "session": string("关联普通会话 id"),
+                    "limit": integer(&format!("每页条数，缺省 {PAGE_LIMIT}")),
+                    "offset": integer("跳过的条数，缺省 0")
+                },
                 "required": ["session"]
             }),
         },
@@ -811,6 +839,25 @@ mod tests {
         ] {
             assert!(names.contains(&expected.to_string()), "缺少工具 {expected}");
         }
+    }
+
+    #[test]
+    fn page_arg_parses_limit_and_offset_with_defaults() {
+        assert_eq!(page_arg(&serde_json::json!({})), (PAGE_LIMIT, 0));
+        assert_eq!(
+            page_arg(&serde_json::json!({ "limit": 50, "offset": 100 })),
+            (50, 100)
+        );
+        // limit 缺省按默认窗口，offset 缺省为 0
+        assert_eq!(
+            page_arg(&serde_json::json!({ "offset": 10 })),
+            (PAGE_LIMIT, 10)
+        );
+        // 非法 limit 不 panic，退回默认
+        assert_eq!(
+            page_arg(&serde_json::json!({ "limit": "x" })),
+            (PAGE_LIMIT, 0)
+        );
     }
 
     #[test]

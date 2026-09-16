@@ -46,16 +46,16 @@ impl Store {
         self.sessions
             .lock()
             .execute(
-                "INSERT INTO sessions (id, machine, agent, title, state, workspace, worktree_dir, agent_session_id, created_at, updated_at)
+                "INSERT INTO sessions (id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
                 params![
                     session.id,
-                    session.machine,
-                    session.agent,
-                    session.title,
                     session.state.as_str(),
+                    session.title,
                     session.workspace,
                     session.worktree_dir,
+                    session.machine,
+                    session.agent,
                     session.created_at as i64,
                     session.updated_at as i64,
                 ],
@@ -68,7 +68,7 @@ impl Store {
         self.sessions
             .lock()
             .query_row(
-                "SELECT id, machine, agent, title, state, workspace, worktree_dir, agent_session_id, created_at, updated_at
+                "SELECT id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 row_to_session,
@@ -82,7 +82,7 @@ impl Store {
     pub fn sessions_all(&self) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, machine, agent, title, state, workspace, worktree_dir, agent_session_id, created_at, updated_at
+            "SELECT id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions ORDER BY updated_at DESC",
         ) {
             Ok(stmt) => stmt,
@@ -96,7 +96,7 @@ impl Store {
     pub fn sessions_page(&self, limit: usize, offset: usize) -> (Vec<Session>, bool) {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, machine, agent, title, state, workspace, worktree_dir, agent_session_id, created_at, updated_at
+            "SELECT id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions
              WHERE id NOT IN (SELECT session_id FROM linked_sessions)
              ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
@@ -114,7 +114,7 @@ impl Store {
     pub fn sessions_of_agent(&self, machine: &str, agent: &str) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, machine, agent, title, state, workspace, worktree_dir, agent_session_id, created_at, updated_at
+            "SELECT id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions WHERE machine = ?1 AND agent = ?2",
         ) {
             Ok(stmt) => stmt,
@@ -432,18 +432,41 @@ impl Store {
     }
 
     pub fn linked_sessions(&self, workflow_id: &str) -> Vec<String> {
-        let conn = self.workflows.lock();
-        let mut stmt = match conn
-            .prepare("SELECT session_id FROM workflow_linked_sessions WHERE workflow_id = ?1")
-        {
-            Ok(stmt) => stmt,
-            Err(_) => return Vec::new(),
+        let ids: Vec<String> = {
+            let conn = self.workflows.lock();
+            let mut stmt = match conn
+                .prepare("SELECT session_id FROM workflow_linked_sessions WHERE workflow_id = ?1")
+            {
+                Ok(stmt) => stmt,
+                Err(_) => return Vec::new(),
+            };
+            let rows = stmt.query_map(params![workflow_id], |row| row.get::<_, String>(0));
+            match rows {
+                Ok(rows) => rows.flatten().collect(),
+                Err(_) => return Vec::new(),
+            }
         };
-        let rows = stmt.query_map(params![workflow_id], |row| row.get::<_, String>(0));
-        match rows {
-            Ok(rows) => rows.flatten().collect(),
-            Err(_) => Vec::new(),
-        }
+
+        // 关联普通会话按其自身最近活跃（updated_at）排序（docs/PRD.md「工作流会话」）。
+        let mut sessions: Vec<(String, u64)> = ids
+            .into_iter()
+            .filter_map(|session_id| {
+                let updated_at = self
+                    .sessions
+                    .lock()
+                    .query_row(
+                        "SELECT updated_at FROM sessions WHERE id = ?1",
+                        params![session_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()?;
+                Some((session_id, updated_at as u64))
+            })
+            .collect();
+        sessions.sort_by_key(|(_, updated_at)| std::cmp::Reverse(*updated_at));
+        sessions.into_iter().map(|(id, _)| id).collect()
     }
 }
 
@@ -464,12 +487,12 @@ fn open_db(path: &Path) -> Result<Connection, String> {
         "PRAGMA journal_mode = WAL;
          CREATE TABLE IF NOT EXISTS sessions (
              id TEXT PRIMARY KEY,
+             state TEXT NOT NULL,
+             title TEXT,
+             workspace TEXT NOT NULL,
+             worktree_dir TEXT,
              machine TEXT NOT NULL,
              agent TEXT NOT NULL,
-             title TEXT NOT NULL,
-             state TEXT NOT NULL,
-             workspace TEXT NOT NULL,
-             worktree_dir TEXT NOT NULL,
              agent_session_id TEXT,
              created_at INTEGER NOT NULL,
              updated_at INTEGER NOT NULL
@@ -499,7 +522,7 @@ fn open_db(path: &Path) -> Result<Connection, String> {
          );
          CREATE TABLE IF NOT EXISTS workflows (
              id TEXT PRIMARY KEY,
-             title TEXT NOT NULL,
+             title TEXT,
              state TEXT NOT NULL,
              plan TEXT NOT NULL,
              created_at INTEGER NOT NULL,
@@ -516,15 +539,15 @@ fn open_db(path: &Path) -> Result<Connection, String> {
 }
 
 fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
-    let state: String = row.get(4)?;
+    let state: String = row.get(1)?;
     Ok(Session {
         id: row.get(0)?,
-        machine: row.get(1)?,
-        agent: row.get(2)?,
-        title: row.get(3)?,
         state: amux_common::domain::parse_session_state(&state).unwrap_or(SessionState::Idle),
-        workspace: row.get(5)?,
-        worktree_dir: row.get(6)?,
+        title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        workspace: row.get(3)?,
+        worktree_dir: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        machine: row.get(5)?,
+        agent: row.get(6)?,
         created_at: row.get::<_, i64>(8)? as u64,
         updated_at: row.get::<_, i64>(9)? as u64,
     })
@@ -534,7 +557,7 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRow> {
     let state: String = row.get(2)?;
     Ok(WorkflowRow {
         id: row.get(0)?,
-        title: row.get(1)?,
+        title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
         state: amux_common::domain::parse_session_state(&state).unwrap_or(SessionState::Idle),
         plan: row.get(3)?,
         created_at: row.get::<_, i64>(4)? as u64,
@@ -587,6 +610,24 @@ mod tests {
         );
         assert!(!has_more);
         assert_eq!(store.linked_sessions("w1"), ["s2"]);
+    }
+
+    #[test]
+    fn linked_sessions_sorted_by_session_updated_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        for (id, updated_at) in [("s1", 100u64), ("s2", 300), ("s3", 200)] {
+            let mut s = session(id, "pc", "codex");
+            s.updated_at = updated_at;
+            store.insert_session(&s).unwrap();
+        }
+        store.insert_workflow("w1", "wf", SessionState::Idle, "plan", 1);
+        // 按任意顺序关联，返回时应按各自最近活跃倒序
+        store.link_session("w1", "s3");
+        store.link_session("w1", "s1");
+        store.link_session("w1", "s2");
+
+        assert_eq!(store.linked_sessions("w1"), ["s2", "s3", "s1"]);
     }
 
     #[test]

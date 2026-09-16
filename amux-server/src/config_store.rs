@@ -34,6 +34,7 @@ impl ConfigStore {
     }
 
     pub fn set_skills(&self, skills: &[Skill]) -> Result<(), String> {
+        reject_duplicate_names(skills, |item| &item.name, "技能")?;
         write_json(&self.path("skills"), skills)
     }
 
@@ -42,6 +43,7 @@ impl ConfigStore {
     }
 
     pub fn set_workflow_plans(&self, plans: &[WorkflowPlanItem]) -> Result<(), String> {
+        reject_duplicate_names(plans, |item| &item.name, "工作流计划")?;
         write_json(&self.path("workflows"), plans)
     }
 
@@ -50,6 +52,7 @@ impl ConfigStore {
     }
 
     pub fn set_quick_commands(&self, commands: &[QuickCommand]) -> Result<(), String> {
+        reject_duplicate_names(commands, |item| &item.name, "快捷指令")?;
         write_json(&self.path("quick_commands"), commands)
     }
 
@@ -86,6 +89,22 @@ impl ConfigStore {
     fn path(&self, name: &str) -> PathBuf {
         self.home.join("config").join(format!("{name}.json"))
     }
+}
+
+/// 配置项 name 必须唯一（docs/DESIGN.md 各「存储」一节）。
+fn reject_duplicate_names<T>(
+    items: &[T],
+    name: impl Fn(&T) -> &str,
+    kind: &str,
+) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let name = name(item);
+        if !seen.insert(name) {
+            return Err(format!("{kind} name 重复: {name}"));
+        }
+    }
+    Ok(())
 }
 
 fn recent_path(home: &std::path::Path) -> PathBuf {
@@ -142,5 +161,53 @@ mod tests {
         let reopened = ConfigStore::new(dir.path().to_path_buf());
         assert_eq!(reopened.recent_workspaces().len(), 2);
         assert_eq!(reopened.skills()[0].name, "opencli");
+    }
+
+    #[test]
+    fn named_configs_reject_duplicate_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+
+        let skills = [
+            Skill {
+                name: "opencli".into(),
+                description: "a".into(),
+            },
+            Skill {
+                name: "opencli".into(),
+                description: "b".into(),
+            },
+        ];
+        assert!(store.set_skills(&skills).is_err(), "技能 name 重复应报错");
+
+        let plans = [
+            WorkflowPlanItem {
+                name: "w".into(),
+                plan: "p".into(),
+            },
+            WorkflowPlanItem {
+                name: "w".into(),
+                plan: "p2".into(),
+            },
+        ];
+        assert!(
+            store.set_workflow_plans(&plans).is_err(),
+            "工作流计划 name 重复应报错"
+        );
+
+        let commands = [
+            QuickCommand {
+                name: "c".into(),
+                prompt: "a".into(),
+            },
+            QuickCommand {
+                name: "c".into(),
+                prompt: "b".into(),
+            },
+        ];
+        assert!(
+            store.set_quick_commands(&commands).is_err(),
+            "快捷指令 name 重复应报错"
+        );
     }
 }
