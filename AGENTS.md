@@ -43,4 +43,4 @@
 | `amux-daemon` | Daemon 实现 |
 | `amux-server` | Server 实现 |
 | `amux-desktop` | 桌面应用 |
-| `amux-web` | Web 应用（待定） |
+| `amux-web` | Web 应用 |
