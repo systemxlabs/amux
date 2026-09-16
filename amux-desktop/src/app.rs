@@ -2378,13 +2378,15 @@ impl Render for AmuxApp {
             .relative()
             .bg(cx.theme().background)
             .child(self.render_title_bar(cx));
-        // 无法成功连接 Server 时进入登录页面，连接成功后由连接状态切到主页面
+        // 连接中整页转圈；连不上 Server 时进入登录页面，连接成功后切到主页面
         // （docs/PRD.md「登录页面」）
         if core.status == ConnectionStatus::Online {
             root = root.child(self.render_main_page(&core, cx));
             if core.settings_open {
                 root = root.child(settings::render_overlay(&core, self, cx));
             }
+        } else if core.status == ConnectionStatus::Connecting {
+            root = root.child(login::connecting(cx));
         } else {
             root = root.child(login::render(&core, self, cx));
         }

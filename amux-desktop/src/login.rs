@@ -5,11 +5,24 @@ use gpui_component::alert::Alert;
 use gpui_component::button::*;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
-use gpui_component::{v_flex, ActiveTheme, Disableable as _};
+use gpui_component::spinner::Spinner;
+use gpui_component::{v_flex, ActiveTheme, Disableable as _, Sizable as _};
 
 use crate::app::AmuxApp;
 use crate::state::{ConnectionStatus, Core};
 use crate::ui;
+
+/// 建立连接中：整页转圈（docs/PRD.md「登录页面」）。
+pub fn connecting(cx: &App) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .child(Spinner::new().large().color(theme.muted_foreground))
+        .into_any_element()
+}
 
 /// 登录页面：错误提示 + Server 地址 / token + 进入按钮。
 pub fn render(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
@@ -53,7 +66,6 @@ pub fn render(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> Any
                 .primary()
                 .w_full()
                 .label("进入")
-                .loading(matches!(core.status, ConnectionStatus::Connecting))
                 .disabled(!can_enter)
                 .on_click(cx.listener(|this, _, window, cx| this.login(window, cx))),
         );
