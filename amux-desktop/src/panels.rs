@@ -1051,20 +1051,13 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
             .iter()
             .all(|file| this.diff_collapsed_files.contains(&file.path));
 
+    // 工具栏（docs/PRD.md「改动审查视图」）：折叠/展开文件树按钮左对齐，折叠/展开 diff
+    // 区域按钮右对齐
     let toolbar = h_flex()
         .items_center()
         .gap_2()
         .px_3()
         .pb_2()
-        .child(div().flex_1())
-        .when(has_selection, |row| {
-            row.child(
-                Button::new("diff-clear-selection")
-                    .small()
-                    .label("清空选择")
-                    .on_click(cx.listener(|this, _, _, cx| this.clear_diff_selection(cx))),
-            )
-        })
         .child(
             Button::new("diff-toggle-tree")
                 .small()
@@ -1076,6 +1069,7 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx))),
         )
+        .child(div().flex_1())
         .child(
             Button::new("diff-toggle-changes")
                 .small()
@@ -1086,19 +1080,12 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
                     "折叠 diff"
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_all_diffs(cx))),
-        )
-        .child(
-            Button::new("diff-refresh")
-                .small()
-                .ghost()
-                .label("刷新改动")
-                .on_click(cx.listener(|this, _, _, cx| this.refresh_diff(cx))),
         );
 
     let body = if not_repo {
         ui::empty_hint("当前工作目录不是 git 仓库", &theme).into_any_element()
     } else if !loaded {
-        ui::empty_hint("点击「刷新改动」加载改动", &theme).into_any_element()
+        ui::empty_hint("正在加载改动…", &theme).into_any_element()
     } else if files.is_empty() {
         ui::empty_hint("暂无改动", &theme).into_any_element()
     } else {
@@ -1442,6 +1429,12 @@ fn diff_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
             ))
             .text_xs()
             .text_color(theme.muted_foreground),
+        )
+        .child(
+            Button::new("diff-clear-selection")
+                .small()
+                .label("清空选择")
+                .on_click(cx.listener(|this, _, _, cx| this.clear_diff_selection(cx))),
         )
         .child(div().flex_1())
         .child(
