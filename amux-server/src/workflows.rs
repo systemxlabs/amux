@@ -71,7 +71,7 @@ impl WorkflowService {
         let title = title.unwrap_or_else(|| generate_title(plan));
         self.store
             .insert_workflow(&id, &title, SessionState::Idle, plan, now_ms());
-        Ok(self.get(&id)?)
+        self.get(&id)
     }
 
     pub fn get(&self, id: &str) -> Result<Workflow, String> {

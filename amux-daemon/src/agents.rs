@@ -62,14 +62,14 @@ struct RunningAgent {
 
 pub struct AgentRegistry {
     agents: Mutex<HashMap<String, RunningAgent>>,
-    next_instance: Mutex<u64>,
+    next_instance: std::sync::atomic::AtomicU64,
 }
 
 impl AgentRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             agents: Mutex::new(HashMap::new()),
-            next_instance: Mutex::new(1),
+            next_instance: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -202,12 +202,9 @@ impl AgentRegistry {
             }
         });
 
-        let instance = {
-            let mut next = self.next_instance.lock();
-            let instance = *next;
-            *next += 1;
-            instance
-        };
+        let instance = self
+            .next_instance
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let registry = Arc::clone(self);
         let agent_name = agent.to_string();
         tokio::spawn(async move {

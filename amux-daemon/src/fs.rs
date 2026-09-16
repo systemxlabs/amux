@@ -25,9 +25,6 @@ impl FsBrowser {
         offset: usize,
     ) -> Result<FsListResult, String> {
         let dir = canonical_dir(path.unwrap_or(""))?;
-        if !dir.is_dir() {
-            return Err(format!("不是文件夹: {}", dir.display()));
-        }
 
         let mut entries = std::fs::read_dir(&dir)
             .map_err(|e| format!("读取目录失败: {e}"))?

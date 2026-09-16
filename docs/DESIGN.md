@@ -175,8 +175,7 @@ Daemon 在内存中仅存储终端元信息，终端输出由 Server 侧缓存�
 ### 技术栈
 
 - 基础库：`tokio` / `serde` / `serde_json`
-- WebSocket：`tokio-tungstenite`
-- HTTP: `axum`
+- HTTP & WebSocket: `axum`
 - SQLite：`rusqlite`
 - 编排智能体：`rig`
 - ACP：`agent-client-protocol` 官方 SDK
@@ -209,7 +208,7 @@ Server 作为 ACP client 与 Agents 通信
 - 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送指令或查询会话选项时，才向 Agent 发送 `session/new` 请求创建 agent 侧会话
 - 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 Agent 发送 `session/resume` 请求恢复 agent 侧已有会话
 - 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 Agent 发送 `session/set_config_option` 请求进行设置
-- 主动关闭长时间无活动会话：当会话长时间无活动（大于 1h）时，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，释放资源
+- 主动关闭长时间无活动会话：当会话长时间无新活动（大于 1h）且会话状态为空闲时，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，释放资源
 - 取消会话：当用户取消会话时，向 Agent 发送 `session/cancel` 通知来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，如果 Agent 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
 

@@ -535,11 +535,8 @@ impl AmuxApp {
 
     /// 打开列表条目（普通会话或工作流会话）。
     pub fn open_entry(&mut self, id: &str, cx: &mut Context<Self>) {
-        let is_workflow = self.with_core(|core| {
-            core.entries
-                .iter()
-                .any(|entry| matches!(entry, ListEntry::Workflow(workflow) if workflow.id == id))
-        });
+        let is_workflow =
+            self.with_core(|core| matches!(core.entry(id), Some(ListEntry::Workflow(_))));
         {
             let mut core = self.core.lock();
             if is_workflow {
@@ -571,13 +568,7 @@ impl AmuxApp {
 
     /// 开始行内重命名。
     pub fn begin_rename(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.with_core(|core| {
-            core.entries
-                .iter()
-                .find(|entry| entry.id() == id)
-                .map(|entry| entry.title())
-                .unwrap_or_default()
-        });
+        let current = self.with_core(|core| core.entry(id).map_or(String::new(), |e| e.title()));
         self.renaming_id = Some(id.to_string());
         let input = self.rename_input.clone();
         input.update(cx, |state, cx| state.set_value(current, window, cx));
@@ -602,13 +593,10 @@ impl AmuxApp {
             return;
         }
         let target = self.with_core(|core| {
-            core.entries
-                .iter()
-                .find(|entry| entry.id() == id)
-                .map(|entry| match entry {
-                    ListEntry::Session(_) => OpenTarget::Session(id.clone()),
-                    ListEntry::Workflow(_) => OpenTarget::Workflow(id.clone()),
-                })
+            core.entry(&id).map(|entry| match entry {
+                ListEntry::Session(_) => OpenTarget::Session(id.clone()),
+                ListEntry::Workflow(_) => OpenTarget::Workflow(id.clone()),
+            })
         });
         if let Some(target) = target {
             self.rename(target, title, cx);
@@ -1189,20 +1177,29 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 打开终端视图（首次打开时创建终端）。
+    /// 打开终端面板：刷新终端列表并选中当前（或首个）终端，没有则创建一个。
     pub fn open_terminal(&mut self, cx: &mut Context<Self>) {
-        let (client, open, existing) = self.with_core(|core| {
-            (
-                core.client.clone(),
-                core.open.clone(),
-                core.view.detail.active_terminal.clone(),
-            )
-        });
+        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
         let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
             return;
         };
+        self.with_core(|core| core.side_panel = Some(SidePanel::Terminal));
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
+            if let Ok(terminals) = client.terminals(&id).await {
+                core.lock().view.detail.terminals = terminals;
+            }
+            if core.lock().view.detail.active_terminal.is_some() {
+                return;
+            }
+            let existing = {
+                let core = core.lock();
+                core.view
+                    .detail
+                    .terminals
+                    .first()
+                    .map(|terminal| terminal.id.clone())
+            };
             match existing {
                 Some(terminal) => {
                     let mut core = core.lock();
@@ -1211,17 +1208,22 @@ impl AmuxApp {
                     core.last.terminal_cursor = 0;
                     core.last.terminal = None;
                 }
-                None => match client.open_terminal(&id, None, 68, 24).await {
-                    Ok(terminal) => {
-                        let mut core = core.lock();
-                        core.view.detail.terminal_output.clear();
-                        core.view.detail.active_terminal = Some(terminal);
-                        core.last.terminal_cursor = 0;
-                        core.last.terminal = None;
-                    }
-                    Err(error) => core.lock().error(format!("打开终端失败：{error}")),
-                },
+                None => create_terminal(&client, &core, &id).await,
             }
+        });
+        cx.notify();
+    }
+
+    /// 新建终端：无论已有多少终端都再创建一个（docs/PRD.md「可创建多个终端」）。
+    pub fn new_terminal(&mut self, cx: &mut Context<Self>) {
+        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
+        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
+            return;
+        };
+        self.with_core(|core| core.side_panel = Some(SidePanel::Terminal));
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            create_terminal(&client, &core, &id).await;
         });
         cx.notify();
     }
@@ -2071,6 +2073,25 @@ fn empty_orchestrator_config() -> OrchestratorConfig {
         api_key: String::new(),
         model: String::new(),
         effort: String::new(),
+    }
+}
+
+/// 创建一个终端并设为当前终端，随后刷新终端列表。
+async fn create_terminal(client: &crate::client::Client, core: &SharedCore, session: &str) {
+    match client.open_terminal(session, None, 100, 30).await {
+        Ok(terminal) => {
+            {
+                let mut core = core.lock();
+                core.view.detail.terminal_output.clear();
+                core.view.detail.active_terminal = Some(terminal);
+                core.last.terminal_cursor = 0;
+                core.last.terminal = None;
+            }
+            if let Ok(terminals) = client.terminals(session).await {
+                core.lock().view.detail.terminals = terminals;
+            }
+        }
+        Err(error) => core.lock().error(format!("打开终端失败：{error}")),
     }
 }
 

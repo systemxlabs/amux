@@ -985,7 +985,7 @@ fn terminal_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
             .icon(IconName::Plus)
             .tooltip("新建终端")
             .disabled(!online)
-            .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx))),
+            .on_click(cx.listener(|this, _, _, cx| this.new_terminal(cx))),
     );
 
     let body = if core.view.detail.terminals.is_empty() {

@@ -683,7 +683,7 @@ impl SessionService {
     pub async fn maintain(&self) {
         let now = now_ms();
         for session in self.store.sessions_all() {
-            if now.saturating_sub(session.updated_at) > IDLE_CLOSE_AFTER_MS {
+            if idle_expired(&session, now) {
                 if let Some(agent_session_id) = self.store.agent_session_id(&session.id) {
                     if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
                         conn.close(&agent_session_id).await;
@@ -701,5 +701,52 @@ impl SessionService {
                 log::info!("会话 worktree 过期清理: {}", session.id);
             }
         }
+    }
+}
+
+/// 是否关闭 agent 侧会话：会话空闲且长时间无新活动（docs/DESIGN.md「ACP 通信」）。
+///
+/// 工作中的 turn 可能长时间没有 agent 消息，thinking/tool_call 活动只写 activities 表、
+/// 不刷新会话活跃时间，因此必须同时要求空闲，否则长 turn 会被中途关闭。
+fn idle_expired(session: &Session, now: u64) -> bool {
+    session.state == SessionState::Idle
+        && now.saturating_sub(session.updated_at) > IDLE_CLOSE_AFTER_MS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(state: SessionState, updated_at: u64) -> Session {
+        Session {
+            id: "s1".into(),
+            machine: "pc".into(),
+            agent: "codex".into(),
+            title: String::new(),
+            state,
+            workspace: "/tmp".into(),
+            worktree_dir: String::new(),
+            created_at: 1,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn busy_session_is_never_closed() {
+        let now = 10 * IDLE_CLOSE_AFTER_MS;
+        assert!(!idle_expired(&session(SessionState::Busy, 0), now));
+    }
+
+    #[test]
+    fn idle_session_closed_after_one_hour() {
+        let now = 10 * IDLE_CLOSE_AFTER_MS;
+        assert!(!idle_expired(
+            &session(SessionState::Idle, now - IDLE_CLOSE_AFTER_MS),
+            now
+        ));
+        assert!(idle_expired(
+            &session(SessionState::Idle, now - IDLE_CLOSE_AFTER_MS - 1),
+            now
+        ));
     }
 }

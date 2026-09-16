@@ -4,8 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::GitDiffResult;
-
 /// Server → Daemon 的请求方法名。
 pub mod method {
     /// 获取当前机器信息（操作系统等）
@@ -126,9 +124,6 @@ pub struct WorktreePathParams {
 pub struct WorktreeListResult {
     pub worktrees: Vec<String>,
 }
-
-/// `git.diff` 结果。
-pub type GitDiffResponse = GitDiffResult;
 
 #[cfg(test)]
 mod tests {

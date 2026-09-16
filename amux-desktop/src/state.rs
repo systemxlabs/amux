@@ -19,6 +19,11 @@ pub const HISTORY_INTERVAL: Duration = Duration::from_secs(5);
 pub const ONGOING_INTERVAL: Duration = Duration::from_secs(2);
 pub const ACTIVITIES_INTERVAL: Duration = Duration::from_secs(10);
 pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
+/// 会话选项与斜杠命令：无独立视图，交互视图常驻需要（输入框下方的选项控件与斜杠补全）；
+/// 两者由 agent 侧异步推送，取与对话视图相同的周期。
+pub const OPTIONS_INTERVAL: Duration = Duration::from_secs(5);
+/// 会话上下文信息（会话详情面板）。
+pub const CONTEXT_INTERVAL: Duration = Duration::from_secs(10);
 pub const TERMINAL_INTERVAL: Duration = Duration::from_millis(500);
 /// 工作目录树：仅在面板打开且根目录尚未加载时拉取。
 pub const WORKSPACE_INTERVAL: Duration = Duration::from_secs(5);
@@ -370,6 +375,8 @@ pub struct Ticks {
     pub ongoing: Option<Instant>,
     pub activities: Option<Instant>,
     pub plan: Option<Instant>,
+    pub options: Option<Instant>,
+    pub context: Option<Instant>,
     pub workspace: Option<Instant>,
     pub terminal: Option<Instant>,
     pub terminal_cursor: u64,
@@ -422,6 +429,25 @@ impl Core {
     }
 
     /// 当前打开的是否为工作流会话。
+    /// 按 id 解析列表条目：工作流会话内关联的普通会话也是列表里的一行。
+    pub fn entry(&self, id: &str) -> Option<ListEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id() == id)
+            .cloned()
+            .or_else(|| {
+                self.entries.iter().find_map(|entry| match entry {
+                    ListEntry::Workflow(workflow) => workflow
+                        .linked_sessions
+                        .iter()
+                        .find(|session| session.id == id)
+                        .cloned()
+                        .map(ListEntry::Session),
+                    ListEntry::Session(_) => None,
+                })
+            })
+    }
+
     pub fn is_workflow(&self) -> bool {
         matches!(self.open, Some(OpenTarget::Workflow(_)))
     }
