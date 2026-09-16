@@ -535,32 +535,24 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
         }
     }
 
-    let mut content = v_flex().flex_1().min_w_0().h_full().gap_2();
-    if let Some(path) = &this.workspace_file {
-        content = content.child(
-            Label::new(path.clone())
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.foreground),
-        );
-    }
-    let mut body = v_flex().flex_1().min_h_0().overflow_y_scrollbar();
+    // 文件内容：不再重复展示文件路径（左侧树里选中项已能看出是哪个文件）
+    let mut content = v_flex().flex_1().min_w_0().h_full().overflow_y_scrollbar();
     match &core.view.detail.file_content {
         // 文本文件内容以围栏块渲染（等宽、保留空白）
         Some(text) => {
-            body = body.child(
+            content = content.child(
                 TextView::markdown("workspace-file-content", format!("```text\n{text}\n```"))
                     .selectable(true),
             );
         }
         None => {
-            body = body.child(
+            content = content.child(
                 Label::new("在左侧选择文件查看内容")
                     .text_sm()
                     .text_color(theme.muted_foreground),
             );
         }
     }
-    content = content.child(body);
 
     let mut body = h_flex().flex_1().min_h_0().gap_2().px_3().pb_3();
     if this.workspace_tree_visible {
