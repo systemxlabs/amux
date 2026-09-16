@@ -36,6 +36,8 @@ rig-core.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 reqwest.workspace = true
+# 编排工具循环用脚本化 completion model 驱动（rig 的 test-utils 仅在测试构建启用）
+rig-core = { workspace = true, features = ["test-utils"] }
 
 # 测试用模拟 ACP v2 agent（真实 stdio 路径，与 codex-acp-v2 等真实 agent 交互一致）
 [[bin]]

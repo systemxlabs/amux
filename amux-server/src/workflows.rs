@@ -14,6 +14,7 @@ use amux_common::domain::{
     StateChangeReason,
 };
 use parking_lot::Mutex;
+use rig_core::completion::message::ToolCall;
 use rig_core::completion::{Message, ToolDefinition};
 use uuid::Uuid;
 
@@ -119,14 +120,7 @@ impl WorkflowService {
         input: Vec<ContentBlock>,
     ) -> Result<(), String> {
         self.get(id)?;
-        let text: String = input
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        self.push_user(id, &text);
+        self.push_user(id, input);
         Ok(())
     }
 
@@ -214,16 +208,18 @@ impl WorkflowService {
             state_label(new_state),
             reason_label(reason)
         );
-        self.push_user(&workflow_id, &message);
+        self.push_user(&workflow_id, vec![ContentBlock::Text { text: message }]);
     }
 
     /// 推送一条用户消息：运行中进 steer，空闲则起一轮调度。
-    fn push_user(self: &Arc<Self>, workflow_id: &str, text: &str) {
+    fn push_user(self: &Arc<Self>, workflow_id: &str, content: Vec<ContentBlock>) {
+        // 编排对话只承载文本，非文本块不进 rig 历史
+        let text = blocks_text(&content);
         append_line(
             &self.history_path(workflow_id),
             &HistoryLine {
                 role: "user".to_string(),
-                content: text.to_string(),
+                content,
                 timestamp: now_ms(),
             },
         );
@@ -232,10 +228,10 @@ impl WorkflowService {
             let mut runs = self.runs.lock();
             let state = runs.entry(workflow_id.to_string()).or_default();
             if state.running {
-                state.steers.push(text.to_string());
+                state.steers.push(text);
                 true
             } else {
-                state.history.push(Message::user(text.to_string()));
+                state.history.push(Message::user(text));
                 false
             }
         };
@@ -271,7 +267,7 @@ impl WorkflowService {
                         &self.history_path(workflow_id),
                         &HistoryLine {
                             role: "agent".to_string(),
-                            content: text.clone(),
+                            content: vec![ContentBlock::Text { text: text.clone() }],
                             timestamp: now_ms(),
                         },
                     );
@@ -400,7 +396,7 @@ impl WorkflowService {
     }
 }
 
-/// 编排智能体的工具执行面：全部动作限定在本工作流的关联普通会话上。
+/// 编排智能体的工具执行面与活动记录面：全部动作限定在本工作流的关联普通会话上。
 struct WorkflowTools {
     service: Arc<WorkflowService>,
     workflow_id: String,
@@ -413,6 +409,29 @@ impl Tools for WorkflowTools {
 
     fn dispatch<'a>(&'a self, name: &'a str, arguments: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move { self.call(name, arguments).await })
+    }
+
+    fn record_thinking(&self, text: &str) {
+        self.service.record_activity(
+            &self.workflow_id,
+            &Activity::Thinking {
+                timestamp: now_ms(),
+                thinking: text.to_string(),
+            },
+        );
+    }
+
+    fn record_tool_call(&self, call: &ToolCall) {
+        self.service.record_activity(
+            &self.workflow_id,
+            &Activity::ToolCall {
+                timestamp: now_ms(),
+                tool_call_id: call.id.to_string(),
+                tool_name: call.function.name.clone(),
+                title: tool_title(&call.function.name, &call.function.arguments),
+                parameters: Some(call.function.arguments.to_string()),
+            },
+        );
     }
 }
 
@@ -553,6 +572,27 @@ impl WorkflowTools {
     }
 }
 
+/// 工具调用的展示标题（活动历史中与工具名并列展示）。
+fn tool_title(name: &str, arguments: &serde_json::Value) -> Option<String> {
+    let session = string_arg(arguments, "session").unwrap_or_else(|_| "会话".to_string());
+    Some(match name {
+        "list_agents" => "列出机器与 agent".to_string(),
+        "list_sessions" => "列出关联普通会话".to_string(),
+        "create_session" => format!(
+            "创建普通会话 {}@{}",
+            string_arg(arguments, "machine").unwrap_or_default(),
+            string_arg(arguments, "agent").unwrap_or_default()
+        ),
+        "prompt_session" => format!("向 {session} 下发指令"),
+        "cancel_session" => format!("取消 {session} 进行中的工作"),
+        "configure_session" => format!("配置 {session}"),
+        "get_session_config_options" => format!("读取 {session} 会话选项"),
+        "read_session_history" => format!("读取 {session} 对话内容"),
+        "read_session_activities" => format!("读取 {session} 活动内容"),
+        _ => return None,
+    })
+}
+
 fn string_arg(arguments: &serde_json::Value, key: &str) -> Result<String, String> {
     arguments
         .get(key)
@@ -682,19 +722,17 @@ fn reason_label(reason: StateChangeReason) -> &'static str {
     }
 }
 
-/// 对话历史行（JSONL）。
+/// 对话历史行（JSONL）：`content` 为内容块数组，与设计约定一致。
 #[derive(serde::Serialize, serde::Deserialize)]
 struct HistoryLine {
     role: String,
-    content: String,
+    content: Vec<ContentBlock>,
     timestamp: u64,
 }
 
 impl From<&HistoryLine> for HistoryItem {
     fn from(line: &HistoryLine) -> Self {
-        let content = vec![ContentBlock::Text {
-            text: line.content.clone(),
-        }];
+        let content = line.content.clone();
         if line.role == "user" {
             HistoryItem::UserMessage {
                 content,
@@ -707,6 +745,17 @@ impl From<&HistoryLine> for HistoryItem {
             }
         }
     }
+}
+
+/// 内容块拼接为纯文本（非文本块丢弃）。
+fn blocks_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn append_line(path: &PathBuf, value: &impl serde::Serialize) {
@@ -765,23 +814,96 @@ mod tests {
     }
 
     #[test]
-    fn history_line_maps_to_history_item() {
+    fn history_line_round_trips_content_blocks() {
         let line = HistoryLine {
             role: "user".into(),
-            content: "你好".into(),
+            content: vec![ContentBlock::Text {
+                text: "你好".into(),
+            }],
             timestamp: 7,
         };
-        match HistoryItem::from(&line) {
-            HistoryItem::UserMessage { content, timestamp } => {
-                assert_eq!(timestamp, 7);
-                assert_eq!(
-                    content,
-                    vec![ContentBlock::Text {
-                        text: "你好".into()
-                    }]
-                );
+        let json = serde_json::to_string(&line).unwrap();
+        assert_eq!(
+            json,
+            r#"{"role":"user","content":[{"type":"text","text":"你好"}],"timestamp":7}"#
+        );
+        let parsed: HistoryLine = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            HistoryItem::from(&parsed),
+            HistoryItem::UserMessage {
+                content: vec![ContentBlock::Text {
+                    text: "你好".into()
+                }],
+                timestamp: 7,
             }
-            _ => panic!("应为用户消息"),
+        );
+    }
+
+    /// 编排过程中的工具调用与思考立即进活动历史，并作为进行中活动对外可见。
+    #[tokio::test]
+    async fn recorded_activities_are_persisted_and_reported_as_ongoing() {
+        use std::sync::Arc;
+
+        use rig_core::completion::message::ToolFunction;
+
+        use crate::terminals::TerminalCache;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let store = Arc::new(Store::open(&home).unwrap());
+        let config = Arc::new(ConfigStore::new(home.clone()));
+        let terminals = Arc::new(TerminalCache::new());
+        let (events, _events_rx) = tokio::sync::mpsc::channel(4);
+        let machines = MachineHub::new("token".into(), events, Arc::clone(&terminals));
+        let sessions = Arc::new(SessionService::new(
+            Arc::clone(&store),
+            machines.clone(),
+            terminals,
+            Arc::clone(&config),
+        ));
+        let service = Arc::new(WorkflowService::new(
+            Arc::clone(&store),
+            sessions,
+            machines,
+            config,
+            home,
+        ));
+        let workflow = service.create("计划", None).await.unwrap();
+        service.runs.lock().entry(workflow.id.clone()).or_default();
+
+        let tools = WorkflowTools {
+            service: Arc::clone(&service),
+            workflow_id: workflow.id.clone(),
+        };
+        tools.record_tool_call(&ToolCall::from_wire(
+            "call_001",
+            ToolFunction::new("list_agents".into(), serde_json::json!({})),
+        ));
+        tools.record_thinking("先看机器列表");
+
+        let (activities, _) = service.activities(&workflow.id, PAGE_LIMIT, 0);
+        match &activities[0] {
+            Activity::ToolCall {
+                tool_call_id,
+                tool_name,
+                title,
+                parameters,
+                ..
+            } => {
+                assert_eq!(tool_call_id, "call_001");
+                assert_eq!(tool_name, "list_agents");
+                assert_eq!(title.as_deref(), Some("列出机器与 agent"));
+                assert_eq!(parameters.as_deref(), Some("{}"));
+            }
+            other => panic!("应为工具调用活动: {other:?}"),
         }
+        assert!(matches!(
+            activities[1],
+            Activity::Thinking { ref thinking, .. } if thinking == "先看机器列表"
+        ));
+        assert_eq!(
+            service.ongoing_activity(&workflow.id),
+            Some(activities[1].clone())
+        );
     }
 }

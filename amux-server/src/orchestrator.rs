@@ -9,7 +9,9 @@ use std::pin::Pin;
 
 use amux_common::api::{ApiFormat, OrchestratorConfig};
 use rig_core::client::CompletionClient;
-use rig_core::completion::message::{ToolResultContent, UserContent};
+use rig_core::completion::message::{
+    Reasoning, ReasoningContent, ToolCall, ToolResultContent, UserContent,
+};
 use rig_core::completion::{AssistantContent, CompletionModel, Message, ToolDefinition};
 
 /// 单轮工作流推进最多允许的工具轮次。
@@ -17,10 +19,17 @@ const MAX_TOOL_TURNS: usize = 32;
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 
-/// 工具执行面：编排智能体可用的调度动作。
+/// 编排智能体执行面：工具清单、工具执行与活动记录。
+///
+/// 活动记录在条目完整后立即调用（docs/DESIGN.md「工作流会话存储」：thinking 与工具调用
+/// 在内存中合并为完整条目后落盘）。
 pub trait Tools: Send + Sync {
     fn definitions(&self) -> Vec<ToolDefinition>;
     fn dispatch<'a>(&'a self, name: &'a str, arguments: serde_json::Value) -> ToolFuture<'a>;
+    /// 记录一段思考：`text` 为已合并的完整推理文本。
+    fn record_thinking(&self, text: &str);
+    /// 记录一次工具调用，在 [`Tools::dispatch`] 之前调用。
+    fn record_tool_call(&self, call: &ToolCall);
 }
 
 /// 运行一轮编排：模型循环调用工具直到输出纯文本。
@@ -107,6 +116,12 @@ where
         for item in &response.choice {
             match item {
                 AssistantContent::Text(content) => text.push_str(&content.text),
+                AssistantContent::Reasoning(reasoning) => {
+                    let thinking = reasoning_text(reasoning);
+                    if !thinking.trim().is_empty() {
+                        tools.record_thinking(&thinking);
+                    }
+                }
                 AssistantContent::ToolCall(call) => calls.push(call.clone()),
                 _ => {}
             }
@@ -121,6 +136,7 @@ where
 
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
+            tools.record_tool_call(&call);
             let outcome = tools
                 .dispatch(&call.function.name, call.function.arguments.clone())
                 .await
@@ -138,6 +154,20 @@ where
     ))
 }
 
+/// reasoning 块中的可读文本；加密与脱敏载荷不是可读思考，不落盘。
+fn reasoning_text(reasoning: &Reasoning) -> String {
+    reasoning
+        .content
+        .iter()
+        .filter_map(|item| match item {
+            ReasoningContent::Text { text, .. } => Some(text.as_str()),
+            ReasoningContent::Summary(text) => Some(text.as_str()),
+            ReasoningContent::Encrypted(_) | ReasoningContent::Redacted { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// 系统提示词：角色、工作方式、行为约束 + 工作流计划。
 pub fn preamble(plan: &str) -> String {
     format!(
@@ -151,6 +181,11 @@ pub fn preamble(plan: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use rig_core::completion::message::ToolFunction;
+    use rig_core::test_utils::{MockCompletionModel, MockTurn};
+
     use super::*;
 
     #[test]
@@ -159,5 +194,55 @@ mod tests {
         assert!(text.contains("使用远程 codex 实现功能"));
         assert!(text.contains("编排智能体"));
         assert!(text.contains("关联普通会话"));
+    }
+
+    /// 记录调用顺序的假执行面。
+    #[derive(Default)]
+    struct RecordingTools {
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl Tools for RecordingTools {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+
+        fn dispatch<'a>(&'a self, name: &'a str, _arguments: serde_json::Value) -> ToolFuture<'a> {
+            Box::pin(async move { Ok(format!("{name} 结果")) })
+        }
+
+        fn record_thinking(&self, text: &str) {
+            self.seen.lock().unwrap().push(format!("thinking:{text}"));
+        }
+
+        fn record_tool_call(&self, call: &ToolCall) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("tool_call:{}", call.function.name));
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_loop_records_thinking_and_tool_call_before_dispatch() {
+        let model = MockCompletionModel::new([
+            MockTurn::from_contents([
+                AssistantContent::Reasoning(Reasoning::new("先看关联会话")),
+                AssistantContent::ToolCall(ToolCall::from_wire(
+                    "call_001",
+                    ToolFunction::new("list_sessions".to_string(), serde_json::json!({})),
+                )),
+            ]),
+            MockTurn::text("完成"),
+        ]);
+        let tools = RecordingTools::default();
+        let text = tool_loop(model, "系统提示词", vec![Message::user("开始")], &tools)
+            .await
+            .unwrap();
+        assert_eq!(text, "完成");
+        assert_eq!(
+            tools.seen.lock().unwrap().as_slice(),
+            ["thinking:先看关联会话", "tool_call:list_sessions"]
+        );
     }
 }
