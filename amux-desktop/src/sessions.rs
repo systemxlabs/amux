@@ -116,6 +116,10 @@ fn mode_switch(workflow_mode: bool, cx: &mut Context<AmuxApp>) -> impl IntoEleme
                 core.new_session.workflow_mode = workflow;
                 core.new_session.suggestions.clear();
             });
+            // 工作流模式需要编排智能体配置与计划：进入该模式时拉取
+            if workflow {
+                this.load_workflow_setup();
+            }
             cx.notify();
         }))
 }
@@ -161,7 +165,8 @@ fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
 
 /// 工作流模式：工作计划 / 创建（未配置编排智能体时引导去设置）。
 fn workflow_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    if core.settings.orchestrator.is_none() {
+    // 配置尚未拉取回来时不做判断，避免把「还没拉取」误报成「未配置」
+    if core.settings.orchestrator_loaded && core.settings.orchestrator.is_none() {
         return v_flex()
             .gap_2()
             .child(

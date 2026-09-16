@@ -506,12 +506,28 @@ impl AmuxApp {
     }
 
     /// 拉取新建会话视图的数据：机器、agents、常用工作目录（docs/DESIGN.md「新建会话视图」）。
+    /// 拉取新建会话视图的数据：机器/agents 与常用工作目录；表单已在工作流模式时
+    /// 一并拉取该模式所需的编排智能体配置与计划。
     fn load_new_session(&mut self) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let core = Arc::clone(&self.core);
+        let workflow_mode = self.with_core(|core| core.new_session.workflow_mode);
+        self.runtime.spawn(async move {
+            poll::refresh_new_session(&client, &core).await;
+            if workflow_mode {
+                poll::refresh_workflow_setup(&client, &core).await;
+            }
+        });
+    }
+
+    /// 拉取工作流模式所需数据（切换到工作流模式时）。
+    pub fn load_workflow_setup(&mut self) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let core = Arc::clone(&self.core);
         self.runtime
-            .spawn(async move { poll::refresh_new_session(&client, &core).await });
+            .spawn(async move { poll::refresh_workflow_setup(&client, &core).await });
     }
 
     /// 拉取会话交互视图的常驻数据：机器/agents、编排智能体配置与快捷指令。

@@ -415,6 +415,8 @@ pub struct SettingsData {
     pub plans: Vec<WorkflowPlanItem>,
     pub quick_commands: Vec<QuickCommand>,
     pub orchestrator: Option<OrchestratorConfig>,
+    /// 编排智能体配置是否已拉取过：区分「未配置」与「尚未拉取」
+    pub orchestrator_loaded: bool,
 }
 
 /// 非 UI 状态：连接、客户端与缓存。

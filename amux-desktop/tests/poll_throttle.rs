@@ -176,9 +176,29 @@ async fn new_session_load_fetches_machines_agents_and_recent_workspaces() {
     assert_eq!(hit_count(&hits, "/machines"), 1);
     assert_eq!(hit_count(&hits, "/machines/pc/agents"), 1);
     assert_eq!(hit_count(&hits, "/config/recent_workspaces/"), 1);
+    // 新建会话视图只拉这三项：编排智能体配置与计划在进入工作流模式时才拉
+    assert_eq!(hit_count(&hits, "/config/agent/"), 0);
+    assert_eq!(hit_count(&hits, "/config/workflows/"), 0);
     let core = core.lock();
     assert_eq!(core.settings.machines.len(), 1);
     assert_eq!(core.recent_workspaces.len(), 1);
+}
+
+/// 工作流模式所需数据（编排智能体配置与计划）在进入该模式时拉取
+/// （docs/PRD.md「新建会话视图」工作流模式）。
+#[tokio::test]
+async fn workflow_setup_load_fetches_orchestrator_and_plans() {
+    let (server, hits) = start_stub().await;
+    let core = core_with(server);
+    let client = client_of(&core);
+
+    poll::refresh_workflow_setup(&client, &core).await;
+
+    assert_eq!(hit_count(&hits, "/config/agent/"), 1);
+    assert_eq!(hit_count(&hits, "/config/workflows/"), 1);
+    let core = core.lock();
+    assert!(core.settings.orchestrator_loaded);
+    assert_eq!(core.settings.plans.len(), 1);
 }
 
 /// 会话交互视图打开时实时拉取可用性与快捷指令。
