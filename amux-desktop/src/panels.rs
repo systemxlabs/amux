@@ -60,7 +60,7 @@ pub fn render_sidebar(
     for entry in core.entries.clone() {
         match &entry {
             ListEntry::Session(session) => {
-                list = list.child(session_row(session, core, this, cx));
+                list = list.child(session_row(session, false, core, this, cx));
             }
             ListEntry::Workflow(workflow) => {
                 list = list.child(workflow_row(workflow, core, this, cx));
@@ -148,8 +148,11 @@ pub fn render_sidebar(
 }
 
 /// 普通会话行：状态图标、标题、活跃时间、工作中转圈；右键菜单重命名/删除。
+///
+/// `linked` 表示这是工作流会话下挂的关联普通会话，行首改用缩进符标记。
 fn session_row(
     session: &Session,
+    linked: bool,
     core: &Core,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
@@ -163,21 +166,29 @@ fn session_row(
     let theme = ui::Colors::of(cx.theme());
     let entry = ListEntry::Session(session.clone());
 
+    let marker = if linked {
+        Label::new("↳")
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .into_any_element()
+    } else {
+        Icon::new(IconName::SquareTerminal)
+            .small()
+            .text_color(if selected {
+                theme.primary
+            } else {
+                theme.muted_foreground
+            })
+            .into_any_element()
+    };
+
     let row = h_flex()
         .w_full()
         .h_8()
         .px_1()
         .gap_1p5()
         .items_center()
-        .child(
-            Icon::new(IconName::SquareTerminal)
-                .small()
-                .text_color(if selected {
-                    theme.primary
-                } else {
-                    theme.muted_foreground
-                }),
-        )
+        .child(marker)
         .child(
             h_flex()
                 .flex_1()
@@ -289,26 +300,7 @@ fn workflow_row(
     let mut children = v_flex().gap_1();
     if expanded {
         for linked in &workflow.linked_sessions {
-            children = children.child(
-                h_flex()
-                    .w_full()
-                    .gap_1()
-                    .items_center()
-                    .px_1()
-                    .child(
-                        Label::new("↳")
-                            .text_sm()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        Label::new(session_title(&linked.title, &linked.workspace))
-                        .text_sm()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate(),
-                    )
-                    .child(busy_indicator(linked.state, theme.primary)),
-            );
+            children = children.child(session_row(linked, true, core, this, cx));
         }
     }
 
@@ -1040,7 +1032,11 @@ fn terminal_tab(
         .cursor_pointer()
         .on_click(cx.listener({
             let id = id.clone();
-            move |this, _, _, cx| this.select_terminal(id.clone(), cx)
+            move |this, _, window, cx| {
+                this.select_terminal(id.clone(), cx);
+                // 切到某终端即把键盘交给它，键盘输入才落到 VT 网格
+                window.focus(&this.terminal_focus, cx);
+            }
         }))
         .child(
             Label::new(title)

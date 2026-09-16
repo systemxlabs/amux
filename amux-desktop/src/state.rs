@@ -126,6 +126,53 @@ impl WorkspaceNode {
     }
 }
 
+/// 终端输出缓冲：按游标增量累积。
+///
+/// 切换终端、服务端丢弃旧输出、乃至整个会话视图重建时缓冲会整体重建，
+/// `generation` 随之取一个新的全局序号，供本地 VT 网格判断是否需要重建
+/// （重建一律换新序号，避免「新缓冲恰好回到旧序号」被误判为增量）。
+#[derive(Clone)]
+pub struct TerminalBuffer {
+    bytes: Vec<u8>,
+    generation: u64,
+}
+
+impl Default for TerminalBuffer {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::new(),
+            generation: next_terminal_generation(),
+        }
+    }
+}
+
+/// 终端缓冲代际序号：全局单调递增，每次缓冲重建取一个新值。
+pub fn next_terminal_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl TerminalBuffer {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 追加增量输出。
+    pub fn append(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    /// 整体重建（切换终端、服务端已丢弃旧输出）。
+    pub fn reset(&mut self) {
+        self.bytes.clear();
+        self.generation = next_terminal_generation();
+    }
+}
+
 /// 打开的会话明细视图数据（普通会话与工作流会话共用）。
 #[derive(Default, Clone)]
 pub struct SessionView {
@@ -142,7 +189,7 @@ pub struct SessionView {
     pub active_terminal: Option<String>,
     pub history_has_more: bool,
     /// 终端输出字节（按游标增量累积；truncated 时整体替换）
-    pub terminal_output: Vec<u8>,
+    pub terminal_output: TerminalBuffer,
     /// 工作目录树的根节点（懒加载子目录）
     pub workspace_tree: Vec<WorkspaceNode>,
     /// 最近查看的文件内容
@@ -292,6 +339,14 @@ pub struct Note {
     pub level: NoteLevel,
 }
 
+/// 后台任务排队的一条结果弹窗（保存成功/失败等需要用户确认的反馈）；
+/// 由节拍在有窗口时开出弹窗。
+#[derive(Debug, Clone)]
+pub struct Alert {
+    pub title: String,
+    pub message: String,
+}
+
 /// 设置面板分类（PRD 设置页面）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -367,6 +422,8 @@ pub struct Core {
     pub loaded_view: Option<ViewKey>,
     /// 待投递的提示（后台任务无窗口，只能排队等节拍投递）
     pub notes: VecDeque<Note>,
+    /// 待投递的结果弹窗（同上）
+    pub alerts: VecDeque<Alert>,
     pub list_limit: usize,
     /// 当前打开的右侧面板
     pub side_panel: Option<SidePanel>,
@@ -404,6 +461,7 @@ impl Default for Core {
             settings: SettingsData::default(),
             loaded_view: None,
             notes: VecDeque::new(),
+            alerts: VecDeque::new(),
             list_limit: 20,
             side_panel: None,
             expanded_workflows: HashSet::new(),
@@ -490,6 +548,14 @@ impl Core {
         self.notes.push_back(Note {
             message: message.into(),
             level: NoteLevel::Error,
+        });
+    }
+
+    /// 排队一条结果弹窗。
+    pub fn alert(&mut self, title: impl Into<String>, message: impl Into<String>) {
+        self.alerts.push_back(Alert {
+            title: title.into(),
+            message: message.into(),
         });
     }
 }

@@ -572,7 +572,9 @@ fn skills_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                     .label(action)
                     .on_click(cx.listener({
                         let skill = skill.clone();
-                        move |this, _, _, cx| this.apply_skill(skill.clone(), action, cx)
+                        move |this, _, window, cx| {
+                            this.open_skill_action_form(skill.clone(), action, window, cx)
+                        }
                     })),
             );
         }
@@ -741,34 +743,18 @@ fn plans_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
         .into_any_element()
 }
 
-/// 技能安装/更新/卸载：创建临时目录普通会话并发送指令（docs/DESIGN.md「技能操作」）。
-pub fn install_skill(
+/// 技能安装/更新/卸载：在指定机器与 agent 上创建临时目录普通会话并发送指令
+/// （docs/DESIGN.md「技能操作」）。
+pub fn manage_skill(
     client: Client,
     runtime: tokio::runtime::Handle,
     core: SharedCore,
     skill: Skill,
     action: String,
+    machine: String,
+    agent: String,
 ) {
     runtime.spawn(async move {
-        let machines = match client.machines().await {
-            Ok(machines) => machines,
-            Err(error) => {
-                core.lock().error(format!("读取机器失败：{error}"));
-                return;
-            }
-        };
-        let mut target = None;
-        for machine in &machines {
-            let agents = client.agents(&machine.name).await.unwrap_or_default();
-            if let Some(agent) = agents.into_iter().find(|agent| agent.available) {
-                target = Some((machine.name.clone(), agent.name));
-                break;
-            }
-        }
-        let Some((machine, agent)) = target else {
-            core.lock().warning("没有可用的机器与 agent");
-            return;
-        };
         let workspace = std::env::temp_dir().to_string_lossy().to_string();
         let session = match client
             .create_session(&amux_common::api::CreateSessionRequest {

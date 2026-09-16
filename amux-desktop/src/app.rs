@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amux_common::api::{
-    ApiFormat, CreateSessionRequest, OrchestratorConfig, QuickCommand, SessionConfigSetting, Skill,
-    WorkflowPlanItem,
+    Agent, ApiFormat, CreateSessionRequest, OrchestratorConfig, QuickCommand, SessionConfigSetting,
+    Skill, WorkflowPlanItem,
 };
 use amux_common::domain::{
     ContentBlock, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SlashCommand,
@@ -16,9 +16,12 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::*;
 use gpui_component::input::{InputEvent, InputState, Paste};
-use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::label::Label;
-use gpui_component::{h_flex, v_flex, ActiveTheme, GlobalState, Root, Sizable, TitleBar, WindowExt as _};
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::{
+    h_flex, v_flex, ActiveTheme, Disableable as _, GlobalState, Root, Sizable, TitleBar,
+    WindowExt as _,
+};
 use parking_lot::Mutex;
 
 use crate::config::{self, Connection};
@@ -30,6 +33,7 @@ use crate::sessions;
 use crate::state::{
     Attachment, Core, DirectoryCache, ListEntry, OpenTarget, SharedCore, SidePanel, WorkspaceNode,
 };
+use crate::terminal_view;
 use crate::theme::SIDEBAR_WIDTH;
 use crate::ui;
 
@@ -45,7 +49,7 @@ const PANEL_MIN_WIDTH: f32 = 300.0;
 /// 中间列最小宽度：左/右面板的拖拽上限都据此计算。
 const MIN_CONTENT_COL_WIDTH: f32 = 320.0;
 
-actions!(amux, [CloseSettingsOverlay]);
+actions!(amux, [CloseSettingsOverlay, TerminalTab, TerminalBackTab]);
 
 /// 侧栏调宽拖拽载荷（与面板载荷分开，避免全局拖拽事件互相触发）。
 struct SidebarResizeDrag;
@@ -85,8 +89,10 @@ pub struct AmuxApp {
     pub skill_desc: Entity<InputState>,
     pub plan_name: Entity<InputState>,
     pub plan_plan: Entity<InputState>,
-    /// 终端命令行输入
-    pub terminal_input: Entity<InputState>,
+    /// 终端 VT 网格（本地维护屏幕内容与光标；输入经 `send_terminal_input` 上行）
+    pub terminal: terminal_view::TerminalScreen,
+    /// 终端焦点：按键经它派发（Tab/Shift+Tab 走 action，其余走 key_down）
+    pub terminal_focus: FocusHandle,
     /// 待发送附件（拖拽/粘贴产生）
     pub attachments: Vec<Attachment>,
     /// 斜杠命令上拉框中高亮项
@@ -140,12 +146,14 @@ impl AmuxApp {
             .build()
             .expect("构建 tokio runtime 失败");
 
-        // Esc 关闭设置浮窗：仅在浮窗持有焦点（SettingsOverlay 上下文）时生效
-        cx.bind_keys([KeyBinding::new(
-            "escape",
-            CloseSettingsOverlay,
-            Some("SettingsOverlay"),
-        )]);
+        // Esc 关闭设置浮窗：仅在浮窗持有焦点（SettingsOverlay 上下文）时生效。
+        // Tab/Shift+Tab 进终端输入：action 绑定先于 key_down 监听器派发，而 gpui-component
+        // 的 Root 全局绑定了 tab（焦点循环），终端不持更具体的绑定就收不到这两个键。
+        cx.bind_keys([
+            KeyBinding::new("escape", CloseSettingsOverlay, Some("SettingsOverlay")),
+            KeyBinding::new("tab", TerminalTab, Some("Terminal")),
+            KeyBinding::new("shift-tab", TerminalBackTab, Some("Terminal")),
+        ]);
 
         let server = connection.server.clone();
         let token = connection.token.clone();
@@ -267,20 +275,6 @@ impl AmuxApp {
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
-        let terminal_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("终端命令，回车发送"));
-        let terminal_input_entity = terminal_input.clone();
-        // 终端命令行：回车发送（补换行由 send_terminal_line 负责）
-        cx.subscribe_in(
-            &terminal_input_entity,
-            window,
-            |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.send_terminal_line(window, cx);
-                }
-            },
-        )
-        .detach();
         let diff_instruction = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("对选中的改动说明指令，发送给 agent")
@@ -322,7 +316,8 @@ impl AmuxApp {
             skill_desc,
             plan_name,
             plan_plan,
-            terminal_input,
+            terminal: terminal_view::TerminalScreen::default(),
+            terminal_focus: cx.focus_handle(),
             attachments: Vec::new(),
             slash_selected: 0,
             slash_dismissed: false,
@@ -352,13 +347,13 @@ impl AmuxApp {
         f(&mut core)
     }
 
-    /// 把后台排队的提示投递为通知（后台任务无窗口，只能在有窗口的节拍里投递）。
+    /// 把后台排队的提示与弹窗投递出去（后台任务无窗口，只能在有窗口的节拍里投递）。
     fn flush_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        loop {
-            let Some(note) = self.with_core(|core| core.notes.pop_front()) else {
-                return;
-            };
+        while let Some(note) = self.with_core(|core| core.notes.pop_front()) {
             window.push_notification(dialog::note_notification(note), cx);
+        }
+        while let Some(alert) = self.with_core(|core| core.alerts.pop_front()) {
+            dialog::alert(window, cx, alert.title, alert.message);
         }
     }
 
@@ -503,17 +498,56 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 终端命令行：发送命令文本（补换行）。
-    pub fn send_terminal_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.terminal_input.read(cx).value().trim_end().to_string();
+    /// 终端按键：粘贴、控制键与可打印字符转字节序列上行。
+    pub fn terminal_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let modifiers = event.keystroke.modifiers;
+        // 剪贴板是 IME 之外输入中文的主要途径（macOS 用 Cmd+V）
+        let paste_modifier = if cfg!(target_os = "macos") {
+            modifiers.platform
+        } else {
+            modifiers.control
+        };
+        if paste_modifier && event.keystroke.key == "v" {
+            cx.stop_propagation();
+            self.paste_into_terminal(cx);
+            return;
+        }
+        let Some(bytes) = terminal_view::keystroke_to_bytes(&event.keystroke) else {
+            return;
+        };
+        cx.stop_propagation();
+        self.send_terminal_input(bytes, cx);
+    }
+
+    /// 粘贴剪贴板文本：终端处于 bracketed paste 模式（应用开启 DECSET 2004）时原样
+    /// 包裹发送，多行粘贴不会被逐行当作回车执行；否则换行归一为 `\r`。
+    fn paste_into_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let Some(text) = item.text() else {
+            return;
+        };
         if text.is_empty() {
             return;
         }
-        self.terminal_input
-            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
-        let mut data = text.into_bytes();
-        data.push(b'\n');
-        self.terminal_input(data, cx);
+        let bytes = if self.terminal.bracketed_paste() {
+            format!("\x1b[200~{text}\x1b[201~").into_bytes()
+        } else {
+            text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+        };
+        self.send_terminal_input(bytes, cx);
+    }
+
+    /// 终端滚轮：向上（delta.y 为负）进入回滚历史。
+    pub fn terminal_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let line_height = px(terminal_view::CELL_HEIGHT);
+        let lines = (-event.delta.pixel_delta(line_height).y / line_height).round() as i32;
+        if lines == 0 {
+            return;
+        }
+        self.terminal.scroll(lines);
+        cx.notify();
     }
 
     /// 查看文件内容（工作目录面板）。
@@ -545,14 +579,27 @@ impl AmuxApp {
             let mut core = core.lock();
             if core.view.detail.active_terminal.as_deref() == Some(terminal.as_str()) {
                 core.view.detail.active_terminal = None;
-                core.view.detail.terminal_output.clear();
+                core.view.detail.terminal_output.reset();
             }
         });
         cx.notify();
     }
 
-    /// 终端可视区尺寸变化时同步 PTY 行列（尺寸未变则不发请求）。
-    pub fn sync_terminal_size(&mut self, cols: u16, rows: u16, cx: &mut Context<Self>) {
+    /// 终端可视区尺寸变化时同步 VT 网格与 PTY 行列（PTY 尺寸未变则不发请求）。
+    ///
+    /// 布局未就绪时画布 bounds 可能退化为 0：此时直接忽略，绝不能把 0 除字宽后
+    /// clamp 成最小行列——那会把 PTY 缩到不可用尺寸并丢掉输出。
+    pub fn sync_terminal_size(&mut self, width: Pixels, height: Pixels, cx: &mut Context<Self>) {
+        let cell_width = px(terminal_view::CELL_WIDTH);
+        let cell_height = px(terminal_view::CELL_HEIGHT);
+        if width < cell_width || height < cell_height {
+            return;
+        }
+        let cols = ((width.as_f32() / terminal_view::CELL_WIDTH).floor() as u16)
+            .clamp(terminal_view::MIN_COLS, terminal_view::MAX_COLS);
+        let rows = ((height.as_f32() / terminal_view::CELL_HEIGHT).floor() as u16)
+            .clamp(terminal_view::MIN_ROWS, terminal_view::MAX_ROWS);
+        self.terminal.resize(cols, rows);
         let (active, current) = self.with_core(|core| {
             let active = core.view.detail.active_terminal.clone();
             let current = active.as_ref().and_then(|id| {
@@ -592,11 +639,6 @@ impl AmuxApp {
             }
         });
         cx.notify();
-    }
-
-    /// 终端控制键（Ctrl-C / Esc / Tab / 方向键等）。
-    pub fn send_terminal_key(&mut self, bytes: &'static [u8], cx: &mut Context<Self>) {
-        self.terminal_input(bytes.to_vec(), cx);
     }
 
     /// 打开新建会话视图：实时拉取机器、agents 与常用工作目录
@@ -722,7 +764,7 @@ impl AmuxApp {
     pub fn select_terminal(&mut self, terminal: String, cx: &mut Context<Self>) {
         self.with_core(|core| {
             core.view.detail.active_terminal = Some(terminal);
-            core.view.detail.terminal_output.clear();
+            core.view.detail.terminal_output.reset();
             core.last.terminal_cursor = 0;
             core.last.terminal = None;
         });
@@ -872,12 +914,7 @@ impl AmuxApp {
         let message = match config::save(&config::connection_path(), &connection) {
             Ok(()) => {
                 self.with_core(|core| core.apply_connection(connection));
-                dialog::alert(
-                    window,
-                    cx,
-                    "保存成功",
-                    "连接设置已保存。".to_string(),
-                );
+                dialog::alert(window, cx, "保存成功", "连接设置已保存。");
                 self.settings_dirty = false;
                 return;
             }
@@ -1285,7 +1322,7 @@ impl AmuxApp {
                 Some(terminal) => {
                     let mut core = core.lock();
                     core.view.detail.active_terminal = Some(terminal);
-                    core.view.detail.terminal_output.clear();
+                    core.view.detail.terminal_output.reset();
                     core.last.terminal_cursor = 0;
                     core.last.terminal = None;
                 }
@@ -1309,8 +1346,8 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 终端输入（按键字节）。
-    pub fn terminal_input(&mut self, data: Vec<u8>, cx: &mut Context<Self>) {
+    /// 终端输入（原始字节，base64 上行）。
+    pub fn send_terminal_input(&mut self, data: Vec<u8>, cx: &mut Context<Self>) {
         let (client, open, terminal) = self.with_core(|core| {
             (
                 core.client.clone(),
@@ -1515,16 +1552,87 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 安装/更新/卸载技能：由应用侧发起临时目录会话并发送指令（docs/DESIGN.md「技能操作」）。
-    pub fn apply_skill(&mut self, skill: Skill, action: &str, cx: &mut Context<Self>) {
+    /// 技能安装/更新/卸载：先选目标机器与 agent（docs/PRD.md「技能管理设置」）。
+    ///
+    /// 目标列表与设置项一样在打开时实时获取，弹窗内容每帧按最新数据重建。
+    pub fn open_skill_action_form(
+        &mut self,
+        skill: Skill,
+        action: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.with_core(|core| core.client.clone());
+        if let Some(client) = client {
+            let core = Arc::clone(&self.core);
+            self.runtime.spawn(async move {
+                poll::refresh_machines(&client, &core).await;
+            });
+        }
+        let app = cx.entity();
+        let width = rems(32.5).to_pixels(window.rem_size());
+        window.open_dialog(cx, move |dialog, _, _| {
+            let app = app.clone();
+            let skill = skill.clone();
+            dialog
+                .title(format!("{action}技能"))
+                .width(width)
+                .footer(
+                    Button::new("skill-action-cancel")
+                        .small()
+                        .label("取消")
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                )
+                .content(move |content, _, cx| {
+                    app.update(cx, |this, cx| {
+                        let targets = this.skill_targets();
+                        content.child(skill_target_card(&targets, &skill, action, cx))
+                    })
+                })
+        });
+        cx.notify();
+    }
+
+    /// 技能操作的候选目标：机器 · agent（未拉取到机器时为 空）。
+    fn skill_targets(&self) -> Vec<(String, Vec<Agent>)> {
+        self.with_core(|core| {
+            core.settings
+                .machines
+                .iter()
+                .map(|machine| {
+                    let agents = core
+                        .settings
+                        .agents
+                        .iter()
+                        .find(|(name, _)| name == &machine.name)
+                        .map(|(_, agents)| agents.clone())
+                        .unwrap_or_default();
+                    (machine.name.clone(), agents)
+                })
+                .collect()
+        })
+    }
+
+    /// 安装/更新/卸载技能：由应用侧在目标机器与 agent 上发起临时目录会话并发送指令
+    /// （docs/DESIGN.md「技能操作」）。
+    pub fn apply_skill(
+        &mut self,
+        skill: Skill,
+        action: &str,
+        machine: String,
+        agent: String,
+        cx: &mut Context<Self>,
+    ) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
-        crate::settings::install_skill(
+        settings::manage_skill(
             client,
             self.runtime.handle().clone(),
             Arc::clone(&self.core),
             skill,
             action.to_string(),
+            machine,
+            agent,
         );
         cx.notify();
     }
@@ -1863,12 +1971,7 @@ impl AmuxApp {
             effort: self.orch_effort.read(cx).value().trim().to_string(),
         };
         if config.base_url.is_empty() || config.api_key.is_empty() || config.model.is_empty() {
-            dialog::alert(
-                window,
-                cx,
-                "保存失败",
-                "请填写 Base URL、API Key 与模型名称。".to_string(),
-            );
+            dialog::alert(window, cx, "保存失败", "请填写 Base URL、API Key 与模型名称。");
             return;
         }
         let core = Arc::clone(&self.core);
@@ -1877,9 +1980,9 @@ impl AmuxApp {
                 Ok(()) => {
                     let mut core = core.lock();
                     core.settings.orchestrator = Some(config);
-                    core.success("编排智能体设置已保存。");
+                    core.alert("保存成功", "编排智能体设置已保存。");
                 }
-                Err(error) => core.lock().error(format!("保存失败：{error}")),
+                Err(error) => core.lock().alert("保存失败", error),
             }
         });
         cx.notify();
@@ -2182,6 +2285,56 @@ impl Render for AmuxApp {
     }
 }
 
+/// 技能操作的目标列表：机器 · agent，不可用的 agent 置灰不可点击。
+fn skill_target_card(
+    targets: &[(String, Vec<Agent>)],
+    skill: &Skill,
+    action: &'static str,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let mut buttons = h_flex().flex_wrap().gap_1();
+    for (machine, agents) in targets {
+        for agent in agents {
+            buttons = buttons.child(
+                Button::new(SharedString::from(format!(
+                    "skill-target-{action}-{machine}-{}",
+                    agent.name
+                )))
+                .small()
+                .label(format!("{machine} · {}", agent.name))
+                .disabled(!agent.available)
+                .on_click(cx.listener({
+                    let skill = skill.clone();
+                    let machine = machine.clone();
+                    let agent = agent.name.clone();
+                    move |this, _, window, cx| {
+                        this.apply_skill(skill.clone(), action, machine.clone(), agent.clone(), cx);
+                        window.close_dialog(cx);
+                    }
+                })),
+            );
+        }
+    }
+    let has_target = targets.iter().any(|(_, agents)| !agents.is_empty());
+    v_flex()
+        .gap_2()
+        .child(
+            Label::new(format!("选择执行技能「{}」的机器和 agent", skill.name))
+                .text_sm()
+                .text_color(theme.muted_foreground),
+        )
+        .child(if has_target {
+            buttons.into_any_element()
+        } else {
+            Label::new("当前没有已发现的机器 agent。")
+                .text_sm()
+                .text_color(theme.danger)
+                .into_any_element()
+        })
+        .into_any_element()
+}
+
 /// 未保存过编排智能体配置时的空基准。
 fn empty_orchestrator_config() -> OrchestratorConfig {
     OrchestratorConfig {
@@ -2199,7 +2352,7 @@ async fn create_terminal(client: &crate::client::Client, core: &SharedCore, sess
         Ok(terminal) => {
             {
                 let mut core = core.lock();
-                core.view.detail.terminal_output.clear();
+                core.view.detail.terminal_output.reset();
                 core.view.detail.active_terminal = Some(terminal);
                 core.last.terminal_cursor = 0;
                 core.last.terminal = None;

@@ -215,9 +215,10 @@ async fn refresh_open(
                             && core.view.detail.active_terminal.as_deref() == Some(&terminal_id)
                         {
                             if output.truncated {
-                                core.view.detail.terminal_output.clear();
+                                // 服务端已丢弃旧输出：整个缓冲重建（本地 VT 网格随之重置）
+                                core.view.detail.terminal_output.reset();
                             }
-                            core.view.detail.terminal_output.extend_from_slice(&bytes);
+                            core.view.detail.terminal_output.append(&bytes);
                             core.last.terminal_cursor = output.next_cursor;
                         }
                     }
@@ -299,7 +300,7 @@ pub async fn refresh_settings(client: &Client, core: &SharedCore, tab: SettingsT
 }
 
 /// 机器与各机器上的 agents。
-async fn refresh_machines(client: &Client, core: &SharedCore) {
+pub async fn refresh_machines(client: &Client, core: &SharedCore) {
     let Ok(machines) = client.machines().await else {
         return;
     };

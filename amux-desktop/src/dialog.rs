@@ -61,9 +61,11 @@ pub fn confirm(
 pub fn alert(
     window: &mut Window,
     cx: &mut Context<AmuxApp>,
-    title: &'static str,
-    description: String,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
 ) {
+    let title = title.into();
+    let description = description.into();
     window.open_alert_dialog(cx, move |alert, _, _| {
         alert
             .button_props(
@@ -71,7 +73,7 @@ pub fn alert(
                     .ok_text("确定")
                     .show_cancel(false),
             )
-            .title(title)
+            .title(title.clone())
             .description(description.clone())
             .on_ok(|_, _, _| true)
     });
