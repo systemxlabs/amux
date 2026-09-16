@@ -198,7 +198,8 @@ fn workflow_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> 
                 .text_color(cx.theme().muted_foreground),
         )
         .children(plan_selector(core, cx))
-        .child(this.plan_input.clone())
+        // 必须用 Input 组件渲染：直接挂 InputState 实体只会渲染成不可交互的文本
+        .child(Input::new(&this.plan_input).w_full())
         .child(
             Label::new("创建后由编排智能体按计划推进；可随时输入指令调整调度。")
                 .text_sm()

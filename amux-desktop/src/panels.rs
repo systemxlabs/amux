@@ -7,6 +7,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
+use gpui_component::input::Input;
 use gpui_component::label::Label;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::scroll::{ScrollableElement as _, Scrollbar};
@@ -278,7 +279,8 @@ fn rename_form(id: &str, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyEl
     v_flex()
         .gap_1()
         .p_1()
-        .child(this.rename_input.clone())
+        // 必须用 Input 组件渲染：直接挂 InputState 实体只会渲染成不可交互的文本
+        .child(Input::new(&this.rename_input).w_full())
         .child(
             h_flex()
                 .gap_1()
