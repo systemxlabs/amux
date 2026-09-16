@@ -31,6 +31,21 @@ fn short_cwd_handles_platform_separators() {
     assert_eq!(ui::short_cwd(""), "");
 }
 
+/// 工作目录输入拆分：末尾带分隔符时列该目录全部条目，否则列父目录下与前缀匹配的条目
+/// （docs/DESIGN.md「新建会话视图」的两个例子）。
+#[test]
+fn dir_query_splits_directory_and_prefix() {
+    assert_eq!(ui::split_dir_query("/home/tom/"), Some(("/home/tom/", "")));
+    assert_eq!(ui::split_dir_query("/home/tom"), Some(("/home/", "tom")));
+    assert_eq!(
+        ui::split_dir_query("/home/tom/x"),
+        Some(("/home/tom/", "x"))
+    );
+    assert_eq!(ui::split_dir_query("/"), Some(("/", "")));
+    assert_eq!(ui::split_dir_query("tom"), None, "相对路径不联想");
+    assert_eq!(ui::split_dir_query(""), None);
+}
+
 #[test]
 fn bubble_width_scales_with_content_and_clamps() {
     let narrow = ui::estimate_bubble_width("hi", 14.0, 132.0, 720.0);

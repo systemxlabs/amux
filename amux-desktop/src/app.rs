@@ -917,20 +917,19 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 刷新前缀匹配的目录项：取输入最后一段为前缀，列其所在目录的子目录。
+    /// 刷新前缀匹配的目录项（docs/DESIGN.md「新建会话视图」）：输入 `…/tom/` 列出该目录下
+    /// 全部条目；输入 `…/tom` 列出其父目录下与 `tom` 前缀匹配的条目。
     fn refresh_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
         let text = self.workspace_input.read(cx).value().to_string();
         let machine = self.with_core(|core| core.new_session.machine.clone());
-        // 无目录分隔符或前缀为空时不联想（避免每次选中目录项都重新展开整目录）
-        let parsed = text
-            .rsplit_once('/')
-            .map(|(base, prefix)| (format!("{base}/"), prefix.to_string()))
-            .filter(|(_, prefix)| !prefix.is_empty());
+        let parsed = ui::split_dir_query(&text);
         let (Some((dir, prefix)), Some(machine)) = (parsed, machine) else {
             self.with_core(|core| core.new_session.suggestions.clear());
             cx.notify();
             return;
         };
+        let dir = dir.to_string();
+        let prefix = prefix.to_string();
         let cached = self.with_core(|core| {
             let cache = core.new_session.suggestion_cache.as_ref()?;
             (cache.machine == machine && cache.dir == dir).then(|| cache.matching(&prefix))

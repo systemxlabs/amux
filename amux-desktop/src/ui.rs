@@ -347,3 +347,12 @@ pub fn empty_hint(text: &str, theme: &Colors) -> impl IntoElement {
         .text_color(theme.muted_foreground)
         .child(text.to_string())
 }
+
+/// 工作目录输入拆分为（要列的目录, 名前缀）（docs/DESIGN.md「新建会话视图」）：
+/// `/home/tom/` → 列 `/home/tom/` 下全部条目；`/home/tom` → 列 `/home/` 下与 `tom` 前缀匹配的条目。
+///
+/// 输入不含路径分隔符（相对路径或空串）时返回 `None`，不做联想。
+pub fn split_dir_query(text: &str) -> Option<(&str, &str)> {
+    let index = text.rfind('/')?;
+    Some((&text[..=index], &text[index + 1..]))
+}
