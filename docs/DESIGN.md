@@ -186,6 +186,8 @@ Server 启动和关闭由用户手动执行，启动参数包括
 - `--port`: 监听端口，默认为 `34567`
 - `--token`：指定认证 token，必传
 
+Server 的 WebSocket 监听地址为 `ws://<host>:<port>/daemon`。
+
 ### Agent 生命周期
 
 当 Daemon 与 Server 建立好连接后
