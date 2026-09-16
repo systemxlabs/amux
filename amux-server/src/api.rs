@@ -152,6 +152,7 @@ async fn list_machines(State(state): State<Arc<AppState>>) -> Json<Vec<Machine>>
                 os: info.os,
                 arch: info.arch,
                 hostname: info.hostname,
+                temp_dir: info.temp_dir,
                 version: info.version,
             })
             .collect(),

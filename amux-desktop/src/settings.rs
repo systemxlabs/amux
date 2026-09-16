@@ -704,7 +704,20 @@ pub fn manage_skill(
     agent: String,
 ) {
     runtime.spawn(async move {
-        let workspace = std::env::temp_dir().to_string_lossy().to_string();
+        // 工作目录取该机器的系统临时目录（docs/DESIGN.md「技能操作」）
+        let workspace = match client.machines().await {
+            Ok(machines) => match machines.into_iter().find(|item| item.name == machine) {
+                Some(machine) => machine.temp_dir,
+                None => {
+                    core.lock().error(format!("找不到机器 {machine}"));
+                    return;
+                }
+            },
+            Err(error) => {
+                core.lock().error(format!("读取机器信息失败：{error}"));
+                return;
+            }
+        };
         let session = match client
             .create_session(&amux_common::api::CreateSessionRequest {
                 machine,

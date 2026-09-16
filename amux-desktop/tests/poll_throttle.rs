@@ -28,7 +28,7 @@ fn stub(path: &str) -> &'static str {
         }
         "/sessions/s1/slash_commands" => r#"{"commands":[{"name":"goal","description":"目标"}]}"#,
         "/machines" => {
-            r#"[{"name":"pc","os":"linux","arch":"x86_64","hostname":"pc","version":"0.1.0"}]"#
+            r#"[{"name":"pc","os":"linux","arch":"x86_64","hostname":"pc","tempDir":"/tmp","version":"0.1.0"}]"#
         }
         "/machines/pc/agents" => r#"[{"name":"codex","available":true}]"#,
         "/config/workflows/" => r#"[{"name":"plan","plan":"做点什么"}]"#,

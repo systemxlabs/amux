@@ -514,7 +514,7 @@ mod tests {
                     }
                     (
                         axum::http::StatusCode::OK,
-                        r#"[{"name":"localpc","os":"linux","arch":"x86_64","hostname":"pc","version":"0.1.0"}]"#,
+                        r#"[{"name":"localpc","os":"linux","arch":"x86_64","hostname":"pc","tempDir":"/tmp","version":"0.1.0"}]"#,
                     )
                         .into_response()
                 }),

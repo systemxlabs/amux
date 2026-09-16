@@ -72,6 +72,8 @@ pub struct MachineInfo {
     pub os: String,
     pub arch: String,
     pub hostname: String,
+    /// 系统临时目录（技能操作以它作为会话工作目录）
+    pub temp_dir: String,
     /// daemon 版本
     pub version: String,
 }

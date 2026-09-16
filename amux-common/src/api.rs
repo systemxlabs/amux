@@ -29,6 +29,8 @@ pub struct Machine {
     pub os: String,
     pub arch: String,
     pub hostname: String,
+    /// 该机器的系统临时目录（技能操作以它作为会话工作目录）
+    pub temp_dir: String,
     pub version: String,
 }
 

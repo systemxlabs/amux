@@ -8,6 +8,7 @@ pub fn machine_info(name: &str) -> MachineInfo {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         hostname: hostname(),
+        temp_dir: std::env::temp_dir().to_string_lossy().into_owned(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
@@ -36,6 +37,7 @@ mod tests {
         assert_eq!(info.name, "localpc");
         assert!(!info.os.is_empty());
         assert!(!info.arch.is_empty());
+        assert!(!info.temp_dir.is_empty(), "技能操作要用机器的系统临时目录");
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
     }
 }
