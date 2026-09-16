@@ -3,7 +3,7 @@
 //!   无本地化输出解析
 //! - gitoxide 无等价能力处保留 git CLI：patch 应用（`git apply --reverse`）、
 //!   索引+工作区整体恢复（`git restore` / `git clean`）、
-//!   worktree 增删查（`git worktree add/remove/list/prune`）
+//!   worktree 新增/删除/重建（gix-worktree 仅有列出能力，无增删管理）
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -594,15 +594,49 @@ impl GitRunner {
         Ok(target.to_string_lossy().replace('\\', "/"))
     }
 
-    /// 查询仓库的所有 worktree 路径。
+    /// 查询仓库的所有 worktree 路径（主工作树 + linked worktrees）。
+    /// gix-worktree 可枚举工作树；若枚举失败则回退到 `git worktree list`。
     pub fn worktree_list(&self, repo: &str) -> Result<Vec<String>, String> {
-        let out = run(repo, &["worktree", "list", "--porcelain"])
-            .map_err(|e| format!("{}: {}", e.message, e.stderr.trim()))?;
-        Ok(out
-            .lines()
-            .filter_map(|line| line.strip_prefix("worktree "))
-            .map(|path| path.to_string())
-            .collect())
+        match self.worktree_list_gix(repo) {
+            Ok(paths) => Ok(paths),
+            Err(gix_err) => {
+                let out = run(repo, &["worktree", "list", "--porcelain"])
+                    .map_err(|e| format!("{}: {}", e.message, e.stderr.trim()))?;
+                let paths: Vec<String> = out
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("worktree "))
+                    .map(|path| path.to_string())
+                    .collect();
+                if paths.is_empty() {
+                    return Err(gix_err);
+                }
+                Ok(paths)
+            }
+        }
+    }
+
+    /// 用 gix 枚举全部 worktree 路径：主工作树 + `<common_dir>/worktrees` 下所有 linked。
+    fn worktree_list_gix(&self, repo: &str) -> Result<Vec<String>, String> {
+        let repo = gix::discover(repo).map_err(|e| format!("不是 git 仓库: {repo}: {e}"))?;
+        let mut paths = Vec::new();
+        // 从主仓库读取工作树路径；bare 仓库无主工作树，此时只列 linked。
+        if let Ok(main) = repo.main_repo() {
+            if let Some(workdir) = main.workdir() {
+                paths.push(workdir.to_string_lossy().into_owned());
+            }
+        }
+        let mut linked = repo
+            .worktrees()
+            .map_err(|e| format!("枚举 worktree 失败: {e}"))?;
+        // git worktree list 按 gitdir 路径排序，保持输出稳定。
+        linked.sort_by(|a, b| a.git_dir().cmp(b.git_dir()));
+        for proxy in linked {
+            let base = proxy
+                .base()
+                .map_err(|e| format!("读取 worktree 路径失败: {e}"))?;
+            paths.push(base.to_string_lossy().into_owned());
+        }
+        Ok(paths)
     }
 
     /// 删除 worktree（强制：会话删除级联清理不因未提交改动而失败）。
