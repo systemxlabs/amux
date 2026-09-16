@@ -261,9 +261,7 @@ fn connection_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
                             .primary()
                             .label("保存")
                             .disabled(!this.settings_dirty)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.save_connection(window, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, _, cx| this.save_connection(cx))),
                     ),
                 ),
         )

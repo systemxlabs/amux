@@ -57,28 +57,6 @@ pub fn confirm(
     });
 }
 
-/// 结果提示弹窗（保存成功/失败等）：只有「确定」按钮。
-pub fn alert(
-    window: &mut Window,
-    cx: &mut Context<AmuxApp>,
-    title: impl Into<SharedString>,
-    description: impl Into<SharedString>,
-) {
-    let title = title.into();
-    let description = description.into();
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        alert
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text("确定")
-                    .show_cancel(false),
-            )
-            .title(title.clone())
-            .description(description.clone())
-            .on_ok(|_, _, _| true)
-    });
-}
-
 /// 表单弹窗：`fields` 为（字段名，输入框实体）列表，宽度以 rem 给出。
 ///
 /// 保存按钮点击后执行 `on_save`，返回 false 时保留弹窗（校验未通过）。

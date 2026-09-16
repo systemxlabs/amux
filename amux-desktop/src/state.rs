@@ -376,14 +376,6 @@ pub struct Note {
     pub level: NoteLevel,
 }
 
-/// 后台任务排队的一条结果弹窗（保存成功/失败等需要用户确认的反馈）；
-/// 由节拍在有窗口时开出弹窗。
-#[derive(Debug, Clone)]
-pub struct Alert {
-    pub title: String,
-    pub message: String,
-}
-
 /// 设置面板分类（PRD 设置页面）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -461,8 +453,6 @@ pub struct Core {
     pub loaded_view: Option<ViewKey>,
     /// 待投递的提示（后台任务无窗口，只能排队等节拍投递）
     pub notes: VecDeque<Note>,
-    /// 待投递的结果弹窗（同上）
-    pub alerts: VecDeque<Alert>,
     /// 会话列表分页：每页从普通会话与工作流会话各拉取的条目数
     pub list_loaded: usize,
     /// 会话列表分页状态
@@ -503,7 +493,6 @@ impl Default for Core {
             settings: SettingsData::default(),
             loaded_view: None,
             notes: VecDeque::new(),
-            alerts: VecDeque::new(),
             list_loaded: DEFAULT_PAGE_SIZE,
             list_paging: Paging::default(),
             side_panel: None,
@@ -591,14 +580,6 @@ impl Core {
         self.notes.push_back(Note {
             message: message.into(),
             level: NoteLevel::Error,
-        });
-    }
-
-    /// 排队一条结果弹窗。
-    pub fn alert(&mut self, title: impl Into<String>, message: impl Into<String>) {
-        self.alerts.push_back(Alert {
-            title: title.into(),
-            message: message.into(),
         });
     }
 }

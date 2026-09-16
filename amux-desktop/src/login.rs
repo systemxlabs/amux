@@ -67,7 +67,7 @@ pub fn render(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> Any
                 .w_full()
                 .label("进入")
                 .disabled(!can_enter)
-                .on_click(cx.listener(|this, _, window, cx| this.login(window, cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.login(cx))),
         );
 
     v_flex()

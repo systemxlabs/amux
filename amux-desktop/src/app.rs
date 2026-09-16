@@ -334,13 +334,10 @@ impl AmuxApp {
         f(&mut core)
     }
 
-    /// 把后台排队的提示与弹窗投递出去（后台任务无窗口，只能在有窗口的节拍里投递）。
+    /// 把后台排队的提示投递为通知（后台任务无窗口，只能在有窗口的节拍里投递）。
     fn flush_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         while let Some(note) = self.with_core(|core| core.notes.pop_front()) {
             window.push_notification(dialog::note_notification(note), cx);
-        }
-        while let Some(alert) = self.with_core(|core| core.alerts.pop_front()) {
-            dialog::alert(window, cx, alert.title, alert.message);
         }
     }
 
@@ -1022,19 +1019,22 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 保存连接设置：写入 `~/.amux/app/server.json` 并重建客户端。
-    pub fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 保存连接设置：写入 `~/.amux/app/server.json` 并重建客户端；结果以通知提示
+    /// （docs/PRD.md「连接设置」）。
+    pub fn save_connection(&mut self, cx: &mut Context<Self>) {
         match self.save_input_connection(cx) {
-            Ok(()) => dialog::alert(window, cx, "保存成功", "连接设置已保存。"),
-            Err(error) => dialog::alert(window, cx, "保存失败", error),
+            Ok(()) => self.with_core(|core| core.success("连接设置已保存")),
+            Err(error) => self.with_core(|core| core.error(format!("保存失败：{error}"))),
         }
+        cx.notify();
     }
 
     /// 登录页「进入」：写入连接信息并立即尝试连接；连接成功后由连接状态切到主页面
     /// （docs/PRD.md「登录页面」）。
-    pub fn login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn login(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.save_input_connection(cx) {
-            dialog::alert(window, cx, "保存失败", error);
+            self.with_core(|core| core.error(format!("保存失败：{error}")));
+            cx.notify();
         }
     }
 
@@ -2085,8 +2085,9 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             match client.set_orchestrator(&config).await {
                 Ok(()) => {
-                    // 保存成功不提示：表单状态与内容本身即是反馈
-                    core.lock().settings.orchestrator = Some(config);
+                    let mut core = core.lock();
+                    core.settings.orchestrator = Some(config);
+                    core.success("编排智能体设置已保存");
                 }
                 Err(error) => core.lock().error(format!("保存失败：{error}")),
             }
