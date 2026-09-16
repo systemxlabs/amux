@@ -938,6 +938,25 @@ impl AmuxApp {
         cx.notify();
     }
 
+    /// 打开发起新增表单（设置各分类右上角「+」）。
+    pub fn open_new_form(
+        &mut self,
+        tab: crate::state::SettingsTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match tab {
+            crate::state::SettingsTab::QuickCommands => {
+                self.open_quick_command_form(FormTarget::New, window, cx)
+            }
+            crate::state::SettingsTab::Skills => self.open_skill_form(FormTarget::New, window, cx),
+            crate::state::SettingsTab::WorkflowPlans => {
+                self.open_plan_form(FormTarget::New, window, cx)
+            }
+            _ => {}
+        }
+    }
+
     /// 填入工作流计划（已保存计划）。
     pub fn set_plan(&mut self, plan: String, window: &mut Window, cx: &mut Context<Self>) {
         self.plan_input

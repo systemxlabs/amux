@@ -172,22 +172,51 @@ fn render_content(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
         .p_4()
         .overflow_y_scroll()
         .child(
-            v_flex()
-                .gap_0p5()
+            h_flex()
+                .w_full()
+                .items_start()
+                .gap_2()
                 .child(
-                    Label::new(title)
-                        .text_lg()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.foreground),
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            Label::new(title)
+                                .text_lg()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground),
+                        )
+                        .child(
+                            Label::new(subtitle)
+                                .text_sm()
+                                .text_color(theme.muted_foreground),
+                        ),
                 )
-                .child(
-                    Label::new(subtitle)
-                        .text_sm()
-                        .text_color(theme.muted_foreground),
-                ),
+                .children(tab_action(core, cx)),
         )
         .child(page)
         .into_any_element()
+}
+
+/// 分类右上角的「+」新增按钮（只有需要新增的分类有）。
+fn tab_action(core: &Core, cx: &mut Context<AmuxApp>) -> Option<AnyElement> {
+    let tab = core.settings_tab;
+    let (id, tooltip) = match tab {
+        SettingsTab::QuickCommands => ("qc-add", "添加快捷指令"),
+        SettingsTab::Skills => ("skill-add", "添加技能"),
+        SettingsTab::WorkflowPlans => ("plan-add", "添加计划"),
+        _ => return None,
+    };
+    Some(
+        Button::new(id)
+            .small()
+            .primary()
+            .icon(IconName::Plus)
+            .tooltip(tooltip)
+            .on_click(cx.listener(move |this, _, window, cx| this.open_new_form(tab, window, cx)))
+            .into_any_element(),
+    )
 }
 
 /// 分类标题与说明。
@@ -495,22 +524,7 @@ fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .text_color(theme.muted_foreground),
         );
     }
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex().items_center().child(div().flex_1()).child(
-                Button::new("qc-add")
-                    .small()
-                    .primary()
-                    .icon(IconName::Plus)
-                    .tooltip("添加快捷指令")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_quick_command_form(FormTarget::New, window, cx)
-                    })),
-            ),
-        )
-        .child(list)
-        .into_any_element()
+    list.into_any_element()
 }
 
 /// 技能：卡片两层（名称/描述 + 编辑/删除，安装/更新/卸载），右上角「+」新增。
@@ -597,22 +611,7 @@ fn skills_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .text_color(theme.muted_foreground),
         );
     }
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex().items_center().child(div().flex_1()).child(
-                Button::new("skill-add")
-                    .small()
-                    .primary()
-                    .icon(IconName::Plus)
-                    .tooltip("添加技能")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_skill_form(FormTarget::New, window, cx)
-                    })),
-            ),
-        )
-        .child(list)
-        .into_any_element()
+    list.into_any_element()
 }
 
 /// 工作流计划：卡片列表（名称 + 内容 + 编辑/删除），右上角「+」新增。
@@ -674,22 +673,7 @@ fn plans_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .text_color(theme.muted_foreground),
         );
     }
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex().items_center().child(div().flex_1()).child(
-                Button::new("plan-add")
-                    .small()
-                    .primary()
-                    .icon(IconName::Plus)
-                    .tooltip("添加计划")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_plan_form(FormTarget::New, window, cx)
-                    })),
-            ),
-        )
-        .child(list)
-        .into_any_element()
+    list.into_any_element()
 }
 
 /// 技能安装/更新/卸载：在指定机器与 agent 上创建临时目录普通会话并发送指令
