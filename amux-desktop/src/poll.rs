@@ -61,7 +61,7 @@ pub async fn tick(core: SharedCore) {
     if core_due(&core, |last| last.list, SESSION_LIST_INTERVAL, last_list) {
         refresh_list(&client, &core).await;
     }
-    // 机器/agent 与编排智能体配置：新建会话视图常驻需要，按周期节流刷新
+    // 机器/agent 与列表类配置：新建会话视图与交互视图常驻需要，按周期节流刷新
     if core_due(
         &core,
         |last| last.settings,
@@ -282,10 +282,12 @@ async fn refresh_open(
     }
 }
 
-/// 机器/agent 列表与编排智能体配置：新建会话视图与设置浮窗共用。
+/// 机器/agent、编排智能体、工作流计划与快捷指令：新建会话视图、交互视图与设置浮窗共用。
 async fn refresh_config(client: &Client, core: &SharedCore) {
     let machines = client.machines().await.ok();
     let orchestrator = client.orchestrator().await.ok();
+    let plans = client.workflow_plans().await.ok();
+    let quick_commands = client.quick_commands().await.ok();
     let mut agents = Vec::new();
     if let Some(machines) = &machines {
         for machine in machines {
@@ -301,10 +303,16 @@ async fn refresh_config(client: &Client, core: &SharedCore) {
     if let Some(orchestrator) = orchestrator {
         core.settings.orchestrator = orchestrator;
     }
+    if let Some(plans) = plans {
+        core.settings.plans = plans;
+    }
+    if let Some(commands) = quick_commands {
+        core.settings.quick_commands = commands;
+    }
     core.last.settings = Some(Instant::now());
 }
 
-/// 设置面板当前分类的列表类配置（机器/agent 与编排智能体配置由 `refresh_config` 刷新）。
+/// 设置面板当前分类的列表类配置（其余配置数据由 `refresh_config` 常驻刷新）。
 async fn refresh_settings(client: &Client, core: &SharedCore, tab: crate::state::SettingsTab) {
     use crate::state::SettingsTab;
     match tab {
@@ -313,17 +321,11 @@ async fn refresh_settings(client: &Client, core: &SharedCore, tab: crate::state:
                 core.lock().settings.skills = skills;
             }
         }
-        SettingsTab::WorkflowPlans => {
-            if let Ok(plans) = client.workflow_plans().await {
-                core.lock().settings.plans = plans;
-            }
-        }
-        SettingsTab::QuickCommands => {
-            if let Ok(commands) = client.quick_commands().await {
-                core.lock().settings.quick_commands = commands;
-            }
-        }
-        SettingsTab::Connection | SettingsTab::Machines | SettingsTab::Orchestrator => {}
+        SettingsTab::Connection
+        | SettingsTab::Machines
+        | SettingsTab::Orchestrator
+        | SettingsTab::WorkflowPlans
+        | SettingsTab::QuickCommands => {}
     }
 }
 
