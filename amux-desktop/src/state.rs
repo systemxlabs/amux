@@ -1,5 +1,6 @@
 //! 应用状态：连接、会话列表、当前会话视图、设置面板与轮询节拍。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -240,6 +241,10 @@ pub struct Core {
     pub settings: SettingsData,
     pub toast: Option<String>,
     pub list_limit: usize,
+    /// 当前打开的右侧面板
+    pub side_panel: Option<SidePanel>,
+    /// 工作流会话展开的关联普通会话列表
+    pub expanded_workflows: HashSet<String>,
     /// 各视图上次刷新时间（轮询节流）
     pub last: Ticks,
 }
@@ -271,6 +276,8 @@ impl Default for Core {
             settings: SettingsData::default(),
             toast: None,
             list_limit: 20,
+            side_panel: None,
+            expanded_workflows: HashSet::new(),
             last: Ticks::default(),
         }
     }

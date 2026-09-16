@@ -46,18 +46,21 @@ pub fn render_left(
                 ));
             }
             ListEntry::Workflow(workflow) => {
-                list = list.child(workflow_row(workflow, core, this, cx));
-                for linked in &workflow.linked_sessions {
-                    list = list.child(div().pl_6().child(session_row(
-                        &linked.id,
-                        &linked.title,
-                        linked.state,
-                        linked.updated_at,
-                        false,
-                        core,
-                        this,
-                        cx,
-                    )));
+                let expanded = core.expanded_workflows.contains(&workflow.id);
+                list = list.child(workflow_row(workflow, expanded, core, this, cx));
+                if expanded {
+                    for linked in &workflow.linked_sessions {
+                        list = list.child(div().pl_6().child(session_row(
+                            &linked.id,
+                            &linked.title,
+                            linked.state,
+                            linked.updated_at,
+                            false,
+                            core,
+                            this,
+                            cx,
+                        )));
+                    }
                 }
             }
         }
@@ -262,9 +265,10 @@ fn session_row(
     row.into_any()
 }
 
-/// 工作流会话行（标题带「工作流」标记）。
+/// 工作流会话行（标题带「工作流」标记，可展开/折叠关联普通会话）。
 fn workflow_row(
     workflow: &amux_common::api::Workflow,
+    expanded: bool,
     core: &crate::state::Core,
     this: &mut AmuxApp,
     cx: &mut Context<AmuxApp>,
@@ -279,10 +283,32 @@ fn workflow_row(
         this,
         cx,
     );
+    let toggle = Button::new(format!("toggle-{}", workflow.id))
+        .xsmall()
+        .ghost()
+        .icon(if expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        })
+        .on_click(cx.listener({
+            let id = workflow.id.clone();
+            move |this, _, _, cx| {
+                this.with_core(|core| {
+                    if core.expanded_workflows.contains(&id) {
+                        core.expanded_workflows.remove(&id);
+                    } else {
+                        core.expanded_workflows.insert(id.clone());
+                    }
+                });
+                cx.notify();
+            }
+        }));
     h_flex()
         .w_full()
         .gap_1()
         .items_center()
+        .child(toggle)
         .child(
             div()
                 .text_xs()
@@ -672,7 +698,14 @@ fn interaction_view(
                 .ghost()
                 .label(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.side_panel = Some(panel);
+                    this.with_core(|core| {
+                        core.side_panel = Some(panel);
+                        match panel {
+                            SidePanel::Activities => core.last.activities = None,
+                            SidePanel::Plan | SidePanel::Detail => core.last.plan = None,
+                            _ => {}
+                        }
+                    });
                     if panel == SidePanel::Terminal {
                         this.open_terminal(cx);
                     }
@@ -716,7 +749,7 @@ pub fn render_right(
                 .ghost()
                 .icon(IconName::Close)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.side_panel = None;
+                    this.with_core(|core| core.side_panel = None);
                     cx.notify();
                 })),
         );

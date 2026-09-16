@@ -35,8 +35,6 @@ pub struct AmuxApp {
     pub token_input: Entity<InputState>,
     /// 设置面板的「保存」是否可点（任一配置修改过）
     pub settings_dirty: bool,
-    /// 侧栏面板
-    pub side_panel: Option<SidePanel>,
     /// 设置表单编辑缓冲（技能/快捷指令/工作流计划/编排智能体）
     pub skill_form: (String, String),
     pub quick_form: (String, String),
@@ -135,7 +133,6 @@ impl AmuxApp {
             server_input,
             token_input,
             settings_dirty: false,
-            side_panel: None,
             skill_form: (String::new(), String::new()),
             quick_form: (String::new(), String::new()),
             plan_form: (String::new(), String::new()),
@@ -444,7 +441,11 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match poll::send_prompt(&client, &target, &text).await {
-                Ok(()) => {}
+                Ok(()) => {
+                    let mut core = core.lock();
+                    core.last.list = None;
+                    core.last.history = None;
+                }
                 Err(error) => core.lock().note(format!("发送失败：{error}")),
             }
         });
@@ -483,7 +484,9 @@ impl AmuxApp {
             self.runtime.spawn(async move {
                 match client.create_workflow(&plan, None).await {
                     Ok(workflow) => {
-                        poll::open_workflow(&mut core.lock(), &workflow.id);
+                        let mut core = core.lock();
+                        core.last.list = None;
+                        poll::open_workflow(&mut core, &workflow.id);
                     }
                     Err(error) => core.lock().note(format!("创建失败：{error}")),
                 }
@@ -509,6 +512,7 @@ impl AmuxApp {
                 match client.create_session(&request).await {
                     Ok(session) => {
                         let mut core = core.lock();
+                        core.last.list = None;
                         core.note("会话已创建");
                         poll::open_session(&mut core, &session.id);
                     }
@@ -535,6 +539,7 @@ impl AmuxApp {
                     {
                         core.open = None;
                     }
+                    core.last.list = None;
                     core.note("已删除");
                 }
                 Err(error) => core.lock().note(format!("删除失败：{error}")),
@@ -553,8 +558,9 @@ impl AmuxApp {
                 OpenTarget::Session(id) => client.configure_session(id, Some(title), None).await,
                 OpenTarget::Workflow(id) => client.configure_workflow(id, Some(title)).await,
             };
-            if let Err(error) = result {
-                core.lock().note(format!("重命名失败：{error}"));
+            match result {
+                Ok(()) => core.lock().last.list = None,
+                Err(error) => core.lock().note(format!("重命名失败：{error}")),
             }
         });
         cx.notify();
@@ -572,7 +578,7 @@ impl AmuxApp {
         let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
             return;
         };
-        self.side_panel = Some(SidePanel::Terminal);
+        self.with_core(|core| core.side_panel = Some(SidePanel::Terminal));
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match existing {
@@ -581,6 +587,7 @@ impl AmuxApp {
                     core.view.detail.active_terminal = Some(terminal);
                     core.view.detail.terminal_output.clear();
                     core.last.terminal_cursor = 0;
+                    core.last.terminal = None;
                 }
                 None => match client.open_terminal(&id, None, 100, 30).await {
                     Ok(terminal) => {
@@ -588,6 +595,7 @@ impl AmuxApp {
                         core.view.detail.terminal_output.clear();
                         core.view.detail.active_terminal = Some(terminal);
                         core.last.terminal_cursor = 0;
+                        core.last.terminal = None;
                     }
                     Err(error) => core.lock().note(format!("打开终端失败：{error}")),
                 },
@@ -749,7 +757,7 @@ impl Render for AmuxApp {
 
         let left = panels::render_left(&core, self, cx);
         let middle = panels::render_middle(&core, self, cx);
-        let right = self
+        let right = core
             .side_panel
             .map(|panel| panels::render_right(&core, panel, self, cx));
 

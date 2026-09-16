@@ -8,7 +8,7 @@ use amux_common::domain::ContentBlock;
 
 use crate::client::Client;
 use crate::state::{
-    ConnectionStatus, Core, ListEntry, OpenTarget, SharedCore, ACTIVITIES_INTERVAL,
+    ConnectionStatus, Core, ListEntry, OpenTarget, SharedCore, SidePanel, ACTIVITIES_INTERVAL,
     HISTORY_INTERVAL, ONGOING_INTERVAL, PLAN_INTERVAL, SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
 };
 
@@ -17,7 +17,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 单次节拍：按需刷新各视图。
 pub async fn tick(core: SharedCore) {
-    let (client, status, last_list, open, _limit, settings_open, settings_tab) = {
+    let (client, status, last_list, open, _limit, settings_open, settings_tab, side_panel) = {
         let core = core.lock();
         (
             core.client.clone(),
@@ -27,6 +27,7 @@ pub async fn tick(core: SharedCore) {
             core.list_limit,
             core.settings_open,
             core.settings_tab,
+            core.side_panel,
         )
     };
     let Some(client) = client else {
@@ -63,7 +64,7 @@ pub async fn tick(core: SharedCore) {
         refresh_settings(&client, &core, settings_tab).await;
     }
     if let Some(target) = open {
-        refresh_open(&client, &core, &target).await;
+        refresh_open(&client, &core, &target, side_panel).await;
     }
 }
 
@@ -100,7 +101,7 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
     let mut entries: Vec<ListEntry> = Vec::new();
     entries.extend(sessions.sessions.into_iter().map(ListEntry::Session));
     entries.extend(workflows.workflows.into_iter().map(ListEntry::Workflow));
-    entries.sort_by(|a, b| b.updated_at().cmp(&a.updated_at()));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.updated_at()));
     let mut core = core.lock();
     core.last.list = Some(Instant::now());
     core.entries = entries;
@@ -110,7 +111,17 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
 }
 
 /// 打开会话的视图数据：按各自周期刷新。
-async fn refresh_open(client: &Client, core: &SharedCore, target: &OpenTarget) {
+async fn refresh_open(
+    client: &Client,
+    core: &SharedCore,
+    target: &OpenTarget,
+    side_panel: Option<SidePanel>,
+) {
+    let activities_open = side_panel == Some(SidePanel::Activities);
+    let plan_open = side_panel == Some(SidePanel::Plan);
+    let detail_open = side_panel == Some(SidePanel::Detail);
+    let terminal_open = side_panel == Some(SidePanel::Terminal);
+
     let (due_history, due_ongoing, due_activities, due_plan, due_terminal, terminal, cursor) = {
         let core = core.lock();
         (
@@ -142,7 +153,7 @@ async fn refresh_open(client: &Client, core: &SharedCore, target: &OpenTarget) {
                     }
                 }
             }
-            if due_activities {
+            if due_activities && activities_open {
                 if let Ok(page) = client.activities(id, 200, 0).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
@@ -151,7 +162,7 @@ async fn refresh_open(client: &Client, core: &SharedCore, target: &OpenTarget) {
                     }
                 }
             }
-            if due_plan {
+            if due_plan && plan_open {
                 if let Ok(entries) = client.plan(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
@@ -159,6 +170,8 @@ async fn refresh_open(client: &Client, core: &SharedCore, target: &OpenTarget) {
                         core.last.plan = Some(Instant::now());
                     }
                 }
+            }
+            if due_plan {
                 if let Ok(options) = client.config_options(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
@@ -171,6 +184,8 @@ async fn refresh_open(client: &Client, core: &SharedCore, target: &OpenTarget) {
                         core.view.detail.slash_commands = commands;
                     }
                 }
+            }
+            if due_plan && detail_open {
                 if let Ok(info) = client.context(id).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
@@ -188,7 +203,7 @@ async fn refresh_open(client: &Client, core: &SharedCore, target: &OpenTarget) {
                     }
                 }
             }
-            if due_terminal {
+            if due_terminal && terminal_open {
                 if let Some(terminal_id) = terminal {
                     if let Ok(output) = client.terminal_output(id, &terminal_id, Some(cursor)).await
                     {
@@ -235,7 +250,7 @@ async fn refresh_open(client: &Client, core: &SharedCore, target: &OpenTarget) {
                     }
                 }
             }
-            if due_activities {
+            if due_activities && activities_open {
                 if let Ok(activities) = client.workflow_activities(id, 200, 0).await {
                     let mut core = core.lock();
                     if core.open.as_ref() == Some(target) {
