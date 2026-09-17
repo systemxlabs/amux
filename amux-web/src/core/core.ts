@@ -119,6 +119,8 @@ export type CoreState = {
   open: OpenTarget | null;
   sidePanel: SidePanel | null;
   detail: DetailState;
+  /** 会话交互视图输入框草稿（改动审查引用会往这里追加） */
+  inputDraft: string;
   newSession: NewSessionState;
   settings: SettingsState;
   recentWorkspaces: { machine: string; workspace: string; lastUsed: number }[];
@@ -188,6 +190,7 @@ export function initialState(): CoreState {
     open: null,
     sidePanel: null,
     detail: initialDetail(),
+    inputDraft: "",
     newSession: initialNewSession(),
     settings: initialSettings(),
     recentWorkspaces: [],

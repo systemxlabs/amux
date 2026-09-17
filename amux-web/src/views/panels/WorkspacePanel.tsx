@@ -1,6 +1,7 @@
 // 工作目录视图：文件树 + 文件内容（docs/PRD.md「工作目录视图」、docs/DESIGN.md「工作目录视图」）。
 //
-// 每一级目录项都在节点展开时实时拉取，不做缓存也不定时刷新；文件内容按行拉取一次。
+// 每一级目录项都在节点展开时实时拉取，不做缓存也不定时刷新；目录与文件内容都按分页续拉，
+// 有剩余页时展示「加载更多」入口。
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -12,10 +13,23 @@ import { cn } from "../../lib/utils";
 
 /** 目录页大小（与服务端夹取后的上限一致）。 */
 const DIR_PAGE_LIMIT = 500;
-/** 单次读取的行数；超出部分不展示。 */
+/** 单次读取的行数；有剩余行时通过「加载更多」续读。 */
 const FILE_LINE_LIMIT = 400;
 
-type Level = { entries: FsEntry[]; loading: boolean; error: string | null };
+type Level = {
+  entries: FsEntry[];
+  loading: boolean;
+  error: string | null;
+  hasMore: boolean;
+  nextOffset: number;
+};
+
+type FileState = {
+  path: string;
+  content: string;
+  hasMore: boolean;
+  nextOffset: number;
+};
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -37,9 +51,19 @@ type TreeProps = {
   selected: string | null;
   onToggleDir: (path: string) => void;
   onOpenFile: (entry: FsEntry) => void;
+  onLoadMoreDir: (path: string) => void;
 };
 
-function TreeNodes({ entries, depth, levels, expanded, selected, onToggleDir, onOpenFile }: TreeProps) {
+function TreeNodes({
+  entries,
+  depth,
+  levels,
+  expanded,
+  selected,
+  onToggleDir,
+  onOpenFile,
+  onLoadMoreDir,
+}: TreeProps) {
   return (
     <>
       {entries.map((entry) => {
@@ -82,15 +106,31 @@ function TreeNodes({ entries, depth, levels, expanded, selected, onToggleDir, on
                     加载失败：{level.error}
                   </div>
                 ) : (
-                  <TreeNodes
-                    entries={level.entries}
-                    depth={depth + 1}
-                    levels={levels}
-                    expanded={expanded}
-                    selected={selected}
-                    onToggleDir={onToggleDir}
-                    onOpenFile={onOpenFile}
-                  />
+                  <>
+                    <TreeNodes
+                      entries={level.entries}
+                      depth={depth + 1}
+                      levels={levels}
+                      expanded={expanded}
+                      selected={selected}
+                      onToggleDir={onToggleDir}
+                      onOpenFile={onOpenFile}
+                      onLoadMoreDir={onLoadMoreDir}
+                    />
+                    {level.hasMore ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        data-slot="workspace-load-more-dir"
+                        className="w-full justify-start font-normal text-muted-foreground"
+                        style={{ paddingLeft: `${20 + depth * 12}px` }}
+                        onClick={() => onLoadMoreDir(entry.path)}
+                      >
+                        加载更多…
+                      </Button>
+                    ) : null}
+                  </>
                 )}
               </div>
             )}
@@ -113,7 +153,7 @@ export function WorkspacePanel() {
   const [levels, setLevels] = useState<Record<string, Level>>({});
   const [expanded, setExpanded] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [file, setFile] = useState<string | null>(null);
+  const [file, setFile] = useState<FileState | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
 
@@ -121,22 +161,76 @@ export function WorkspacePanel() {
     async (path: string) => {
       const client = core.client;
       if (client === null || machine === null) return;
-      setLevels((prev) => ({ ...prev, [path]: { entries: [], loading: true, error: null } }));
+      setLevels((prev) => ({
+        ...prev,
+        [path]: { entries: [], loading: true, error: null, hasMore: false, nextOffset: 0 },
+      }));
       try {
         const result = await client.listDir(machine, path, DIR_PAGE_LIMIT, 0, false);
         setLevels((prev) => ({
           ...prev,
-          [path]: { entries: sortEntries(result.entries), loading: false, error: null },
+          [path]: {
+            entries: sortEntries(result.entries),
+            loading: false,
+            error: null,
+            hasMore: result.hasMore,
+            nextOffset: result.nextOffset,
+          },
         }));
       } catch (error) {
         setLevels((prev) => ({
           ...prev,
-          [path]: { entries: [], loading: false, error: messageOf(error) },
+          [path]: {
+            entries: [],
+            loading: false,
+            error: messageOf(error),
+            hasMore: false,
+            nextOffset: 0,
+          },
         }));
       }
     },
     [core, machine],
   );
+
+  const loadDirMore = async (path: string) => {
+    const client = core.client;
+    if (client === null || machine === null) return;
+    const level = levels[path];
+    if (level === undefined || !level.hasMore || level.loading) return;
+    setLevels((prev) => ({
+      ...prev,
+      [path]: { ...prev[path], loading: true },
+    }));
+    try {
+      const result = await client.listDir(machine, path, DIR_PAGE_LIMIT, level.nextOffset, false);
+      setLevels((prev) => {
+        const current = prev[path] ?? level;
+        const merged: FsEntry[] = [];
+        const seen = new Set<string>();
+        for (const entry of [...current.entries, ...result.entries]) {
+          if (seen.has(entry.path)) continue;
+          seen.add(entry.path);
+          merged.push(entry);
+        }
+        return {
+          ...prev,
+          [path]: {
+            entries: sortEntries(merged),
+            loading: false,
+            error: null,
+            hasMore: result.hasMore,
+            nextOffset: result.nextOffset,
+          },
+        };
+      });
+    } catch (error) {
+      setLevels((prev) => ({
+        ...prev,
+        [path]: { ...prev[path], loading: false, error: messageOf(error) },
+      }));
+    }
+  };
 
   // 切换会话或根目录变化时整棵树重新拉取
   useEffect(() => {
@@ -164,7 +258,35 @@ export function WorkspacePanel() {
     setFileLoading(true);
     try {
       const result = await client.readFile(machine, entry.path, FILE_LINE_LIMIT, 0);
-      setFile(result.content);
+      setFile({
+        path: result.path,
+        content: result.content,
+        hasMore: result.hasMore,
+        nextOffset: result.nextOffset,
+      });
+    } catch (error) {
+      setFileError(messageOf(error));
+    } finally {
+      setFileLoading(false);
+    }
+  };
+
+  const loadMoreFile = async () => {
+    const client = core.client;
+    if (client === null || machine === null || file === null || !file.hasMore || fileLoading) return;
+    setFileLoading(true);
+    try {
+      const result = await client.readFile(machine, file.path, FILE_LINE_LIMIT, file.nextOffset);
+      setFile((prev) =>
+        prev !== null && prev.path === result.path
+          ? {
+              ...prev,
+              content: prev.content + result.content,
+              hasMore: result.hasMore,
+              nextOffset: result.nextOffset,
+            }
+          : prev,
+      );
     } catch (error) {
       setFileError(messageOf(error));
     } finally {
@@ -217,15 +339,30 @@ export function WorkspacePanel() {
                     加载失败：{rootLevel.error}
                   </div>
                 ) : (
-                  <TreeNodes
-                    entries={rootLevel.entries}
-                    depth={0}
-                    levels={levels}
-                    expanded={expanded}
-                    selected={selected}
-                    onToggleDir={toggleDir}
-                    onOpenFile={openFile}
-                  />
+                  <>
+                    <TreeNodes
+                      entries={rootLevel.entries}
+                      depth={0}
+                      levels={levels}
+                      expanded={expanded}
+                      selected={selected}
+                      onToggleDir={toggleDir}
+                      onOpenFile={openFile}
+                      onLoadMoreDir={loadDirMore}
+                    />
+                    {rootLevel.hasMore ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        data-slot="workspace-load-more-dir"
+                        className="w-full justify-start font-normal text-muted-foreground"
+                        onClick={() => loadDirMore(root)}
+                      >
+                        加载更多…
+                      </Button>
+                    ) : null}
+                  </>
                 )}
               </>
             )}
@@ -241,7 +378,23 @@ export function WorkspacePanel() {
             ) : fileError !== null ? (
               <div className="px-2 py-1 text-xs text-destructive">读取文件失败：{fileError}</div>
             ) : file !== null ? (
-              <pre className="whitespace-pre p-1 font-mono text-xs">{file}</pre>
+              <div className="flex h-full flex-col">
+                <pre className="whitespace-pre shrink-0 p-1 font-mono text-xs">{file.content}</pre>
+                {file.hasMore ? (
+                  <div className="shrink-0 px-1 py-2 text-xs text-muted-foreground">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-slot="workspace-load-more-file"
+                      onClick={() => void loadMoreFile()}
+                    >
+                      加载更多…
+                    </Button>
+                    <span className="ml-2">文件内容较长，仅显示已加载部分</span>
+                  </div>
+                ) : null}
+              </div>
             ) : (
               <div className="px-2 py-1 text-xs text-muted-foreground">
                 在左侧选择文件查看内容

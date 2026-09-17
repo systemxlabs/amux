@@ -57,6 +57,26 @@ export function SessionListPanel() {
     void renameEntry(core, entry, value);
   };
 
+  // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) return;
+    const updatePageSize = () => {
+      const size = pageSizeForViewport(node.clientHeight, node.scrollHeight, state.entries.length);
+      core.update((next) => {
+        next.listPaging.pageSize = size;
+      });
+    };
+    updatePageSize();
+    const observer = new ResizeObserver(updatePageSize);
+    observer.observe(node);
+    window.addEventListener("resize", updatePageSize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updatePageSize);
+    };
+  }, [core, state.entries.length]);
+
   const handleScroll = (event: UIEvent<HTMLDivElement>): void => {
     const node = event.currentTarget;
     const pageSize = pageSizeForViewport(node.clientHeight, node.scrollHeight, state.entries.length);
@@ -65,7 +85,9 @@ export function SessionListPanel() {
         next.listPaging.pageSize = pageSize;
       });
     }
-    if (node.scrollTop <= 0 && state.listPaging.hasOlder && !state.listPaging.loadingOlder) {
+    // 预取相邻一页：进入窗口「更老」一侧的一屏之内即拉取（不必等到滚到最顶部）
+    const nearOlderEdge = node.scrollTop <= node.clientHeight;
+    if (nearOlderEdge && state.listPaging.hasOlder && !state.listPaging.loadingOlder) {
       anchorRef.current = node.scrollHeight;
       void loadOlderList(core);
     }

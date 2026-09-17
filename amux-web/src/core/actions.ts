@@ -7,6 +7,7 @@ import { loadToken, saveToken } from "../lib/token";
 import type {
   Agent,
   ContentBlock,
+  FsEntry,
   ListEntry,
   OpenTarget,
   OrchestratorConfig,
@@ -244,12 +245,24 @@ export async function updateWorkspaceInput(core: Core, text: string): Promise<vo
   });
   if (!core.client || machine === "") return;
   try {
-    const result = await core.client.listDir(machine, query.dir, undefined, 0, true);
+    // 联想要在实时输入时拉取全部目录项再做前缀匹配：按分页续拉，直到没有更多
+    const entries: FsEntry[] = [];
+    let offset = 0;
+    while (true) {
+      const result = await core.client.listDir(machine, query.dir, undefined, offset, true);
+      entries.push(...result.entries);
+      // 用户可能已经继续输入：尽早放弃过期拉取
+      if (core.state.newSession.suggestionDir !== query.dir) return;
+      if (core.state.newSession.suggestionPrefix !== query.prefix) return;
+      if (!result.hasMore) break;
+      const next = result.nextOffset;
+      if (next <= offset) break;
+      offset = next;
+    }
     core.update((state) => {
-      // 用户可能已经继续输入：过期应答不落地
       if (state.newSession.suggestionDir !== query.dir) return;
       if (state.newSession.suggestionPrefix !== query.prefix) return;
-      state.newSession.suggestions = matchingPrefix(result.entries, query.prefix);
+      state.newSession.suggestions = matchingPrefix(entries, query.prefix);
     });
   } catch {
     core.update((state) => {
@@ -289,6 +302,14 @@ export async function addFiles(core: Core, files: FileList | File[]): Promise<vo
 export function removeAttachment(core: Core, index: number): void {
   core.update((state) => {
     state.attachments = state.attachments.filter((_, at) => at !== index);
+  });
+}
+
+/** 改动审查引用：把文件路径或代码块内容追加到会话输入框（docs/PRD.md「改动审查」）。 */
+export function appendPromptDraft(core: Core, text: string): void {
+  core.update((state) => {
+    const current = state.inputDraft;
+    state.inputDraft = current === "" ? text : current.endsWith("\n") ? `${current}${text}` : `${current}\n${text}`;
   });
 }
 

@@ -4,7 +4,17 @@
 
 import type { Activity, HistoryItem, ListEntry, OpenTarget } from "../lib/types";
 import { entryId, entryUpdatedAt } from "../lib/types";
-import { beginOlderPage, mergeNewest, prependOlder, refreshLimit } from "../lib/paging";
+import {
+  beginNewerPage,
+  beginOlderPage,
+  prependNewer,
+  prependOlder,
+  refreshFetch,
+  refreshLimit,
+  replaceWindow,
+  trimNewest,
+  trimOldest,
+} from "../lib/paging";
 import { mergeListPage } from "../lib/list";
 import { appendTerminalOutput } from "../lib/terminal";
 import type { Core, SettingsTab } from "./core";
@@ -76,7 +86,7 @@ function messageOf(error: unknown): string {
 export async function refreshList(core: Core): Promise<void> {
   const client = core.client;
   if (!client) return;
-  const limit = Math.max(core.state.listPaging.pageSize, core.state.entries.length);
+  const limit = refreshLimit(core.state.entries.length, core.state.listPaging.pageSize);
   try {
     const [sessions, workflows] = await Promise.all([
       client.sessions(limit, 0),
@@ -229,27 +239,26 @@ function sameTarget(a: OpenTarget | null, b: OpenTarget): boolean {
   return a !== null && a.kind === b.kind && a.id === b.id;
 }
 
-/** 对话历史刷新：拉取最新一段并与窗口合并。 */
+/** 对话历史刷新：按当前窗口取数并整窗替换，拉取量不超过服务端单次上限。 */
 export async function refreshHistory(core: Core): Promise<void> {
   const target = core.state.open;
   if (!target) return;
-  const limit = refreshLimit(
-    core.state.detail.history.length,
-    core.state.detail.historyPaging.pageSize,
-  );
+  const paging = core.state.detail.historyPaging;
+  const loaded = core.state.detail.history.length;
+  const { offset, limit } = refreshFetch(paging, loaded);
   try {
     const page =
       target.kind === "session"
-        ? await core.client!.history(target.id, limit, 0)
-        : await core.client!.workflowHistory(target.id, limit, 0);
+        ? await core.client!.history(target.id, limit, offset)
+        : await core.client!.workflowHistory(target.id, limit, offset);
     core.update((state) => {
       if (!sameTarget(state.open, target)) return;
-      const merged = mergeNewest<HistoryItem>(
+      const merged = replaceWindow<HistoryItem>(
         state.detail.history,
         state.detail.historyPaging,
         page.items,
+        offset,
         page.hasMore,
-        (item) => item.id,
       );
       state.detail.history = merged.items;
       state.detail.historyPaging = merged.paging;
@@ -283,8 +292,9 @@ export async function loadOlderHistory(core: Core): Promise<void> {
         state.detail.historyPaging,
         page.items,
       );
-      state.detail.history = merged.items;
-      state.detail.historyPaging = { ...merged.paging, hasOlder: page.hasMore };
+      const trimmed = trimNewest(merged.items, merged.paging);
+      state.detail.history = trimmed.items;
+      state.detail.historyPaging = { ...trimmed.paging, hasOlder: page.hasMore };
     });
   } catch (error) {
     core.update((state) => {
@@ -294,27 +304,60 @@ export async function loadOlderHistory(core: Core): Promise<void> {
   }
 }
 
-/** 活动历史刷新：拉取最新一段并与窗口合并。 */
-export async function refreshActivities(core: Core): Promise<void> {
+/** 对话历史更新一页：插到窗口末尾（底部），供用户回到较新内容时加载。 */
+export async function loadNewerHistory(core: Core): Promise<void> {
   const target = core.state.open;
   if (!target) return;
-  const limit = refreshLimit(
-    core.state.detail.activities.length,
-    core.state.detail.activitiesPaging.pageSize,
-  );
+  const started = beginNewerPage(core.state.detail.historyPaging);
+  if (!started) return;
+  core.update((state) => {
+    state.detail.historyPaging = started.paging;
+  });
   try {
     const page =
       target.kind === "session"
-        ? await core.client!.activities(target.id, limit, 0)
-        : await core.client!.workflowActivities(target.id, limit, 0);
+        ? await core.client!.history(target.id, started.limit, started.offset)
+        : await core.client!.workflowHistory(target.id, started.limit, started.offset);
     core.update((state) => {
       if (!sameTarget(state.open, target)) return;
-      const merged = mergeNewest<Activity>(
+      const merged = prependNewer<HistoryItem>(
+        state.detail.history,
+        state.detail.historyPaging,
+        page.items,
+        started.offset,
+      );
+      const trimmed = trimOldest(merged.items, merged.paging);
+      state.detail.history = trimmed.items;
+      state.detail.historyPaging = trimmed.paging;
+    });
+  } catch (error) {
+    core.update((state) => {
+      state.detail.historyPaging = { ...state.detail.historyPaging, loadingNewer: false };
+    });
+    core.failure(`加载更新对话失败：${messageOf(error)}`);
+  }
+}
+
+/** 活动历史刷新：按当前窗口取数并整窗替换，拉取量不超过服务端单次上限。 */
+export async function refreshActivities(core: Core): Promise<void> {
+  const target = core.state.open;
+  if (!target) return;
+  const paging = core.state.detail.activitiesPaging;
+  const loaded = core.state.detail.activities.length;
+  const { offset, limit } = refreshFetch(paging, loaded);
+  try {
+    const page =
+      target.kind === "session"
+        ? await core.client!.activities(target.id, limit, offset)
+        : await core.client!.workflowActivities(target.id, limit, offset);
+    core.update((state) => {
+      if (!sameTarget(state.open, target)) return;
+      const merged = replaceWindow<Activity>(
         state.detail.activities,
         state.detail.activitiesPaging,
         page.activities,
+        offset,
         page.hasMore,
-        (item) => item.id,
       );
       state.detail.activities = merged.items;
       state.detail.activitiesPaging = merged.paging;
@@ -348,14 +391,49 @@ export async function loadOlderActivities(core: Core): Promise<void> {
         state.detail.activitiesPaging,
         page.activities,
       );
-      state.detail.activities = merged.items;
-      state.detail.activitiesPaging = { ...merged.paging, hasOlder: page.hasMore };
+      const trimmed = trimNewest(merged.items, merged.paging);
+      state.detail.activities = trimmed.items;
+      state.detail.activitiesPaging = { ...trimmed.paging, hasOlder: page.hasMore };
     });
   } catch (error) {
     core.update((state) => {
       state.detail.activitiesPaging = { ...state.detail.activitiesPaging, loadingOlder: false };
     });
     core.failure(`加载更早活动失败：${messageOf(error)}`);
+  }
+}
+
+/** 活动历史更新一页：插到窗口末尾（底部）。 */
+export async function loadNewerActivities(core: Core): Promise<void> {
+  const target = core.state.open;
+  if (!target) return;
+  const started = beginNewerPage(core.state.detail.activitiesPaging);
+  if (!started) return;
+  core.update((state) => {
+    state.detail.activitiesPaging = started.paging;
+  });
+  try {
+    const page =
+      target.kind === "session"
+        ? await core.client!.activities(target.id, started.limit, started.offset)
+        : await core.client!.workflowActivities(target.id, started.limit, started.offset);
+    core.update((state) => {
+      if (!sameTarget(state.open, target)) return;
+      const merged = prependNewer<Activity>(
+        state.detail.activities,
+        state.detail.activitiesPaging,
+        page.activities,
+        started.offset,
+      );
+      const trimmed = trimOldest(merged.items, merged.paging);
+      state.detail.activities = trimmed.items;
+      state.detail.activitiesPaging = trimmed.paging;
+    });
+  } catch (error) {
+    core.update((state) => {
+      state.detail.activitiesPaging = { ...state.detail.activitiesPaging, loadingNewer: false };
+    });
+    core.failure(`加载更新活动失败：${messageOf(error)}`);
   }
 }
 

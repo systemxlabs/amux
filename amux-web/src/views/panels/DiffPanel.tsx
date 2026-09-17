@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "../../components/ui/button";
+import { appendPromptDraft } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 import { buildDiffTree, type DiffNode } from "../../lib/difftree";
 import type { GitChangeStatus, GitDiffLine, GitDiffResult } from "../../lib/types";
@@ -188,12 +189,34 @@ export function DiffPanel() {
                   <span className="shrink-0 text-muted-foreground">
                     +{file.additions}/-{file.deletions}
                   </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    data-slot="diff-quote-file"
+                    className="h-5 shrink-0 text-xs"
+                    title="复制文件路径到输入框"
+                    onClick={() => appendPromptDraft(core, file.path)}
+                  >
+                    引用文件
+                  </Button>
                 </div>
                 {!collapseAll &&
                   file.hunks.map((hunk, hunkIx) => (
                     <div key={hunkIx}>
-                      <div className="whitespace-pre px-2 font-mono text-xs text-muted-foreground">
-                        {hunk.header}
+                      <div className="flex items-center gap-2 px-2 font-mono text-xs text-muted-foreground">
+                        <span className="min-w-0 flex-1">{hunk.header}</span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          data-slot="diff-quote-hunk"
+                          className="h-5 shrink-0 text-xs"
+                          title="复制代码块内容到输入框"
+                          onClick={() => appendPromptDraft(core, hunk.lines.map((line) => line.text).join("\n"))}
+                        >
+                          引用代码块
+                        </Button>
                       </div>
                       {hunk.lines.map((line, lineIx) => (
                         <div

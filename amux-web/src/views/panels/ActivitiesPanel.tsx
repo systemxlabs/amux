@@ -1,8 +1,8 @@
 // 会话活动视图：活动条目列表（docs/PRD.md「主页面」、docs/DESIGN.md「活动视图」）。
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { loadOlderActivities } from "../../core/poll";
+import { loadNewerActivities, loadOlderActivities } from "../../core/poll";
 import { useCore, useCoreState } from "../../core/store";
 import {
   activityDetail,
@@ -77,6 +77,30 @@ export function ActivitiesPanel() {
     previousHeight.current = height;
   }, [core, activities, shift, expanded]);
 
+  // 页大小随可视高度自适应：首次渲染与尺寸变化时也重新计算
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (element === null) return;
+    const updatePageSize = () => {
+      const size = pageSizeForViewport(
+        element.clientHeight,
+        element.scrollHeight,
+        core.state.detail.activities.length,
+      );
+      core.update((next) => {
+        next.detail.activitiesPaging.pageSize = size;
+      });
+    };
+    updatePageSize();
+    const observer = new ResizeObserver(updatePageSize);
+    observer.observe(element);
+    window.addEventListener("resize", updatePageSize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updatePageSize);
+    };
+  }, [core, core.state.detail.activities.length]);
+
   const handleScroll = () => {
     const element = scrollRef.current;
     if (element === null) return;
@@ -91,8 +115,15 @@ export function ActivitiesPanel() {
         next.detail.activitiesPaging.pageSize = pageSize;
       });
     }
-    if (element.scrollTop <= TOP_THRESHOLD && paging.hasOlder && !paging.loadingOlder) {
+    const nearOlderEdge = element.scrollTop <= TOP_THRESHOLD + element.clientHeight;
+    const nearNewerEdge =
+      element.scrollHeight - element.scrollTop - element.clientHeight <=
+      TOP_THRESHOLD + element.clientHeight;
+    if (nearOlderEdge && paging.hasOlder && !paging.loadingOlder) {
       void loadOlderActivities(core);
+    }
+    if (nearNewerEdge && paging.hasNewer && !paging.loadingNewer) {
+      void loadNewerActivities(core);
     }
   };
 

@@ -1,7 +1,7 @@
 // 会话交互视图（docs/PRD.md「会话交互视图」）：agent 状态、对话气泡、实时活动、
 // 快捷指令栏、输入区（Enter 发送 / Shift+Enter 换行、斜杠命令上拉框、附件）、会话选项。
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { SendHorizontal, Square } from "lucide-react";
 
 import { Button } from "../components/ui/button";
@@ -15,7 +15,7 @@ import {
 import { Switch } from "../components/ui/switch";
 import { Textarea } from "../components/ui/textarea";
 import { addFiles, cancelOpen, removeAttachment, sendPrompt, setConfigOption } from "../core/actions";
-import { loadOlderHistory } from "../core/poll";
+import { loadNewerHistory, loadOlderHistory } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
 import { activitySummary, blocksText, formatTime, truncate } from "../lib/format";
 import { pageSizeForViewport } from "../lib/paging";
@@ -29,13 +29,15 @@ export function InteractionView() {
   const target = state.open;
   const detail = state.detail;
 
-  const [draft, setDraft] = useState("");
+  const draft = state.inputDraft;
   const listRef = useRef<HTMLDivElement>(null);
   const heightBeforeLoad = useRef<number | null>(null);
 
   useEffect(() => {
-    setDraft("");
-  }, [target?.kind, target?.id]);
+    core.update((next) => {
+      next.inputDraft = "";
+    });
+  }, [core, target?.kind, target?.id]);
 
   // 更早一页插入后把原首条目保持在原位置（docs/DESIGN.md「对话滚动机制」）
   useEffect(() => {
@@ -74,6 +76,30 @@ export function InteractionView() {
         ?.agents.find((agent) => agent.name === detail.session?.agent)?.available ?? false)
     : detail.workflow !== null;
 
+  // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算（不只是滚动事件）
+  useEffect(() => {
+    const element = listRef.current;
+    if (!element) return;
+    const updatePageSize = () => {
+      const size = pageSizeForViewport(
+        element.clientHeight,
+        element.scrollHeight,
+        detail.history.length,
+      );
+      core.update((next) => {
+        next.detail.historyPaging.pageSize = size;
+      });
+    };
+    updatePageSize();
+    const observer = new ResizeObserver(updatePageSize);
+    observer.observe(element);
+    window.addEventListener("resize", updatePageSize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updatePageSize);
+    };
+  }, [core, detail.history.length]);
+
   const onScroll = () => {
     const element = listRef.current;
     if (!element) return;
@@ -87,20 +113,35 @@ export function InteractionView() {
         next.detail.historyPaging.pageSize = size;
       });
     }
+    const nearOlderEdge = element.scrollTop <= element.clientHeight;
+    const nearNewerEdge =
+      element.scrollHeight - element.scrollTop - element.clientHeight <= element.clientHeight;
     if (
-      element.scrollTop <= 0 &&
+      nearOlderEdge &&
       detail.historyPaging.hasOlder &&
       !detail.historyPaging.loadingOlder
     ) {
       heightBeforeLoad.current = element.scrollHeight;
       void loadOlderHistory(core);
     }
+    if (
+      nearNewerEdge &&
+      detail.historyPaging.hasNewer &&
+      !detail.historyPaging.loadingNewer
+    ) {
+      heightBeforeLoad.current = element.scrollHeight;
+      void loadNewerHistory(core);
+    }
   };
 
   const send = async () => {
     if (draft.trim() === "" && state.attachments.length === 0) return;
     const ok = await sendPrompt(core, draft);
-    if (ok) setDraft("");
+    if (ok) {
+      core.update((next) => {
+        next.inputDraft = "";
+      });
+    }
   };
 
   const quickSend = async (prompt: string) => {
@@ -179,7 +220,12 @@ export function InteractionView() {
                 type="button"
                 data-slot="slash-command"
                 className="flex w-full flex-col items-start px-2 py-1 text-left hover:bg-accent"
-                onClick={() => setDraft(`/${command.name} `)}
+
+                onClick={() =>
+                  core.update((next) => {
+                    next.inputDraft = `/${command.name} `;
+                  })
+                }
               >
                 <span>/{command.name}</span>
                 <span className="text-xs text-muted-foreground">{command.description}</span>
@@ -224,7 +270,11 @@ export function InteractionView() {
             rows={3}
             placeholder="输入指令，Enter 发送，Shift+Enter 换行"
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) =>
+              core.update((next) => {
+                next.inputDraft = event.target.value;
+              })
+            }
             onPaste={(event) => {
               const files = [...event.clipboardData.files];
               if (files.length > 0) {
