@@ -253,6 +253,15 @@ impl AmuxApp {
 
         // 输入框的提示只补充 label 之外的信息：label 已说明字段含义时不再重复
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("会话标题"));
+        cx.subscribe(
+            &rename_input,
+            |this: &mut Self, _, event: &InputEvent, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_rename(cx),
+                InputEvent::Blur => this.cancel_rename(cx),
+                _ => {}
+            },
+        )
+        .detach();
         let orch_base_url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://api.openai.com/v1"));
         let orch_api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
@@ -774,7 +783,10 @@ impl AmuxApp {
         let current = self.with_core(|core| core.entry(id).map_or(String::new(), |e| e.title()));
         self.renaming_id = Some(id.to_string());
         let input = self.rename_input.clone();
-        input.update(cx, |state, cx| state.set_value(current, window, cx));
+        input.update(cx, |state, cx| {
+            state.set_value(current, window, cx);
+            state.focus(window, cx);
+        });
         cx.notify();
     }
 

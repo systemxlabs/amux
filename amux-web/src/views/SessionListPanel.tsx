@@ -188,12 +188,13 @@ export function SessionListPanel() {
                           setRenaming(null);
                         }
                       }}
+                      // PRD「会话列表视图」：失焦取消，不保存
                       onBlur={() => {
                         if (handledRef.current) {
                           handledRef.current = false;
                           return;
                         }
-                        commitRename(entry, renaming.value);
+                        setRenaming(null);
                       }}
                       className="h-6"
                     />
