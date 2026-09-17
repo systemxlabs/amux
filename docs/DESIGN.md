@@ -104,8 +104,8 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/config/recent_workspaces/` | 查询所有配置的常用工作目录 |
 | GET `/config/quick_commands/` | 查询所有配置的快捷指令 |
 | PUT `/config/quick_commands/` | 全量更新所有快捷指令 |
-| GET `/config/agent/` | 查询编排智能体配置 |
-| PUT `/config/agent/` | 更新编排智能体配置 |
+| GET `/config/agent/` | 查询内置智能体配置 |
+| PUT `/config/agent/` | 更新内置智能体配置 |
 
 ## Daemon
 
@@ -117,6 +117,8 @@ Daemon 常驻于每个机器上，主要负责 ACP 多路复用和执行与机�
 - WebSocket：`tokio-tungstenite`
 - Git：`gix`，gix 功能不足则用 git CLI
 - PTY：`portable-pty`
+- Nano 智能体：`rig`
+- ACP：`agent-client-protocol` 官方 SDK
 - CLI: `clap`
 
 ### Daemon 启动
@@ -132,13 +134,55 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 
 | agent | 发现方式 |
 |---|---|
+| nano | 已内置 |
 | codex | 本机装有 `codex` CLI 且 npx 可用 |
 
 ### Agent 启动
 
 | agent | 启动方式 |
 |---|---|
+| nano | 进程内启动 |
 | codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @nyssance/codex-acp-v2` |
+
+### Nano 智能体
+
+Nano 智能体为 Daemon 内置智能体，运行在进程内，只有一个 shell 工具，数据存储在内存中。
+
+#### ACP 认证
+
+1. initialize 响应里声明一个私有认证方法：
+   ```json
+     {
+       "authMethods": [
+         {
+           "type": "_amux_config",
+           "methodId": "amux-config",
+           "name": "Amux 模型配置"
+         }
+       ]
+     }
+   ```
+2. Server 初始化后立刻发 auth/login，模型配置放 _meta：
+   ```json
+     {
+       "methodId": "amux-config",
+       "_meta": {
+         "amuxApiFormat": "responses",
+         "amuxBaseUrl": "https://api.deepseek.com/v1",
+         "amuxApiKey": "sk-xxx",
+         "amuxModel": "deepseek-v4-flash",
+         "amuxEffort": "high"
+       }
+     }
+   ```
+3. nano 收到后校验并生效；未登录（未收到配置）时 session/new 返回标准的 auth_required 错误
+   
+#### ACP 实现
+
+- Initialization: 能力支持 `PromptCapabilities` / `SessionDeleteCapabilities`
+- `session/resume`：在内存中恢复会话，若会话被删除，则新建会话
+- `session/close` 和 `session/delete`：从内存中删除会话
+- 不支持 agent 计划、斜杠命令、会话选项、Elicitation、MCP
 
 ### ACP 多路复用
 
@@ -175,7 +219,7 @@ Daemon 在内存中仅存储终端元信息，终端输出由 Server 侧缓存�
 - 基础库：`tokio` / `serde` / `serde_json`
 - HTTP & WebSocket: `axum`
 - SQLite：`rusqlite`
-- 编排智能体：`rig`
+- 工作流智能体：`rig`
 - ACP：`agent-client-protocol` 官方 SDK
 - CLI: `clap`
 
@@ -196,7 +240,7 @@ Server 的 WebSocket 监听地址为 `ws://<host>:<port>/daemon`。
 2. 如果 agent 未启动，则进行重新启动
 3. 如果 agent 已启动但 Server 内无该 agent 活跃 ACP 连接记录，则关闭该 agent，进行重新启动
 4. 如果 agent 已启动且 Server 内有该 agent 活跃 ACP 连接记录，则无需重新启动
-5. 通过 Daemon 与重新启动的 Agent 建立 ACP 连接和初始化
+5. 通过 Daemon 与重新启动的 Agent 建立 ACP 连接和初始化，针对 Nano 智能体还需额外认证流程
 
 Server 可中途重启某一 Agent（无论是否已启动）。
 
@@ -306,7 +350,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 当普通会话超过 7 天不活跃时，自动清理其关联的 worktree，但不要清理其会话的 worktree 相关元数据，后续可按需（如用户向该会话输入新指令、查看会话工作目录）在同一目录重建 worktree。
 
-### 编排智能体
+### 工作流智能体
 
 系统提示词应包括
 - 角色，工作方式，行为约束
@@ -324,7 +368,9 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 | `read_session_history` | 分页读取关联普通会话对话内容 |
 | `read_session_activities` | 分页读取关联普通会话活动内容 |
 
-编排智能体实现应支持 steer，当工作流会话处于工作中时，接收的用户消息以 steer 方式注入。
+工作流智能体实现应支持 steer，当工作流会话处于工作中时，接收的用户消息以 steer 方式注入。
+
+工作流智能体采用非流式方式请求模型 API。
 
 ### 工作流会话驱动
 
@@ -339,8 +385,8 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 工作流会话状态变更
 - 新建会话时，会话状态为空闲
 - Server 重启后，其上所有工作流会话状态应置为空闲
-- 当编排智能体开始运行时，将状态置为工作中
-- 当编排智能体结束运行时，重新计算工作流会话状态
+- 当工作流智能体开始运行时，将状态置为工作中
+- 当工作流智能体结束运行时，重新计算工作流会话状态
 - 当接收关联普通会话的 `session/update` ACP 通知的 `state_update` 类型时，重新计算工作流会话状态
 
 ### 工作流会话存储
@@ -363,7 +409,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     PRIMARY KEY (workflow_id, session_id)
   );
   ```
-- 对话历史：存储在 `~/.amux/workflows/<workflow_id>_history.jsonl` 文件中，仅包含用户输入和编排智能体输出
+- 对话历史：存储在 `~/.amux/workflows/<workflow_id>_history.jsonl` 文件中，仅包含用户输入和工作流智能体输出
   ```json
   {"role": "user", "content": [ ... ], "timestamp": 1725800000000}
   {"role": "agent", "content": [ ... ], "timestamp": 1725800001000}
@@ -374,8 +420,6 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "title": "读 src/lib.rs", "parameters": "..."}
   {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
   ```
-
-流式输出合并后写入：编排智能体输出、thinking、工具调用等等流式传输均在内存中进行合并，合并成完整条目后立即进行追加写入磁盘。
 
 ### 工作流计划存储
 
@@ -414,7 +458,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
-### 编排智能体配置存储
+### 内置智能体配置存储
 
 存储在 `~/.amux/config/agent.json` 路径，格式为
 ```json
