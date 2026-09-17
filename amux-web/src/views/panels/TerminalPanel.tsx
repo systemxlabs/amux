@@ -21,6 +21,27 @@ import { cn } from "../../lib/utils";
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
+/** 浅色终端 ANSI 调色板（取 VS Code Light 主题，保证白底上十六色都可读）。 */
+const LIGHT_ANSI_COLORS = {
+  black: "#000000",
+  red: "#cd3131",
+  green: "#107c10",
+  yellow: "#7a6400",
+  blue: "#0451a5",
+  magenta: "#bc05bc",
+  cyan: "#0598bc",
+  white: "#555555",
+  brightBlack: "#666666",
+  brightRed: "#cd3131",
+  brightGreen: "#107c10",
+  brightYellow: "#7a6400",
+  brightBlue: "#0451a5",
+  brightMagenta: "#bc05bc",
+  brightCyan: "#0598bc",
+  brightWhite: "#555555",
+  selectionBackground: "#bfdbfe",
+};
+
 export function TerminalPanel() {
   const core = useCore();
   const state = useCoreState();
@@ -41,6 +62,9 @@ export function TerminalPanel() {
       theme: {
         background: tokens.getPropertyValue("--color-background").trim(),
         foreground: tokens.getPropertyValue("--color-foreground").trim(),
+        cursor: tokens.getPropertyValue("--color-foreground").trim(),
+        // 浅色底需要显式的 ANSI 调色板：xterm 默认的高亮色（黄/白）在白色背景上不可读
+        ...LIGHT_ANSI_COLORS,
       },
     });
     const fit = new FitAddon();

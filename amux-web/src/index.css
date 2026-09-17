@@ -1,31 +1,32 @@
 @import "tailwindcss";
 
 /*
- * shadcn/ui 令牌（Tailwind v4 CSS-first 配置）：应用为单一深色主题，
- * 组件按 shadcn 约定引用 background/foreground/muted/primary/destructive 等语义色。
+ * shadcn/ui 令牌（Tailwind v4 CSS-first 配置）：应用为单一浅色主题，取值对齐桌面应用的
+ * 浅色令牌（amux-desktop/src/theme.rs），组件按 shadcn 约定引用
+ * background/foreground/muted/primary/destructive 等语义色。
  */
 @theme inline {
-  --color-background: #16181d;
-  --color-foreground: #e6e8ec;
-  --color-card: #1c1f26;
-  --color-card-foreground: #e6e8ec;
-  --color-popover: #22262e;
-  --color-popover-foreground: #e6e8ec;
-  --color-primary: #4a86d8;
+  --color-background: #ffffff;
+  --color-foreground: #1d1d1f;
+  --color-card: #ededea;
+  --color-card-foreground: #1d1d1f;
+  --color-popover: #fdfdfc;
+  --color-popover-foreground: #1d1d1f;
+  --color-primary: #0a84ff;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #262b34;
-  --color-secondary-foreground: #d7dbe2;
-  --color-muted: #22262e;
-  --color-muted-foreground: #8b93a1;
-  --color-accent: #2b313b;
-  --color-accent-foreground: #e6e8ec;
-  --color-destructive: #d8564a;
+  --color-secondary: #e8e8e5;
+  --color-secondary-foreground: #2b2b2d;
+  --color-muted: #e8e8e5;
+  --color-muted-foreground: #686761;
+  --color-accent: #e7e7e3;
+  --color-accent-foreground: #1d1d1f;
+  --color-destructive: #c53030;
   --color-destructive-foreground: #ffffff;
-  --color-border: #2c313b;
-  --color-input: #2c313b;
-  --color-ring: #4a86d8;
-  --color-diff-add: #16351f;
-  --color-diff-remove: #3a1c1c;
+  --color-border: #e3e3df;
+  --color-input: #dadad6;
+  --color-ring: #0a84ff;
+  --color-diff-add: #e4f5e9;
+  --color-diff-remove: #fce8e6;
 
   --radius-sm: 4px;
   --radius-md: 6px;
@@ -37,6 +38,11 @@ body,
 #root {
   height: 100%;
   margin: 0;
+}
+
+/* 原生控件（滚动条、任务列表勾选框）跟随浅色主题 */
+html {
+  color-scheme: light;
 }
 
 body {
@@ -54,8 +60,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3a404c;
+  background: #d2d2cf;
   border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbc;
 }
 
 ::-webkit-scrollbar-track {

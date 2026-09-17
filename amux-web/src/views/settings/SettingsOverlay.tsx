@@ -49,7 +49,7 @@ export function SettingsOverlay() {
   return (
     <div
       data-slot="settings-overlay"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-6"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/25 p-6"
       onClick={() => closeSettings(core)}
     >
       {/* 浮窗尺寸对齐桌面应用（55rem × 38.75rem，其 rem 基准 14px → 770 × 540）；

@@ -28,13 +28,13 @@ const COMPONENTS: Components = {
     </a>
   ),
   code: ({ children }) => (
-    <code className="rounded-sm bg-black/25 px-1 py-px font-mono text-[0.85em] break-words">
+    <code className="rounded-sm bg-foreground/10 px-1 py-px font-mono text-[0.85em] break-words">
       {children}
     </code>
   ),
   // 代码块：内联代码的底色在 pre 内复位，避免两层底色叠加
   pre: ({ children }) => (
-    <pre className="overflow-x-auto rounded-sm bg-black/30 p-2 font-mono text-[0.85em] [&>code]:bg-transparent [&>code]:p-0">
+    <pre className="overflow-x-auto rounded-sm bg-foreground/10 p-2 font-mono text-[0.85em] [&>code]:bg-transparent [&>code]:p-0">
       {children}
     </pre>
   ),
