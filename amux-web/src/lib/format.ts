@@ -24,6 +24,8 @@ export function blocksText(blocks: readonly ContentBlock[]): string {
         case "text":
           return block.text;
         case "resource":
+          if (block.text) return block.text;
+          if (block.blob) return block.uri ? `[图片 ${block.uri}]` : "[图片]";
           return block.uri ? `[资源 ${block.uri}]` : "[资源]";
         case "resource_link":
           return `[引用 ${block.title ?? block.name}]`;

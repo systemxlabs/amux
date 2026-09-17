@@ -260,12 +260,12 @@ export async function updateWorkspaceInput(core: Core, text: string): Promise<vo
 
 // ---------- 会话交互 ----------
 
-/** 附件：图片按 blob（base64）发送，文本文件按 text 发送。 */
+/** 附件：图片按 blob（base64）发送，文本文件按 text 发送；uri 保留文件名供历史展示。 */
 export async function attachmentFromFile(file: File): Promise<Attachment> {
   if (file.type.startsWith("image/")) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     return {
-      block: { type: "resource", mimeType: file.type, blob: encodeBase64(bytes) },
+      block: { type: "resource", mimeType: file.type, uri: file.name, blob: encodeBase64(bytes) },
       label: file.name,
     };
   }
@@ -273,6 +273,7 @@ export async function attachmentFromFile(file: File): Promise<Attachment> {
     block: {
       type: "resource",
       mimeType: file.type || "text/plain",
+      uri: file.name,
       text: await file.text(),
     },
     label: file.name,
