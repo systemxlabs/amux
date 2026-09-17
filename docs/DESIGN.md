@@ -146,7 +146,7 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 
 ### Nano 智能体
 
-Nano 智能体为 Daemon 内置智能体，运行在进程内，只有一个 shell 工具，数据存储在内存中。
+Nano 智能体为 Daemon 内置智能体，运行在进程内，采用非流式传输请求模型 API，只有一个 shell 工具，所有数据存储在内存中。
 
 #### ACP 认证
 
@@ -175,7 +175,7 @@ Nano 智能体为 Daemon 内置智能体，运行在进程内，只有一个 she
        }
      }
    ```
-3. nano 收到后校验并生效；未登录（未收到配置）时 session/new 返回标准的 auth_required 错误
+3. nano 收到后校验并生效；未登录（未收到配置）时 `session/new` 返回标准的 auth_required 错误
    
 #### ACP 实现
 
