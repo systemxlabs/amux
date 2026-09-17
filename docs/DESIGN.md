@@ -117,7 +117,7 @@ Daemon 常驻于每个机器上，主要负责 ACP 多路复用和执行与机�
 - WebSocket：`tokio-tungstenite`
 - Git：`gix`，gix 功能不足则用 git CLI
 - PTY：`portable-pty`
-- Nano 智能体：`rig`
+- Nano 智能体：`rig` / `process-wrap`
 - ACP：`agent-client-protocol` 官方 SDK
 - CLI: `clap`
 
