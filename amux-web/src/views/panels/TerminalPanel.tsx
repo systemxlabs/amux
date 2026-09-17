@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+import { Plus } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 
 import { Button } from "../../components/ui/button";
@@ -150,11 +151,14 @@ export function TerminalPanel() {
         <Button
           type="button"
           variant="ghost"
-          size="sm"
+          size="icon"
+          className="size-6"
           data-slot="terminal-new"
+          aria-label="新建终端"
+          title="新建终端"
           onClick={createTerminal}
         >
-          新建终端
+          <Plus className="size-3.5" />
         </Button>
       </div>
       <div
