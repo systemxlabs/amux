@@ -13,7 +13,7 @@ import { Switch } from "../components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Textarea } from "../components/ui/textarea";
 import { createSession, createWorkflow, openSettings, updateWorkspaceInput } from "../core/actions";
-import { refreshNewSession, refreshWorkflowSetup } from "../core/poll";
+import { refreshWorkflowSetup } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
 import { truncate } from "../lib/format";
 import { cn } from "../lib/utils";
@@ -96,10 +96,6 @@ export function NewSessionView() {
     .filter((item) => item.machine === machine)
     .sort((a, b) => b.lastUsed - a.lastUsed)
     .slice(0, 8);
-
-  useEffect(() => {
-    if (state.settings.machines.length === 0) void refreshNewSession(core);
-  }, [core, state.settings.machines.length]);
 
   // 切换模式后不保留浮层：回到工作流/普通模式时由聚焦输入框重新触发
   useEffect(() => {

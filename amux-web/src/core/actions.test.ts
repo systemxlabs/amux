@@ -12,7 +12,7 @@ import type {
   Workflow,
   WorkflowList,
 } from "../lib/types";
-import { cancelOpen, openEntry, updateWorkspaceInput } from "./actions";
+import { cancelOpen, createWorkflow, openEntry, showNewSession, updateWorkspaceInput } from "./actions";
 import { Core } from "./core";
 
 function session(): Session {
@@ -43,6 +43,34 @@ function workflow(): Workflow {
 
 const sessionEntry: ListEntry = { kind: "session", session: session() };
 const workflowEntry: ListEntry = { kind: "workflow", workflow: workflow() };
+
+it("重新打开新建视图收起面板，创建失败保留模式和完整草稿", async () => {
+  const core = new Core();
+  core.state.middle = "interaction";
+  core.state.sidePanel = "workspace";
+  core.state.newSession = {
+    ...core.state.newSession,
+    mode: "workflow",
+    machine: "localpc",
+    agent: "codex",
+    workspace: "/draft",
+    useWorktree: true,
+    plan: "尚未创建的计划",
+  };
+  const draft = structuredClone(core.state.newSession);
+
+  showNewSession(core);
+  expect(core.state.middle).toBe("new");
+  expect(core.state.sidePanel).toBeNull();
+  expect(core.state.newSession).toEqual(draft);
+
+  core.client = {
+    createWorkflow: async () => { throw new Error("创建失败"); },
+  } as unknown as ApiClient;
+  await createWorkflow(core);
+  expect(core.state.middle).toBe("new");
+  expect(core.state.newSession).toEqual(draft);
+});
 
 describe("openEntry", () => {
   it("切到工作流会话时关闭仅普通会话有的面板", async () => {

@@ -463,20 +463,18 @@ pub async fn load_older_activities(client: &Client, core: &SharedCore, target: &
 //
 // 设置类数据不做定时刷新，由视图打开时拉取一次（docs/DESIGN.md「应用」各视图小节）。
 
-/// 新建会话视图：机器、agents、常用工作目录，以及工作流模式下用到的内置智能体配置与已保存计划。
-/// 新建会话视图的数据：机器、agents 与常用工作目录（docs/DESIGN.md「新建会话视图」）。
+/// 新建视图打开时刷新，不依赖当前表单模式。
 pub async fn refresh_new_session(client: &Client, core: &SharedCore) {
     refresh_machines(client, core).await;
     if let Ok(recent) = client.recent_workspaces().await {
         core.lock().recent_workspaces = recent;
     }
+    refresh_plans(client, core).await;
 }
 
-/// 工作流模式所需数据：内置智能体配置（未配置时引导去设置）与已保存计划
-/// （docs/PRD.md「新建会话视图」工作流模式）。进入工作流模式时拉取。
+/// 进入工作流模式时检查内置智能体是否已配置。
 pub async fn refresh_workflow_setup(client: &Client, core: &SharedCore) {
     refresh_orchestrator(client, core).await;
-    refresh_plans(client, core).await;
 }
 
 /// 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置（工作流会话）

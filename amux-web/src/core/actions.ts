@@ -17,7 +17,7 @@ import type {
   WorkflowPlanItem,
 } from "../lib/types";
 import { entryTitle, rootDir } from "../lib/types";
-import { panelAvailable } from "./core";
+import { initialNewSession, panelAvailable } from "./core";
 import type { Attachment, Core, SidePanel } from "./core";
 import {
   refreshHistory,
@@ -107,9 +107,9 @@ export async function saveConnection(core: Core, token: string): Promise<void> {
 export function showNewSession(core: Core): void {
   core.update((state) => {
     state.middle = "new";
+    state.sidePanel = null;
     state.attachments = [];
   });
-  // DESIGN「新建会话视图」：打开视图时实时拉取机器、agents 与常用工作目录，不做定时刷新
   void refreshNewSession(core);
 }
 
@@ -169,12 +169,12 @@ export async function deleteEntry(core: Core, entry: ListEntry): Promise<void> {
     } else {
       await core.client.deleteWorkflow(entry.workflow.id);
     }
-    core.update((state) => {
-      if (state.open && state.open.id === (entry.kind === "session" ? entry.session.id : entry.workflow.id)) {
+    if (core.state.open?.id === (entry.kind === "session" ? entry.session.id : entry.workflow.id)) {
+      core.update((state) => {
         state.open = null;
-        state.middle = "new";
-      }
-    });
+      });
+      showNewSession(core);
+    }
     core.resetDetail();
     core.success(`已删除「${entryTitle(entry) || "未命名会话"}」`);
     await refreshList(core);
@@ -212,6 +212,9 @@ export async function createSession(core: Core): Promise<void> {
       workspace,
       useWorktree,
     });
+    core.update((state) => {
+      state.newSession = { ...initialNewSession(), mode: state.newSession.mode };
+    });
     await refreshList(core);
     await openEntry(core, { kind: "session", session });
   } catch (error) {
@@ -226,6 +229,9 @@ export async function createWorkflow(core: Core): Promise<void> {
   if (plan === "") return;
   try {
     const workflow = await core.client.createWorkflow(plan, null);
+    core.update((state) => {
+      state.newSession = { ...initialNewSession(), mode: state.newSession.mode };
+    });
     await refreshList(core);
     await openEntry(core, { kind: "workflow", workflow });
   } catch (error) {

@@ -511,9 +511,7 @@ impl AmuxApp {
             .spawn(async move { poll::refresh_settings(&client, &core, tab).await });
     }
 
-    /// 拉取新建会话视图的数据：机器、agents、常用工作目录（docs/DESIGN.md「新建会话视图」）。
-    /// 拉取新建会话视图的数据：机器/agents 与常用工作目录；表单已在工作流模式时
-    /// 一并拉取该模式所需的内置智能体配置与计划。
+    /// 表单保留工作流模式时，同时重新检查内置智能体配置。
     fn load_new_session(&mut self) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
@@ -725,6 +723,7 @@ impl AmuxApp {
     pub fn open_new_session(&mut self, cx: &mut Context<Self>) {
         self.with_core(|core| {
             core.open = None;
+            core.side_panel = None;
             core.view = Default::default();
         });
         self.load_view_data();
@@ -1349,21 +1348,16 @@ impl AmuxApp {
         let form = self.with_core(|core| core.new_session.clone());
         let workspace = self.workspace_input.read(cx).value().trim().to_string();
         let plan = self.plan_input.read(cx).value().trim().to_string();
-        let core = Arc::clone(&self.core);
-        if form.workflow_mode {
+        let task = if form.workflow_mode {
             if plan.is_empty() {
                 return;
             }
             self.runtime.spawn(async move {
-                match client.create_workflow(&plan, None).await {
-                    Ok(workflow) => {
-                        let mut core = core.lock();
-                        core.last.list = None;
-                        poll::open_workflow(&mut core, &workflow.id);
-                    }
-                    Err(error) => core.lock().error(format!("创建会话失败：{error}")),
-                }
-            });
+                client
+                    .create_workflow(&plan, None)
+                    .await
+                    .map(|workflow| OpenTarget::Workflow(workflow.id))
+            })
         } else {
             let (Some(machine), Some(agent)) = (form.machine.clone(), form.agent.clone()) else {
                 return;
@@ -1378,16 +1372,40 @@ impl AmuxApp {
                 use_worktree: form.use_worktree,
             };
             self.runtime.spawn(async move {
-                match client.create_session(&request).await {
-                    Ok(session) => {
-                        let mut core = core.lock();
-                        core.last.list = None;
-                        poll::open_session(&mut core, &session.id);
+                client
+                    .create_session(&request)
+                    .await
+                    .map(|session| OpenTarget::Session(session.id))
+            })
+        };
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(target) => {
+                        this.with_core(|core| {
+                            let workflow_mode = core.new_session.workflow_mode;
+                            core.new_session = Default::default();
+                            core.new_session.workflow_mode = workflow_mode;
+                            core.last.list = None;
+                            match target {
+                                OpenTarget::Session(id) => poll::open_session(core, &id),
+                                OpenTarget::Workflow(id) => poll::open_workflow(core, &id),
+                            }
+                        });
+                        this.workspace_input
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.plan_input
+                            .update(cx, |state, cx| state.set_value("", window, cx));
                     }
-                    Err(error) => core.lock().error(format!("创建会话失败：{error}")),
+                    Err(error) => {
+                        this.with_core(|core| core.error(format!("创建会话失败：{error}")))
+                    }
                 }
+                cx.notify();
             });
-        }
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1406,6 +1424,7 @@ impl AmuxApp {
                     }) == Some(true)
                     {
                         core.open = None;
+                        core.side_panel = None;
                     }
                     core.last.list = None;
                     core.success("已删除");

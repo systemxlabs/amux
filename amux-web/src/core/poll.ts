@@ -456,14 +456,14 @@ async function refreshTerminal(core: Core, sessionId: string): Promise<void> {
 
 // ---------- 视图打开时的实时拉取 ----------
 
-/** 新建会话视图：机器、agents 与常用工作目录。 */
+/** 新建视图打开时刷新，不依赖当前表单模式。 */
 export async function refreshNewSession(core: Core): Promise<void> {
-  await Promise.all([refreshMachines(core), refreshRecentWorkspaces(core)]);
+  await Promise.all([refreshMachines(core), refreshRecentWorkspaces(core), refreshPlans(core)]);
 }
 
-/** 工作流模式所需数据：内置智能体配置（未配置时引导去设置）与已保存计划。 */
+/** 进入工作流模式时检查内置智能体是否已配置。 */
 export async function refreshWorkflowSetup(core: Core): Promise<void> {
-  await Promise.all([refreshOrchestrator(core), refreshPlans(core)]);
+  await refreshOrchestrator(core);
 }
 
 /** 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置与快捷指令。 */

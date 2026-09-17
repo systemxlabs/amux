@@ -117,7 +117,6 @@ fn mode_switch(workflow_mode: bool, cx: &mut Context<AmuxApp>) -> impl IntoEleme
                 core.new_session.workflow_mode = workflow;
                 core.new_session.suggestions.clear();
             });
-            // 工作流模式需要内置智能体配置与计划：进入该模式时拉取
             if workflow {
                 this.load_workflow_setup();
             }

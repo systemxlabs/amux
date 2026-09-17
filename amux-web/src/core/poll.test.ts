@@ -14,7 +14,30 @@ import type {
   WorkflowList,
 } from "../lib/types";
 import { Core } from "./core";
-import { loadOlderList, refreshDetails, refreshList, refreshOrchestrator, tick } from "./poll";
+import { loadOlderList, refreshDetails, refreshList, refreshNewSession, refreshWorkflowSetup, refreshOrchestrator, tick } from "./poll";
+
+it("每次打开新建视图都读取最新计划，切换工作流模式不重复读取计划", async () => {
+  const core = new Core();
+  const workflowPlans = vi.fn().mockResolvedValueOnce([{ name: "旧计划", plan: "旧内容" }])
+    .mockResolvedValueOnce([{ name: "新计划", plan: "新内容" }]);
+  const machines = vi.fn(async () => [{ name: "pc" }]);
+  const agents = vi.fn(async () => []);
+  const recentWorkspaces = vi.fn(async () => []);
+  core.client = {
+    machines, agents, recentWorkspaces, workflowPlans,
+    orchestrator: vi.fn(async () => null),
+  } as unknown as ApiClient;
+
+  await refreshNewSession(core);
+  await refreshWorkflowSetup(core);
+  expect(workflowPlans).toHaveBeenCalledTimes(1);
+  await refreshNewSession(core);
+  expect(workflowPlans).toHaveBeenCalledTimes(2);
+  expect(core.state.settings.plans).toEqual([{ name: "新计划", plan: "新内容" }]);
+  expect(machines).toHaveBeenCalledTimes(2);
+  expect(agents).toHaveBeenCalledWith("pc");
+  expect(recentWorkspaces).toHaveBeenCalledTimes(2);
+});
 
 function session(id: string, updatedAt: number): Session {
   return {
