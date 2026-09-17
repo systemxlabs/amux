@@ -160,7 +160,7 @@ export function InteractionView() {
   };
 
   const quickSend = async (prompt: string) => {
-    await sendPrompt(core, prompt);
+    await sendPrompt(core, prompt, false);
   };
 
   return (

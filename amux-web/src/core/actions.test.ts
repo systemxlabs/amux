@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ApiClient } from "../lib/api";
 import type {
+  ContentBlock,
   FsEntry,
   ListEntry,
   Session,
@@ -12,7 +13,7 @@ import type {
   Workflow,
   WorkflowList,
 } from "../lib/types";
-import { cancelOpen, createWorkflow, openEntry, showNewSession, updateWorkspaceInput } from "./actions";
+import { cancelOpen, createWorkflow, openEntry, sendPrompt, showNewSession, updateWorkspaceInput } from "./actions";
 import { Core } from "./core";
 
 function session(): Session {
@@ -155,6 +156,61 @@ describe("cancelOpen", () => {
     await cancelOpen(core);
 
     expect(calls).toEqual(["cancelSession", "history"]);
+  });
+});
+
+describe("sendPrompt", () => {
+  /** 记录 prompt 载荷并返回最小可用的假客户端。 */
+  function promptingClient(): { client: ApiClient; prompts: ContentBlock[][] } {
+    const prompts: ContentBlock[][] = [];
+    const client = {
+      promptSession: async (_id: string, input: ContentBlock[]) => {
+        prompts.push(input);
+      },
+      history: async () => ({ items: [], hasMore: false }),
+      sessions: async (): Promise<SessionList> => ({ sessions: [], hasMore: false }),
+      workflows: async (): Promise<WorkflowList> => ({ workflows: [], hasMore: false }),
+    } as unknown as ApiClient;
+    return { client, prompts };
+  }
+
+  function withAttachments(core: Core): void {
+    core.update((state) => {
+      state.attachments = [{ block: { type: "text", text: "draft.txt" }, label: "draft.txt" }];
+    });
+  }
+
+  it("快捷指令只发送预设提示词，不携带也不清空待发送附件", async () => {
+    const { client, prompts } = promptingClient();
+    const core = new Core();
+    core.client = client;
+    core.state.open = { kind: "session", id: "s1" };
+    withAttachments(core);
+
+    await sendPrompt(core, "检查构建", false);
+
+    expect(prompts).toEqual([[{ type: "text", text: "检查构建" }]]);
+    // 未打算提交的附件保留在输入区，供后续手动发送。
+    expect(core.state.attachments.map((attachment) => attachment.label)).toEqual(["draft.txt"]);
+  });
+
+  it("输入框发送仍一并携带附件并在成功后清空", async () => {
+    const { client, prompts } = promptingClient();
+    const core = new Core();
+    core.client = client;
+    core.state.open = { kind: "session", id: "s1" };
+    withAttachments(core);
+
+    const ok = await sendPrompt(core, "看一下这个文件");
+
+    expect(ok).toBe(true);
+    expect(prompts).toEqual([
+      [
+        { type: "text", text: "看一下这个文件" },
+        { type: "text", text: "draft.txt" },
+      ],
+    ]);
+    expect(core.state.attachments).toEqual([]);
   });
 });
 

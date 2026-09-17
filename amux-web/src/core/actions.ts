@@ -346,13 +346,19 @@ export function appendPromptDraft(core: Core, text: string): void {
   });
 }
 
-/** 发送指令：文本与附件一并作为用户输入，发送后主动刷新对话与列表。 */
-export async function sendPrompt(core: Core, text: string): Promise<boolean> {
+/** 仅输入框发送会消费待发送附件。 */
+export async function sendPrompt(
+  core: Core,
+  text: string,
+  includeAttachments = true,
+): Promise<boolean> {
   const target = core.state.open;
   if (!core.client || !target) return false;
   const input: ContentBlock[] = [];
   if (text !== "") input.push({ type: "text", text });
-  input.push(...core.state.attachments.map((attachment) => attachment.block));
+  if (includeAttachments) {
+    input.push(...core.state.attachments.map((attachment) => attachment.block));
+  }
   if (input.length === 0) return false;
   try {
     if (target.kind === "session") {
@@ -365,7 +371,7 @@ export async function sendPrompt(core: Core, text: string): Promise<boolean> {
     return false;
   }
   core.update((state) => {
-    state.attachments = [];
+    if (includeAttachments) state.attachments = [];
   });
   await Promise.all([refreshHistory(core), refreshList(core)]);
   core.last.history = Date.now();
