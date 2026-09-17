@@ -7,3 +7,6 @@
 # Web 应用
 /amux-web/node_modules
 /amux-web/dist
+
+# TypeScript 增量构建信息（tsc -b 产生）
+*.tsbuildinfo
