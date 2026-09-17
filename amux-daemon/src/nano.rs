@@ -1,17 +1,16 @@
 use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 
-use agent_client_protocol::schema::v2::ToolCallContent;
+mod runtime;
 use agent_client_protocol::{
     schema::v2::*, Agent, Client, ConnectTo, Error, Lines, V2ConnectionTo,
 };
 use amux_common::{
     api::{OrchestratorConfig, AMUX_AUTH_METHOD, NANO_AGENT},
     daemon::{notify, AcpForward},
-    model::{self, ToolFuture, Tools},
 };
 use futures_util::{sink, stream};
 use parking_lot::Mutex;
-use rig_core::completion::{message::ToolCall, Message, ToolDefinition};
+use rig_core::completion::Message;
 use tokio::sync::{mpsc, watch};
 
 use crate::{frames, outbox::Outbox};
@@ -125,7 +124,7 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                 _ => Err(Error::invalid_params().data("Nano 仅支持文本输入")),
             }).collect::<Result<Vec<_>, _>>();
             let text = match text { Ok(text) => text.join("\n"), Err(error) => return responder.respond_with_error(error) };
-            let (cwd, mut history, mut cancel) = {
+            let (cwd, history, mut cancel) = {
                 let mut sessions = nano.sessions.lock();
                 let Some(session) = sessions.get_mut(&request.session_id) else { return responder.respond_with_error(Error::invalid_params()); };
                 if session.cancel.is_some() { return responder.respond_with_error(Error::invalid_request().data("会话正在工作中")); }
@@ -133,19 +132,21 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                 session.cancel = Some(tx);
                 (session.cwd.clone(), std::mem::take(&mut session.history), rx)
             };
-            history.push(Message::user(text));
+            let history = Arc::new(Mutex::new(history));
             responder.respond(PromptResponse::new())?;
-            let tools = Shell { cwd, cx: cx.clone(), id: request.session_id.clone(), last_call: Mutex::new(String::new()) };
+            let tools = runtime::Events { cx: cx.clone(), id: request.session_id.clone() };
             tools.update(SessionUpdate::StateUpdate(StateUpdate::Running(RunningStateUpdate::new())));
             let nano = nano.clone();
             cx.spawn(async move {
                 let reason = tokio::select! {
                     biased;
                     _ = cancel.changed() => StopReason::Cancelled,
-                    result = model::run(&config, "你是 Nano，使用 shell 工具在指定工作目录中完成用户任务。", &mut history, &tools) => {
+                    result = async {
+                        runtime::run(runtime::builder(&config)?, cwd, text, history.clone(), tools.clone()).await
+                    } => {
                         match result {
                             Ok(_) => StopReason::EndTurn,
-                            Err(error) => { tools.record_text(&error); StopReason::Other("_error".into()) }
+                            Err(error) => { tools.text(&error); StopReason::Other("_error".into()) }
                         }
                     }
                 };
@@ -153,7 +154,7 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                 if let Some(session) = sessions.get_mut(&request.session_id) {
                     // 删除后恢复的同名会话不得被旧任务覆盖。
                     if session.cancel.as_ref().is_some_and(|tx| tx.subscribe().same_channel(&cancel)) {
-                        session.history = history;
+                        session.history = std::mem::take(&mut *history.lock());
                         session.cancel = None;
                         tools.update(SessionUpdate::StateUpdate(StateUpdate::Idle(IdleStateUpdate::new().stop_reason(reason))));
                     }
@@ -162,89 +163,6 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
             })
         }}, agent_client_protocol::on_receive_request!())
         .connect_to(transport).await
-}
-
-struct Shell {
-    cwd: PathBuf,
-    cx: V2ConnectionTo<Client>,
-    id: SessionId,
-    /// 最近一次记录的工具调用 ID：dispatch 结束后据此补发 Completed 状态
-    last_call: Mutex<String>,
-}
-
-impl Shell {
-    fn update(&self, update: SessionUpdate) {
-        if let Err(error) = self
-            .cx
-            .send_notification(UpdateSessionNotification::new(self.id.clone(), update))
-        {
-            log::warn!("Nano 通知发送失败: {error}");
-        }
-    }
-}
-
-impl Tools for Shell {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "shell".into(),
-            description: "在会话工作目录执行 shell 命令".into(),
-            parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}),
-        }]
-    }
-    fn dispatch<'a>(&'a self, name: &'a str, arguments: serde_json::Value) -> ToolFuture<'a> {
-        Box::pin(async move {
-            if name != "shell" {
-                return Err(format!("未知工具: {name}"));
-            }
-            let command = arguments["command"].as_str().ok_or("缺少 command")?;
-            let output = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&self.cwd)
-                .kill_on_drop(true)
-                .output()
-                .await
-                .map_err(|e| e.to_string())?;
-            let result = format!(
-                "exit: {}\n{}\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            self.update(SessionUpdate::ToolCallUpdate(
-                ToolCallUpdate::new(self.last_call.lock().clone())
-                    .title("shell")
-                    .kind(ToolKind::Execute)
-                    .status(ToolCallStatus::Completed)
-                    .content(vec![ToolCallContent::Content(Box::new(Content::new(
-                        ContentBlock::Text(TextContent::new(&result)),
-                    )))]),
-            ));
-            Ok(result)
-        })
-    }
-    fn record_text(&self, text: &str) {
-        self.update(SessionUpdate::AgentMessage(
-            AgentMessage::new(uuid::Uuid::new_v4().to_string())
-                .content(vec![text.to_string().into()]),
-        ));
-    }
-    fn record_thinking(&self, text: &str) {
-        self.update(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
-            text.to_string().into(),
-            MessageId::new(uuid::Uuid::new_v4().to_string()),
-        )));
-    }
-    fn record_tool_call(&self, call: &ToolCall) {
-        *self.last_call.lock() = call.id.to_string();
-        self.update(SessionUpdate::ToolCallUpdate(
-            ToolCallUpdate::new(call.id.to_string())
-                .title("shell")
-                .kind(ToolKind::Execute)
-                .status(ToolCallStatus::InProgress)
-                .raw_input(call.function.arguments.clone()),
-        ));
-    }
 }
 
 #[cfg(test)]
@@ -319,6 +237,62 @@ mod tests {
         assert_eq!(response["error"]["code"], -32000);
         drop(tx);
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_inflight_model_request_returns_idle_and_allows_next_prompt() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (entered_tx, mut entered_rx) = mpsc::channel(2);
+        let server = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut byte = [0];
+                socket.read_exact(&mut byte).await.unwrap();
+                sockets.push(socket);
+                entered_tx.send(()).await.unwrap();
+            }
+            std::future::pending::<()>().await;
+        });
+        let (tx, outbox, task) = started().await;
+        let _ = next_raw(&outbox).await;
+        let mut meta = config_meta();
+        meta["amuxBaseUrl"] = format!("http://{address}").into();
+        send(
+            &tx,
+            2,
+            "auth/login",
+            serde_json::json!({"methodId": AMUX_AUTH_METHOD, "_meta": meta}),
+        )
+        .await;
+        assert!(next_raw(&outbox).await.get("error").is_none());
+        send(&tx, 3, "session/new", serde_json::json!({"cwd": "/tmp"})).await;
+        let session_id = next_raw(&outbox).await["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for id in [4, 5] {
+            send(&tx, id, "session/prompt", serde_json::json!({"sessionId": session_id, "prompt": [{"type":"text", "text":"开始"}]})).await;
+            let response = next_raw(&outbox).await;
+            assert_eq!(response["id"], id);
+            assert!(response.get("error").is_none(), "{response}");
+            let running = next_raw(&outbox).await;
+            assert_eq!(running["params"]["update"]["state"], "running");
+            tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            tx.send(serde_json::json!({"jsonrpc":"2.0", "method":"session/cancel", "params":{"sessionId":session_id}}).to_string()).await.unwrap();
+            let idle = next_raw(&outbox).await;
+            assert_eq!(idle["params"]["update"]["state"], "idle", "{idle}");
+            assert_eq!(idle["params"]["update"]["stopReason"], "cancelled");
+        }
+        drop(tx);
+        let _ = task.await;
+        server.abort();
+        let _ = server.await;
     }
 
     /// 登录后 session/new 成功；close/delete 后 resume 新建会话（内存中恢复）。

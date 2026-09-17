@@ -327,10 +327,10 @@ impl WorkflowService {
             .workflow(workflow_id)
             .map(|row| row.plan)
             .unwrap_or_default();
-        let tools = WorkflowTools {
+        let tools: Arc<dyn Tools> = Arc::new(WorkflowTools {
             service: Arc::clone(self),
             workflow_id: workflow_id.to_string(),
-        };
+        });
         let mut output = String::new();
         loop {
             let history = self
@@ -339,8 +339,13 @@ impl WorkflowService {
                 .get(workflow_id)
                 .map(|s| s.history.clone())
                 .unwrap_or_default();
-            let text =
-                orchestrator::run(&config, &orchestrator::preamble(&plan), history, &tools).await?;
+            let text = orchestrator::run(
+                &config,
+                &orchestrator::preamble(&plan),
+                history,
+                tools.clone(),
+            )
+            .await?;
             output.push_str(&text);
             let steers = {
                 let mut runs = self.runs.lock();
@@ -418,6 +423,19 @@ struct WorkflowTools {
 }
 
 impl Tools for WorkflowTools {
+    fn take_steers(&self) -> Vec<Message> {
+        let mut runs = self.service.runs.lock();
+        let Some(state) = runs.get_mut(&self.workflow_id) else {
+            return Vec::new();
+        };
+        let messages: Vec<_> = std::mem::take(&mut state.steers)
+            .into_iter()
+            .map(|text| Message::user(format!("用户：{text}")))
+            .collect();
+        state.history.extend(messages.iter().cloned());
+        messages
+    }
+
     fn definitions(&self) -> Vec<ToolDefinition> {
         tool_definitions()
     }

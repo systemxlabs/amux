@@ -10,6 +10,7 @@ publish = false
 amux-common = { workspace = true, features = ["model"] }
 agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2"] }
 rig-core.workspace = true
+rig-agent.workspace = true
 clap.workspace = true
 log.workspace = true
 serde.workspace = true
@@ -34,4 +35,5 @@ portable-pty.workspace = true
 gix.workspace = true
 
 [dev-dependencies]
+rig-core = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
