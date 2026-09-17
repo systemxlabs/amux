@@ -20,6 +20,19 @@ import { cn } from "../../lib/utils";
 /** 未知终端尺寸时的回退（xterm.js 默认值）。 */
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
+/** 字号对齐桌面应用（FONT_SIZE = 13px）。 */
+const FONT_SIZE = 13;
+/**
+ * 行高：xterm.js 的 lineHeight 是「字体自然行高的倍数」，取 1 即自然行高，
+ * 该字体在 13px 下的自然行高（约 17px）与桌面应用 1.3em 的格子高一致，因此不再额外放大。
+ */
+const LINE_HEIGHT = 1;
+
+/** 取全局等宽字体栈（index.css 的 --font-mono）；读不到时退回系统等宽。 */
+function monoFontFamily(): string {
+  const value = getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim();
+  return value === "" ? "monospace" : value;
+}
 
 /** 浅色终端 ANSI 调色板（取 VS Code Light 主题，保证白底上十六色都可读）。 */
 const LIGHT_ANSI_COLORS = {
@@ -56,8 +69,9 @@ export function TerminalPanel() {
     if (container === null || activeTerminal === null) return;
     const tokens = getComputedStyle(document.documentElement);
     const term = new Terminal({
-      fontSize: 12,
-      fontFamily: "monospace",
+      fontSize: FONT_SIZE,
+      lineHeight: LINE_HEIGHT,
+      fontFamily: monoFontFamily(),
       cursorBlink: true,
       theme: {
         background: tokens.getPropertyValue("--color-background").trim(),

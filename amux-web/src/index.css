@@ -31,6 +31,15 @@
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
+
+  /*
+   * 等宽字体栈：终端（xterm.js 直接读该变量）、diff 行、文件内容、代码块共用一处定义。
+   * 首选对齐桌面应用在 Linux 上的等宽字体（DejaVu Sans Mono），随后是常见编程等宽字体，
+   * 最后落到系统等宽与 CJK 等宽字体（终端输出含中文时不至于取到比例字体而错位）。
+   */
+  --font-mono: "DejaVu Sans Mono", "Source Code Pro", "Adwaita Mono", "Noto Sans Mono",
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Noto Sans Mono CJK SC",
+    monospace;
 }
 
 html,
