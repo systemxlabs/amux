@@ -28,20 +28,29 @@ import { cn } from "../lib/utils";
 /** 已保存计划上拉框：向上弹出，上方空间不足时向下弹，高度按剩余空间收敛。 */
 type PlanPopupPlacement = { below: boolean; maxHeight: number };
 
-/** 上拉框最大高度（对应 max-h-56）。 */
+/** 工作目录字段的浮层：点击输入框展示最近目录（上拉），手动输入改为前缀匹配（下拉）。 */
+type WorkspacePopup = { kind: "recent" | "suggest"; maxHeight: number };
+
+/** 浮层最大高度（对应 max-h-56）。 */
 const PLAN_POPUP_HEIGHT = 224;
-/** 上拉框与输入框的间距。 */
-const PLAN_POPUP_GAP = 8;
-/** 上拉框最小高度：空间实在不够时允许略超出视口，也不至于只露一条缝。 */
-const PLAN_POPUP_MIN_HEIGHT = 80;
+/** 浮层与锚点的间距。 */
+const POPUP_GAP = 8;
+/** 浮层最小高度：空间实在不够时允许略超出视口，也不至于只露一条缝。 */
+const POPUP_MIN_HEIGHT = 80;
+
+/** 锚点某一侧可用于浮层的高度：收敛到该方向剩余空间。 */
+function popupMaxHeight(anchor: DOMRect, below: boolean): number {
+  const available = below ? window.innerHeight - anchor.bottom - POPUP_GAP : anchor.top - POPUP_GAP;
+  return Math.max(Math.min(PLAN_POPUP_HEIGHT, available), POPUP_MIN_HEIGHT);
+}
 
 export function NewSessionView() {
   const core = useCore();
   const state = useCoreState();
-  const workspaceField = useRef<HTMLDivElement | null>(null);
   const planField = useRef<HTMLDivElement | null>(null);
   const [planPopup, setPlanPopup] = useState<PlanPopupPlacement | null>(null);
-  const { mode, machine, agent, workspace, useWorktree, plan, selectedPlan, suggestions, recentOpen } =
+  const [workspacePopup, setWorkspacePopup] = useState<WorkspacePopup | null>(null);
+  const { mode, machine, agent, workspace, useWorktree, plan, selectedPlan, suggestions } =
     state.newSession;
   const agents = state.settings.agents.find((item) => item.machine === machine)?.agents ?? [];
   const selectedAgent = agents.find((item) => item.name === agent);
@@ -55,53 +64,45 @@ export function NewSessionView() {
     .filter((item) => item.machine === machine)
     .sort((a, b) => b.lastUsed - a.lastUsed)
     .slice(0, 8);
-  const showRecent = machine !== "" && recent.length > 0 && (workspace.trim() === "" || recentOpen);
 
   useEffect(() => {
     if (state.settings.machines.length === 0) void refreshNewSession(core);
   }, [core, state.settings.machines.length]);
 
-  // 切换模式后不保留上拉框：回到工作流模式时由聚焦输入框重新触发
+  // 切换模式后不保留浮层：回到工作流/普通模式时由聚焦输入框重新触发
   useEffect(() => {
     setPlanPopup(null);
+    setWorkspacePopup(null);
   }, [mode]);
 
-  // 点击字段以外的位置时收起下拉框；工作目录还要清 suggestionDir/suggestionPrefix，
-  // 使在途应答因前缀不匹配而丢弃，不会在收起后又弹回来
+  // 已保存计划的上拉框按点击外部收起（工作目录的两个浮层由输入框失焦收起）
   useEffect(() => {
     const onMouseDown = (event: MouseEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
-      const field = workspaceField.current;
-      if (field === null || !field.contains(target)) {
-        const { suggestions: open, suggestionDir, recentOpen: recent } = core.state.newSession;
-        if (open.length > 0 || suggestionDir !== null || recent) {
-          core.update((draft) => {
-            draft.newSession.suggestions = [];
-            draft.newSession.suggestionDir = null;
-            draft.newSession.suggestionPrefix = "";
-            draft.newSession.recentOpen = false;
-          });
-        }
-      }
       const plans = planField.current;
       if (plans !== null && !plans.contains(target)) setPlanPopup(null);
     };
     document.addEventListener("mousedown", onMouseDown);
     return () => document.removeEventListener("mousedown", onMouseDown);
-  }, [core]);
+  }, []);
+
+  /** 点击/聚焦工作目录输入框：上拉展示最近使用的工作目录。 */
+  const showRecentWorkspaces = (input: HTMLInputElement): void => {
+    setWorkspacePopup(
+      recent.length === 0
+        ? null
+        : { kind: "recent", maxHeight: popupMaxHeight(input.getBoundingClientRect(), false) },
+    );
+  };
 
   /** 展开已保存计划上拉框：按输入框上下的可用空间决定方向与高度。 */
   const openPlanPopup = (input: HTMLElement): void => {
     const rect = input.getBoundingClientRect();
-    const above = rect.top - PLAN_POPUP_GAP;
-    const below = window.innerHeight - rect.bottom - PLAN_POPUP_GAP;
+    const above = rect.top - POPUP_GAP;
+    const below = window.innerHeight - rect.bottom - POPUP_GAP;
     const useBelow = above < PLAN_POPUP_HEIGHT && below > above;
-    const available = useBelow ? below : above;
-    setPlanPopup({
-      below: useBelow,
-      maxHeight: Math.max(Math.min(PLAN_POPUP_HEIGHT, available), PLAN_POPUP_MIN_HEIGHT),
-    });
+    setPlanPopup({ below: useBelow, maxHeight: popupMaxHeight(rect, useBelow) });
   };
 
   /** 选中已保存计划：填入输入框并收起上拉框。 */
@@ -113,12 +114,12 @@ export function NewSessionView() {
     setPlanPopup(null);
   };
 
-  /** 填入工作目录并按其内容刷新前缀匹配候选。 */
+  /** 填入工作目录并收起浮层。 */
   const pickWorkspace = (value: string): void => {
     core.update((draft) => {
       draft.newSession.workspace = value;
-      draft.newSession.recentOpen = false;
     });
+    setWorkspacePopup(null);
     void updateWorkspaceInput(core, value);
   };
 
@@ -184,77 +185,75 @@ export function NewSessionView() {
         )}
       </div>
 
-      <div ref={workspaceField} className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <Label>工作目录</Label>
-          {machine !== "" && recent.length > 0 ? (
-            <Button
-              data-slot="recent-toggle"
-              variant="ghost"
-              size="sm"
-              onClick={() =>
-                core.update((draft) => {
-                  draft.newSession.recentOpen = !draft.newSession.recentOpen;
-                })
-              }
+      <div className="flex flex-col gap-2">
+        <Label>工作目录</Label>
+        <div className="relative">
+          <Input
+            data-slot="workspace-input"
+            aria-label="工作目录"
+            value={workspace}
+            onFocus={(event) => showRecentWorkspaces(event.currentTarget)}
+            onClick={(event) => showRecentWorkspaces(event.currentTarget)}
+            onBlur={() => setWorkspacePopup(null)}
+            onChange={(event) => {
+              const value = event.target.value;
+              core.update((draft) => {
+                draft.newSession.workspace = value;
+                // 输入变化先清掉旧候选：新前缀的应答到达前不展示与当前输入不符的目录项
+                draft.newSession.suggestions = [];
+              });
+              void updateWorkspaceInput(core, value);
+              // 手动输入：上拉框（最近目录）换成下拉框（前缀匹配）
+              setWorkspacePopup({
+                kind: "suggest",
+                maxHeight: popupMaxHeight(event.currentTarget.getBoundingClientRect(), true),
+              });
+            }}
+          />
+          {workspacePopup?.kind === "recent" && recent.length > 0 ? (
+            <div
+              data-slot="recent-workspaces"
+              style={{ maxHeight: workspacePopup.maxHeight }}
+              className="absolute bottom-full left-0 z-10 mb-1 flex w-full flex-col overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg"
             >
-              最近使用的工作目录
-            </Button>
+              {recent.map((item) => (
+                <button
+                  key={item.workspace}
+                  type="button"
+                  data-slot="recent-workspace"
+                  // 阻止默认行为以免输入框失焦（失焦会收起浮层，点击就落不到这一项上）
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => pickWorkspace(item.workspace)}
+                  className="cursor-pointer truncate px-2 py-1 text-left text-sm hover:bg-accent"
+                >
+                  {item.workspace}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {workspacePopup?.kind === "suggest" && suggestions.length > 0 ? (
+            <div
+              data-slot="workspace-suggestions"
+              style={{ maxHeight: workspacePopup.maxHeight }}
+              className="absolute top-full left-0 z-10 mt-1 flex w-full flex-col overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg"
+            >
+              {suggestions.map((item) => (
+                <button
+                  key={item.path}
+                  type="button"
+                  data-slot="workspace-suggestion"
+                  data-path={item.path}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => pickWorkspace(item.path.endsWith("/") ? item.path : `${item.path}/`)}
+                  className="flex cursor-pointer items-center gap-1.5 rounded-sm px-2 py-1 text-left text-sm hover:bg-accent"
+                >
+                  <Folder className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{item.name}</span>
+                </button>
+              ))}
+            </div>
           ) : null}
         </div>
-        <Input
-          data-slot="workspace-input"
-          aria-label="工作目录"
-          value={workspace}
-          onFocus={() => void updateWorkspaceInput(core, workspace)}
-          onChange={(event) => {
-            const value = event.target.value;
-            core.update((draft) => {
-              draft.newSession.workspace = value;
-            });
-            void updateWorkspaceInput(core, value);
-          }}
-        />
-        {suggestions.length > 0 ? (
-          <div
-            data-slot="workspace-suggestions"
-            className="flex max-h-48 flex-col overflow-y-auto rounded-md border border-border bg-popover p-1"
-          >
-            {suggestions.map((item) => (
-              <button
-                key={item.path}
-                type="button"
-                data-slot="workspace-suggestion"
-                data-path={item.path}
-                onClick={() =>
-                  pickWorkspace(item.path.endsWith("/") ? item.path : `${item.path}/`)
-                }
-                className="flex cursor-pointer items-center gap-1.5 rounded-sm px-2 py-1 text-left text-sm hover:bg-accent"
-              >
-                <Folder className="size-4 shrink-0 text-muted-foreground" />
-                <span className="truncate">{item.name}</span>
-              </button>
-            ))}
-          </div>
-        ) : null}
-        {showRecent ? (
-          <div
-            data-slot="recent-workspaces"
-            className="flex flex-col rounded-md border border-border bg-popover p-1"
-          >
-            {recent.map((item) => (
-              <button
-                key={item.workspace}
-                type="button"
-                data-slot="recent-workspace"
-                onClick={() => pickWorkspace(item.workspace)}
-                className="cursor-pointer truncate rounded-sm px-2 py-1 text-left text-sm hover:bg-accent"
-              >
-                {item.workspace}
-              </button>
-            ))}
-          </div>
-        ) : null}
       </div>
 
       <div className="flex items-center justify-between">

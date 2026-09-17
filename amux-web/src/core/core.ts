@@ -64,8 +64,6 @@ export type NewSessionState = {
   suggestions: FsEntry[];
   suggestionDir: string | null;
   suggestionPrefix: string;
-  /** 是否展开最近工作目录列表 */
-  recentOpen: boolean;
 };
 
 /** 设置浮窗分类。 */
@@ -175,7 +173,6 @@ export function initialNewSession(): NewSessionState {
     suggestions: [],
     suggestionDir: null,
     suggestionPrefix: "",
-    recentOpen: false,
   };
 }
 
