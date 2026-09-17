@@ -150,27 +150,9 @@ async function refreshOpen(core: Core): Promise<void> {
   const planOpen = core.state.sidePanel === "plan";
   const terminalOpen = core.state.sidePanel === "terminal";
 
+  // 会话详情与上下文用量只在详情视图打开时刷新一次（refreshDetails），不随节拍拉取
   if (due(core.last.history, HISTORY_INTERVAL)) {
     core.last.history = Date.now();
-    if (target.kind === "session") {
-      try {
-        const session = await core.client!.session(target.id);
-        core.update((state) => {
-          if (sameTarget(state.open, target)) state.detail.session = session;
-        });
-      } catch {
-        // 会话可能已被删除：列表刷新会移除它
-      }
-    } else {
-      try {
-        const workflow = await core.client!.workflow(target.id);
-        core.update((state) => {
-          if (sameTarget(state.open, target)) state.detail.workflow = workflow;
-        });
-      } catch {
-        // 同上
-      }
-    }
     await refreshHistory(core);
   }
   if (activitiesOpen && due(core.last.activities, ACTIVITIES_INTERVAL)) {
@@ -191,17 +173,14 @@ async function refreshOpen(core: Core): Promise<void> {
   if (due(core.last.options, OPTIONS_INTERVAL) && target.kind === "session") {
     core.last.options = Date.now();
     try {
-      const [options, commands, context] = await Promise.all([
+      const [options, commands] = await Promise.all([
         core.client!.configOptions(target.id),
         core.client!.slashCommands(target.id),
-        core.client!.context(target.id),
       ]);
       core.update((state) => {
         if (!sameTarget(state.open, target)) return;
         state.detail.configOptions = options;
         state.detail.slashCommands = commands;
-        state.detail.contextSize = context.contextSize;
-        state.detail.contextWindowSize = context.contextWindowSize;
       });
     } catch {
       // 会话选项需 agent 侧就绪；失败留待下一周期
@@ -470,13 +449,15 @@ export async function refreshOrchestrator(core: Core): Promise<void> {
   const client = core.client;
   if (!client) return;
   try {
-    const orchestrator = await client.orchestrator();
+    const config = await client.orchestrator();
     core.update((state) => {
-      state.settings.orchestrator = orchestrator;
-      state.settings.orchestratorLoaded = true;
+      state.settings.orchestrator = { status: "ready", config };
     });
-  } catch {
-    // 未配置或读取失败：保持未加载状态，由视图决定是否提示
+  } catch (error) {
+    // 读取失败不能当作「未配置」：视图需据此拒绝创建工作流会话并给出重试入口
+    core.update((state) => {
+      state.settings.orchestrator = { status: "failed", error: messageOf(error) };
+    });
   }
 }
 
@@ -519,23 +500,39 @@ export async function refreshSkills(core: Core): Promise<void> {
   }
 }
 
-/** 会话详情视图：打开时刷新一次（不定时刷新）。 */
+/** 会话详情视图：打开时刷新一次，不定时刷新（docs/DESIGN.md「会话详情视图」）。 */
 export async function refreshDetails(core: Core): Promise<void> {
   const client = core.client;
   const target = core.state.open;
   if (!client || !target) return;
-  try {
-    if (target.kind === "session") {
+  if (target.kind === "session") {
+    try {
       const session = await client.session(target.id);
       core.update((state) => {
+        if (!sameTarget(state.open, target)) return;
         state.detail.session = session;
       });
-    } else {
-      const workflow = await client.workflow(target.id);
-      core.update((state) => {
-        state.detail.workflow = workflow;
-      });
+    } catch (error) {
+      core.failure(`读取会话详情失败：${messageOf(error)}`);
     }
+    try {
+      const context = await client.context(target.id);
+      core.update((state) => {
+        if (!sameTarget(state.open, target)) return;
+        state.detail.contextSize = context.contextSize;
+        state.detail.contextWindowSize = context.contextWindowSize;
+      });
+    } catch {
+      // 上下文用量需 agent 侧就绪；失败时该行留空
+    }
+    return;
+  }
+  try {
+    const workflow = await client.workflow(target.id);
+    core.update((state) => {
+      if (!sameTarget(state.open, target)) return;
+      state.detail.workflow = workflow;
+    });
   } catch (error) {
     core.failure(`读取会话详情失败：${messageOf(error)}`);
   }

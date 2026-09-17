@@ -30,7 +30,9 @@ function sameConfig(left: OrchestratorConfig, right: OrchestratorConfig): boolea
 export function OrchestratorSection() {
   const core = useCore();
   const state = useCoreState();
-  const loaded = state.settings.orchestrator;
+  const orchestrator = state.settings.orchestrator;
+  // 未确认（读取中或失败）时无配置可编辑，退回空表单
+  const loaded = orchestrator.status === "ready" ? orchestrator.config : null;
   const key = configKey(loaded);
   const [form, setForm] = useState<OrchestratorConfig>(() => loaded ?? defaultConfig());
 
@@ -44,6 +46,11 @@ export function OrchestratorSection() {
   return (
     <section className="flex flex-col gap-4">
       <h2 className="text-sm font-medium">编排智能体</h2>
+      {orchestrator.status === "failed" ? (
+        <p data-slot="orchestrator-error" className="text-xs text-destructive">
+          读取配置失败：{orchestrator.error}
+        </p>
+      ) : null}
       <div className="flex flex-col gap-1.5">
         <Label>API 格式</Label>
         <RadioGroup

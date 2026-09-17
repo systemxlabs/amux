@@ -69,15 +69,22 @@ export type SettingsTab =
   | "skills"
   | "plans";
 
+/**
+ * 编排智能体配置的读取状态：只有 `ready` 才表示配置已确认
+ * （`config` 为 null 即未配置），未确认前不允许创建工作流会话。
+ */
+export type OrchestratorState =
+  | { status: "loading" }
+  | { status: "ready"; config: OrchestratorConfig | null }
+  | { status: "failed"; error: string };
+
 export type SettingsState = {
   open: boolean;
   tab: SettingsTab;
   machines: Machine[];
   /** 每台机器的 agent 列表（与 machines 同序） */
   agents: { machine: string; agents: Agent[] }[];
-  orchestrator: OrchestratorConfig | null;
-  /** 编排智能体配置是否已拉取（未拉取时工作流模式不报「未配置」） */
-  orchestratorLoaded: boolean;
+  orchestrator: OrchestratorState;
   quickCommands: QuickCommand[];
   skills: Skill[];
   plans: WorkflowPlanItem[];
@@ -168,8 +175,7 @@ export function initialSettings(): SettingsState {
     tab: "connection",
     machines: [],
     agents: [],
-    orchestrator: null,
-    orchestratorLoaded: false,
+    orchestrator: { status: "loading" },
     quickCommands: [],
     skills: [],
     plans: [],

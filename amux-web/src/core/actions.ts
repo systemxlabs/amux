@@ -319,7 +319,10 @@ export async function sendPrompt(core: Core, text: string): Promise<boolean> {
   return true;
 }
 
-/** 取消进行中的工作；工作流会话以用户消息方式取消（PRD「工作流会话取消」）。 */
+/**
+ * 取消进行中的工作；工作流会话以用户消息方式取消（PRD「工作流会话取消」），
+ * 该消息同样触发会话列表主动刷新（docs/DESIGN.md「会话列表刷新机制」）。
+ */
 export async function cancelOpen(core: Core): Promise<void> {
   const target = core.state.open;
   if (!core.client || !target) return;
@@ -330,6 +333,8 @@ export async function cancelOpen(core: Core): Promise<void> {
       await core.client.promptWorkflow(target.id, [
         { type: "text", text: "取消当前进行中的全部工作" },
       ]);
+      await refreshList(core);
+      core.last.list = Date.now();
     }
     await refreshHistory(core);
   } catch (error) {
@@ -461,8 +466,7 @@ export async function saveOrchestrator(core: Core, config: OrchestratorConfig): 
   try {
     await core.client.setOrchestrator(config);
     core.update((state) => {
-      state.settings.orchestrator = config;
-      state.settings.orchestratorLoaded = true;
+      state.settings.orchestrator = { status: "ready", config };
     });
     core.success("编排智能体配置已保存");
   } catch (error) {
