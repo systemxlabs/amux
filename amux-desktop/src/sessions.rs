@@ -669,7 +669,7 @@ fn user_bubble(
     let images = ui::message_images(content);
     let mut width = ui::estimate_bubble_width(
         &text,
-        crate::theme::FONT_BODY.as_f32(),
+        crate::theme::font_body().as_f32(),
         BUBBLE_MIN_WIDTH,
         BUBBLE_MAX_WIDTH,
     );
@@ -725,7 +725,7 @@ fn agent_bubble(
     let images = ui::message_images(content);
     let mut width = ui::estimate_bubble_width(
         &text,
-        crate::theme::FONT_BODY.as_f32(),
+        crate::theme::font_body().as_f32(),
         BUBBLE_MIN_WIDTH,
         BUBBLE_MAX_WIDTH,
     );

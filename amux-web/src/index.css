@@ -1,43 +1,13 @@
 @import "tailwindcss";
+@import "./theme.generated.css";
 
 /*
- * shadcn/ui 令牌（Tailwind v4 CSS-first 配置）：应用为单一浅色主题，取值对齐官方
- * New York 样式 + Zinc 基础色 + 中性色强调（shadcn 文档 Theming），组件按 shadcn 约定
- * 引用 background/foreground/muted/primary/destructive 等语义色；
+ * shadcn/ui 令牌（Tailwind v4 CSS-first 配置）：应用为单一浅色主题，颜色/圆角/字号
+ * 由项目根 theme.json 生成（docs/DESIGN.md「共享主题」，与桌面端共用一套取值，
+ * 对齐官方 New York 样式 + Zinc 基础色 + 中性色强调）；
  * diff 色与等宽字体栈为应用自有扩展。
  */
 @theme inline {
-  --color-background: oklch(1 0 0);
-  --color-foreground: oklch(0.141 0.005 285.823);
-  --color-card: oklch(1 0 0);
-  --color-card-foreground: oklch(0.141 0.005 285.823);
-  --color-popover: oklch(1 0 0);
-  --color-popover-foreground: oklch(0.141 0.005 285.823);
-  --color-primary: oklch(0.21 0.006 285.885);
-  --color-primary-foreground: oklch(0.985 0 0);
-  --color-secondary: oklch(0.967 0.001 286.375);
-  --color-secondary-foreground: oklch(0.21 0.006 285.885);
-  --color-muted: oklch(0.967 0.001 286.375);
-  --color-muted-foreground: oklch(0.552 0.016 285.938);
-  --color-accent: oklch(0.967 0.001 286.375);
-  --color-accent-foreground: oklch(0.21 0.006 285.885);
-  --color-destructive: oklch(0.577 0.245 27.325);
-  --color-destructive-foreground: oklch(0.985 0 0);
-  --color-border: oklch(0.92 0.004 286.32);
-  --color-input: oklch(0.92 0.004 286.32);
-  --color-ring: oklch(0.705 0.015 286.067);
-  --color-diff-add: oklch(0.945 0.048 150.5);
-  --color-diff-remove: oklch(0.955 0.026 17.5);
-
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.625rem;
-
-  /*
-   * 等宽字体栈：终端（xterm.js 直接读该变量）、diff 行、文件内容、代码块共用一处定义。
-   * 首选对齐桌面应用在 Linux 上的等宽字体（DejaVu Sans Mono），随后是常见编程等宽字体，
-   * 最后落到系统等宽与 CJK 等宽字体（终端输出含中文时不至于取到比例字体而错位）。
-   */
   --font-mono: "DejaVu Sans Mono", "Source Code Pro", "Adwaita Mono", "Noto Sans Mono",
     ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Noto Sans Mono CJK SC",
     monospace;
@@ -84,7 +54,7 @@ body {
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  font-size: 14px;
+  font-size: var(--font-body, 14px);
   /* 触摸点击不再有高亮方块与双击缩放的等待 */
   -webkit-tap-highlight-color: transparent;
 }

@@ -1,0 +1,43 @@
+{
+  "$comment": "共享主题（docs/DESIGN.md「共享主题」）：颜色与圆角供桌面端与 Web 端共用；色值与 shadcn/ui Zinc 浅色主题对齐",
+  "color": {
+    "background": "#ffffff",
+    "foreground": "#09090b",
+    "card": "#ffffff",
+    "cardForeground": "#09090b",
+    "popover": "#ffffff",
+    "popoverForeground": "#09090b",
+    "primary": "#18181b",
+    "primaryForeground": "#fafafa",
+    "secondary": "#f4f4f5",
+    "secondaryForeground": "#18181b",
+    "muted": "#f4f4f5",
+    "mutedForeground": "#71717b",
+    "accent": "#f4f4f5",
+    "accentForeground": "#18181b",
+    "destructive": "#e7000b",
+    "destructiveForeground": "#ffffff",
+    "border": "#e4e4e7",
+    "input": "#e4e4e7",
+    "ring": "#9f9fa9",
+    "scrollbarThumb": "#d4d4d8",
+    "scrollbarThumbHover": "#9f9fa9",
+    "link": "#09090b",
+    "success": "#00a63e",
+    "successForeground": "#ffffff",
+    "warning": "#fe9a00",
+    "warningForeground": "#431407",
+    "diffAdd": "#e5f6eb",
+    "diffRemove": "#fdeaea",
+    "selection": "#18181b",
+    "caret": "#18181b"
+  },
+  "radius": {
+    "sm": 6,
+    "md": 8,
+    "lg": 10
+  },
+  "font": {
+    "body": 14
+  }
+}

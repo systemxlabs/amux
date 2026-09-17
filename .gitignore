@@ -10,3 +10,6 @@
 
 # TypeScript 增量构建信息（tsc -b 产生）
 *.tsbuildinfo
+
+# 由 theme.json 生成的 CSS（docs/DESIGN.md「共享主题」，构建时刷新）
+/amux-web/src/theme.generated.css

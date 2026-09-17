@@ -23,6 +23,7 @@ use crate::difftree::{self, DiffNode};
 use crate::sessions;
 use crate::state::{Core, ListEntry, OpenTarget, SidePanel, WorkspaceNode};
 use crate::terminal_view;
+use crate::theme;
 use crate::ui;
 
 /// 改动审查视图左侧文件树宽度。
@@ -1401,9 +1402,14 @@ fn diff_file_block(
             );
             let numbers = diff::line_numbers(&hunk.header, &hunk.lines);
             for (index, line) in hunk.lines.iter().enumerate() {
+                // 行底色取自共享主题（docs/DESIGN.md「共享主题」，与 Web 端同一取值）
                 let (background, marker, marker_color) = match line.kind {
-                    GitDiffLineKind::Add => (theme.success.opacity(0.16), "+", theme.success),
-                    GitDiffLineKind::Remove => (theme.danger.opacity(0.16), "-", theme.danger),
+                    GitDiffLineKind::Add => {
+                        (theme::diff_line_background(line.kind), "+", theme.success)
+                    }
+                    GitDiffLineKind::Remove => {
+                        (theme::diff_line_background(line.kind), "-", theme.danger)
+                    }
                     GitDiffLineKind::Context => (theme.popover, " ", theme.muted_foreground),
                 };
                 let numbers = numbers[index];

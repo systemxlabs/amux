@@ -1,156 +1,175 @@
-//! shadcn/ui Zinc 视觉令牌（浅色/深色两套）：覆盖 gpui-component 的语义主题，
-//! 全局字号与圆角也在此统一。三面板布局与各控件一律引用这些令牌，不写死颜色。
+//! 桌面端主题：颜色/圆角/字号取自项目根 theme.json（docs/DESIGN.md「共享主题」，
+//! 编译期内嵌，与 Web 端同一来源），映射到 gpui-component 的语义主题；
+//! 三面板布局与各控件一律引用这些令牌，不写死颜色。
 
 use gpui::{px, App, Hsla, Rgba, Window};
-use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeTokens};
+use gpui_component::{Theme, ThemeTokens};
+use serde::Deserialize;
 
 /// 左侧面板默认宽度（可拖拽调整）。
 pub const SIDEBAR_WIDTH: f32 = 240.0;
-/// 正文字号；同时决定 `rem` 基准（Root 每帧把 rem 设为该值）。
-pub const FONT_BODY: gpui::Pixels = px(14.0);
 
-fn color(hex: u32) -> Hsla {
+/// 编译期内嵌的共享主题（docs/DESIGN.md「共享主题」），与 Web 端同一文件。
+const SHARED_JSON: &str = include_str!("../../theme.json");
+
+/// 解析后的共享主题；主题坏了应用无法按预期呈现，直接 panic。
+fn shared() -> Shared {
+    serde_json::from_str(SHARED_JSON).expect("theme.json 解析失败")
+}
+
+#[derive(Deserialize)]
+struct Shared {
+    color: Colors,
+    radius: Radius,
+    font: Font,
+}
+
+/// theme.json 的 camelCase 颜色键，与 Web 端 CSS 变量一一对应。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Colors {
+    background: String,
+    foreground: String,
+    popover: String,
+    popover_foreground: String,
+    primary: String,
+    primary_foreground: String,
+    secondary: String,
+    secondary_foreground: String,
+    muted: String,
+    muted_foreground: String,
+    accent: String,
+    accent_foreground: String,
+    destructive: String,
+    destructive_foreground: String,
+    border: String,
+    input: String,
+    ring: String,
+    scrollbar_thumb: String,
+    scrollbar_thumb_hover: String,
+    link: String,
+    success: String,
+    success_foreground: String,
+    warning: String,
+    warning_foreground: String,
+    diff_add: String,
+    diff_remove: String,
+}
+
+#[derive(Deserialize)]
+struct Radius {
+    #[allow(dead_code)] // radius-sm 由 Web 端细粒度组件使用，桌面端只消费 md/lg
+    sm: u32,
+    md: u32,
+    lg: u32,
+}
+
+#[derive(Deserialize)]
+struct Font {
+    body: u32,
+}
+
+/// 正文字号（px）；同时决定 `rem` 基准（Root 每帧把 rem 设为该值）。
+pub fn font_body() -> gpui::Pixels {
+    px(shared().font.body as f32)
+}
+
+/// #rrggbb → Hsla；非法色值在启动时 panic（主题坏了应用必然异常）。
+fn color(hex: &str) -> Hsla {
+    let value = hex.strip_prefix('#').expect("theme.json 颜色需为 #rrggbb");
+    let int = u32::from_str_radix(value, 16).expect("theme.json 颜色需为 #rrggbb");
     Rgba {
-        r: ((hex >> 16) & 0xff) as f32 / 255.0,
-        g: ((hex >> 8) & 0xff) as f32 / 255.0,
-        b: (hex & 0xff) as f32 / 255.0,
+        r: ((int >> 16) & 0xff) as f32 / 255.0,
+        g: ((int >> 8) & 0xff) as f32 / 255.0,
+        b: (int & 0xff) as f32 / 255.0,
         a: 1.0,
     }
     .into()
 }
 
-fn translucent(hex: u32, alpha: f32) -> Hsla {
+fn translucent(hex: &str, alpha: f32) -> Hsla {
     let mut value = color(hex);
     value.a = alpha;
     value
 }
 
-/// 应用浅色/深色两套配色。
+/// 应用共享主题到 gpui-component：浅色一套，按 hover/active 派生交互色。
 pub fn apply(cx: &mut App) {
-    let dark = cx.theme().mode.is_dark();
+    let shared = shared();
+    let c = &shared.color;
     let theme = Theme::global_mut(cx);
-    if dark {
-        // shadcn/ui Zinc 深色基准：与 Web 端（amux-web/src/index.css）同源换算成 sRGB
-        theme.background = color(0x09090b);
-        theme.foreground = color(0xfafafa);
-        theme.border = color(0x27272a);
-        theme.ring = color(0x71717b);
-        theme.sidebar = color(0x17171a);
-        theme.sidebar_foreground = color(0x9f9fa9);
-        theme.sidebar_border = color(0x27272a);
-        theme.sidebar_accent = color(0x27272a);
-        theme.sidebar_accent_foreground = color(0xfafafa);
-        theme.sidebar_primary = color(0xe4e4e7);
-        theme.sidebar_primary_foreground = color(0x17171a);
-        theme.list.active_highlight = true;
-        theme.list_hover = color(0x212124);
-        theme.list_active = color(0x27272a);
-        theme.list_active_border = color(0x27272a);
-        theme.list_even = color(0x101012);
-        theme.list_head = color(0x101012);
-        theme.muted = color(0x27272a);
-        theme.muted_foreground = color(0x9f9fa9);
-        theme.accent = color(0x27272a);
-        theme.accent_foreground = color(0xfafafa);
-        theme.primary = color(0xe4e4e7);
-        theme.primary_hover = color(0xceced1);
-        theme.primary_active = color(0xb8b8bb);
-        theme.primary_foreground = color(0x17171a);
-        theme.secondary = color(0x27272a);
-        theme.secondary_hover = color(0x212124);
-        theme.secondary_active = color(0x1b1b1e);
-        theme.secondary_foreground = color(0xfafafa);
-        theme.popover = color(0x18181b);
-        theme.popover_foreground = color(0xfafafa);
-        theme.group_box = color(0x18181b);
-        theme.group_box_foreground = color(0xfafafa);
-        theme.input = color(0x27272a);
-        theme.selection = translucent(0xe4e4e7, 0.24);
-        theme.caret = color(0xfafafa);
-        theme.title_bar = color(0x17171a);
-        theme.title_bar_border = color(0x17171a);
-        theme.scrollbar_thumb = color(0x46464f);
-        theme.scrollbar_thumb_hover = color(0x71717b);
-        theme.link = color(0xfafafa);
-        theme.danger = color(0xff6467);
-        theme.danger_hover = color(0xff8588);
-        theme.danger_active = color(0xff9fa1);
-        theme.danger_foreground = color(0x09090b);
-        theme.success = color(0x00a63e);
-        theme.success_foreground = color(0xf2fcf5);
-        theme.warning = color(0xfe9a00);
-        theme.warning_foreground = color(0x1c1200);
-        theme.overlay = gpui::hsla(0.0, 0.0, 0.0, 0.6);
-    } else {
-        // shadcn/ui Zinc 浅色基准：与 Web 端（amux-web/src/index.css）同源，中性色强调
-        theme.background = color(0xffffff);
-        theme.foreground = color(0x09090b);
-        theme.border = color(0xe4e4e7);
-        theme.ring = color(0x9f9fa9);
-        theme.sidebar = color(0xfafafa);
-        theme.sidebar_foreground = color(0x71717b);
-        theme.sidebar_border = color(0xe4e4e7);
-        theme.sidebar_accent = color(0xf4f4f5);
-        theme.sidebar_accent_foreground = color(0x18181b);
-        theme.sidebar_primary = color(0x18181b);
-        theme.sidebar_primary_foreground = color(0xfafafa);
-        theme.list.active_highlight = true;
-        theme.list_hover = color(0xf4f4f5);
-        theme.list_active = color(0xe4e4e7);
-        theme.list_active_border = color(0xe4e4e7);
-        theme.list_even = color(0xfafafa);
-        theme.list_head = color(0xfafafa);
-        theme.muted = color(0xf4f4f5);
-        theme.muted_foreground = color(0x71717b);
-        theme.accent = color(0xf4f4f5);
-        theme.accent_foreground = color(0x18181b);
-        theme.primary = color(0x18181b);
-        theme.primary_hover = color(0x2f2f32);
-        theme.primary_active = color(0x464649);
-        theme.primary_foreground = color(0xfafafa);
-        theme.secondary = color(0xf4f4f5);
-        theme.secondary_hover = color(0xf6f6f7);
-        theme.secondary_active = color(0xf8f8f9);
-        theme.secondary_foreground = color(0x18181b);
-        theme.popover = color(0xffffff);
-        theme.popover_foreground = color(0x09090b);
-        theme.group_box = color(0xffffff);
-        theme.group_box_foreground = color(0x09090b);
-        theme.input = color(0xe4e4e7);
-        theme.selection = translucent(0x18181b, 0.16);
-        theme.caret = color(0x18181b);
-        theme.title_bar = color(0xfafafa);
-        theme.title_bar_border = color(0xfafafa);
-        theme.scrollbar_thumb = color(0xd4d4d8);
-        theme.scrollbar_thumb_hover = color(0x9f9fa9);
-        theme.link = color(0x09090b);
-        // 语义文字色需在浅色底上保持可读：这里是状态标签与行内校验文案的前景色
-        theme.danger = color(0xe7000b);
-        theme.danger_hover = color(0xfb2c36);
-        theme.danger_active = color(0xff6467);
-        theme.danger_foreground = color(0xffffff);
-        theme.success = color(0x00a63e);
-        theme.success_foreground = color(0xffffff);
-        theme.warning = color(0xfe9a00);
-        theme.warning_foreground = color(0x431407);
-        theme.overlay = gpui::hsla(0.0, 0.0, 0.0, 0.25);
-    }
+    theme.background = color(&c.background);
+    theme.foreground = color(&c.foreground);
+    theme.border = color(&c.border);
+    theme.ring = color(&c.ring);
+    theme.sidebar = color(&c.muted);
+    theme.sidebar_foreground = color(&c.muted_foreground);
+    theme.sidebar_border = color(&c.border);
+    theme.sidebar_accent = color(&c.accent);
+    theme.sidebar_accent_foreground = color(&c.accent_foreground);
+    theme.sidebar_primary = color(&c.primary);
+    theme.sidebar_primary_foreground = color(&c.primary_foreground);
+    theme.list.active_highlight = true;
+    theme.list_hover = color(&c.accent);
+    theme.list_active = color(&c.secondary);
+    theme.list_active_border = color(&c.border);
+    theme.list_even = color(&c.background);
+    theme.list_head = color(&c.background);
+    theme.muted = color(&c.muted);
+    theme.muted_foreground = color(&c.muted_foreground);
+    theme.accent = color(&c.accent);
+    theme.accent_foreground = color(&c.accent_foreground);
+    theme.primary = color(&c.primary);
+    theme.primary_hover = color(&c.primary).opacity(0.9);
+    theme.primary_active = color(&c.primary).opacity(0.8);
+    theme.primary_foreground = color(&c.primary_foreground);
+    theme.secondary = color(&c.secondary);
+    theme.secondary_hover = color(&c.secondary).opacity(0.9);
+    theme.secondary_active = color(&c.secondary).opacity(0.8);
+    theme.secondary_foreground = color(&c.secondary_foreground);
+    theme.popover = color(&c.popover);
+    theme.popover_foreground = color(&c.popover_foreground);
+    theme.group_box = color(&c.popover);
+    theme.group_box_foreground = color(&c.popover_foreground);
+    theme.input = color(&c.input);
+    theme.selection = translucent(&c.primary, 0.16);
+    theme.caret = color(&c.foreground);
+    theme.title_bar = color(&c.secondary);
+    theme.title_bar_border = color(&c.secondary);
+    theme.scrollbar_thumb = color(&c.scrollbar_thumb);
+    theme.scrollbar_thumb_hover = color(&c.scrollbar_thumb_hover);
+    theme.link = color(&c.link);
+    // 语义文字色需在浅色底上保持可读：这里是状态标签与行内校验文案的前景色
+    theme.danger = color(&c.destructive);
+    theme.danger_hover = color(&c.destructive).opacity(0.9);
+    theme.danger_active = color(&c.destructive).opacity(0.8);
+    theme.danger_foreground = color(&c.destructive_foreground);
+    theme.success = color(&c.success);
+    theme.success_foreground = color(&c.success_foreground);
+    theme.warning = color(&c.warning);
+    theme.warning_foreground = color(&c.warning_foreground);
+    theme.overlay = gpui::hsla(0.0, 0.0, 0.0, 0.25);
     theme.font_family = ".AppleSystemUIFont".into();
-    theme.font_size = FONT_BODY;
-    // 对齐 Web 端 shadcn New York 基准：radius-md 0.5rem、radius-lg 0.625rem（rem 基准 16px）
-    theme.radius = px(8.0);
-    theme.radius_lg = px(10.0);
+    theme.font_size = font_body();
+    // radius-md 作为组件默认圆角、radius-lg 作对话框等大元素圆角、radius-sm 作小控件圆角
+    theme.radius = px(shared.radius.md as f32);
+    theme.radius_lg = px(shared.radius.lg as f32);
     theme.shadow = true;
     // 组件读取的是由颜色派生的 tokens：改完颜色必须重建，否则组件仍用默认配色
     theme.tokens = ThemeTokens::from(&theme.colors);
 }
 
-/// 同步系统外观（`AMUX_THEME=dark|light` 可强制指定），随后套用配色令牌。
-pub fn sync_appearance(window: Option<&mut Window>, cx: &mut App) {
-    match std::env::var("AMUX_THEME").as_deref() {
-        Ok("dark") => Theme::change(ThemeMode::Dark, window, cx),
-        Ok("light") => Theme::change(ThemeMode::Light, window, cx),
-        _ => Theme::sync_system_appearance(window, cx),
-    }
+/// 打开应用时套用共享主题；浅色为唯一模式（docs/DESIGN.md「共享主题」只有一套主题）。
+pub fn sync_appearance(_window: Option<&mut Window>, cx: &mut App) {
     apply(cx);
+}
+
+/// 改动审查行的 diff 底色：按行类别取自共享主题（与 Web 端同一取值）。
+pub fn diff_line_background(kind: amux_common::domain::GitDiffLineKind) -> Hsla {
+    let shared = shared();
+    match kind {
+        amux_common::domain::GitDiffLineKind::Add => color(&shared.color.diff_add),
+        amux_common::domain::GitDiffLineKind::Remove => color(&shared.color.diff_remove),
+        amux_common::domain::GitDiffLineKind::Context => gpui::transparent_black(),
+    }
 }
