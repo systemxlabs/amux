@@ -43,13 +43,18 @@ export function newPaging(): Paging {
   };
 }
 
-/** 页大小：面板可视高度大致能容纳的条目数（内容高度按已加载条目均摊）。 */
+/**
+ * 页大小：面板可视高度大致能容纳的条目数（内容高度按已加载条目均摊）。
+ *
+ * 内容未溢满视口时无法据此估算行高：比值会退化成「已加载条数」，页大小随之被压到 1，
+ * 刷新窗口（按页大小重新拉取并替换）就会丢掉更早的已加载条目，因此此时保持默认页大小。
+ */
 export function pageSizeForViewport(
   viewportHeight: number,
   contentHeight: number,
   loaded: number,
 ): number {
-  if (loaded === 0 || viewportHeight <= 0 || contentHeight <= 0) {
+  if (loaded === 0 || viewportHeight <= 0 || contentHeight <= 0 || contentHeight <= viewportHeight) {
     return DEFAULT_PAGE_SIZE;
   }
   const visible = Math.round(viewportHeight / (contentHeight / loaded));
