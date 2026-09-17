@@ -3,7 +3,7 @@
 // 顶部为模式切换（普通/工作流）：普通模式选择机器与可用 agent、输入工作目录（前缀匹配联想与最近目录）、
 // worktree 开关；工作流模式选择或输入工作计划（编排智能体未配置时引导去设置）。
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Folder } from "lucide-react";
 
 import { Button } from "../components/ui/button";
@@ -28,6 +28,7 @@ import { cn } from "../lib/utils";
 export function NewSessionView() {
   const core = useCore();
   const state = useCoreState();
+  const workspaceField = useRef<HTMLDivElement | null>(null);
   const { mode, machine, agent, workspace, useWorktree, plan, selectedPlan, suggestions, recentOpen } =
     state.newSession;
   const agents = state.settings.agents.find((item) => item.machine === machine)?.agents ?? [];
@@ -47,6 +48,25 @@ export function NewSessionView() {
   useEffect(() => {
     if (state.settings.machines.length === 0) void refreshNewSession(core);
   }, [core, state.settings.machines.length]);
+
+  // 点击工作目录字段以外的位置时收起下拉框；同时清 suggestionDir/suggestionPrefix，
+  // 使在途应答因前缀不匹配而丢弃，不会在收起后又弹回来
+  useEffect(() => {
+    const onMouseDown = (event: MouseEvent) => {
+      const field = workspaceField.current;
+      if (field !== null && event.target instanceof Node && field.contains(event.target)) return;
+      const { suggestions: open, suggestionDir, recentOpen: recent } = core.state.newSession;
+      if (open.length === 0 && suggestionDir === null && !recent) return;
+      core.update((draft) => {
+        draft.newSession.suggestions = [];
+        draft.newSession.suggestionDir = null;
+        draft.newSession.suggestionPrefix = "";
+        draft.newSession.recentOpen = false;
+      });
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [core]);
 
   /** 填入工作目录并按其内容刷新前缀匹配候选。 */
   const pickWorkspace = (value: string): void => {
@@ -119,7 +139,7 @@ export function NewSessionView() {
         )}
       </div>
 
-      <div className="flex flex-col gap-2">
+      <div ref={workspaceField} className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <Label>工作目录</Label>
           {machine !== "" && recent.length > 0 ? (
@@ -141,6 +161,7 @@ export function NewSessionView() {
           data-slot="workspace-input"
           aria-label="工作目录"
           value={workspace}
+          onFocus={() => void updateWorkspaceInput(core, workspace)}
           onChange={(event) => {
             const value = event.target.value;
             core.update((draft) => {
