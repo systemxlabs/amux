@@ -1427,7 +1427,8 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 打开终端面板：刷新终端列表并选中当前（或首个）终端，没有则创建一个。
+    /// 打开终端面板：刷新终端列表并选中当前（或首个）终端；没有终端时不自动新建
+    /// （新建只由标签栏的 + 触发，docs/PRD.md「终端」只要求「可创建多个终端」）。
     pub fn open_terminal(&mut self, cx: &mut Context<Self>) {
         let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
         let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
@@ -1438,27 +1439,6 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             if let Ok(terminals) = client.terminals(&id).await {
                 crate::state::set_terminals(&mut core.lock(), terminals);
-            }
-            if core.lock().view.detail.active_terminal.is_some() {
-                return;
-            }
-            let existing = {
-                let core = core.lock();
-                core.view
-                    .detail
-                    .terminals
-                    .first()
-                    .map(|terminal| terminal.id.clone())
-            };
-            match existing {
-                Some(terminal) => {
-                    let mut core = core.lock();
-                    core.view.detail.active_terminal = Some(terminal);
-                    core.view.detail.terminal_output.reset();
-                    core.last.terminal_cursor = 0;
-                    core.last.terminal = None;
-                }
-                None => create_terminal(&client, &core, &id).await,
             }
         });
         cx.notify();
