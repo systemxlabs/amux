@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { canExpand, listRows, mergeListPage, sortEntries } from "./list";
+import { buildListWindow, canExpand, listRows, sortEntries } from "./list";
 import { newPaging } from "./paging";
 import type { ListEntry, Session, Workflow } from "./types";
 
@@ -47,10 +47,9 @@ describe("sortEntries", () => {
   });
 });
 
-describe("mergeListPage", () => {
-  it("两个来源合并为一个排序窗口，并更新更早标记", () => {
-    const result = mergeListPage(
-      [],
+describe("buildListWindow", () => {
+  it("两个来源构建为统一排序的最新窗口，并更新更早标记", () => {
+    const result = buildListWindow(
       newPaging(),
       [session("s1", 100)],
       [workflow("w1", 200, [session("linked", 150)])],
@@ -61,6 +60,19 @@ describe("mergeListPage", () => {
       "s1",
     ]);
     expect(result.paging.hasOlder).toBe(true);
+  });
+
+  it("重建窗口不保留服务端已删除的旧条目", () => {
+    const result = buildListWindow(
+      newPaging(),
+      [session("alive", 300)],
+      [workflow("kept", 200, [])],
+      false,
+    );
+    expect(result.entries.map((entry) => (entry.kind === "session" ? entry.session.id : entry.workflow.id))).toEqual([
+      "alive",
+      "kept",
+    ]);
   });
 });
 

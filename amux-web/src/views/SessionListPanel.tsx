@@ -1,9 +1,9 @@
 // 会话列表视图（docs/PRD.md「会话列表视图」、docs/DESIGN.md「会话列表视图」）。
 //
 // 顶部「+」进入新建会话视图；普通会话与工作流会话统一排序，工作流会话可展开关联普通会话。
-// 滚动到顶部时按分页模型加载更早一页，插入后依据容器高度差把原首条目滚回原位。
+// 会话按最近活跃倒序排列（最新在上），滚到最下方时按分页模型加载更早一页。
 
-import { useEffect, useRef, useState, type UIEvent } from "react";
+import { useRef, useState, type UIEvent } from "react";
 import { ChevronDown, ChevronRight, Loader2, Plus } from "lucide-react";
 
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -22,8 +22,6 @@ export function SessionListPanel() {
   const core = useCore();
   const state = useCoreState();
   const scrollRef = useRef<HTMLDivElement>(null);
-  /** 触发加载更早一页前的容器内容高度：插入后按其差值校正滚动位置 */
-  const anchorRef = useRef<number | null>(null);
   /** 本次行内重命名是否已由按键结束：结束时不再由 blur 重复提交 */
   const handledRef = useRef(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -35,22 +33,6 @@ export function SessionListPanel() {
     value: string;
   } | null>(null);
   const [deleting, setDeleting] = useState<ListEntry | null>(null);
-
-  useEffect(() => {
-    if (state.listPaging.shift === null) return;
-    const node = scrollRef.current;
-    const before = anchorRef.current;
-    anchorRef.current = null;
-    if (node !== null && before !== null) {
-      const delta = node.scrollHeight - before;
-      requestAnimationFrame(() => {
-        node.scrollTop += delta;
-      });
-    }
-    core.update((next) => {
-      next.listPaging.shift = null;
-    });
-  }, [core, state.listPaging.shift]);
 
   const commitRename = (entry: ListEntry, value: string): void => {
     setRenaming(null);
@@ -65,8 +47,8 @@ export function SessionListPanel() {
         next.listPaging.pageSize = pageSize;
       });
     }
-    if (node.scrollTop <= 0 && state.listPaging.hasOlder && !state.listPaging.loadingOlder) {
-      anchorRef.current = node.scrollHeight;
+    const nearBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 8;
+    if (nearBottom && state.listPaging.hasOlder && !state.listPaging.loadingOlder) {
       void loadOlderList(core);
     }
   };

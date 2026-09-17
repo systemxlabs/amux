@@ -3,9 +3,9 @@
 // 单任务节拍内按到期时间触发各视图刷新；设置类数据不做定时刷新，由视图打开时实时拉取。
 
 import type { Activity, HistoryItem, ListEntry, OpenTarget } from "../lib/types";
-import { entryId, entryUpdatedAt } from "../lib/types";
+import { entryId } from "../lib/types";
 import { beginOlderPage, mergeNewest, prependOlder, refreshLimit } from "../lib/paging";
-import { mergeListPage } from "../lib/list";
+import { buildListWindow, sortEntries } from "../lib/list";
 import { appendTerminalOutput } from "../lib/terminal";
 import type { Core, SettingsTab } from "./core";
 
@@ -83,15 +83,14 @@ export async function refreshList(core: Core): Promise<void> {
       client.workflows(limit, 0),
     ]);
     core.update((state) => {
-      const merged = mergeListPage(
-        state.entries,
+      const window = buildListWindow(
         state.listPaging,
         sessions.sessions,
         workflows.workflows,
         sessions.hasMore || workflows.hasMore,
       );
-      state.entries = merged.entries;
-      state.listPaging = merged.paging;
+      state.entries = window.entries;
+      state.listPaging = window.paging;
     });
   } catch (error) {
     core.update((state) => {
@@ -111,10 +110,14 @@ export async function loadOlderList(core: Core): Promise<void> {
   core.update((state) => {
     state.listPaging = started.paging;
   });
+  // 普通会话与工作流会话是独立分页的两个列表，偏移各自按已加载条数计算；
+  // 用合并后总条数当 offset 会跳过两端的中间页（issue：普通会话和工作流混合翻页会跳数）。
+  const sessionsOffset = core.state.entries.filter((entry) => entry.kind === "session").length;
+  const workflowsOffset = core.state.entries.filter((entry) => entry.kind === "workflow").length;
   try {
     const [sessions, workflows] = await Promise.all([
-      client.sessions(started.limit, started.offset),
-      client.workflows(started.limit, started.offset),
+      client.sessions(started.limit, sessionsOffset),
+      client.workflows(started.limit, workflowsOffset),
     ]);
     core.update((state) => {
       const page: ListEntry[] = [
@@ -123,8 +126,7 @@ export async function loadOlderList(core: Core): Promise<void> {
       ];
       const pageIds = new Set(page.map(entryId));
       const kept = state.entries.filter((entry) => !pageIds.has(entryId(entry)));
-      const merged = [...kept, ...page].sort((a, b) => entryUpdatedAt(b) - entryUpdatedAt(a));
-      state.entries = merged;
+      state.entries = sortEntries([...kept, ...page]);
       state.listPaging = {
         ...state.listPaging,
         loadingOlder: false,
