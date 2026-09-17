@@ -34,6 +34,14 @@ export type MiddleView = "new" | "interaction";
 /** 右侧面板。 */
 export type SidePanel = "workspace" | "diff" | "details" | "activities" | "plan" | "terminal";
 
+/** 仅普通会话有的右侧面板（docs/PRD.md「主页面」）。 */
+const SESSION_ONLY_PANELS: readonly SidePanel[] = ["workspace", "diff", "plan", "terminal"];
+
+/** 右侧面板是否适用于该会话：普通会话专属面板在工作流会话下不展示。 */
+export function panelAvailable(panel: SidePanel, target: OpenTarget): boolean {
+  return target.kind === "session" || !SESSION_ONLY_PANELS.includes(panel);
+}
+
 export type Notice = { kind: "success" | "error"; text: string };
 
 /** 待发送附件（拖拽或粘贴得到）。 */

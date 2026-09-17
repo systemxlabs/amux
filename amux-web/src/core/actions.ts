@@ -16,6 +16,7 @@ import type {
   WorkflowPlanItem,
 } from "../lib/types";
 import { entryTitle, rootDir } from "../lib/types";
+import { panelAvailable } from "./core";
 import type { Attachment, Core, SidePanel } from "./core";
 import {
   refreshHistory,
@@ -130,6 +131,11 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
     state.open = target;
     state.middle = "interaction";
     state.attachments = [];
+    // 工作目录/改动审查/计划/终端仅普通会话有：切到不适用的会话时关闭面板
+    // （docs/PRD.md「主页面」；否则会留下关闭按钮都已隐藏的空白面板）
+    if (state.sidePanel !== null && !panelAvailable(state.sidePanel, target)) {
+      state.sidePanel = null;
+    }
     if (entry.kind === "session") {
       state.detail.session = entry.session;
     } else {
