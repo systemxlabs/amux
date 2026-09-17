@@ -1,11 +1,12 @@
 //! Nano 的模型运行与 ACP 活动适配；工具循环由 rig-agent 驱动。
 
-use std::{io, path::PathBuf, sync::Arc};
+use std::{io, path::PathBuf, process::Stdio, sync::Arc};
 
 use agent_client_protocol::{schema::v2::*, Client, V2ConnectionTo};
 pub(super) use amux_common::model::builder;
 use amux_common::model::reasoning_text;
 use parking_lot::Mutex;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use rig_agent::{
     agent::hook::{self, AgentHook, HookContext},
     completion::PromptError,
@@ -14,6 +15,7 @@ use rig_agent::{
 };
 use rig_core::completion::{AssistantContent, Message};
 use serde::Deserialize;
+use tokio::io::AsyncReadExt;
 
 const MAX_MODEL_CALLS: usize = 32;
 
@@ -185,6 +187,20 @@ struct Shell {
     cwd: PathBuf,
 }
 
+struct ShellProcess {
+    child: Box<dyn ChildWrapper>,
+    completed: bool,
+}
+
+impl Drop for ShellProcess {
+    fn drop(&mut self) {
+        // Unix 的 KillOnDrop 只杀直接子进程；取消 future 时必须经 wrapper 杀整个组。
+        if !self.completed {
+            let _ = self.child.start_kill();
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct ShellArgs {
     command: String,
@@ -209,18 +225,40 @@ impl Tool for Shell {
         _context: &mut ToolContext,
         args: ShellArgs,
     ) -> Result<ToolOutput, io::Error> {
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(args.command)
-            .current_dir(&self.cwd)
-            .kill_on_drop(true)
-            .output()
-            .await?;
+        let mut command = CommandWrap::with_new("sh", |command| {
+            command
+                .arg("-c")
+                .arg(args.command)
+                .current_dir(&self.cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        });
+        command.wrap(KillOnDrop);
+        #[cfg(unix)]
+        command.wrap(process_wrap::tokio::ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(process_wrap::tokio::JobObject);
+        let mut process = ShellProcess {
+            child: command.spawn()?,
+            completed: false,
+        };
+        let mut stdout = process.child.stdout().take().unwrap();
+        let mut stderr = process.child.stderr().take().unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        // 同时排空两根管道，避免输出超过管道容量后相互等待。
+        let (status, _, _) = tokio::try_join!(
+            process.child.wait(),
+            stdout.read_to_end(&mut out),
+            stderr.read_to_end(&mut err),
+        )?;
+        process.completed = true;
         Ok(ToolOutput::text(format!(
             "exit: {}\n{}\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            status,
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
         )))
     }
 }
@@ -369,6 +407,61 @@ mod tests {
         ));
         assert!(has_tool_result(&saved.lock(), "hello"));
         assert_eq!(saved.lock().len(), 8, "历史不能重复添加旧消息");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_child_fixture() {
+        use std::io::{Read, Write};
+        let Ok(address) = std::env::var("AMUX_NANO_TEST_SOCKET") else {
+            return;
+        };
+        let mut socket = std::os::unix::net::UnixStream::connect(address).unwrap();
+        socket.write_all(b"ready").unwrap();
+        let _ = socket.read(&mut [0]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_shell_runner_kills_descendants() {
+        use std::time::Duration;
+        use tokio::{io::AsyncReadExt, net::UnixListener};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ready.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let quote =
+            |path: &std::path::Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
+        // 子进程持有 socket；父 shell 必须继续 wait，不能被 exec 优化替换。
+        let command = format!(
+            "AMUX_NANO_TEST_SOCKET={} {} --exact nano::runtime::tests::shell_child_fixture --nocapture & wait",
+            quote(&socket_path), quote(&executable),
+        );
+        let agent = AgentBuilder::new(MockCompletionModel::new([tool_turn("child", &command)]))
+            .tool(Shell {
+                cwd: dir.path().into(),
+            })
+            .build();
+        let task = tokio::spawn(async move { agent.runner("开始").run().await });
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ready = [0; 5];
+        socket.read_exact(&mut ready).await.unwrap();
+        assert_eq!(&ready, b"ready");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        // EOF 证明子进程关闭了描述符，不依赖 sleep 或 PID 回收时机。
+        // 失败时 socket 也会关闭，fixture 因 EOF 退出，不遗留测试进程。
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), socket.read(&mut [0]))
+                .await
+                .expect("取消后 shell 子进程仍在运行")
+                .unwrap(),
+            0,
+        );
     }
 
     #[tokio::test]
