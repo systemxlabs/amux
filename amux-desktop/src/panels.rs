@@ -50,7 +50,6 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
     let sidebar = theme.sidebar;
     let sidebar_border = theme.sidebar_border;
     let foreground = theme.foreground;
-    let primary = theme.primary;
 
     let mut list = v_flex()
         .id("sidebar-sessions")
@@ -90,9 +89,8 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
             h_flex()
                 .gap_2()
                 .items_center()
-                .child(div().size_2().rounded_full().bg(primary))
                 .child(
-                    Label::new("会话")
+                    Label::new("会话列表")
                         .text_xl()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(foreground),

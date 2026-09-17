@@ -118,6 +118,7 @@ pub struct AmuxApp {
     pub list_scroll: ScrollHandle,
     /// 对话历史滚动句柄（贴底判断与滚动分页）
     pub dialog_scroll: ScrollHandle,
+    pub dialog_scroll_on_entry: bool,
     /// 活动历史滚动句柄
     pub activities_scroll: ScrollHandle,
     /// 计划面板滚动句柄
@@ -315,6 +316,7 @@ impl AmuxApp {
             diff_scroll: ScrollHandle::new(),
             list_scroll: ScrollHandle::new(),
             dialog_scroll: ScrollHandle::new(),
+            dialog_scroll_on_entry: true,
             activities_scroll: ScrollHandle::new(),
             plan_scroll: ScrollHandle::new(),
             expanded_activities: HashSet::new(),
@@ -446,9 +448,11 @@ impl AmuxApp {
         };
         let handle = self.dialog_scroll.clone();
         let loaded = self.with_core(|core| core.view.detail.history.len());
-        if self.sync_list_paging(&handle, loaded, true, |core| {
-            &mut core.view.detail.history_paging
-        }) {
+        if !self.dialog_scroll_on_entry
+            && self.sync_list_paging(&handle, loaded, true, |core| {
+                &mut core.view.detail.history_paging
+            })
+        {
             let core = Arc::clone(&self.core);
             let client = client.clone();
             let target = target.clone();
@@ -721,6 +725,7 @@ impl AmuxApp {
     /// 打开新建会话视图：实时拉取机器、agents 与常用工作目录
     /// （docs/DESIGN.md「新建会话视图」）。
     pub fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        self.dialog_scroll_on_entry = true;
         self.with_core(|core| {
             core.open = None;
             core.side_panel = None;
@@ -759,7 +764,7 @@ impl AmuxApp {
         self.expanded_activities.clear();
         self.workspace_file = None;
         self.workspace_tree_visible = true;
-        self.dialog_scroll.scroll_to_bottom();
+        self.dialog_scroll_on_entry = true;
         self.load_view_data();
         cx.notify();
     }

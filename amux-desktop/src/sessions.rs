@@ -617,8 +617,9 @@ fn dialog(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
     }
 
     // 贴底跟随在渲染期重申：底部区域高度变化会缩小视口，旧 offset 不再贴底
-    if scroll_at_bottom(&this.dialog_scroll) {
+    if this.dialog_scroll_on_entry || scroll_at_bottom(&this.dialog_scroll) {
         this.dialog_scroll.scroll_to_bottom();
+        this.dialog_scroll_on_entry = false;
     }
     let scroll = v_flex()
         .id("dialog")

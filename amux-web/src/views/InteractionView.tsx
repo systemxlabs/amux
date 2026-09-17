@@ -1,7 +1,7 @@
 // 会话交互视图（docs/PRD.md「会话交互视图」）：agent 状态、对话气泡、实时活动、
 // 快捷指令栏、输入区（Enter 发送 / Shift+Enter 换行、斜杠命令上拉框、附件）、会话选项。
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { SendHorizontal, Square } from "lucide-react";
 
 import { Markdown } from "../components/Markdown";
@@ -33,6 +33,20 @@ export function InteractionView() {
   const draft = state.inputDraft;
   const listRef = useRef<HTMLDivElement>(null);
   const heightBeforeLoad = useRef<number | null>(null);
+  const scrollOnEntry = useRef(true);
+
+  useLayoutEffect(() => {
+    scrollOnEntry.current = true;
+    heightBeforeLoad.current = null;
+  }, [detail]);
+
+  useLayoutEffect(() => {
+    const element = listRef.current;
+    // 打开时历史异步加载；首次有消息再定位，不能在空列表上消耗此次滚动。
+    if (!element || !scrollOnEntry.current || detail.history.length === 0) return;
+    element.scrollTop = element.scrollHeight;
+    scrollOnEntry.current = false;
+  }, [detail, detail.history.length]);
 
   useEffect(() => {
     core.update((next) => {

@@ -78,7 +78,8 @@ export function SessionListPanel() {
 
   return (
     <div data-slot="session-list-panel" className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center border-b border-border p-2">
+      <div className="flex items-center justify-between gap-2 border-b border-border p-2">
+        <h2 className="font-semibold">会话列表</h2>
         <Button
           data-slot="session-new"
           aria-label="新建会话"
