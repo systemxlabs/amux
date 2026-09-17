@@ -2,13 +2,16 @@
 
 use amux_common::api::*;
 use amux_common::domain::{
-    Activity, ContentBlock, FsListResult, FsReadResult, GitDiffResult, SessionConfigOption,
-    SessionPlanEntry, SlashCommand,
+    Activity, ContentBlock, FsEntry, FsListResult, FsReadResult, GitDiffResult,
+    SessionConfigOption, SessionPlanEntry, SlashCommand,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::config::Connection;
+
+/// 目录列表请求的页大小（Daemon 单页上限 500）。
+const DIRS_PAGE_LIMIT: usize = 500;
 
 #[derive(Clone)]
 pub struct Client {
@@ -73,6 +76,22 @@ impl Client {
             urlencode(path)
         ))
         .await
+    }
+
+    /// 拉取目录下全部子目录：分页续拉到底，前缀匹配要在完整列表上做过滤。
+    pub async fn list_all_dirs(&self, machine: &str, dir: &str) -> Result<Vec<FsEntry>, String> {
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = self
+                .list_dir(machine, Some(dir), DIRS_PAGE_LIMIT, offset, true)
+                .await?;
+            entries.extend(page.entries);
+            if !page.has_more || page.next_offset <= offset {
+                return Ok(entries);
+            }
+            offset = page.next_offset;
+        }
     }
 
     pub async fn read_file(

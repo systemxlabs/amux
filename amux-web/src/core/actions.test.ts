@@ -4,8 +4,15 @@
 import { describe, expect, it } from "vitest";
 
 import type { ApiClient } from "../lib/api";
-import type { ListEntry, Session, SessionList, Workflow, WorkflowList } from "../lib/types";
-import { cancelOpen, openEntry } from "./actions";
+import type {
+  FsEntry,
+  ListEntry,
+  Session,
+  SessionList,
+  Workflow,
+  WorkflowList,
+} from "../lib/types";
+import { cancelOpen, openEntry, updateWorkspaceInput } from "./actions";
 import { Core } from "./core";
 
 function session(): Session {
@@ -120,5 +127,99 @@ describe("cancelOpen", () => {
     await cancelOpen(core);
 
     expect(calls).toEqual(["cancelSession", "history"]);
+  });
+});
+
+/// 目录条目（联想列表只列目录）。
+function dir(name: string, path: string): FsEntry {
+  return { name, path, isDir: true, size: 0 };
+}
+
+/** 假客户端：按「机器:目录@offset」返回分页结果，并记录每次拉取的机器、目录与偏移。 */
+function listingClient(
+  pages: Record<string, { entries: FsEntry[]; hasMore: boolean }>,
+): { client: ApiClient; calls: string[] } {
+  const calls: string[] = [];
+  const client = {
+    listDir: async (
+      machine: string,
+      path: string,
+      _limit?: number,
+      offset = 0,
+    ): Promise<{ path: string; entries: FsEntry[]; hasMore: boolean; nextOffset: number }> => {
+      calls.push(`${machine}:${path}@${offset}`);
+      const page = pages[`${path}@${offset}`] ?? { entries: [], hasMore: false };
+      return {
+        path,
+        entries: page.entries,
+        hasMore: page.hasMore,
+        nextOffset: offset + page.entries.length,
+      };
+    },
+  } as unknown as ApiClient;
+  return { client, calls };
+}
+
+/** 工作目录输入联想（docs/DESIGN.md「新建会话视图」）。 */
+describe("updateWorkspaceInput", () => {
+  it("目录边界处拉取该目录全部条目（分页续拉到底）", async () => {
+    const { client, calls } = listingClient({
+      "/home/@0": { entries: [dir("tom", "/home/tom"), dir("tmp", "/home/tmp")], hasMore: true },
+      "/home/@2": { entries: [dir("usr", "/home/usr")], hasMore: false },
+    });
+    const core = new Core();
+    core.client = client;
+    core.state.newSession.machine = "localpc";
+
+    await updateWorkspaceInput(core, "/home/");
+
+    expect(calls).toEqual(["localpc:/home/@0", "localpc:/home/@2"]);
+    expect(core.state.newSession.suggestions.map((entry) => entry.name)).toEqual([
+      "tom",
+      "tmp",
+      "usr",
+    ]);
+  });
+
+  it("同一目录内继续输入不重复拉取，用已拉取的条目做前缀匹配", async () => {
+    const { client, calls } = listingClient({
+      "/@0": {
+        entries: [dir("home", "/home"), dir("hola", "/hola"), dir("etc", "/etc")],
+        hasMore: false,
+      },
+      "/home/@0": { entries: [dir("tom", "/home/tom"), dir("jerry", "/home/jerry")], hasMore: false },
+    });
+    const core = new Core();
+    core.client = client;
+    core.state.newSession.machine = "localpc";
+
+    await updateWorkspaceInput(core, "/ho");
+    await updateWorkspaceInput(core, "/hol");
+
+    expect(calls).toEqual(["localpc:/@0"]);
+    expect(core.state.newSession.suggestions.map((entry) => entry.name)).toEqual(["hola"]);
+
+    // 跨过目录边界（末尾的 `/`）才拉下一级目录
+    await updateWorkspaceInput(core, "/home/");
+    await updateWorkspaceInput(core, "/home/t");
+
+    expect(calls).toEqual(["localpc:/@0", "localpc:/home/@0"]);
+    expect(core.state.newSession.suggestions.map((entry) => entry.name)).toEqual(["tom"]);
+  });
+
+  it("换机器后即使目录相同也重新拉取", async () => {
+    const { client, calls } = listingClient({
+      "/@0": { entries: [dir("home", "/home")], hasMore: false },
+    });
+    const core = new Core();
+    core.client = client;
+    core.state.newSession.machine = "localpc";
+
+    await updateWorkspaceInput(core, "/ho");
+
+    core.state.newSession.machine = "otherpc";
+    await updateWorkspaceInput(core, "/ho");
+
+    expect(calls).toEqual(["localpc:/@0", "otherpc:/@0"]);
   });
 });

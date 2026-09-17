@@ -33,8 +33,8 @@ use crate::poll;
 use crate::sessions;
 use crate::settings;
 use crate::state::{
-    matching_prefix, Attachment, ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SharedCore,
-    SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
+    matching_prefix, Attachment, ConnectionStatus, Core, DirectoryListing, ListEntry, OpenTarget,
+    Paging, SharedCore, SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
 };
 use crate::terminal_view;
 use crate::theme::SIDEBAR_WIDTH;
@@ -973,9 +973,10 @@ impl AmuxApp {
     /// 刷新前缀匹配的目录项（docs/DESIGN.md「新建会话视图」）：输入 `…/tom/` 列出该目录下
     /// 全部条目；输入 `…/tom` 列出其父目录下与 `tom` 前缀匹配的条目。
     ///
-    /// 每次输入都实时拉取该目录的条目（不按目录缓存，目录内的增删要立刻反映）；
-    /// 应答回来时若目录已变则丢弃，否则按最新前缀过滤。联想优先于最近目录下拉，
-    /// 避免两层浮层叠加；输入清空时恢复最近目录下拉（交互参考旧桌面应用）。
+    /// 目录变了才重新拉取（边界处触发，且一次拉全该目录的条目），目录没变时直接用已拉取的
+    /// 条目按最新前缀过滤，避免同一个目录在输入过程中被反复拉取。应答回来时若目录或机器已变
+    /// 则丢弃。联想优先于最近目录下拉，避免两层浮层叠加；输入清空时恢复最近目录下拉
+    /// （交互参考旧桌面应用）。
     fn refresh_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
         let text = self.workspace_input.read(cx).value().to_string();
         let machine = self.with_core(|core| core.new_session.machine.clone());
@@ -983,7 +984,7 @@ impl AmuxApp {
         let (Some((dir, prefix)), Some(machine)) = (parsed, machine) else {
             self.with_core(|core| {
                 core.new_session.suggestions.clear();
-                core.new_session.suggestion_dir = None;
+                core.new_session.suggestion = None;
             });
             if text.trim().is_empty() {
                 let has_recent = self.with_core(|core| {
@@ -996,28 +997,71 @@ impl AmuxApp {
             cx.notify();
             return;
         };
+        // 还在同一个目录里输入：用已拉取的条目做前缀匹配，不再拉取
+        let listed = self.with_core(|core| {
+            core.new_session
+                .suggestion
+                .as_ref()
+                .is_some_and(|listing| listing.machine == machine && listing.dir == dir)
+        });
+        if listed {
+            self.with_core(|core| {
+                core.new_session.suggestion_prefix = prefix.to_string();
+                let entries = core
+                    .new_session
+                    .suggestion
+                    .as_ref()
+                    .map(|listing| listing.entries.clone())
+                    .unwrap_or_default();
+                core.new_session.suggestions = matching_prefix(entries, prefix);
+            });
+            cx.notify();
+            return;
+        }
         self.workspace_recent_open = false;
         let dir = dir.to_string();
         let prefix = prefix.to_string();
         self.with_core(|core| {
-            core.new_session.suggestion_dir = Some(dir.clone());
-            core.new_session.suggestion_prefix = prefix.clone();
+            // 先占位：新目录的条目到达前不展示上一个目录的项，也不为它重复拉取
+            core.new_session.suggestion = Some(DirectoryListing {
+                machine: machine.clone(),
+                dir: dir.clone(),
+                entries: Vec::new(),
+            });
+            core.new_session.suggestion_prefix = prefix;
+            core.new_session.suggestions.clear();
         });
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            let entries = match client.list_dir(&machine, Some(&dir), 500, 0, true).await {
-                Ok(result) => result.entries,
-                Err(_) => Vec::new(),
-            };
+            let result = client.list_all_dirs(&machine, &dir).await;
             let mut core = core.lock();
-            // 用户可能已经继续输入或换了目录：过期应答不落地
-            if core.new_session.suggestion_dir.as_deref() != Some(dir.as_str()) {
+            // 用户可能已经继续输入、换了目录或换了机器：过期应答不落地
+            let stale = core
+                .new_session
+                .suggestion
+                .as_ref()
+                .is_none_or(|listing| listing.machine != machine || listing.dir != dir);
+            if stale {
                 return;
             }
-            let prefix = core.new_session.suggestion_prefix.clone();
-            core.new_session.suggestions = matching_prefix(entries, &prefix);
+            match result {
+                Ok(entries) => {
+                    let prefix = core.new_session.suggestion_prefix.clone();
+                    core.new_session.suggestions = matching_prefix(entries.clone(), &prefix);
+                    core.new_session.suggestion = Some(DirectoryListing {
+                        machine,
+                        dir,
+                        entries,
+                    });
+                }
+                // 拉取失败：撤掉占位，下次输入时重试
+                Err(_) => {
+                    core.new_session.suggestion = None;
+                    core.new_session.suggestions.clear();
+                }
+            }
         });
         cx.notify();
     }

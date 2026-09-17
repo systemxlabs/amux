@@ -270,10 +270,18 @@ pub struct NewSessionForm {
     pub use_worktree: bool,
     /// 工作目录输入框的前缀匹配目录项
     pub suggestions: Vec<FsEntry>,
-    /// 当前联想请求的目录（实时拉取，不做缓存；应答回来时目录已变则丢弃）
-    pub suggestion_dir: Option<String>,
-    /// 当前联想请求的前缀（应答回来时按最新前缀过滤）
+    /// 已拉取条目的目录（前缀匹配的数据源；应答回来时目录或机器已变则丢弃）
+    pub suggestion: Option<DirectoryListing>,
+    /// 当前输入的名字前缀（应答回来时按最新前缀过滤）
     pub suggestion_prefix: String,
+}
+
+/// 某机器某目录下的全部目录项：输入停在同一个目录内时直接用它做前缀匹配，不再重复拉取。
+#[derive(Clone)]
+pub struct DirectoryListing {
+    pub machine: String,
+    pub dir: String,
+    pub entries: Vec<FsEntry>,
 }
 
 /// 目录条目中名称以 `prefix` 开头的项（工作目录联想项；服务端已只返回目录）。

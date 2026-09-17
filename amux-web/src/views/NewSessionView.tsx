@@ -146,13 +146,26 @@ export function NewSessionView() {
     setPlanPopup(null);
   };
 
-  /** 填入工作目录并收起浮层。 */
-  const pickWorkspace = (value: string): void => {
+  /** 选中最近使用的工作目录：填入并收起浮层（选定项，不再联想）。 */
+  const pickRecentWorkspace = (value: string): void => {
     core.update((draft) => {
       draft.newSession.workspace = value;
+      draft.newSession.suggestions = [];
     });
     setWorkspacePopup(null);
-    void updateWorkspaceInput(core, value);
+  };
+
+  /**
+   * 选中前缀匹配的目录项：填入该目录并保持下拉框，由联想结果继续展示这一级目录项，
+   * 用户可一路点选下钻（docs/DESIGN.md「新建会话视图」：目录边界处拉取该目录的全部目录项）。
+   */
+  const pickSuggestion = (value: string): void => {
+    const path = value.endsWith("/") ? value : `${value}/`;
+    core.update((draft) => {
+      draft.newSession.workspace = path;
+      draft.newSession.suggestions = [];
+    });
+    void updateWorkspaceInput(core, path);
   };
 
   const normalForm = (
@@ -251,7 +264,7 @@ export function NewSessionView() {
                   data-slot="recent-workspace"
                   // 阻止默认行为以免输入框失焦（失焦会收起浮层，点击就落不到这一项上）
                   onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => pickWorkspace(item.workspace)}
+                  onClick={() => pickRecentWorkspace(item.workspace)}
                   className="cursor-pointer truncate px-2 py-1 text-left text-sm hover:bg-accent"
                 >
                   {item.workspace}
@@ -272,7 +285,7 @@ export function NewSessionView() {
                   data-slot="workspace-suggestion"
                   data-path={item.path}
                   onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => pickWorkspace(item.path.endsWith("/") ? item.path : `${item.path}/`)}
+                  onClick={() => pickSuggestion(item.path)}
                   className="flex cursor-pointer items-center gap-1.5 rounded-sm px-2 py-1 text-left text-sm hover:bg-accent"
                 >
                   <Folder className="size-4 shrink-0 text-muted-foreground" />

@@ -233,48 +233,68 @@ export async function createWorkflow(core: Core): Promise<void> {
   }
 }
 
-/** 工作目录输入：拆分为（目录, 前缀）并按前缀匹配拉取候选目录。 */
+/**
+ * 工作目录输入：拆分为（目录, 前缀）。
+ *
+ * 目录变了（输入跨过目录边界，如 `/`、`/home/`、`/home/tom/`）才拉取该目录的全部目录项；
+ * 目录没变时直接用已拉取的条目做前缀匹配，不为同一个目录重复拉取
+ * （docs/DESIGN.md「新建会话视图」）。
+ */
 export async function updateWorkspaceInput(core: Core, text: string): Promise<void> {
   const query = splitDirQuery(text);
-  if (query === null) {
+  const machine = core.state.newSession.machine;
+  if (query === null || machine === "" || !core.client) {
     core.update((state) => {
       state.newSession.suggestions = [];
-      state.newSession.suggestionDir = null;
+      state.newSession.suggestion = null;
       state.newSession.suggestionPrefix = "";
     });
     return;
   }
-  const machine = core.state.newSession.machine;
+  const listed = core.state.newSession.suggestion;
+  if (listed !== null && listed.machine === machine && listed.dir === query.dir) {
+    core.update((state) => {
+      state.newSession.suggestionPrefix = query.prefix;
+      state.newSession.suggestions = matchingPrefix(listed.entries, query.prefix);
+    });
+    return;
+  }
   core.update((state) => {
-    state.newSession.suggestionDir = query.dir;
+    // 先占位：新目录的条目到达前不展示上一个目录的项，也不为它重复拉取
+    state.newSession.suggestion = { machine, dir: query.dir, entries: [] };
     state.newSession.suggestionPrefix = query.prefix;
+    state.newSession.suggestions = [];
   });
-  if (!core.client || machine === "") return;
+  const client = core.client;
+  // 前缀匹配要在完整列表上做，因此按分页续拉，直到没有更多
+  const entries: FsEntry[] = [];
   try {
-    // 联想要在实时输入时拉取全部目录项再做前缀匹配：按分页续拉，直到没有更多
-    const entries: FsEntry[] = [];
     let offset = 0;
     while (true) {
-      const result = await core.client.listDir(machine, query.dir, undefined, offset, true);
+      const result = await client.listDir(machine, query.dir, undefined, offset, true);
       entries.push(...result.entries);
-      // 用户可能已经继续输入：尽早放弃过期拉取
-      if (core.state.newSession.suggestionDir !== query.dir) return;
-      if (core.state.newSession.suggestionPrefix !== query.prefix) return;
       if (!result.hasMore) break;
       const next = result.nextOffset;
       if (next <= offset) break;
       offset = next;
     }
-    core.update((state) => {
-      if (state.newSession.suggestionDir !== query.dir) return;
-      if (state.newSession.suggestionPrefix !== query.prefix) return;
-      state.newSession.suggestions = matchingPrefix(entries, query.prefix);
-    });
   } catch {
     core.update((state) => {
+      // 撤掉占位，下次输入时重试
+      const listing = state.newSession.suggestion;
+      if (listing === null || listing.machine !== machine || listing.dir !== query.dir) return;
+      state.newSession.suggestion = null;
       state.newSession.suggestions = [];
     });
+    return;
   }
+  core.update((state) => {
+    // 用户可能已经继续输入、换了目录或换了机器：过期应答不落地
+    const listing = state.newSession.suggestion;
+    if (listing === null || listing.machine !== machine || listing.dir !== query.dir) return;
+    state.newSession.suggestion = { machine, dir: query.dir, entries };
+    state.newSession.suggestions = matchingPrefix(entries, state.newSession.suggestionPrefix);
+  });
 }
 
 // ---------- 会话交互 ----------

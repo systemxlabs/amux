@@ -363,10 +363,10 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                 this.workspace_recent_open = !this.workspace_recent_open;
                 if this.workspace_recent_open {
                     // 展开最近目录时收起前缀匹配项，两者不叠加（进行中的联想应答也会因
-                    // 目录被清空而丢弃）
+                    // 已拉取目录被清空而丢弃）
                     this.with_core(|core| {
                         core.new_session.suggestions.clear();
-                        core.new_session.suggestion_dir = None;
+                        core.new_session.suggestion = None;
                     });
                 }
                 cx.notify();
