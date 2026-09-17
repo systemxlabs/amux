@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SendHorizontal, Square } from "lucide-react";
 
+import { Markdown } from "../components/Markdown";
 import { Button } from "../components/ui/button";
 import {
   Select,
@@ -308,7 +309,7 @@ function MessageContent({ content }: { content: readonly ContentBlock[] }) {
 function BlockContent({ block }: { block: ContentBlock }) {
   switch (block.type) {
     case "text":
-      return <p className="whitespace-pre-wrap">{block.text}</p>;
+      return <Markdown text={block.text} />;
     case "resource":
       if (block.blob && block.mimeType.startsWith("image/")) {
         return (
