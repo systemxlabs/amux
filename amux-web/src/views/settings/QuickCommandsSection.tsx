@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
+import { Textarea } from "../../components/ui/textarea";
 import { Label } from "../../components/ui/label";
 import { saveQuickCommands } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
@@ -123,9 +124,10 @@ export function QuickCommandsSection() {
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="quick-command-form-prompt">提示词</Label>
-            <Input
+            <Textarea
               id="quick-command-form-prompt"
               data-slot="quick-command-form-prompt"
+              className="min-h-32"
               value={form?.prompt ?? ""}
               onChange={(event) =>
                 setForm(form === null ? form : { ...form, prompt: event.target.value })

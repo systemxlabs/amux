@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
+import { Textarea } from "../../components/ui/textarea";
 import { Label } from "../../components/ui/label";
 import {
   Select,
@@ -171,9 +172,10 @@ export function SkillsSection() {
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="skill-form-description">描述</Label>
-            <Input
+            <Textarea
               id="skill-form-description"
               data-slot="skill-form-description"
+              className="min-h-32"
               value={form?.description ?? ""}
               onChange={(event) =>
                 setForm(form === null ? form : { ...form, description: event.target.value })
