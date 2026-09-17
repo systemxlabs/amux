@@ -3,19 +3,12 @@
 // 顶部为模式切换（普通/工作流）：普通模式选择机器与可用 agent、输入工作目录（前缀匹配联想与最近目录）、
 // worktree 开关；工作流模式选择或输入工作计划（编排智能体未配置时引导去设置）。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Folder } from "lucide-react";
 
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Textarea } from "../components/ui/textarea";
@@ -42,6 +35,45 @@ const POPUP_MIN_HEIGHT = 80;
 function popupMaxHeight(anchor: DOMRect, below: boolean): number {
   const available = below ? window.innerHeight - anchor.bottom - POPUP_GAP : anchor.top - POPUP_GAP;
   return Math.max(Math.min(PLAN_POPUP_HEIGHT, available), POPUP_MIN_HEIGHT);
+}
+
+/**
+ * 选项按钮组中的一个按钮（docs/PRD.md「新建会话视图」：机器与 agent 均采用选项按钮组，
+ * 不可用的 agent 置灰不可点击）。与桌面应用 `Button::small().selected()` 的外观一致。
+ */
+function OptionButton({
+  slot,
+  selected,
+  disabled = false,
+  available = true,
+  onClick,
+  children,
+}: {
+  slot: "machine-option" | "agent-option";
+  selected: boolean;
+  disabled?: boolean;
+  available?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      data-slot={slot}
+      data-selected={selected ? "true" : "false"}
+      data-available={available ? "true" : "false"}
+      aria-pressed={selected}
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "rounded-sm border border-border bg-card px-2 py-1 text-xs",
+        selected && "border-primary bg-accent",
+        disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:bg-accent",
+      )}
+    >
+      {children}
+    </button>
+  );
 }
 
 export function NewSessionView() {
@@ -127,28 +159,30 @@ export function NewSessionView() {
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-2">
         <Label>机器</Label>
-        {/* 空串即未选择，Radix 会以此展示 placeholder */}
-        <Select
-          value={machine}
-          onValueChange={(value) => {
-            core.update((draft) => {
-              draft.newSession.machine = value;
-              draft.newSession.agent = "";
-            });
-            void updateWorkspaceInput(core, workspace);
-          }}
-        >
-          <SelectTrigger data-slot="machine-select" aria-label="机器" className="w-full">
-            <SelectValue placeholder="选择机器" />
-          </SelectTrigger>
-          <SelectContent>
+        {state.settings.machines.length === 0 ? (
+          <p data-slot="machine-empty" className="text-xs text-muted-foreground">
+            （未接入机器）
+          </p>
+        ) : (
+          <div data-slot="machine-group" className="flex flex-wrap gap-1">
             {state.settings.machines.map((item) => (
-              <SelectItem key={item.name} value={item.name}>
+              <OptionButton
+                key={item.name}
+                slot="machine-option"
+                selected={machine === item.name}
+                onClick={() => {
+                  core.update((draft) => {
+                    draft.newSession.machine = item.name;
+                    draft.newSession.agent = "";
+                  });
+                  void updateWorkspaceInput(core, workspace);
+                }}
+              >
                 {item.name}
-              </SelectItem>
+              </OptionButton>
             ))}
-          </SelectContent>
-        </Select>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col gap-2">
@@ -158,28 +192,22 @@ export function NewSessionView() {
             {machine === "" ? "请先选择机器" : "该机器未发现 agent"}
           </p>
         ) : (
-          <div className="flex flex-col gap-1">
+          <div data-slot="agent-group" className="flex flex-wrap gap-1">
             {agents.map((item) => (
-              <button
+              <OptionButton
                 key={item.name}
-                type="button"
-                data-slot="agent-option"
-                data-available={item.available ? "true" : "false"}
-                data-selected={agent === item.name ? "true" : "false"}
+                slot="agent-option"
+                selected={agent === item.name}
+                available={item.available}
                 disabled={!item.available}
                 onClick={() =>
                   core.update((draft) => {
                     draft.newSession.agent = item.name;
                   })
                 }
-                className={cn(
-                  "rounded-md border border-border bg-card px-2.5 py-1.5 text-left text-sm",
-                  item.available ? "cursor-pointer hover:bg-accent" : "cursor-not-allowed opacity-50",
-                  agent === item.name && "border-primary",
-                )}
               >
                 {item.name}
-              </button>
+              </OptionButton>
             ))}
           </div>
         )}
