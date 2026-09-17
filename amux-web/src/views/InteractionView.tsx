@@ -23,10 +23,12 @@ import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
 import type { ContentBlock, HistoryItem, SessionConfigOption } from "../lib/types";
 import { cn } from "../lib/utils";
+import { useIsMobile } from "../lib/viewport";
 
 export function InteractionView() {
   const core = useCore();
   const state = useCoreState();
+  const isMobile = useIsMobile();
   const target = state.open;
   const detail = state.detail;
 
@@ -165,7 +167,8 @@ export function InteractionView() {
 
   return (
     <div data-slot="interaction-view" className="flex h-full min-h-0 flex-col">
-      <header className="flex items-center gap-2 border-b border-border py-2 pr-12 pl-3">
+      {/* pl-12/pr-12：为左上角的抽屉按钮与右上角的悬浮按钮留出空间 */}
+      <header className="flex items-center gap-2 border-b border-border py-2 pr-12 pl-12 lg:pl-3">
         <span data-slot="interaction-agent" className="font-medium">
           {title}
         </span>
@@ -234,7 +237,7 @@ export function InteractionView() {
                 key={command.name}
                 type="button"
                 data-slot="slash-command"
-                className="flex w-full flex-col items-start px-2 py-1 text-left hover:bg-accent"
+                className="flex w-full flex-col items-start px-2 py-2 text-left hover:bg-accent lg:py-1"
 
                 onClick={() =>
                   core.update((next) => {
@@ -263,6 +266,7 @@ export function InteractionView() {
                     <button
                       type="button"
                       aria-label="移除附件"
+                      className="-my-1 px-1 py-1 text-sm leading-none lg:my-0 lg:text-xs"
                       onClick={() => removeAttachment(core, index)}
                     >
                       ×
@@ -300,6 +304,10 @@ export function InteractionView() {
                 }}
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" || event.shiftKey) return;
+                  // 输入法组字中的回车是候选确认，不是发送
+                  if (event.nativeEvent.isComposing) return;
+                  // 软键盘没有 Shift，回车用于换行，发送交给发送按钮
+                  if (isMobile) return;
                   event.preventDefault();
                   void send();
                 }}
@@ -438,7 +446,7 @@ function SessionOption({ option }: { option: SessionConfigOption }) {
           value={option.current_value}
           onValueChange={(value) => void setConfigOption(core, option.id, { type: "value_id", value })}
         >
-          <SelectTrigger data-slot="option-select" className="h-7 w-40">
+          <SelectTrigger data-slot="option-select" className="h-10 w-40 lg:h-7">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

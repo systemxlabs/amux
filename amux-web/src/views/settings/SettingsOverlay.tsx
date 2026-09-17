@@ -49,17 +49,21 @@ export function SettingsOverlay() {
   return (
     <div
       data-slot="settings-overlay"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/25 p-6"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/25 lg:p-6"
       onClick={() => closeSettings(core)}
     >
       {/* 浮窗尺寸对齐桌面应用（55rem × 38.75rem，其 rem 基准 14px → 770 × 540）；
-          窗口更小时按 p-6 内边距收缩。点击面板需阻止冒泡，否则会误触发遮罩的关闭 */}
+          窗口更小时按 p-6 内边距收缩。窄视口占满整屏，分类导航从侧边栏改为顶部横向标签。
+          点击面板需阻止冒泡，否则会误触发遮罩的关闭 */}
       <div
         data-slot="settings-panel"
-        className="flex h-full max-h-[540px] w-full max-w-[770px] overflow-hidden rounded-lg border border-border bg-card shadow-lg"
+        className="flex h-full w-full flex-col overflow-hidden bg-card lg:max-h-[540px] lg:max-w-[770px] lg:flex-row lg:rounded-lg lg:border lg:border-border lg:shadow-lg"
         onClick={(event) => event.stopPropagation()}
       >
-        <div data-slot="settings-nav" className="flex w-44 shrink-0 flex-col border-r border-border p-2">
+        <div
+          data-slot="settings-nav"
+          className="flex shrink-0 flex-col border-b border-border p-2 lg:w-44 lg:border-r lg:border-b-0"
+        >
           <div className="mb-2 flex items-center justify-between px-2">
             <span className="text-xs font-medium text-muted-foreground">设置</span>
             <Button
@@ -72,7 +76,7 @@ export function SettingsOverlay() {
               <span className="sr-only">关闭设置</span>
             </Button>
           </div>
-          <div className="flex flex-col gap-0.5">
+          <div className="flex flex-row gap-0.5 overflow-x-auto lg:flex-col">
             {TABS.map((item) => (
               <Button
                 key={item.tab}
@@ -81,7 +85,7 @@ export function SettingsOverlay() {
                 data-active={state.settings.tab === item.tab ? "true" : "false"}
                 variant="ghost"
                 className={cn(
-                  "w-full justify-start",
+                  "w-auto shrink-0 justify-start lg:w-full",
                   state.settings.tab === item.tab && "bg-accent text-accent-foreground",
                 )}
                 onClick={() => selectSettingsTab(core, item.tab)}
@@ -91,7 +95,7 @@ export function SettingsOverlay() {
             ))}
           </div>
         </div>
-        <div data-slot="settings-content" className="flex-1 overflow-auto p-4">
+        <div data-slot="settings-content" className="min-h-0 flex-1 overflow-auto p-4">
           {section(state.settings.tab)}
         </div>
       </div>

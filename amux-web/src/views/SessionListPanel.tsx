@@ -4,10 +4,10 @@
 // 会话按最近活跃倒序排列（最新在上），滚到最下方时按分页模型加载更早一页。
 
 import { useEffect, useRef, useState, type UIEvent } from "react";
-import { ChevronDown, ChevronRight, Loader2, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, MoreHorizontal, Plus } from "lucide-react";
 
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { ContextMenu, type MenuState } from "../components/ContextMenu";
+import { ContextMenu, type MenuItem, type MenuState } from "../components/ContextMenu";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { deleteEntry, openEntry, renameEntry, showNewSession, toggleExpand } from "../core/actions";
@@ -18,7 +18,11 @@ import { pageSizeForViewport } from "../lib/paging";
 import { entryId, entryState, entryTitle, type ListEntry } from "../lib/types";
 import { cn } from "../lib/utils";
 
-export function SessionListPanel() {
+/**
+ * `onNavigate`：窄视口下会话列表在抽屉浮层里，选中会话或新建会话后要收起它，
+ * 否则抽屉会盖住刚切换过来的视图。宽视口下抽屉本就不展开，收起动作没有副作用。
+ */
+export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
   const core = useCore();
   const state = useCoreState();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -38,6 +42,23 @@ export function SessionListPanel() {
     setRenaming(null);
     void renameEntry(core, entry, value);
   };
+
+  /** 会话操作菜单项：右键与窄视口的「会话操作」按钮共用。 */
+  const menuItems = (
+    entry: ListEntry,
+    id: string,
+    title: string,
+    depth: number,
+  ): MenuItem[] => [
+    {
+      label: "重命名",
+      onSelect: () => {
+        handledRef.current = false;
+        setRenaming({ kind: entry.kind, id, depth, value: title });
+      },
+    },
+    { label: "删除", danger: true, onSelect: () => setDeleting(entry) },
+  ];
 
   // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算
   useEffect(() => {
@@ -85,7 +106,10 @@ export function SessionListPanel() {
           aria-label="新建会话"
           variant="ghost"
           size="icon"
-          onClick={() => showNewSession(core)}
+          onClick={() => {
+            onNavigate();
+            showNewSession(core);
+          }}
         >
           <Plus />
         </Button>
@@ -119,26 +143,20 @@ export function SessionListPanel() {
                 data-kind={entry.kind}
                 data-depth={row.depth}
                 data-active={active ? "true" : "false"}
-                onClick={() => void openEntry(core, entry)}
+                onClick={() => {
+                  onNavigate();
+                  void openEntry(core, entry);
+                }}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   setMenu({
                     x: event.clientX,
                     y: event.clientY,
-                    items: [
-                      {
-                        label: "重命名",
-                        onSelect: () => {
-                          handledRef.current = false;
-                          setRenaming({ kind: entry.kind, id, depth: row.depth, value: title });
-                        },
-                      },
-                      { label: "删除", danger: true, onSelect: () => setDeleting(entry) },
-                    ],
+                    items: menuItems(entry, id, title, row.depth),
                   });
                 }}
                 className={cn(
-                  "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5",
+                  "flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 lg:py-1.5",
                   row.depth === 1 && "pl-6",
                   active ? "bg-accent" : "hover:bg-accent",
                 )}
@@ -153,7 +171,7 @@ export function SessionListPanel() {
                       event.stopPropagation();
                       toggleExpand(core, entry.workflow.id);
                     }}
-                    className="flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                    className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:text-foreground lg:size-4"
                   >
                     {expanded ? (
                       <ChevronDown className="size-4" />
@@ -196,7 +214,7 @@ export function SessionListPanel() {
                         }
                         setRenaming(null);
                       }}
-                      className="h-6"
+                      className="h-9 lg:h-6"
                     />
                   ) : (
                     <>
@@ -218,6 +236,24 @@ export function SessionListPanel() {
                     className="size-4 shrink-0 animate-spin text-muted-foreground"
                   />
                 ) : null}
+                {/* 窄视口的长按不一定弹出右键菜单（iOS Safari 就不弹），给会话操作留一个按钮入口 */}
+                <button
+                  type="button"
+                  data-slot="session-menu"
+                  aria-label="会话操作"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    const box = event.currentTarget.getBoundingClientRect();
+                    setMenu({
+                      x: box.right,
+                      y: box.bottom,
+                      items: menuItems(entry, id, title, row.depth),
+                    });
+                  }}
+                  className="flex size-8 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground lg:hidden"
+                >
+                  <MoreHorizontal className="size-4" />
+                </button>
               </div>
             );
           })

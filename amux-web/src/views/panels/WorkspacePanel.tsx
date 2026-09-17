@@ -329,13 +329,14 @@ export function WorkspacePanel() {
           {contentVisible ? "折叠内容区域" : "展开内容区域"}
         </Button>
       </div>
-      <div className="flex min-h-0 flex-1 items-stretch gap-2 px-3 pb-3">
+      {/* 窄视口下（右侧面板为整屏浮层）文件树与内容上下排布，不再各占一半宽度 */}
+      <div className="flex min-h-0 flex-1 flex-col items-stretch gap-2 px-3 pb-3 lg:flex-row">
         {treeVisible && (
           <div
             data-slot="workspace-tree"
             className={cn(
-              "h-full min-h-0 overflow-y-auto rounded-md bg-muted/40 p-1",
-              contentVisible ? "w-1/2" : "flex-1",
+              "min-h-0 max-h-[45%] overflow-y-auto rounded-md bg-muted/40 p-1 lg:max-h-none lg:h-full",
+              contentVisible ? "lg:w-1/2" : "lg:flex-1",
             )}
           >
             {session === null || root === null ? (
@@ -382,7 +383,7 @@ export function WorkspacePanel() {
         {contentVisible && (
           <div
             data-slot="workspace-content"
-            className="h-full min-h-0 flex-1 overflow-auto rounded-md bg-muted/20 p-1"
+            className="min-h-0 flex-1 overflow-auto rounded-md bg-muted/20 p-1 lg:h-full"
           >
             {fileLoading ? (
               <div className="px-2 py-1 text-xs text-muted-foreground">加载中…</div>

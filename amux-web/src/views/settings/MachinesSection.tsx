@@ -42,7 +42,7 @@ export function MachinesSection() {
               state.settings.agents.find((entry) => entry.machine === machine.name)?.agents ?? [];
             return (
               <Card key={machine.name} data-slot="machine-card" className="gap-3">
-                <CardHeader className="flex-row items-center justify-between">
+                <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
                   <CardTitle>{machine.name}</CardTitle>
                   <Button
                     variant="outline"

@@ -66,7 +66,7 @@ function OptionButton({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "rounded-sm border border-border bg-card px-2 py-1 text-xs",
+        "min-h-10 rounded-sm border border-border bg-card px-2.5 py-2 text-xs lg:min-h-0 lg:px-2 lg:py-1",
         selected && "border-primary bg-accent",
         disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:bg-accent",
       )}
@@ -259,7 +259,7 @@ export function NewSessionView() {
                   // 阻止默认行为以免输入框失焦（失焦会收起浮层，点击就落不到这一项上）
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => pickRecentWorkspace(item.workspace)}
-                  className="cursor-pointer truncate px-2 py-1 text-left text-sm hover:bg-accent"
+                  className="cursor-pointer truncate px-2 py-2 text-left text-sm hover:bg-accent lg:py-1"
                 >
                   {item.workspace}
                 </button>
@@ -280,7 +280,7 @@ export function NewSessionView() {
                   data-path={item.path}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => pickSuggestion(item.path)}
-                  className="flex cursor-pointer items-center gap-1.5 rounded-sm px-2 py-1 text-left text-sm hover:bg-accent"
+                  className="flex cursor-pointer items-center gap-1.5 rounded-sm px-2 py-2 text-left text-sm hover:bg-accent lg:py-1"
                 >
                   <Folder className="size-4 shrink-0 text-muted-foreground" />
                   <span className="truncate">{item.name}</span>
@@ -338,7 +338,7 @@ export function NewSessionView() {
                     data-selected={selectedPlan === item.name ? "true" : "false"}
                     onClick={() => pickPlan(item.name, item.plan)}
                     className={cn(
-                      "flex cursor-pointer flex-col items-start gap-1 px-2 py-1 text-left hover:bg-accent",
+                      "flex cursor-pointer flex-col items-start gap-1 px-2 py-2 text-left hover:bg-accent lg:py-1",
                       selectedPlan === item.name && "bg-accent",
                     )}
                   >
@@ -419,7 +419,7 @@ export function NewSessionView() {
     );
 
   return (
-    <div data-slot="new-session-view" className="flex h-full overflow-auto p-6">
+    <div data-slot="new-session-view" className="flex h-full overflow-auto p-4 lg:p-6">
       {/* PRD「新建会话视图」：居中展示。用 m-auto 而非 justify-center，
           表单比面板高时不会被裁掉顶部、仍可从上往下滚动 */}
       <div className="m-auto flex w-full max-w-lg flex-col gap-4">

@@ -2,16 +2,22 @@
 //
 // 左侧为会话列表与左下角设置入口；中间为新建会话视图或会话交互视图，右侧面板默认折叠，
 // 由中间面板右上方的悬浮按钮展开。
+//
+// 窄视口（手机浏览器）下三栏放不下：左栏收成贴在左侧的抽屉浮层（由中间面板左上方的悬浮按钮打开，
+// 选中会话后自动收起），右侧面板改为整屏浮层（自带关闭按钮，因为此时悬浮按钮被浮层盖住），
+// 面板分隔条与拖拽宽度只在宽视口下有效。
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity as ActivityIcon,
   FileDiff,
   FolderTree,
   Info,
   ListTodo,
+  Menu,
   Settings as SettingsIcon,
   SquareTerminal,
+  X,
 } from "lucide-react";
 
 import { openSettings, toggleSidePanel } from "../core/actions";
@@ -19,6 +25,7 @@ import { panelAvailable } from "../core/core";
 import { useCore, useCoreState } from "../core/store";
 import type { SidePanel } from "../core/core";
 import { cn } from "../lib/utils";
+import { useIsMobile } from "../lib/viewport";
 import { InteractionView } from "./InteractionView";
 import { NewSessionView } from "./NewSessionView";
 import { SessionListPanel } from "./SessionListPanel";
@@ -34,8 +41,10 @@ const RIGHT_MAX = 900;
 export function Main() {
   const core = useCore();
   const state = useCoreState();
+  const isMobile = useIsMobile();
   const [leftWidth, setLeftWidth] = useState(260);
   const [rightWidth, setRightWidth] = useState(420);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const dragging = useRef<"left" | "right" | null>(null);
 
   const onMouseDown = useCallback((which: "left" | "right") => {
@@ -56,6 +65,13 @@ export function Main() {
     window.addEventListener("mouseup", onUp);
   }, []);
 
+  // 回到宽视口后抽屉状态不再有意义：留着会让下次进窄视口时左栏直接是展开的
+  useEffect(() => {
+    if (!isMobile) setDrawerOpen(false);
+  }, [isMobile]);
+
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+
   const panels: { panel: SidePanel; label: string; icon: typeof Info }[] = [
     { panel: "workspace", label: "工作目录", icon: FolderTree },
     { panel: "diff", label: "改动审查", icon: FileDiff },
@@ -65,19 +81,42 @@ export function Main() {
     { panel: "terminal", label: "终端", icon: SquareTerminal },
   ];
 
+  const openPanel = state.sidePanel;
+  const openPanelLabel = panels.find((entry) => entry.panel === openPanel)?.label ?? "";
+
   return (
     <div data-slot="main-layout" className="flex h-full w-full overflow-hidden">
+      {drawerOpen ? (
+        <div
+          data-slot="drawer-backdrop"
+          className="fixed inset-0 z-20 bg-black/25 lg:hidden"
+          onClick={closeDrawer}
+        />
+      ) : null}
+
       <aside
         data-slot="left-panel"
-        className="flex min-h-0 shrink-0 flex-col border-r border-border bg-card"
+        data-open={drawerOpen ? "true" : "false"}
+        className={cn(
+          "min-h-0 flex-col border-r border-border bg-card",
+          // 窄视口：固定定位的抽屉，收起时不渲染（不占布局空间；也不给内部 fixed 的
+          // 会话右键菜单引入偏移的包含块）
+          "fixed inset-y-0 left-0 z-30 max-w-[85vw] shadow-lg",
+          drawerOpen ? "flex" : "hidden",
+          // 宽视口：回到三栏布局中的普通一栏
+          "lg:static lg:z-auto lg:flex lg:max-w-none lg:shrink-0 lg:shadow-none",
+        )}
         style={{ width: leftWidth }}
       >
-        <SessionListPanel />
+        <SessionListPanel onNavigate={closeDrawer} />
         <button
           data-slot="settings-entry"
           type="button"
-          className="flex items-center gap-2 border-t border-border px-3 py-2 text-left hover:bg-accent"
-          onClick={() => openSettings(core)}
+          className="flex items-center gap-2 border-t border-border px-3 py-3 text-left hover:bg-accent lg:py-2"
+          onClick={() => {
+            closeDrawer();
+            openSettings(core);
+          }}
         >
           <SettingsIcon className="size-4" />
           设置
@@ -86,7 +125,7 @@ export function Main() {
 
       <div
         data-slot="panel-divider-left"
-        className="w-1 shrink-0 cursor-col-resize bg-border/40 hover:bg-primary/60"
+        className="hidden w-1 shrink-0 cursor-col-resize bg-border/40 hover:bg-primary/60 lg:block"
         onMouseDown={() => onMouseDown("left")}
       />
 
@@ -95,6 +134,17 @@ export function Main() {
         className="relative flex min-h-0 min-w-0 flex-1 flex-col"
       >
         {state.middle === "interaction" ? <InteractionView /> : <NewSessionView />}
+
+        {/* 窄视口下左栏收在抽屉里，需要一个入口把它拉出来；宽视口下左栏常驻，不渲染 */}
+        <button
+          data-slot="drawer-toggle"
+          type="button"
+          aria-label="打开会话列表"
+          className="absolute top-2 left-2 z-10 rounded-md border border-border bg-popover p-2.5 hover:bg-accent lg:hidden"
+          onClick={() => setDrawerOpen(true)}
+        >
+          <Menu className="size-4" />
+        </button>
 
         {state.middle === "interaction" && state.open ? (
           <div
@@ -112,7 +162,7 @@ export function Main() {
                   title={entry.label}
                   aria-label={entry.label}
                   className={cn(
-                    "rounded-md border border-border bg-popover p-1.5 hover:bg-accent",
+                    "rounded-md border border-border bg-popover p-2.5 hover:bg-accent lg:p-1.5",
                     state.sidePanel === entry.panel && "bg-accent",
                   )}
                   onClick={() => toggleSidePanel(core, entry.panel)}
@@ -124,19 +174,33 @@ export function Main() {
         ) : null}
       </main>
 
-      {state.sidePanel ? (
+      {openPanel !== null ? (
         <>
           <div
             data-slot="panel-divider-right"
-            className="w-1 shrink-0 cursor-col-resize bg-border/40 hover:bg-primary/60"
+            className="hidden w-1 shrink-0 cursor-col-resize bg-border/40 hover:bg-primary/60 lg:block"
             onMouseDown={() => onMouseDown("right")}
           />
           <aside
             data-slot="right-panel"
-            className="min-h-0 shrink-0 border-l border-border bg-card"
-            style={{ width: rightWidth }}
+            className="fixed inset-0 z-30 flex min-h-0 flex-col bg-card lg:static lg:z-auto lg:shrink-0 lg:border-l lg:border-border"
+            style={isMobile ? undefined : { width: rightWidth }}
           >
-            <SidePanelView />
+            <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1 lg:hidden">
+              <span className="text-sm font-medium">{openPanelLabel}</span>
+              <button
+                data-slot="side-panel-close"
+                type="button"
+                aria-label="关闭面板"
+                className="rounded-md p-2.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                onClick={() => toggleSidePanel(core, openPanel)}
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1">
+              <SidePanelView />
+            </div>
           </aside>
         </>
       ) : null}

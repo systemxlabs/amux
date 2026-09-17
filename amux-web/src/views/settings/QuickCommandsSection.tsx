@@ -76,9 +76,9 @@ export function QuickCommandsSection() {
         <div className="flex flex-col gap-3">
           {commands.map((command, index) => (
             <Card key={command.name} data-slot="quick-command-card" className="gap-2">
-              <CardHeader className="flex-row items-center justify-between">
+              <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
                 <CardTitle>{command.name}</CardTitle>
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <Button
                     variant="outline"
                     size="sm"

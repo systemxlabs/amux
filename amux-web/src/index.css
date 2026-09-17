@@ -53,6 +53,29 @@ body,
 /* 原生控件（滚动条、任务列表勾选框）跟随浅色主题 */
 html {
   color-scheme: light;
+  /* 移动端：下拉刷新会与列表翻页/滚动手势冲突，而在根滚动容器上禁用即可关掉它 */
+  overscroll-behavior-y: none;
+}
+
+/*
+ * 移动端浏览器地址栏/工具栏会伸缩，固定布局必须跟着当前视口高度（dvh）而不是「最大视口」，
+ * 否则底部输入区会被地址栏盖住。
+ */
+@supports (height: 100dvh) {
+  html,
+  body,
+  #root {
+    height: 100dvh;
+  }
+}
+
+/* 触摸设备（手机、平板）用 16px 输入字号，避免 iOS Safari 聚焦时自动放大页面 */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
 }
 
 body {
@@ -62,6 +85,14 @@ body {
     -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 14px;
+  /* 触摸点击不再有高亮方块与双击缩放的等待 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a,
+[role="button"] {
+  touch-action: manipulation;
 }
 
 ::-webkit-scrollbar {

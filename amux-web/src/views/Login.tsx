@@ -37,10 +37,10 @@ export function Login() {
   };
 
   return (
-    <div data-slot="login-page" className="flex h-full items-center justify-center">
+    <div data-slot="login-page" className="flex h-full items-center justify-center p-6">
       <form
         data-slot="login-form"
-        className="flex w-80 flex-col gap-3"
+        className="flex w-full max-w-80 flex-col gap-3"
         onSubmit={(event) => {
           event.preventDefault();
           submit();

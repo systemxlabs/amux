@@ -74,9 +74,9 @@ export function WorkflowPlansSection() {
         <div className="flex flex-col gap-3">
           {plans.map((plan, index) => (
             <Card key={plan.name} data-slot="plan-card" className="gap-2">
-              <CardHeader className="flex-row items-center justify-between">
+              <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
                 <CardTitle>{plan.name}</CardTitle>
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <Button
                     variant="outline"
                     size="sm"

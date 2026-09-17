@@ -2,7 +2,13 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- interactive-widget=resizes-content：软键盘弹出时收缩布局视口，
+         使 100dvh 的根容器随之变矮，输入区不会被键盘挡住 -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#ffffff" />
     <title>amux</title>
     <!-- 内联 SVG 图标：避免浏览器请求不存在的 /favicon.ico（静态托管下会 404） -->
     <link

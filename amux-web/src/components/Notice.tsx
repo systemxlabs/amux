@@ -11,7 +11,7 @@ export function Notice() {
       data-slot="notice"
       data-kind={state.notice.kind}
       className={cn(
-        "fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-md border px-3 py-2 shadow-lg",
+        "fixed bottom-4 left-1/2 z-50 max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-md border px-3 py-2 text-center shadow-lg",
         state.notice.kind === "success"
           ? "border-border bg-card text-foreground"
           : "border-destructive bg-card text-destructive",

@@ -148,12 +148,13 @@ export function DiffPanel() {
   } else if (files.length === 0) {
     body = <Hint text="暂无改动" />;
   } else {
+    // 窄视口下（右侧面板为整屏浮层）文件树与 diff 上下排布，不再各占一半宽度
     body = (
-      <div className="flex min-h-0 flex-1 items-stretch gap-2 px-3 pb-3">
+      <div className="flex min-h-0 flex-1 flex-col items-stretch gap-2 px-3 pb-3 lg:flex-row">
         {treeVisible && (
           <div
             data-slot="diff-tree"
-            className="h-full min-h-0 w-1/2 overflow-y-auto rounded-md bg-muted/40 p-1"
+            className="max-h-[40%] min-h-0 overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none lg:w-1/2"
           >
             {nodes.map((node) => (
               <DiffTreeNode
@@ -172,7 +173,7 @@ export function DiffPanel() {
         <div
           data-slot="diff-files"
           data-collapsed={diffsCollapsed ? "true" : "false"}
-          className="h-full min-h-0 flex-1 overflow-auto rounded-md bg-muted/20"
+          className="min-h-0 flex-1 overflow-auto rounded-md bg-muted/20 lg:h-full"
         >
           {files.map((file, index) => (
             <div
@@ -192,7 +193,7 @@ export function DiffPanel() {
                   variant="ghost"
                   size="sm"
                   data-slot="diff-quote-file"
-                  className="h-5 shrink-0 text-xs"
+                  className="h-9 shrink-0 text-xs lg:h-5"
                   title="复制文件路径到输入框"
                   onClick={() => appendPromptDraft(core, file.path)}
                 >
@@ -209,7 +210,7 @@ export function DiffPanel() {
                         variant="ghost"
                         size="sm"
                         data-slot="diff-quote-hunk"
-                        className="h-5 shrink-0 text-xs"
+                        className="h-9 shrink-0 text-xs lg:h-5"
                         title="复制代码块内容到输入框"
                         onClick={() =>
                           appendPromptDraft(core, hunk.lines.map((line) => line.text).join("\n"))

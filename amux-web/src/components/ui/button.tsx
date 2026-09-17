@@ -18,10 +18,11 @@ const buttonVariants = cva(
         link: "bg-transparent text-primary underline-offset-4 hover:underline",
       },
       size: {
-        default: "h-8 px-3",
-        sm: "h-7 gap-1 rounded-sm px-2 text-xs",
-        lg: "h-9 rounded-md px-4",
-        icon: "size-8",
+        // 窄视口下（手机/窄窗口）触摸目标不小于 40px，`lg:` 起回到桌面尺寸
+        default: "h-10 px-3 lg:h-8",
+        sm: "h-10 gap-1 rounded-sm px-2.5 text-xs lg:h-7 lg:px-2",
+        lg: "h-10 rounded-md px-4 lg:h-9",
+        icon: "size-10 lg:size-8",
       },
     },
     defaultVariants: {

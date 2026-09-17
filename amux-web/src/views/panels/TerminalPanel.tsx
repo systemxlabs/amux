@@ -127,7 +127,7 @@ export function TerminalPanel() {
             key={terminal.id}
             data-slot="terminal-item"
             className={cn(
-              "flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs",
+              "flex cursor-pointer items-center gap-1 rounded-md px-2 py-2 text-xs lg:py-1",
               terminal.id === activeTerminal ? "bg-accent text-accent-foreground" : "bg-muted/40",
             )}
             onClick={() => selectTerminal(core, terminal.id)}
@@ -152,7 +152,7 @@ export function TerminalPanel() {
           type="button"
           variant="ghost"
           size="icon"
-          className="size-6"
+          className="size-9 lg:size-6"
           data-slot="terminal-new"
           aria-label="新建终端"
           title="新建终端"
