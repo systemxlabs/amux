@@ -6,6 +6,7 @@ import type { FsEntry } from "./types";
 import {
   baseName,
   dirsOnly,
+  isInSubtree,
   joinPath,
   matchingPrefix,
   parentDir,
@@ -80,5 +81,14 @@ describe("路径工具", () => {
 
   it("拆出路径段", () => {
     expect(pathSegments("/a/b/c")).toEqual(["a", "b", "c"]);
+  });
+
+  it("子树判断按目录边界：同名前缀的兄弟目录不算在内", () => {
+    expect(isInSubtree("/a/b", "/a")).toBe(true);
+    expect(isInSubtree("/a/b/c", "/a")).toBe(true);
+    expect(isInSubtree("/a", "/a")).toBe(true);
+    expect(isInSubtree("/a/bc", "/a/b")).toBe(false);
+    expect(isInSubtree("/a", "/a/b")).toBe(false);
+    expect(isInSubtree("/a/b", "/")).toBe(true);
   });
 });

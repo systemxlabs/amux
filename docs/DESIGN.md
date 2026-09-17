@@ -55,7 +55,7 @@ Client-Server 通信采用 HTTPS。
 
 #### 认证
 
-Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer <token>`，Server 对每个 Client 请求都需要进行验证。
+Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer <token>`，Server 对每个 Client 数据请求都需要进行验证，Web 静态资源请求无需验证。
 
 #### 协议
 
@@ -542,3 +542,4 @@ Daemon、Server 和应用在实现时，均需埋点丰富的日志。日志按�
 - Daemon：存放在 `~/.amux/logs/daemon.log`
 - Server：存放在 `~/.amux/logs/server.log`
 - 桌面应用：存放在 `~/.amux/logs/desktop.log`
+- Web 应用：无需日志

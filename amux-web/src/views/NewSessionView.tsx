@@ -211,22 +211,10 @@ export function NewSessionView() {
     </div>
   );
 
+  // PRD「新建会话视图」：确认编排智能体已配置后才展示创建表单
+  const orchestrator = state.settings.orchestrator;
   const workflowForm =
-    state.settings.orchestratorLoaded && state.settings.orchestrator === null ? (
-      <div
-        data-slot="orchestrator-missing"
-        className="flex flex-col gap-3 rounded-md border border-destructive/50 bg-card p-3"
-      >
-        <p className="text-destructive">编排智能体未配置，无法创建工作流会话。</p>
-        <Button
-          data-slot="open-orchestrator-settings"
-          variant="outline"
-          onClick={() => openSettings(core, "orchestrator")}
-        >
-          前往设置
-        </Button>
-      </div>
-    ) : (
+    orchestrator.status === "ready" && orchestrator.config !== null ? (
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-2">
           <Label>工作计划</Label>
@@ -277,6 +265,46 @@ export function NewSessionView() {
         >
           创建会话
         </Button>
+      </div>
+    ) : (
+      <div
+        data-slot="orchestrator-unavailable"
+        className="flex flex-col gap-3 rounded-md border border-destructive/50 bg-card p-3"
+      >
+        {orchestrator.status === "loading" ? (
+          <p data-slot="orchestrator-loading" className="text-muted-foreground">
+            正在确认编排智能体配置…
+          </p>
+        ) : orchestrator.status === "failed" ? (
+          <>
+            <p data-slot="orchestrator-error" className="text-destructive">
+              读取编排智能体配置失败：{orchestrator.error}
+            </p>
+            <div className="flex gap-2">
+              <Button
+                data-slot="retry-orchestrator"
+                variant="outline"
+                onClick={() => void refreshWorkflowSetup(core)}
+              >
+                重试
+              </Button>
+              <Button variant="outline" onClick={() => openSettings(core, "orchestrator")}>
+                前往设置
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-destructive">编排智能体未配置，无法创建工作流会话。</p>
+            <Button
+              data-slot="open-orchestrator-settings"
+              variant="outline"
+              onClick={() => openSettings(core, "orchestrator")}
+            >
+              前往设置
+            </Button>
+          </>
+        )}
       </div>
     );
 

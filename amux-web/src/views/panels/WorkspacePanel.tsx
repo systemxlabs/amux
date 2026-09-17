@@ -10,6 +10,7 @@ import { useCore, useCoreState } from "../../core/store";
 import type { FsEntry } from "../../lib/types";
 import { rootDir } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { isInSubtree } from "../../lib/workspace";
 
 /** 目录页大小（与服务端夹取后的上限一致）。 */
 const DIR_PAGE_LIMIT = 500;
@@ -244,9 +245,18 @@ export function WorkspacePanel() {
 
   const toggleDir = (path: string) => {
     const open = expanded.includes(path);
-    setExpanded((prev) => (open ? prev.filter((item) => item !== path) : [...prev, path]));
+    if (open) {
+      // 折叠即丢弃整棵子树（展开状态与已加载目录项）：不保留任何缓存，
+      // 再次展开时父目录与逐级子目录都重新拉取（docs/DESIGN.md「工作目录视图」）
+      setExpanded((prev) => prev.filter((item) => !isInSubtree(item, path)));
+      setLevels((prev) =>
+        Object.fromEntries(Object.entries(prev).filter(([key]) => !isInSubtree(key, path))),
+      );
+      return;
+    }
+    setExpanded((prev) => [...prev, path]);
     // 展开即重新拉取，不使用任何缓存
-    if (!open) void loadDir(path);
+    void loadDir(path);
   };
 
   const openFile = async (entry: FsEntry) => {

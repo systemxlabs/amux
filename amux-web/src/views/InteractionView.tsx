@@ -17,10 +17,10 @@ import { Textarea } from "../components/ui/textarea";
 import { addFiles, cancelOpen, removeAttachment, sendPrompt, setConfigOption } from "../core/actions";
 import { loadNewerHistory, loadOlderHistory } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
-import { activitySummary, blocksText, formatTime, truncate } from "../lib/format";
+import { activitySummary, formatTime, truncate } from "../lib/format";
 import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
-import type { HistoryItem, SessionConfigOption } from "../lib/types";
+import type { ContentBlock, HistoryItem, SessionConfigOption } from "../lib/types";
 import { cn } from "../lib/utils";
 
 export function InteractionView() {
@@ -74,7 +74,7 @@ export function InteractionView() {
     ? (state.settings.agents
         .find((entry) => entry.machine === detail.session?.machine)
         ?.agents.find((agent) => agent.name === detail.session?.agent)?.available ?? false)
-    : detail.workflow !== null;
+    : state.settings.orchestrator.status === "ready" && state.settings.orchestrator.config !== null;
 
   // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算（不只是滚动事件）
   useEffect(() => {
@@ -159,7 +159,7 @@ export function InteractionView() {
           data-available={available}
           className={cn("text-xs", available ? "text-muted-foreground" : "text-destructive")}
         >
-          {isSession ? (available ? "可用" : "不可用") : "编排智能体"}
+          {available ? "可用" : "不可用"}
         </span>
         {detail.workflow ? (
           <span className="ml-auto text-xs text-muted-foreground">
@@ -234,76 +234,78 @@ export function InteractionView() {
           </div>
         ) : null}
 
-        {state.attachments.length > 0 ? (
-          <div className="mb-2 flex flex-wrap gap-1">
-            {state.attachments.map((attachment, index) => (
-              <span
-                key={`${attachment.label}-${index}`}
-                data-slot="attachment-chip"
-                className="flex items-center gap-1 rounded-sm bg-muted px-2 py-0.5 text-xs"
-              >
-                {attachment.label}
-                <button
-                  type="button"
-                  aria-label="移除附件"
-                  onClick={() => removeAttachment(core, index)}
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        ) : null}
-
-        <div
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.preventDefault();
-            if (event.dataTransfer.files.length > 0) {
-              void addFiles(core, event.dataTransfer.files);
-            }
-          }}
-        >
-          <Textarea
-            data-slot="prompt-input"
-            aria-label="消息输入框"
-            rows={3}
-            placeholder="输入指令，Enter 发送，Shift+Enter 换行"
-            value={draft}
-            onChange={(event) =>
-              core.update((next) => {
-                next.inputDraft = event.target.value;
-              })
-            }
-            onPaste={(event) => {
-              const files = [...event.clipboardData.files];
-              if (files.length > 0) {
+        <div className="flex items-end gap-3">
+          <div className="min-w-0 flex-1">
+            {state.attachments.length > 0 ? (
+              <div className="mb-2 flex flex-wrap gap-1">
+                {state.attachments.map((attachment, index) => (
+                  <span
+                    key={`${attachment.label}-${index}`}
+                    data-slot="attachment-chip"
+                    className="flex items-center gap-1 rounded-sm bg-muted px-2 py-0.5 text-xs"
+                  >
+                    {attachment.label}
+                    <button
+                      type="button"
+                      aria-label="移除附件"
+                      onClick={() => removeAttachment(core, index)}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            <div
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
                 event.preventDefault();
-                void addFiles(core, files);
+                if (event.dataTransfer.files.length > 0) {
+                  void addFiles(core, event.dataTransfer.files);
+                }
+              }}
+            >
+              <Textarea
+                data-slot="prompt-input"
+                aria-label="消息输入框"
+                rows={3}
+                placeholder="输入指令，Enter 发送，Shift+Enter 换行"
+                value={draft}
+                onChange={(event) =>
+                core.update((next) => {
+                  next.inputDraft = event.target.value;
+                })
               }
-            }}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.shiftKey) return;
-              event.preventDefault();
-              void send();
-            }}
-          />
-        </div>
-
-        <div className="mt-2 flex justify-end gap-2">
-          <Button
-            data-slot="cancel-button"
-            variant="outline"
-            size="sm"
-            onClick={() => void cancelOpen(core)}
-          >
-            <Square className="size-3" />
-            取消
-          </Button>
-          <Button data-slot="send-button" size="sm" onClick={() => void send()}>
-            <SendHorizontal className="size-3" />
-            发送
-          </Button>
+                onPaste={(event) => {
+                  const files = [...event.clipboardData.files];
+                  if (files.length > 0) {
+                    event.preventDefault();
+                    void addFiles(core, files);
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.shiftKey) return;
+                  event.preventDefault();
+                  void send();
+                }}
+              />
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-col gap-2">
+            <Button
+              data-slot="cancel-button"
+              variant="outline"
+              size="sm"
+              onClick={() => void cancelOpen(core)}
+            >
+              <Square className="size-3" />
+              取消
+            </Button>
+            <Button data-slot="send-button" size="sm" onClick={() => void send()}>
+              <SendHorizontal className="size-3" />
+              发送
+            </Button>
+          </div>
         </div>
 
         {isSession && detail.configOptions.length > 0 ? (
@@ -329,17 +331,85 @@ function MessageBubble({ item }: { item: HistoryItem }) {
       <div
         data-slot="message-content"
         className={cn(
-          "max-w-[80%] rounded-md px-3 py-2 whitespace-pre-wrap",
+          "flex max-w-[80%] flex-col gap-1.5 rounded-md px-3 py-2",
           mine ? "bg-primary text-primary-foreground" : "bg-muted",
         )}
       >
-        {blocksText(item.content)}
+        <MessageContent content={item.content} />
       </div>
       <span data-slot="message-time" className="mt-1 text-xs text-muted-foreground">
         {formatTime(item.timestamp)}
       </span>
     </div>
   );
+}
+
+/** 消息气泡内容：文本块直接展示，资源块展示文本内容与图片，URI 资源提供打开入口。 */
+function MessageContent({ content }: { content: readonly ContentBlock[] }) {
+  return (
+    <>
+      {content.map((block, index) => (
+        <BlockContent key={index} block={block} />
+      ))}
+    </>
+  );
+}
+
+function BlockContent({ block }: { block: ContentBlock }) {
+  switch (block.type) {
+    case "text":
+      return <p className="whitespace-pre-wrap">{block.text}</p>;
+    case "resource":
+      if (block.blob && block.mimeType.startsWith("image/")) {
+        return (
+          <div className="flex flex-col gap-1">
+            {block.uri ? (
+              <span data-slot="message-resource-name" className="text-xs opacity-80">
+                {block.uri}
+              </span>
+            ) : null}
+            <img
+              data-slot="message-resource-image"
+              alt={block.uri ?? "图片附件"}
+              src={`data:${block.mimeType};base64,${block.blob}`}
+              className="max-h-60 w-full rounded object-contain"
+            />
+          </div>
+        );
+      }
+      if (block.text) {
+        return (
+          <div className="flex flex-col gap-1">
+            {block.uri ? (
+              <span data-slot="message-resource-name" className="text-xs opacity-80">
+                {block.uri}
+              </span>
+            ) : null}
+            <p data-slot="message-resource-text" className="whitespace-pre-wrap">
+              {block.text}
+            </p>
+          </div>
+        );
+      }
+      if (block.uri) {
+        return (
+          <a
+            data-slot="message-resource-link"
+            href={block.uri}
+            className="whitespace-pre-wrap underline"
+          >
+            [资源 {block.uri}]
+          </a>
+        );
+      }
+      return <span>[资源]</span>;
+    case "resource_link":
+      return (
+        <a data-slot="message-resource-link" href={block.uri} className="whitespace-pre-wrap underline">
+          [引用 {block.title ?? block.name}]
+        </a>
+      );
+  }
 }
 
 /** 会话选项：下拉或开关（PRD「会话选项」）。 */

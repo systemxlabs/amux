@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { openSettings, toggleSidePanel } from "../core/actions";
+import { panelAvailable } from "../core/core";
 import { useCore, useCoreState } from "../core/store";
 import type { SidePanel } from "../core/core";
 import { cn } from "../lib/utils";
@@ -55,14 +56,13 @@ export function Main() {
     window.addEventListener("mouseup", onUp);
   }, []);
 
-  const isSession = state.open?.kind === "session";
-  const panels: { panel: SidePanel; label: string; icon: typeof Info; sessionOnly: boolean }[] = [
-    { panel: "workspace", label: "工作目录", icon: FolderTree, sessionOnly: true },
-    { panel: "diff", label: "改动审查", icon: FileDiff, sessionOnly: true },
-    { panel: "details", label: "会话详情", icon: Info, sessionOnly: false },
-    { panel: "activities", label: "会话活动", icon: ActivityIcon, sessionOnly: false },
-    { panel: "plan", label: "会话计划", icon: ListTodo, sessionOnly: true },
-    { panel: "terminal", label: "终端", icon: SquareTerminal, sessionOnly: true },
+  const panels: { panel: SidePanel; label: string; icon: typeof Info }[] = [
+    { panel: "workspace", label: "工作目录", icon: FolderTree },
+    { panel: "diff", label: "改动审查", icon: FileDiff },
+    { panel: "details", label: "会话详情", icon: Info },
+    { panel: "activities", label: "会话活动", icon: ActivityIcon },
+    { panel: "plan", label: "会话计划", icon: ListTodo },
+    { panel: "terminal", label: "终端", icon: SquareTerminal },
   ];
 
   return (
@@ -102,7 +102,7 @@ export function Main() {
             className="absolute top-2 right-2 z-10 flex flex-col gap-1"
           >
             {panels
-              .filter((entry) => isSession || !entry.sessionOnly)
+              .filter((entry) => state.open !== null && panelAvailable(entry.panel, state.open))
               .map((entry) => (
                 <button
                   key={entry.panel}

@@ -1,4 +1,7 @@
 // 右侧面板入口：按 state.sidePanel 渲染唯一面板（docs/PRD.md「主页面」）。
+//
+// sidePanel 只在适用时才被设置（openEntry 与悬浮按钮都按 panelAvailable 过滤），
+// 因此这里直接渲染对应面板。
 
 import { useCoreState } from "../../core/store";
 import { ActivitiesPanel } from "./ActivitiesPanel";
@@ -14,22 +17,20 @@ export function SidePanelView() {
   const panel = state.sidePanel;
   if (panel === null || target === null) return null;
 
-  // 工作目录/改动审查/计划/终端仅普通会话有（docs/PRD.md「主页面」）
-  const sessionOnly = target.kind === "session";
   const body = () => {
     switch (panel) {
       case "workspace":
-        return sessionOnly ? <WorkspacePanel /> : null;
+        return <WorkspacePanel />;
       case "diff":
-        return sessionOnly ? <DiffPanel /> : null;
+        return <DiffPanel />;
       case "details":
         return <DetailsPanel />;
       case "activities":
         return <ActivitiesPanel />;
       case "plan":
-        return sessionOnly ? <PlanPanel /> : null;
+        return <PlanPanel />;
       case "terminal":
-        return sessionOnly ? <TerminalPanel /> : null;
+        return <TerminalPanel />;
     }
   };
 

@@ -32,6 +32,16 @@ export function sortEntriesByName(entries: readonly FsEntry[]): FsEntry[] {
   });
 }
 
+/**
+ * `path` 是否在 `dir` 子树内（含 `dir` 自身）。
+ *
+ * 按目录边界判断：`/a/bc` 不在 `/a/b` 子树内。
+ */
+export function isInSubtree(path: string, dir: string): boolean {
+  if (path === dir) return true;
+  return path.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
+}
+
 /** 父目录：`/a/b` → `/a`，`/a` → `/`，无分隔符时返回空串。 */
 export function parentDir(path: string): string {
   const index = path.replace(/\/+$/, "").lastIndexOf("/");

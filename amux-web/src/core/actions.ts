@@ -17,6 +17,7 @@ import type {
   WorkflowPlanItem,
 } from "../lib/types";
 import { entryTitle, rootDir } from "../lib/types";
+import { panelAvailable } from "./core";
 import type { Attachment, Core, SidePanel } from "./core";
 import {
   refreshHistory,
@@ -131,6 +132,11 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
     state.open = target;
     state.middle = "interaction";
     state.attachments = [];
+    // 工作目录/改动审查/计划/终端仅普通会话有：切到不适用的会话时关闭面板
+    // （docs/PRD.md「主页面」；否则会留下关闭按钮都已隐藏的空白面板）
+    if (state.sidePanel !== null && !panelAvailable(state.sidePanel, target)) {
+      state.sidePanel = null;
+    }
     if (entry.kind === "session") {
       state.detail.session = entry.session;
     } else {
@@ -273,12 +279,12 @@ export async function updateWorkspaceInput(core: Core, text: string): Promise<vo
 
 // ---------- 会话交互 ----------
 
-/** 附件：图片按 blob（base64）发送，文本文件按 text 发送。 */
+/** 附件：图片按 blob（base64）发送，文本文件按 text 发送；uri 保留文件名供历史展示。 */
 export async function attachmentFromFile(file: File): Promise<Attachment> {
   if (file.type.startsWith("image/")) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     return {
-      block: { type: "resource", mimeType: file.type, blob: encodeBase64(bytes) },
+      block: { type: "resource", mimeType: file.type, uri: file.name, blob: encodeBase64(bytes) },
       label: file.name,
     };
   }
@@ -286,6 +292,7 @@ export async function attachmentFromFile(file: File): Promise<Attachment> {
     block: {
       type: "resource",
       mimeType: file.type || "text/plain",
+      uri: file.name,
       text: await file.text(),
     },
     label: file.name,
@@ -340,7 +347,10 @@ export async function sendPrompt(core: Core, text: string): Promise<boolean> {
   return true;
 }
 
-/** 取消进行中的工作；工作流会话以用户消息方式取消（PRD「工作流会话取消」）。 */
+/**
+ * 取消进行中的工作；工作流会话以用户消息方式取消（PRD「工作流会话取消」），
+ * 该消息同样触发会话列表主动刷新（docs/DESIGN.md「会话列表刷新机制」）。
+ */
 export async function cancelOpen(core: Core): Promise<void> {
   const target = core.state.open;
   if (!core.client || !target) return;
@@ -351,6 +361,8 @@ export async function cancelOpen(core: Core): Promise<void> {
       await core.client.promptWorkflow(target.id, [
         { type: "text", text: "取消当前进行中的全部工作" },
       ]);
+      await refreshList(core);
+      core.last.list = Date.now();
     }
     await refreshHistory(core);
   } catch (error) {
@@ -482,8 +494,7 @@ export async function saveOrchestrator(core: Core, config: OrchestratorConfig): 
   try {
     await core.client.setOrchestrator(config);
     core.update((state) => {
-      state.settings.orchestrator = config;
-      state.settings.orchestratorLoaded = true;
+      state.settings.orchestrator = { status: "ready", config };
     });
     core.success("编排智能体配置已保存");
   } catch (error) {

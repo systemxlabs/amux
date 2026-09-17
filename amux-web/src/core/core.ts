@@ -34,6 +34,14 @@ export type MiddleView = "new" | "interaction";
 /** 右侧面板。 */
 export type SidePanel = "workspace" | "diff" | "details" | "activities" | "plan" | "terminal";
 
+/** 仅普通会话有的右侧面板（docs/PRD.md「主页面」）。 */
+const SESSION_ONLY_PANELS: readonly SidePanel[] = ["workspace", "diff", "plan", "terminal"];
+
+/** 右侧面板是否适用于该会话：普通会话专属面板在工作流会话下不展示。 */
+export function panelAvailable(panel: SidePanel, target: OpenTarget): boolean {
+  return target.kind === "session" || !SESSION_ONLY_PANELS.includes(panel);
+}
+
 export type Notice = { kind: "success" | "error"; text: string };
 
 /** 待发送附件（拖拽或粘贴得到）。 */
@@ -69,15 +77,22 @@ export type SettingsTab =
   | "skills"
   | "plans";
 
+/**
+ * 编排智能体配置的读取状态：只有 `ready` 才表示配置已确认
+ * （`config` 为 null 即未配置），未确认前不允许创建工作流会话。
+ */
+export type OrchestratorState =
+  | { status: "loading" }
+  | { status: "ready"; config: OrchestratorConfig | null }
+  | { status: "failed"; error: string };
+
 export type SettingsState = {
   open: boolean;
   tab: SettingsTab;
   machines: Machine[];
   /** 每台机器的 agent 列表（与 machines 同序） */
   agents: { machine: string; agents: Agent[] }[];
-  orchestrator: OrchestratorConfig | null;
-  /** 编排智能体配置是否已拉取（未拉取时工作流模式不报「未配置」） */
-  orchestratorLoaded: boolean;
+  orchestrator: OrchestratorState;
   quickCommands: QuickCommand[];
   skills: Skill[];
   plans: WorkflowPlanItem[];
@@ -170,8 +185,7 @@ export function initialSettings(): SettingsState {
     tab: "connection",
     machines: [],
     agents: [],
-    orchestrator: null,
-    orchestratorLoaded: false,
+    orchestrator: { status: "loading" },
     quickCommands: [],
     skills: [],
     plans: [],

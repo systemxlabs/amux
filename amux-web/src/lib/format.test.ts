@@ -25,6 +25,15 @@ describe("blocksText", () => {
       ]),
     ).toBe("看这个 [引用 a.rs][资源 file:///b.rs]");
   });
+
+  it("资源块的文本内容与图片 blob 不再退化为通用标签", () => {
+    expect(
+      blocksText([
+        { type: "resource", mimeType: "text/plain", uri: "a.txt", text: "hello\nworld" },
+        { type: "resource", mimeType: "image/png", uri: "pic.png", blob: "AAAA" },
+      ]),
+    ).toBe("hello\nworld[图片 pic.png]");
+  });
 });
 
 describe("activitySummary", () => {
