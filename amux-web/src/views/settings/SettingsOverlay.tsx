@@ -49,13 +49,14 @@ export function SettingsOverlay() {
   return (
     <div
       data-slot="settings-overlay"
-      className="fixed inset-0 z-40 bg-black/50"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-6"
       onClick={() => closeSettings(core)}
     >
-      {/* 面板嵌在遮罩内，点击面板需阻止冒泡，否则会误触发遮罩的关闭 */}
+      {/* 浮窗尺寸对齐桌面应用（55rem × 38.75rem，其 rem 基准 14px → 770 × 540）；
+          窗口更小时按 p-6 内边距收缩。点击面板需阻止冒泡，否则会误触发遮罩的关闭 */}
       <div
         data-slot="settings-panel"
-        className="fixed inset-6 z-50 flex overflow-hidden rounded-lg border border-border bg-card"
+        className="flex h-full max-h-[540px] w-full max-w-[770px] overflow-hidden rounded-lg border border-border bg-card shadow-lg"
         onClick={(event) => event.stopPropagation()}
       >
         <div data-slot="settings-nav" className="flex w-44 shrink-0 flex-col border-r border-border p-2">
