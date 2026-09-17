@@ -164,41 +164,39 @@ export function NewSessionView() {
     void updateWorkspaceInput(core, path);
   };
 
-  const normalForm = (
+  const normalForm = state.settings.machines.length === 0 ? (
+    <p data-slot="no-machines" className="text-sm text-muted-foreground">
+      请运行 amux-daemon 程序将机器连接至服务器
+    </p>
+  ) : (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-2">
         <Label>机器</Label>
-        {state.settings.machines.length === 0 ? (
-          <p data-slot="machine-empty" className="text-xs text-muted-foreground">
-            （未接入机器）
-          </p>
-        ) : (
-          <div data-slot="machine-group" className="flex flex-wrap gap-1">
-            {state.settings.machines.map((item) => (
-              <OptionButton
-                key={item.name}
-                slot="machine-option"
-                selected={machine === item.name}
-                onClick={() => {
-                  core.update((draft) => {
-                    draft.newSession.machine = item.name;
-                    draft.newSession.agent = "";
-                  });
-                  void updateWorkspaceInput(core, workspace);
-                }}
-              >
-                {item.name}
-              </OptionButton>
-            ))}
-          </div>
-        )}
+        <div data-slot="machine-group" className="flex flex-wrap gap-1">
+          {state.settings.machines.map((item) => (
+            <OptionButton
+              key={item.name}
+              slot="machine-option"
+              selected={machine === item.name}
+              onClick={() => {
+                core.update((draft) => {
+                  draft.newSession.machine = item.name;
+                  draft.newSession.agent = "";
+                });
+                void updateWorkspaceInput(core, workspace);
+              }}
+            >
+              {item.name}
+            </OptionButton>
+          ))}
+        </div>
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>agent</Label>
+        <Label>智能体</Label>
         {agents.length === 0 ? (
           <p className="text-xs text-muted-foreground">
-            {machine === "" ? "请先选择机器" : "该机器未发现 agent"}
+            {machine === "" ? "请选择机器" : "该机器未发现智能体"}
           </p>
         ) : (
           <div data-slot="agent-group" className="flex flex-wrap gap-1">

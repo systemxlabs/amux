@@ -124,15 +124,22 @@ fn mode_switch(workflow_mode: bool, cx: &mut Context<AmuxApp>) -> impl IntoEleme
         }))
 }
 
-/// 普通模式：机器 / agent / 工作目录 / worktree / 创建。
+/// 普通模式：无连接机器时仅提示，否则机器 / 智能体 / 工作目录 / worktree / 创建。
 fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    if core.settings.machines.is_empty() {
+        return Label::new("请运行 amux-daemon 程序将机器连接至服务器")
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .into_any_element();
+    }
     let machine = core.new_session.machine.clone();
-    // 机器与 agent 同一行；工作目录另起一行（其输入框占满整行）
+    // 机器与智能体同一行；工作目录另起一行（其输入框占满整行）
     let mut row = h_flex().flex_wrap().gap_6().items_start();
     row = row.child(field("机器", machine_selector(core, cx), cx));
-    if let Some(machine) = &machine {
-        row = row.child(field("Agent", agent_selector(core, machine, cx), cx));
-    }
+    row = row.child(match &machine {
+        Some(machine) => field("智能体", agent_selector(core, machine, cx), cx),
+        None => field("智能体", hint_text("请选择机器", cx), cx),
+    });
 
     let workspace = this.workspace_input.read(cx).value().trim().to_string();
     let can_create = !workspace.is_empty() && selected_agent_available(core);
@@ -271,11 +278,7 @@ fn machine_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
         );
     }
     if core.settings.machines.is_empty() {
-        row = row.child(
-            Label::new("（未接入机器）")
-                .text_sm()
-                .text_color(cx.theme().muted_foreground),
-        );
+        return row.into_any_element();
     }
     row.into_any_element()
 }
@@ -308,13 +311,17 @@ fn agent_selector(core: &Core, machine: &str, cx: &mut Context<AmuxApp>) -> AnyE
         );
     }
     if !any {
-        row = row.child(
-            Label::new("（未发现 agent）")
-                .text_sm()
-                .text_color(cx.theme().muted_foreground),
-        );
+        row = row.child(hint_text("该机器未发现智能体", cx));
     }
     row.into_any_element()
+}
+
+/// 字段内的灰提示文本（如「请选择机器」）。
+fn hint_text(text: &str, cx: &Context<AmuxApp>) -> AnyElement {
+    Label::new(text.to_string())
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .into_any_element()
 }
 
 /// 工作目录：可手动输入（前缀联想）或从最近目录中选择。
