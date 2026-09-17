@@ -51,7 +51,7 @@ export function DetailsPanel() {
     });
   } else if (workflow !== null) {
     rows.push({ label: "会话 ID", value: workflow.id });
-    rows.push({ label: "agent", value: "编排智能体" });
+    rows.push({ label: "agent", value: "工作流智能体" });
     rows.push({ label: "会话状态", value: stateLabel(workflow.state) });
     rows.push({ label: "标题", value: workflow.title });
     rows.push({ label: "创建时间", value: formatTime(workflow.createdAt) });

@@ -6,9 +6,16 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+model = ["dep:rig-core"]
+
 [dependencies]
+rig-core = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 logforth.workspace = true
 percent-encoding.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

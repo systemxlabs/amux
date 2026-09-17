@@ -1,7 +1,4 @@
-//! Agent 多路复用：发现、启动/重启、stdio 转发。
-//!
-//! Daemon 不实现 ACP 语义，只做逐行转发：Agent stdout 的每一行作为一条 `acp` 通知上行，
-//! Server 下行的 `acp` 通知写回 Agent stdin（docs/DESIGN.md「ACP 多路复用」）。
+//! Agent 发现、生命周期和 ACP 消息转发。
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -23,7 +20,7 @@ struct LaunchSpec {
     env: &'static [(&'static str, &'static str)],
 }
 
-const KNOWN_AGENTS: &[&str] = &["codex"];
+const KNOWN_AGENTS: &[&str] = &[amux_common::api::NANO_AGENT, "codex"];
 
 fn launch_spec(agent: &str) -> Option<LaunchSpec> {
     match agent {
@@ -39,6 +36,7 @@ fn launch_spec(agent: &str) -> Option<LaunchSpec> {
 /// 本机是否已安装该 agent。
 fn is_installed(agent: &str) -> bool {
     match agent {
+        amux_common::api::NANO_AGENT => true,
         // codex 经 npx 启动：需要 codex CLI 与 npx 同时可用
         "codex" => in_path("codex") && in_path("npx"),
         _ => false,
@@ -55,9 +53,14 @@ fn in_path(bin: &str) -> bool {
 struct RunningAgent {
     /// 实例号：重启后旧实例的退出回调不得影响新实例
     instance: u64,
-    pid: u32,
+    process: AgentProcess,
     /// ACP 下行写入端（Server → Agent stdin）
     stdin: mpsc::Sender<String>,
+}
+
+enum AgentProcess {
+    External(u32),
+    Nano(tokio::task::JoinHandle<()>),
 }
 
 pub struct AgentRegistry {
@@ -90,13 +93,30 @@ impl AgentRegistry {
 
     /// 启动（未启动）或重启（已启动）指定 agent。
     pub async fn restart(self: &Arc<Self>, agent: &str, outbox: Arc<Outbox>) -> Result<(), String> {
-        let spec = launch_spec(agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
         if !is_installed(agent) {
             return Err(format!("本机未安装 agent: {agent}"));
         }
         self.terminate(agent).await;
-        let running = self.spawn(agent, spec, outbox).await?;
-        log::info!("agent 已启动: {agent} (pid={})", running.pid);
+        let running = if agent == amux_common::api::NANO_AGENT {
+            let (stdin, incoming) = mpsc::channel(256);
+            let instance = self
+                .next_instance
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let task = tokio::spawn(async move {
+                if let Err(error) = crate::nano::run(incoming, outbox).await {
+                    log::warn!("Nano 已停止: {error}");
+                }
+            });
+            RunningAgent {
+                instance,
+                process: AgentProcess::Nano(task),
+                stdin,
+            }
+        } else {
+            let spec = launch_spec(agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
+            self.spawn(agent, spec, outbox).await?
+        };
+        log::info!("agent 已启动: {agent}");
         self.agents.lock().insert(agent.to_string(), running);
         Ok(())
     }
@@ -125,8 +145,14 @@ impl AgentRegistry {
     async fn terminate(&self, agent: &str) {
         let running = self.agents.lock().remove(agent);
         if let Some(running) = running {
-            terminate_process_group(running.pid).await;
-            log::info!("agent 已停止: {agent} (pid={})", running.pid);
+            match running.process {
+                AgentProcess::External(pid) => terminate_process_group(pid).await,
+                AgentProcess::Nano(task) => {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+            log::info!("agent 已停止: {agent}");
         }
     }
 
@@ -214,7 +240,7 @@ impl AgentRegistry {
 
         Ok(RunningAgent {
             instance,
-            pid,
+            process: AgentProcess::External(pid),
             stdin: stdin_tx,
         })
     }
@@ -268,7 +294,7 @@ mod tests {
         let registry = AgentRegistry::new();
         let list = registry.list();
         for agent in list.agents {
-            assert_eq!(agent.name, "codex");
+            assert!(KNOWN_AGENTS.contains(&agent.name.as_str()));
             assert!(!agent.running, "未启动时 running 应为 false");
         }
     }

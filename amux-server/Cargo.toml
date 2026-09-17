@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-amux-common.workspace = true
+amux-common = { workspace = true, features = ["model"] }
 clap.workspace = true
 log.workspace = true
 serde.workspace = true

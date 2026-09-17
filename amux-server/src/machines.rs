@@ -40,6 +40,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct MachineHub {
     token: String,
+    config: Arc<crate::config_store::ConfigStore>,
     events: mpsc::Sender<AcpEvent>,
     terminals: Arc<TerminalCache>,
     machines: Arc<Mutex<HashMap<String, Arc<Machine>>>>,
@@ -66,9 +67,11 @@ impl MachineHub {
         token: String,
         events: mpsc::Sender<AcpEvent>,
         terminals: Arc<TerminalCache>,
+        config: Arc<crate::config_store::ConfigStore>,
     ) -> Self {
         Self {
             token,
+            config,
             events,
             terminals,
             machines: Arc::new(Mutex::new(HashMap::new())),
@@ -309,7 +312,7 @@ impl MachineHub {
         let (mut sink, mut stream) = socket.split();
         let writer = tokio::spawn(async move {
             while let Some(frame) = outgoing_rx.recv().await {
-                log::debug!("下行帧: {}", amux_common::text::truncate(&frame, 200));
+                // ACP auth/login 帧包含模型 API Key，不记录下行载荷。
                 if sink.send(Message::Text(frame.into())).await.is_err() {
                     break;
                 }
@@ -477,6 +480,11 @@ impl MachineHub {
             outgoing,
             inbound_rx,
             self.events.clone(),
+            if agent == amux_common::api::NANO_AGENT {
+                self.config.orchestrator()
+            } else {
+                None
+            },
         )
         .await
         {

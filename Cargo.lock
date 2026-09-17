@@ -237,14 +237,17 @@ dependencies = [
  "log",
  "logforth",
  "percent-encoding",
+ "rig-core",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
 name = "amux-daemon"
 version = "0.1.0"
 dependencies = [
+ "agent-client-protocol",
  "amux-common",
  "base64 0.23.1",
  "clap",
@@ -254,6 +257,7 @@ dependencies = [
  "log",
  "parking_lot",
  "portable-pty",
+ "rig-core",
  "serde",
  "serde_json",
  "tempfile",

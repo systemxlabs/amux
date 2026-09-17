@@ -1,5 +1,5 @@
 // 会话列表刷新与翻页边界（docs/DESIGN.md「会话列表视图」），
-// 以及打开会话的刷新节拍（「会话详情视图」）与编排智能体配置读取失败的处理（docs/PRD.md「新建会话视图」）。
+// 以及打开会话的刷新节拍（「会话详情视图」）与内置智能体配置读取失败的处理（docs/PRD.md「新建会话视图」）。
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -102,7 +102,7 @@ describe("loadOlderList", () => {
   });
 });
 
-// ---------- 打开会话的刷新节拍与编排智能体配置 ----------
+// ---------- 打开会话的刷新节拍与内置智能体配置 ----------
 
 /** 记录被调用方法名的假客户端；处理器返回 Error 表示该方法拒绝。 */
 function recordingClient(overrides: Record<string, unknown> = {}): {

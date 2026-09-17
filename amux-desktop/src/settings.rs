@@ -1,4 +1,4 @@
-//! 设置浮窗：分类导航 + 连接设置 / 机器管理 / 编排智能体 / 快捷指令 / 技能管理 / 工作流计划。
+//! 设置浮窗：分类导航 + 连接设置 / 机器管理 / 内置智能体 / 快捷指令 / 技能管理 / 工作流计划。
 
 use amux_common::api::{ApiFormat, Machine, Skill};
 use amux_common::domain::ContentBlock;
@@ -18,7 +18,7 @@ use crate::dialog::{self, FormTarget};
 use crate::state::{Core, SettingsTab, SharedCore};
 use crate::ui;
 
-/// 编排智能体 API 格式的顺序（索引与单选组一一对应）。
+/// 内置智能体 API 格式的顺序（索引与单选组一一对应）。
 const API_FORMATS: [ApiFormat; 3] = [
     ApiFormat::ChatCompletions,
     ApiFormat::Responses,
@@ -224,7 +224,7 @@ fn tab_heading(tab: SettingsTab) -> (&'static str, &'static str) {
     match tab {
         SettingsTab::Connection => ("连接设置", "配置 Server 地址与认证 token"),
         SettingsTab::Machines => ("机器管理", "查看已接入机器与其 agent，可重启 / 重新发现"),
-        SettingsTab::Orchestrator => ("编排智能体", "配置工作流编排使用的大模型供应商连接信息"),
+        SettingsTab::Orchestrator => ("内置智能体", "配置内置智能体使用的大模型供应商连接信息"),
         SettingsTab::QuickCommands => ("快捷指令", "自定义快捷指令，在会话输入区上方一键发送"),
         SettingsTab::Skills => ("技能管理", "集中管理各机器各 agent 上的技能"),
         SettingsTab::WorkflowPlans => ("工作流计划", "可复用的工作流计划，发起工作流会话时选用"),
@@ -406,7 +406,7 @@ fn machine_card(
     card.into_any_element()
 }
 
-/// 编排智能体：API 格式单选 + 连接信息表单，改动后才可保存。
+/// 内置智能体：API 格式单选 + 连接信息表单，改动后才可保存。
 fn orchestrator_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let selected = API_FORMATS

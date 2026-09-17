@@ -1,7 +1,7 @@
-//! 工作流会话：元数据（workflow.sqlite）、JSONL 对话与活动、编排智能体驱动。
+//! 工作流会话：元数据（workflow.sqlite）、JSONL 对话与活动、工作流智能体驱动。
 //!
 //! 语义要点（docs/DESIGN.md「Server」）：
-//! - 状态以 Server 元数据为权威；编排智能体运行中或任一关联普通会话工作中即为工作中
+//! - 状态以 Server 元数据为权威；工作流智能体运行中或任一关联普通会话工作中即为工作中
 //! - 关联普通会话从「其他状态 → idle 且非取消」时，向工作流会话注入一条用户消息触发调度
 //! - 工作中收到的用户消息以 steer 方式注入（下一轮请求前作为用户消息进入对话）
 
@@ -294,7 +294,7 @@ impl WorkflowService {
                 }
             }
             Err(error) => {
-                log::warn!("编排智能体运行失败（{workflow_id}）: {error}");
+                log::warn!("工作流智能体运行失败（{workflow_id}）: {error}");
                 self.record_activity(
                     workflow_id,
                     &Activity::Error {
@@ -321,7 +321,7 @@ impl WorkflowService {
         let config = self
             .config
             .orchestrator()
-            .ok_or("编排智能体未配置".to_string())?;
+            .ok_or("工作流智能体未配置".to_string())?;
         let plan = self
             .store
             .workflow(workflow_id)
@@ -358,7 +358,7 @@ impl WorkflowService {
         }
     }
 
-    /// 工作流状态重算：编排智能体运行中或任一关联会话工作中即为工作中。
+    /// 工作流状态重算：工作流智能体运行中或任一关联会话工作中即为工作中。
     pub fn recompute_state(&self, workflow_id: &str) {
         let running = self
             .runs
@@ -386,7 +386,7 @@ impl WorkflowService {
         }
     }
 
-    /// 会话被工作流关联（编排智能体创建会话时调用）。
+    /// 会话被工作流关联（工作流智能体创建会话时调用）。
     pub fn link_session(&self, workflow_id: &str, session_id: &str) {
         self.store.link_session(workflow_id, session_id);
         self.recompute_state(workflow_id);
@@ -411,7 +411,7 @@ impl WorkflowService {
     }
 }
 
-/// 编排智能体的工具执行面与活动记录面：全部动作限定在本工作流的关联普通会话上。
+/// 工作流智能体的工具执行面与活动记录面：全部动作限定在本工作流的关联普通会话上。
 struct WorkflowTools {
     service: Arc<WorkflowService>,
     workflow_id: String,
@@ -636,7 +636,7 @@ fn page_arg(arguments: &serde_json::Value) -> (usize, usize) {
     (limit, offset)
 }
 
-/// 编排工具清单（docs/DESIGN.md「编排智能体」工具表）。
+/// 工作流工具清单（docs/DESIGN.md「工作流智能体」工具表）。
 fn tool_definitions() -> Vec<ToolDefinition> {
     let string =
         |description: &str| serde_json::json!({ "type": "string", "description": description });
@@ -927,7 +927,12 @@ mod tests {
         let config = Arc::new(ConfigStore::new(home.clone()));
         let terminals = Arc::new(TerminalCache::new());
         let (events, _events_rx) = tokio::sync::mpsc::channel(4);
-        let machines = MachineHub::new("token".into(), events, Arc::clone(&terminals));
+        let machines = MachineHub::new(
+            "token".into(),
+            events,
+            Arc::clone(&terminals),
+            Arc::clone(&config),
+        );
         let sessions = Arc::new(SessionService::new(
             Arc::clone(&store),
             machines.clone(),

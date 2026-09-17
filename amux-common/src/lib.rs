@@ -13,5 +13,7 @@ pub mod daemon;
 pub mod domain;
 pub mod jsonrpc;
 pub mod log;
+#[cfg(feature = "model")]
+pub mod model;
 pub mod paths;
 pub mod text;

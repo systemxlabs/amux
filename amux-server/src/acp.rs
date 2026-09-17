@@ -245,6 +245,7 @@ pub async fn connect(
     outgoing: mpsc::Sender<String>,
     incoming: mpsc::Receiver<String>,
     events: mpsc::Sender<AcpEvent>,
+    config: Option<amux_common::api::OrchestratorConfig>,
 ) -> Result<Arc<AgentConnection>, String> {
     let (calls_tx, mut calls_rx) = mpsc::channel::<Call>(64);
     let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, String>>();
@@ -293,6 +294,32 @@ pub async fn connect(
                     .capabilities(ClientCapabilities::default());
                     match cx.send_request(initialize).block_task().await {
                         Ok(response) => {
+                            if agent_name == amux_common::api::NANO_AGENT {
+                                let login = async {
+                                    use amux_common::api::AMUX_AUTH_METHOD;
+                                    if !response.auth_methods.iter().any(|method| {
+                                        method.method_id().to_string() == AMUX_AUTH_METHOD
+                                    }) {
+                                        return Err("Nano 未声明配置认证方法".to_string());
+                                    }
+                                    let config = config.ok_or("内置智能体未配置")?;
+                                    config.validate()?;
+                                    request(
+                                        &cx,
+                                        agent_client_protocol::schema::v2::LoginAuthRequest::new(
+                                            AMUX_AUTH_METHOD,
+                                        )
+                                        .meta(config.auth_meta()),
+                                    )
+                                    .await?;
+                                    Ok::<_, String>(())
+                                }
+                                .await;
+                                if let Err(error) = login {
+                                    let _ = ready_tx.send(Err(error));
+                                    return Ok(());
+                                }
+                            }
                             let supports_delete = supports_session_delete(&response.capabilities);
                             let _ = ready_tx.send(Ok(supports_delete));
                             log::info!("ACP 连接就绪: {agent_name}@{machine_name}");

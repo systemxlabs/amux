@@ -1,7 +1,7 @@
 //! amux Server：公网枢纽。
 //!
 //! 对外提供 Client HTTPS API 与 Daemon WebSocket 接入（docs/DESIGN.md「Server」）：
-//! 作为 ACP client 经 Daemon 与各机器上的 Agents 通信，持有会话/工作流数据与编排智能体。
+//! 作为 ACP client 经 Daemon 与各机器上的 Agents 通信，持有会话/工作流数据与工作流智能体。
 
 mod acp;
 mod api;
@@ -76,7 +76,12 @@ async fn run(args: Args) -> Result<(), String> {
     let terminals = Arc::new(TerminalCache::new());
     let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
 
-    let machines = MachineHub::new(args.token.clone(), events_tx, Arc::clone(&terminals));
+    let machines = MachineHub::new(
+        args.token.clone(),
+        events_tx,
+        Arc::clone(&terminals),
+        Arc::clone(&config),
+    );
     let sessions = Arc::new(SessionService::new(
         Arc::clone(&store),
         machines.clone(),

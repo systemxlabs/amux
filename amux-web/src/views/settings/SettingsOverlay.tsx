@@ -18,7 +18,7 @@ import { WorkflowPlansSection } from "./WorkflowPlansSection";
 const TABS: { tab: SettingsTab; label: string }[] = [
   { tab: "connection", label: "连接" },
   { tab: "machines", label: "机器管理" },
-  { tab: "orchestrator", label: "编排智能体" },
+  { tab: "orchestrator", label: "内置智能体" },
   { tab: "quickCommands", label: "快捷指令" },
   { tab: "skills", label: "技能管理" },
   { tab: "plans", label: "工作流计划" },

@@ -117,7 +117,7 @@ fn mode_switch(workflow_mode: bool, cx: &mut Context<AmuxApp>) -> impl IntoEleme
                 core.new_session.workflow_mode = workflow;
                 core.new_session.suggestions.clear();
             });
-            // 工作流模式需要编排智能体配置与计划：进入该模式时拉取
+            // 工作流模式需要内置智能体配置与计划：进入该模式时拉取
             if workflow {
                 this.load_workflow_setup();
             }
@@ -164,7 +164,7 @@ fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
         .into_any_element()
 }
 
-/// 工作流模式：工作计划 / 创建（未配置编排智能体时引导去设置）。
+/// 工作流模式：工作计划 / 创建（未配置内置智能体时引导去设置）。
 fn workflow_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     // 配置尚未拉取回来时不做判断，避免把「还没拉取」误报成「未配置」
     if core.settings.orchestrator_loaded && core.settings.orchestrator.is_none() {
@@ -173,15 +173,15 @@ fn workflow_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> 
             .child(
                 Alert::warning(
                     "ns-no-orchestrator-alert",
-                    "请先在设置 → 编排智能体中配置大模型供应商连接。",
+                    "请先在设置 → 内置智能体中配置大模型供应商连接。",
                 )
-                .title("编排智能体尚未配置"),
+                .title("内置智能体尚未配置"),
             )
             .child(
                 Button::new("ns-goto-orchestrator-settings")
                     .small()
                     .primary()
-                    .label("去配置编排智能体")
+                    .label("去配置内置智能体")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_settings(Some(SettingsTab::Orchestrator), window, cx)
                     })),
@@ -201,7 +201,7 @@ fn workflow_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> 
         // 必须用 Input 组件渲染：直接挂 InputState 实体只会渲染成不可交互的文本
         .child(Input::new(&this.plan_input).w_full())
         .child(
-            Label::new("创建后由编排智能体按计划推进；可随时输入指令调整调度。")
+            Label::new("创建后由工作流智能体按计划推进；可随时输入指令调整调度。")
                 .text_sm()
                 .text_color(cx.theme().muted_foreground),
         )

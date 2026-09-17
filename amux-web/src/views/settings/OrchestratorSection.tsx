@@ -1,4 +1,4 @@
-// 编排智能体设置（docs/PRD.md「编排智能体设置」）。
+// 内置智能体设置（docs/PRD.md「内置智能体设置」）。
 
 import { useEffect, useState } from "react";
 
@@ -45,7 +45,7 @@ export function OrchestratorSection() {
 
   return (
     <section className="flex flex-col gap-4">
-      <h2 className="text-sm font-medium">编排智能体</h2>
+      <h2 className="text-sm font-medium">内置智能体</h2>
       {orchestrator.status === "failed" ? (
         <p data-slot="orchestrator-error" className="text-xs text-destructive">
           读取配置失败：{orchestrator.error}

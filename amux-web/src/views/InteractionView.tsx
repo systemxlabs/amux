@@ -70,7 +70,7 @@ export function InteractionView() {
   const isSession = target.kind === "session";
   const title = isSession
     ? `${detail.session?.agent ?? ""}@${detail.session?.machine ?? ""}`
-    : "编排智能体";
+    : "工作流智能体";
   const available = isSession
     ? (state.settings.agents
         .find((entry) => entry.machine === detail.session?.machine)

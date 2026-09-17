@@ -74,9 +74,9 @@ pub struct AmuxApp {
     pub token_input: Entity<InputState>,
     /// 连接设置的「保存」是否可点（server/token 输入变更后置位）
     pub settings_dirty: bool,
-    /// 编排智能体 API 格式的当前选择（文本项直接取输入框）
+    /// 内置智能体 API 格式的当前选择（文本项直接取输入框）
     pub orchestrator_format: Option<ApiFormat>,
-    /// 编排智能体表单已预填的配置（分类打开时的拉取是异步的，落地后据此重填一次）
+    /// 内置智能体表单已预填的配置（分类打开时的拉取是异步的，落地后据此重填一次）
     pub orchestrator_prefilled: Option<OrchestratorConfig>,
     /// 行内重命名的会话 id 与输入框
     pub renaming_id: Option<String>,
@@ -377,7 +377,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 设置分类切换：切到编排智能体分类时预填已保存配置。
+    /// 设置分类切换：切到内置智能体分类时预填已保存配置。
     pub fn select_settings_tab(
         &mut self,
         tab: crate::state::SettingsTab,
@@ -513,7 +513,7 @@ impl AmuxApp {
 
     /// 拉取新建会话视图的数据：机器、agents、常用工作目录（docs/DESIGN.md「新建会话视图」）。
     /// 拉取新建会话视图的数据：机器/agents 与常用工作目录；表单已在工作流模式时
-    /// 一并拉取该模式所需的编排智能体配置与计划。
+    /// 一并拉取该模式所需的内置智能体配置与计划。
     fn load_new_session(&mut self) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
@@ -536,7 +536,7 @@ impl AmuxApp {
             .spawn(async move { poll::refresh_workflow_setup(&client, &core).await });
     }
 
-    /// 拉取会话交互视图的常驻数据：机器/agents、编排智能体配置与快捷指令。
+    /// 拉取会话交互视图的常驻数据：机器/agents、内置智能体配置与快捷指令。
     fn load_interaction(&mut self) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
@@ -2054,7 +2054,7 @@ impl AmuxApp {
         );
     }
 
-    /// 保存编排智能体配置；保存结果以弹窗反馈（docs/DESIGN.md 连接/编排设置）。
+    /// 保存内置智能体配置；保存结果以弹窗反馈（docs/DESIGN.md 连接/内置智能体设置）。
     pub fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
@@ -2076,7 +2076,7 @@ impl AmuxApp {
                 Ok(()) => {
                     let mut core = core.lock();
                     core.settings.orchestrator = Some(config);
-                    core.success("编排智能体设置已保存");
+                    core.success("内置智能体设置已保存");
                 }
                 Err(error) => core.lock().error(format!("保存失败：{error}")),
             }
@@ -2084,7 +2084,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 编排智能体表单是否与已保存配置不同（决定「保存」是否可点）。
+    /// 内置智能体表单是否与已保存配置不同（决定「保存」是否可点）。
     /// 尚未保存过配置时以空配置为基准，表单未填写则不视为改动。
     pub fn orchestrator_dirty(&self, cx: &App) -> bool {
         let saved = self
@@ -2104,7 +2104,7 @@ impl AmuxApp {
         }
     }
 
-    /// 编排智能体 API 格式：用户已选择则用其选择，否则用已保存配置的格式。
+    /// 内置智能体 API 格式：用户已选择则用其选择，否则用已保存配置的格式。
     pub fn current_orchestrator_format(&self) -> ApiFormat {
         self.orchestrator_format
             .or_else(|| {
@@ -2113,7 +2113,7 @@ impl AmuxApp {
             .unwrap_or(ApiFormat::ChatCompletions)
     }
 
-    /// 打开编排智能体设置页时预填已保存的配置。
+    /// 打开内置智能体设置页时预填已保存的配置。
     pub fn load_orchestrator_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = self
             .with_core(|core| core.settings.orchestrator.clone())
@@ -2131,7 +2131,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 编排智能体分类打开时拉取的配置落地后重填一次表单（打开瞬间可能还是缓存或空）。
+    /// 内置智能体分类打开时拉取的配置落地后重填一次表单（打开瞬间可能还是缓存或空）。
     fn sync_orchestrator_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.with_core(|core| {
             core.settings_open && core.settings_tab == crate::state::SettingsTab::Orchestrator
@@ -2439,7 +2439,7 @@ fn skill_target_card(
         .into_any_element()
 }
 
-/// 未保存过编排智能体配置时的空基准。
+/// 未保存过内置智能体配置时的空基准。
 fn empty_orchestrator_config() -> OrchestratorConfig {
     OrchestratorConfig {
         api_format: ApiFormat::ChatCompletions,

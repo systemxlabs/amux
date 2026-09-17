@@ -488,7 +488,7 @@ export function selectSettingsTab(core: Core, tab: Core["state"]["settings"]["ta
   void refreshSettings(core, tab);
 }
 
-/** 保存编排智能体配置（PRD「编排智能体设置」）。 */
+/** 保存内置智能体配置（PRD「内置智能体设置」）。 */
 export async function saveOrchestrator(core: Core, config: OrchestratorConfig): Promise<void> {
   if (!core.client) return;
   try {
@@ -496,7 +496,7 @@ export async function saveOrchestrator(core: Core, config: OrchestratorConfig): 
     core.update((state) => {
       state.settings.orchestrator = { status: "ready", config };
     });
-    core.success("编排智能体配置已保存");
+    core.success("内置智能体配置已保存");
   } catch (error) {
     core.failure(`保存失败：${messageOf(error)}`);
   }

@@ -332,7 +332,13 @@ async fn server_daemon_agent_end_to_end() {
         "codex 可用",
     )
     .await;
-    assert_eq!(agents.len(), 1, "{agents:?}");
+    // 仅 codex 可用：nano 已内置但未配置模型，连接未就绪
+    let available: Vec<_> = agents
+        .iter()
+        .filter(|agent| agent["available"] == true)
+        .map(|agent| agent["name"].clone())
+        .collect();
+    assert_eq!(available, vec![json!("codex")], "{agents:?}");
 
     // 建会话（惰性创建 agent 侧会话）
     let session = client

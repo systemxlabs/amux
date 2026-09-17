@@ -9,6 +9,7 @@ mod frames;
 mod fs;
 mod git;
 mod machine;
+mod nano;
 mod outbox;
 mod rpc;
 mod terminal;

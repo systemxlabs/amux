@@ -251,12 +251,12 @@ pub struct OpenView {
 }
 
 impl OpenView {
-    /// 会话交互视图标题：`agent@机器` 或编排智能体（docs/PRD.md 会话交互视图）。
+    /// 会话交互视图标题：`agent@机器` 或工作流智能体（docs/PRD.md 会话交互视图）。
     pub fn subtitle(&self) -> String {
         if let Some(session) = &self.session {
             format!("{}@{}", session.agent, session.machine)
         } else {
-            "编排智能体".to_string()
+            "工作流智能体".to_string()
         }
     }
 }
@@ -401,7 +401,7 @@ impl SettingsTab {
         match self {
             SettingsTab::Connection => "连接设置",
             SettingsTab::Machines => "机器管理",
-            SettingsTab::Orchestrator => "编排智能体",
+            SettingsTab::Orchestrator => "内置智能体",
             SettingsTab::QuickCommands => "快捷指令",
             SettingsTab::Skills => "技能管理",
             SettingsTab::WorkflowPlans => "工作流计划",
@@ -431,7 +431,7 @@ pub struct SettingsData {
     pub plans: Vec<WorkflowPlanItem>,
     pub quick_commands: Vec<QuickCommand>,
     pub orchestrator: Option<OrchestratorConfig>,
-    /// 编排智能体配置是否已拉取过：区分「未配置」与「尚未拉取」
+    /// 内置智能体配置是否已拉取过：区分「未配置」与「尚未拉取」
     pub orchestrator_loaded: bool,
 }
 

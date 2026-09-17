@@ -9,6 +9,9 @@ use crate::domain::{
     SessionConfigOptionValue, SessionPlanEntry, SessionState, SlashCommand,
 };
 
+/// Daemon 内置智能体的发现名称。
+pub const NANO_AGENT: &str = "nano";
+
 /// 端点路径片段（应用侧请求共用，避免字面量漂移）。
 pub mod path {
     pub const MACHINES: &str = "/machines";
@@ -331,6 +334,48 @@ pub struct OrchestratorConfig {
     pub effort: String,
 }
 
+pub const AMUX_AUTH_METHOD: &str = "amux-config";
+
+impl OrchestratorConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.base_url.trim().is_empty()
+            || self.api_key.trim().is_empty()
+            || self.model.trim().is_empty()
+        {
+            return Err("请配置 Base URL、API Key 和模型".into());
+        }
+        Ok(())
+    }
+
+    pub fn auth_meta(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({
+            "amuxApiFormat": self.api_format,
+            "amuxBaseUrl": self.base_url,
+            "amuxApiKey": self.api_key,
+            "amuxModel": self.model,
+            "amuxEffort": self.effort
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    pub fn from_auth_meta(
+        meta: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, String> {
+        let config: Self = serde_json::from_value(serde_json::json!({
+            "apiFormat": meta.get("amuxApiFormat"),
+            "baseUrl": meta.get("amuxBaseUrl"),
+            "apiKey": meta.get("amuxApiKey"),
+            "model": meta.get("amuxModel"),
+            "effort": meta.get("amuxEffort")
+        }))
+        .map_err(|_| "模型配置格式不正确".to_string())?;
+        config.validate()?;
+        Ok(config)
+    }
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -368,5 +413,28 @@ mod tests {
         let json = serde_json::to_value(&output).unwrap();
         assert!(json.get("truncated").is_none());
         assert_eq!(json["nextCursor"], 3);
+    }
+
+    /// Nano 认证的 _meta 载荷：编码后能无损还原，字段名按 docs/DESIGN.md「ACP 认证」。
+    #[test]
+    fn agent_config_round_trips_through_auth_meta() {
+        let config = OrchestratorConfig {
+            api_format: ApiFormat::Responses,
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: "sk-xxx".into(),
+            model: "deepseek-v4-flash".into(),
+            effort: "high".into(),
+        };
+        let meta = config.auth_meta();
+        assert_eq!(meta["amuxApiFormat"], "responses");
+        assert_eq!(meta["amuxModel"], "deepseek-v4-flash");
+        assert_eq!(OrchestratorConfig::from_auth_meta(meta).unwrap(), config);
+    }
+
+    #[test]
+    fn agent_config_rejects_missing_required_fields() {
+        let mut meta = serde_json::Map::new();
+        meta.insert("amuxModel".into(), "m".into());
+        assert!(OrchestratorConfig::from_auth_meta(meta).is_err());
     }
 }

@@ -1,7 +1,7 @@
 // 新建会话视图（docs/PRD.md「新建会话视图」、docs/DESIGN.md「新建会话视图」）。
 //
 // 顶部为模式切换（普通/工作流）：普通模式选择机器与可用 agent、输入工作目录（前缀匹配联想与最近目录）、
-// worktree 开关；工作流模式选择或输入工作计划（编排智能体未配置时引导去设置）。
+// worktree 开关；工作流模式选择或输入工作计划（内置智能体未配置时引导去设置）。
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Folder } from "lucide-react";
@@ -304,7 +304,7 @@ export function NewSessionView() {
     </div>
   );
 
-  // PRD「新建会话视图」：确认编排智能体已配置后才展示创建表单
+  // PRD「新建会话视图」：确认内置智能体已配置后才展示创建表单
   const orchestrator = state.settings.orchestrator;
   const workflowForm =
     orchestrator.status === "ready" && orchestrator.config !== null ? (
@@ -376,12 +376,12 @@ export function NewSessionView() {
       >
         {orchestrator.status === "loading" ? (
           <p data-slot="orchestrator-loading" className="text-muted-foreground">
-            正在确认编排智能体配置…
+            正在确认内置智能体配置…
           </p>
         ) : orchestrator.status === "failed" ? (
           <>
             <p data-slot="orchestrator-error" className="text-destructive">
-              读取编排智能体配置失败：{orchestrator.error}
+              读取内置智能体配置失败：{orchestrator.error}
             </p>
             <div className="flex gap-2">
               <Button
@@ -398,7 +398,7 @@ export function NewSessionView() {
           </>
         ) : (
           <>
-            <p className="text-destructive">编排智能体未配置，无法创建工作流会话。</p>
+            <p className="text-destructive">内置智能体未配置，无法创建工作流会话。</p>
             <Button
               data-slot="open-orchestrator-settings"
               variant="outline"

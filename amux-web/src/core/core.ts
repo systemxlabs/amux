@@ -76,7 +76,7 @@ export type SettingsTab =
   | "plans";
 
 /**
- * 编排智能体配置的读取状态：只有 `ready` 才表示配置已确认
+ * 内置智能体配置的读取状态：只有 `ready` 才表示配置已确认
  * （`config` 为 null 即未配置），未确认前不允许创建工作流会话。
  */
 export type OrchestratorState =

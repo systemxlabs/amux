@@ -461,12 +461,12 @@ export async function refreshNewSession(core: Core): Promise<void> {
   await Promise.all([refreshMachines(core), refreshRecentWorkspaces(core)]);
 }
 
-/** 工作流模式所需数据：编排智能体配置（未配置时引导去设置）与已保存计划。 */
+/** 工作流模式所需数据：内置智能体配置（未配置时引导去设置）与已保存计划。 */
 export async function refreshWorkflowSetup(core: Core): Promise<void> {
   await Promise.all([refreshOrchestrator(core), refreshPlans(core)]);
 }
 
-/** 会话交互视图常驻数据：机器/agents（可用性标记）、编排智能体配置与快捷指令。 */
+/** 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置与快捷指令。 */
 export async function refreshInteraction(core: Core): Promise<void> {
   await Promise.all([refreshMachines(core), refreshOrchestrator(core), refreshQuickCommands(core)]);
 }
