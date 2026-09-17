@@ -3,7 +3,7 @@
 // 顶部为模式切换（普通/工作流）：普通模式选择机器与可用 agent、输入工作目录（前缀匹配联想与最近目录）、
 // worktree 开关；工作流模式选择或输入工作计划（编排智能体未配置时引导去设置）。
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Folder } from "lucide-react";
 
 import { Button } from "../components/ui/button";
@@ -25,10 +25,22 @@ import { useCore, useCoreState } from "../core/store";
 import { truncate } from "../lib/format";
 import { cn } from "../lib/utils";
 
+/** 已保存计划上拉框：向上弹出，上方空间不足时向下弹，高度按剩余空间收敛。 */
+type PlanPopupPlacement = { below: boolean; maxHeight: number };
+
+/** 上拉框最大高度（对应 max-h-56）。 */
+const PLAN_POPUP_HEIGHT = 224;
+/** 上拉框与输入框的间距。 */
+const PLAN_POPUP_GAP = 8;
+/** 上拉框最小高度：空间实在不够时允许略超出视口，也不至于只露一条缝。 */
+const PLAN_POPUP_MIN_HEIGHT = 80;
+
 export function NewSessionView() {
   const core = useCore();
   const state = useCoreState();
   const workspaceField = useRef<HTMLDivElement | null>(null);
+  const planField = useRef<HTMLDivElement | null>(null);
+  const [planPopup, setPlanPopup] = useState<PlanPopupPlacement | null>(null);
   const { mode, machine, agent, workspace, useWorktree, plan, selectedPlan, suggestions, recentOpen } =
     state.newSession;
   const agents = state.settings.agents.find((item) => item.machine === machine)?.agents ?? [];
@@ -49,24 +61,57 @@ export function NewSessionView() {
     if (state.settings.machines.length === 0) void refreshNewSession(core);
   }, [core, state.settings.machines.length]);
 
-  // 点击工作目录字段以外的位置时收起下拉框；同时清 suggestionDir/suggestionPrefix，
+  // 切换模式后不保留上拉框：回到工作流模式时由聚焦输入框重新触发
+  useEffect(() => {
+    setPlanPopup(null);
+  }, [mode]);
+
+  // 点击字段以外的位置时收起下拉框；工作目录还要清 suggestionDir/suggestionPrefix，
   // 使在途应答因前缀不匹配而丢弃，不会在收起后又弹回来
   useEffect(() => {
     const onMouseDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
       const field = workspaceField.current;
-      if (field !== null && event.target instanceof Node && field.contains(event.target)) return;
-      const { suggestions: open, suggestionDir, recentOpen: recent } = core.state.newSession;
-      if (open.length === 0 && suggestionDir === null && !recent) return;
-      core.update((draft) => {
-        draft.newSession.suggestions = [];
-        draft.newSession.suggestionDir = null;
-        draft.newSession.suggestionPrefix = "";
-        draft.newSession.recentOpen = false;
-      });
+      if (field === null || !field.contains(target)) {
+        const { suggestions: open, suggestionDir, recentOpen: recent } = core.state.newSession;
+        if (open.length > 0 || suggestionDir !== null || recent) {
+          core.update((draft) => {
+            draft.newSession.suggestions = [];
+            draft.newSession.suggestionDir = null;
+            draft.newSession.suggestionPrefix = "";
+            draft.newSession.recentOpen = false;
+          });
+        }
+      }
+      const plans = planField.current;
+      if (plans !== null && !plans.contains(target)) setPlanPopup(null);
     };
     document.addEventListener("mousedown", onMouseDown);
     return () => document.removeEventListener("mousedown", onMouseDown);
   }, [core]);
+
+  /** 展开已保存计划上拉框：按输入框上下的可用空间决定方向与高度。 */
+  const openPlanPopup = (input: HTMLElement): void => {
+    const rect = input.getBoundingClientRect();
+    const above = rect.top - PLAN_POPUP_GAP;
+    const below = window.innerHeight - rect.bottom - PLAN_POPUP_GAP;
+    const useBelow = above < PLAN_POPUP_HEIGHT && below > above;
+    const available = useBelow ? below : above;
+    setPlanPopup({
+      below: useBelow,
+      maxHeight: Math.max(Math.min(PLAN_POPUP_HEIGHT, available), PLAN_POPUP_MIN_HEIGHT),
+    });
+  };
+
+  /** 选中已保存计划：填入输入框并收起上拉框。 */
+  const pickPlan = (name: string, text: string): void => {
+    core.update((draft) => {
+      draft.newSession.plan = text;
+      draft.newSession.selectedPlan = name;
+    });
+    setPlanPopup(null);
+  };
 
   /** 填入工作目录并按其内容刷新前缀匹配候选。 */
   const pickWorkspace = (value: string): void => {
@@ -239,45 +284,55 @@ export function NewSessionView() {
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-2">
           <Label>工作计划</Label>
-          {state.settings.plans.length > 0 ? (
-            <div className="flex flex-col gap-2">
-              {state.settings.plans.map((item) => (
-                <button
-                  key={item.name}
-                  type="button"
-                  data-slot="plan-choice"
-                  data-selected={selectedPlan === item.name ? "true" : "false"}
-                  onClick={() =>
-                    core.update((draft) => {
-                      draft.newSession.plan = item.plan;
-                      draft.newSession.selectedPlan = item.name;
-                    })
-                  }
-                  className={cn(
-                    "flex cursor-pointer flex-col gap-1 rounded-md border border-border bg-card p-2.5 text-left hover:bg-accent",
-                    selectedPlan === item.name && "border-primary",
-                  )}
-                >
-                  <span className="text-sm">{item.name}</span>
-                  <span className="text-xs text-muted-foreground">{truncate(item.plan, 80)}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-          <Textarea
-            data-slot="workflow-plan-input"
-            aria-label="工作计划"
-            className="min-h-32"
-            placeholder="输入工作计划"
-            value={plan}
-            onChange={(event) => {
-              const value = event.target.value;
-              core.update((draft) => {
-                draft.newSession.plan = value;
-                draft.newSession.selectedPlan = null;
-              });
-            }}
-          />
+          <div ref={planField} className="relative">
+            {/* 已保存计划的上拉框：聚焦输入框时弹出，覆盖在上方不挤占表单版面 */}
+            {planPopup !== null && state.settings.plans.length > 0 ? (
+              <div
+                data-slot="plan-popup"
+                data-direction={planPopup.below ? "below" : "above"}
+                style={{ maxHeight: planPopup.maxHeight }}
+                className={cn(
+                  "absolute left-0 z-10 flex w-full flex-col overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg",
+                  planPopup.below ? "top-full mt-1" : "bottom-full mb-1",
+                )}
+              >
+                {state.settings.plans.map((item) => (
+                  <button
+                    key={item.name}
+                    type="button"
+                    data-slot="plan-choice"
+                    data-selected={selectedPlan === item.name ? "true" : "false"}
+                    onClick={() => pickPlan(item.name, item.plan)}
+                    className={cn(
+                      "flex cursor-pointer flex-col items-start gap-1 px-2 py-1 text-left hover:bg-accent",
+                      selectedPlan === item.name && "bg-accent",
+                    )}
+                  >
+                    <span className="text-sm">{item.name}</span>
+                    <span className="text-xs text-muted-foreground">{truncate(item.plan, 80)}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <Textarea
+              data-slot="workflow-plan-input"
+              aria-label="工作计划"
+              className="min-h-32"
+              placeholder="输入工作计划"
+              value={plan}
+              onFocus={(event) => openPlanPopup(event.currentTarget)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setPlanPopup(null);
+              }}
+              onChange={(event) => {
+                const value = event.target.value;
+                core.update((draft) => {
+                  draft.newSession.plan = value;
+                  draft.newSession.selectedPlan = null;
+                });
+              }}
+            />
+          </div>
         </div>
         <Button
           data-slot="create-workflow"
@@ -330,11 +385,10 @@ export function NewSessionView() {
     );
 
   return (
-    <div
-      data-slot="new-session-view"
-      className="flex h-full flex-col items-center overflow-auto p-6"
-    >
-      <div className="flex w-full max-w-lg flex-col gap-4">
+    <div data-slot="new-session-view" className="flex h-full overflow-auto p-6">
+      {/* PRD「新建会话视图」：居中展示。用 m-auto 而非 justify-center，
+          表单比面板高时不会被裁掉顶部、仍可从上往下滚动 */}
+      <div className="m-auto flex w-full max-w-lg flex-col gap-4">
         <Tabs
           data-slot="new-session-mode"
           value={mode}
