@@ -85,8 +85,9 @@ function TreeNodes({
               style={{ paddingLeft: `${8 + depth * 12}px` }}
               onClick={() => (entry.isDir ? onToggleDir(entry.path) : onOpenFile(entry))}
             >
-              <span className="shrink-0 text-muted-foreground">
-                {entry.isDir ? (open ? "▾" : "▸") : "·"}
+              {/* 展开箭头列：文件不显示符号，但保留同宽占位，使名称与目录对齐 */}
+              <span className="w-3 shrink-0 text-muted-foreground">
+                {entry.isDir ? (open ? "▾" : "▸") : null}
               </span>
               <span className="truncate">{entry.name}</span>
             </Button>
