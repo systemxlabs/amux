@@ -55,6 +55,7 @@ export function OrchestratorSection() {
         <Label>API 格式</Label>
         <RadioGroup
           data-slot="orchestrator-api-format"
+          className="flex flex-wrap items-center gap-4"
           value={form.apiFormat}
           onValueChange={(value) => setForm({ ...form, apiFormat: value as ApiFormat })}
         >
