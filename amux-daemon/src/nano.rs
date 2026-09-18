@@ -23,7 +23,8 @@ struct Nano {
 }
 
 struct Session {
-    cwd: PathBuf,
+    /// 会话内持久 shell：工作目录、环境变量、函数跨调用保留（见 `shell` 模块）
+    shell: shell::Shell,
     history: Vec<Message>,
     cancel: Option<watch::Sender<bool>>,
 }
@@ -31,7 +32,7 @@ struct Session {
 impl Session {
     fn new(cwd: PathBuf) -> Self {
         Self {
-            cwd,
+            shell: shell::Shell::new(cwd),
             history: Vec::new(),
             cancel: None,
         }
@@ -125,13 +126,13 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                 _ => Err(Error::invalid_params().data("Nano 仅支持文本输入")),
             }).collect::<Result<Vec<_>, _>>();
             let text = match text { Ok(text) => text.join("\n"), Err(error) => return responder.respond_with_error(error) };
-            let (cwd, history, mut cancel) = {
+            let (shell, history, mut cancel) = {
                 let mut sessions = nano.sessions.lock();
                 let Some(session) = sessions.get_mut(&request.session_id) else { return responder.respond_with_error(Error::invalid_params()); };
                 if session.cancel.is_some() { return responder.respond_with_error(Error::invalid_request().data("会话正在工作中")); }
                 let (tx, rx) = watch::channel(false);
                 session.cancel = Some(tx);
-                (session.cwd.clone(), std::mem::take(&mut session.history), rx)
+                (session.shell.clone(), std::mem::take(&mut session.history), rx)
             };
             let history = Arc::new(Mutex::new(history));
             responder.respond(PromptResponse::new())?;
@@ -143,7 +144,7 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                     biased;
                     _ = cancel.changed() => StopReason::Cancelled,
                     result = async {
-                        runtime::run(runtime::builder(&config)?, cwd, text, history.clone(), tools.clone()).await
+                        runtime::run(runtime::builder(&config)?, shell.clone(), text, history.clone(), tools.clone()).await
                     } => {
                         match result {
                             Ok(_) => StopReason::EndTurn,

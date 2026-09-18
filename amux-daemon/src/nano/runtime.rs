@@ -1,6 +1,6 @@
 //! Nano 的模型运行与 ACP 活动适配；工具循环由 rig-agent 驱动。
 
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use agent_client_protocol::{schema::v2::*, Client, V2ConnectionTo};
 pub(super) use amux_common::model::builder;
@@ -9,11 +9,11 @@ use parking_lot::Mutex;
 use rig_agent::{
     agent::hook::{self, AgentHook, HookContext},
     completion::PromptError,
-    tool::{Tool, ToolContext, ToolOutput},
     AgentBuilder,
 };
 use rig_core::completion::{AssistantContent, Message};
-use serde::Deserialize;
+
+use super::shell::Shell;
 
 const MAX_MODEL_CALLS: usize = 32;
 
@@ -43,7 +43,7 @@ impl Events {
 
 pub(super) async fn run(
     builder: AgentBuilder,
-    cwd: PathBuf,
+    shell: Shell,
     text: String,
     history: Arc<Mutex<Vec<Message>>>,
     events: Events,
@@ -53,7 +53,7 @@ pub(super) async fn run(
     let agent = builder
         .preamble("你是 Nano，使用 shell 工具在指定工作目录中完成用户任务。")
         .default_max_turns(MAX_MODEL_CALLS)
-        .tool(Shell { cwd })
+        .tool(shell)
         .add_hook(AcpHook {
             events,
             history: history.clone(),
@@ -181,71 +181,6 @@ impl AgentHook for AcpHook {
     }
 }
 
-struct Shell {
-    cwd: PathBuf,
-}
-
-#[derive(Deserialize)]
-struct ShellArgs {
-    command: String,
-    /// 超时秒数（可选，见 `shell::MAX_TIMEOUT_SECONDS`）。
-    timeout: Option<u64>,
-}
-
-impl Tool for Shell {
-    const NAME: &'static str = "shell";
-    type Args = ShellArgs;
-    type Output = ToolOutput;
-    type Error = io::Error;
-
-    fn description(&self) -> String {
-        "在会话工作目录通过 sh -c 执行命令。返回退出状态、stdout 和 stderr；\
-         每个输出流最多保留末尾 2000 行或 50 KiB，超出部分丢弃，完整输出写入临时文件并在结果里给出路径。\
-         可选 timeout（秒），超时会终止整个进程组。"
-            .into()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string", "description": "要执行的 shell 命令" },
-                "timeout": {
-                    "type": "integer",
-                    "description": format!("超时秒数（1-{}），缺省不超时", super::shell::MAX_TIMEOUT_SECONDS)
-                }
-            },
-            "required": ["command"]
-        })
-    }
-
-    async fn call(
-        &self,
-        _context: &mut ToolContext,
-        args: ShellArgs,
-    ) -> Result<ToolOutput, io::Error> {
-        let timeout = match args.timeout {
-            None => None,
-            Some(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "timeout 必须大于 0 秒",
-                ))
-            }
-            Some(seconds) if seconds > super::shell::MAX_TIMEOUT_SECONDS => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("timeout 最大为 {} 秒", super::shell::MAX_TIMEOUT_SECONDS),
-                ))
-            }
-            Some(seconds) => Some(Duration::from_secs(seconds)),
-        };
-        Ok(ToolOutput::text(
-            super::shell::execute(&self.cwd, &args.command, timeout).await?,
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_preserves_tool_history_and_maps_acp_events() {
         let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().to_path_buf();
+        let shell = Shell::new(dir.path().to_path_buf());
         let model = MockCompletionModel::new([
             tool_turn("call-one", "printf hello > result; printf hello"),
             MockTurn::text("完成"),
@@ -304,7 +239,7 @@ mod tests {
                 ))?;
                 let model = model.clone();
                 let history = history.clone();
-                let cwd = cwd.clone();
+                let shell = shell.clone();
                 let done = done_tx.lock().take().unwrap();
                 cx.clone().spawn(async move {
                     let events = Events {
@@ -313,7 +248,7 @@ mod tests {
                     };
                     run(
                         AgentBuilder::new(model.clone()),
-                        cwd.clone(),
+                        shell.clone(),
                         "执行".into(),
                         history.clone(),
                         events.clone(),
@@ -322,7 +257,7 @@ mod tests {
                     .unwrap();
                     run(
                         AgentBuilder::new(model),
-                        cwd,
+                        shell,
                         "继续".into(),
                         history,
                         events,
@@ -422,9 +357,7 @@ mod tests {
             quote(&socket_path), quote(&executable),
         );
         let agent = AgentBuilder::new(MockCompletionModel::new([tool_turn("child", &command)]))
-            .tool(Shell {
-                cwd: dir.path().into(),
-            })
+            .tool(Shell::new(dir.path().into()))
             .build();
         let task = tokio::spawn(async move { agent.runner("开始").run().await });
         let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
@@ -456,9 +389,7 @@ mod tests {
         let captured = model.clone();
         let dir = tempfile::tempdir().unwrap();
         let agent = AgentBuilder::new(model)
-            .tool(Shell {
-                cwd: dir.path().join("missing"),
-            })
+            .tool(Shell::new(dir.path().join("missing")))
             .default_max_turns(32)
             .build();
         let response = agent.runner("开始").run().await.unwrap();
