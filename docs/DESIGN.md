@@ -314,25 +314,25 @@ Server 作为 ACP client 与 Agents 通信
   - Server 在往 Agent 发送 `session/prompt` 成功后，应立即给用户消息赋予消息 ID 并落盘，忽略 Agent 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
   ```SQL
   CREATE TABLE IF NOT EXISTS messages (
-      session_id TEXT NOT NULL,      -- Amux 普通会话 ID
-      message_id TEXT NOT NULL,      -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 Agent 提供
-      role TEXT NOT NULL,            -- user / agent
-      content TEXT NOT NULL,         -- 消息内容，以 json 格式存放
-      created_at INTEGER NOT NULL,   -- 创建时间
-      updated_at INTEGER NOT NULL,   -- 更新时间
-      PRIMARY KEY (session_id, message_id)
+    session_id TEXT NOT NULL,      -- Amux 普通会话 ID
+    message_id TEXT NOT NULL,      -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 Agent 提供
+    role TEXT NOT NULL,            -- user / agent
+    content TEXT NOT NULL,         -- 消息内容，以 json 格式存放
+    created_at INTEGER NOT NULL,   -- 创建时间
+    updated_at INTEGER NOT NULL,   -- 更新时间
+    PRIMARY KEY (session_id, message_id)
   );
   ```
 - 活动历史：存储在 `~/.amux/session.sqlite` 文件中
   ```
   CREATE TABLE IF NOT EXISTS activities (
-      session_id TEXT NOT NULL,      -- Amux 普通会话 ID
-      activity_id TEXT NOT NULL,     -- toolCallId / thought message id / 本地生成的唯一 ID
-      kind TEXT NOT NULL,            -- 类别：tool_call / thinking / error
-      content TEXT,                  -- 活动内容，以 json 格式存放
-      created_at INTEGER NOT NULL,   -- 创建时间
-      updated_at INTEGER NOT NULL,   -- 更新时间
-      PRIMARY KEY (session_id, activity_id)
+    session_id TEXT NOT NULL,      -- Amux 普通会话 ID
+    activity_id TEXT NOT NULL,     -- toolCallId / thought message id / 本地生成的唯一 ID
+    kind TEXT NOT NULL,            -- 类别：tool_call / thinking / error
+    content TEXT,                  -- 活动内容，以 json 格式存放
+    created_at INTEGER NOT NULL,   -- 创建时间
+    updated_at INTEGER NOT NULL,   -- 更新时间
+    PRIMARY KEY (session_id, activity_id)
   );
   ```
 
@@ -370,7 +370,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 工作流智能体实现应支持 steer，当工作流会话处于工作中时，接收的用户消息以 steer 方式注入。
 
-工作流智能体采用非流式方式请求模型 API。
+工作流智能体采用非流式方式请求模型 API，其模型对话上下文应从磁盘上 `<workflow_id>_history.jsonl` 和 `<workflow_id>_activities.jsonl` 文件中进行恢复。
 
 ### 工作流会话驱动
 
@@ -414,10 +414,12 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   {"role": "user", "content": [ ... ], "timestamp": 1725800000000}
   {"role": "agent", "content": [ ... ], "timestamp": 1725800001000}
   ```
-- 活动历史：存储在 `~/.amux/workflows/<workflow_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误等等
+- 活动历史：存储在 `~/.amux/workflows/<workflow_id>_activities.jsonl` 文件中，包含工具调用、工具结果、thinking、执行错误
+  - 工具结果长度最大为 500 字符，超过需截断前面内容保留结果尾部，截断后存储为 `[前面内容已截掉] <截断后的结果>`
   ```json
   {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
-  {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "title": "读 src/lib.rs", "parameters": "..."}
+  {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "parameters": "..."}
+  {"kind": "tool_result", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_result": "..." }
   {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
   ```
 
