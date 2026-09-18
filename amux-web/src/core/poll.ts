@@ -194,7 +194,7 @@ async function refreshOpen(core: Core): Promise<void> {
   }
   if (terminalOpen && target.kind === "session" && due(core.last.terminal, TERMINAL_INTERVAL)) {
     core.last.terminal = Date.now();
-    await refreshTerminal(core, target.id);
+    await refreshTerminalOutput(core, target.id);
   }
 }
 
@@ -400,13 +400,17 @@ export async function loadNewerActivities(core: Core): Promise<void> {
   }
 }
 
-/** 终端：拉取终端列表，并按游标取活动终端的增量输出。 */
-async function refreshTerminal(core: Core, sessionId: string): Promise<void> {
+/** 终端视图打开时从 Server 拉取一次终端列表，并移除服务端已消失的终端；不做周期性轮询。 */
+export async function refreshTerminalList(core: Core): Promise<void> {
   const client = core.client;
-  if (!client) return;
+  const target = core.state.open;
+  if (!client || !target || target.kind !== "session" || core.state.sidePanel !== "terminal") {
+    return;
+  }
   try {
-    const terminals = await client.terminals(sessionId);
+    const terminals = await client.terminals(target.id);
     core.update((state) => {
+      if (state.sidePanel !== "terminal" || !sameTarget(state.open, target)) return;
       state.detail.terminals = terminals;
       // 列表中消失的终端（会话重开、退出后被清理）从应用侧移除
       if (
@@ -418,8 +422,14 @@ async function refreshTerminal(core: Core, sessionId: string): Promise<void> {
       }
     });
   } catch {
-    // 忽略：下一周期重试
+    // 读取失败仅影响当前打开这次；下次视图打开时再重试
   }
+}
+
+/** 终端输出增量：按游标取活动终端的输出内容（终端视图打开期间每 500ms 轮询）。 */
+async function refreshTerminalOutput(core: Core, sessionId: string): Promise<void> {
+  const client = core.client;
+  if (!client) return;
   const active = core.state.detail.activeTerminal;
   if (active === null) return;
   try {
@@ -450,7 +460,13 @@ export async function refreshWorkflowSetup(core: Core): Promise<void> {
 
 /** 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置与快捷指令。 */
 export async function refreshInteraction(core: Core): Promise<void> {
-  await Promise.all([refreshMachines(core), refreshOrchestrator(core), refreshQuickCommands(core), refreshSessionControls(core)]);
+  await Promise.all([
+    refreshMachines(core),
+    refreshOrchestrator(core),
+    refreshQuickCommands(core),
+    refreshSessionControls(core),
+    refreshTerminalList(core),
+  ]);
 }
 
 async function refreshSessionControls(core: Core): Promise<void> {

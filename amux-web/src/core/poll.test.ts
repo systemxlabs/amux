@@ -223,6 +223,35 @@ describe("tick", () => {
   });
 });
 
+describe("tick 终端轮询", () => {
+  it("终端视图打开期间只轮询终端输出内容，不周期性拉取终端列表", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, calls } = recordingClient({
+        terminals: () => [],
+        terminalOutput: () => ({ data: "", nextCursor: 0 }),
+        ongoingActivity: () => null,
+      });
+      const core = onlineCore(client);
+      core.state.middle = "interaction";
+      core.state.open = { kind: "session", id: "s1" };
+      core.state.sidePanel = "terminal";
+      core.state.detail.activeTerminal = "t1";
+      core.state.detail.stream = { cursor: 0 };
+
+      await tick(core);
+      expect(calls).toContain("terminalOutput");
+      expect(calls).not.toContain("terminals");
+
+      vi.advanceTimersByTime(500);
+      await tick(core);
+      expect(calls).not.toContain("terminals");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("refreshDetails", () => {
   it("普通会话：拉取一次详情与上下文用量", async () => {
     const { client, calls } = recordingClient();

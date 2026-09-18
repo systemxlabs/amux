@@ -204,13 +204,7 @@ async fn refresh_open(
                 core.lock().last.ongoing = Some(Instant::now());
             }
             if due_terminal && terminal_open {
-                // 终端列表无活动终端时也要刷新（重开会话后列出已有终端、退出状态等）
-                if let Ok(terminals) = client.terminals(id).await {
-                    let mut core = core.lock();
-                    if core.open.as_ref() == Some(target) {
-                        set_terminals(&mut core, terminals);
-                    }
-                }
+                // 期间只轮询终端输出内容；终端列表仅在终端视图打开时拉取一次
                 if let Some(terminal_id) = terminal {
                     if let Ok(output) = client.terminal_output(id, &terminal_id, Some(cursor)).await
                     {
@@ -459,7 +453,29 @@ pub async fn refresh_interaction(client: &Client, core: &SharedCore) {
         refresh_orchestrator(client, core),
         refresh_quick_commands(client, core),
         refresh_session_controls(client, core),
+        refresh_terminal_list(client, core),
     );
+}
+
+/// 终端视图打开时从 Server 拉取一次终端列表，并移除服务端已消失的终端；
+/// 不做周期性轮询（docs/DESIGN.md「终端视图」）。
+async fn refresh_terminal_list(client: &Client, core: &SharedCore) {
+    let id = {
+        let open = core.lock();
+        let Some(OpenTarget::Session(id)) = open.open.clone() else {
+            return;
+        };
+        if open.side_panel != Some(SidePanel::Terminal) {
+            return;
+        }
+        id
+    };
+    if let Ok(terminals) = client.terminals(&id).await {
+        let mut core = core.lock();
+        if core.open.as_ref() == Some(&OpenTarget::Session(id)) {
+            set_terminals(&mut core, terminals);
+        }
+    }
 }
 
 /// 普通会话的会话选项与斜杠命令只在打开会话时拉取一次，不定时刷新；

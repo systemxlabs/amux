@@ -25,6 +25,7 @@ import {
   refreshList,
   refreshNewSession,
   refreshSettings,
+  refreshTerminalList,
   tick,
 } from "./poll";
 
@@ -149,14 +150,18 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
 
 /** 切换右侧面板（再次点击收起）。 */
 export function toggleSidePanel(core: Core, panel: SidePanel): void {
+  let opened = false;
   core.update((state) => {
     const next = state.sidePanel === panel ? null : panel;
     state.sidePanel = next;
+    opened = next === "terminal";
     // 终端视图每次打开都从头拉取完整输出（docs/DESIGN.md「终端视图」）
     if (next === "terminal") state.detail.stream = { cursor: null };
   });
   core.resetTicks();
   core.last.list = Date.now();
+  // 终端视图打开时从 Server 拉取一次终端列表（docs/DESIGN.md「终端视图」）
+  if (opened) void refreshTerminalList(core);
 }
 
 /** 删除会话（工作流会话连同关联普通会话，由 Server 级联）。 */
