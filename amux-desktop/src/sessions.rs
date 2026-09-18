@@ -16,12 +16,10 @@ use gpui_component::{
     h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Selectable, Sizable,
 };
 
-use crate::app::AmuxApp;
+use crate::app::{AmuxApp, InputResizeDrag, INPUT_RESIZE_HANDLE_HEIGHT};
 use crate::state::{Core, SettingsTab};
 use crate::ui;
 
-/// 输入框最小高度：宽松的命中区域，随 auto_grow 继续增高。
-const INPUT_MIN_HEIGHT: f32 = 96.0;
 /// 消息气泡宽度上下限（下限需容纳时间戳行）。
 const BUBBLE_MIN_WIDTH: f32 = 132.0;
 const BUBBLE_MAX_WIDTH: f32 = 720.0;
@@ -886,9 +884,32 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
         );
     }
 
+    // 高度拖拽手柄：贴输入框上沿，向上拖变高、向下拖变矮（docs/PRD.md「会话交互视图」：
+    // 多行输入框，可拖拽高度）。与侧栏/面板手柄同一套拖拽做法。
+    let resize_handle = div()
+        .id("composer-resize-handle")
+        .w_full()
+        .h(px(INPUT_RESIZE_HANDLE_HEIGHT))
+        .rounded_full()
+        .bg(theme.border.opacity(0.6))
+        .cursor(CursorStyle::ResizeRow)
+        .hover(|handle| handle.bg(theme.primary))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, _, _| {
+                this.begin_composer_resize(event.position.y.as_f32());
+            }),
+        )
+        .on_drag(InputResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
+        .on_drag_move(
+            cx.listener(|this, event: &DragMoveEvent<InputResizeDrag>, window, cx| {
+                this.resize_composer(event.event.position.y.as_f32(), window, cx);
+            }),
+        );
+
     let mut row = h_flex().relative().gap_2().items_end();
     row = row.child(
-        div()
+        v_flex()
             .id("input-drop-zone")
             .flex_1()
             .min_w_0()
@@ -896,7 +917,8 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.attach_paths(paths.paths(), cx)
             }))
-            .child(Input::new(&this.input).min_h(px(INPUT_MIN_HEIGHT))),
+            .child(resize_handle)
+            .child(Input::new(&this.input).h(px(this.composer_height))),
     );
     row = row.child(
         v_flex()

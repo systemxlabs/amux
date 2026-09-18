@@ -45,6 +45,12 @@ const TICK: Duration = Duration::from_millis(250);
 
 /// 面板拖拽手柄宽度。
 pub const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
+/// 输入框高度拖拽手柄厚度。
+pub const INPUT_RESIZE_HANDLE_HEIGHT: f32 = 5.0;
+/// 输入框默认高度（约 3 行，与 Web 输入区一致，docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）。
+pub const INPUT_DEFAULT_HEIGHT: f32 = 96.0;
+/// 输入框高度拖拽下限（与 Web 输入区的 `min-h-16` 一致）。
+pub const INPUT_MIN_HEIGHT: f32 = 64.0;
 /// 会话选项值上限宽度：值文本超过它就省略（docs/PRD.md「会话交互视图」：宽度自适应 + 超长省略）。
 const CONFIG_VALUE_MAX_WIDTH: f32 = 224.0;
 
@@ -54,6 +60,8 @@ actions!(amux, [CloseSettingsOverlay, TerminalTab, TerminalBackTab]);
 struct SidebarResizeDrag;
 /// 右侧面板调宽拖拽载荷。
 struct PanelResizeDrag;
+/// 输入框高度拖拽载荷。
+pub(crate) struct InputResizeDrag;
 
 pub struct AmuxApp {
     pub core: SharedCore,
@@ -135,6 +143,10 @@ pub struct AmuxApp {
     pub workspace_tree_visible: bool,
     /// 工作目录面板中文件内容区域是否展开
     pub workspace_content_visible: bool,
+    /// 输入框高度（拖拽调整，docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）
+    pub composer_height: f32,
+    /// 输入框高度拖拽起点（指针 y, 起始高度）
+    composer_drag: Option<(f32, f32)>,
     /// 左侧面板宽度（逻辑像素）
     sidebar_width: f32,
     /// 侧栏拖拽起点（指针 x, 起始宽度）
@@ -168,9 +180,11 @@ impl AmuxApp {
         let server = connection.server.clone();
         let token = connection.token.clone();
         let input = cx.new(|cx| {
+            // 高度由拖拽手柄决定（不再按内容自动增高）：超出高度的内容在框内滚动，
+            // 与 Web 输入区（可竖向拖拽的 textarea）一致（docs/PRD.md「会话交互视图」）
             InputState::new(window, cx)
+                .multi_line(true)
                 .placeholder("输入消息，Enter 发送；Shift+Enter 换行")
-                .auto_grow(3, 8)
                 .submit_on_enter(true)
         });
         let plan_input = cx.new(|cx| {
@@ -338,6 +352,8 @@ impl AmuxApp {
             workspace_file: None,
             workspace_tree_visible: true,
             workspace_content_visible: true,
+            composer_height: INPUT_DEFAULT_HEIGHT,
+            composer_drag: None,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_drag: None,
             panel_width: 0.0,
@@ -356,6 +372,21 @@ impl AmuxApp {
         while let Some(note) = self.with_core(|core| core.notes.pop_front()) {
             window.push_notification(dialog::note_notification(note), cx);
         }
+    }
+
+    /// 记录输入框高度拖拽起点（docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）。
+    pub fn begin_composer_resize(&mut self, pointer_y: f32) {
+        self.composer_drag = Some((pointer_y, self.composer_height));
+    }
+
+    /// 拖拽调整输入框高度：向上拖（y 变小）变高；上限取窗口高度，避免把输入区顶出窗口。
+    pub fn resize_composer(&mut self, pointer_y: f32, window: &Window, cx: &mut Context<Self>) {
+        let Some((origin, initial)) = self.composer_drag else {
+            return;
+        };
+        self.composer_height = (initial + (origin - pointer_y))
+            .clamp(INPUT_MIN_HEIGHT, window.bounds().size.height.as_f32());
+        cx.notify();
     }
 
     /// 打开设置浮窗；`tab` 为 `None` 时保持当前分类。
