@@ -209,24 +209,6 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                     </div>
                   )}
                 </div>
-                {/* 窄视口的长按不一定弹出右键菜单（iOS Safari 就不弹），给会话操作留一个按钮入口 */}
-                <button
-                  type="button"
-                  data-slot="session-menu"
-                  aria-label="会话操作"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    const box = event.currentTarget.getBoundingClientRect();
-                    setMenu({
-                      x: box.right,
-                      y: box.bottom,
-                      items: menuItems(entry, id, title, row.depth),
-                    });
-                  }}
-                  className="flex size-8 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground lg:hidden"
-                >
-                  <MoreHorizontal className="size-4" />
-                </button>
                 {entry.kind === "workflow" && canExpand(entry) ? (
                   <button
                     type="button"
@@ -246,6 +228,24 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                     )}
                   </button>
                 ) : null}
+                {/* 窄视口的长按不一定弹出右键菜单（iOS Safari 就不弹），给会话操作留一个按钮入口 */}
+                <button
+                  type="button"
+                  data-slot="session-menu"
+                  aria-label="会话操作"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    const box = event.currentTarget.getBoundingClientRect();
+                    setMenu({
+                      x: box.right,
+                      y: box.bottom,
+                      items: menuItems(entry, id, title, row.depth),
+                    });
+                  }}
+                  className="flex size-8 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground lg:hidden"
+                >
+                  <MoreHorizontal className="size-4" />
+                </button>
                 {entryState(entry) === "busy" ? (
                   <Loader2
                     data-slot="session-spinner"
