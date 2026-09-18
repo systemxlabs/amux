@@ -370,7 +370,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 工作流智能体实现应支持 steer，当工作流会话处于工作中时，接收的用户消息以 steer 方式注入。
 
-工作流智能体采用非流式方式请求模型 API，其模型对话上下文应从磁盘上 `<workflow_id>_history.jsonl` 和 `<workflow_id>_activities.jsonl` 文件中进行恢复。
+工作流智能体采用非流式方式请求模型 API，其模型对话上下文应从磁盘上 `<workflow_id>_history.jsonl` 和 `<workflow_id>_activities.jsonl` 文件中进行恢复，为每个工具调用自动补一条工具结果：`[工具结果已过期]`。
 
 ### 工作流会话驱动
 
@@ -414,12 +414,10 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   {"role": "user", "content": [ ... ], "timestamp": 1725800000000}
   {"role": "agent", "content": [ ... ], "timestamp": 1725800001000}
   ```
-- 活动历史：存储在 `~/.amux/workflows/<workflow_id>_activities.jsonl` 文件中，包含工具调用、工具结果、thinking、执行错误
-  - 工具结果长度最大为 500 字符，超过需截断前面内容保留结果尾部，截断后存储为 `[前面内容已截掉] <截断后的结果>`
+- 活动历史：存储在 `~/.amux/workflows/<workflow_id>_activities.jsonl` 文件中，包含工具调用、thinking、执行错误
   ```json
   {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
   {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "parameters": "..."}
-  {"kind": "tool_result", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_result": "..." }
   {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
   ```
 
