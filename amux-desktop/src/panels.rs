@@ -830,6 +830,12 @@ fn detail_panel(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
 /// 会话活动面板：条目默认折叠为一行，点击展开详情；滚动分页见 docs/DESIGN.md「活动列表滚动机制」。
 fn activities_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
+    // 进入时默认滚动到底部（最新一条）；此后不再主动贴底，除非用户本就在底部
+    if this.activities_scroll_on_entry || crate::sessions::scroll_at_bottom(&this.activities_scroll)
+    {
+        this.activities_scroll.scroll_to_bottom();
+        this.activities_scroll_on_entry = false;
+    }
     let mut rows = v_flex()
         .id("activities-panel")
         .w_full()

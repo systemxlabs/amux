@@ -1058,7 +1058,7 @@ fn config_options(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
 }
 
 /// 滚动区是否贴底（gpui 的 offset.y 范围为 [-max, 0]，留 1px 浮点容差）。
-fn scroll_at_bottom(handle: &ScrollHandle) -> bool {
+pub(crate) fn scroll_at_bottom(handle: &ScrollHandle) -> bool {
     handle.offset().y <= -handle.max_offset().y + px(1.0)
 }
 

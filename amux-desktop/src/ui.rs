@@ -239,31 +239,37 @@ pub fn activity_kind_detail(activity: &Activity) -> (String, String) {
         } => {
             let title = title.clone().unwrap_or_default();
             let body = parameters.clone().unwrap_or_default();
-            let detail = if title.trim().is_empty() {
-                body
-            } else if body.trim().is_empty() {
-                title
-            } else {
-                format!("{title}\n{body}")
-            };
-            (format!("工具调用：{tool_name}"), detail)
+            let mut detail = tool_name.clone();
+            if !title.trim().is_empty() {
+                detail.push('\n');
+                detail.push_str(&title);
+            }
+            if !body.trim().is_empty() {
+                detail.push('\n');
+                detail.push_str(&body);
+            }
+            ("工具调用".to_string(), detail)
         }
         Activity::Error { error, .. } => ("错误".to_string(), error.clone()),
     }
 }
 
-/// 实时活动条文案（无进行中活动为 `None`）：`<活动类型>：<活动内容>`，内容只折叠空白，由布局截断。
+/// 实时活动条文案（无进行中活动为 `None`）：`<活动类型> <活动内容>`，内容只折叠空白，由布局截断。
 pub fn activity_bar_text(current: Option<&Activity>) -> Option<String> {
     match current? {
-        Activity::Thinking { thinking, .. } => Some(format!("思考：{}", one_line(thinking))),
+        Activity::Thinking { thinking, .. } => Some(format!("思考 {}", one_line(thinking))),
         Activity::ToolCall {
             tool_name, title, ..
-        } => Some(format!(
-            "工具调用：{} {}",
-            tool_name,
-            one_line(title.as_deref().unwrap_or(""))
-        )),
-        Activity::Error { error, .. } => Some(format!("错误：{}", one_line(error))),
+        } => {
+            let title = one_line(title.as_deref().unwrap_or(""));
+            let content = if title.is_empty() {
+                tool_name.clone()
+            } else {
+                format!("{tool_name} {title}")
+            };
+            Some(format!("工具调用 {content}"))
+        }
+        Activity::Error { error, .. } => Some(format!("错误 {}", one_line(error))),
     }
 }
 

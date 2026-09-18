@@ -117,6 +117,8 @@ pub struct AmuxApp {
     pub dialog_scroll_on_entry: bool,
     /// 活动历史滚动句柄
     pub activities_scroll: ScrollHandle,
+    /// 活动视图打开时是否尚需贴到最新一条（进入时默认滚动到底部）
+    pub activities_scroll_on_entry: bool,
     /// 计划面板滚动句柄
     pub plan_scroll: ScrollHandle,
     /// 已展开的活动条目（key = 时间戳 + 文案，跨帧稳定）
@@ -327,6 +329,7 @@ impl AmuxApp {
             dialog_scroll: ScrollHandle::new(),
             dialog_scroll_on_entry: true,
             activities_scroll: ScrollHandle::new(),
+            activities_scroll_on_entry: false,
             plan_scroll: ScrollHandle::new(),
             expanded_activities: HashSet::new(),
             workspace_recent_open: false,
@@ -472,9 +475,11 @@ impl AmuxApp {
         if self.with_core(|core| core.side_panel == Some(SidePanel::Activities)) {
             let handle = self.activities_scroll.clone();
             let loaded = self.with_core(|core| core.view.detail.activities.len());
-            if self.sync_list_paging(&handle, loaded, true, |core| {
-                &mut core.view.detail.activities_paging
-            }) {
+            if !self.activities_scroll_on_entry
+                && self.sync_list_paging(&handle, loaded, true, |core| {
+                    &mut core.view.detail.activities_paging
+                })
+            {
                 let core = Arc::clone(&self.core);
                 self.runtime.spawn(async move {
                     poll::load_older_activities(&client, &core, &target).await
@@ -774,6 +779,7 @@ impl AmuxApp {
         self.workspace_file = None;
         self.workspace_tree_visible = true;
         self.dialog_scroll_on_entry = true;
+        self.activities_scroll_on_entry = true;
         self.load_view_data();
         cx.notify();
     }
@@ -1512,6 +1518,9 @@ impl AmuxApp {
                 _ => {}
             }
         });
+        if panel == SidePanel::Activities {
+            self.activities_scroll_on_entry = true;
+        }
         // 在已打开的面板之间切换时保留用户调整后的宽度；首次打开用默认宽度
         if previous.is_none() || previous == Some(panel) {
             self.panel_width = panel.default_width();

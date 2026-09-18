@@ -70,7 +70,7 @@ describe("activitySummary", () => {
 });
 
 describe("activityBarText", () => {
-  it("实时活动条为「活动类型：活动内容」", () => {
+  it("实时活动条为「活动类型 活动内容」", () => {
     expect(
       activityBarText({
         kind: "tool_call",
@@ -80,12 +80,12 @@ describe("activityBarText", () => {
         tool_name: "read_file",
         title: "读取 src/lib.rs",
       }),
-    ).toBe("工具调用：读取 src/lib.rs");
+    ).toBe("工具调用 读取 src/lib.rs");
     expect(activityBarText({ kind: "thinking", id: "a2", timestamp: 1, thinking: "先看看" })).toBe(
-      "思考：先看看",
+      "思考 先看看",
     );
     expect(activityBarText({ kind: "error", id: "a3", timestamp: 1, error: "调用失败" })).toBe(
-      "错误：调用失败",
+      "错误 调用失败",
     );
   });
 });

@@ -51,9 +51,9 @@ export function activitySummary(activity: Activity): string {
   }
 }
 
-/** 实时活动条文案：`<活动类型>：<活动内容>`（docs/PRD.md「会话交互视图」）。 */
+/** 实时活动条文案：`<活动类型> <活动内容>`（docs/PRD.md「会话交互视图」）。 */
 export function activityBarText(activity: Activity): string {
-  return `${activityKindLabel(activity)}：${activitySummary(activity)}`;
+  return `${activityKindLabel(activity)} ${activitySummary(activity)}`;
 }
 
 /** 活动详情（展开态展示）。 */

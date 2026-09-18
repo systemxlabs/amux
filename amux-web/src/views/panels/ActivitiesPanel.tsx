@@ -9,7 +9,6 @@ import {
   activityKindLabel,
   activitySummary,
   formatTime,
-  truncate,
 } from "../../lib/format";
 import { pageSizeForViewport } from "../../lib/paging";
 import type { Activity } from "../../lib/types";
@@ -34,7 +33,7 @@ function ActivityRow({ activity, expanded, onToggle }: RowProps) {
       <div data-slot="activity-summary" className="flex items-start gap-2">
         <span className="shrink-0 text-xs text-muted-foreground">{activityKindLabel(activity)}</span>
         <span className="min-w-0 flex-1 truncate text-sm">
-          {truncate(activitySummary(activity), 120)}
+          {activitySummary(activity)}
         </span>
         <span className="shrink-0 text-xs text-muted-foreground">
           {formatTime(activity.timestamp)}
@@ -57,10 +56,24 @@ export function ActivitiesPanel() {
   const state = useCoreState();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const previousHeight = useRef(0);
+  const scrollOnEntry = useRef(true);
   const [expanded, setExpanded] = useState<string[]>([]);
 
   const activities = state.detail.activities;
   const shift = state.detail.activitiesPaging.shift;
+  const target = state.open;
+
+  // 每条进入时默认滚动到底部；切换会话（面板保持打开）时重新贴底
+  useLayoutEffect(() => {
+    scrollOnEntry.current = true;
+  }, [core, target?.kind, target?.id]);
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (element === null || !scrollOnEntry.current || activities.length === 0) return;
+    element.scrollTop = element.scrollHeight;
+    scrollOnEntry.current = false;
+  }, [activities]);
 
   // 更早一页插入后内容整体下移：在下一帧之前按插入高度补偿滚动位置，
   // 让插入前可见的条目停在原处（上一帧已记录插入前的内容高度）
