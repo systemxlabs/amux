@@ -335,6 +335,10 @@ pub struct OrchestratorConfig {
 }
 
 pub const AMUX_AUTH_METHOD: &str = "amux-config";
+/// Nano 无法归类为标准 ACP stop reason 时的自定义停止原因。
+pub const NANO_ERROR_STOP_REASON: &str = "_nano_error";
+/// `IdleStateUpdate._meta` 中承载 Nano 错误详情的键。
+pub const NANO_ERROR_META_KEY: &str = "_nanoError";
 
 impl OrchestratorConfig {
     pub fn validate(&self) -> Result<(), String> {

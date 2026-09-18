@@ -17,6 +17,18 @@ use super::shell::Shell;
 
 const MAX_MODEL_CALLS: usize = 32;
 
+#[derive(Debug, PartialEq)]
+pub(super) enum RunError {
+    Stop(StopReason),
+    Failed(String),
+}
+
+impl From<String> for RunError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Events {
     pub cx: V2ConnectionTo<Client>,
@@ -47,7 +59,7 @@ pub(super) async fn run(
     text: String,
     history: Arc<Mutex<Vec<Message>>>,
     events: Events,
-) -> Result<(), String> {
+) -> Result<(), RunError> {
     let previous = history.lock().clone();
     history.lock().push(Message::user(text.clone()));
     let agent = builder
@@ -74,12 +86,21 @@ pub(super) async fn run(
             }
             Ok(())
         }
-        Err(PromptError::MaxTurnsError { chat_history, .. }) => {
+        Err(error) => Err(classify_prompt_error(error, &history)),
+    }
+}
+
+fn classify_prompt_error(error: PromptError, history: &Arc<Mutex<Vec<Message>>>) -> RunError {
+    match error {
+        PromptError::MaxTurnsError { chat_history, .. } => {
             *history.lock() = *chat_history;
-            // 保留原 Nano 达到预算后结束本轮的行为，而不是报告模型错误。
-            Ok(())
+            RunError::Stop(StopReason::MaxTurnRequests)
         }
-        Err(error) => Err(format!("模型调用失败: {error}")),
+        PromptError::PromptCancelled { chat_history, .. } => {
+            *history.lock() = chat_history;
+            RunError::Stop(StopReason::Cancelled)
+        }
+        error => RunError::Failed(format!("模型调用失败: {error}")),
     }
 }
 
@@ -186,7 +207,10 @@ mod tests {
     use super::*;
     use agent_client_protocol::{schema::ProtocolVersion, Agent};
     use rig_core::{
-        completion::message::{Reasoning, ToolCall, ToolFunction, UserContent},
+        completion::{
+            message::{Reasoning, ToolCall, ToolFunction, UserContent},
+            CompletionError,
+        },
         test_utils::{MockCompletionModel, MockTurn},
     };
     use tokio::sync::{mpsc, oneshot};
@@ -211,6 +235,39 @@ mod tests {
             }),
             _ => false,
         })
+    }
+
+    #[test]
+    fn prompt_errors_map_to_acp_stop_reasons() {
+        let history = Arc::new(Mutex::new(Vec::new()));
+        assert_eq!(
+            classify_prompt_error(
+                PromptError::MaxTurnsError {
+                    max_turns: 1,
+                    chat_history: Box::new(Vec::new()),
+                    prompt: Box::new(Message::user("继续")),
+                },
+                &history,
+            ),
+            RunError::Stop(StopReason::MaxTurnRequests)
+        );
+        assert_eq!(
+            classify_prompt_error(
+                PromptError::PromptCancelled {
+                    chat_history: Vec::new(),
+                    reason: "取消".into(),
+                },
+                &history,
+            ),
+            RunError::Stop(StopReason::Cancelled)
+        );
+        assert_eq!(
+            classify_prompt_error(
+                PromptError::CompletionError(CompletionError::ProviderError("失败".into())),
+                &history,
+            ),
+            RunError::Failed("模型调用失败: CompletionError: ProviderError: 失败".to_string())
+        );
     }
 
     #[tokio::test]

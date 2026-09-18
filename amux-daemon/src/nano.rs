@@ -6,7 +6,10 @@ use agent_client_protocol::{
     schema::v2::*, Agent, Client, ConnectTo, Error, Lines, V2ConnectionTo,
 };
 use amux_common::{
-    api::{OrchestratorConfig, AMUX_AUTH_METHOD, NANO_AGENT},
+    api::{
+        OrchestratorConfig, AMUX_AUTH_METHOD, NANO_AGENT, NANO_ERROR_META_KEY,
+        NANO_ERROR_STOP_REASON,
+    },
     daemon::{notify, AcpForward},
 };
 use futures_util::{sink, stream};
@@ -140,15 +143,19 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
             tools.update(SessionUpdate::StateUpdate(StateUpdate::Running(RunningStateUpdate::new())));
             let nano = nano.clone();
             cx.spawn(async move {
-                let reason = tokio::select! {
+                let (reason, error) = tokio::select! {
                     biased;
-                    _ = cancel.changed() => StopReason::Cancelled,
+                    _ = cancel.changed() => (StopReason::Cancelled, None),
                     result = async {
                         runtime::run(runtime::builder(&config)?, shell.clone(), text, history.clone(), tools.clone()).await
                     } => {
                         match result {
-                            Ok(_) => StopReason::EndTurn,
-                            Err(error) => { tools.text(&error); StopReason::Other("_error".into()) }
+                            Ok(()) => (StopReason::EndTurn, None),
+                            Err(runtime::RunError::Stop(reason)) => (reason, None),
+                            Err(runtime::RunError::Failed(error)) => (
+                                StopReason::Other(NANO_ERROR_STOP_REASON.into()),
+                                Some(error),
+                            ),
                         }
                     }
                 };
@@ -158,7 +165,16 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                     if session.cancel.as_ref().is_some_and(|tx| tx.subscribe().same_channel(&cancel)) {
                         session.history = std::mem::take(&mut *history.lock());
                         session.cancel = None;
-                        tools.update(SessionUpdate::StateUpdate(StateUpdate::Idle(IdleStateUpdate::new().stop_reason(reason))));
+                        let mut idle = IdleStateUpdate::new().stop_reason(reason);
+                        if let Some(error) = error {
+                            let mut meta = serde_json::Map::new();
+                            meta.insert(
+                                NANO_ERROR_META_KEY.to_string(),
+                                serde_json::json!({ "message": error }),
+                            );
+                            idle = idle.meta(meta);
+                        }
+                        tools.update(SessionUpdate::StateUpdate(StateUpdate::Idle(idle)));
                     }
                 }
                 Ok(())
@@ -295,6 +311,49 @@ mod tests {
         let _ = task.await;
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn model_error_uses_nano_stop_reason_and_meta() {
+        let (tx, outbox, task) = started().await;
+        let _ = next_raw(&outbox).await;
+        send(
+            &tx,
+            2,
+            "auth/login",
+            serde_json::json!({"methodId": AMUX_AUTH_METHOD, "_meta": config_meta()}),
+        )
+        .await;
+        assert!(next_raw(&outbox).await.get("error").is_none());
+        send(&tx, 3, "session/new", serde_json::json!({"cwd": "/tmp"})).await;
+        let session_id = next_raw(&outbox).await["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        send(
+            &tx,
+            4,
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": "执行"}],
+            }),
+        )
+        .await;
+        assert!(next_raw(&outbox).await.get("error").is_none());
+        assert_eq!(
+            next_raw(&outbox).await["params"]["update"]["state"],
+            "running"
+        );
+        let idle = next_raw(&outbox).await;
+        let update = &idle["params"]["update"];
+        assert_eq!(update["state"], "idle");
+        assert_eq!(update["stopReason"], NANO_ERROR_STOP_REASON);
+        assert!(update["_meta"][NANO_ERROR_META_KEY]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("模型调用失败:")));
+        drop(tx);
+        let _ = task.await;
     }
 
     /// 登录后 session/new 成功；close/delete 后 resume 新建会话（内存中恢复）。

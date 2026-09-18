@@ -14,8 +14,8 @@ use std::sync::Arc;
 use agent_client_protocol::schema::v2::{
     AvailableCommand, AvailableCommandInput, BlobResourceContents, CancelSessionNotification,
     ClientCapabilities, CloseSessionRequest, ContentBlock as AcpContentBlock, DeleteSessionRequest,
-    EmbeddedResource, EmbeddedResourceResource, Implementation, InitializeRequest, MediaType,
-    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    EmbeddedResource, EmbeddedResourceResource, IdleStateUpdate, Implementation, InitializeRequest,
+    MediaType, NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
     PlanUpdateContent, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
     SessionConfigKind as AcpSessionConfigKind, SessionConfigOption as AcpSessionConfigOption,
@@ -25,6 +25,7 @@ use agent_client_protocol::schema::v2::{
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{Agent, Client, ConnectTo, JsonRpcRequest, Lines, V2ConnectionTo};
+use amux_common::api::{NANO_ERROR_META_KEY, NANO_ERROR_STOP_REASON};
 use amux_common::domain::{
     ContentBlock, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
     SessionConfigSelectEntry, SessionPlanEntry, SessionPlanPriority, SessionPlanStatus,
@@ -34,9 +35,6 @@ use futures_util::sink;
 use futures_util::stream;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
-
-/// agent 以错误结束前台工作时上报的自定义 stopReason。
-const ERROR_STOP_REASON: &str = "_error";
 
 /// ACP 通知 → 会话层事件（文本已按 upsert 语义合并为整条内容）。
 #[derive(Debug, Clone)]
@@ -527,11 +525,12 @@ fn translate(
                 let reason = stop_reason_reason(idle.stop_reason.as_ref());
                 if matches!(
                     idle.stop_reason.as_ref(),
-                    Some(StopReason::Other(value)) if value == ERROR_STOP_REASON
+                    Some(StopReason::Other(value)) if value == NANO_ERROR_STOP_REASON
                 ) {
                     out.push(AcpEvent::Error {
                         agent_session_id: session_id.clone(),
-                        message: "agent 前台工作以错误结束".to_string(),
+                        message: nano_error_message(idle)
+                            .unwrap_or_else(|| "agent 前台工作以错误结束".to_string()),
                     });
                 }
                 out.push(AcpEvent::State {
@@ -660,9 +659,21 @@ fn stop_reason_reason(reason: Option<&StopReason>) -> StateChangeReason {
         Some(StopReason::MaxTokens) => StateChangeReason::MaxTokens,
         Some(StopReason::MaxTurnRequests) => StateChangeReason::MaxTurnRequests,
         Some(StopReason::Refusal) => StateChangeReason::Refusal,
-        Some(StopReason::Other(value)) if value == ERROR_STOP_REASON => StateChangeReason::Aborted,
+        Some(StopReason::Other(value)) if value == NANO_ERROR_STOP_REASON => {
+            StateChangeReason::Aborted
+        }
         _ => StateChangeReason::Completed,
     }
+}
+
+/// 从 Nano 的 idle `_meta` 中提取模型错误详情。
+fn nano_error_message(idle: &IdleStateUpdate) -> Option<String> {
+    idle.meta
+        .as_ref()?
+        .get(NANO_ERROR_META_KEY)?
+        .get("message")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// 权限自动审批：优先 allow 类选项（选项列表首项往往是「拒绝」）。
@@ -845,13 +856,30 @@ mod tests {
             StateChangeReason::Cancelled
         );
         assert_eq!(
-            stop_reason_reason(Some(&StopReason::Other(ERROR_STOP_REASON.to_string()))),
+            stop_reason_reason(Some(&StopReason::Other(NANO_ERROR_STOP_REASON.to_string()))),
             StateChangeReason::Aborted
         );
         assert_eq!(stop_reason_reason(None), StateChangeReason::Completed);
         assert_eq!(
             stop_reason_reason(Some(&StopReason::EndTurn)),
             StateChangeReason::Completed
+        );
+    }
+
+    #[test]
+    fn nano_error_message_reads_idle_meta() {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            NANO_ERROR_META_KEY.to_string(),
+            serde_json::json!({ "message": "模型调用失败: timeout" }),
+        );
+        let idle = IdleStateUpdate::new()
+            .stop_reason(StopReason::Other(NANO_ERROR_STOP_REASON.to_string()))
+            .meta(meta);
+
+        assert_eq!(
+            nano_error_message(&idle).as_deref(),
+            Some("模型调用失败: timeout")
         );
     }
 
