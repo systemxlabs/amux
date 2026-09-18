@@ -60,8 +60,25 @@ export function ActivitiesPanel() {
   const [expanded, setExpanded] = useState<string[]>([]);
 
   const activities = state.detail.activities;
-  const shift = state.detail.activitiesPaging.shift;
+  const paging = state.detail.activitiesPaging;
+  const shift = paging.shift;
   const target = state.open;
+
+  /**
+   * 内容不足一屏时主动补拉更早一页。
+   *
+   * 此时面板没有可滚动区域，滚轮与滚动条都不产生 scroll 事件，只在边界预取的 handleScroll
+   * 永远不触发（大窗口下列表卡在第一页，表现为「滚轮完全没反应」）。补拉到填满可视区或没有
+   * 更早的活动为止。
+   */
+  const fillViewport = (): void => {
+    const element = scrollRef.current;
+    if (element === null) return;
+    const current = core.state.detail.activitiesPaging;
+    if (!current.hasOlder || current.loadingOlder) return;
+    if (element.scrollHeight > element.clientHeight) return;
+    void loadOlderActivities(core);
+  };
 
   // 每条进入时默认滚动到底部；切换会话（面板保持打开）时重新贴底
   useLayoutEffect(() => {
@@ -90,7 +107,7 @@ export function ActivitiesPanel() {
     previousHeight.current = height;
   }, [core, activities, shift, expanded]);
 
-  // 页大小随可视高度自适应：首次渲染与尺寸变化时也重新计算
+  // 页大小随可视高度自适应：首次渲染与尺寸变化时也重新计算；顺带补拉填满可视区
   useEffect(() => {
     const element = scrollRef.current;
     if (element === null) return;
@@ -103,6 +120,7 @@ export function ActivitiesPanel() {
       core.update((next) => {
         next.detail.activitiesPaging.pageSize = size;
       });
+      fillViewport();
     };
     updatePageSize();
     const observer = new ResizeObserver(updatePageSize);
@@ -113,6 +131,12 @@ export function ActivitiesPanel() {
       window.removeEventListener("resize", updatePageSize);
     };
   }, [core, core.state.detail.activities.length]);
+
+  // 每次窗口内容变化后补拉一次：补拉结果会再次触发本副作用，直到填满可视区或没有更早的活动。
+  // 失败时（内容不变）不会重试，避免请求风暴，留待下一次滚动或刷新节拍。
+  useEffect(() => {
+    fillViewport();
+  }, [core, activities]);
 
   const handleScroll = () => {
     const element = scrollRef.current;
