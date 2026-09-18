@@ -13,8 +13,8 @@ import {
 import { pageSizeForViewport } from "../../lib/paging";
 import type { Activity } from "../../lib/types";
 
-/** 距顶部多少像素内视为「滚动到顶部」。 */
-const TOP_THRESHOLD = 4;
+/** 距顶/底多少像素内视为「滚动到边界」（只有真正到达边界才预取下一页）。 */
+const EDGE_THRESHOLD = 8;
 
 type RowProps = { activity: Activity; expanded: boolean; onToggle: () => void };
 
@@ -128,10 +128,9 @@ export function ActivitiesPanel() {
         next.detail.activitiesPaging.pageSize = pageSize;
       });
     }
-    const nearOlderEdge = element.scrollTop <= TOP_THRESHOLD + element.clientHeight;
+    const nearOlderEdge = element.scrollTop <= EDGE_THRESHOLD;
     const nearNewerEdge =
-      element.scrollHeight - element.scrollTop - element.clientHeight <=
-      TOP_THRESHOLD + element.clientHeight;
+      element.scrollHeight - element.scrollTop - element.clientHeight <= EDGE_THRESHOLD;
     if (nearOlderEdge && paging.hasOlder && !paging.loadingOlder) {
       void loadOlderActivities(core);
     }
