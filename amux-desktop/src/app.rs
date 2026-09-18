@@ -1673,6 +1673,16 @@ impl AmuxApp {
         cx.notify();
     }
 
+    /// 折叠/展开工作流下的关联普通会话。
+    pub fn toggle_workflow(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.with_core(|core| {
+            if !core.expanded_workflows.remove(id) {
+                core.expanded_workflows.insert(id.to_string());
+            }
+        });
+        cx.notify();
+    }
+
     /// 折叠/展开工作目录面板的文件树区域。
     pub fn toggle_workspace_tree(&mut self, cx: &mut Context<Self>) {
         self.workspace_tree_visible = !self.workspace_tree_visible;

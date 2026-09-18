@@ -235,12 +235,8 @@ fn workflow_row(
                 .on_click(cx.listener({
                     let id = id.clone();
                     move |this, _, _, cx| {
-                        this.with_core(|core| {
-                            if !core.expanded_workflows.remove(&id) {
-                                core.expanded_workflows.insert(id.clone());
-                            }
-                        });
-                        cx.notify();
+                        cx.stop_propagation();
+                        this.toggle_workflow(&id, cx);
                     }
                 })),
         )
@@ -305,6 +301,7 @@ fn list_row(
     let hover = theme.list_hover;
     let row_id = format!("sess-row-{id}");
     let open_id = id.to_string();
+    let toggle_workflow = matches!(entry, Some(ListEntry::Workflow(_)));
     let entry = entry.clone();
     let app = cx.entity();
     div()
@@ -315,7 +312,12 @@ fn list_row(
         .bg(active.opacity(if selected { 1.0 } else { 0.0 }))
         .when(selected, |row| row.border_1().border_color(active_border))
         .hover(move |row| row.bg(hover))
-        .on_click(cx.listener(move |this, _, _, cx| this.open_entry(&open_id, cx)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if toggle_workflow {
+                this.toggle_workflow(&open_id, cx);
+            }
+            this.open_entry(&open_id, cx);
+        }))
         .context_menu(move |menu, _, _| {
             let Some(entry) = &entry else {
                 return menu;
