@@ -203,7 +203,7 @@ export function InteractionView() {
           data-slot="live-activity"
           className="truncate border-t border-border py-1 pr-12 pl-3 text-xs text-muted-foreground"
         >
-          {truncate(activityBarText(detail.ongoing), 200)}
+          {activityBarText(detail.ongoing)}
         </div>
       ) : null}
 
