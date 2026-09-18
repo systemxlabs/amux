@@ -24,8 +24,6 @@ export const HISTORY_INTERVAL = 5_000;
 export const ONGOING_INTERVAL = 2_000;
 export const ACTIVITIES_INTERVAL = 10_000;
 export const PLAN_INTERVAL = 10_000;
-/** 会话选项与斜杠命令由 agent 侧异步推送，取与对话视图相同的周期。 */
-export const OPTIONS_INTERVAL = 5_000;
 export const TERMINAL_INTERVAL = 500;
 export const RECONNECT_INTERVAL = 5_000;
 
@@ -178,22 +176,6 @@ async function refreshOpen(core: Core): Promise<void> {
       });
     } catch {
       // 计划仅普通会话有；失败留待下一周期
-    }
-  }
-  if (due(core.last.options, OPTIONS_INTERVAL) && target.kind === "session") {
-    core.last.options = Date.now();
-    try {
-      const [options, commands] = await Promise.all([
-        core.client!.configOptions(target.id),
-        core.client!.slashCommands(target.id),
-      ]);
-      core.update((state) => {
-        if (!sameTarget(state.open, target)) return;
-        state.detail.configOptions = options;
-        state.detail.slashCommands = commands;
-      });
-    } catch {
-      // 会话选项需 agent 侧就绪；失败留待下一周期
     }
   }
   if (due(core.last.ongoing, ONGOING_INTERVAL)) {
@@ -468,7 +450,31 @@ export async function refreshWorkflowSetup(core: Core): Promise<void> {
 
 /** 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置与快捷指令。 */
 export async function refreshInteraction(core: Core): Promise<void> {
-  await Promise.all([refreshMachines(core), refreshOrchestrator(core), refreshQuickCommands(core)]);
+  await Promise.all([refreshMachines(core), refreshOrchestrator(core), refreshQuickCommands(core), refreshSessionControls(core)]);
+}
+
+async function refreshSessionControls(core: Core): Promise<void> {
+  const client = core.client;
+  const target = core.state.open;
+  if (!client || target?.kind !== "session") return;
+  // 查询选项会惰性创建或恢复 ACP 会话，随后再读取其已发布的斜杠命令。
+  try {
+    const options = await client.configOptions(target.id);
+    core.update((state) => {
+      if (sameTarget(state.open, target)) state.detail.configOptions = options;
+    });
+  } catch (error) {
+    core.failure(`读取会话选项失败：${messageOf(error)}`);
+  }
+  if (!sameTarget(core.state.open, target)) return;
+  try {
+    const commands = await client.slashCommands(target.id);
+    core.update((state) => {
+      if (sameTarget(state.open, target)) state.detail.slashCommands = commands;
+    });
+  } catch (error) {
+    core.failure(`读取斜杠命令失败：${messageOf(error)}`);
+  }
 }
 
 /** 设置浮窗当前分类的配置数据（均实时获取，不做定时刷新）。 */

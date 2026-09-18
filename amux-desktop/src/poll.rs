@@ -11,8 +11,8 @@ use amux_common::domain::{Activity, ContentBlock, HistoryItem};
 use crate::client::Client;
 use crate::state::{
     set_terminals, ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SettingsTab, SharedCore,
-    SidePanel, ACTIVITIES_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, OPTIONS_INTERVAL,
-    PLAN_INTERVAL, SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
+    SidePanel, ACTIVITIES_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, PLAN_INTERVAL,
+    SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
 };
 
 /// 连接重试间隔。
@@ -156,23 +156,13 @@ async fn refresh_open(
     let plan_open = side_panel == Some(SidePanel::Plan);
     let terminal_open = side_panel == Some(SidePanel::Terminal);
 
-    let (
-        due_history,
-        due_ongoing,
-        due_activities,
-        due_plan,
-        due_options,
-        due_terminal,
-        terminal,
-        cursor,
-    ) = {
+    let (due_history, due_ongoing, due_activities, due_plan, due_terminal, terminal, cursor) = {
         let core = core.lock();
         (
             core.due(core.last.history, HISTORY_INTERVAL),
             core.due(core.last.ongoing, ONGOING_INTERVAL),
             core.due(core.last.activities, ACTIVITIES_INTERVAL),
             core.due(core.last.plan, PLAN_INTERVAL),
-            core.due(core.last.options, OPTIONS_INTERVAL),
             core.due(core.last.terminal, TERMINAL_INTERVAL),
             core.view.detail.active_terminal.clone(),
             core.last.terminal_cursor,
@@ -203,22 +193,6 @@ async fn refresh_open(
                     }
                 }
                 core.lock().last.plan = Some(Instant::now());
-            }
-            // 会话选项与斜杠命令随交互视图常驻，与计划面板是否打开无关，按自身周期节流
-            if due_options {
-                if let Ok(options) = client.config_options(id).await {
-                    let mut core = core.lock();
-                    if core.open.as_ref() == Some(target) {
-                        core.view.detail.config_options = options;
-                    }
-                }
-                if let Ok(commands) = client.slash_commands(id).await {
-                    let mut core = core.lock();
-                    if core.open.as_ref() == Some(target) {
-                        core.view.detail.slash_commands = commands;
-                    }
-                }
-                core.lock().last.options = Some(Instant::now());
             }
             if due_ongoing {
                 if let Ok(activity) = client.ongoing_activity(id).await {
@@ -477,12 +451,39 @@ pub async fn refresh_workflow_setup(client: &Client, core: &SharedCore) {
     refresh_orchestrator(client, core).await;
 }
 
-/// 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置（工作流会话）
-/// 与快捷指令（输入区按钮）。
+/// 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置（工作流会话）、
+/// 快捷指令（输入区按钮）与普通会话的选项和斜杠命令。
 pub async fn refresh_interaction(client: &Client, core: &SharedCore) {
-    refresh_machines(client, core).await;
-    refresh_orchestrator(client, core).await;
-    refresh_quick_commands(client, core).await;
+    tokio::join!(
+        refresh_machines(client, core),
+        refresh_orchestrator(client, core),
+        refresh_quick_commands(client, core),
+        refresh_session_controls(client, core),
+    );
+}
+
+/// 普通会话的会话选项与斜杠命令只在打开会话时拉取一次，不定时刷新；
+/// agent 侧后续变更由 `session/update` 推送经 Server 落地后随重开视图读到。
+async fn refresh_session_controls(client: &Client, core: &SharedCore) {
+    let Some(OpenTarget::Session(id)) = core.lock().open.clone() else {
+        return;
+    };
+    // 查询选项会惰性创建或恢复 ACP 会话，随后再读取其已发布的斜杠命令
+    if let Ok(options) = client.config_options(&id).await {
+        let mut core = core.lock();
+        if core.open.as_ref() == Some(&OpenTarget::Session(id.clone())) {
+            core.view.detail.config_options = options;
+        }
+    }
+    if core.lock().open.as_ref() != Some(&OpenTarget::Session(id.clone())) {
+        return;
+    }
+    if let Ok(commands) = client.slash_commands(&id).await {
+        let mut core = core.lock();
+        if core.open.as_ref() == Some(&OpenTarget::Session(id)) {
+            core.view.detail.slash_commands = commands;
+        }
+    }
 }
 
 /// 设置浮窗当前分类的配置数据。

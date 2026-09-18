@@ -144,8 +144,7 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
     }
   });
   core.resetTicks();
-  await refreshInteraction(core);
-  await tick(core);
+  await Promise.all([refreshInteraction(core), tick(core)]);
 }
 
 /** 切换右侧面板（再次点击收起）。 */

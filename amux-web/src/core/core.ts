@@ -224,7 +224,6 @@ export type Ticks = {
   ongoing?: number;
   activities?: number;
   plan?: number;
-  options?: number;
   terminal?: number;
   reconnect?: number;
 };

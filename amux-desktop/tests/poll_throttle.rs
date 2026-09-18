@@ -96,11 +96,15 @@ fn hit_count(hits: &Arc<Mutex<Vec<String>>>, path: &str) -> usize {
         .count()
 }
 
-/// 计划面板未打开时会话选项与斜杠命令也必须按自身周期节流。
+/// 会话选项与斜杠命令只在打开会话时拉取一次，节拍不再请求。
 #[tokio::test]
-async fn options_and_slash_commands_are_throttled() {
+async fn options_and_slash_commands_fetched_once_on_open() {
     let (server, hits) = start_stub().await;
     let core = opened_core(server);
+    {
+        let client = client_of(&core);
+        poll::refresh_interaction(&client, &core).await;
+    }
     for _ in 0..3 {
         poll::tick(Arc::clone(&core)).await;
     }

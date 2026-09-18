@@ -19,9 +19,6 @@ pub const HISTORY_INTERVAL: Duration = Duration::from_secs(5);
 pub const ONGOING_INTERVAL: Duration = Duration::from_secs(2);
 pub const ACTIVITIES_INTERVAL: Duration = Duration::from_secs(10);
 pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
-/// 会话选项与斜杠命令：无独立视图，交互视图常驻需要（输入框下方的选项控件与斜杠补全）；
-/// 两者由 agent 侧异步推送，取与对话视图相同的周期。
-pub const OPTIONS_INTERVAL: Duration = Duration::from_secs(5);
 pub const TERMINAL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 连接状态（决定进入登录页面还是主页面）。
@@ -480,7 +477,6 @@ pub struct Ticks {
     pub ongoing: Option<Instant>,
     pub activities: Option<Instant>,
     pub plan: Option<Instant>,
-    pub options: Option<Instant>,
     pub terminal: Option<Instant>,
     pub terminal_cursor: u64,
 }

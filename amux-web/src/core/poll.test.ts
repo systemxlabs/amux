@@ -14,7 +14,7 @@ import type {
   WorkflowList,
 } from "../lib/types";
 import { Core } from "./core";
-import { loadOlderList, refreshDetails, refreshList, refreshNewSession, refreshWorkflowSetup, refreshOrchestrator, tick } from "./poll";
+import { loadOlderList, refreshDetails, refreshList, refreshNewSession, refreshWorkflowSetup, refreshOrchestrator, refreshInteraction, tick } from "./poll";
 
 it("每次打开新建视图都读取最新计划，切换工作流模式不重复读取计划", async () => {
   const core = new Core();
@@ -163,6 +163,38 @@ function onlineCore(client: ApiClient): Core {
 }
 
 describe("tick", () => {
+  it("打开时读取控件数据，只有实时活动每两秒刷新，重开才重新读取控件", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, calls } = recordingClient({
+        machines: () => [], orchestrator: () => null, quickCommands: () => [],
+        configOptions: () => [], slashCommands: () => [], ongoingActivity: () => null,
+      });
+      const core = onlineCore(client);
+      core.state.middle = "interaction";
+      core.state.open = { kind: "session", id: "s1" };
+      await Promise.all([refreshInteraction(core), tick(core)]);
+      const count = (name: string) => calls.filter((call) => call === name).length;
+      expect(count("ongoingActivity")).toBe(1);
+      vi.advanceTimersByTime(1999);
+      await tick(core);
+      expect(count("ongoingActivity")).toBe(1);
+      vi.advanceTimersByTime(1);
+      await tick(core);
+      expect(count("ongoingActivity")).toBe(2);
+      vi.advanceTimersByTime(10_000);
+      await tick(core);
+      for (const name of ["quickCommands", "configOptions", "slashCommands"]) {
+        expect(count(name)).toBe(1);
+      }
+      await refreshInteraction(core);
+      for (const name of ["quickCommands", "configOptions", "slashCommands"]) {
+        expect(count(name)).toBe(2);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("详情视图未打开时，只刷新会话列表与对话历史，不拉取会话详情与上下文", async () => {
     const { client, calls } = recordingClient();
     const core = onlineCore(client);
