@@ -113,6 +113,9 @@ fn mode_switch(workflow_mode: bool, cx: &mut Context<AmuxApp>) -> impl IntoEleme
         )
         .on_click(cx.listener(move |this, clicks: &Vec<usize>, _, cx| {
             let workflow = clicks.contains(&1);
+            // 切换模式不保留浮层（docs/PRD.md「新建会话视图」：切换模式后回到普通模式由
+            // 聚焦输入框重新触发）
+            this.workspace_recent_open = false;
             this.with_core(|core| {
                 core.new_session.workflow_mode = workflow;
                 core.new_session.suggestions.clear();
@@ -268,10 +271,13 @@ fn machine_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .label(name.clone())
                 .selected(selected.as_deref() == Some(name.as_str()))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    // 换机器后最近目录与联想项都属于上一台机器：收起浮层重新点选
+                    this.workspace_recent_open = false;
                     this.with_core(|core| {
                         core.new_session.machine = Some(name.clone());
                         core.new_session.agent = None;
                         core.new_session.suggestions.clear();
+                        core.new_session.suggestion = None;
                     });
                     cx.notify();
                 })),
@@ -326,9 +332,10 @@ fn hint_text(text: &str, cx: &Context<AmuxApp>) -> AnyElement {
 
 /// 工作目录：可手动输入（前缀联想）或从最近目录中选择。
 ///
-/// 该机器有最近目录时，输入框尾部带下拉箭头，点击输入框即在其下方展开最近目录列表
-/// （行内展示完整路径、溢出从头部截断）；没有最近目录时就是普通输入框
-/// （docs/PRD.md「新建会话视图」，交互参考旧桌面应用）。
+/// 该机器有最近目录时，输入框尾部带上拉箭头，点击输入框即在输入框上方展开最近目录上拉框
+/// （行内展示完整路径、溢出从头部截断）；手动输入时上拉框换成输入框下方的前缀匹配下拉框，
+/// 输入框失焦或点击浮层之外则上下拉框都收起；没有最近目录时就是普通输入框
+/// （docs/PRD.md「新建会话视图」）。
 fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let recent: Vec<String> = core
         .recent_workspaces
@@ -354,29 +361,19 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     .w_full()
                     .when(has_recent, |input| {
                         input.suffix(
-                            Icon::new(IconName::ChevronDown)
+                            Icon::new(IconName::ChevronUp)
                                 .small()
                                 .text_color(theme.muted_foreground),
                         )
                     }),
             );
     if has_recent {
-        // 点击输入框切换最近目录列表（鼠标事件先到输入框自身，再冒泡到这里，不影响编辑；
-        // 列表项挂在输入行之外，点选项不会经过这里）
+        // 点击输入框弹出最近目录上拉框（鼠标事件先到输入框自身，再冒泡到这里，不影响编辑；
+        // 列表项挂在输入行之外，点选项不会经过这里）。收起由点击浮层之外或输入框失焦触发
+        // （docs/PRD.md「新建会话视图」）
         let app = app.clone();
         input_row = input_row.on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            app.update(cx, |this, cx| {
-                this.workspace_recent_open = !this.workspace_recent_open;
-                if this.workspace_recent_open {
-                    // 展开最近目录时收起前缀匹配项，两者不叠加（进行中的联想应答也会因
-                    // 已拉取目录被清空而丢弃）
-                    this.with_core(|core| {
-                        core.new_session.suggestions.clear();
-                        core.new_session.suggestion = None;
-                    });
-                }
-                cx.notify();
-            });
+            app.update(cx, |this, cx| this.show_recent_workspaces(cx));
         });
     }
     let mut wrap = h_flex()
@@ -386,7 +383,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         .min_w_0()
         .child(input_row);
 
-    // 最近目录：贴输入框下方展开（deferred 以免撑开表单），高度按条目数自适应、
+    // 最近目录：贴输入框上沿向上展开（deferred 以免撑开表单），高度按条目数自适应、
     // 超过上限时列表内滚动查看（带滚动条）
     if open {
         let hover_bg = theme.accent;
@@ -418,9 +415,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     .on_click(move |_, window, cx| {
                         let value = value.clone();
                         app.update(cx, |this, cx| {
-                            this.set_workspace(value.clone(), window, cx);
-                            this.workspace_recent_open = false;
-                            cx.notify();
+                            this.select_recent_workspace(value.clone(), window, cx)
                         });
                     })
                     .child(
@@ -435,7 +430,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             v_flex()
                 .id("ns-workspace-recent-panel")
                 .absolute()
-                .top(relative(1.0))
+                .bottom(relative(1.0))
                 .left_0()
                 .right_0()
                 .h(height)
@@ -446,10 +441,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                 .border_color(theme.border)
                 .rounded_lg()
                 .shadow_lg()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.workspace_recent_open = false;
-                    cx.notify();
-                }))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)))
                 .child(rows)
                 .child(
                     div()
@@ -491,9 +483,6 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     .cursor_pointer()
                     .overflow_hidden()
                     .hover(|row| row.bg(theme.accent))
-                    .on_mouse_down_out(
-                        cx.listener(|this, _, _, cx| this.dismiss_workspace_suggestions(cx)),
-                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.set_workspace(value.clone(), window, cx)
                     }))
@@ -520,6 +509,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                 .border_color(theme.border)
                 .rounded_lg()
                 .shadow_lg()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)))
                 .child(rows)
                 .child(
                     div()

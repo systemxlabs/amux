@@ -198,13 +198,17 @@ impl AmuxApp {
             .detach();
         }
 
-        // 手动输入工作目录时刷新前缀匹配的目录项
+        // 工作目录输入框：手动输入时上拉框换成前缀匹配下拉框；失焦时两个浮层都收起
+        // （docs/PRD.md「新建会话视图」）
         cx.subscribe(
             &workspace_input,
-            |this: &mut Self, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
+            |this: &mut Self, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.workspace_recent_open = false;
                     this.refresh_workspace_suggestions(cx);
                 }
+                InputEvent::Blur => this.dismiss_workspace_popups(cx),
+                _ => {}
             },
         )
         .detach();
@@ -933,20 +937,24 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 填入工作目录（最近目录或前缀联想项）。
-    ///
-    /// 联想项以 `/` 结尾：填入后继续列出该目录下的条目，用户可一路点选下钻
-    /// （docs/DESIGN.md「新建会话视图」：输入以 `/` 结尾时列出该目录全部条目）；
-    /// 最近目录是选定项，填入后收起列表。
-    pub fn set_workspace(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        let drill_down = path.ends_with('/');
+    /// 选定最近工作目录：填入并收起上下拉框（最近目录是选定项，不再联想）。
+    pub fn select_recent_workspace(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.workspace_input
             .update(cx, |state, cx| state.set_value(path, window, cx));
-        if drill_down {
-            self.refresh_workspace_suggestions(cx);
-        } else {
-            self.with_core(|core| core.new_session.suggestions.clear());
-        }
+        self.dismiss_workspace_popups(cx);
+    }
+
+    /// 点选前缀联想项：填入该目录并继续列出其下的条目，用户可一路点选下钻
+    /// （docs/DESIGN.md「新建会话视图」：输入以 `/` 结尾时列出该目录全部条目）。
+    pub fn set_workspace(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_input
+            .update(cx, |state, cx| state.set_value(path, window, cx));
+        self.refresh_workspace_suggestions(cx);
         cx.notify();
     }
 
@@ -976,9 +984,24 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 收起工作目录前缀联想（点击联想区之外）。
-    pub fn dismiss_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
-        self.with_core(|core| core.new_session.suggestions.clear());
+    /// 展开工作目录最近目录上拉框：收起前缀匹配项，两者不叠加（进行中的联想应答也会因
+    /// 已拉取目录被清空而丢弃）。
+    pub fn show_recent_workspaces(&mut self, cx: &mut Context<Self>) {
+        self.workspace_recent_open = true;
+        self.with_core(|core| {
+            core.new_session.suggestions.clear();
+            core.new_session.suggestion = None;
+        });
+        cx.notify();
+    }
+
+    /// 收起工作目录的上下拉框（输入框失焦、点击浮层之外）。
+    pub fn dismiss_workspace_popups(&mut self, cx: &mut Context<Self>) {
+        self.workspace_recent_open = false;
+        self.with_core(|core| {
+            core.new_session.suggestions.clear();
+            core.new_session.suggestion = None;
+        });
         cx.notify();
     }
 
