@@ -252,10 +252,10 @@ pub fn activity_kind_detail(activity: &Activity) -> (String, String) {
     }
 }
 
-/// 实时活动条文案（无进行中活动为 `None`）；内容只折叠空白，由布局截断。
+/// 实时活动条文案（无进行中活动为 `None`）：`<活动类型>：<活动内容>`，内容只折叠空白，由布局截断。
 pub fn activity_bar_text(current: Option<&Activity>) -> Option<String> {
     match current? {
-        Activity::Thinking { thinking, .. } => Some(format!("思考中：{}", one_line(thinking))),
+        Activity::Thinking { thinking, .. } => Some(format!("思考：{}", one_line(thinking))),
         Activity::ToolCall {
             tool_name, title, ..
         } => Some(format!(

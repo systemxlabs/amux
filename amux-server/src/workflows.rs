@@ -1,4 +1,4 @@
-//! 工作流会话：元数据（workflow.sqlite）、JSONL 对话与活动、工作流智能体驱动。
+//! 工作流会话：元数据（workflow.sqlite）、transcript JSONL（对话与活动）、工作流智能体驱动。
 //!
 //! 语义要点（docs/DESIGN.md「Server」）：
 //! - 状态以 Server 元数据为权威；工作流智能体运行中或任一关联普通会话工作中即为工作中
@@ -14,7 +14,9 @@ use amux_common::domain::{
     StateChangeReason,
 };
 use parking_lot::Mutex;
-use rig_core::completion::message::ToolCall;
+use rig_core::completion::message::{
+    AssistantContent, Reasoning, ToolCall, ToolFunction, ToolResultContent, UserContent,
+};
 use rig_core::completion::{Message, ToolDefinition};
 use uuid::Uuid;
 
@@ -28,9 +30,15 @@ use crate::timestamps::now_ms;
 /// 历史条目分页默认窗口。
 const PAGE_LIMIT: usize = 200;
 
+/// 上下文恢复时给工具调用补的工具结果文本，也是内存上下文中过期轮次的占位文本。
+const EXPIRED_TOOL_RESULT: &str = "[工具结果已过期]";
+
+/// 内存上下文中保留真实工具结果的轮数（更早轮次替换为过期文本）。
+const KEPT_TOOL_RESULT_ROUNDS: usize = 5;
+
 #[derive(Default)]
 struct RunState {
-    /// rig 对话历史（含工具消息）
+    /// 模型对话上下文：进程启动后首次交互从 transcript 恢复，之后在内存中维护
     history: Vec<Message>,
     /// 待注入的 steer 用户消息
     steers: Vec<String>,
@@ -140,60 +148,41 @@ impl WorkflowService {
         for session_id in linked {
             let _ = self.sessions.delete(&session_id).await;
         }
-        for path in [self.history_path(id), self.activities_path(id)] {
-            let _ = std::fs::remove_file(path);
-        }
+        let _ = std::fs::remove_file(self.transcript_path(id));
         log::info!("工作流会话已删除: {id}");
         Ok(())
     }
 
     pub fn history(&self, id: &str, limit: usize, offset: usize) -> (Vec<HistoryItem>, bool) {
-        let lines = read_lines(&self.history_path(id));
-        let mut items: Vec<HistoryItem> = lines
-            .iter()
+        let items: Vec<HistoryItem> = self
+            .transcript(id)
+            .into_iter()
             .enumerate()
             .filter_map(|(index, line)| {
-                serde_json::from_str::<HistoryLine>(line)
-                    .ok()
-                    .map(|line| (index, line))
+                // 文件只追加：行号即条目标识，分页刷新时用它识别同一条消息
+                let id = format!("line-{index}");
+                match line {
+                    TranscriptLine::User { content, timestamp } => {
+                        Some(HistoryItem::UserMessage { id, content, timestamp })
+                    }
+                    TranscriptLine::Agent { content, timestamp } => {
+                        Some(HistoryItem::AgentMessage { id, content, timestamp })
+                    }
+                    _ => None,
+                }
             })
-            // 文件只追加：行号即条目标识，分页刷新时用它识别同一条消息
-            .map(|(index, line)| history_item(index, &line))
             .collect();
-        items.reverse();
-        let window: Vec<HistoryItem> = items.into_iter().skip(offset).take(limit + 1).collect();
-        let has_more = window.len() > limit;
-        let mut window = window;
-        window.truncate(limit);
-        window.reverse();
-        (window, has_more)
+        page(items, limit, offset)
     }
 
     pub fn activities(&self, id: &str, limit: usize, offset: usize) -> (Vec<Activity>, bool) {
-        let lines = read_lines(&self.activities_path(id));
-        let mut activities: Vec<Activity> = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(index, line)| {
-                let mut activity: Activity = serde_json::from_str(line).ok()?;
-                // 文件只追加：没有自带标识的历史行（旧数据）用行号充当标识
-                if activity.id().is_empty() {
-                    activity.set_id(format!("line-{index}"));
-                }
-                Some(activity)
-            })
-            .collect();
-        activities.reverse();
-        let window: Vec<Activity> = activities
+        let items: Vec<Activity> = self
+            .transcript(id)
             .into_iter()
-            .skip(offset)
-            .take(limit + 1)
+            .enumerate()
+            .filter_map(|(index, line)| line.into_activity(format!("line-{index}")))
             .collect();
-        let has_more = window.len() > limit;
-        let mut window = window;
-        window.truncate(limit);
-        window.reverse();
-        (window, has_more)
+        page(items, limit, offset)
     }
 
     pub fn ongoing_activity(&self, id: &str) -> Option<Activity> {
@@ -227,31 +216,29 @@ impl WorkflowService {
 
     /// 推送一条用户消息：运行中进 steer，空闲则起一轮调度。
     fn push_user(self: &Arc<Self>, workflow_id: &str, content: Vec<ContentBlock>) {
-        // 编排对话只承载文本，非文本块不进 rig 历史
+        // 编排对话只承载文本，非文本块不进模型上下文
         let text = blocks_text(&content);
-        append_line(
-            &self.history_path(workflow_id),
-            &HistoryLine {
-                role: "user".to_string(),
+        let mut runs = self.runs.lock();
+        let state = runs.entry(workflow_id.to_string()).or_default();
+        if state.history.is_empty() {
+            // 进程启动后的首次交互：恢复 transcript 里的上下文，再接上本条输入
+            state.history = self.restore_history(workflow_id);
+        }
+        self.append(
+            workflow_id,
+            &TranscriptLine::User {
                 content,
                 timestamp: now_ms(),
             },
         );
         self.store.touch_workflow(workflow_id);
-        let running = {
-            let mut runs = self.runs.lock();
-            let state = runs.entry(workflow_id.to_string()).or_default();
-            if state.running {
-                state.steers.push(text);
-                true
-            } else {
-                state.history.push(Message::user(text));
-                false
-            }
-        };
-        if !running {
-            self.spawn_run(workflow_id.to_string());
+        if state.running {
+            state.steers.push(text);
+            return;
         }
+        state.history.push(Message::user(text));
+        drop(runs);
+        self.spawn_run(workflow_id.to_string());
     }
 
     fn spawn_run(self: &Arc<Self>, workflow_id: String) {
@@ -277,20 +264,13 @@ impl WorkflowService {
         match result {
             Ok(text) => {
                 if !text.trim().is_empty() {
-                    append_line(
-                        &self.history_path(workflow_id),
-                        &HistoryLine {
-                            role: "agent".to_string(),
-                            content: vec![ContentBlock::Text { text: text.clone() }],
+                    self.append(
+                        workflow_id,
+                        &TranscriptLine::Agent {
+                            content: vec![ContentBlock::Text { text }],
                             timestamp: now_ms(),
                         },
                     );
-                    self.runs
-                        .lock()
-                        .entry(workflow_id.to_string())
-                        .or_default()
-                        .history
-                        .push(Message::assistant(text));
                 }
             }
             Err(error) => {
@@ -333,12 +313,12 @@ impl WorkflowService {
         });
         let mut output = String::new();
         loop {
-            let history = self
-                .runs
-                .lock()
-                .get(workflow_id)
-                .map(|s| s.history.clone())
-                .unwrap_or_default();
+            let history = {
+                let mut runs = self.runs.lock();
+                let state = runs.entry(workflow_id.to_string()).or_default();
+                fill_missing_tool_results(&mut state.history);
+                state.history.clone()
+            };
             let text = orchestrator::run(
                 &config,
                 &orchestrator::preamble(&plan),
@@ -385,7 +365,7 @@ impl WorkflowService {
     }
 
     pub fn record_activity(&self, workflow_id: &str, activity: &Activity) {
-        append_line(&self.activities_path(workflow_id), activity);
+        self.append(workflow_id, &TranscriptLine::from(activity));
         if let Some(state) = self.runs.lock().get_mut(workflow_id) {
             state.ongoing = Some(activity.clone());
         }
@@ -403,17 +383,166 @@ impl WorkflowService {
             .is_some_and(|id| id == workflow_id)
     }
 
-    fn history_path(&self, workflow_id: &str) -> PathBuf {
+    fn transcript_path(&self, workflow_id: &str) -> PathBuf {
         self.home
             .join("workflows")
-            .join(format!("{workflow_id}_history.jsonl"))
+            .join(format!("{workflow_id}_transcript.jsonl"))
     }
 
-    fn activities_path(&self, workflow_id: &str) -> PathBuf {
-        self.home
-            .join("workflows")
-            .join(format!("{workflow_id}_activities.jsonl"))
+    /// 追加一条 transcript 记录。
+    fn append(&self, workflow_id: &str, line: &TranscriptLine) {
+        append_line(&self.transcript_path(workflow_id), line);
     }
+
+    /// 读取 transcript 记录（无法解析的行丢弃）。
+    fn transcript(&self, workflow_id: &str) -> Vec<TranscriptLine> {
+        read_lines(&self.transcript_path(workflow_id))
+            .into_iter()
+            .filter_map(|line| serde_json::from_str(&line).ok())
+            .collect()
+    }
+
+    /// 从 transcript 恢复模型对话上下文：为每个工具调用补一条过期工具结果。
+    fn restore_history(&self, workflow_id: &str) -> Vec<Message> {
+        let mut messages: Vec<Message> = Vec::new();
+        // transcript 不记回合边界：thinking 归到紧随其后的 assistant 回合，工具结果由 fill 补齐
+        let mut thinking: Vec<AssistantContent> = Vec::new();
+        let mut calls: Vec<AssistantContent> = Vec::new();
+        for line in self.transcript(workflow_id) {
+            match line {
+                TranscriptLine::Thinking { thinking: text, .. } => {
+                    settle_turn(&mut messages, &mut thinking, &mut calls);
+                    thinking.push(AssistantContent::Reasoning(Reasoning::new(&text)));
+                }
+                TranscriptLine::ToolCall {
+                    tool_call_id,
+                    tool_name,
+                    parameters,
+                    ..
+                } => {
+                    calls.push(AssistantContent::ToolCall(ToolCall::from_wire(
+                        tool_call_id,
+                        ToolFunction::new(tool_name, parse_arguments(&parameters)),
+                    )));
+                }
+                TranscriptLine::User { content, .. } => {
+                    settle_turn(&mut messages, &mut thinking, &mut calls);
+                    messages.push(Message::user(blocks_text(&content)));
+                }
+                TranscriptLine::Agent { content, .. } => {
+                    let text = blocks_text(&content);
+                    if calls.is_empty() {
+                        // 末回合只有文本输出：与同回合的思考合成一条消息
+                        let mut content = std::mem::take(&mut thinking);
+                        content.push(AssistantContent::text(text));
+                        messages.push(Message::Assistant { id: None, content });
+                    } else {
+                        settle_turn(&mut messages, &mut thinking, &mut calls);
+                        messages.push(Message::assistant(text));
+                    }
+                }
+                // 执行错误只是本地记录，不构成回合边界，也不进模型上下文
+                TranscriptLine::Error { .. } => {}
+            }
+        }
+        settle_turn(&mut messages, &mut thinking, &mut calls);
+        fill_missing_tool_results(&mut messages);
+        messages
+    }
+}
+
+/// 结算当前累积的 assistant 回合（思考 + 工具调用；工具结果由 `fill_missing_tool_results` 补齐）。
+fn settle_turn(
+    messages: &mut Vec<Message>,
+    thinking: &mut Vec<AssistantContent>,
+    calls: &mut Vec<AssistantContent>,
+) {
+    if thinking.is_empty() && calls.is_empty() {
+        return;
+    }
+    let mut content = std::mem::take(thinking);
+    content.append(calls);
+    messages.push(Message::Assistant { id: None, content });
+}
+
+/// 给没有工具结果的工具调用补一条过期工具结果，保证回放给模型的对话形态完整。
+fn fill_missing_tool_results(history: &mut Vec<Message>) {
+    let mut index = 0;
+    while index < history.len() {
+        let calls: Vec<(String, String)> = match &history[index] {
+            Message::Assistant { content, .. } => content
+                .iter()
+                .filter_map(|item| match item {
+                    AssistantContent::ToolCall(call) => {
+                        Some((call.id.to_string(), call.function.name.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if calls.is_empty() {
+            index += 1;
+            continue;
+        }
+        if matches!(history.get(index + 1), Some(message) if has_tool_result(message)) {
+            index += 2;
+            continue;
+        }
+        let results: Vec<UserContent> = calls
+            .iter()
+            .map(|(id, name)| {
+                UserContent::tool_result(
+                    id.as_str(),
+                    name.clone(),
+                    vec![ToolResultContent::text(EXPIRED_TOOL_RESULT)],
+                )
+            })
+            .collect();
+        history.insert(index + 1, Message::User { content: results });
+        index += 2;
+    }
+}
+
+fn has_tool_result(message: &Message) -> bool {
+    matches!(message, Message::User { content } if content.iter().any(|item| matches!(item, UserContent::ToolResult(_))))
+}
+
+/// 内存上下文只保留最近若干轮工具结果的真实值，更早轮次替换为过期文本。
+fn expire_old_tool_results(history: &mut [Message]) {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (index, message) in history.iter().enumerate() {
+        if !has_tool_result(message) {
+            continue;
+        }
+        match groups.last_mut() {
+            // 相邻的工具结果属于同一轮
+            Some(group) if group.last().is_some_and(|last| last + 1 == index) => group.push(index),
+            _ => groups.push(vec![index]),
+        }
+    }
+    let expired = groups.len().saturating_sub(KEPT_TOOL_RESULT_ROUNDS);
+    for group in &groups[..expired] {
+        for &index in group {
+            let Message::User { content } = &mut history[index] else {
+                continue;
+            };
+            for item in content.iter_mut() {
+                if let UserContent::ToolResult(result) = item {
+                    result.content = vec![ToolResultContent::text(EXPIRED_TOOL_RESULT)];
+                }
+            }
+        }
+    }
+}
+
+/// 反向分页：`items` 按时间正序传入，返回最新在后的窗口与是否还有更早的条目。
+fn page<T>(items: Vec<T>, limit: usize, offset: usize) -> (Vec<T>, bool) {
+    let mut window: Vec<T> = items.into_iter().rev().skip(offset).take(limit + 1).collect();
+    let has_more = window.len() > limit;
+    window.truncate(limit);
+    window.reverse();
+    (window, has_more)
 }
 
 /// 工作流智能体的工具执行面与活动记录面：全部动作限定在本工作流的关联普通会话上。
@@ -428,12 +557,21 @@ impl Tools for WorkflowTools {
         let Some(state) = runs.get_mut(&self.workflow_id) else {
             return Vec::new();
         };
-        let messages: Vec<_> = std::mem::take(&mut state.steers)
+        let messages: Vec<Message> = std::mem::take(&mut state.steers)
             .into_iter()
             .map(|text| Message::user(format!("用户：{text}")))
             .collect();
+        // 请求补丁不写入 rig 自己的对话，内存上下文要自己记下 steer
         state.history.extend(messages.iter().cloned());
         messages
+    }
+
+    fn record_context(&self, message: Message) {
+        let mut runs = self.service.runs.lock();
+        if let Some(state) = runs.get_mut(&self.workflow_id) {
+            state.history.push(message);
+            expire_old_tool_results(&mut state.history);
+        }
     }
 
     fn definitions(&self) -> Vec<ToolDefinition> {
@@ -609,7 +747,7 @@ impl WorkflowTools {
     }
 }
 
-/// 工具调用的展示标题（活动历史中与工具名并列展示）。
+/// 工具调用的展示标题（活动历史中与工具名并列展示；不入盘，读 transcript 时重建）。
 fn tool_title(name: &str, arguments: &serde_json::Value) -> Option<String> {
     let session = string_arg(arguments, "session").unwrap_or_else(|_| "会话".to_string());
     Some(match name {
@@ -628,6 +766,11 @@ fn tool_title(name: &str, arguments: &serde_json::Value) -> Option<String> {
         "read_session_activities" => format!("读取 {session} 活动内容"),
         _ => return None,
     })
+}
+
+/// 工具调用的参数（transcript 中以 JSON 字符串存放）转回 JSON 值。
+fn parse_arguments(parameters: &str) -> serde_json::Value {
+    serde_json::from_str(parameters).unwrap_or_default()
 }
 
 fn string_arg(arguments: &serde_json::Value, key: &str) -> Result<String, String> {
@@ -785,35 +928,96 @@ fn reason_label(reason: StateChangeReason) -> &'static str {
     }
 }
 
-/// 对话历史行（JSONL）：`content` 为内容块数组，与设计约定一致。
+/// `~/.amux/workflows/<workflow_id>_transcript.jsonl` 的一行：`kind` 区分对话与活动，不含工具结果。
 #[derive(serde::Serialize, serde::Deserialize)]
-struct HistoryLine {
-    role: String,
-    content: Vec<ContentBlock>,
-    timestamp: u64,
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TranscriptLine {
+    User {
+        content: Vec<ContentBlock>,
+        timestamp: u64,
+    },
+    Agent {
+        content: Vec<ContentBlock>,
+        timestamp: u64,
+    },
+    Thinking {
+        timestamp: u64,
+        thinking: String,
+    },
+    ToolCall {
+        timestamp: u64,
+        tool_call_id: String,
+        tool_name: String,
+        parameters: String,
+    },
+    Error {
+        timestamp: u64,
+        error: String,
+    },
 }
 
-impl From<&HistoryLine> for HistoryItem {
-    fn from(line: &HistoryLine) -> Self {
-        history_item(0, line)
+impl From<&Activity> for TranscriptLine {
+    fn from(activity: &Activity) -> Self {
+        match activity {
+            Activity::Thinking {
+                timestamp, thinking, ..
+            } => TranscriptLine::Thinking {
+                timestamp: *timestamp,
+                thinking: thinking.clone(),
+            },
+            Activity::ToolCall {
+                timestamp,
+                tool_call_id,
+                tool_name,
+                parameters,
+                ..
+            } => TranscriptLine::ToolCall {
+                timestamp: *timestamp,
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                parameters: parameters.clone().unwrap_or_default(),
+            },
+            Activity::Error {
+                timestamp, error, ..
+            } => TranscriptLine::Error {
+                timestamp: *timestamp,
+                error: error.clone(),
+            },
+        }
     }
 }
 
-/// JSONL 行转历史条目：行号即标识（文件只追加，行号稳定）。
-fn history_item(index: usize, line: &HistoryLine) -> HistoryItem {
-    let id = format!("line-{index}");
-    let content = line.content.clone();
-    if line.role == "user" {
-        HistoryItem::UserMessage {
-            id,
-            content,
-            timestamp: line.timestamp,
-        }
-    } else {
-        HistoryItem::AgentMessage {
-            id,
-            content,
-            timestamp: line.timestamp,
+impl TranscriptLine {
+    /// 活动类记录转活动条目；`id` 由调用方按 transcript 行号给出（文件只追加，行号稳定）。
+    fn into_activity(self, id: String) -> Option<Activity> {
+        match self {
+            TranscriptLine::Thinking { timestamp, thinking } => Some(Activity::Thinking {
+                id,
+                timestamp,
+                thinking,
+            }),
+            TranscriptLine::ToolCall {
+                timestamp,
+                tool_call_id,
+                tool_name,
+                parameters,
+            } => {
+                let title = tool_title(&tool_name, &parse_arguments(&parameters));
+                Some(Activity::ToolCall {
+                    id,
+                    timestamp,
+                    tool_call_id,
+                    tool_name,
+                    title,
+                    parameters: Some(parameters),
+                })
+            }
+            TranscriptLine::Error { timestamp, error } => Some(Activity::Error {
+                id,
+                timestamp,
+                error,
+            }),
+            TranscriptLine::User { .. } | TranscriptLine::Agent { .. } => None,
         }
     }
 }
@@ -904,45 +1108,299 @@ mod tests {
     }
 
     #[test]
-    fn history_line_round_trips_content_blocks() {
-        let line = HistoryLine {
-            role: "user".into(),
+    fn transcript_lines_match_documented_shape() {
+        let user = TranscriptLine::User {
             content: vec![ContentBlock::Text {
                 text: "你好".into(),
             }],
             timestamp: 7,
         };
-        let json = serde_json::to_string(&line).unwrap();
         assert_eq!(
-            json,
-            r#"{"role":"user","content":[{"type":"text","text":"你好"}],"timestamp":7}"#
+            serde_json::to_string(&user).unwrap(),
+            r#"{"kind":"user","content":[{"type":"text","text":"你好"}],"timestamp":7}"#
         );
-        let parsed: HistoryLine = serde_json::from_str(&json).unwrap();
+        let call = TranscriptLine::ToolCall {
+            timestamp: 9,
+            tool_call_id: "call_001".into(),
+            tool_name: "prompt_session".into(),
+            parameters: r#"{"session":"s1"}"#.into(),
+        };
         assert_eq!(
-            HistoryItem::from(&parsed),
-            HistoryItem::UserMessage {
-                id: "line-0".to_string(),
-                content: vec![ContentBlock::Text {
-                    text: "你好".into()
-                }],
-                timestamp: 7,
-            }
+            serde_json::to_string(&call).unwrap(),
+            r#"{"kind":"tool_call","timestamp":9,"tool_call_id":"call_001","tool_name":"prompt_session","parameters":"{\"session\":\"s1\"}"}"#
         );
     }
 
-    /// 编排过程中的工具调用与思考立即进活动历史，并作为进行中活动对外可见。
+    /// 对话与活动共用一份 transcript：活动读回时按行号取标识、按参数重建展示标题。
     #[tokio::test]
-    async fn recorded_activities_are_persisted_and_reported_as_ongoing() {
-        use std::sync::Arc;
+    async fn transcript_serves_history_and_activities() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let workflow = service.create("计划", None).await.unwrap();
+        service.runs.lock().entry(workflow.id.clone()).or_default();
+        let tools = WorkflowTools {
+            service: Arc::clone(&service),
+            workflow_id: workflow.id.clone(),
+        };
 
-        use rig_core::completion::message::ToolFunction;
+        service.append(
+            &workflow.id,
+            &TranscriptLine::User {
+                content: vec![ContentBlock::Text {
+                    text: "启动".into(),
+                }],
+                timestamp: 1,
+            },
+        );
+        tools.record_tool_call(&ToolCall::from_wire(
+            "call_001",
+            ToolFunction::new(
+                "prompt_session".into(),
+                serde_json::json!({ "session": "s1", "prompt": "跑测试" }),
+            ),
+        ));
+        tools.record_thinking("先下发指令");
 
+        let (activities, more) = service.activities(&workflow.id, PAGE_LIMIT, 0);
+        assert!(!more);
+        match &activities[0] {
+            Activity::ToolCall {
+                id,
+                tool_call_id,
+                tool_name,
+                title,
+                parameters,
+                ..
+            } => {
+                assert_eq!(id, "line-1");
+                assert_eq!(tool_call_id, "call_001");
+                assert_eq!(tool_name, "prompt_session");
+                assert_eq!(title.as_deref(), Some("向 s1 下发指令"));
+                assert_eq!(
+                    parameters.as_deref(),
+                    Some(r#"{"session":"s1","prompt":"跑测试"}"#)
+                );
+            }
+            other => panic!("应为工具调用活动: {other:?}"),
+        }
+        assert!(matches!(
+            activities[1],
+            Activity::Thinking { ref thinking, .. } if thinking == "先下发指令"
+        ));
+
+        // 进行中活动取自内存，内容与落盘记录一致
+        match service.ongoing_activity(&workflow.id) {
+            Some(Activity::Thinking { thinking, .. }) => assert_eq!(thinking, "先下发指令"),
+            other => panic!("进行中活动应为思考: {other:?}"),
+        }
+
+        // 活动行不进对话历史
+        service.append(
+            &workflow.id,
+            &TranscriptLine::Agent {
+                content: vec![ContentBlock::Text {
+                    text: "已下发".into(),
+                }],
+                timestamp: 4,
+            },
+        );
+        let (history, more) = service.history(&workflow.id, PAGE_LIMIT, 0);
+        assert!(!more);
+        assert_eq!(
+            history
+                .iter()
+                .map(|item| item.id().to_string())
+                .collect::<Vec<_>>(),
+            ["line-0", "line-3"]
+        );
+        assert!(matches!(
+            &history[1],
+            HistoryItem::AgentMessage { content, .. } if blocks_text(content) == "已下发"
+        ));
+    }
+
+    /// 模型上下文从 transcript 恢复：工具调用补过期结果，thinking 归到紧随的 assistant 回合。
+    #[tokio::test]
+    async fn restore_history_fills_expired_results_and_thinking() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let workflow = service.create("计划", None).await.unwrap();
+        for line in [
+            TranscriptLine::User {
+                content: vec![ContentBlock::Text {
+                    text: "启动".into(),
+                }],
+                timestamp: 1,
+            },
+            TranscriptLine::ToolCall {
+                timestamp: 2,
+                tool_call_id: "call_001".into(),
+                tool_name: "list_sessions".into(),
+                parameters: "{}".into(),
+            },
+            TranscriptLine::Thinking {
+                timestamp: 3,
+                thinking: "看看会话".into(),
+            },
+            TranscriptLine::Error {
+                timestamp: 4,
+                error: "模型调用失败: xxx".into(),
+            },
+            TranscriptLine::Agent {
+                content: vec![ContentBlock::Text {
+                    text: "已启动".into(),
+                }],
+                timestamp: 5,
+            },
+            TranscriptLine::User {
+                content: vec![ContentBlock::Text {
+                    text: "继续".into(),
+                }],
+                timestamp: 6,
+            },
+        ] {
+            service.append(&workflow.id, &line);
+        }
+
+        let history = service.restore_history(&workflow.id);
+        let json: Vec<String> = history
+            .iter()
+            .map(|message| serde_json::to_string(message).unwrap())
+            .collect();
+        assert_eq!(history.len(), 5);
+        assert!(json[0].contains("启动"));
+        assert!(json[1].contains("call_001") && json[1].contains("list_sessions"));
+        assert!(json[2].contains(EXPIRED_TOOL_RESULT) && json[2].contains("call_001"));
+        // thinking 归到紧随其后的 assistant 回合（回合文本输出之前）
+        assert!(json[3].contains("看看会话") && json[3].contains("已启动"));
+        assert!(json[4].contains("继续"));
+        // 执行错误只用于展示，不进模型上下文
+        assert!(!json.concat().contains("模型调用失败"));
+    }
+
+    /// 进程启动后的首次交互：接上旧 transcript 与本次输入，且不重复本次输入。
+    #[tokio::test]
+    async fn first_interaction_restores_transcript_without_duplicating_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let workflow = {
+            let service = test_service(home);
+            let workflow = service.create("计划", None).await.unwrap();
+            for line in [
+                TranscriptLine::User {
+                    content: vec![ContentBlock::Text {
+                        text: "上一轮".into(),
+                    }],
+                    timestamp: 1,
+                },
+                TranscriptLine::ToolCall {
+                    timestamp: 2,
+                    tool_call_id: "call_001".into(),
+                    tool_name: "list_sessions".into(),
+                    parameters: "{}".into(),
+                },
+                TranscriptLine::Agent {
+                    content: vec![ContentBlock::Text {
+                        text: "上次输出".into(),
+                    }],
+                    timestamp: 3,
+                },
+            ] {
+                service.append(&workflow.id, &line);
+            }
+            workflow
+        };
+        // 模拟进程重启：同一目录重新开一个服务，内存上下文为空
+        let service = test_service(home);
+        service.push_user(
+            &workflow.id,
+            vec![ContentBlock::Text {
+                text: "新输入".into(),
+            }],
+        );
+
+        let history = service.runs.lock().get(&workflow.id).unwrap().history.clone();
+        let json: Vec<String> = history
+            .iter()
+            .map(|message| serde_json::to_string(message).unwrap())
+            .collect();
+        assert_eq!(history.len(), 5);
+        assert!(json[0].contains("上一轮"));
+        assert!(json[1].contains("call_001"));
+        assert!(json[2].contains(EXPIRED_TOOL_RESULT));
+        assert!(json[3].contains("上次输出"));
+        assert!(json[4].contains("新输入"));
+    }
+
+    /// 内存上下文只保留最近 5 轮工具结果的真实值。
+    #[test]
+    fn expire_old_tool_results_keeps_only_recent_rounds() {
+        let mut history: Vec<Message> = vec![Message::user("开始")];
+        for round in 0..7 {
+            let call = ToolCall::from_wire(
+                format!("call_{round}"),
+                ToolFunction::new("list_sessions".into(), serde_json::json!({})),
+            );
+            history.push(Message::Assistant {
+                id: None,
+                content: vec![AssistantContent::ToolCall(call)],
+            });
+            history.push(Message::tool_result(
+                format!("call_{round}"),
+                "list_sessions",
+                format!("结果{round}"),
+            ));
+        }
+
+        expire_old_tool_results(&mut history);
+
+        let results: Vec<String> = history
+            .iter()
+            .filter(|message| has_tool_result(message))
+            .map(|message| serde_json::to_string(message).unwrap())
+            .collect();
+        assert_eq!(results.len(), 7);
+        for (round, json) in results.iter().enumerate() {
+            let expired = json.contains(EXPIRED_TOOL_RESULT);
+            assert_eq!(expired, round < 2, "第 {round} 轮: {json}");
+        }
+        // 未过期的工具调用与其结果仍成对相邻
+        assert!(fill_missing_is_noop(&history));
+    }
+
+    /// 悬空的工具调用会被补上过期结果，补齐后不再重复补。
+    #[test]
+    fn missing_tool_results_are_filled_once() {
+        let mut history = vec![
+            Message::user("开始"),
+            Message::Assistant {
+                id: None,
+                content: vec![AssistantContent::ToolCall(ToolCall::from_wire(
+                    "call_001",
+                    ToolFunction::new("list_sessions".into(), serde_json::json!({})),
+                ))],
+            },
+            Message::user("继续"),
+        ];
+
+        fill_missing_tool_results(&mut history);
+
+        assert_eq!(history.len(), 4);
+        assert!(matches!(&history[2], Message::User { content } if matches!(content.first(), Some(UserContent::ToolResult(result)) if matches!(&result.content[..], [ToolResultContent::Text(text)] if text.text == EXPIRED_TOOL_RESULT))));
+        assert!(fill_missing_is_noop(&history));
+    }
+
+    fn fill_missing_is_noop(history: &[Message]) -> bool {
+        let mut clone = history.to_vec();
+        fill_missing_tool_results(&mut clone);
+        clone.len() == history.len()
+    }
+
+    fn test_service(home: &std::path::Path) -> Arc<WorkflowService> {
         use crate::terminals::TerminalCache;
 
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().to_path_buf();
-        let store = Arc::new(Store::open(&home).unwrap());
-        let config = Arc::new(ConfigStore::new(home.clone()));
+        let store = Arc::new(Store::open(home).unwrap());
+        let config = Arc::new(ConfigStore::new(home.to_path_buf()));
         let terminals = Arc::new(TerminalCache::new());
         let (events, _events_rx) = tokio::sync::mpsc::channel(4);
         let machines = MachineHub::new(
@@ -957,49 +1415,12 @@ mod tests {
             terminals,
             Arc::clone(&config),
         ));
-        let service = Arc::new(WorkflowService::new(
-            Arc::clone(&store),
+        Arc::new(WorkflowService::new(
+            store,
             sessions,
             machines,
             config,
-            home,
-        ));
-        let workflow = service.create("计划", None).await.unwrap();
-        service.runs.lock().entry(workflow.id.clone()).or_default();
-
-        let tools = WorkflowTools {
-            service: Arc::clone(&service),
-            workflow_id: workflow.id.clone(),
-        };
-        tools.record_tool_call(&ToolCall::from_wire(
-            "call_001",
-            ToolFunction::new("list_agents".into(), serde_json::json!({})),
-        ));
-        tools.record_thinking("先看机器列表");
-
-        let (activities, _) = service.activities(&workflow.id, PAGE_LIMIT, 0);
-        match &activities[0] {
-            Activity::ToolCall {
-                tool_call_id,
-                tool_name,
-                title,
-                parameters,
-                ..
-            } => {
-                assert_eq!(tool_call_id, "call_001");
-                assert_eq!(tool_name, "list_agents");
-                assert_eq!(title.as_deref(), Some("列出机器与 agent"));
-                assert_eq!(parameters.as_deref(), Some("{}"));
-            }
-            other => panic!("应为工具调用活动: {other:?}"),
-        }
-        assert!(matches!(
-            activities[1],
-            Activity::Thinking { ref thinking, .. } if thinking == "先看机器列表"
-        ));
-        assert_eq!(
-            service.ongoing_activity(&workflow.id),
-            Some(activities[1].clone())
-        );
+            home.to_path_buf(),
+        ))
     }
 }

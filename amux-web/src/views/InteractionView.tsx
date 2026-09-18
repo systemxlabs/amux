@@ -18,7 +18,7 @@ import { Textarea } from "../components/ui/textarea";
 import { addFiles, cancelOpen, removeAttachment, sendPrompt, setConfigOption } from "../core/actions";
 import { loadNewerHistory, loadOlderHistory } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
-import { activitySummary, formatTime, truncate } from "../lib/format";
+import { activityBarText, formatTime, truncate } from "../lib/format";
 import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
 import type { ContentBlock, HistoryItem, SessionConfigOption } from "../lib/types";
@@ -203,7 +203,7 @@ export function InteractionView() {
           data-slot="live-activity"
           className="truncate border-t border-border py-1 pr-12 pl-3 text-xs text-muted-foreground"
         >
-          {truncate(activitySummary(detail.ongoing), 200)}
+          {truncate(activityBarText(detail.ongoing), 200)}
         </div>
       ) : null}
 

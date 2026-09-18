@@ -9,7 +9,7 @@ use rig_agent::{
     AgentBuilder,
 };
 use rig_core::completion::{
-    message::{ToolCall, ToolFunction},
+    message::{ToolCall, ToolFunction, UserContent},
     AssistantContent, Message, ToolDefinition,
 };
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -22,6 +22,8 @@ pub trait Tools: Send + Sync {
     fn dispatch<'a>(&'a self, name: &'a str, arguments: serde_json::Value) -> ToolFuture<'a>;
     fn record_thinking(&self, text: &str);
     fn record_tool_call(&self, call: &ToolCall);
+    /// 把一个对话回合追加到内存中的模型上下文（工具结果不入盘）。
+    fn record_context(&self, message: Message);
     fn take_steers(&self) -> Vec<Message>;
 }
 
@@ -123,6 +125,13 @@ impl AgentHook for WorkflowHook {
         _ctx: &HookContext,
         event: hook::CompletionResponse<'_>,
     ) -> hook::ObservationAction {
+        // 整个回合原样进内存上下文（含思考）：思考模型要求 assistant 回合回放推理内容
+        if !event.content.is_empty() {
+            self.tools.record_context(Message::Assistant {
+                id: event.message_id.map(str::to_string),
+                content: event.content.clone(),
+            });
+        }
         for content in event.content {
             if let AssistantContent::Reasoning(reasoning) = content {
                 let text = model::reasoning_text(reasoning);
@@ -132,6 +141,21 @@ impl AgentHook for WorkflowHook {
             }
         }
         hook::ObservationAction::Continue
+    }
+
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: hook::ToolResultEvent<'_>,
+    ) -> hook::ToolResultAction {
+        self.tools.record_context(Message::User {
+            content: vec![UserContent::tool_result(
+                event.tool_call_id.unwrap_or(event.internal_call_id),
+                event.tool_name,
+                event.presentation.as_content().to_vec(),
+            )],
+        });
+        hook::ToolResultAction::Keep
     }
 
     async fn on_tool_call(
@@ -210,6 +234,11 @@ mod tests {
         fn record_tool_call(&self, call: &ToolCall) {
             self.events.lock().push(format!("call:{}", call.id));
         }
+        fn record_context(&self, message: Message) {
+            self.events
+                .lock()
+                .push(format!("context:{}", serde_json::to_string(&message).unwrap()));
+        }
         fn take_steers(&self) -> Vec<Message> {
             std::mem::take(&mut *self.steers.lock())
         }
@@ -273,9 +302,19 @@ mod tests {
             "工具结果未回填: {second}"
         );
         assert!(tools.steers.lock().is_empty());
+        // 内存上下文按回合累积：assistant 回合（含思考）、工具结果、最终输出
+        let events = tools.events.lock().clone();
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|event| event.split(':').next().unwrap())
+            .collect();
         assert_eq!(
-            *tools.events.lock(),
-            ["thinking:先检查", "call:call-1", "dispatch:list_sessions"]
+            kinds,
+            ["context", "thinking", "call", "dispatch", "context", "context"]
         );
+        assert!(events[0].contains("call-1") && events[0].contains("先检查"));
+        assert!(events[1].contains("先检查"));
+        assert!(events[4].contains("session-result"));
+        assert!(events[5].contains("按新指令暂停"));
     }
 }
