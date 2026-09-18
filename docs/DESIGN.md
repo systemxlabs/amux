@@ -570,6 +570,8 @@ Server 连接信息存储在 `~/.amux/app/server.json` 中，格式为
 
 ### Web 应用
 
+Web 应用需适配桌面和手机浏览器。
+
 #### 技术栈
 
 - UI：`react` + `typescript`
