@@ -162,11 +162,17 @@ impl WorkflowService {
                 // 文件只追加：行号即条目标识，分页刷新时用它识别同一条消息
                 let id = format!("line-{index}");
                 match line {
-                    TranscriptLine::User { content, timestamp } => {
-                        Some(HistoryItem::UserMessage { id, content, timestamp })
-                    }
+                    TranscriptLine::User { content, timestamp } => Some(HistoryItem::UserMessage {
+                        id,
+                        content,
+                        timestamp,
+                    }),
                     TranscriptLine::Agent { content, timestamp } => {
-                        Some(HistoryItem::AgentMessage { id, content, timestamp })
+                        Some(HistoryItem::AgentMessage {
+                            id,
+                            content,
+                            timestamp,
+                        })
                     }
                     _ => None,
                 }
@@ -538,7 +544,12 @@ fn expire_old_tool_results(history: &mut [Message]) {
 
 /// 反向分页：`items` 按时间正序传入，返回最新在后的窗口与是否还有更早的条目。
 fn page<T>(items: Vec<T>, limit: usize, offset: usize) -> (Vec<T>, bool) {
-    let mut window: Vec<T> = items.into_iter().rev().skip(offset).take(limit + 1).collect();
+    let mut window: Vec<T> = items
+        .into_iter()
+        .rev()
+        .skip(offset)
+        .take(limit + 1)
+        .collect();
     let has_more = window.len() > limit;
     window.truncate(limit);
     window.reverse();
@@ -960,7 +971,9 @@ impl From<&Activity> for TranscriptLine {
     fn from(activity: &Activity) -> Self {
         match activity {
             Activity::Thinking {
-                timestamp, thinking, ..
+                timestamp,
+                thinking,
+                ..
             } => TranscriptLine::Thinking {
                 timestamp: *timestamp,
                 thinking: thinking.clone(),
@@ -991,7 +1004,10 @@ impl TranscriptLine {
     /// 活动类记录转活动条目；`id` 由调用方按 transcript 行号给出（文件只追加，行号稳定）。
     fn into_activity(self, id: String) -> Option<Activity> {
         match self {
-            TranscriptLine::Thinking { timestamp, thinking } => Some(Activity::Thinking {
+            TranscriptLine::Thinking {
+                timestamp,
+                thinking,
+            } => Some(Activity::Thinking {
                 id,
                 timestamp,
                 thinking,
@@ -1319,7 +1335,13 @@ mod tests {
             }],
         );
 
-        let history = service.runs.lock().get(&workflow.id).unwrap().history.clone();
+        let history = service
+            .runs
+            .lock()
+            .get(&workflow.id)
+            .unwrap()
+            .history
+            .clone();
         let json: Vec<String> = history
             .iter()
             .map(|message| serde_json::to_string(message).unwrap())
@@ -1386,7 +1408,9 @@ mod tests {
         fill_missing_tool_results(&mut history);
 
         assert_eq!(history.len(), 4);
-        assert!(matches!(&history[2], Message::User { content } if matches!(content.first(), Some(UserContent::ToolResult(result)) if matches!(&result.content[..], [ToolResultContent::Text(text)] if text.text == EXPIRED_TOOL_RESULT))));
+        assert!(
+            matches!(&history[2], Message::User { content } if matches!(content.first(), Some(UserContent::ToolResult(result)) if matches!(&result.content[..], [ToolResultContent::Text(text)] if text.text == EXPIRED_TOOL_RESULT)))
+        );
         assert!(fill_missing_is_noop(&history));
     }
 

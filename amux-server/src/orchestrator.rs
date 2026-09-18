@@ -235,9 +235,10 @@ mod tests {
             self.events.lock().push(format!("call:{}", call.id));
         }
         fn record_context(&self, message: Message) {
-            self.events
-                .lock()
-                .push(format!("context:{}", serde_json::to_string(&message).unwrap()));
+            self.events.lock().push(format!(
+                "context:{}",
+                serde_json::to_string(&message).unwrap()
+            ));
         }
         fn take_steers(&self) -> Vec<Message> {
             std::mem::take(&mut *self.steers.lock())
