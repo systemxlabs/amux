@@ -198,7 +198,10 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                       className="h-9 lg:h-6"
                     />
                   ) : (
-                    <div data-slot="session-title" className="truncate text-sm">
+                    <div
+                      data-slot="session-title"
+                      className="overflow-hidden whitespace-nowrap text-sm"
+                    >
                       {title}
                     </div>
                   )}

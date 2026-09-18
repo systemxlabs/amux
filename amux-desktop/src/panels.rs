@@ -164,12 +164,14 @@ fn session_row(
         .items_center()
         .child(marker)
         .child(
-            h_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .items_center()
-                .child(Label::new(title).text_sm().flex_1().min_w_0().truncate()),
+            h_flex().flex_1().min_w_0().gap_1().items_center().child(
+                Label::new(title)
+                    .text_sm()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap(),
+            ),
         )
         .child(busy_indicator(session.state, theme.primary));
 
@@ -212,7 +214,14 @@ fn workflow_row(
                     theme.muted_foreground
                 }),
         )
-        .child(Label::new(title).text_sm().flex_1().min_w_0().truncate())
+        .child(
+            Label::new(title)
+                .text_sm()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap(),
+        )
         .child(
             Button::new(format!("wf-toggle-{id}"))
                 .xsmall()
