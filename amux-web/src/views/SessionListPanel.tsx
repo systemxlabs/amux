@@ -229,13 +229,6 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                     </>
                   )}
                 </div>
-                {entryState(entry) === "busy" ? (
-                  <Loader2
-                    data-slot="session-spinner"
-                    aria-label="工作中"
-                    className="size-4 shrink-0 animate-spin text-muted-foreground"
-                  />
-                ) : null}
                 {/* 窄视口的长按不一定弹出右键菜单（iOS Safari 就不弹），给会话操作留一个按钮入口 */}
                 <button
                   type="button"
@@ -254,6 +247,13 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                 >
                   <MoreHorizontal className="size-4" />
                 </button>
+                {entryState(entry) === "busy" ? (
+                  <Loader2
+                    data-slot="session-spinner"
+                    aria-label="工作中"
+                    className="size-4 shrink-0 animate-spin text-muted-foreground"
+                  />
+                ) : null}
               </div>
             );
           })

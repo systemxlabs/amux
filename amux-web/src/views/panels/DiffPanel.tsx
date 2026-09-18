@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
+import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
 import { appendPromptDraft } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
@@ -148,97 +149,93 @@ export function DiffPanel() {
   } else if (files.length === 0) {
     body = <Hint text="暂无改动" />;
   } else {
-    // 窄视口下（右侧面板为整屏浮层）文件树与 diff 上下排布，不再各占一半宽度
+    // 窄视口下文件树与 diff 上下排布；宽屏可通过分割线调整左右宽度
     body = (
-      <div className="flex min-h-0 flex-1 flex-col items-stretch gap-2 px-3 pb-3 lg:flex-row">
-        {treeVisible && (
+      <ResizableTreePane
+        label="调整改动文件树与 diff 宽度"
+        tree={
+          treeVisible
+            ? nodes.map((node) => (
+                <DiffTreeNode
+                  key={node.key}
+                  node={node}
+                  depth={0}
+                  collapsedDirs={collapsedDirs}
+                  selected={selected}
+                  onToggleDir={toggleDir}
+                  onSelectFile={selectFile}
+                />
+              ))
+            : null
+        }
+        content={files.map((file, index) => (
           <div
-            data-slot="diff-tree"
-            className="max-h-[40%] min-h-0 overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none lg:w-1/2"
+            key={file.path}
+            id={`diff-file-${index}`}
+            data-slot="diff-file"
+            className="mb-2 rounded-md border border-border"
           >
-            {nodes.map((node) => (
-              <DiffTreeNode
-                key={node.key}
-                node={node}
-                depth={0}
-                collapsedDirs={collapsedDirs}
-                selected={selected}
-                onToggleDir={toggleDir}
-                onSelectFile={selectFile}
-              />
-            ))}
-          </div>
-        )}
-        {/* 折叠全部改动时仍保留文件列表，只是不再展示 diff 内容 */}
-        <div
-          data-slot="diff-files"
-          data-collapsed={diffsCollapsed ? "true" : "false"}
-          className="min-h-0 flex-1 overflow-auto rounded-md bg-muted/20 lg:h-full"
-        >
-          {files.map((file, index) => (
-            <div
-              key={file.path}
-              id={`diff-file-${index}`}
-              data-slot="diff-file"
-              className="mb-2 rounded-md border border-border"
-            >
-              <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-2 py-1 font-mono text-xs">
-                <span className="min-w-0 flex-1 truncate">{file.path}</span>
-                <span className="shrink-0">{STATUS_LABEL[file.status]}</span>
-                <span className="shrink-0 text-muted-foreground">
-                  +{file.additions}/-{file.deletions}
-                </span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  data-slot="diff-quote-file"
-                  className="h-9 shrink-0 text-xs lg:h-5"
-                  title="复制文件路径到输入框"
-                  onClick={() => appendPromptDraft(core, file.path)}
-                >
-                  引用文件
-                </Button>
-              </div>
-              {!diffsCollapsed &&
-                file.hunks.map((hunk, hunkIx) => (
-                  <div key={hunkIx}>
-                    <div className="flex items-center gap-2 px-2 font-mono text-xs text-muted-foreground">
-                      <span className="min-w-0 flex-1">{hunk.header}</span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        data-slot="diff-quote-hunk"
-                        className="h-9 shrink-0 text-xs lg:h-5"
-                        title="复制代码块内容到输入框"
-                        onClick={() =>
-                          appendPromptDraft(core, hunk.lines.map((line) => line.text).join("\n"))
-                        }
-                      >
-                        引用代码块
-                      </Button>
-                    </div>
-                    {hunk.lines.map((line, lineIx) => (
-                      <div
-                        key={lineIx}
-                        data-slot="diff-line"
-                        className={cn(
-                          "whitespace-pre px-2 font-mono text-xs",
-                          line.kind === "add" && "bg-diff-add",
-                          line.kind === "remove" && "bg-diff-remove",
-                        )}
-                      >
-                        {linePrefix(line.kind)}
-                        {line.text}
-                      </div>
-                    ))}
-                  </div>
-                ))}
+            <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-2 py-1 font-mono text-xs">
+              <span className="min-w-0 flex-1 truncate">{file.path}</span>
+              <span className="shrink-0">{STATUS_LABEL[file.status]}</span>
+              <span className="shrink-0 text-muted-foreground">
+                +{file.additions}/-{file.deletions}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-slot="diff-quote-file"
+                className="h-9 shrink-0 text-xs lg:h-5"
+                title="复制文件路径到输入框"
+                onClick={() => appendPromptDraft(core, file.path)}
+              >
+                引用文件
+              </Button>
             </div>
-          ))}
-        </div>
-      </div>
+            {!diffsCollapsed &&
+              file.hunks.map((hunk, hunkIx) => (
+                <div key={hunkIx}>
+                  <div className="flex items-center gap-2 px-2 font-mono text-xs text-muted-foreground">
+                    <span className="min-w-0 flex-1">{hunk.header}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      data-slot="diff-quote-hunk"
+                      className="h-9 shrink-0 text-xs lg:h-5"
+                      title="复制代码块内容到输入框"
+                      onClick={() =>
+                        appendPromptDraft(core, hunk.lines.map((line) => line.text).join("\n"))
+                      }
+                    >
+                      引用代码块
+                    </Button>
+                  </div>
+                  {hunk.lines.map((line, lineIx) => (
+                    <div
+                      key={lineIx}
+                      data-slot="diff-line"
+                      className={cn(
+                        "whitespace-pre px-2 font-mono text-xs",
+                        line.kind === "add" && "bg-diff-add",
+                        line.kind === "remove" && "bg-diff-remove",
+                      )}
+                    >
+                      {linePrefix(line.kind)}
+                      {line.text}
+                    </div>
+                  ))}
+                </div>
+              ))}
+          </div>
+        ))}
+        treeSlot="diff-tree"
+        contentSlot="diff-files"
+        treeClassName="max-h-[40%] min-h-0 overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none"
+        contentClassName="min-h-0 flex-1 overflow-auto rounded-md bg-muted/20 lg:h-full"
+        contentCollapsed={diffsCollapsed}
+      />
     );
   }
 

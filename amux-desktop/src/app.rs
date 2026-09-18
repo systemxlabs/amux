@@ -118,6 +118,10 @@ pub struct AmuxApp {
     pub diff_selected_hunks: HashSet<(String, String)>,
     /// 改动审查：改动区域滚动句柄（点击文件时定位）
     pub diff_scroll: ScrollHandle,
+    /// 改动审查：文件树宽度
+    pub diff_tree_width: f32,
+    /// 改动审查：文件树宽度拖拽起点（指针 x, 起始宽度）
+    diff_tree_drag: Option<(f32, f32)>,
     /// 会话列表滚动句柄（滚动分页）
     pub list_scroll: ScrollHandle,
     /// 对话历史滚动句柄（贴底判断与滚动分页）
@@ -143,6 +147,10 @@ pub struct AmuxApp {
     pub workspace_tree_visible: bool,
     /// 工作目录面板中文件内容区域是否展开
     pub workspace_content_visible: bool,
+    /// 工作目录面板：文件树宽度
+    pub workspace_tree_width: f32,
+    /// 工作目录面板：文件树宽度拖拽起点（指针 x, 起始宽度）
+    workspace_tree_drag: Option<(f32, f32)>,
     /// 输入框高度（拖拽调整，docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）
     pub composer_height: f32,
     /// 输入框高度拖拽起点（指针 y, 起始高度）
@@ -339,6 +347,8 @@ impl AmuxApp {
             diff_selected_files: HashSet::new(),
             diff_selected_hunks: HashSet::new(),
             diff_scroll: ScrollHandle::new(),
+            diff_tree_width: panels::DIFF_TREE_WIDTH,
+            diff_tree_drag: None,
             list_scroll: ScrollHandle::new(),
             dialog_scroll: ScrollHandle::new(),
             dialog_scroll_on_entry: true,
@@ -352,6 +362,8 @@ impl AmuxApp {
             workspace_file: None,
             workspace_tree_visible: true,
             workspace_content_visible: true,
+            workspace_tree_width: panels::WORKSPACE_TREE_WIDTH,
+            workspace_tree_drag: None,
             composer_height: INPUT_DEFAULT_HEIGHT,
             composer_drag: None,
             sidebar_width: SIDEBAR_WIDTH,
@@ -1674,8 +1686,36 @@ impl AmuxApp {
         cx.notify();
     }
 
+    /// 记录工作目录文件树宽度拖拽起点。
+    pub fn begin_workspace_tree_resize(&mut self, pointer_x: f32) {
+        self.workspace_tree_drag = Some((pointer_x, self.workspace_tree_width));
+    }
+
+    /// 调整工作目录文件树宽度（docs/PRD.md「工作目录视图」）。
+    pub fn resize_workspace_tree(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
+        let Some((origin, initial)) = self.workspace_tree_drag else {
+            return;
+        };
+        self.workspace_tree_width = tree_width(initial + pointer_x - origin, self.panel_width);
+        cx.notify();
+    }
+
     pub fn toggle_diff_tree(&mut self, cx: &mut Context<Self>) {
         self.diff_tree_visible = !self.diff_tree_visible;
+        cx.notify();
+    }
+
+    /// 记录改动文件树宽度拖拽起点。
+    pub fn begin_diff_tree_resize(&mut self, pointer_x: f32) {
+        self.diff_tree_drag = Some((pointer_x, self.diff_tree_width));
+    }
+
+    /// 调整改动文件树宽度（docs/PRD.md「改动审查视图」）。
+    pub fn resize_diff_tree(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
+        let Some((origin, initial)) = self.diff_tree_drag else {
+            return;
+        };
+        self.diff_tree_width = tree_width(initial + pointer_x - origin, self.panel_width);
         cx.notify();
     }
 
@@ -2623,6 +2663,13 @@ fn toggle_set<T: std::hash::Hash + Eq>(set: &mut HashSet<T>, value: T) {
     if !set.remove(&value) {
         set.insert(value);
     }
+}
+
+/// 将文件树宽度限制在面板可容纳的左右最小宽度之间。
+fn tree_width(width: f32, panel_width: f32) -> f32 {
+    let min = panels::TREE_MIN_WIDTH.min(panel_width / 2.0);
+    let max = (panel_width - min - panels::TREE_RESIZE_HANDLE_WIDTH).max(min);
+    width.clamp(min, max)
 }
 
 /// 页大小：面板可视高度大致能容纳的条目数，随可视高度自适应（docs/DESIGN.md 各滚动机制小节）。

@@ -27,11 +27,18 @@ use crate::theme;
 use crate::ui;
 
 /// 改动审查视图左侧文件树宽度。
-const DIFF_TREE_WIDTH: f32 = 168.0;
+pub(crate) const DIFF_TREE_WIDTH: f32 = 168.0;
 /// 工作目录树宽度。
-const WORKSPACE_TREE_WIDTH: f32 = 196.0;
+pub(crate) const WORKSPACE_TREE_WIDTH: f32 = 196.0;
+/// 文件树可拖拽到的最小宽度。
+pub(crate) const TREE_MIN_WIDTH: f32 = 120.0;
+/// 文件树与内容之间的拖拽手柄宽度。
+pub(crate) const TREE_RESIZE_HANDLE_WIDTH: f32 = 5.0;
 /// 工作目录树中每层缩进。
 const TREE_INDENT: f32 = 14.0;
+
+struct WorkspaceTreeResizeDrag;
+struct DiffTreeResizeDrag;
 
 /// 改动面板图标：文件 diff（文件轮廓内含 +/−）。gpui-component 默认图标集无
 /// 对应图标，SVG 由应用自有资产提供（main.rs `AmuxAssets`）。
@@ -234,7 +241,6 @@ fn workflow_row(
                 .text_color(theme.muted_foreground),
             )
         })
-        .child(busy_indicator(workflow.state, theme.primary))
         .child(
             Button::new(format!("wf-toggle-{id}"))
                 .xsmall()
@@ -256,7 +262,8 @@ fn workflow_row(
                         cx.notify();
                     }
                 })),
-        );
+        )
+        .child(busy_indicator(workflow.state, theme.primary));
 
     let mut children = v_flex().gap_1();
     if expanded {
@@ -496,8 +503,9 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
         .map(|session| (session.machine.clone(), session.root_dir().to_string()));
     let mut tree = v_flex()
         .id("workspace-tree")
-        .w(px(WORKSPACE_TREE_WIDTH))
+        .w(px(this.workspace_tree_width))
         .h_full()
+        .flex_none()
         .min_h_0()
         .gap_1()
         .p_1()
@@ -583,9 +591,35 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_workspace_content(cx))),
         );
 
-    let mut body = h_flex().flex_1().min_h_0().gap_2().px_3().pb_3();
+    let mut body = h_flex().flex_1().min_h_0().gap_1().px_3().pb_3();
     if this.workspace_tree_visible {
         body = body.child(tree);
+        if this.workspace_content_visible {
+            let border = theme.border;
+            let primary = theme.primary;
+            body = body.child(
+                div()
+                    .id("workspace-tree-resize-handle")
+                    .w(px(TREE_RESIZE_HANDLE_WIDTH))
+                    .h_full()
+                    .flex_none()
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .bg(border.opacity(0.55))
+                    .hover(move |handle| handle.bg(primary))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, _| {
+                            this.begin_workspace_tree_resize(event.position.x.as_f32());
+                        }),
+                    )
+                    .on_drag(WorkspaceTreeResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
+                    .on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<WorkspaceTreeResizeDrag>, _, cx| {
+                            this.resize_workspace_tree(event.event.position.x.as_f32(), cx);
+                        },
+                    )),
+            );
+        }
     }
     if this.workspace_content_visible {
         body = body.child(content);
@@ -1141,9 +1175,33 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
     } else if files.is_empty() {
         ui::empty_hint("暂无改动", &theme).into_any_element()
     } else {
-        let mut content = h_flex().flex_1().min_h_0().min_w_0().gap_2();
+        let mut content = h_flex().flex_1().min_h_0().min_w_0().gap_1();
         if this.diff_tree_visible {
             content = content.child(diff_tree(&files, this, cx));
+            let border = theme.border;
+            let primary = theme.primary;
+            content = content.child(
+                div()
+                    .id("diff-tree-resize-handle")
+                    .w(px(TREE_RESIZE_HANDLE_WIDTH))
+                    .h_full()
+                    .flex_none()
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .bg(border.opacity(0.55))
+                    .hover(move |handle| handle.bg(primary))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, _| {
+                            this.begin_diff_tree_resize(event.position.x.as_f32());
+                        }),
+                    )
+                    .on_drag(DiffTreeResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
+                    .on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<DiffTreeResizeDrag>, _, cx| {
+                            this.resize_diff_tree(event.event.position.x.as_f32(), cx);
+                        },
+                    )),
+            );
         }
         content
             .child(diff_inline(&files, this, cx))
@@ -1174,8 +1232,9 @@ fn diff_tree(files: &[GitDiffFile], this: &mut AmuxApp, cx: &mut Context<AmuxApp
     }
     v_flex()
         .id("diff-tree")
-        .w(px(DIFF_TREE_WIDTH))
+        .w(px(this.diff_tree_width))
         .h_full()
+        .flex_none()
         .min_h_0()
         .gap_1()
         .p_1()

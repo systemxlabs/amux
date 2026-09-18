@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
 import { useCore, useCoreState } from "../../core/store";
 import type { FsEntry } from "../../lib/types";
@@ -329,92 +330,99 @@ export function WorkspacePanel() {
           {contentVisible ? "折叠内容区域" : "展开内容区域"}
         </Button>
       </div>
-      {/* 窄视口下（右侧面板为整屏浮层）文件树与内容上下排布，不再各占一半宽度 */}
-      <div className="flex min-h-0 flex-1 flex-col items-stretch gap-2 px-3 pb-3 lg:flex-row">
-        {treeVisible && (
-          <div
-            data-slot="workspace-tree"
-            className={cn(
-              "min-h-0 max-h-[45%] overflow-y-auto rounded-md bg-muted/40 p-1 lg:max-h-none lg:h-full",
-              contentVisible ? "lg:w-1/2" : "lg:flex-1",
-            )}
-          >
-            {session === null || root === null ? (
-              <div className="px-2 py-1 text-xs text-muted-foreground">未选择会话</div>
-            ) : (
-              <>
-                <div className="truncate px-2 py-1 text-xs text-muted-foreground">{root}</div>
-                {rootLevel === undefined || rootLevel.loading ? (
-                  <div className="px-2 py-1 text-xs text-muted-foreground">加载中…</div>
-                ) : rootLevel.error !== null ? (
-                  <div className="px-2 py-1 text-xs text-destructive">
-                    加载失败：{rootLevel.error}
-                  </div>
-                ) : (
-                  <>
-                    <TreeNodes
-                      entries={rootLevel.entries}
-                      depth={0}
-                      levels={levels}
-                      expanded={expanded}
-                      selected={selected}
-                      onToggleDir={toggleDir}
-                      onOpenFile={openFile}
-                      onLoadMoreDir={loadDirMore}
-                    />
-                    {rootLevel.hasMore ? (
+      {/* 窄视口下文件树与内容上下排布；宽屏可通过分割线调整左右宽度 */}
+      <ResizableTreePane
+        label="调整工作目录文件树与内容宽度"
+        tree={
+          treeVisible ? (
+            <>
+              {session === null || root === null ? (
+                <div className="px-2 py-1 text-xs text-muted-foreground">未选择会话</div>
+              ) : (
+                <>
+                  <div className="truncate px-2 py-1 text-xs text-muted-foreground">{root}</div>
+                  {rootLevel === undefined || rootLevel.loading ? (
+                    <div className="px-2 py-1 text-xs text-muted-foreground">加载中…</div>
+                  ) : rootLevel.error !== null ? (
+                    <div className="px-2 py-1 text-xs text-destructive">
+                      加载失败：{rootLevel.error}
+                    </div>
+                  ) : (
+                    <>
+                      <TreeNodes
+                        entries={rootLevel.entries}
+                        depth={0}
+                        levels={levels}
+                        expanded={expanded}
+                        selected={selected}
+                        onToggleDir={toggleDir}
+                        onOpenFile={openFile}
+                        onLoadMoreDir={loadDirMore}
+                      />
+                      {rootLevel.hasMore ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          data-slot="workspace-load-more-dir"
+                          className="w-full justify-start font-normal text-muted-foreground"
+                          onClick={() => loadDirMore(root)}
+                        >
+                          加载更多…
+                        </Button>
+                      ) : null}
+                    </>
+                  )}
+                </>
+              )}
+            </>
+          ) : null
+        }
+        content={
+          contentVisible ? (
+            <>
+              {fileLoading ? (
+                <div className="px-2 py-1 text-xs text-muted-foreground">加载中…</div>
+              ) : fileError !== null ? (
+                <div className="px-2 py-1 text-xs text-destructive">
+                  读取文件失败：{fileError}
+                </div>
+              ) : file !== null ? (
+                <div className="flex h-full flex-col">
+                  <pre className="whitespace-pre shrink-0 p-1 font-mono text-xs">
+                    {file.content}
+                  </pre>
+                  {file.hasMore ? (
+                    <div className="shrink-0 px-1 py-2 text-xs text-muted-foreground">
                       <Button
                         type="button"
-                        variant="ghost"
+                        variant="outline"
                         size="sm"
-                        data-slot="workspace-load-more-dir"
-                        className="w-full justify-start font-normal text-muted-foreground"
-                        onClick={() => loadDirMore(root)}
+                        data-slot="workspace-load-more-file"
+                        onClick={() => void loadMoreFile()}
                       >
                         加载更多…
                       </Button>
-                    ) : null}
-                  </>
-                )}
-              </>
-            )}
-          </div>
+                      <span className="ml-2">文件内容较长，仅显示已加载部分</span>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="px-2 py-1 text-xs text-muted-foreground">
+                  在左侧选择文件查看内容
+                </div>
+              )}
+            </>
+          ) : null
+        }
+        treeSlot="workspace-tree"
+        contentSlot="workspace-content"
+        treeClassName={cn(
+          "min-h-0 max-h-[45%] overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none",
+          !contentVisible && "lg:flex-1",
         )}
-        {contentVisible && (
-          <div
-            data-slot="workspace-content"
-            className="min-h-0 flex-1 overflow-auto rounded-md bg-muted/20 p-1 lg:h-full"
-          >
-            {fileLoading ? (
-              <div className="px-2 py-1 text-xs text-muted-foreground">加载中…</div>
-            ) : fileError !== null ? (
-              <div className="px-2 py-1 text-xs text-destructive">读取文件失败：{fileError}</div>
-            ) : file !== null ? (
-              <div className="flex h-full flex-col">
-                <pre className="whitespace-pre shrink-0 p-1 font-mono text-xs">{file.content}</pre>
-                {file.hasMore ? (
-                  <div className="shrink-0 px-1 py-2 text-xs text-muted-foreground">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      data-slot="workspace-load-more-file"
-                      onClick={() => void loadMoreFile()}
-                    >
-                      加载更多…
-                    </Button>
-                    <span className="ml-2">文件内容较长，仅显示已加载部分</span>
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <div className="px-2 py-1 text-xs text-muted-foreground">
-                在左侧选择文件查看内容
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+        contentClassName="min-h-0 flex-1 overflow-auto rounded-md bg-muted/20 p-1 lg:h-full"
+      />
     </div>
   );
 }
