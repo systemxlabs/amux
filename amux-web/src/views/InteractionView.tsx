@@ -40,9 +40,12 @@ export function InteractionView() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const heightBeforeLoad = useRef<number | null>(null);
   const scrollOnEntry = useRef(true);
+  const followingBottom = useRef(true);
+  const previousTarget = useRef<string | null>(null);
   // 输入框高度（拖拽调整；null 表示用 rows 的默认高度）
   const [inputHeight, setInputHeight] = useState<number | null>(null);
   const inputDrag = useRef<{ startY: number; startHeight: number } | null>(null);
+  const targetKey = target === null ? null : `${target.kind}:${target.id}`;
 
   /** 开始拖拽输入框高度（docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）。 */
   const startInputResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
@@ -71,18 +74,21 @@ export function InteractionView() {
     }
   };
 
+  // 仅切换会话时重新进入贴底状态；历史轮询更新不能覆盖用户当前阅读位置。
   useLayoutEffect(() => {
-    scrollOnEntry.current = true;
-    heightBeforeLoad.current = null;
-  }, [detail]);
-
-  useLayoutEffect(() => {
+    if (previousTarget.current !== targetKey) {
+      previousTarget.current = targetKey;
+      scrollOnEntry.current = true;
+      followingBottom.current = true;
+      heightBeforeLoad.current = null;
+    }
     const element = listRef.current;
     // 打开时历史异步加载；首次有消息再定位，不能在空列表上消耗此次滚动。
-    if (!element || !scrollOnEntry.current || detail.history.length === 0) return;
+    if (!element || detail.history.length === 0) return;
+    if (!scrollOnEntry.current && !followingBottom.current) return;
     element.scrollTop = element.scrollHeight;
     scrollOnEntry.current = false;
-  }, [detail, detail.history.length]);
+  });
 
   useEffect(() => {
     core.update((next) => {
@@ -154,6 +160,8 @@ export function InteractionView() {
   const onScroll = () => {
     const element = listRef.current;
     if (!element) return;
+    followingBottom.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
     const size = pageSizeForViewport(
       element.clientHeight,
       element.scrollHeight,
