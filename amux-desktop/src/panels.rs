@@ -127,9 +127,9 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         .into_any_element()
 }
 
-/// 普通会话行：状态图标、标题、活跃时间、工作中转圈；右键菜单重命名/删除。
+/// 普通会话行：状态图标、标题、工作中转圈；右键菜单重命名/删除。
 ///
-/// `linked` 表示这是工作流会话下挂的关联普通会话，行首改用缩进符标记。
+/// `linked` 表示这是工作流会话下挂的关联普通会话，增加左缩进。
 fn session_row(
     session: &Session,
     linked: bool,
@@ -146,26 +146,20 @@ fn session_row(
     let theme = ui::Colors::of(cx.theme());
     let entry = ListEntry::Session(session.clone());
 
-    let marker = if linked {
-        Label::new("↳")
-            .text_sm()
-            .text_color(theme.muted_foreground)
-            .into_any_element()
-    } else {
-        Icon::new(IconName::SquareTerminal)
-            .small()
-            .text_color(if selected {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            })
-            .into_any_element()
-    };
+    let marker = Icon::new(IconName::SquareTerminal)
+        .small()
+        .text_color(if selected {
+            theme.primary
+        } else {
+            theme.muted_foreground
+        })
+        .into_any_element();
 
     let row = h_flex()
         .w_full()
         .h_8()
         .px_1()
+        .when(linked, |row| row.pl_6())
         .gap_1p5()
         .items_center()
         .child(marker)
@@ -177,23 +171,12 @@ fn session_row(
                 .items_center()
                 .child(Label::new(title).text_sm().flex_1().min_w_0().truncate()),
         )
-        .when(session.updated_at > 0, |row| {
-            row.child(
-                Label::new(ui::format_local_time(
-                    session.updated_at,
-                    ui::TimePrecision::Compact,
-                ))
-                .text_xs()
-                .flex_none()
-                .text_color(theme.muted_foreground),
-            )
-        })
         .child(busy_indicator(session.state, theme.primary));
 
     list_row(row, &id, selected, Some(entry), cx).into_any_element()
 }
 
-/// 工作流会话行：标题 + 展开开关 + 关联普通会话（展开时按自身活跃排序）。
+/// 工作流会话行：标题 + 右侧展开开关和工作中转圈 + 关联普通会话。
 fn workflow_row(
     workflow: &Workflow,
     core: &Core,
@@ -230,17 +213,6 @@ fn workflow_row(
                 }),
         )
         .child(Label::new(title).text_sm().flex_1().min_w_0().truncate())
-        .when(workflow.updated_at > 0, |row| {
-            row.child(
-                Label::new(ui::format_local_time(
-                    workflow.updated_at,
-                    ui::TimePrecision::Compact,
-                ))
-                .text_xs()
-                .flex_none()
-                .text_color(theme.muted_foreground),
-            )
-        })
         .child(
             Button::new(format!("wf-toggle-{id}"))
                 .xsmall()

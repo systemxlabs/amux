@@ -161,25 +161,6 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                   active ? "bg-accent" : "hover:bg-accent",
                 )}
               >
-                {entry.kind === "workflow" && canExpand(entry) ? (
-                  <button
-                    type="button"
-                    data-slot="session-expand"
-                    data-expanded={expanded ? "true" : "false"}
-                    aria-label={expanded ? "折叠关联普通会话" : "展开关联普通会话"}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      toggleExpand(core, entry.workflow.id);
-                    }}
-                    className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:text-foreground lg:size-4"
-                  >
-                    {expanded ? (
-                      <ChevronDown className="size-4" />
-                    ) : (
-                      <ChevronRight className="size-4" />
-                    )}
-                  </button>
-                ) : null}
                 <div className="min-w-0 flex-1">
                   {editing ? (
                     <Input
@@ -217,16 +198,9 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                       className="h-9 lg:h-6"
                     />
                   ) : (
-                    <>
-                      <div data-slot="session-title" className="truncate text-sm">
-                        {title}
-                      </div>
-                      {row.depth === 1 && entry.kind === "session" ? (
-                        <div className="truncate text-xs text-muted-foreground">
-                          {entry.session.agent}@{entry.session.machine}
-                        </div>
-                      ) : null}
-                    </>
+                    <div data-slot="session-title" className="truncate text-sm">
+                      {title}
+                    </div>
                   )}
                 </div>
                 {/* 窄视口的长按不一定弹出右键菜单（iOS Safari 就不弹），给会话操作留一个按钮入口 */}
@@ -247,6 +221,25 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                 >
                   <MoreHorizontal className="size-4" />
                 </button>
+                {entry.kind === "workflow" && canExpand(entry) ? (
+                  <button
+                    type="button"
+                    data-slot="session-expand"
+                    data-expanded={expanded ? "true" : "false"}
+                    aria-label={expanded ? "折叠关联普通会话" : "展开关联普通会话"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleExpand(core, entry.workflow.id);
+                    }}
+                    className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:text-foreground lg:size-4"
+                  >
+                    {expanded ? (
+                      <ChevronDown className="size-4" />
+                    ) : (
+                      <ChevronRight className="size-4" />
+                    )}
+                  </button>
+                ) : null}
                 {entryState(entry) === "busy" ? (
                   <Loader2
                     data-slot="session-spinner"
