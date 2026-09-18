@@ -1,7 +1,7 @@
 // 会话交互视图（docs/PRD.md「会话交互视图」）：agent 状态、对话气泡、实时活动、
 // 快捷指令栏、输入区（Enter 发送 / Shift+Enter 换行、斜杠命令上拉框、附件）、会话选项。
 
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { SendHorizontal, Square } from "lucide-react";
 
 import { Markdown } from "../components/Markdown";
@@ -25,6 +25,9 @@ import type { ContentBlock, HistoryItem, SessionConfigOption } from "../lib/type
 import { cn } from "../lib/utils";
 import { useIsMobile } from "../lib/viewport";
 
+/** 输入框拖拽下限：与 Textarea 的 `min-h-16` 一致。 */
+const INPUT_MIN_HEIGHT = 64;
+
 export function InteractionView() {
   const core = useCore();
   const state = useCoreState();
@@ -34,8 +37,39 @@ export function InteractionView() {
 
   const draft = state.inputDraft;
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const heightBeforeLoad = useRef<number | null>(null);
   const scrollOnEntry = useRef(true);
+  // 输入框高度（拖拽调整；null 表示用 rows 的默认高度）
+  const [inputHeight, setInputHeight] = useState<number | null>(null);
+  const inputDrag = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  /** 开始拖拽输入框高度（docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）。 */
+  const startInputResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const element = inputRef.current;
+    if (element === null) return;
+    event.preventDefault();
+    inputDrag.current = {
+      startY: event.clientY,
+      startHeight: element.getBoundingClientRect().height,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  /** 向上拖变高：上限取可视区高度，避免把输入区顶出窗口。 */
+  const moveInputResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const drag = inputDrag.current;
+    if (drag === null) return;
+    const next = drag.startHeight + (drag.startY - event.clientY);
+    setInputHeight(Math.min(Math.max(next, INPUT_MIN_HEIGHT), window.innerHeight));
+  };
+
+  const endInputResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    inputDrag.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
 
   useLayoutEffect(() => {
     scrollOnEntry.current = true;
@@ -275,6 +309,18 @@ export function InteractionView() {
                 ))}
               </div>
             ) : null}
+            {/* 高度拖拽手柄：贴输入框上沿，向上拖变高、向下拖变矮（触屏同样可用） */}
+            <div
+              data-slot="prompt-resize-handle"
+              role="separator"
+              aria-label="拖拽调整输入框高度"
+              aria-orientation="horizontal"
+              className="h-2 w-full touch-none cursor-row-resize rounded-full bg-border/60 hover:bg-primary/60 lg:h-1.5"
+              onPointerDown={startInputResize}
+              onPointerMove={moveInputResize}
+              onPointerUp={endInputResize}
+              onPointerCancel={endInputResize}
+            />
             <div
               onDragOver={(event) => event.preventDefault()}
               onDrop={(event) => {
@@ -285,9 +331,12 @@ export function InteractionView() {
               }}
             >
               <Textarea
+                ref={inputRef}
                 data-slot="prompt-input"
                 aria-label="消息输入框"
                 rows={3}
+                className="resize-none"
+                style={inputHeight === null ? undefined : { height: inputHeight }}
                 placeholder="输入指令，Enter 发送，Shift+Enter 换行"
                 value={draft}
                 onChange={(event) =>
