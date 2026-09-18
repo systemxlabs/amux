@@ -45,12 +45,8 @@ const TICK: Duration = Duration::from_millis(250);
 
 /// 面板拖拽手柄宽度。
 pub const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
-/// 左侧面板拖拽下限。
-const SIDEBAR_MIN_WIDTH: f32 = 180.0;
-/// 右侧面板拖拽下限。
-const PANEL_MIN_WIDTH: f32 = 300.0;
-/// 中间列最小宽度：左/右面板的拖拽上限都据此计算。
-const MIN_CONTENT_COL_WIDTH: f32 = 320.0;
+/// 会话选项值上限宽度：值文本超过它就省略（docs/PRD.md「会话交互视图」：宽度自适应 + 超长省略）。
+const CONFIG_VALUE_MAX_WIDTH: f32 = 224.0;
 
 actions!(amux, [CloseSettingsOverlay, TerminalTab, TerminalBackTab]);
 
@@ -2252,7 +2248,15 @@ impl AmuxApp {
         Button::new(id)
             .small()
             .outline()
-            .label(current)
+            // 值文本按内容自适应宽度、超过上限则省略：`.label()` 渲染的文本在本版本 gpui-component
+            // 里不截断（会溢出按钮边框），因此自带一个可截断的文本子元素，行高对齐 Button 内部的标签
+            .child(
+                div()
+                    .max_w(px(CONFIG_VALUE_MAX_WIDTH))
+                    .line_height(relative(1.))
+                    .truncate()
+                    .child(current),
+            )
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                 let mut menu = menu;
                 for (value, name) in entries.clone() {
@@ -2363,10 +2367,11 @@ impl AmuxApp {
                     let Some((origin, initial)) = this.sidebar_drag else {
                         return;
                     };
-                    let max = (window.bounds().size.width.as_f32() - MIN_CONTENT_COL_WIDTH)
-                        .max(SIDEBAR_MIN_WIDTH);
+                    // docs/PRD.md「主页面」：不限制最大宽度，最小宽度以保证可拖拽回为准。
+                    // 手柄含在面板宽度内，因此下限取手柄宽度，否则手柄被拖没了就抓不回来；
+                    // 上限取窗口宽度，再宽手柄就会被推到窗口外。
                     this.sidebar_width = (initial + (event.event.position.x.as_f32() - origin))
-                        .clamp(SIDEBAR_MIN_WIDTH, max);
+                        .clamp(PANEL_RESIZE_HANDLE_WIDTH, window.bounds().size.width.as_f32());
                     cx.notify();
                 },
             ));
@@ -2402,13 +2407,11 @@ impl AmuxApp {
                     let Some((origin, initial)) = this.panel_drag else {
                         return;
                     };
-                    // 向左拖（x 变小）即面板变宽；上限 = 窗口宽 − 侧栏宽 − 中间列最小宽
-                    let max = (window.bounds().size.width.as_f32()
-                        - this.sidebar_width
-                        - MIN_CONTENT_COL_WIDTH)
-                        .max(PANEL_MIN_WIDTH);
+                    // 向左拖（x 变小）即面板变宽。docs/PRD.md「主页面」：不限制最大宽度，
+                    // 最小宽度以保证可拖拽回为准 —— 手柄在面板之外，面板宽度可以一直拖到 0，
+                    // 手柄仍留在原位可再拖回；上限取窗口宽度，再宽手柄会被挤出窗口。
                     this.panel_width = (initial + (origin - event.event.position.x.as_f32()))
-                        .clamp(PANEL_MIN_WIDTH, max);
+                        .clamp(0.0, window.bounds().size.width.as_f32());
                     cx.notify();
                 },
             ));

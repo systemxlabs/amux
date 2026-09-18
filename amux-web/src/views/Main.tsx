@@ -32,11 +32,17 @@ import { SessionListPanel } from "./SessionListPanel";
 import { SidePanelView } from "./panels";
 import { SettingsOverlay } from "./settings/SettingsOverlay";
 
-/** 面板宽度拖拽边界：拖拽只影响自身宽度，中间面板自适应剩余空间。 */
-const LEFT_MIN = 180;
-const LEFT_MAX = 520;
-const RIGHT_MIN = 280;
-const RIGHT_MAX = 900;
+/**
+ * 面板宽度拖拽边界（docs/PRD.md「主页面」：不限制最大宽度，最小宽度以保证可拖拽回为准）。
+ *
+ * 下限取 0：分隔条是面板之外的独立元素，面板宽度归零后分隔条仍留在原位，可以再拖回来。
+ * 上限取「视口宽度 − 分隔条宽度」：面板再宽也只会把分隔条挤出屏幕、反而拖不回来，
+ * 因此上限刚好留出分隔条的位置（分隔条在左栏之后，会被溢出到视口外的是它自己）。
+ */
+const PANEL_MIN_WIDTH = 0;
+/** 分隔条宽度，与分隔条的 `w-1` 保持一致。 */
+const PANEL_DIVIDER_WIDTH = 4;
+const panelMaxWidth = (): number => window.innerWidth - PANEL_DIVIDER_WIDTH;
 
 export function Main() {
   const core = useCore();
@@ -51,9 +57,9 @@ export function Main() {
     dragging.current = which;
     const onMove = (event: MouseEvent) => {
       if (dragging.current === "left") {
-        setLeftWidth(clamp(event.clientX, LEFT_MIN, LEFT_MAX));
+        setLeftWidth(clamp(event.clientX, PANEL_MIN_WIDTH, panelMaxWidth()));
       } else if (dragging.current === "right") {
-        setRightWidth(clamp(window.innerWidth - event.clientX, RIGHT_MIN, RIGHT_MAX));
+        setRightWidth(clamp(window.innerWidth - event.clientX, PANEL_MIN_WIDTH, panelMaxWidth()));
       }
     };
     const onUp = () => {
@@ -98,13 +104,15 @@ export function Main() {
         data-slot="left-panel"
         data-open={drawerOpen ? "true" : "false"}
         className={cn(
-          "min-h-0 flex-col border-r border-border bg-card",
+          // overflow-hidden：面板可被拖到接近 0 宽，内容溢出会盖住分隔条（见 middle-panel）
+          "min-h-0 flex-col overflow-hidden border-r border-border bg-card",
           // 窄视口：固定定位的抽屉，收起时不渲染（不占布局空间；也不给内部 fixed 的
-          // 会话右键菜单引入偏移的包含块）
-          "fixed inset-y-0 left-0 z-30 max-w-[85vw] shadow-lg",
+          // 会话右键菜单引入偏移的包含块）。抽屉是浮层、没有分隔条可以拖回来，
+          // 因此给一个最小宽度，避免宽视口下把左栏拖到 0 之后进手机浏览器看不到会话列表
+          "fixed inset-y-0 left-0 z-30 min-w-[200px] max-w-[85vw] shadow-lg",
           drawerOpen ? "flex" : "hidden",
           // 宽视口：回到三栏布局中的普通一栏
-          "lg:static lg:z-auto lg:flex lg:max-w-none lg:shrink-0 lg:shadow-none",
+          "lg:static lg:z-auto lg:flex lg:min-w-0 lg:max-w-none lg:shrink-0 lg:shadow-none",
         )}
         style={{ width: leftWidth }}
       >
@@ -126,12 +134,17 @@ export function Main() {
       <div
         data-slot="panel-divider-left"
         className="hidden w-1 shrink-0 cursor-col-resize bg-border/40 hover:bg-primary/60 lg:block"
-        onMouseDown={() => onMouseDown("left")}
+        onMouseDown={(event) => {
+          // 阻止默认行为：否则拖拽会顺带在面板里刷出一片文字选区
+          event.preventDefault();
+          onMouseDown("left");
+        }}
       />
 
       <main
         data-slot="middle-panel"
-        className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+        // overflow-hidden：面板可以被拖到接近 0 宽，内容溢出会盖住相邻的分隔条，分隔条就点不到了
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
         {state.middle === "interaction" ? <InteractionView /> : <NewSessionView />}
 
@@ -179,11 +192,14 @@ export function Main() {
           <div
             data-slot="panel-divider-right"
             className="hidden w-1 shrink-0 cursor-col-resize bg-border/40 hover:bg-primary/60 lg:block"
-            onMouseDown={() => onMouseDown("right")}
+            onMouseDown={(event) => {
+              event.preventDefault();
+              onMouseDown("right");
+            }}
           />
           <aside
             data-slot="right-panel"
-            className="fixed inset-0 z-30 flex min-h-0 flex-col bg-card lg:static lg:z-auto lg:shrink-0 lg:border-l lg:border-border"
+            className="fixed inset-0 z-30 flex min-h-0 flex-col overflow-hidden bg-card lg:static lg:z-auto lg:shrink-0 lg:border-l lg:border-border"
             style={isMobile ? undefined : { width: rightWidth }}
           >
             <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1 lg:hidden">
