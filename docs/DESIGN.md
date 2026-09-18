@@ -411,8 +411,8 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   ```
 - 对话和活动历史：存储在 `~/.amux/workflows/<workflow_id>_transcript.jsonl` 文件中，包含用户输入、工作流智能体输出、工具调用、thinking、执行错误，不包含工具结果
   ```json
-  {"role": "user", "content": [ ... ], "timestamp": 1725800000000}
-  {"role": "agent", "content": [ ... ], "timestamp": 1725800001000}
+  {"kind": "user", "content": [ ... ], "timestamp": 1725800000000}
+  {"kind": "agent", "content": [ ... ], "timestamp": 1725800001000}
   {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
   {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "parameters": "..."}
   {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
