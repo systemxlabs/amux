@@ -446,7 +446,8 @@ function SessionOption({ option }: { option: SessionConfigOption }) {
           value={option.current_value}
           onValueChange={(value) => void setConfigOption(core, option.id, { type: "value_id", value })}
         >
-          <SelectTrigger data-slot="option-select" className="h-10 w-40 lg:h-7">
+          {/* 宽度随当前值自适应（组件基类是 w-fit），超长时按上限省略为省略号（见 components/ui/select.tsx） */}
+          <SelectTrigger data-slot="option-select" className="h-10 max-w-40 lg:h-7 lg:max-w-56">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
