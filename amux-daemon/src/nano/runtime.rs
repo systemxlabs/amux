@@ -1,12 +1,11 @@
 //! Nano 的模型运行与 ACP 活动适配；工具循环由 rig-agent 驱动。
 
-use std::{io, path::PathBuf, process::Stdio, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc, time::Duration};
 
 use agent_client_protocol::{schema::v2::*, Client, V2ConnectionTo};
 pub(super) use amux_common::model::builder;
 use amux_common::model::reasoning_text;
 use parking_lot::Mutex;
-use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use rig_agent::{
     agent::hook::{self, AgentHook, HookContext},
     completion::PromptError,
@@ -15,7 +14,6 @@ use rig_agent::{
 };
 use rig_core::completion::{AssistantContent, Message};
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
 
 const MAX_MODEL_CALLS: usize = 32;
 
@@ -187,23 +185,11 @@ struct Shell {
     cwd: PathBuf,
 }
 
-struct ShellProcess {
-    child: Box<dyn ChildWrapper>,
-    completed: bool,
-}
-
-impl Drop for ShellProcess {
-    fn drop(&mut self) {
-        // Unix 的 KillOnDrop 只杀直接子进程；取消 future 时必须经 wrapper 杀整个组。
-        if !self.completed {
-            let _ = self.child.start_kill();
-        }
-    }
-}
-
 #[derive(Deserialize)]
 struct ShellArgs {
     command: String,
+    /// 超时秒数（可选，见 `shell::MAX_TIMEOUT_SECONDS`）。
+    timeout: Option<u64>,
 }
 
 impl Tool for Shell {
@@ -213,11 +199,24 @@ impl Tool for Shell {
     type Error = io::Error;
 
     fn description(&self) -> String {
-        "在会话工作目录执行 shell 命令".into()
+        "在会话工作目录通过 sh -c 执行命令。返回退出状态、stdout 和 stderr；\
+         每个输出流最多保留末尾 2000 行或 50 KiB，超出部分丢弃，完整输出写入临时文件并在结果里给出路径。\
+         可选 timeout（秒），超时会终止整个进程组。"
+            .into()
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "要执行的 shell 命令" },
+                "timeout": {
+                    "type": "integer",
+                    "description": format!("超时秒数（1-{}），缺省不超时", super::shell::MAX_TIMEOUT_SECONDS)
+                }
+            },
+            "required": ["command"]
+        })
     }
 
     async fn call(
@@ -225,41 +224,25 @@ impl Tool for Shell {
         _context: &mut ToolContext,
         args: ShellArgs,
     ) -> Result<ToolOutput, io::Error> {
-        let mut command = CommandWrap::with_new("sh", |command| {
-            command
-                .arg("-c")
-                .arg(args.command)
-                .current_dir(&self.cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-        });
-        command.wrap(KillOnDrop);
-        #[cfg(unix)]
-        command.wrap(process_wrap::tokio::ProcessGroup::leader());
-        #[cfg(windows)]
-        command.wrap(process_wrap::tokio::JobObject);
-        let mut process = ShellProcess {
-            child: command.spawn()?,
-            completed: false,
+        let timeout = match args.timeout {
+            None => None,
+            Some(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "timeout 必须大于 0 秒",
+                ))
+            }
+            Some(seconds) if seconds > super::shell::MAX_TIMEOUT_SECONDS => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("timeout 最大为 {} 秒", super::shell::MAX_TIMEOUT_SECONDS),
+                ))
+            }
+            Some(seconds) => Some(Duration::from_secs(seconds)),
         };
-        let mut stdout = process.child.stdout().take().unwrap();
-        let mut stderr = process.child.stderr().take().unwrap();
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        // 同时排空两根管道，避免输出超过管道容量后相互等待。
-        let (status, _, _) = tokio::try_join!(
-            process.child.wait(),
-            stdout.read_to_end(&mut out),
-            stderr.read_to_end(&mut err),
-        )?;
-        process.completed = true;
-        Ok(ToolOutput::text(format!(
-            "exit: {}\n{}\n{}",
-            status,
-            String::from_utf8_lossy(&out),
-            String::from_utf8_lossy(&err)
-        )))
+        Ok(ToolOutput::text(
+            super::shell::execute(&self.cwd, &args.command, timeout).await?,
+        ))
     }
 }
 

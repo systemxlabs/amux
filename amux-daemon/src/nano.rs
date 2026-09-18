@@ -1,6 +1,7 @@
 use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 
 mod runtime;
+mod shell;
 use agent_client_protocol::{
     schema::v2::*, Agent, Client, ConnectTo, Error, Lines, V2ConnectionTo,
 };

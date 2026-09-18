@@ -2371,7 +2371,10 @@ impl AmuxApp {
                     // 手柄含在面板宽度内，因此下限取手柄宽度，否则手柄被拖没了就抓不回来；
                     // 上限取窗口宽度，再宽手柄就会被推到窗口外。
                     this.sidebar_width = (initial + (event.event.position.x.as_f32() - origin))
-                        .clamp(PANEL_RESIZE_HANDLE_WIDTH, window.bounds().size.width.as_f32());
+                        .clamp(
+                            PANEL_RESIZE_HANDLE_WIDTH,
+                            window.bounds().size.width.as_f32(),
+                        );
                     cx.notify();
                 },
             ));
