@@ -4,6 +4,7 @@ import type { ApiClient } from "../lib/api";
 import type { Paging } from "../lib/paging";
 import { newPaging } from "../lib/paging";
 import { newTerminalStream, type TerminalStream } from "../lib/terminal";
+import { clearToken } from "../lib/token";
 import type {
   Activity,
   Agent,
@@ -287,5 +288,22 @@ export class Core {
   /** 清空所有定时刷新节拍，使下次 tick 立即拉取。 */
   resetTicks(): void {
     this.last = {};
+  }
+
+  /** 当前连接认证失效：清除凭据与定时请求，并立即进入登录页面。 */
+  invalidateAuthentication(client: ApiClient): void {
+    if (this.client !== client) return;
+    this.client = null;
+    clearToken();
+    this.last = {};
+    if (this.noticeTimer !== null) {
+      clearTimeout(this.noticeTimer);
+      this.noticeTimer = null;
+    }
+    this.update((state) => {
+      state.status = "failed";
+      state.error = "登录已失效，请重新输入 token";
+      state.notice = null;
+    });
   }
 }

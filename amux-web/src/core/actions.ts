@@ -1,9 +1,9 @@
 // 用户动作：调用 API、更新状态、触发对应视图的主动刷新（docs/DESIGN.md 各刷新机制）。
 
-import { ApiClient } from "../lib/api";
+import { ApiClient, ApiError } from "../lib/api";
 import { matchingPrefix, splitDirQuery } from "../lib/workspace";
 import { encodeBase64 } from "../lib/terminal";
-import { loadToken, saveToken } from "../lib/token";
+import { clearToken, loadToken, saveToken } from "../lib/token";
 import type {
   Agent,
   ContentBlock,
@@ -33,6 +33,11 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 已认证客户端：任一请求返回 401 时统一触发登录失效处理。 */
+function authenticatedClient(core: Core, token: string): ApiClient {
+  return new ApiClient("", token, undefined, (client) => core.invalidateAuthentication(client));
+}
+
 /** 启动：用本地 token 建立连接；本地无 token 时进入登录页面且不展示错误。 */
 export async function start(core: Core): Promise<void> {
   const token = loadToken();
@@ -60,6 +65,7 @@ async function connect(core: Core, token: string, notify: boolean): Promise<bool
   try {
     await client.ping();
   } catch (error) {
+    if (error instanceof ApiError && error.status === 401) clearToken();
     core.update((state) => {
       state.status = "failed";
       state.error = messageOf(error);
@@ -67,7 +73,7 @@ async function connect(core: Core, token: string, notify: boolean): Promise<bool
     if (notify) core.failure(`连接失败：${messageOf(error)}`);
     return false;
   }
-  core.client = client;
+  core.client = authenticatedClient(core, token);
   saveToken(token);
   core.update((state) => {
     state.status = "online";
@@ -92,7 +98,7 @@ export async function saveConnection(core: Core, token: string): Promise<void> {
     core.failure(`保存失败：${messageOf(error)}`);
     return;
   }
-  core.client = client;
+  core.client = authenticatedClient(core, token);
   saveToken(token);
   core.update((state) => {
     state.status = "online";

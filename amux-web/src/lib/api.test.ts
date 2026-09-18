@@ -2,7 +2,7 @@
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ApiClient, errorMessage } from "./api";
 
@@ -106,6 +106,23 @@ describe("ApiClient", () => {
   it("回答非 2xx 时给出带状态码与响应体的错误消息", async () => {
     const client = new ApiClient(base, "bad");
     await expect(client.machines()).rejects.toThrow("HTTP 401: unauthorized");
+  });
+
+  it("并发 401 只触发一次认证回调并保留状态码", async () => {
+    const onUnauthorized = vi.fn();
+    const client = new ApiClient(
+      base,
+      "bad",
+      globalThis.fetch.bind(globalThis),
+      onUnauthorized,
+    );
+    const results = await Promise.allSettled([client.machines(), client.sessions(1, 0)]);
+
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(onUnauthorized).toHaveBeenCalledWith(client);
+    const error = results[0].status === "rejected" ? results[0].reason : null;
+    expect(error).toMatchObject({ status: 401, message: "HTTP 401: unauthorized" });
   });
 
   it("list_dir 按查询参数传递路径与仅目录开关，响应解析为条目", async () => {

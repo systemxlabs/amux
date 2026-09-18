@@ -47,11 +47,25 @@ export function errorMessage(status: number, body: string): string {
   return trimmed === "" ? `HTTP ${status}` : `HTTP ${status}: ${trimmed}`;
 }
 
+/** 保留 HTTP 状态码的 API 错误，供跨请求的统一认证处理使用。 */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export class ApiClient {
+  private unauthorized = false;
+
   constructor(
     private readonly baseUrl: string,
     private readonly token: string,
     private readonly fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+    private readonly onUnauthorized?: (client: ApiClient) => void,
   ) {}
 
   get authToken(): string {
@@ -320,6 +334,10 @@ export class ApiClient {
         ...(init.headers ?? {}),
       },
     });
+    if (response.status === 401 && !this.unauthorized) {
+      this.unauthorized = true;
+      this.onUnauthorized?.(this);
+    }
     return response;
   }
 
@@ -355,7 +373,7 @@ export class ApiClient {
 async function decode<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(errorMessage(response.status, body));
+    throw new ApiError(response.status, errorMessage(response.status, body));
   }
   const text = await response.text();
   try {

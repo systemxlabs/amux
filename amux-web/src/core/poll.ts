@@ -101,11 +101,7 @@ export async function refreshList(core: Core): Promise<void> {
       state.listPaging = window.paging;
     });
   } catch (error) {
-    core.update((state) => {
-      state.status = "failed";
-      state.error = messageOf(error);
-    });
-    core.last.reconnect = Date.now();
+    core.failure(`刷新会话列表失败：${messageOf(error)}`);
   }
 }
 

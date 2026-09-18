@@ -95,6 +95,27 @@ describe("refreshList", () => {
     ).toEqual(["alive"]);
     expect(core.state.listPaging.hasOlder).toBe(true);
   });
+
+  it("普通请求失败时保留登录状态并提示错误", async () => {
+    const core = new Core();
+    const client = {
+      sessions: vi.fn(async () => {
+        throw new Error("network down");
+      }),
+      workflows: vi.fn(async () => ({ workflows: [], hasMore: false })),
+    } as unknown as ApiClient;
+    core.client = client;
+    core.state.status = "online";
+
+    await refreshList(core);
+
+    expect(core.client).toBe(client);
+    expect(core.state.status).toBe("online");
+    expect(core.state.notice).toEqual({
+      kind: "error",
+      text: "刷新会话列表失败：network down",
+    });
+  });
 });
 
 describe("loadOlderList", () => {
