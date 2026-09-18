@@ -51,7 +51,7 @@ pub(super) async fn run(
     let previous = history.lock().clone();
     history.lock().push(Message::user(text.clone()));
     let agent = builder
-        .preamble("你是 Nano，使用 shell 工具在指定工作目录中完成用户任务。")
+        .preamble("你是 Nano，一名有用的电脑助手。")
         .default_max_turns(MAX_MODEL_CALLS)
         .tool(shell)
         .add_hook(AcpHook {
