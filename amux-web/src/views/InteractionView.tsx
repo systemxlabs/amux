@@ -18,7 +18,7 @@ import { Textarea } from "../components/ui/textarea";
 import { addFiles, cancelOpen, removeAttachment, sendPrompt, setConfigOption } from "../core/actions";
 import { loadNewerHistory, loadOlderHistory } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
-import { activityBarText, formatTime, truncate } from "../lib/format";
+import { activityBarText, formatTime } from "../lib/format";
 import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
 import type { ContentBlock, HistoryItem, SessionConfigOption } from "../lib/types";
@@ -221,11 +221,6 @@ export function InteractionView() {
         >
           {available ? "可用" : "不可用"}
         </span>
-        {detail.workflow ? (
-          <span className="ml-auto text-xs text-muted-foreground">
-            {truncate(detail.workflow.title || "未命名会话", 24)}
-          </span>
-        ) : null}
       </header>
 
       {/* pr-12：为悬浮按钮留出空间，消息气泡不会被按钮遮挡 */}
