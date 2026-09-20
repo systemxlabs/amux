@@ -85,7 +85,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | POST `/sessions/<session_id>/terminals` | 打开指定普通会话一个终端 |
 | GET `/sessions/<session_id>/terminals` | 查询指定普通会话所有打开的终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>` | 向指定终端输入内容 |
-| GET `/sessions/<session_id>/terminals/<terminal_id>` | 读取指定终端输出内容，支持根据游标读取增量内容 |
+| GET `/sessions/<session_id>/terminals/<terminal_id>` | SSE 流式输出指定终端输出内容 |
 | DELETE `/sessions/<session_id>/terminals/<terminal_id>` | 关闭指定终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>/resize` | 调整指定终端窗口大小 |
 | POST `/workflows` | 新建一个工作流会话 |
@@ -534,9 +534,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 ### 终端视图
 
-终端视图首次打开时，应从头拉取终端完整输出内容。随后再次拉取时，传入游标，只拉取游标之后的增量内容。
-
-终端视图未打开时，不主动拉取终端输出内容。终端视图打开时，每隔 500ms 拉取一次终端输出增量内容。
+终端视图未打开时，不主动拉取终端输出内容。终端视图打开时，通过 HTTP SSE 技术增量获取终端输出内容。
 
 终端每次打开时，从 Server 获取一次终端列表，不在列表中的终端从应用中移除掉，终端列表不做周期性轮询刷新。
 
