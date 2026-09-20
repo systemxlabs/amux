@@ -46,7 +46,7 @@ const TICK: Duration = Duration::from_millis(250);
 /// 面板拖拽手柄宽度。
 pub const PANEL_RESIZE_HANDLE_WIDTH: f32 = 5.0;
 /// 输入框高度拖拽手柄厚度。
-pub const INPUT_RESIZE_HANDLE_HEIGHT: f32 = 5.0;
+pub const INPUT_RESIZE_HANDLE_HEIGHT: f32 = 12.0;
 /// 输入框默认高度（约 3 行，与 Web 输入区一致，docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）。
 pub const INPUT_DEFAULT_HEIGHT: f32 = 96.0;
 /// 输入框高度拖拽下限（与 Web 输入区的 `min-h-16` 一致）。

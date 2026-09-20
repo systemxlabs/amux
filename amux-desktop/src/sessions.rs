@@ -885,15 +885,19 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     }
 
     // 高度拖拽手柄：贴输入框上沿，向上拖变高、向下拖变矮（docs/PRD.md「会话交互视图」：
-    // 多行输入框，可拖拽高度）。与侧栏/面板手柄同一套拖拽做法。
+    // 多行输入框，可拖拽高度）。外层保留鼠标命中区，视觉上仅显示一条细线。
+    let resize_line = theme.border;
+    let resize_hover = theme.primary.opacity(0.08);
+    let resize_active = theme.primary.opacity(0.16);
     let resize_handle = div()
         .id("composer-resize-handle")
         .w_full()
         .h(px(INPUT_RESIZE_HANDLE_HEIGHT))
-        .rounded_full()
-        .bg(theme.border.opacity(0.6))
+        .flex()
+        .items_center()
         .cursor(CursorStyle::ResizeRow)
-        .hover(|handle| handle.bg(theme.primary))
+        .hover(move |handle| handle.bg(resize_hover))
+        .active(move |handle| handle.bg(resize_active))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, _, _| {
@@ -905,6 +909,13 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
             cx.listener(|this, event: &DragMoveEvent<InputResizeDrag>, window, cx| {
                 this.resize_composer(event.event.position.y.as_f32(), window, cx);
             }),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(1.))
+                .rounded_full()
+                .bg(resize_line.opacity(0.6)),
         );
 
     let mut row = h_flex().relative().gap_2().items_end();

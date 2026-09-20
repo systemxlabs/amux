@@ -44,6 +44,7 @@ export function InteractionView() {
   const previousTarget = useRef<string | null>(null);
   // 输入框高度（拖拽调整；null 表示用 rows 的默认高度）
   const [inputHeight, setInputHeight] = useState<number | null>(null);
+  const [inputResizing, setInputResizing] = useState(false);
   const inputDrag = useRef<{ startY: number; startHeight: number } | null>(null);
   const targetKey = target === null ? null : `${target.kind}:${target.id}`;
 
@@ -56,6 +57,7 @@ export function InteractionView() {
       startY: event.clientY,
       startHeight: element.getBoundingClientRect().height,
     };
+    setInputResizing(true);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
@@ -69,6 +71,7 @@ export function InteractionView() {
 
   const endInputResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
     inputDrag.current = null;
+    setInputResizing(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -312,18 +315,30 @@ export function InteractionView() {
                 ))}
               </div>
             ) : null}
-            {/* 高度拖拽手柄：贴输入框上沿，向上拖变高、向下拖变矮（触屏同样可用） */}
+            {/* 高度拖拽手柄：外层保留触控命中区，视觉上仅显示输入框上沿的细线 */}
             <div
               data-slot="prompt-resize-handle"
               role="separator"
               aria-label="拖拽调整输入框高度"
               aria-orientation="horizontal"
-              className="h-2 w-full touch-none cursor-row-resize rounded-full bg-border/60 hover:bg-primary/60 lg:h-1.5"
+              className={cn(
+                "group flex h-3 w-full touch-none cursor-row-resize items-center",
+                inputResizing && "bg-primary/10",
+              )}
               onPointerDown={startInputResize}
               onPointerMove={moveInputResize}
               onPointerUp={endInputResize}
               onPointerCancel={endInputResize}
-            />
+            >
+              <div
+                className={cn(
+                  "h-px w-full rounded-full transition-colors",
+                  inputResizing
+                    ? "bg-primary"
+                    : "bg-border/60 group-hover:bg-primary/70",
+                )}
+              />
+            </div>
             <div
               onDragOver={(event) => event.preventDefault()}
               onDrop={(event) => {
