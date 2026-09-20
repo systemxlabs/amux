@@ -104,6 +104,15 @@ fn classify_prompt_error(error: PromptError, history: &Arc<Mutex<Vec<Message>>>)
     }
 }
 
+/// ACP tool call 的 title：优先使用模型请求执行的原始 shell 命令。
+fn shell_command(args: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|input| input.get("command")?.as_str().map(str::to_string))
+        .filter(|command| !command.trim().is_empty())
+        .unwrap_or_else(|| "shell".to_string())
+}
+
 struct AcpHook {
     events: Events,
     history: Arc<Mutex<Vec<Message>>>,
@@ -160,7 +169,7 @@ impl AgentHook for AcpHook {
     ) -> hook::ToolCallAction {
         self.events.update(SessionUpdate::ToolCallUpdate(
             ToolCallUpdate::new(event.tool_call_id.unwrap_or(event.internal_call_id))
-                .title("shell")
+                .title(shell_command(event.args))
                 .kind(ToolKind::Execute)
                 .status(ToolCallStatus::InProgress)
                 .raw_input(
@@ -177,7 +186,7 @@ impl AgentHook for AcpHook {
     ) -> hook::ToolResultAction {
         self.events.update(SessionUpdate::ToolCallUpdate(
             ToolCallUpdate::new(event.tool_call_id.unwrap_or(event.internal_call_id))
-                .title("shell")
+                .title(shell_command(event.args))
                 .kind(ToolKind::Execute)
                 .status(if event.raw_result.is_error() {
                     ToolCallStatus::Failed
@@ -357,6 +366,14 @@ mod tests {
                 };
                 assert_eq!(start.tool_call_id, end.tool_call_id);
                 assert_eq!(end.tool_call_id.to_string(), "call-one");
+                assert_eq!(
+                    serde_json::to_value(start).unwrap()["title"],
+                    "printf hello > result; printf hello"
+                );
+                assert_eq!(
+                    serde_json::to_value(end).unwrap()["title"],
+                    "printf hello > result; printf hello"
+                );
                 assert!(serde_json::to_value(end).unwrap()["content"]
                     .to_string()
                     .contains("hello"));
@@ -382,6 +399,12 @@ mod tests {
         ));
         assert!(has_tool_result(&saved.lock(), "hello"));
         assert_eq!(saved.lock().len(), 8, "历史不能重复添加旧消息");
+    }
+
+    #[test]
+    fn shell_command_falls_back_to_tool_name() {
+        assert_eq!(shell_command(r#"{"command":"pwd"}"#), "pwd");
+        assert_eq!(shell_command(r#"{"timeout":1}"#), "shell");
     }
 
     #[cfg(unix)]
