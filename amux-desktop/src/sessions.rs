@@ -918,53 +918,72 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .bg(resize_line.opacity(0.6)),
         );
 
-    let mut row = h_flex().relative().gap_2().items_end();
-    row = row.child(
-        v_flex()
-            .id("input-drop-zone")
-            .flex_1()
-            .min_w_0()
-            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.attach_paths(paths.paths(), cx)
-            }))
-            .child(resize_handle)
-            .child(Input::new(&this.input).h(px(this.composer_height))),
-    );
-    row = row.child(
-        v_flex()
-            .gap_2()
-            .child(
-                Button::new("send")
-                    .primary()
-                    .label("发送")
-                    .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-            )
-            .child(
-                Button::new("cancel-work")
-                    .small()
-                    .custom(
-                        ButtonCustomVariant::new(cx)
-                            .color(transparent)
-                            .foreground(danger)
-                            .hover(danger.opacity(0.12))
-                            .active(danger.opacity(0.2)),
-                    )
-                    .icon(IconName::Close)
-                    .label("取消")
-                    .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
-            ),
-    );
-    if attachment_count > 1 {
-        row = row.child(
-            Button::new("clear-attachments")
-                .small()
-                .ghost()
-                .label("清空附件")
-                .on_click(cx.listener(|this, _, _, cx| this.clear_attachments(cx))),
+    let mut editor = v_flex()
+        .id("input-drop-zone")
+        .relative()
+        .w_full()
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .overflow_hidden()
+        .bg(theme.background)
+        .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
+        .on_drop(
+            cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach_paths(paths.paths(), cx)),
+        )
+        .child(resize_handle)
+        .child(
+            Input::new(&this.input)
+                .appearance(false)
+                .w_full()
+                .h(px(this.composer_height)),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .px_2()
+                .pb_2()
+                .child(
+                    Button::new("attach-files")
+                        .small()
+                        .ghost()
+                        .icon(IconName::File)
+                        .label("附件")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.pick_attachments(window, cx)),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("cancel-work")
+                                .small()
+                                .custom(
+                                    ButtonCustomVariant::new(cx)
+                                        .color(transparent)
+                                        .foreground(danger)
+                                        .hover(danger.opacity(0.12))
+                                        .active(danger.opacity(0.2)),
+                                )
+                                .icon(IconName::Close)
+                                .label("取消")
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                        )
+                        .child(
+                            Button::new("send")
+                                .small()
+                                .primary()
+                                .label("发送")
+                                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                        ),
+                ),
         );
-    }
-    row = row.children(slash_menu(this, cx));
+    editor = editor.children(slash_menu(this, cx));
 
     v_flex()
         .id("composer")
@@ -978,7 +997,7 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
             this.composer_key_down(event, window, cx)
         }))
         .when(attachment_count > 0, |composer| composer.child(chips))
-        .child(row)
+        .child(editor)
         .into_any_element()
 }
 

@@ -2,7 +2,7 @@
 // 快捷指令栏、输入区（Enter 发送 / Shift+Enter 换行、斜杠命令上拉框、附件）、会话选项。
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { SendHorizontal, Square } from "lucide-react";
+import { Paperclip, SendHorizontal, Square } from "lucide-react";
 
 import { Markdown } from "../components/Markdown";
 import { Button } from "../components/ui/button";
@@ -38,6 +38,7 @@ export function InteractionView() {
   const draft = state.inputDraft;
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const heightBeforeLoad = useRef<number | null>(null);
   const scrollOnEntry = useRef(true);
   const followingBottom = useRef(true);
@@ -292,109 +293,131 @@ export function InteractionView() {
           </div>
         ) : null}
 
-        <div className="flex items-end gap-3">
-          <div className="min-w-0 flex-1">
-            {state.attachments.length > 0 ? (
-              <div className="mb-2 flex flex-wrap gap-1">
-                {state.attachments.map((attachment, index) => (
-                  <span
-                    key={`${attachment.label}-${index}`}
-                    data-slot="attachment-chip"
-                    className="flex items-center gap-1 rounded-sm bg-muted px-2 py-0.5 text-xs"
-                  >
-                    {attachment.label}
-                    <button
-                      type="button"
-                      aria-label="移除附件"
-                      className="-my-1 px-1 py-1 text-sm leading-none lg:my-0 lg:text-xs"
-                      onClick={() => removeAttachment(core, index)}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            {/* 高度拖拽手柄：外层保留触控命中区，视觉上仅显示输入框上沿的细线 */}
-            <div
-              data-slot="prompt-resize-handle"
-              role="separator"
-              aria-label="拖拽调整输入框高度"
-              aria-orientation="horizontal"
-              className={cn(
-                "group flex h-3 w-full touch-none cursor-row-resize items-center",
-                inputResizing && "bg-primary/10",
-              )}
-              onPointerDown={startInputResize}
-              onPointerMove={moveInputResize}
-              onPointerUp={endInputResize}
-              onPointerCancel={endInputResize}
-            >
-              <div
-                className={cn(
-                  "h-px w-full rounded-full transition-colors",
-                  inputResizing
-                    ? "bg-primary"
-                    : "bg-border/60 group-hover:bg-primary/70",
-                )}
-              />
-            </div>
-            <div
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (event.dataTransfer.files.length > 0) {
-                  void addFiles(core, event.dataTransfer.files);
-                }
-              }}
-            >
-              <Textarea
-                ref={inputRef}
-                data-slot="prompt-input"
-                aria-label="消息输入框"
-                rows={3}
-                className="resize-none"
-                style={inputHeight === null ? undefined : { height: inputHeight }}
-                placeholder="输入指令，Enter 发送，Shift+Enter 换行"
-                value={draft}
-                onChange={(event) =>
+        {state.attachments.length > 0 ? (
+          <div className="mb-2 flex flex-wrap gap-1">
+            {state.attachments.map((attachment, index) => (
+              <span
+                key={`${attachment.label}-${index}`}
+                data-slot="attachment-chip"
+                className="flex items-center gap-1 rounded-sm bg-muted px-2 py-0.5 text-xs"
+              >
+                {attachment.label}
+                <button
+                  type="button"
+                  aria-label="移除附件"
+                  className="-my-1 px-1 py-1 text-sm leading-none lg:my-0 lg:text-xs"
+                  onClick={() => removeAttachment(core, index)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {/* 高度拖拽手柄：外层保留触控命中区，视觉上仅显示输入框上沿的细线 */}
+        <div
+          data-slot="prompt-resize-handle"
+          role="separator"
+          aria-label="拖拽调整输入框高度"
+          aria-orientation="horizontal"
+          className={cn(
+            "group flex h-3 w-full touch-none cursor-row-resize items-center",
+            inputResizing && "bg-primary/10",
+          )}
+          onPointerDown={startInputResize}
+          onPointerMove={moveInputResize}
+          onPointerUp={endInputResize}
+          onPointerCancel={endInputResize}
+        >
+          <div
+            className={cn(
+              "h-px w-full rounded-full transition-colors",
+              inputResizing ? "bg-primary" : "bg-border/60 group-hover:bg-primary/70",
+            )}
+          />
+        </div>
+
+        <div className="rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/40">
+          <div
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              if (event.dataTransfer.files.length > 0) {
+                void addFiles(core, event.dataTransfer.files);
+              }
+            }}
+          >
+            <Textarea
+              ref={inputRef}
+              data-slot="prompt-input"
+              aria-label="消息输入框"
+              rows={3}
+              className="min-h-16 resize-none rounded-none border-0 bg-transparent px-2.5 pt-2 pb-1 focus-visible:border-0 focus-visible:ring-0"
+              style={inputHeight === null ? undefined : { height: inputHeight }}
+              placeholder="输入指令，Enter 发送，Shift+Enter 换行"
+              value={draft}
+              onChange={(event) =>
                 core.update((next) => {
                   next.inputDraft = event.target.value;
                 })
               }
-                onPaste={(event) => {
-                  const files = [...event.clipboardData.files];
-                  if (files.length > 0) {
-                    event.preventDefault();
-                    void addFiles(core, files);
-                  }
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" || event.shiftKey) return;
-                  // 输入法组字中的回车是候选确认，不是发送
-                  if (event.nativeEvent.isComposing) return;
-                  // 软键盘没有 Shift，回车用于换行，发送交给发送按钮
-                  if (isMobile) return;
+              onPaste={(event) => {
+                const files = [...event.clipboardData.files];
+                if (files.length > 0) {
                   event.preventDefault();
-                  void send();
-                }}
-              />
-            </div>
+                  void addFiles(core, files);
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || event.shiftKey) return;
+                // 输入法组字中的回车是候选确认，不是发送
+                if (event.nativeEvent.isComposing) return;
+                // 软键盘没有 Shift，回车用于换行，发送交给发送按钮
+                if (isMobile) return;
+                event.preventDefault();
+                void send();
+              }}
+            />
           </div>
-          <div className="flex shrink-0 flex-col gap-2">
+          <div className="flex items-center justify-between gap-2 px-2 pb-2">
+            <input
+              ref={fileInputRef}
+              data-slot="attachment-input"
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                if (event.target.files !== null) {
+                  void addFiles(core, event.target.files);
+                }
+                event.target.value = "";
+              }}
+            />
             <Button
-              data-slot="cancel-button"
-              variant="outline"
+              data-slot="attachment-button"
+              variant="ghost"
               size="sm"
-              onClick={() => void cancelOpen(core)}
+              onClick={() => fileInputRef.current?.click()}
             >
-              <Square className="size-3" />
-              取消
+              <Paperclip className="size-3" />
+              附件
             </Button>
-            <Button data-slot="send-button" size="sm" onClick={() => void send()}>
-              <SendHorizontal className="size-3" />
-              发送
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                data-slot="cancel-button"
+                variant="outline"
+                size="sm"
+                onClick={() => void cancelOpen(core)}
+              >
+                <Square className="size-3" />
+                取消
+              </Button>
+              <Button data-slot="send-button" size="sm" onClick={() => void send()}>
+                <SendHorizontal className="size-3" />
+                发送
+              </Button>
+            </div>
           </div>
         </div>
 

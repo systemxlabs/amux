@@ -1252,6 +1252,26 @@ impl AmuxApp {
         cx.notify();
     }
 
+    /// 打开系统文件选择窗口并添加附件。
+    pub fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("选择附件".into()),
+        });
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let Ok(Ok(Some(paths))) = receiver.await else {
+                    return;
+                };
+                let _ =
+                    cx.update(|_, cx| this.update(cx, |this, cx| this.attach_paths(&paths, cx)));
+            })
+            .detach();
+    }
+
     pub fn remove_attachment(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.attachments.len() {
             self.attachments.remove(ix);
