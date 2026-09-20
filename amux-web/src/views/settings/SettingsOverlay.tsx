@@ -52,12 +52,12 @@ export function SettingsOverlay() {
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/25 lg:p-6"
       onClick={() => closeSettings(core)}
     >
-      {/* 浮窗尺寸对齐桌面应用（55rem × 38.75rem，其 rem 基准 14px → 770 × 540）；
+      {/* 浮窗尺寸对齐桌面应用（65.714rem × 45.714rem，其 rem 基准 14px → 920 × 640）；
           窗口更小时按 p-6 内边距收缩。窄视口占满整屏，分类导航从侧边栏改为顶部横向标签。
           点击面板需阻止冒泡，否则会误触发遮罩的关闭 */}
       <div
         data-slot="settings-panel"
-        className="flex h-full w-full flex-col overflow-hidden bg-card lg:max-h-[540px] lg:max-w-[770px] lg:flex-row lg:rounded-lg lg:border lg:border-border lg:shadow-lg"
+        className="flex h-full w-full flex-col overflow-hidden bg-card lg:max-h-[640px] lg:max-w-[920px] lg:flex-row lg:rounded-lg lg:border lg:border-border lg:shadow-lg"
         onClick={(event) => event.stopPropagation()}
       >
         <div
