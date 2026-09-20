@@ -340,7 +340,6 @@ export function WorkspacePanel() {
                 <div className="px-2 py-1 text-xs text-muted-foreground">未选择会话</div>
               ) : (
                 <>
-                  <div className="truncate px-2 py-1 text-xs text-muted-foreground">{root}</div>
                   {rootLevel === undefined || rootLevel.loading ? (
                     <div className="px-2 py-1 text-xs text-muted-foreground">加载中…</div>
                   ) : rootLevel.error !== null ? (
