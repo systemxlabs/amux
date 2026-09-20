@@ -188,6 +188,7 @@ Nano 智能体为 Daemon 内置智能体，运行在进程内，采用非流式�
 - `session/resume`：在内存中恢复会话，若会话被删除，则新建会话
 - `session/close` 和 `session/delete`：从内存中删除会话
 - 不支持 agent 计划、斜杠命令、会话选项、Elicitation、MCP
+- 发送 tool_call_update 时，其 title 为 shell 命令
 
 ### ACP 多路复用
 
