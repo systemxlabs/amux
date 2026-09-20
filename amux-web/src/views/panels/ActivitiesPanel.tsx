@@ -57,6 +57,7 @@ export function ActivitiesPanel() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const previousHeight = useRef(0);
   const scrollOnEntry = useRef(true);
+  const followingBottom = useRef(true);
   const [expanded, setExpanded] = useState<string[]>([]);
 
   const activities = state.detail.activities;
@@ -83,11 +84,13 @@ export function ActivitiesPanel() {
   // 每条进入时默认滚动到底部；切换会话（面板保持打开）时重新贴底
   useLayoutEffect(() => {
     scrollOnEntry.current = true;
+    followingBottom.current = true;
   }, [core, target?.kind, target?.id]);
 
   useLayoutEffect(() => {
     const element = scrollRef.current;
-    if (element === null || !scrollOnEntry.current || activities.length === 0) return;
+    if (element === null || activities.length === 0) return;
+    if (!scrollOnEntry.current && !followingBottom.current) return;
     element.scrollTop = element.scrollHeight;
     scrollOnEntry.current = false;
   }, [activities]);
@@ -141,6 +144,8 @@ export function ActivitiesPanel() {
   const handleScroll = () => {
     const element = scrollRef.current;
     if (element === null) return;
+    followingBottom.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
     const paging = core.state.detail.activitiesPaging;
     const pageSize = pageSizeForViewport(
       element.clientHeight,
