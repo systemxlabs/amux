@@ -546,3 +546,53 @@ async fn server_daemon_agent_end_to_end() {
         reqwest::StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn prompt_accepts_body_above_axum_default_limit() {
+    let home = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let _server = spawn_server(port, home.path());
+
+    // 先等 server 监听，否则请求会连不上。
+    poll(
+        || {
+            let client = reqwest::Client::new();
+            let base = base.clone();
+            async move {
+                client
+                    .get(format!("{base}/machines"))
+                    .send()
+                    .await
+                    .ok()
+                    .map(|_| ())
+            }
+        },
+        "server 监听",
+    )
+    .await;
+
+    // 超过 axum 默认 2 MiB 的 base64 图片附件：会话不存在时应解析 body 后返回 404，
+    // 而不是在读取 body 时被 413 Payload Too Large 拒绝。
+    let blob = "A".repeat(4 * 1024 * 1024);
+    let response = reqwest::Client::new()
+        .post(format!("{base}/sessions/nonexistent"))
+        .bearer_auth(TOKEN)
+        .json(&json!({
+            "input": [{
+                "type": "resource",
+                "mimeType": "image/png",
+                "uri": "large.png",
+                "blob": blob,
+            }],
+        }))
+        .send()
+        .await
+        .expect("POST /sessions 失败");
+    assert_ne!(
+        response.status(),
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+        "图片附件不应触发 413"
+    );
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+}

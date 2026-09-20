@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use amux_common::api::*;
 use amux_common::domain::{SESSION_LIST_DEFAULT_LIMIT, SESSION_PAGE_DEFAULT_LIMIT};
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -126,8 +126,13 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/config/agent/",
             get(get_orchestrator).put(put_orchestrator),
         )
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
 }
+
+/// JSON 请求体上限：图片附件以内联 base64 发送（PRD「可拖拽文件和图片，可粘贴图片」），
+/// axum 默认 2 MiB 不够；按尽量宽松但不至失控的量级取 50 MiB。
+const MAX_REQUEST_BODY_BYTES: usize = 50 * 1024 * 1024;
 
 // ---------- Daemon 接入 ----------
 
