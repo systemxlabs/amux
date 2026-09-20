@@ -77,6 +77,13 @@ beforeAll(async () => {
       );
       return;
     }
+    if (/^\/sessions\/[^/]+\/terminals\/[^/]+$/.test(url) && request.method === "GET") {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write('event: output\ndata: {"data":"aGk=","nextCursor":2}\n\n');
+      response.write('event: output\ndata: {"data":"IQ==","nextCursor":3}\n\n');
+      response.end();
+      return;
+    }
     const reply = replies.shift();
     if (!reply) {
       response.writeHead(404, { "content-type": "text/plain" });
@@ -181,6 +188,23 @@ describe("ApiClient", () => {
       timestamp: 7,
     });
     expect(page.hasMore).toBe(false);
+  });
+
+  it("终端 SSE 携带认证并逐事件解析输出", async () => {
+    const client = new ApiClient(base, "tk");
+    const outputs: { data: string; nextCursor: number }[] = [];
+    await client.terminalOutputStream(
+      "s1",
+      "t1",
+      new AbortController().signal,
+      (output) => outputs.push(output),
+    );
+
+    expect(seen.at(-1)?.authorization).toBe("Bearer tk");
+    expect(outputs).toEqual([
+      { data: "aGk=", nextCursor: 2 },
+      { data: "IQ==", nextCursor: 3 },
+    ]);
   });
 
   it("错误消息拼接：空响应体只给状态码", () => {

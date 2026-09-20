@@ -227,15 +227,15 @@ pub struct TerminalResizeRequest {
     pub rows: u16,
 }
 
-/// `GET /sessions/<id>/terminals/<id>` 响应：游标之后的增量输出。
+/// `GET /sessions/<id>/terminals/<id>` SSE 流的输出事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOutput {
     /// base64 编码的输出字节
     pub data: String,
-    /// 下次请求携带的游标
+    /// 该事件之后终端输出流的字节偏移
     pub next_cursor: u64,
-    /// 请求的游标早于缓存起点（旧输出已被丢弃），本次返回缓存全量
+    /// 客户端应重建本地输出缓冲（首个事件或流中发生断点）
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
 }

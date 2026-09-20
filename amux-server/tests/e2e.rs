@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine as _;
+use futures_util::StreamExt as _;
 use serde_json::{json, Value};
 
 const TOKEN: &str = "e2e-token";
@@ -456,7 +457,7 @@ async fn server_daemon_agent_end_to_end() {
         "{options}"
     );
 
-    // 终端：PTY 输出经 Daemon 上行、Server 缓存，按游标增量读取
+    // 终端：PTY 输出经 Daemon 上行、Server 缓存，并通过 SSE 增量读取
     let terminal = client
         .post_ok(
             &format!("/sessions/{session_id}/terminals"),
@@ -471,6 +472,25 @@ async fn server_daemon_agent_end_to_end() {
         .as_str()
         .expect("terminalId")
         .to_string();
+    let response = client
+        .http
+        .get(format!(
+            "{}/sessions/{session_id}/terminals/{terminal_id}",
+            client.base
+        ))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .expect("连接终端 SSE 失败");
+    assert!(response.status().is_success());
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
     let input = base64::engine::general_purpose::STANDARD.encode(b"echo amux-terminal\n");
     client
         .post_ok(
@@ -478,23 +498,31 @@ async fn server_daemon_agent_end_to_end() {
             json!({ "data": input }),
         )
         .await;
-    let output = poll(
-        || {
-            let client = &client;
-            let path = format!("/sessions/{session_id}/terminals/{terminal_id}");
-            async move {
-                let value = client.try_get(&path).await?;
+    let stream = response.bytes_stream();
+    tokio::pin!(stream);
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let mut wire = String::new();
+    let output = loop {
+        let chunk = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("等待终端 SSE 输出超时")
+            .expect("终端 SSE 提前结束")
+            .expect("读取终端 SSE 失败");
+        wire.push_str(&String::from_utf8_lossy(&chunk));
+        let found = wire
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .find(|value| {
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(value["data"].as_str().unwrap_or_default())
                     .unwrap_or_default();
-                String::from_utf8_lossy(&bytes)
-                    .contains("amux-terminal")
-                    .then_some(value)
-            }
-        },
-        "终端输出",
-    )
-    .await;
+                String::from_utf8_lossy(&bytes).contains("amux-terminal")
+            });
+        if let Some(output) = found {
+            break output;
+        }
+    };
     assert!(output["nextCursor"].as_u64().unwrap() > 0);
     let terminals = client
         .get(&format!("/sessions/{session_id}/terminals"))

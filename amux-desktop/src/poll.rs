@@ -12,7 +12,7 @@ use crate::client::Client;
 use crate::state::{
     set_terminals, ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SettingsTab, SharedCore,
     SidePanel, ACTIVITIES_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, PLAN_INTERVAL,
-    SESSION_LIST_INTERVAL, TERMINAL_INTERVAL,
+    SESSION_LIST_INTERVAL,
 };
 
 /// 连接重试间隔。
@@ -154,18 +154,14 @@ async fn refresh_open(
 ) {
     let activities_open = side_panel == Some(SidePanel::Activities);
     let plan_open = side_panel == Some(SidePanel::Plan);
-    let terminal_open = side_panel == Some(SidePanel::Terminal);
 
-    let (due_history, due_ongoing, due_activities, due_plan, due_terminal, terminal, cursor) = {
+    let (due_history, due_ongoing, due_activities, due_plan) = {
         let core = core.lock();
         (
             core.due(core.last.history, HISTORY_INTERVAL),
             core.due(core.last.ongoing, ONGOING_INTERVAL),
             core.due(core.last.activities, ACTIVITIES_INTERVAL),
             core.due(core.last.plan, PLAN_INTERVAL),
-            core.due(core.last.terminal, TERMINAL_INTERVAL),
-            core.view.detail.active_terminal.clone(),
-            core.last.terminal_cursor,
         )
     };
 
@@ -202,32 +198,6 @@ async fn refresh_open(
                     }
                 }
                 core.lock().last.ongoing = Some(Instant::now());
-            }
-            if due_terminal && terminal_open {
-                // 期间只轮询终端输出内容；终端列表仅在终端视图打开时拉取一次
-                if let Some(terminal_id) = terminal {
-                    if let Ok(output) = client.terminal_output(id, &terminal_id, Some(cursor)).await
-                    {
-                        let bytes = base64::Engine::decode(
-                            &base64::engine::general_purpose::STANDARD,
-                            &output.data,
-                        )
-                        .unwrap_or_default();
-                        let mut core = core.lock();
-                        if core.open.as_ref() == Some(target)
-                            && core.view.detail.active_terminal.as_deref() == Some(&terminal_id)
-                        {
-                            if output.truncated {
-                                // 服务端已丢弃旧输出：整个缓冲重建（本地 VT 网格随之重置）
-                                core.view.detail.terminal_output.reset();
-                            }
-                            core.view.detail.terminal_output.append(&bytes);
-                            core.last.terminal_cursor = output.next_cursor;
-                        }
-                    }
-                }
-                let mut core = core.lock();
-                core.last.terminal = Some(Instant::now());
             }
         }
         OpenTarget::Workflow(id) => {

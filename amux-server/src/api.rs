@@ -2,12 +2,15 @@
 //!
 //! 路径与语义对齐 docs/DESIGN.md「Client-Server 通信」一节。
 
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use amux_common::api::*;
 use amux_common::domain::{SESSION_LIST_DEFAULT_LIMIT, SESSION_PAGE_DEFAULT_LIMIT};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -33,12 +36,6 @@ impl Page {
     fn offset(&self) -> usize {
         self.offset.unwrap_or(0)
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Cursor {
-    #[serde(default)]
-    pub cursor: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -467,14 +464,28 @@ async fn terminal_input(
 
 async fn terminal_output(
     State(state): State<Arc<AppState>>,
-    Path((_id, terminal)): Path<(String, String)>,
-    Query(query): Query<Cursor>,
-) -> ApiResult<TerminalOutput> {
-    state
+    Path((id, terminal)): Path<(String, String)>,
+) -> Result<
+    Sse<impl futures_util::Stream<Item = Result<Event, Infallible>> + Send>,
+    (StatusCode, String),
+> {
+    state.sessions.get(&id).map_err(not_found)?;
+    let subscription = state
         .sessions
-        .terminal_output(&terminal, query.cursor)
-        .ok_or_else(|| not_found("终端不存在".to_string()))
-        .map(Json)
+        .subscribe_terminal(&terminal)
+        .ok_or_else(|| not_found("终端不存在".to_string()))?;
+    let stream = futures_util::StreamExt::map(subscription.into_stream(), |output| {
+        let output = output.expect("终端输出流不会失败");
+        Ok(Event::default()
+            .event("output")
+            .json_data(output)
+            .expect("终端输出事件始终可序列化"))
+    });
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
 }
 
 async fn close_terminal(

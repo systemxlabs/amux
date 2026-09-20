@@ -62,6 +62,12 @@ struct SidebarResizeDrag;
 struct PanelResizeDrag;
 /// 输入框高度拖拽载荷。
 pub(crate) struct InputResizeDrag;
+/// 当前终端 SSE 的身份；会话、终端或面板变化时重建连接。
+#[derive(Clone, PartialEq, Eq)]
+struct TerminalStreamKey {
+    session: String,
+    terminal: String,
+}
 
 pub struct AmuxApp {
     pub core: SharedCore,
@@ -100,6 +106,8 @@ pub struct AmuxApp {
     pub terminal: terminal_view::TerminalScreen,
     /// 终端焦点：按键经它派发（Tab/Shift+Tab 走 action，其余走 key_down）
     pub terminal_focus: FocusHandle,
+    /// 当前终端 SSE 连接与任务；视图关闭或终端切换时 abort。
+    terminal_stream: Option<(TerminalStreamKey, tokio::task::JoinHandle<()>)>,
     /// 待发送附件（拖拽/粘贴产生）
     pub attachments: Vec<Attachment>,
     /// 斜杠命令上拉框中高亮项
@@ -246,6 +254,7 @@ impl AmuxApp {
             if this
                 .update_in(cx, |this, window, cx| {
                     this.sync_view_data();
+                    this.sync_terminal_stream();
                     this.sync_paging();
                     this.sync_orchestrator_form(window, cx);
                     this.flush_notes(window, cx);
@@ -338,6 +347,7 @@ impl AmuxApp {
             plan_plan,
             terminal: terminal_view::TerminalScreen::default(),
             terminal_focus: cx.focus_handle(),
+            terminal_stream: None,
             attachments: Vec::new(),
             slash_selected: 0,
             slash_dismissed: false,
@@ -904,15 +914,53 @@ impl AmuxApp {
         );
     }
 
-    /// 切换当前终端（重置游标与输出缓冲）。
+    /// 切换当前终端并重建本地输出缓冲。
     pub fn select_terminal(&mut self, terminal: String, cx: &mut Context<Self>) {
         self.with_core(|core| {
             core.view.detail.active_terminal = Some(terminal);
             core.view.detail.terminal_output.reset();
-            core.last.terminal_cursor = 0;
-            core.last.terminal = None;
         });
         cx.notify();
+    }
+
+    /// 终端 SSE 只在普通会话的终端面板打开且已选择终端时存在；连接身份变化即重建。
+    fn sync_terminal_stream(&mut self) {
+        let next = self.with_core(|core| {
+            if core.status != ConnectionStatus::Online
+                || core.side_panel != Some(SidePanel::Terminal)
+            {
+                return None;
+            }
+            match (&core.open, &core.view.detail.active_terminal) {
+                (Some(OpenTarget::Session(session)), Some(terminal)) => Some(TerminalStreamKey {
+                    session: session.clone(),
+                    terminal: terminal.clone(),
+                }),
+                _ => None,
+            }
+        });
+        if self
+            .terminal_stream
+            .as_ref()
+            .is_some_and(|(key, _)| Some(key) == next.as_ref())
+        {
+            return;
+        }
+        if let Some((_, task)) = self.terminal_stream.take() {
+            task.abort();
+        }
+        let Some(key) = next else {
+            return;
+        };
+        let Some(client) = self.with_core(|core| core.client.clone()) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        let task = self.runtime.spawn({
+            let key = key.clone();
+            async move { stream_terminal_output(client, core, key).await }
+        });
+        self.terminal_stream = Some((key, task));
     }
 
     /// 加载工作目录树根节点；每次打开面板都实时拉取，不缓存
@@ -2669,6 +2717,78 @@ fn empty_orchestrator_config() -> OrchestratorConfig {
     }
 }
 
+/// 持续消费终端 SSE；每次连接的首个事件重建缓冲，断线后自动重连。
+async fn stream_terminal_output(
+    client: crate::client::Client,
+    core: SharedCore,
+    key: TerminalStreamKey,
+) {
+    const RETRY_DELAY: Duration = Duration::from_millis(500);
+    loop {
+        let mut first = true;
+        let mut last_cursor = None;
+        let result = client
+            .terminal_output_stream(&key.session, &key.terminal, |output| {
+                let bytes = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &output.data,
+                )
+                .unwrap_or_default();
+                let mut core = core.lock();
+                if core.status != ConnectionStatus::Online
+                    || core.side_panel != Some(SidePanel::Terminal)
+                    || !matches!(
+                        core.open.as_ref(),
+                        Some(OpenTarget::Session(session)) if session == &key.session
+                    )
+                    || core.view.detail.active_terminal.as_deref() != Some(key.terminal.as_str())
+                {
+                    return;
+                }
+                if last_cursor.is_some_and(|cursor| output.next_cursor <= cursor) {
+                    return;
+                }
+                if first || output.truncated {
+                    core.view.detail.terminal_output.reset();
+                }
+                first = false;
+                last_cursor = Some(output.next_cursor);
+                core.view.detail.terminal_output.append(&bytes);
+            })
+            .await;
+
+        if !terminal_stream_current(&core, &key) {
+            return;
+        }
+        if let Err(error) = result {
+            if error.starts_with("HTTP 401") {
+                core.lock().status = ConnectionStatus::Failed(error);
+                return;
+            }
+            if error.starts_with("HTTP 404") {
+                let mut core = core.lock();
+                if core.view.detail.active_terminal.as_deref() == Some(key.terminal.as_str()) {
+                    core.view.detail.active_terminal = None;
+                    core.view.detail.terminal_output.reset();
+                }
+                return;
+            }
+        }
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
+}
+
+fn terminal_stream_current(core: &SharedCore, key: &TerminalStreamKey) -> bool {
+    let core = core.lock();
+    core.status == ConnectionStatus::Online
+        && core.side_panel == Some(SidePanel::Terminal)
+        && matches!(
+            core.open.as_ref(),
+            Some(OpenTarget::Session(session)) if session == &key.session
+        )
+        && core.view.detail.active_terminal.as_deref() == Some(key.terminal.as_str())
+}
+
 /// 创建一个终端并设为当前终端，随后刷新终端列表。
 async fn create_terminal(client: &crate::client::Client, core: &SharedCore, session: &str) {
     match client.open_terminal(session, None, 100, 30).await {
@@ -2677,8 +2797,6 @@ async fn create_terminal(client: &crate::client::Client, core: &SharedCore, sess
                 let mut core = core.lock();
                 core.view.detail.terminal_output.reset();
                 core.view.detail.active_terminal = Some(terminal);
-                core.last.terminal_cursor = 0;
-                core.last.terminal = None;
             }
             if let Ok(terminals) = client.terminals(session).await {
                 crate::state::set_terminals(&mut core.lock(), terminals);

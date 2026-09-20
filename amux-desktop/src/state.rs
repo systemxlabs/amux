@@ -19,7 +19,6 @@ pub const HISTORY_INTERVAL: Duration = Duration::from_secs(5);
 pub const ONGOING_INTERVAL: Duration = Duration::from_secs(2);
 pub const ACTIVITIES_INTERVAL: Duration = Duration::from_secs(10);
 pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
-pub const TERMINAL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 连接状态（决定进入登录页面还是主页面）。
 #[derive(Debug, Clone, PartialEq)]
@@ -112,7 +111,7 @@ impl WorkspaceNode {
     }
 }
 
-/// 终端输出缓冲：按游标增量累积。
+/// 终端输出缓冲：按 SSE 事件增量累积。
 ///
 /// 切换终端、服务端丢弃旧输出、乃至整个会话视图重建时缓冲会整体重建，
 /// `generation` 随之取一个新的全局序号，供本地 VT 网格判断是否需要重建
@@ -179,8 +178,6 @@ pub fn set_terminals(core: &mut Core, terminals: Vec<Terminal>) {
         .first()
         .map(|terminal| terminal.id.clone());
     core.view.detail.terminal_output.reset();
-    core.last.terminal_cursor = 0;
-    core.last.terminal = None;
 }
 
 /// 列表分页：窗口贴着「最新」一端，随滚动向更早方向按页扩展
@@ -231,7 +228,7 @@ pub struct SessionView {
     pub history_paging: Paging,
     /// 活动历史分页（窗口为最新的若干条）
     pub activities_paging: Paging,
-    /// 终端输出字节（按游标增量累积；truncated 时整体替换）
+    /// 终端输出字节（按 SSE 事件增量累积；truncated 时整体替换）
     pub terminal_output: TerminalBuffer,
     /// 工作目录树的根节点（懒加载子目录）
     pub workspace_tree: Vec<WorkspaceNode>,
@@ -477,8 +474,6 @@ pub struct Ticks {
     pub ongoing: Option<Instant>,
     pub activities: Option<Instant>,
     pub plan: Option<Instant>,
-    pub terminal: Option<Instant>,
-    pub terminal_cursor: u64,
 }
 
 impl Default for Core {

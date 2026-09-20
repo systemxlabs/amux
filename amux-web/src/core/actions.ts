@@ -161,8 +161,14 @@ export function toggleSidePanel(core: Core, panel: SidePanel): void {
     const next = state.sidePanel === panel ? null : panel;
     state.sidePanel = next;
     opened = next === "terminal";
-    // 终端视图每次打开都从头拉取完整输出（docs/DESIGN.md「终端视图」）
-    if (next === "terminal") state.detail.stream = { cursor: null };
+    if (next === "terminal") {
+      state.detail.terminalSeq += 1;
+      state.detail.terminalChunks.push({
+        seq: state.detail.terminalSeq,
+        bytes: new Uint8Array(0),
+        reset: true,
+      });
+    }
   });
   core.resetTicks();
   core.last.list = Date.now();
@@ -449,8 +455,12 @@ export async function openTerminal(core: Core, cols: number, rows: number): Prom
     core.update((state) => {
       state.detail.terminals = terminals;
       state.detail.activeTerminal = terminalId;
-      state.detail.stream = { cursor: null };
-      state.detail.chunk = { seq: state.detail.chunk.seq + 1, bytes: new Uint8Array(0), reset: true };
+      state.detail.terminalSeq += 1;
+      state.detail.terminalChunks.push({
+        seq: state.detail.terminalSeq,
+        bytes: new Uint8Array(0),
+        reset: true,
+      });
     });
   } catch (error) {
     core.failure(`打开终端失败：${messageOf(error)}`);
@@ -460,8 +470,12 @@ export async function openTerminal(core: Core, cols: number, rows: number): Prom
 export function selectTerminal(core: Core, terminalId: string): void {
   core.update((state) => {
     state.detail.activeTerminal = terminalId;
-    state.detail.stream = { cursor: null };
-    state.detail.chunk = { seq: state.detail.chunk.seq + 1, bytes: new Uint8Array(0), reset: true };
+    state.detail.terminalSeq += 1;
+    state.detail.terminalChunks.push({
+      seq: state.detail.terminalSeq,
+      bytes: new Uint8Array(0),
+      reset: true,
+    });
   });
   core.resetTicks();
 }
@@ -476,7 +490,12 @@ export async function closeTerminal(core: Core, terminalId: string): Promise<voi
       state.detail.terminals = terminals;
       if (state.detail.activeTerminal === terminalId) {
         state.detail.activeTerminal = terminals.at(-1)?.id ?? null;
-        state.detail.stream = { cursor: null };
+        state.detail.terminalSeq += 1;
+        state.detail.terminalChunks.push({
+          seq: state.detail.terminalSeq,
+          bytes: new Uint8Array(0),
+          reset: true,
+        });
       }
     });
   } catch (error) {

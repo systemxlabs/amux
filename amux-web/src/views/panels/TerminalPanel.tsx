@@ -61,8 +61,9 @@ export function TerminalPanel() {
   const state = useCoreState();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
+  const processedSeqRef = useRef(0);
   const activeTerminal = state.detail.activeTerminal;
-  const chunk = state.detail.chunk;
+  const chunks = state.detail.terminalChunks;
 
   // 活动终端变化时重建实例：VT 网格无法跨实例迁移，重建后的完整输出由后续 chunk 写入
   useEffect(() => {
@@ -106,13 +107,20 @@ export function TerminalPanel() {
     };
   }, [core, activeTerminal]);
 
-  // 输出：chunk 序号变化时写入；缓冲被服务端截断时先重置网格
+  // 输出：按序消费 SSE 队列；缓冲被替换或重连时先重置网格
   useEffect(() => {
     const term = termRef.current;
     if (term === null) return;
-    if (chunk.reset) term.reset();
-    if (chunk.bytes.length > 0) term.write(chunk.bytes);
-  }, [chunk]);
+    let processed = processedSeqRef.current;
+    for (const chunk of chunks) {
+      if (chunk.seq <= processed) continue;
+      if (chunk.reset) term.reset();
+      if (chunk.bytes.length > 0) term.write(chunk.bytes);
+      processed = chunk.seq;
+    }
+    processedSeqRef.current = processed;
+    core.acknowledgeTerminalChunks(processed);
+  }, [chunks, core]);
 
   const createTerminal = () => {
     const term = termRef.current;

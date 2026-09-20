@@ -1,19 +1,25 @@
 //! 终端输出缓存（Server 侧）。
 //!
-//! Daemon 只推 PTY 字节流，Server 负责按会话缓存输出并支持游标增量读取
+//! Daemon 只推 PTY 字节流，Server 负责按会话缓存输出，并向 SSE 订阅者广播增量
 //! （docs/DESIGN.md「终端存储」「终端视图」）：缓存有上限，超限丢弃最早的输出；
-//! 客户端游标早于缓存起点时返回缓存全量并标记 `truncated`。
+//! 订阅先取得缓存快照，再消费广播，保证两者之间不丢输出。
 
 use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
+use std::sync::Arc;
 
 use amux_common::api::{Terminal, TerminalOutput, TerminalState};
 use base64::Engine as _;
+use futures_util::stream::{self, Stream};
 use parking_lot::Mutex;
+use tokio::sync::broadcast;
 
 use crate::timestamps::now_ms;
 
 /// 单终端缓存上限（字节）。
 const BUFFER_LIMIT: usize = 256 * 1024;
+/// 单终端实时输出广播容量；订阅落后时从缓存快照恢复。
+const OUTPUT_CHANNEL_CAPACITY: usize = 64;
 
 /// 终端空闲删除阈值：超过该时长没有任何输入输出即删除（docs/DESIGN.md「终端存储」）。
 pub const IDLE_EXPIRE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -31,6 +37,7 @@ struct Entry {
     total: u64,
     /// 最近一次输入或输出的时间（毫秒时间戳）
     last_active: u64,
+    subscribers: broadcast::Sender<TerminalOutput>,
 }
 
 #[derive(Default)]
@@ -44,6 +51,7 @@ impl TerminalCache {
     }
 
     pub fn open(&self, session_id: &str, terminal_id: &str, cwd: &str, cols: u16, rows: u16) {
+        let (subscribers, _) = broadcast::channel(OUTPUT_CHANNEL_CAPACITY);
         self.terminals.lock().insert(
             terminal_id.to_string(),
             Entry {
@@ -56,6 +64,7 @@ impl TerminalCache {
                 start: 0,
                 total: 0,
                 last_active: now_ms(),
+                subscribers,
             },
         );
     }
@@ -72,6 +81,11 @@ impl TerminalCache {
             entry.buffer.pop_front();
             entry.start += 1;
         }
+        let _ = entry.subscribers.send(TerminalOutput {
+            data: base64::engine::general_purpose::STANDARD.encode(data),
+            next_cursor: entry.total,
+            truncated: false,
+        });
     }
 
     /// 记录一次输入（终端空闲删除以「最近一次输入或输出」为基准）。
@@ -112,18 +126,23 @@ impl TerminalCache {
     }
 
     /// 读取游标之后的增量输出。
-    pub fn read(&self, terminal_id: &str, cursor: Option<u64>) -> Option<TerminalOutput> {
+    fn read(&self, terminal_id: &str, cursor: Option<u64>) -> Option<TerminalOutput> {
         let terminals = self.terminals.lock();
         let entry = terminals.get(terminal_id)?;
-        let requested = cursor.unwrap_or(0);
-        let truncated = requested < entry.start;
-        let from = requested.max(entry.start);
-        let skip = (from - entry.start) as usize;
-        let bytes: Vec<u8> = entry.buffer.iter().skip(skip).copied().collect();
-        Some(TerminalOutput {
-            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-            next_cursor: entry.total,
-            truncated,
+        Some(terminal_output(entry, cursor.unwrap_or(0)))
+    }
+
+    /// 订阅终端输出：先固定缓存快照，再从该时刻继续接收实时增量。
+    pub fn subscribe(self: &Arc<Self>, terminal_id: &str) -> Option<TerminalSubscription> {
+        let terminals = self.terminals.lock();
+        let entry = terminals.get(terminal_id)?;
+        let initial = terminal_output(entry, 0);
+        let receiver = entry.subscribers.subscribe();
+        Some(TerminalSubscription {
+            cache: Arc::clone(self),
+            terminal_id: terminal_id.to_string(),
+            initial: Some(initial),
+            receiver,
         })
     }
 
@@ -167,9 +186,50 @@ impl TerminalCache {
     }
 }
 
+/// 一次 SSE 订阅：首个事件是当前缓存快照，后续事件是实时增量。
+pub struct TerminalSubscription {
+    cache: Arc<TerminalCache>,
+    terminal_id: String,
+    initial: Option<TerminalOutput>,
+    receiver: broadcast::Receiver<TerminalOutput>,
+}
+
+impl TerminalSubscription {
+    pub fn into_stream(self) -> impl Stream<Item = Result<TerminalOutput, Infallible>> + Send {
+        stream::unfold(self, |mut subscription| async move {
+            if let Some(initial) = subscription.initial.take() {
+                return Some((Ok(initial), subscription));
+            }
+            match subscription.receiver.recv().await {
+                Ok(output) => Some((Ok(output), subscription)),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let mut output = subscription.cache.read(&subscription.terminal_id, None)?;
+                    // 广播队列落后：快照取代客户端当前缓冲；后续队列中的重复事件由游标过滤。
+                    output.truncated = true;
+                    Some((Ok(output), subscription))
+                }
+                Err(broadcast::error::RecvError::Closed) => None,
+            }
+        })
+    }
+}
+
+fn terminal_output(entry: &Entry, requested: u64) -> TerminalOutput {
+    let truncated = requested < entry.start;
+    let from = requested.max(entry.start);
+    let skip = (from - entry.start) as usize;
+    let bytes: Vec<u8> = entry.buffer.iter().skip(skip).copied().collect();
+    TerminalOutput {
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        next_cursor: entry.total,
+        truncated,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt as _;
 
     fn decoded(output: &TerminalOutput) -> String {
         String::from_utf8(
@@ -215,6 +275,38 @@ mod tests {
             .decode(&output.data)
             .unwrap();
         assert_eq!(bytes.len(), BUFFER_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn subscription_returns_snapshot_then_live_output() {
+        let cache = Arc::new(TerminalCache::new());
+        cache.open("s1", "t1", "/w", 80, 24);
+        cache.output("t1", b"before");
+
+        let mut stream = Box::pin(cache.subscribe("t1").unwrap().into_stream());
+        let snapshot = stream.next().await.unwrap().unwrap();
+        assert_eq!(decoded(&snapshot), "before");
+        assert!(!snapshot.truncated);
+
+        cache.output("t1", b" after");
+        let live = stream.next().await.unwrap().unwrap();
+        assert_eq!(decoded(&live), " after");
+        assert_eq!(live.next_cursor, 12);
+    }
+
+    #[tokio::test]
+    async fn lagged_subscription_recovers_with_full_snapshot() {
+        let cache = Arc::new(TerminalCache::new());
+        cache.open("s1", "t1", "/w", 80, 24);
+        let mut stream = Box::pin(cache.subscribe("t1").unwrap().into_stream());
+        assert_eq!(decoded(&stream.next().await.unwrap().unwrap()), "");
+
+        for _ in 0..=OUTPUT_CHANNEL_CAPACITY {
+            cache.output("t1", b"x");
+        }
+        let recovered = stream.next().await.unwrap().unwrap();
+        assert!(recovered.truncated);
+        assert_eq!(decoded(&recovered), "x".repeat(OUTPUT_CHANNEL_CAPACITY + 1));
     }
 
     #[test]

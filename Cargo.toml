@@ -45,7 +45,7 @@ rig-agent = { version = "0.42.0", default-features = false }
 process-wrap = { version = "10.0.0", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 alacritty_terminal = "0.26.0"
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 [profile.release]
 lto = "thin"

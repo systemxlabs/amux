@@ -14,7 +14,7 @@ import type {
   WorkflowList,
 } from "../lib/types";
 import { Core } from "./core";
-import { loadOlderList, refreshDetails, refreshList, refreshNewSession, refreshWorkflowSetup, refreshOrchestrator, refreshInteraction, tick } from "./poll";
+import { loadOlderList, refreshDetails, refreshList, refreshNewSession, refreshWorkflowSetup, refreshOrchestrator, refreshInteraction, stopTerminalStream, tick } from "./poll";
 
 it("每次打开新建视图都读取最新计划，切换工作流模式不重复读取计划", async () => {
   const core = new Core();
@@ -244,32 +244,44 @@ describe("tick", () => {
   });
 });
 
-describe("tick 终端轮询", () => {
-  it("终端视图打开期间只轮询终端输出内容，不周期性拉取终端列表", async () => {
-    vi.useFakeTimers();
-    try {
-      const { client, calls } = recordingClient({
-        terminals: () => [],
-        terminalOutput: () => ({ data: "", nextCursor: 0 }),
-        ongoingActivity: () => null,
-      });
-      const core = onlineCore(client);
-      core.state.middle = "interaction";
-      core.state.open = { kind: "session", id: "s1" };
-      core.state.sidePanel = "terminal";
-      core.state.detail.activeTerminal = "t1";
-      core.state.detail.stream = { cursor: 0 };
+describe("tick 终端流", () => {
+  it("终端视图打开期间建立 SSE，不周期性拉取终端列表或输出", async () => {
+    let streamSignal: AbortSignal | undefined;
+    const { client, calls } = recordingClient({
+      ongoingActivity: () => null,
+      terminalOutputStream: (
+        _id: string,
+        _terminal: string,
+        signal: AbortSignal,
+        onOutput: (output: { data: string; nextCursor: number }) => void,
+      ) =>
+        new Promise<void>((resolve) => {
+          streamSignal = signal;
+          onOutput({ data: "aGk=", nextCursor: 2 });
+          onOutput({ data: "IQ==", nextCursor: 3 });
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    });
+    const core = onlineCore(client);
+    core.state.middle = "interaction";
+    core.state.open = { kind: "session", id: "s1" };
+    core.state.sidePanel = "terminal";
+    core.state.detail.activeTerminal = "t1";
 
-      await tick(core);
-      expect(calls).toContain("terminalOutput");
-      expect(calls).not.toContain("terminals");
+    await tick(core);
+    expect(calls).toContain("terminalOutputStream");
+    expect(calls).not.toContain("terminals");
+    expect(core.state.detail.terminalChunks).toHaveLength(2);
+    expect(new TextDecoder().decode(core.state.detail.terminalChunks[0].bytes)).toBe("hi");
+    expect(core.state.detail.terminalChunks[0].reset).toBe(true);
+    expect(new TextDecoder().decode(core.state.detail.terminalChunks[1].bytes)).toBe("!");
+    expect(core.state.detail.terminalChunks[1].reset).toBe(false);
 
-      vi.advanceTimersByTime(500);
-      await tick(core);
-      expect(calls).not.toContain("terminals");
-    } finally {
-      vi.useRealTimers();
-    }
+    await tick(core);
+    expect(calls.filter((call) => call === "terminalOutputStream")).toHaveLength(1);
+    expect(streamSignal?.aborted).toBe(false);
+    stopTerminalStream(core);
+    expect(streamSignal?.aborted).toBe(true);
   });
 });
 

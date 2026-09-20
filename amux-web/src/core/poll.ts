@@ -16,7 +16,8 @@ import {
   trimOldest,
 } from "../lib/paging";
 import { buildListWindow, sortEntries } from "../lib/list";
-import { appendTerminalOutput } from "../lib/terminal";
+import { decodeBase64 } from "../lib/terminal";
+import { ApiError } from "../lib/api";
 import type { Core, SettingsTab } from "./core";
 
 export const SESSION_LIST_INTERVAL = 10_000;
@@ -24,8 +25,8 @@ export const HISTORY_INTERVAL = 5_000;
 export const ONGOING_INTERVAL = 2_000;
 export const ACTIVITIES_INTERVAL = 10_000;
 export const PLAN_INTERVAL = 10_000;
-export const TERMINAL_INTERVAL = 500;
 export const RECONNECT_INTERVAL = 5_000;
+const TERMINAL_RETRY_DELAY = 500;
 
 /** 节拍粒度：各视图按其周期在节拍内到期触发。 */
 export const TICK_INTERVAL = 250;
@@ -37,10 +38,14 @@ export function due(last: number | undefined, interval: number, now = Date.now()
 /** 单次节拍：按需刷新各视图。 */
 export async function tick(core: Core): Promise<void> {
   const client = core.client;
-  if (!client) return;
+  if (!client) {
+    stopTerminalStream(core);
+    return;
+  }
 
   // 连接检查：断开时周期重连，成功后重置逐视图节拍与打开视图的已加载标记
   if (core.state.status !== "online") {
+    stopTerminalStream(core);
     if (due(core.last.reconnect, RECONNECT_INTERVAL)) {
       core.last.reconnect = Date.now();
       try {
@@ -65,6 +70,7 @@ export async function tick(core: Core): Promise<void> {
     await refreshList(core);
   }
 
+  syncTerminalStream(core);
   if (core.state.open && core.state.middle === "interaction") {
     await refreshOpen(core);
   }
@@ -152,7 +158,6 @@ async function refreshOpen(core: Core): Promise<void> {
   if (!target) return;
   const activitiesOpen = core.state.sidePanel === "activities";
   const planOpen = core.state.sidePanel === "plan";
-  const terminalOpen = core.state.sidePanel === "terminal";
 
   // 会话详情与上下文用量只在详情视图打开时刷新一次（refreshDetails），不随节拍拉取
   if (due(core.last.history, HISTORY_INTERVAL)) {
@@ -188,14 +193,134 @@ async function refreshOpen(core: Core): Promise<void> {
       // 忽略：下一周期重试
     }
   }
-  if (terminalOpen && target.kind === "session" && due(core.last.terminal, TERMINAL_INTERVAL)) {
-    core.last.terminal = Date.now();
-    await refreshTerminalOutput(core, target.id);
-  }
 }
 
 function sameTarget(a: OpenTarget | null, b: OpenTarget): boolean {
   return a !== null && a.kind === b.kind && a.id === b.id;
+}
+
+type TerminalStreamSession = { key: string; controller: AbortController };
+const terminalStreams = new WeakMap<Core, TerminalStreamSession>();
+
+/** 停止终端流；面板收起、终端切换和 Core 销毁时调用。 */
+export function stopTerminalStream(core: Core): void {
+  const session = terminalStreams.get(core);
+  if (session) session.controller.abort();
+  terminalStreams.delete(core);
+}
+
+/** 同步 SSE 生命周期：只在普通会话的终端面板打开且已有活动终端时连接。 */
+export function syncTerminalStream(core: Core): void {
+  const target = core.state.open;
+  const terminal = core.state.detail.activeTerminal;
+  if (
+    core.client === null ||
+    core.state.status !== "online" ||
+    core.state.middle !== "interaction" ||
+    core.state.sidePanel !== "terminal" ||
+    target?.kind !== "session" ||
+    terminal === null
+  ) {
+    stopTerminalStream(core);
+    return;
+  }
+
+  const key = `${target.id}\0${terminal}`;
+  const current = terminalStreams.get(core);
+  if (current?.key === key) return;
+  if (current) current.controller.abort();
+
+  const session = { key, controller: new AbortController() };
+  terminalStreams.set(core, session);
+  void consumeTerminalStream(core, key, session.controller);
+}
+
+async function consumeTerminalStream(
+  core: Core,
+  key: string,
+  controller: AbortController,
+): Promise<void> {
+  while (isCurrentTerminalStream(core, key, controller)) {
+    let first = true;
+    let lastCursor: number | undefined;
+    const client = core.client;
+    const target = core.state.open;
+    const terminal = core.state.detail.activeTerminal;
+    if (client === null || target?.kind !== "session" || terminal === null) break;
+    try {
+      await client.terminalOutputStream(
+        target.id,
+        terminal,
+        controller.signal,
+        (output) => {
+          if (!isCurrentTerminalStream(core, key, controller)) return;
+          if (lastCursor !== undefined && output.nextCursor <= lastCursor) return;
+          const reset = first || output.truncated === true;
+          first = false;
+          lastCursor = output.nextCursor;
+          const bytes = decodeBase64(output.data);
+          if (bytes.length === 0 && !reset) return;
+          core.pushTerminalChunk(bytes, reset);
+        },
+      );
+    } catch (error) {
+      if (controller.signal.aborted || core.client === null) break;
+      if (error instanceof ApiError && error.status === 404) {
+        core.update((state) => {
+          if (state.detail.activeTerminal === terminal) {
+            state.detail.activeTerminal = null;
+            state.detail.terminalSeq += 1;
+            state.detail.terminalChunks.push({
+              seq: state.detail.terminalSeq,
+              bytes: new Uint8Array(0),
+              reset: true,
+            });
+          }
+        });
+        break;
+      }
+      // 连接失败时保留当前画面，短暂退避后重新建立 SSE。
+      console.warn("终端流中断，准备重连", error);
+    }
+    if (controller.signal.aborted) break;
+    await abortableDelay(TERMINAL_RETRY_DELAY, controller.signal);
+  }
+  if (terminalStreams.get(core)?.controller === controller) {
+    terminalStreams.delete(core);
+  }
+}
+
+function isCurrentTerminalStream(
+  core: Core,
+  key: string,
+  controller: AbortController,
+): boolean {
+  const target = core.state.open;
+  const terminal = core.state.detail.activeTerminal;
+  return (
+    !controller.signal.aborted &&
+    core.state.middle === "interaction" &&
+    core.state.sidePanel === "terminal" &&
+    target?.kind === "session" &&
+    terminal !== null &&
+    `${target.id}\0${terminal}` === key &&
+    terminalStreams.get(core)?.key === key &&
+    terminalStreams.get(core)?.controller === controller
+  );
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 /** 对话历史刷新：按当前窗口取数并整窗替换，拉取量不超过服务端单次上限。 */
@@ -407,38 +532,21 @@ export async function refreshTerminalList(core: Core): Promise<void> {
     const terminals = await client.terminals(target.id);
     core.update((state) => {
       if (state.sidePanel !== "terminal" || !sameTarget(state.open, target)) return;
+      const active = state.detail.activeTerminal;
       state.detail.terminals = terminals;
-      // 列表中消失的终端（会话重开、退出后被清理）从应用侧移除
-      if (
-        state.detail.activeTerminal !== null &&
-        !terminals.some((terminal) => terminal.id === state.detail.activeTerminal)
-      ) {
-        state.detail.activeTerminal = null;
-        state.detail.stream = { cursor: null };
+      if (active === null || !terminals.some((terminal) => terminal.id === active)) {
+        state.detail.activeTerminal = terminals[0]?.id ?? null;
+        state.detail.terminalSeq += 1;
+        state.detail.terminalChunks.push({
+          seq: state.detail.terminalSeq,
+          bytes: new Uint8Array(0),
+          reset: true,
+        });
       }
     });
+    syncTerminalStream(core);
   } catch {
     // 读取失败仅影响当前打开这次；下次视图打开时再重试
-  }
-}
-
-/** 终端输出增量：按游标取活动终端的输出内容（终端视图打开期间每 500ms 轮询）。 */
-async function refreshTerminalOutput(core: Core, sessionId: string): Promise<void> {
-  const client = core.client;
-  if (!client) return;
-  const active = core.state.detail.activeTerminal;
-  if (active === null) return;
-  try {
-    const output = await client.terminalOutput(sessionId, active, core.state.detail.stream.cursor);
-    const next = appendTerminalOutput(output);
-    if (next.bytes.length === 0 && !next.reset) return;
-    core.update((state) => {
-      if (state.detail.activeTerminal !== active) return;
-      state.detail.stream = next.stream;
-      state.detail.chunk = { seq: state.detail.chunk.seq + 1, bytes: next.bytes, reset: next.reset };
-    });
-  } catch {
-    // 忽略：下一周期重试
   }
 }
 

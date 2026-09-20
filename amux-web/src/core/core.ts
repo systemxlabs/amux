@@ -3,7 +3,6 @@
 import type { ApiClient } from "../lib/api";
 import type { Paging } from "../lib/paging";
 import { newPaging } from "../lib/paging";
-import { newTerminalStream, type TerminalStream } from "../lib/terminal";
 import { clearToken } from "../lib/token";
 import type {
   Activity,
@@ -124,8 +123,8 @@ export type DetailState = {
   contextWindowSize: number;
   terminals: Terminal[];
   activeTerminal: string | null;
-  stream: TerminalStream;
-  chunk: TerminalChunk;
+  terminalChunks: TerminalChunk[];
+  terminalSeq: number;
 };
 
 export type CoreState = {
@@ -165,8 +164,8 @@ export function initialDetail(): DetailState {
     contextWindowSize: 0,
     terminals: [],
     activeTerminal: null,
-    stream: newTerminalStream(),
-    chunk: { seq: 0, bytes: new Uint8Array(0), reset: false },
+    terminalChunks: [],
+    terminalSeq: 0,
   };
 }
 
@@ -225,7 +224,6 @@ export type Ticks = {
   ongoing?: number;
   activities?: number;
   plan?: number;
-  terminal?: number;
   reconnect?: number;
 };
 
@@ -258,6 +256,33 @@ export class Core {
     for (const listener of this.listeners) listener();
   }
 
+  /** 追加一条按序的终端输出；React 在单个渲染批次中也不会丢失中间事件。 */
+  pushTerminalChunk(bytes: Uint8Array, reset: boolean): void {
+    this.update((state) => {
+      state.detail.terminalSeq += 1;
+      state.detail.terminalChunks.push({
+        seq: state.detail.terminalSeq,
+        bytes,
+        reset,
+      });
+    });
+  }
+
+  /** 已写入 xterm.js 的事件可移除；确认值后的新事件保留。 */
+  acknowledgeTerminalChunks(seq: number): void {
+    if (
+      seq === 0 ||
+      this.state.detail.terminalChunks.every((chunk) => chunk.seq > seq)
+    ) {
+      return;
+    }
+    this.update((state) => {
+      state.detail.terminalChunks = state.detail.terminalChunks.filter(
+        (chunk) => chunk.seq > seq,
+      );
+    });
+  }
+
   /** 通知提示：成功/失败，数秒后自动消失。 */
   notify(kind: Notice["kind"], text: string): void {
     if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
@@ -282,7 +307,9 @@ export class Core {
 
   /** 重置打开会话的明细与逐视图节拍（切换会话/连接重建时调用）。 */
   resetDetail(): void {
+    const terminalSeq = this.state.detail.terminalSeq;
     this.state.detail = initialDetail();
+    this.state.detail.terminalSeq = terminalSeq;
   }
 
   /** 清空所有定时刷新节拍，使下次 tick 立即拉取。 */

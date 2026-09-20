@@ -5,6 +5,7 @@ use amux_common::domain::{
     Activity, ContentBlock, FsEntry, FsListResult, FsReadResult, GitDiffResult,
     SessionConfigOption, SessionPlanEntry, SlashCommand,
 };
+use futures_util::StreamExt as _;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -243,17 +244,37 @@ impl Client {
         .await
     }
 
-    pub async fn terminal_output(
+    /// 持续读取终端 SSE；每个 `data` 事件解码为一个输出事件，流断开后返回。
+    pub async fn terminal_output_stream(
         &self,
         id: &str,
         terminal: &str,
-        cursor: Option<u64>,
-    ) -> Result<TerminalOutput, String> {
-        let cursor = cursor
-            .map(|value| format!("?cursor={value}"))
-            .unwrap_or_default();
-        self.get_json(&format!("/sessions/{id}/terminals/{terminal}{cursor}"))
+        mut on_output: impl FnMut(TerminalOutput),
+    ) -> Result<(), String> {
+        let response = self
+            .http
+            .get(format!("{}/sessions/{id}/terminals/{terminal}", self.base))
+            .bearer_auth(&self.token)
+            .send()
             .await
+            .map_err(|error| format!("请求失败: {error}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(error_message(status.as_u16(), &body));
+        }
+
+        let mut events = SseDecoder::default();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| format!("读取终端流失败: {error}"))?;
+            for data in events.push(&chunk) {
+                let output = serde_json::from_str(&data)
+                    .map_err(|error| format!("终端输出解析失败: {error}"))?;
+                on_output(output);
+            }
+        }
+        Ok(())
     }
 
     pub async fn close_terminal(&self, id: &str, terminal: &str) -> Result<(), String> {
@@ -452,6 +473,38 @@ impl Client {
     }
 }
 
+/// 解析 Server 发出的单行 `data:` SSE 事件；响应由本项目控制，故忽略 event/id 字段。
+#[derive(Default)]
+struct SseDecoder {
+    buffer: String,
+    data: String,
+}
+
+impl SseDecoder {
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        let mut events = Vec::new();
+        while let Some(line_end) = self.buffer.find('\n') {
+            let line: String = self.buffer.drain(..=line_end).collect();
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    events.push(std::mem::take(&mut self.data));
+                }
+                continue;
+            }
+            let Some(value) = line.strip_prefix("data:") else {
+                continue;
+            };
+            if !self.data.is_empty() {
+                self.data.push('\n');
+            }
+            self.data.push_str(value.strip_prefix(' ').unwrap_or(value));
+        }
+        events
+    }
+}
+
 async fn ensure_success(response: reqwest::Response) -> Result<(), String> {
     if response.status().is_success() {
         return Ok(());
@@ -512,6 +565,18 @@ mod tests {
     fn error_message_includes_status_and_body() {
         assert_eq!(error_message(404, "会话不存在\n"), "HTTP 404: 会话不存在");
         assert_eq!(error_message(500, ""), "HTTP 500");
+    }
+
+    #[test]
+    fn sse_decoder_handles_chunk_boundaries_and_keep_alive() {
+        let mut decoder = SseDecoder::default();
+        assert!(decoder
+            .push(b": keep-alive\n\nevent: output\ndata: {\"data\":\"a")
+            .is_empty());
+        assert_eq!(
+            decoder.push(b"Gk=\"}\n\n"),
+            [r#"{"data":"aGk="}"#.to_string()]
+        );
     }
 
     #[tokio::test]

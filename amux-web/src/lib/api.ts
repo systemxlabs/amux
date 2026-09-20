@@ -35,6 +35,7 @@ import type {
   WorkflowList,
   WorkflowPlanItem,
 } from "./types";
+import { createSseDecoder } from "./sse";
 
 /** 会话页大小上限（服务端也会夹取）。 */
 const FS_PAGE_LIMIT = 500;
@@ -218,9 +219,33 @@ export class ApiClient {
     return this.postEmpty(this.terminalPath(id, terminal), { data });
   }
 
-  terminalOutput(id: string, terminal: string, cursor: number | null): Promise<TerminalOutput> {
-    const suffix = cursor === null ? "" : `?${query({ cursor })}`;
-    return this.getJson(this.terminalPath(id, terminal) + suffix);
+  async terminalOutputStream(
+    id: string,
+    terminal: string,
+    signal: AbortSignal,
+    onOutput: (output: TerminalOutput) => void,
+  ): Promise<void> {
+    const response = await this.send(this.terminalPath(id, terminal), { method: "GET", signal });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new ApiError(response.status, errorMessage(response.status, body));
+    }
+    if (response.body === null) throw new Error("终端流响应缺少 body");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const events = createSseDecoder();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const data of events.push(decoder.decode(value, { stream: true }))) {
+          onOutput(JSON.parse(data) as TerminalOutput);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   closeTerminal(id: string, terminal: string): Promise<void> {

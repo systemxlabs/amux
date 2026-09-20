@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use amux_common::api::{Session, SessionConfigSetting, Terminal as ApiTerminal, TerminalOutput};
+use amux_common::api::{Session, SessionConfigSetting, Terminal as ApiTerminal};
 use amux_common::domain::{
     generate_title, Activity, ContentBlock, FsListParams, HistoryItem, SessionConfigOption,
     SessionPlanEntry, SessionState, SlashCommand, StateChangeReason, TerminalOpenParams,
@@ -22,7 +22,7 @@ use crate::acp::AcpEvent;
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
 use crate::store::Store;
-use crate::terminals::{TerminalCache, IDLE_EXPIRE_MS};
+use crate::terminals::{TerminalCache, TerminalSubscription, IDLE_EXPIRE_MS};
 use crate::timestamps::now_ms;
 
 /// 会话长时间无活动后关闭 agent 侧会话的阈值。
@@ -374,12 +374,8 @@ impl SessionService {
             .await
     }
 
-    pub fn terminal_output(
-        &self,
-        terminal_id: &str,
-        cursor: Option<u64>,
-    ) -> Option<TerminalOutput> {
-        self.terminals.read(terminal_id, cursor)
+    pub fn subscribe_terminal(&self, terminal_id: &str) -> Option<TerminalSubscription> {
+        self.terminals.subscribe(terminal_id)
     }
 
     pub async fn terminal_close(&self, id: &str, terminal_id: &str) -> Result<(), String> {

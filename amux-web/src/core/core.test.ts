@@ -32,3 +32,21 @@ describe("Core.invalidateAuthentication", () => {
     expect(core.state.status).toBe("online");
   });
 });
+
+describe("Core terminal chunks", () => {
+  it("批量事件按序保留，并只确认已写入的序号", () => {
+    const core = new Core();
+    core.pushTerminalChunk(new Uint8Array([1]), true);
+    core.pushTerminalChunk(new Uint8Array([2]), false);
+    core.acknowledgeTerminalChunks(1);
+    expect(core.state.detail.terminalChunks.map((chunk) => chunk.seq)).toEqual([2]);
+
+    core.pushTerminalChunk(new Uint8Array([3]), false);
+    core.acknowledgeTerminalChunks(2);
+    expect(core.state.detail.terminalChunks.map((chunk) => chunk.seq)).toEqual([3]);
+
+    core.resetDetail();
+    core.pushTerminalChunk(new Uint8Array([4]), true);
+    expect(core.state.detail.terminalChunks[0].seq).toBe(4);
+  });
+});

@@ -3,7 +3,7 @@
 import { createContext, useContext, useEffect, useSyncExternalStore, type ReactNode } from "react";
 
 import { Core, type CoreState } from "./core";
-import { tick, TICK_INTERVAL } from "./poll";
+import { stopTerminalStream, tick, TICK_INTERVAL } from "./poll";
 
 const CoreContext = createContext<Core | null>(null);
 
@@ -35,6 +35,9 @@ export function usePolling(core: Core): void {
         running = false;
       });
     }, TICK_INTERVAL);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      stopTerminalStream(core);
+    };
   }, [core]);
 }
