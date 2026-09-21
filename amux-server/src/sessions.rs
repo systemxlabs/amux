@@ -678,7 +678,9 @@ impl SessionService {
                 .store
                 .last_activity_at(&session.id)
                 .unwrap_or(session.created_at);
-            if idle_expired(&session, last_activity, now) {
+            let resumed = self.caches.resumed.lock().contains(&session.id);
+            if should_close_idle_agent_session(idle_expired(&session, last_activity, now), resumed)
+            {
                 if let Some(agent_session_id) = self.store.agent_session_id(&session.id) {
                     if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
                         conn.close(&agent_session_id).await;
@@ -714,6 +716,12 @@ impl SessionService {
 /// 变更更新，thinking/tool_call 不写它，长 turn 会因此被误判为无活动。
 fn idle_expired(session: &Session, last_activity: u64, now: u64) -> bool {
     session.state == SessionState::Idle && now.saturating_sub(last_activity) > IDLE_CLOSE_AFTER_MS
+}
+
+/// 只有内存中仍标记为 resumed 的会话才需要关闭；关闭后该标记会被移除，
+/// 避免后续维护仅凭持久化的 agent_session_id 反复关闭同一会话。
+fn should_close_idle_agent_session(idle_expired: bool, resumed: bool) -> bool {
+    idle_expired && resumed
 }
 
 #[cfg(test)]
@@ -753,5 +761,11 @@ mod tests {
             now - IDLE_CLOSE_AFTER_MS - 1,
             now
         ));
+    }
+
+    #[test]
+    fn idle_agent_session_closes_only_while_resumed() {
+        assert!(!should_close_idle_agent_session(true, false));
+        assert!(should_close_idle_agent_session(true, true));
     }
 }
