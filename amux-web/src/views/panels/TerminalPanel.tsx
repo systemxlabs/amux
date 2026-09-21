@@ -92,16 +92,28 @@ export function TerminalPanel() {
     });
     termRef.current = term;
 
+    let streamStarted = false;
+    const startStream = () => {
+      if (streamStarted || termRef.current !== term) return;
+      streamStarted = true;
+      restartTerminalStream(core);
+    };
     const fitAndResize = () => {
       if (termRef.current !== term) return;
       fit.fit();
       void resizeTerminal(core, term.cols, term.rows);
+      if (fit.proposeDimensions() !== undefined) startStream();
     };
     fitAndResize();
-    const animationFrame = requestAnimationFrame(fitAndResize);
+    const animationFrame = requestAnimationFrame(() => {
+      fitAndResize();
+      term.focus();
+    });
+    const fallbackTimer = window.setTimeout(() => {
+      fitAndResize();
+      startStream();
+    }, 100);
     void document.fonts?.ready.then(fitAndResize);
-    term.focus();
-    restartTerminalStream(core);
     const observer = new ResizeObserver(() => {
       fitAndResize();
     });
@@ -109,6 +121,7 @@ export function TerminalPanel() {
 
     return () => {
       cancelAnimationFrame(animationFrame);
+      window.clearTimeout(fallbackTimer);
       observer.disconnect();
       onData.dispose();
       term.dispose();
