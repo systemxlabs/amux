@@ -34,6 +34,14 @@ describe("Core.invalidateAuthentication", () => {
 });
 
 describe("Core terminal chunks", () => {
+  it("每次追加都更换数组引用，供视图按引用变化重新消费", () => {
+    const core = new Core();
+    const before = core.state.detail.terminalChunks;
+    core.pushTerminalChunk(new Uint8Array([1]), true);
+    const after = core.state.detail.terminalChunks;
+    expect(after).not.toBe(before);
+    expect(after.map((chunk) => chunk.seq)).toEqual([1]);
+  });
   it("批量事件按序保留，并只确认已写入的序号", () => {
     const core = new Core();
     core.pushTerminalChunk(new Uint8Array([1]), true);

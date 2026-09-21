@@ -13,7 +13,16 @@ import type {
   Workflow,
   WorkflowList,
 } from "../lib/types";
-import { cancelOpen, createWorkflow, openEntry, sendPrompt, showNewSession, updateWorkspaceInput } from "./actions";
+import {
+  cancelOpen,
+  createWorkflow,
+  openEntry,
+  openTerminal,
+  sendPrompt,
+  showNewSession,
+  toggleSidePanel,
+  updateWorkspaceInput,
+} from "./actions";
 import { Core } from "./core";
 
 function session(): Session {
@@ -305,5 +314,30 @@ describe("updateWorkspaceInput", () => {
     await updateWorkspaceInput(core, "/ho");
 
     expect(calls).toEqual(["localpc:/@0", "otherpc:/@0"]);
+  });
+});
+
+describe("终端视图", () => {
+  it("打开终端面板与打开终端时追加 chunk 都更换数组引用", async () => {
+    const core = new Core();
+    const before = core.state.detail.terminalChunks;
+    toggleSidePanel(core, "terminal");
+    const after = core.state.detail.terminalChunks;
+    expect(after).not.toBe(before);
+    expect(after).toHaveLength(1);
+
+    core.client = {
+      openTerminal: async () => "t1",
+      terminals: async () => [
+        { id: "t1", cwd: "/w", cols: 80, rows: 24, state: "running" },
+      ],
+    } as unknown as ApiClient;
+    core.state.open = { kind: "session", id: "s1" };
+    core.state.detail.session = { ...session(), id: "s1" };
+    const prior = core.state.detail.terminalChunks;
+    await openTerminal(core, 80, 24);
+    expect(core.state.detail.terminalChunks).not.toBe(prior);
+    expect(core.state.detail.terminalChunks).toHaveLength(2);
+    expect(core.state.detail.activeTerminal).toBe("t1");
   });
 });

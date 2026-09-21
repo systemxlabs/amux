@@ -163,11 +163,10 @@ export function toggleSidePanel(core: Core, panel: SidePanel): void {
     opened = next === "terminal";
     if (next === "terminal") {
       state.detail.terminalSeq += 1;
-      state.detail.terminalChunks.push({
-        seq: state.detail.terminalSeq,
-        bytes: new Uint8Array(0),
-        reset: true,
-      });
+      state.detail.terminalChunks = [
+        ...state.detail.terminalChunks,
+        { seq: state.detail.terminalSeq, bytes: new Uint8Array(0), reset: true },
+      ];
     }
   });
   core.resetTicks();
@@ -456,11 +455,10 @@ export async function openTerminal(core: Core, cols: number, rows: number): Prom
       state.detail.terminals = terminals;
       state.detail.activeTerminal = terminalId;
       state.detail.terminalSeq += 1;
-      state.detail.terminalChunks.push({
-        seq: state.detail.terminalSeq,
-        bytes: new Uint8Array(0),
-        reset: true,
-      });
+      state.detail.terminalChunks = [
+        ...state.detail.terminalChunks,
+        { seq: state.detail.terminalSeq, bytes: new Uint8Array(0), reset: true },
+      ];
     });
   } catch (error) {
     core.failure(`打开终端失败：${messageOf(error)}`);
@@ -471,11 +469,10 @@ export function selectTerminal(core: Core, terminalId: string): void {
   core.update((state) => {
     state.detail.activeTerminal = terminalId;
     state.detail.terminalSeq += 1;
-    state.detail.terminalChunks.push({
-      seq: state.detail.terminalSeq,
-      bytes: new Uint8Array(0),
-      reset: true,
-    });
+    state.detail.terminalChunks = [
+      ...state.detail.terminalChunks,
+      { seq: state.detail.terminalSeq, bytes: new Uint8Array(0), reset: true },
+    ];
   });
   core.resetTicks();
 }
@@ -491,11 +488,10 @@ export async function closeTerminal(core: Core, terminalId: string): Promise<voi
       if (state.detail.activeTerminal === terminalId) {
         state.detail.activeTerminal = terminals.at(-1)?.id ?? null;
         state.detail.terminalSeq += 1;
-        state.detail.terminalChunks.push({
-          seq: state.detail.terminalSeq,
-          bytes: new Uint8Array(0),
-          reset: true,
-        });
+        state.detail.terminalChunks = [
+          ...state.detail.terminalChunks,
+          { seq: state.detail.terminalSeq, bytes: new Uint8Array(0), reset: true },
+        ];
       }
     });
   } catch (error) {

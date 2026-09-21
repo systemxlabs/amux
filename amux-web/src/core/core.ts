@@ -260,11 +260,10 @@ export class Core {
   pushTerminalChunk(bytes: Uint8Array, reset: boolean): void {
     this.update((state) => {
       state.detail.terminalSeq += 1;
-      state.detail.terminalChunks.push({
-        seq: state.detail.terminalSeq,
-        bytes,
-        reset,
-      });
+      state.detail.terminalChunks = [
+        ...state.detail.terminalChunks,
+        { seq: state.detail.terminalSeq, bytes, reset },
+      ];
     });
   }
 
