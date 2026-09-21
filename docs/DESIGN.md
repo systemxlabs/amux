@@ -206,7 +206,7 @@ Daemon 作为 Server 与 Agent 之间的桥梁进行消息转发，由于共享�
 
 ### 工作树存储
 
-Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<随机串>/` 内。Git worktree 生命周期由 Server 进行管理。
+Git worktree 统一存储在 `~/.amux/worktrees/<仓库目录名>-<5字符随机串>/` 内。Git worktree 生命周期由 Server 进行管理。
 
 ### 终端存储
 
