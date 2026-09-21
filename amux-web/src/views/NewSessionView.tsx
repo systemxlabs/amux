@@ -164,11 +164,8 @@ export function NewSessionView() {
     void updateWorkspaceInput(core, path);
   };
 
-  const normalForm = state.settings.machines.length === 0 ? (
-    <p data-slot="no-machines" className="text-sm text-muted-foreground">
-      请运行 amux-daemon 程序将机器连接至服务器
-    </p>
-  ) : (
+  const noMachines = state.settings.machines.length === 0;
+  const normalForm = (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-2">
         <Label>机器</Label>
@@ -418,11 +415,13 @@ export function NewSessionView() {
       </div>
     );
 
+  const noNormalMachines = mode === "normal" && noMachines;
+
   return (
     <div data-slot="new-session-view" className="flex h-full overflow-auto p-4 lg:p-6">
       {/* PRD「新建会话视图」：居中展示。用 m-auto 而非 justify-center，
           表单比面板高时不会被裁掉顶部、仍可从上往下滚动 */}
-      <div className="m-auto flex w-full max-w-lg flex-col gap-4">
+      <div className={cn("flex w-full max-w-lg flex-col gap-4", noNormalMachines ? "h-full" : "m-auto")}>
         <Tabs
           data-slot="new-session-mode"
           value={mode}
@@ -443,7 +442,17 @@ export function NewSessionView() {
             </TabsTrigger>
           </TabsList>
         </Tabs>
-        {mode === "normal" ? normalForm : workflowForm}
+        {noNormalMachines ? (
+          <div className="flex min-h-0 flex-1 flex-col items-center justify-center">
+            <p data-slot="no-machines" className="text-sm text-muted-foreground">
+              请运行 amux-daemon 程序将机器连接至服务器
+            </p>
+          </div>
+        ) : mode === "normal" ? (
+          normalForm
+        ) : (
+          workflowForm
+        )}
       </div>
     </div>
   );
