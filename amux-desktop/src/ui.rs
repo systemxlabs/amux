@@ -195,8 +195,16 @@ pub fn short_cwd(cwd: &str) -> String {
 
 /// agent 可用状态：圆点 + 文本。
 pub fn availability_tag(available: bool, colors: &Colors) -> impl IntoElement {
-    let dot_color = if available { colors.success } else { colors.danger };
-    let text_color = if available { colors.muted_foreground } else { colors.danger };
+    let dot_color = if available {
+        colors.success
+    } else {
+        colors.danger
+    };
+    let text_color = if available {
+        colors.muted_foreground
+    } else {
+        colors.danger
+    };
     h_flex()
         .items_center()
         .gap_1()
