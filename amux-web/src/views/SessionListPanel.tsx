@@ -4,7 +4,15 @@
 // 会话按最近活跃倒序排列（最新在上），滚到最下方时按分页模型加载更早一页。
 
 import { useEffect, useRef, useState, type UIEvent } from "react";
-import { ChevronDown, ChevronRight, Loader2, MoreHorizontal, Plus } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  MoreHorizontal,
+  Network,
+  Plus,
+  SquareTerminal,
+} from "lucide-react";
 
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ContextMenu, type MenuItem, type MenuState } from "../components/ContextMenu";
@@ -164,6 +172,11 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                   active ? "bg-accent" : "hover:bg-accent",
                 )}
               >
+                {entry.kind === "workflow" ? (
+                  <Network className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <SquareTerminal className="size-4 shrink-0 text-muted-foreground" />
+                )}
                 <div className="min-w-0 flex-1">
                   {editing ? (
                     <Input
