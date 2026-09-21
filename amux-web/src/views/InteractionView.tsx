@@ -21,6 +21,7 @@ import { useCore, useCoreState } from "../core/store";
 import { activityBarText, formatTime } from "../lib/format";
 import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
+import { rootDir } from "../lib/types";
 import type { ContentBlock, HistoryItem, SessionConfigOption } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useIsMobile } from "../lib/viewport";
@@ -136,6 +137,7 @@ export function InteractionView() {
         .find((entry) => entry.machine === detail.session?.machine)
         ?.agents.find((agent) => agent.name === detail.session?.agent)?.available ?? false)
     : state.settings.orchestrator.status === "ready" && state.settings.orchestrator.config !== null;
+  const workdir = isSession && detail.session ? rootDir(detail.session) : "";
 
   // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算（不只是滚动事件）
   useEffect(() => {
@@ -225,6 +227,15 @@ export function InteractionView() {
         >
           {available ? "可用" : "不可用"}
         </span>
+        {isSession && workdir !== "" ? (
+          <span
+            data-slot="interaction-workdir"
+            title={workdir}
+            className="min-w-0 max-w-full truncate text-xs text-muted-foreground"
+          >
+            {workdir}
+          </span>
+        ) : null}
       </header>
 
       {/* pr-12：为悬浮按钮留出空间，消息气泡不会被按钮遮挡 */}

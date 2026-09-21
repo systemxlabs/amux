@@ -569,7 +569,20 @@ fn session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> A
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().foreground),
         )
-        .child(ui::availability_tag(available));
+        .child(ui::availability_tag(available))
+        .when_some(
+            core.view.session.as_ref().map(|session| session.root_dir().to_string()),
+            |header, workdir| {
+                header.child(
+                    Label::new(workdir)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
+                )
+            },
+        );
     v_flex()
         .flex_1()
         .min_h_0()
