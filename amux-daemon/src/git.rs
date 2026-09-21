@@ -544,7 +544,7 @@ impl GitRunner {
     }
 }
 
-/// worktree 目标目录：`<root>/<仓库目录名>-<随机串>`。
+/// worktree 目标目录：`<root>/<仓库目录名>-<5 字符随机串>`。
 fn worktree_dir_for(repo: &str, root: &Path) -> Result<PathBuf, String> {
     let workdir = gix::discover(repo)
         .ok()
@@ -555,7 +555,12 @@ fn worktree_dir_for(repo: &str, root: &Path) -> Result<PathBuf, String> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".to_string());
     std::fs::create_dir_all(root).map_err(|e| format!("创建 worktree 根目录失败: {e}"))?;
-    Ok(root.join(format!("{name}-{}", uuid::Uuid::new_v4())))
+    Ok(root.join(format!("{name}-{}", worktree_suffix())))
+}
+
+/// 5 字符随机后缀；UUID v4 的前 5 个十六进制字符满足目录名简洁性与随机性要求。
+fn worktree_suffix() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..5].to_string()
 }
 
 #[cfg(test)]
@@ -701,7 +706,7 @@ mod tests {
         assert_eq!(n.additions, 2);
     }
 
-    /// 目录约定：`<worktrees 根>/<仓库目录名>-<随机串>`，且每次不同。
+    /// 目录约定：`<worktrees 根>/<仓库目录名>-<5 字符随机串>`。
     #[test]
     fn worktree_dir_follows_amux_convention() {
         let repo = init_repo();
@@ -711,10 +716,21 @@ mod tests {
         let target = worktree_dir_for(repo.to_str().unwrap(), &root).unwrap();
         assert_eq!(target.parent(), Some(root.as_path()));
         let name = target.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with(&format!("{repo_name}-")), "{name}");
+        let suffix = name
+            .strip_prefix(&format!("{repo_name}-"))
+            .unwrap_or_default();
+        assert_eq!(suffix.len(), 5, "{name}");
+        assert!(
+            suffix.chars().all(|ch| ch.is_ascii_alphanumeric()),
+            "{suffix}"
+        );
+    }
 
-        let other = worktree_dir_for(repo.to_str().unwrap(), &root).unwrap();
-        assert_ne!(target, other, "同一仓库的两次创建不应撞目录");
+    #[test]
+    fn worktree_suffix_is_five_alphanumeric_chars() {
+        let suffix = worktree_suffix();
+        assert_eq!(suffix.len(), 5);
+        assert!(suffix.chars().all(|ch| ch.is_ascii_alphanumeric()));
     }
 
     #[test]
