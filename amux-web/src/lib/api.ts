@@ -225,7 +225,12 @@ export class ApiClient {
     signal: AbortSignal,
     onOutput: (output: TerminalOutput) => void,
   ): Promise<void> {
-    const response = await this.send(this.terminalPath(id, terminal), { method: "GET", signal });
+    const response = await this.send(this.terminalPath(id, terminal), {
+      method: "GET",
+      signal,
+      cache: "no-store",
+      headers: { accept: "text/event-stream" },
+    });
     if (!response.ok) {
       const body = await response.text().catch(() => "");
       throw new ApiError(response.status, errorMessage(response.status, body));
