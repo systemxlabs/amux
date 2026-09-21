@@ -471,9 +471,9 @@ fn default_fs_read_limit() -> usize {
     FS_READ_PAGE_LIMIT
 }
 
-/// 会话标题：取首条提示词首行、压缩空白、截断到 40 字符（超出追加省略号）。
+/// 会话标题：取首条提示词首行、压缩空白、截断到 60 字符（超出追加省略号）。
 pub fn generate_title(input: &str) -> String {
-    const MAX_CHARS: usize = 40;
+    const MAX_CHARS: usize = 60;
     let line = input.lines().next().unwrap_or("").trim();
     let collapsed: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out: String = collapsed.chars().take(MAX_CHARS).collect();
@@ -510,9 +510,9 @@ mod tests {
         assert_eq!(generate_title("实现登录功能\n然后写测试"), "实现登录功能");
         assert_eq!(generate_title("  多  个   空格  \n第二行"), "多 个 空格");
         assert_eq!(generate_title(""), "");
-        let long = "这".repeat(50);
+        let long = "这".repeat(70);
         let title = generate_title(&long);
-        assert_eq!(title.chars().count(), 41);
+        assert_eq!(title.chars().count(), 61);
         assert!(title.ends_with('…'));
     }
 
