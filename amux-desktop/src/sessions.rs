@@ -13,7 +13,8 @@ use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Selectable, Sizable,
+    h_flex, v_flex, ActiveTheme, Disableable as _, ElementExt as _, Icon, IconName, Selectable,
+    Sizable,
 };
 
 use crate::app::{AmuxApp, InputResizeDrag, INPUT_RESIZE_HANDLE_HEIGHT};
@@ -365,6 +366,10 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                         )
                     }),
             );
+    let bounds_app = app.clone();
+    input_row = input_row.on_prepaint(move |bounds, _, cx| {
+        bounds_app.update(cx, |this, _| this.workspace_input_width = bounds.size.width);
+    });
     if has_recent {
         // 点击输入框弹出最近目录上拉框（鼠标事件先到输入框自身，再冒泡到这里，不影响编辑；
         // 列表项挂在输入行之外，点选项不会经过这里）。收起由点击浮层之外或输入框失焦触发
@@ -381,8 +386,8 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         .min_w_0()
         .child(input_row);
 
-    // 最近目录：贴输入框上沿向上展开（deferred 以免撑开表单），高度按条目数自适应、
-    // 超过上限时列表内滚动查看（带滚动条）
+    // 最近目录：以输入行左缘为锚向上展开（deferred 保持浮层置顶），高度按条目数
+    // 自适应、超过上限时列表内滚动查看（带滚动条）
     if open {
         let hover_bg = theme.accent;
         let visible = recent.len().min(SUGGEST_MAX_ROWS);
@@ -425,36 +430,40 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             );
         }
         wrap = wrap.child(deferred(
-            v_flex()
-                .id("ns-workspace-recent-panel")
-                .absolute()
-                .bottom(relative(1.0))
-                .left_0()
-                .right_0()
-                .h(height)
-                .overflow_hidden()
-                .relative()
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border)
-                .rounded_lg()
-                .shadow_lg()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)))
-                .child(rows)
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .child(Scrollbar::vertical(&scroll).id("ns-workspace-recent-scrollbar")),
-                ),
+            anchored().anchor(Anchor::BottomLeft).child(
+                v_flex()
+                    .id("ns-workspace-recent-panel")
+                    .w(this.workspace_input_width)
+                    .mb_1()
+                    .h(height)
+                    .overflow_hidden()
+                    .relative()
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded_lg()
+                    .shadow_lg()
+                    .on_mouse_down_out(
+                        cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
+                    )
+                    .child(rows)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .child(
+                                Scrollbar::vertical(&scroll).id("ns-workspace-recent-scrollbar"),
+                            ),
+                    ),
+            ),
         ));
     }
 
-    // 前缀联想：贴输入框下方展开（deferred 以免撑开表单）；高度按条目数自适应，
-    // 超过上限时列表内滚动查看（带滚动条）
+    // 前缀联想：以输入行左缘为锚向下展开（deferred 保持浮层置顶）；高度按条目数
+    // 自适应，超过上限时列表内滚动查看（带滚动条）
     if !core.new_session.suggestions.is_empty() {
         let visible = core.new_session.suggestions.len().min(SUGGEST_MAX_ROWS);
         let height = px(SUGGEST_PADDING * 2.0 + SUGGEST_ROW_HEIGHT * visible as f32);
@@ -493,31 +502,33 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             );
         }
         wrap = wrap.child(deferred(
-            v_flex()
-                .id("ns-workspace-suggest-panel")
-                .absolute()
-                .top(relative(1.0))
-                .left_0()
-                .right_0()
-                .h(height)
-                .overflow_hidden()
-                .relative()
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border)
-                .rounded_lg()
-                .shadow_lg()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)))
-                .child(rows)
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .child(Scrollbar::vertical(&scroll_suggest).id("ns-suggest-scrollbar")),
-                ),
+            anchored().anchor(Anchor::TopLeft).child(
+                v_flex()
+                    .id("ns-workspace-suggest-panel")
+                    .w(this.workspace_input_width)
+                    .mt_1()
+                    .h(height)
+                    .overflow_hidden()
+                    .relative()
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded_lg()
+                    .shadow_lg()
+                    .on_mouse_down_out(
+                        cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
+                    )
+                    .child(rows)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .child(Scrollbar::vertical(&scroll_suggest).id("ns-suggest-scrollbar")),
+                    ),
+            ),
         ));
     }
 
@@ -572,7 +583,10 @@ fn session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> A
         )
         .child(ui::availability_tag(available, &theme))
         .when_some(
-            core.view.session.as_ref().map(|session| session.root_dir().to_string()),
+            core.view
+                .session
+                .as_ref()
+                .map(|session| session.root_dir().to_string()),
             |header, workdir| {
                 header.child(
                     Label::new(workdir)

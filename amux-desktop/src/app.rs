@@ -145,6 +145,8 @@ pub struct AmuxApp {
     pub expanded_activities: HashSet<String>,
     /// 工作目录最近目录下拉是否展开
     pub workspace_recent_open: bool,
+    /// 新建会话工作目录输入行宽度（浮层按输入行对齐）
+    pub workspace_input_width: Pixels,
     /// 最近目录下拉的滚动句柄（列表内滚动与滚动条）
     pub workspace_recent_scroll: ScrollHandle,
     /// 工作目录联想的滚动句柄（列表内滚动与滚动条）
@@ -367,6 +369,7 @@ impl AmuxApp {
             plan_scroll: ScrollHandle::new(),
             expanded_activities: HashSet::new(),
             workspace_recent_open: false,
+            workspace_input_width: px(0.),
             workspace_recent_scroll: ScrollHandle::new(),
             workspace_suggest_scroll: ScrollHandle::new(),
             workspace_file: None,
