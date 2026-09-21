@@ -302,6 +302,10 @@ export class ApiClient {
       xhr.setRequestHeader("authorization", `Bearer ${this.token}`);
       xhr.setRequestHeader("accept", "text/event-stream");
       xhr.setRequestHeader("cache-control", "no-cache, no-transform");
+      xhr.setRequestHeader("pragma", "no-cache");
+      xhr.responseType = "text";
+      xhr.overrideMimeType("text/plain; charset=utf-8");
+      xhr.onreadystatechange = consume;
       xhr.onprogress = consume;
       xhr.onload = () => {
         consume();

@@ -224,9 +224,11 @@ describe("ApiClient", () => {
       onload: (() => void) | null = null;
       onerror: (() => void) | null = null;
       onabort: (() => void) | null = null;
+      onreadystatechange: (() => void) | null = null;
       open = vi.fn();
       send = vi.fn();
       abort = vi.fn(() => this.onabort?.());
+      overrideMimeType = vi.fn();
       setRequestHeader = vi.fn((name: string, value: string) => {
         headers.push([name, value]);
       });
