@@ -53,6 +53,23 @@ pub struct SessionCaches {
     resumed: Mutex<HashSet<String>>,
 }
 
+impl SessionCaches {
+    /// 清除会话在 Server 进程内的全部运行时状态；持久化元数据与 agent_session_id 不受影响。
+    fn forget(&self, session_id: &str) {
+        self.resumed.lock().remove(session_id);
+        self.agent_sessions
+            .lock()
+            .retain(|_, value| value != session_id);
+        self.options.lock().remove(session_id);
+        self.commands.lock().remove(session_id);
+        self.plans.lock().remove(session_id);
+        self.contexts.lock().remove(session_id);
+        self.tool_calls
+            .lock()
+            .retain(|(current_session, _), _| current_session != session_id);
+    }
+}
+
 pub struct SessionService {
     store: Arc<Store>,
     machines: MachineHub,
@@ -212,7 +229,7 @@ impl SessionService {
         let session = self.get(id)?;
         let agent_session_id = self.agent_session_id(id);
         self.store.delete_session(id);
-        self.forget(id);
+        self.caches.forget(id);
 
         let terminals = self.terminals.remove_session(id);
         let machines = self.machines.clone();
@@ -640,7 +657,7 @@ impl SessionService {
             AcpEvent::AgentRestarted { machine, agent } => {
                 for session in self.store.sessions_of_agent(&machine, &agent) {
                     self.store.set_state(&session.id, SessionState::Idle);
-                    self.forget(&session.id);
+                    self.caches.forget(&session.id);
                 }
                 None
             }
@@ -655,18 +672,6 @@ impl SessionService {
             .get(agent_session_id)
             .cloned()?;
         self.store.session(&session_id)
-    }
-
-    fn forget(&self, session_id: &str) {
-        self.caches.resumed.lock().remove(session_id);
-        self.caches
-            .agent_sessions
-            .lock()
-            .retain(|_, value| value != session_id);
-        self.caches.options.lock().remove(session_id);
-        self.caches.commands.lock().remove(session_id);
-        self.caches.plans.lock().remove(session_id);
-        self.caches.contexts.lock().remove(session_id);
     }
 
     /// 后台维护：关闭长时间无活动的 agent 会话、清理过期 worktree、删除长期无输入输出的终端。
@@ -684,7 +689,7 @@ impl SessionService {
                 if let Some(agent_session_id) = self.store.agent_session_id(&session.id) {
                     if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
                         conn.close(&agent_session_id).await;
-                        self.caches.resumed.lock().remove(&session.id);
+                        self.caches.forget(&session.id);
                         log::info!("会话长时间无活动，已关闭 agent 侧会话: {}", session.id);
                     }
                 }
@@ -767,5 +772,43 @@ mod tests {
     fn idle_agent_session_closes_only_while_resumed() {
         assert!(!should_close_idle_agent_session(true, false));
         assert!(should_close_idle_agent_session(true, true));
+    }
+
+    #[test]
+    fn forgetting_session_clears_all_runtime_caches() {
+        let caches = SessionCaches::default();
+        caches.resumed.lock().insert("s1".into());
+        caches
+            .agent_sessions
+            .lock()
+            .insert("agent-s1".into(), "s1".into());
+        caches.options.lock().insert("s1".into(), Vec::new());
+        caches.commands.lock().insert("s1".into(), Vec::new());
+        caches.plans.lock().insert("s1".into(), Vec::new());
+        caches.contexts.lock().insert("s1".into(), (1, 2));
+        caches.tool_calls.lock().insert(
+            ("s1".into(), "call-1".into()),
+            Activity::ToolCall {
+                id: "call-1".into(),
+                timestamp: 1,
+                tool_call_id: "call-1".into(),
+                tool_name: "shell".into(),
+                title: None,
+                parameters: None,
+            },
+        );
+
+        caches.forget("s1");
+
+        assert!(!caches.resumed.lock().contains("s1"));
+        assert!(!caches.agent_sessions.lock().contains_key("agent-s1"));
+        assert!(!caches.options.lock().contains_key("s1"));
+        assert!(!caches.commands.lock().contains_key("s1"));
+        assert!(!caches.plans.lock().contains_key("s1"));
+        assert!(!caches.contexts.lock().contains_key("s1"));
+        assert!(!caches
+            .tool_calls
+            .lock()
+            .contains_key(&("s1".into(), "call-1".into())));
     }
 }
