@@ -107,7 +107,7 @@ export function TerminalPanel() {
     fitAndResize();
     const animationFrame = requestAnimationFrame(() => {
       fitAndResize();
-      term.focus();
+      if (!window.matchMedia("(pointer: coarse)").matches) term.focus();
     });
     const fallbackTimer = window.setTimeout(() => {
       fitAndResize();
@@ -118,10 +118,13 @@ export function TerminalPanel() {
       fitAndResize();
     });
     observer.observe(container);
+    const visualViewport = window.visualViewport;
+    visualViewport?.addEventListener("resize", fitAndResize);
 
     return () => {
       cancelAnimationFrame(animationFrame);
       window.clearTimeout(fallbackTimer);
+      visualViewport?.removeEventListener("resize", fitAndResize);
       observer.disconnect();
       onData.dispose();
       term.dispose();
