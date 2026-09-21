@@ -490,20 +490,6 @@ async fn server_daemon_agent_end_to_end() {
             .and_then(|value| value.to_str().ok()),
         Some("text/event-stream")
     );
-    assert_eq!(
-        response
-            .headers()
-            .get(reqwest::header::CACHE_CONTROL)
-            .and_then(|value| value.to_str().ok()),
-        Some("no-cache, no-transform")
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get("x-accel-buffering")
-            .and_then(|value| value.to_str().ok()),
-        Some("no")
-    );
 
     let input = base64::engine::general_purpose::STANDARD.encode(b"echo amux-terminal\n");
     client

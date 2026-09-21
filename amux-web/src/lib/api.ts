@@ -225,18 +225,7 @@ export class ApiClient {
     signal: AbortSignal,
     onOutput: (output: TerminalOutput) => void,
   ): Promise<void> {
-    const path = this.terminalPath(id, terminal);
-    // 移动浏览器可能将 Fetch 的 event-stream body 缓冲到连接结束；XHR 的
-    // responseText/onprogress 在移动 Safari 等环境可稳定增量读取，同时仍可设置认证头。
-    if (typeof XMLHttpRequest !== "undefined") {
-      return this.terminalOutputStreamXhr(path, signal, onOutput);
-    }
-    const response = await this.send(path, {
-      method: "GET",
-      signal,
-      cache: "no-store",
-      headers: { accept: "text/event-stream" },
-    });
+    const response = await this.send(this.terminalPath(id, terminal), { method: "GET", signal });
     if (!response.ok) {
       const body = await response.text().catch(() => "");
       throw new ApiError(response.status, errorMessage(response.status, body));
@@ -257,73 +246,6 @@ export class ApiClient {
     } finally {
       reader.releaseLock();
     }
-  }
-
-  private terminalOutputStreamXhr(
-    path: string,
-    signal: AbortSignal,
-    onOutput: (output: TerminalOutput) => void,
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      const events = createSseDecoder();
-      let offset = 0;
-      let settled = false;
-      let pollTimer: ReturnType<typeof setInterval> | undefined;
-
-      const settle = (error?: Error): void => {
-        if (settled) return;
-        settled = true;
-        if (pollTimer !== undefined) clearInterval(pollTimer);
-        signal.removeEventListener("abort", onAbort);
-        if (error) reject(error);
-        else resolve();
-      };
-      const onAbort = (): void => {
-        xhr.abort();
-        settle();
-      };
-      const consume = (): void => {
-        if (xhr.readyState < XMLHttpRequest.LOADING) return;
-        const text = xhr.responseText;
-        if (text.length <= offset) return;
-        const chunk = text.slice(offset);
-        offset = text.length;
-        try {
-          for (const data of events.push(chunk)) {
-            onOutput(JSON.parse(data) as TerminalOutput);
-          }
-        } catch (error) {
-          const cause = error instanceof Error ? error : new Error(String(error));
-          settle(cause);
-          xhr.abort();
-        }
-      };
-
-      xhr.open("GET", this.url(path), true);
-      xhr.setRequestHeader("authorization", `Bearer ${this.token}`);
-      xhr.setRequestHeader("accept", "text/event-stream");
-      xhr.setRequestHeader("cache-control", "no-cache, no-transform");
-      xhr.setRequestHeader("pragma", "no-cache");
-      xhr.responseType = "text";
-      xhr.overrideMimeType("text/plain; charset=utf-8");
-      xhr.onreadystatechange = consume;
-      xhr.onprogress = consume;
-      xhr.onload = () => {
-        consume();
-        this.handleUnauthorized(xhr.status);
-        if (xhr.status >= 200 && xhr.status < 300) {
-          settle();
-        } else {
-          settle(new ApiError(xhr.status, errorMessage(xhr.status, xhr.responseText)));
-        }
-      };
-      xhr.onerror = () => settle(new Error("终端流网络错误"));
-      xhr.onabort = () => settle();
-      signal.addEventListener("abort", onAbort, { once: true });
-      pollTimer = setInterval(consume, 250);
-      xhr.send();
-    });
   }
 
   closeTerminal(id: string, terminal: string): Promise<void> {
@@ -437,15 +359,11 @@ export class ApiClient {
         ...(init.headers ?? {}),
       },
     });
-    this.handleUnauthorized(response.status);
-    return response;
-  }
-
-  private handleUnauthorized(status: number): void {
-    if (status === 401 && !this.unauthorized) {
+    if (response.status === 401 && !this.unauthorized) {
       this.unauthorized = true;
       this.onUnauthorized?.(this);
     }
+    return response;
   }
 
   private async getJson<T>(path: string): Promise<T> {

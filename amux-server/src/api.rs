@@ -9,9 +9,9 @@ use std::time::Duration;
 use amux_common::api::*;
 use amux_common::domain::{SESSION_LIST_DEFAULT_LIMIT, SESSION_PAGE_DEFAULT_LIMIT};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -465,7 +465,10 @@ async fn terminal_input(
 async fn terminal_output(
     State(state): State<Arc<AppState>>,
     Path((id, terminal)): Path<(String, String)>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<
+    Sse<impl futures_util::Stream<Item = Result<Event, Infallible>> + Send>,
+    (StatusCode, String),
+> {
     state.sessions.get(&id).map_err(not_found)?;
     let subscription = state
         .sessions
@@ -473,27 +476,16 @@ async fn terminal_output(
         .ok_or_else(|| not_found("终端不存在".to_string()))?;
     let stream = futures_util::StreamExt::map(subscription.into_stream(), |output| {
         let output = output.expect("终端输出流不会失败");
-        Ok::<Event, Infallible>(
-            Event::default()
-                .event("output")
-                .json_data(output)
-                .expect("终端输出事件始终可序列化"),
-        )
+        Ok(Event::default()
+            .event("output")
+            .json_data(output)
+            .expect("终端输出事件始终可序列化"))
     });
-    let mut response = Sse::new(stream)
-        .keep_alive(
-            KeepAlive::new()
-                .interval(Duration::from_secs(5))
-                .text("keep-alive"),
-        )
-        .into_response();
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache, no-transform"),
-    );
-    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
-    Ok(response)
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
 }
 
 async fn close_terminal(

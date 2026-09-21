@@ -30,7 +30,7 @@ export function SidePanelView() {
       case "plan":
         return <PlanPanel />;
       case "terminal":
-        return <TerminalPanel key={state.detail.activeTerminal ?? "terminal-empty"} />;
+        return <TerminalPanel />;
     }
   };
 

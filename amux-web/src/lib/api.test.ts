@@ -2,7 +2,7 @@
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ApiClient, errorMessage } from "./api";
 
@@ -99,10 +99,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
 });
 
 describe("ApiClient", () => {
@@ -205,63 +201,6 @@ describe("ApiClient", () => {
     );
 
     expect(seen.at(-1)?.authorization).toBe("Bearer tk");
-    expect(outputs).toEqual([
-      { data: "aGk=", nextCursor: 2 },
-      { data: "IQ==", nextCursor: 3 },
-    ]);
-  });
-
-  it("浏览器终端流通过 XHR 分块增量解析", async () => {
-    let created: FakeXmlHttpRequest | undefined;
-    const headers: [string, string][] = [];
-
-    class FakeXmlHttpRequest {
-      static readonly LOADING = 3;
-      readyState = 3;
-      status = 200;
-      responseText = "";
-      onprogress: (() => void) | null = null;
-      onload: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      onabort: (() => void) | null = null;
-      onreadystatechange: (() => void) | null = null;
-      open = vi.fn();
-      send = vi.fn();
-      abort = vi.fn(() => this.onabort?.());
-      overrideMimeType = vi.fn();
-      setRequestHeader = vi.fn((name: string, value: string) => {
-        headers.push([name, value]);
-      });
-
-      constructor() {
-        created = this;
-      }
-
-      progress(text: string): void {
-        this.responseText += text;
-        this.onprogress?.();
-      }
-    }
-    vi.stubGlobal("XMLHttpRequest", FakeXmlHttpRequest);
-
-    const client = new ApiClient(base, "tk");
-    const outputs: { data: string; nextCursor: number }[] = [];
-    const stream = client.terminalOutputStream(
-      "s1",
-      "t1",
-      new AbortController().signal,
-      (output) => outputs.push(output),
-    );
-
-    expect(created?.open).toHaveBeenCalledWith("GET", `${base}/sessions/s1/terminals/t1`, true);
-    expect(headers).toContainEqual(["authorization", "Bearer tk"]);
-    created?.progress('event: output\ndata: {"data":"aGk=","nextCursor":2}\n\n');
-    expect(outputs).toEqual([{ data: "aGk=", nextCursor: 2 }]);
-
-    created?.progress('event: output\ndata: {"data":"IQ==","nextCursor":3}\n\n');
-    created?.onload?.();
-    await stream;
-
     expect(outputs).toEqual([
       { data: "aGk=", nextCursor: 2 },
       { data: "IQ==", nextCursor: 3 },
