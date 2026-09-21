@@ -3,7 +3,6 @@
 use amux_common::domain::{Activity, ContentBlock, SessionConfigKind, SessionConfigOption};
 use gpui::*;
 use gpui_component::label::Label;
-use gpui_component::tag::Tag;
 use gpui_component::{h_flex, v_flex, Icon, IconName, Sizable};
 
 /// 主题取色的值拷贝。
@@ -194,16 +193,19 @@ pub fn short_cwd(cwd: &str) -> String {
         .to_string()
 }
 
-/// agent 可用状态药丸标签。
-pub fn availability_tag(available: bool) -> impl IntoElement {
-    let tag = if available {
-        Tag::success()
-    } else {
-        Tag::danger()
-    };
-    tag.small()
-        .rounded_full()
-        .child(Label::new(if available { "可用" } else { "不可用" }).text_xs())
+/// agent 可用状态：圆点 + 文本。
+pub fn availability_tag(available: bool, colors: &Colors) -> impl IntoElement {
+    let dot_color = if available { colors.success } else { colors.danger };
+    let text_color = if available { colors.muted_foreground } else { colors.danger };
+    h_flex()
+        .items_center()
+        .gap_1()
+        .child(Label::new("●").text_xs().text_color(dot_color))
+        .child(
+            Label::new(if available { "可用" } else { "不可用" })
+                .text_xs()
+                .text_color(text_color),
+        )
 }
 
 /// 详情面板信息行：灰标签 + 值（值单行截断）。

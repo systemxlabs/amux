@@ -375,7 +375,7 @@ fn machine_card(
                         .text_sm()
                         .text_color(theme.foreground),
                 )
-                .child(ui::availability_tag(agent.available))
+                .child(ui::availability_tag(agent.available, &theme))
                 .child(div().flex_1())
                 .child(
                     Button::new(SharedString::from(format!(

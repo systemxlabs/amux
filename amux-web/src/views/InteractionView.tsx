@@ -223,8 +223,15 @@ export function InteractionView() {
         <span
           data-slot="interaction-agent-state"
           data-available={available}
-          className={cn("text-xs", available ? "text-muted-foreground" : "text-destructive")}
+          className={cn(
+            "flex items-center gap-1 text-xs",
+            available ? "text-muted-foreground" : "text-destructive",
+          )}
         >
+          <span
+            data-slot="interaction-agent-state-dot"
+            className={cn("size-1.5 rounded-full", available ? "bg-success" : "bg-destructive")}
+          />
           {available ? "可用" : "不可用"}
         </span>
         {isSession && workdir !== "" ? (

@@ -552,6 +552,7 @@ pub fn machine_agent_available(core: &Core, machine: &str, agent: &str) -> bool 
 
 /// 会话区：顶部信息 + 对话历史（flex_1 自行收缩）。
 fn session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
     let available = match &core.view.session {
         Some(session) => machine_agent_available(core, &session.machine, &session.agent),
         None => core.settings.orchestrator.is_some(),
@@ -569,7 +570,7 @@ fn session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> A
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().foreground),
         )
-        .child(ui::availability_tag(available))
+        .child(ui::availability_tag(available, &theme))
         .when_some(
             core.view.session.as_ref().map(|session| session.root_dir().to_string()),
             |header, workdir| {
