@@ -269,10 +269,12 @@ export class ApiClient {
       const events = createSseDecoder();
       let offset = 0;
       let settled = false;
+      let pollTimer: ReturnType<typeof setInterval> | undefined;
 
       const settle = (error?: Error): void => {
         if (settled) return;
         settled = true;
+        if (pollTimer !== undefined) clearInterval(pollTimer);
         signal.removeEventListener("abort", onAbort);
         if (error) reject(error);
         else resolve();
@@ -319,6 +321,7 @@ export class ApiClient {
       xhr.onerror = () => settle(new Error("终端流网络错误"));
       xhr.onabort = () => settle();
       signal.addEventListener("abort", onAbort, { once: true });
+      pollTimer = setInterval(consume, 250);
       xhr.send();
     });
   }
