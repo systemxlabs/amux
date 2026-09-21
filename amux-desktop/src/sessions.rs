@@ -368,7 +368,10 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             );
     let bounds_app = app.clone();
     input_row = input_row.on_prepaint(move |bounds, _, cx| {
-        bounds_app.update(cx, |this, _| this.workspace_input_width = bounds.size.width);
+        bounds_app.update(cx, |this, _| {
+            this.workspace_input_width = bounds.size.width;
+            this.workspace_input_height = bounds.size.height;
+        });
     });
     if has_recent {
         // 点击输入框弹出最近目录上拉框（鼠标事件先到输入框自身，再冒泡到这里，不影响编辑；
@@ -430,35 +433,40 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             );
         }
         wrap = wrap.child(deferred(
-            anchored().anchor(Anchor::BottomLeft).child(
-                v_flex()
-                    .id("ns-workspace-recent-panel")
-                    .w(this.workspace_input_width)
-                    .mb_1()
-                    .h(height)
-                    .overflow_hidden()
-                    .relative()
-                    .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded_lg()
-                    .shadow_lg()
-                    .on_mouse_down_out(
-                        cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
-                    )
-                    .child(rows)
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .child(
-                                Scrollbar::vertical(&scroll).id("ns-workspace-recent-scrollbar"),
-                            ),
-                    ),
-            ),
+            anchored()
+                .anchor(Anchor::BottomLeft)
+                .position_mode(AnchoredPositionMode::Local)
+                .position(point(px(0.), px(0.)))
+                .child(
+                    v_flex()
+                        .id("ns-workspace-recent-panel")
+                        .w(this.workspace_input_width)
+                        .mb_1()
+                        .h(height)
+                        .overflow_hidden()
+                        .relative()
+                        .bg(theme.popover)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .on_mouse_down_out(
+                            cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
+                        )
+                        .child(rows)
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .child(
+                                    Scrollbar::vertical(&scroll)
+                                        .id("ns-workspace-recent-scrollbar"),
+                                ),
+                        ),
+                ),
         ));
     }
 
@@ -502,33 +510,39 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             );
         }
         wrap = wrap.child(deferred(
-            anchored().anchor(Anchor::TopLeft).child(
-                v_flex()
-                    .id("ns-workspace-suggest-panel")
-                    .w(this.workspace_input_width)
-                    .mt_1()
-                    .h(height)
-                    .overflow_hidden()
-                    .relative()
-                    .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded_lg()
-                    .shadow_lg()
-                    .on_mouse_down_out(
-                        cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
-                    )
-                    .child(rows)
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .child(Scrollbar::vertical(&scroll_suggest).id("ns-suggest-scrollbar")),
-                    ),
-            ),
+            anchored()
+                .anchor(Anchor::TopLeft)
+                .position_mode(AnchoredPositionMode::Local)
+                .position(point(px(0.), this.workspace_input_height))
+                .child(
+                    v_flex()
+                        .id("ns-workspace-suggest-panel")
+                        .w(this.workspace_input_width)
+                        .mt_1()
+                        .h(height)
+                        .overflow_hidden()
+                        .relative()
+                        .bg(theme.popover)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded_lg()
+                        .shadow_lg()
+                        .on_mouse_down_out(
+                            cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
+                        )
+                        .child(rows)
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .child(
+                                    Scrollbar::vertical(&scroll_suggest).id("ns-suggest-scrollbar"),
+                                ),
+                        ),
+                ),
         ));
     }
 

@@ -147,6 +147,8 @@ pub struct AmuxApp {
     pub workspace_recent_open: bool,
     /// 新建会话工作目录输入行宽度（浮层按输入行对齐）
     pub workspace_input_width: Pixels,
+    /// 新建会话工作目录输入行高度（下拉框从输入行下缘展开）
+    pub workspace_input_height: Pixels,
     /// 最近目录下拉的滚动句柄（列表内滚动与滚动条）
     pub workspace_recent_scroll: ScrollHandle,
     /// 工作目录联想的滚动句柄（列表内滚动与滚动条）
@@ -370,6 +372,7 @@ impl AmuxApp {
             expanded_activities: HashSet::new(),
             workspace_recent_open: false,
             workspace_input_width: px(0.),
+            workspace_input_height: px(0.),
             workspace_recent_scroll: ScrollHandle::new(),
             workspace_suggest_scroll: ScrollHandle::new(),
             workspace_file: None,
@@ -1085,8 +1088,11 @@ impl AmuxApp {
     }
 
     /// 展开工作目录最近目录上拉框：收起前缀匹配项，两者不叠加（进行中的联想应答也会因
-    /// 已拉取目录被清空而丢弃）。
+    /// 已拉取目录被清空而丢弃）。已有输入时保持手动输入流程，不重新展示最近目录。
     pub fn show_recent_workspaces(&mut self, cx: &mut Context<Self>) {
+        if !self.workspace_input.read(cx).value().trim().is_empty() {
+            return;
+        }
         self.workspace_recent_open = true;
         self.with_core(|core| {
             core.new_session.suggestions.clear();
@@ -1110,8 +1116,7 @@ impl AmuxApp {
     ///
     /// 目录变了才重新拉取（边界处触发，且一次拉全该目录的条目），目录没变时直接用已拉取的
     /// 条目按最新前缀过滤，避免同一个目录在输入过程中被反复拉取。应答回来时若目录或机器已变
-    /// 则丢弃。联想优先于最近目录下拉，避免两层浮层叠加；输入清空时恢复最近目录下拉
-    /// （交互参考旧桌面应用）。
+    /// 则丢弃。联想优先于最近目录下拉，避免两层浮层叠加。
     fn refresh_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
         let text = self.workspace_input.read(cx).value().to_string();
         let machine = self.with_core(|core| core.new_session.machine.clone());
@@ -1121,14 +1126,6 @@ impl AmuxApp {
                 core.new_session.suggestions.clear();
                 core.new_session.suggestion = None;
             });
-            if text.trim().is_empty() {
-                let has_recent = self.with_core(|core| {
-                    core.recent_workspaces.iter().any(|workspace| {
-                        core.new_session.machine.as_deref() == Some(workspace.machine.as_str())
-                    })
-                });
-                self.workspace_recent_open = has_recent;
-            }
             cx.notify();
             return;
         };
