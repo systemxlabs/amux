@@ -145,14 +145,8 @@ pub struct AmuxApp {
     pub expanded_activities: HashSet<String>,
     /// 工作目录最近目录下拉是否展开
     pub workspace_recent_open: bool,
-    /// 新建会话工作目录输入行宽度（浮层按输入行对齐）
-    pub workspace_input_width: Pixels,
-    /// 新建会话工作目录输入行高度（下拉框从输入行下缘展开）
-    pub workspace_input_height: Pixels,
-    /// 最近目录下拉的滚动句柄（列表内滚动与滚动条）
-    pub workspace_recent_scroll: ScrollHandle,
-    /// 工作目录联想的滚动句柄（列表内滚动与滚动条）
-    pub workspace_suggest_scroll: ScrollHandle,
+    /// 新建会话工作目录输入框的窗口坐标（浮层按输入框边缘锚定）
+    pub workspace_input_bounds: Option<Bounds<Pixels>>,
     /// 工作目录面板当前查看的文件路径
     pub workspace_file: Option<String>,
     /// 工作目录面板中文件树区域是否展开
@@ -371,10 +365,7 @@ impl AmuxApp {
             plan_scroll: ScrollHandle::new(),
             expanded_activities: HashSet::new(),
             workspace_recent_open: false,
-            workspace_input_width: px(0.),
-            workspace_input_height: px(0.),
-            workspace_recent_scroll: ScrollHandle::new(),
-            workspace_suggest_scroll: ScrollHandle::new(),
+            workspace_input_bounds: None,
             workspace_file: None,
             workspace_tree_visible: true,
             workspace_content_visible: true,

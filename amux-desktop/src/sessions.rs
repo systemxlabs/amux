@@ -8,7 +8,7 @@ use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
-use gpui_component::scroll::Scrollbar;
+use gpui_component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::text::{TextView, TextViewStyle};
@@ -348,8 +348,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
     let app = cx.entity();
     let has_recent = !recent.is_empty();
     let open = has_recent && this.workspace_recent_open;
-    let scroll = this.workspace_recent_scroll.clone();
-    let scroll_suggest = this.workspace_suggest_scroll.clone();
+    let input_bounds = this.workspace_input_bounds;
 
     let mut input_row =
         h_flex()
@@ -368,10 +367,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             );
     let bounds_app = app.clone();
     input_row = input_row.on_prepaint(move |bounds, _, cx| {
-        bounds_app.update(cx, |this, _| {
-            this.workspace_input_width = bounds.size.width;
-            this.workspace_input_height = bounds.size.height;
-        });
+        bounds_app.update(cx, |this, _| this.workspace_input_bounds = Some(bounds));
     });
     if has_recent {
         // 点击输入框弹出最近目录上拉框（鼠标事件先到输入框自身，再冒泡到这里，不影响编辑；
@@ -391,7 +387,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
 
     // 最近目录：以输入行左缘为锚向上展开（deferred 保持浮层置顶），高度按条目数
     // 自适应、超过上限时列表内滚动查看（带滚动条）
-    if open {
+    if let Some(bounds) = input_bounds.filter(|_| open) {
         let hover_bg = theme.accent;
         let visible = recent.len().min(SUGGEST_MAX_ROWS);
         let height = px(SUGGEST_PADDING * 2.0 + SUGGEST_ROW_HEIGHT * visible as f32);
@@ -401,8 +397,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             .flex_1()
             .min_h_0()
             .p(px(SUGGEST_PADDING))
-            .track_scroll(&scroll)
-            .overflow_y_scroll();
+            .overflow_y_scrollbar();
         for path in recent {
             let app = app.clone();
             let value = path.clone();
@@ -411,6 +406,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     .id(SharedString::from(format!("ns-workspace-recent-{path}")))
                     .w_full()
                     .h(px(SUGGEST_ROW_HEIGHT))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .px_2()
@@ -435,13 +431,11 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         wrap = wrap.child(deferred(
             anchored()
                 .anchor(Anchor::BottomLeft)
-                .position_mode(AnchoredPositionMode::Local)
-                .position(point(px(0.), px(0.)))
+                .position(point(bounds.left(), bounds.top() - px(SUGGEST_PADDING)))
                 .child(
                     v_flex()
                         .id("ns-workspace-recent-panel")
-                        .w(this.workspace_input_width)
-                        .mb_1()
+                        .w(bounds.size.width)
                         .h(height)
                         .overflow_hidden()
                         .relative()
@@ -453,26 +447,14 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                         .on_mouse_down_out(
                             cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
                         )
-                        .child(rows)
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .child(
-                                    Scrollbar::vertical(&scroll)
-                                        .id("ns-workspace-recent-scrollbar"),
-                                ),
-                        ),
+                        .child(rows),
                 ),
         ));
     }
 
     // 前缀联想：以输入行左缘为锚向下展开（deferred 保持浮层置顶）；高度按条目数
     // 自适应，超过上限时列表内滚动查看（带滚动条）
-    if !core.new_session.suggestions.is_empty() {
+    if let Some(bounds) = input_bounds.filter(|_| !core.new_session.suggestions.is_empty()) {
         let visible = core.new_session.suggestions.len().min(SUGGEST_MAX_ROWS);
         let height = px(SUGGEST_PADDING * 2.0 + SUGGEST_ROW_HEIGHT * visible as f32);
         let mut rows = v_flex()
@@ -481,8 +463,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             .flex_1()
             .min_h_0()
             .p(px(SUGGEST_PADDING))
-            .track_scroll(&this.workspace_suggest_scroll)
-            .overflow_y_scroll();
+            .overflow_y_scrollbar();
         for entry in core.new_session.suggestions.clone() {
             let path = entry.path.clone();
             let value = format!("{}/", path.trim_end_matches('/'));
@@ -491,6 +472,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     .id(SharedString::from(format!("ns-suggest-{path}")))
                     .w_full()
                     .h(px(SUGGEST_ROW_HEIGHT))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .px_2()
@@ -512,13 +494,11 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         wrap = wrap.child(deferred(
             anchored()
                 .anchor(Anchor::TopLeft)
-                .position_mode(AnchoredPositionMode::Local)
-                .position(point(px(0.), this.workspace_input_height))
+                .position(point(bounds.left(), bounds.bottom() + px(SUGGEST_PADDING)))
                 .child(
                     v_flex()
                         .id("ns-workspace-suggest-panel")
-                        .w(this.workspace_input_width)
-                        .mt_1()
+                        .w(bounds.size.width)
                         .h(height)
                         .overflow_hidden()
                         .relative()
@@ -530,18 +510,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                         .on_mouse_down_out(
                             cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
                         )
-                        .child(rows)
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .child(
-                                    Scrollbar::vertical(&scroll_suggest).id("ns-suggest-scrollbar"),
-                                ),
-                        ),
+                        .child(rows),
                 ),
         ));
     }
