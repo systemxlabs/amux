@@ -14,6 +14,7 @@ import {
   selectTerminal,
   sendTerminalInput,
 } from "../../core/actions";
+import { restartTerminalStream } from "../../core/poll";
 import { useCore, useCoreState } from "../../core/store";
 import { truncate } from "../../lib/format";
 import { cn } from "../../lib/utils";
@@ -92,7 +93,9 @@ export function TerminalPanel() {
     termRef.current = term;
 
     fit.fit();
+    term.focus();
     void resizeTerminal(core, term.cols, term.rows);
+    restartTerminalStream(core);
     const observer = new ResizeObserver(() => {
       fit.fit();
       void resizeTerminal(core, term.cols, term.rows);

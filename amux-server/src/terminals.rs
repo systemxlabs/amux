@@ -40,6 +40,25 @@ struct Entry {
     subscribers: broadcast::Sender<TerminalOutput>,
 }
 
+impl Entry {
+    /// Daemon 的初始输出可能先于 terminal.open 响应到达；先缓存，响应到达后再补全元信息。
+    fn pending() -> Self {
+        let (subscribers, _) = broadcast::channel(OUTPUT_CHANNEL_CAPACITY);
+        Self {
+            session_id: String::new(),
+            cwd: String::new(),
+            cols: 0,
+            rows: 0,
+            state: TerminalState::Running,
+            buffer: VecDeque::new(),
+            start: 0,
+            total: 0,
+            last_active: now_ms(),
+            subscribers,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct TerminalCache {
     terminals: Mutex<HashMap<String, Entry>>,
@@ -51,8 +70,21 @@ impl TerminalCache {
     }
 
     pub fn open(&self, session_id: &str, terminal_id: &str, cwd: &str, cols: u16, rows: u16) {
+        let mut terminals = self.terminals.lock();
+        if let Some(entry) = terminals.get_mut(terminal_id) {
+            if entry.session_id.is_empty() {
+                entry.session_id = session_id.to_string();
+                entry.cwd = cwd.to_string();
+                entry.cols = cols;
+                entry.rows = rows;
+                entry.state = TerminalState::Running;
+                entry.last_active = now_ms();
+                return;
+            }
+        }
+
         let (subscribers, _) = broadcast::channel(OUTPUT_CHANNEL_CAPACITY);
-        self.terminals.lock().insert(
+        terminals.insert(
             terminal_id.to_string(),
             Entry {
                 session_id: session_id.to_string(),
@@ -71,9 +103,9 @@ impl TerminalCache {
 
     pub fn output(&self, terminal_id: &str, data: &[u8]) {
         let mut terminals = self.terminals.lock();
-        let Some(entry) = terminals.get_mut(terminal_id) else {
-            return;
-        };
+        let entry = terminals
+            .entry(terminal_id.to_string())
+            .or_insert_with(Entry::pending);
         entry.buffer.extend(data.iter().copied());
         entry.total += data.len() as u64;
         entry.last_active = now_ms();
@@ -275,6 +307,19 @@ mod tests {
             .decode(&output.data)
             .unwrap();
         assert_eq!(bytes.len(), BUFFER_LIMIT);
+    }
+
+    #[test]
+    fn initial_output_before_open_response_is_retained() {
+        let cache = TerminalCache::new();
+        cache.output("t1", b"prompt$ ");
+        assert!(cache.list("s1").is_empty());
+
+        cache.open("s1", "t1", "/w", 80, 24);
+
+        let output = cache.read("t1", None).unwrap();
+        assert_eq!(decoded(&output), "prompt$ ");
+        assert_eq!(cache.list("s1")[0].cwd, "/w");
     }
 
     #[tokio::test]

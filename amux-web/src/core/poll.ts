@@ -209,6 +209,12 @@ export function stopTerminalStream(core: Core): void {
   terminalStreams.delete(core);
 }
 
+/** 重建终端流并获取完整快照；xterm 实例重建后调用。 */
+export function restartTerminalStream(core: Core): void {
+  stopTerminalStream(core);
+  syncTerminalStream(core);
+}
+
 /** 同步 SSE 生命周期：只在普通会话的终端面板打开且已有活动终端时连接。 */
 export function syncTerminalStream(core: Core): void {
   const target = core.state.open;
