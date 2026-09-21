@@ -2,11 +2,11 @@
 //
 // 面板打开时拉取一次改动，不定时刷新；折叠状态只存在于本地。
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
-import { appendPromptDraft } from "../../core/actions";
+import { sendPrompt } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 import { buildDiffTree, type DiffNode } from "../../lib/difftree";
 import type { GitChangeStatus, GitDiffLine, GitDiffResult } from "../../lib/types";
@@ -26,6 +26,78 @@ function linePrefix(kind: GitDiffLine["kind"]): string {
   if (kind === "add") return "+";
   if (kind === "remove") return "-";
   return " ";
+}
+
+type DiffCommentTarget =
+  | { kind: "file"; path: string }
+  | { kind: "code"; path: string; hunkIndex: number; code: string };
+
+type DiffLineRef = { path: string; hunkIndex: number; lineIndex: number };
+type DiffDrag = { start: DiffLineRef; end: DiffLineRef };
+
+function sameHunk(a: DiffLineRef, b: DiffLineRef): boolean {
+  return a.path === b.path && a.hunkIndex === b.hunkIndex;
+}
+
+function commentMessage(target: DiffCommentTarget, comment: string): string {
+  if (target.kind === "file") return `${target.path} ${comment}`;
+  return `\`\`\`\n${target.code}\n\`\`\`\n${comment}`;
+}
+
+function CommentComposer({
+  target,
+  value,
+  sending,
+  onChange,
+  onCancel,
+  onSubmit,
+}: {
+  target: DiffCommentTarget;
+  value: string;
+  sending: boolean;
+  onChange: (value: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}) {
+  const label =
+    target.kind === "file" ? `评论 ${target.path}` : `评论 ${target.path} 中的选中代码`;
+  return (
+    <div data-slot="diff-comment-composer" className="border-b border-border bg-card p-2">
+      <div className="mb-1 truncate text-xs text-muted-foreground">{label}</div>
+      <textarea
+        data-slot="diff-comment-input"
+        aria-label="评论内容"
+        autoFocus
+        rows={3}
+        value={value}
+        disabled={sending}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            if (value.trim() !== "") onSubmit();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+        className="w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      />
+      <div className="mt-2 flex justify-end gap-2">
+        <Button type="button" variant="ghost" size="sm" disabled={sending} onClick={onCancel}>
+          取消
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={sending || value.trim() === ""}
+          onClick={onSubmit}
+        >
+          {sending ? "发送中…" : "评论"}
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 type TreeProps = {
@@ -101,6 +173,11 @@ export function DiffPanel() {
   const [diffsCollapsed, setDiffsCollapsed] = useState(false);
   const [collapsedDirs, setCollapsedDirs] = useState<string[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
+  const [commentTarget, setCommentTarget] = useState<DiffCommentTarget | null>(null);
+  const [commentText, setCommentText] = useState("");
+  const [commentSending, setCommentSending] = useState(false);
+  const [dragRange, setDragRange] = useState<DiffDrag | null>(null);
+  const dragRef = useRef<DiffDrag | null>(null);
 
   // 打开时刷新一次（docs/DESIGN.md「改动审查视图」）：会话切换时重新拉取
   useEffect(() => {
@@ -109,6 +186,11 @@ export function DiffPanel() {
     setDiffsCollapsed(false);
     setCollapsedDirs([]);
     setSelected(null);
+    setCommentTarget(null);
+    setCommentText("");
+    setCommentSending(false);
+    setDragRange(null);
+    dragRef.current = null;
     const client = core.client;
     if (client === null || sessionId === null) return;
     let cancelled = false;
@@ -137,6 +219,90 @@ export function DiffPanel() {
   const selectFile = (index: number) => {
     setSelected(index);
     document.getElementById(`diff-file-${index}`)?.scrollIntoView({ block: "start" });
+  };
+
+  const openFileComment = (path: string) => {
+    setCommentTarget({ kind: "file", path });
+    setCommentText("");
+  };
+
+  const submitComment = async () => {
+    const target = commentTarget;
+    const comment = commentText.trim();
+    if (target === null || comment === "" || commentSending) return;
+    setCommentSending(true);
+    const ok = await sendPrompt(core, commentMessage(target, comment), false);
+    setCommentSending(false);
+    if (ok) {
+      setCommentTarget(null);
+      setCommentText("");
+    }
+  };
+
+  const cancelComment = () => {
+    setCommentTarget(null);
+    setCommentText("");
+    setDragRange(null);
+    dragRef.current = null;
+  };
+
+  const lineRefAt = (event: ReactPointerEvent<HTMLDivElement>): DiffLineRef | null => {
+    const direct = (event.target as HTMLElement).closest<HTMLElement>("[data-diff-line]");
+    const underPointer = document
+      .elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>("[data-diff-line]");
+    const element = direct ?? underPointer;
+    if (element == null) return null;
+    const path = element.dataset.diffFile;
+    const hunkIndex = Number(element.dataset.diffHunk);
+    const lineIndex = Number(element.dataset.diffLineIndex);
+    if (path === undefined || Number.isNaN(hunkIndex) || Number.isNaN(lineIndex)) return null;
+    return { path, hunkIndex, lineIndex };
+  };
+
+  const beginCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const line = lineRefAt(event);
+    if (line === null) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const drag = { start: line, end: line };
+    dragRef.current = drag;
+    setDragRange(drag);
+  };
+
+  const extendCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = dragRef.current;
+    if (current === null) return;
+    const line = lineRefAt(event);
+    if (line === null || !sameHunk(current.start, line)) return;
+    const drag = { ...current, end: line };
+    dragRef.current = drag;
+    setDragRange(drag);
+  };
+
+  const finishCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    extendCodeSelection(event);
+    const drag = dragRef.current;
+    if (drag === null) return;
+    const file = files.find((item) => item.path === drag.start.path);
+    const hunk = file?.hunks[drag.start.hunkIndex];
+    if (hunk === undefined) {
+      cancelComment();
+      return;
+    }
+    const start = Math.min(drag.start.lineIndex, drag.end.lineIndex);
+    const end = Math.max(drag.start.lineIndex, drag.end.lineIndex);
+    const code = hunk.lines
+      .slice(start, end + 1)
+      .map((line) => `${linePrefix(line.kind)}${line.text}`)
+      .join("\n");
+    dragRef.current = null;
+    setDragRange(null);
+    setCommentTarget({ kind: "code", path: drag.start.path, hunkIndex: drag.start.hunkIndex, code });
+    setCommentText("");
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   };
 
   let body: ReactNode;
@@ -168,68 +334,105 @@ export function DiffPanel() {
               ))
             : null
         }
-        content={files.map((file, index) => (
+        content={
           <div
-            key={file.path}
-            id={`diff-file-${index}`}
-            data-slot="diff-file"
-            className="mb-2 rounded-md border border-border"
+            data-slot="diff-content"
+            className="select-none"
+            onPointerDown={beginCodeSelection}
+            onPointerMove={extendCodeSelection}
+            onPointerUp={finishCodeSelection}
+            onPointerCancel={cancelComment}
           >
-            <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-2 py-1 font-mono text-xs">
-              <span className="min-w-0 flex-1 truncate">{file.path}</span>
-              <span className="shrink-0">{STATUS_LABEL[file.status]}</span>
-              <span className="shrink-0 text-muted-foreground">
-                +{file.additions}/-{file.deletions}
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                data-slot="diff-quote-file"
-                className="h-9 shrink-0 text-xs lg:h-5"
-                title="复制文件路径到输入框"
-                onClick={() => appendPromptDraft(core, file.path)}
+            {files.map((file, index) => (
+              <div
+                key={file.path}
+                id={`diff-file-${index}`}
+                data-slot="diff-file"
+                className="mb-2 rounded-md border border-border"
               >
-                引用文件
-              </Button>
-            </div>
-            {!diffsCollapsed &&
-              file.hunks.map((hunk, hunkIx) => (
-                <div key={hunkIx}>
-                  <div className="flex items-center gap-2 px-2 font-mono text-xs text-muted-foreground">
-                    <span className="min-w-0 flex-1">{hunk.header}</span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      data-slot="diff-quote-hunk"
-                      className="h-9 shrink-0 text-xs lg:h-5"
-                      title="复制代码块内容到输入框"
-                      onClick={() =>
-                        appendPromptDraft(core, hunk.lines.map((line) => line.text).join("\n"))
-                      }
-                    >
-                      引用代码块
-                    </Button>
-                  </div>
-                  {hunk.lines.map((line, lineIx) => (
-                    <div
-                      key={lineIx}
-                      data-slot="diff-line"
-                      className={cn(
-                        "whitespace-pre px-2 font-mono text-xs",
-                        line.kind === "add" && "bg-diff-add",
-                        line.kind === "remove" && "bg-diff-remove",
-                      )}
-                    >
-                      {linePrefix(line.kind)}
-                      {line.text}
-                    </div>
-                  ))}
+                <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-2 py-1 font-mono text-xs">
+                  <span className="min-w-0 flex-1 truncate">{file.path}</span>
+                  <span className="shrink-0">{STATUS_LABEL[file.status]}</span>
+                  <span className="shrink-0 text-muted-foreground">
+                    +{file.additions}/-{file.deletions}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    data-slot="diff-comment-file"
+                    className="h-9 shrink-0 text-xs lg:h-5"
+                    onClick={() => openFileComment(file.path)}
+                  >
+                    评论
+                  </Button>
                 </div>
-              ))}
+                {commentTarget?.kind === "file" && commentTarget.path === file.path ? (
+                  <CommentComposer
+                    target={commentTarget}
+                    value={commentText}
+                    sending={commentSending}
+                    onChange={setCommentText}
+                    onCancel={cancelComment}
+                    onSubmit={() => void submitComment()}
+                  />
+                ) : null}
+                {!diffsCollapsed &&
+                  file.hunks.map((hunk, hunkIx) => {
+                    const selectedLines =
+                      dragRange !== null &&
+                      dragRange.start.path === file.path &&
+                      dragRange.start.hunkIndex === hunkIx
+                        ? [
+                            Math.min(dragRange.start.lineIndex, dragRange.end.lineIndex),
+                            Math.max(dragRange.start.lineIndex, dragRange.end.lineIndex),
+                          ]
+                        : null;
+                    return (
+                      <div key={hunkIx}>
+                        <div className="flex px-2 font-mono text-xs text-muted-foreground">
+                          <span className="min-w-0 flex-1">{hunk.header}</span>
+                        </div>
+                        {hunk.lines.map((line, lineIx) => (
+                          <div
+                            key={lineIx}
+                            data-slot="diff-line"
+                            data-diff-file={file.path}
+                            data-diff-hunk={hunkIx}
+                            data-diff-line-index={lineIx}
+                            className={cn(
+                              "cursor-text whitespace-pre px-2 font-mono text-xs",
+                              line.kind === "add" && "bg-diff-add",
+                              line.kind === "remove" && "bg-diff-remove",
+                              selectedLines !== null &&
+                                lineIx >= selectedLines[0] &&
+                                lineIx <= selectedLines[1] &&
+                                "ring-1 ring-inset ring-primary/60",
+                            )}
+                          >
+                            {linePrefix(line.kind)}
+                            {line.text}
+                          </div>
+                        ))}
+                        {commentTarget?.kind === "code" &&
+                        commentTarget.path === file.path &&
+                        commentTarget.hunkIndex === hunkIx ? (
+                          <CommentComposer
+                            target={commentTarget}
+                            value={commentText}
+                            sending={commentSending}
+                            onChange={setCommentText}
+                            onCancel={cancelComment}
+                            onSubmit={() => void submitComment()}
+                          />
+                        ) : null}
+                      </div>
+                    );
+                  })}
+              </div>
+            ))}
           </div>
-        ))}
+        }
         treeSlot="diff-tree"
         contentSlot="diff-files"
         treeClassName="max-h-[40%] min-h-0 overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none"

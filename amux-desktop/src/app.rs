@@ -10,7 +10,8 @@ use amux_common::api::{
     Skill, WorkflowPlanItem,
 };
 use amux_common::domain::{
-    ContentBlock, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SlashCommand,
+    ContentBlock, GitDiffHunk, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SlashCommand,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -120,10 +121,12 @@ pub struct AmuxApp {
     pub diff_collapsed_dirs: HashSet<String>,
     /// 改动审查：整个文件树区域是否展开
     pub diff_tree_visible: bool,
-    /// 改动审查：已选中的文件
-    pub diff_selected_files: HashSet<String>,
-    /// 改动审查：已选中的代码块（文件路径, hunk 头）
-    pub diff_selected_hunks: HashSet<(String, String)>,
+    /// 改动审查：当前评论目标
+    pub diff_comment_target: Option<diff::CommentTarget>,
+    /// 改动审查：评论输入框
+    pub diff_comment_input: Entity<InputState>,
+    /// 改动审查：代码行拖动选择
+    pub diff_line_selection: Option<diff::LineSelection>,
     /// 改动审查：改动区域滚动句柄（点击文件时定位）
     pub diff_scroll: ScrollHandle,
     /// 改动审查：文件树宽度
@@ -319,6 +322,12 @@ impl AmuxApp {
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
+        let diff_comment_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("输入评论")
+                .multi_line(true)
+                .auto_grow(2, 6)
+        });
 
         Self {
             core,
@@ -343,6 +352,7 @@ impl AmuxApp {
             skill_desc,
             plan_name,
             plan_plan,
+            diff_comment_input,
             terminal: terminal_view::TerminalScreen::default(),
             terminal_focus: cx.focus_handle(),
             terminal_stream: None,
@@ -352,8 +362,8 @@ impl AmuxApp {
             diff_collapsed_files: HashSet::new(),
             diff_collapsed_dirs: HashSet::new(),
             diff_tree_visible: true,
-            diff_selected_files: HashSet::new(),
-            diff_selected_hunks: HashSet::new(),
+            diff_comment_target: None,
+            diff_line_selection: None,
             diff_scroll: ScrollHandle::new(),
             diff_tree_width: panels::DIFF_TREE_WIDTH,
             diff_tree_drag: None,
@@ -823,8 +833,8 @@ impl AmuxApp {
         self.attachments.clear();
         self.diff_collapsed_files.clear();
         self.diff_collapsed_dirs.clear();
-        self.diff_selected_files.clear();
-        self.diff_selected_hunks.clear();
+        self.diff_comment_target = None;
+        self.diff_line_selection = None;
         self.expanded_activities.clear();
         self.workspace_file = None;
         self.workspace_tree_visible = true;
@@ -1807,77 +1817,112 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 改动审查：选中/取消选中整个文件。
-    pub fn toggle_diff_file_selected(&mut self, path: String, cx: &mut Context<Self>) {
-        toggle_set(&mut self.diff_selected_files, path);
-        cx.notify();
-    }
-
-    /// 改动审查：选中/取消选中代码块。
-    pub fn toggle_diff_hunk_selected(
-        &mut self,
-        path: String,
-        header: String,
-        cx: &mut Context<Self>,
-    ) {
-        toggle_set(&mut self.diff_selected_hunks, (path, header));
-        cx.notify();
-    }
-
-    /// 清空改动选择。
-    pub fn clear_diff_selection(&mut self, cx: &mut Context<Self>) {
-        self.diff_selected_files.clear();
-        self.diff_selected_hunks.clear();
-        cx.notify();
-    }
-
     /// 点击文件：右侧改动区域滚动到该文件。
     pub fn scroll_to_file(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.diff_scroll.scroll_to_top_of_item(ix);
         cx.notify();
     }
 
-    /// 把改动审查中选中的文件与代码块引用到会话输入框（docs/PRD.md「改动审查」）。
-    ///
-    /// 文件引用为文件路径，代码块引用为代码块内容，均插入输入框当前光标处；
-    /// 插入后焦点交给输入框，用户可接着补充指令再发送。
-    pub fn reference_diff_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let files = self.with_core(|core| {
-            core.view
-                .detail
-                .diff
-                .as_ref()
-                .map(|diff| diff.files.clone())
-                .unwrap_or_default()
-        });
-        let references =
-            diff::selected_references(&files, &self.diff_selected_files, &self.diff_selected_hunks);
-        if references.is_empty() {
-            return;
-        }
-        let text = references
-            .iter()
-            .map(|reference| reference.text())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        self.insert_composer_text(text, window, cx);
-        self.clear_diff_selection(cx);
+    /// 开始评论整个文件。
+    pub fn begin_diff_file_comment(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_diff_comment(diff::CommentTarget::File { path }, window, cx);
     }
 
-    /// 把文本插入会话输入框当前光标处（剪贴板粘贴的语义）。
-    ///
-    /// 光标不在行首时先换行、内容末尾补一个换行：多行内容不会与已有草稿粘在一行，
-    /// 用户也能直接接着写自己的指令。
-    fn insert_composer_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |state, cx| {
-            let value = state.value().to_string();
-            let cursor = state.cursor().min(value.len());
-            let separator = match value.get(..cursor) {
-                None | Some("") => "",
-                Some(before) if before.ends_with('\n') => "",
-                Some(_) => "\n",
-            };
-            state.insert(format!("{separator}{text}\n"), window, cx);
+    /// 开始拖动选择代码行。
+    pub fn begin_diff_line_selection(&mut self, line: diff::LineRef, cx: &mut Context<Self>) {
+        self.diff_comment_target = None;
+        self.diff_line_selection = Some(diff::LineSelection {
+            start: line.clone(),
+            end: line,
+        });
+        cx.notify();
+    }
+
+    /// 扩展同一 hunk 内的代码行选择。
+    pub fn extend_diff_line_selection(&mut self, line: diff::LineRef, cx: &mut Context<Self>) {
+        let Some(selection) = self.diff_line_selection.as_mut() else {
+            return;
+        };
+        if selection.start.path != line.path || selection.start.hunk_header != line.hunk_header {
+            return;
+        }
+        selection.end = line;
+        cx.notify();
+    }
+
+    /// 松开鼠标：把选中行作为评论目标并展开输入框。
+    pub fn finish_diff_line_selection(
+        &mut self,
+        hunk: GitDiffHunk,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = self.diff_line_selection.take() else {
+            return;
+        };
+        let start = selection.start.line.min(selection.end.line);
+        let end = selection.start.line.max(selection.end.line);
+        let code = hunk
+            .lines
+            .iter()
+            .skip(start)
+            .take(end.saturating_sub(start) + 1)
+            .map(|line| format!("{}{}", line.kind.prefix(), line.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.open_diff_comment(
+            diff::CommentTarget::Code {
+                path: selection.start.path,
+                hunk_header: hunk.header,
+                code,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// 取消评论，同时清除拖动选择。
+    pub fn cancel_diff_comment(&mut self, cx: &mut Context<Self>) {
+        self.diff_comment_target = None;
+        self.diff_line_selection = None;
+        cx.notify();
+    }
+
+    /// 评论作为用户消息发送到会话。
+    pub fn submit_diff_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let comment = self.diff_comment_input.read(cx).value().trim().to_string();
+        let Some(target) = self.diff_comment_target.take() else {
+            return;
+        };
+        if comment.is_empty() {
+            self.diff_comment_target = Some(target);
+            return;
+        }
+        self.diff_comment_input
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        self.diff_line_selection = None;
+        self.send_blocks(
+            vec![ContentBlock::Text {
+                text: target.message(&comment),
+            }],
+            cx,
+        );
+    }
+
+    fn open_diff_comment(
+        &mut self,
+        target: diff::CommentTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.diff_comment_target = Some(target);
+        self.diff_comment_input.update(cx, |state, cx| {
+            state.set_value(String::new(), window, cx);
             state.focus(window, cx);
         });
         cx.notify();

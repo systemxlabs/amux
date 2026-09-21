@@ -353,14 +353,6 @@ export function removeAttachment(core: Core, index: number): void {
   });
 }
 
-/** 改动审查引用：把文件路径或代码块内容追加到会话输入框（docs/PRD.md「改动审查」）。 */
-export function appendPromptDraft(core: Core, text: string): void {
-  core.update((state) => {
-    const current = state.inputDraft;
-    state.inputDraft = current === "" ? text : current.endsWith("\n") ? `${current}${text}` : `${current}\n${text}`;
-  });
-}
-
 /** 仅输入框发送会消费待发送附件。 */
 export async function sendPrompt(
   core: Core,

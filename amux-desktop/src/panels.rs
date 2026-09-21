@@ -6,7 +6,6 @@ use amux_common::domain::{Activity, GitDiffFile, GitDiffLineKind, SessionState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::*;
-use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -1086,7 +1085,7 @@ fn terminal_tab(
 
 // ---------- 改动审查视图 ----------
 
-/// 改动审查视图：工具栏 + 文件树 + inline 改动 + 选中后引用到会话输入框。
+/// 改动审查视图：工具栏 + 文件树 + inline 改动 + 文件/代码评论。
 fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let files = core
@@ -1103,8 +1102,6 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
         .as_ref()
         .is_some_and(|diff| diff.not_repo);
     let loaded = core.view.detail.diff.is_some();
-    let has_selection =
-        !this.diff_selected_files.is_empty() || !this.diff_selected_hunks.is_empty();
     let all_collapsed = !files.is_empty()
         && files
             .iter()
@@ -1190,7 +1187,7 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
             .child(diff_inline(&files, this, cx))
             .into_any_element()
     };
-    let mut view = v_flex()
+    v_flex()
         .flex_1()
         .min_h_0()
         .min_w_0()
@@ -1198,11 +1195,8 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
         .px_3()
         .pb_3()
         .child(toolbar)
-        .child(body);
-    if has_selection && !not_repo && !files.is_empty() {
-        view = view.child(diff_footer(this, cx));
-    }
-    view.into_any_element()
+        .child(body)
+        .into_any_element()
 }
 
 /// 左侧文件树：仅包含改动文件，点击文件滚动到对应改动。
@@ -1332,7 +1326,7 @@ fn diff_inline(files: &[GitDiffFile], this: &mut AmuxApp, cx: &mut Context<AmuxA
         .into_any_element()
 }
 
-/// 单文件区块：文件头（选择/折叠）+ 各 hunk。
+/// 单文件区块：文件头（评论/折叠）+ 各 hunk（拖动选择评论）。
 fn diff_file_block(
     file: &GitDiffFile,
     collapsed: bool,
@@ -1340,7 +1334,6 @@ fn diff_file_block(
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
-    let selected = this.diff_selected_files.contains(&file.path);
     let status = match file.status {
         amux_common::domain::GitChangeStatus::Added => ("A", theme.success),
         amux_common::domain::GitChangeStatus::Deleted => ("D", theme.danger),
@@ -1357,18 +1350,6 @@ fn diff_file_block(
             .border_t_1()
             .border_color(theme.border)
             .child(
-                Checkbox::new(SharedString::from(format!("diff-sel-file-{}", file.path)))
-                    .checked(selected)
-                    .on_click(cx.listener({
-                        let path = file.path.clone();
-                        move |this, checked: &bool, _, cx| {
-                            if *checked != this.diff_selected_files.contains(&path) {
-                                this.toggle_diff_file_selected(path.clone(), cx);
-                            }
-                        }
-                    })),
-            )
-            .child(
                 div()
                     .flex_1()
                     .min_w_0()
@@ -1376,7 +1357,6 @@ fn diff_file_block(
                     .overflow_hidden()
                     .flex()
                     .items_center()
-                    .justify_end()
                     .child(
                         Label::new(file.path.clone())
                             .text_sm()
@@ -1405,13 +1385,29 @@ fn diff_file_block(
                 .small()
                 .rounded_full()
                 .child(Label::new(status.0).text_xs()),
+            )
+            .child(
+                Button::new(SharedString::from(format!(
+                    "diff-comment-file-{}",
+                    file.path
+                )))
+                .xsmall()
+                .ghost()
+                .label("评论")
+                .on_click(cx.listener({
+                    let path = file.path.clone();
+                    move |this, _, window, cx| {
+                        this.begin_diff_file_comment(path.clone(), window, cx)
+                    }
+                })),
             ),
     );
+    if let Some(composer) = diff_comment_composer(&file.path, None, this, cx) {
+        block = block.child(composer);
+    }
 
     if !collapsed {
         for hunk in &file.hunks {
-            let key = (file.path.clone(), hunk.header.clone());
-            let hunk_selected = this.diff_selected_hunks.contains(&key);
             block = block.child(
                 h_flex()
                     .w_full()
@@ -1420,27 +1416,6 @@ fn diff_file_block(
                     .gap_2()
                     .px_2()
                     .bg(theme.primary.opacity(0.12))
-                    .child(
-                        Checkbox::new(SharedString::from(format!(
-                            "diff-sel-hunk-{}-{}",
-                            file.path, hunk.header
-                        )))
-                        .checked(hunk_selected)
-                        .on_click(cx.listener({
-                            let path = file.path.clone();
-                            let header = hunk.header.clone();
-                            move |this, checked: &bool, _, cx| {
-                                let key = (path.clone(), header.clone());
-                                if *checked != this.diff_selected_hunks.contains(&key) {
-                                    this.toggle_diff_hunk_selected(
-                                        path.clone(),
-                                        header.clone(),
-                                        cx,
-                                    );
-                                }
-                            }
-                        })),
-                    )
                     .child(
                         Label::new(hunk.header.clone())
                             .text_xs()
@@ -1461,12 +1436,50 @@ fn diff_file_block(
                     GitDiffLineKind::Context => (theme.popover, " ", theme.muted_foreground),
                 };
                 let numbers = numbers[index];
+                let selected = this.diff_line_selection.as_ref().is_some_and(|selection| {
+                    selection.start.path == file.path
+                        && selection.start.hunk_header == hunk.header
+                        && index >= selection.start.line.min(selection.end.line)
+                        && index <= selection.start.line.max(selection.end.line)
+                });
+                let line_ref = diff::LineRef {
+                    path: file.path.clone(),
+                    hunk_header: hunk.header.clone(),
+                    line: index,
+                };
                 block = block.child(
                     h_flex()
                         .w_full()
                         .h(rems(1.375))
                         .items_center()
                         .bg(background)
+                        .when(selected, |row| row.border_l_2().border_color(theme.primary))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let line_ref = line_ref.clone();
+                                move |this, _, _, cx| {
+                                    this.begin_diff_line_selection(line_ref.clone(), cx)
+                                }
+                            }),
+                        )
+                        .on_mouse_move(cx.listener({
+                            let line_ref = line_ref.clone();
+                            move |this, _, _, cx| {
+                                this.extend_diff_line_selection(line_ref.clone(), cx)
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener({
+                                let hunk = hunk.clone();
+                                let line_ref = line_ref.clone();
+                                move |this, _, window, cx| {
+                                    this.extend_diff_line_selection(line_ref.clone(), cx);
+                                    this.finish_diff_line_selection(hunk.clone(), window, cx)
+                                }
+                            }),
+                        )
                         .child(number_gutter(numbers.old, &theme))
                         .child(number_gutter(numbers.new, &theme))
                         .child(
@@ -1487,9 +1500,69 @@ fn diff_file_block(
                         ),
                 );
             }
+            if let Some(composer) = diff_comment_composer(&file.path, Some(&hunk.header), this, cx)
+            {
+                block = block.child(composer);
+            }
         }
     }
     block.into_any_element()
+}
+
+/// 当前目标匹配时渲染行内评论输入框。
+fn diff_comment_composer(
+    path: &str,
+    hunk_header: Option<&str>,
+    this: &mut AmuxApp,
+    cx: &mut Context<AmuxApp>,
+) -> Option<AnyElement> {
+    let target = this.diff_comment_target.as_ref()?;
+    if target.path() != path || target.hunk_header() != hunk_header {
+        return None;
+    }
+    let theme = ui::Colors::of(cx.theme());
+    Some(
+        v_flex()
+            .w_full()
+            .gap_2()
+            .p_2()
+            .bg(theme.background)
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                Label::new(match target {
+                    diff::CommentTarget::File { path } => format!("评论 {path}"),
+                    diff::CommentTarget::Code {
+                        path, hunk_header, ..
+                    } => format!("评论 {path} {hunk_header} 中的选中代码"),
+                })
+                .text_xs()
+                .text_color(theme.muted_foreground),
+            )
+            .child(Input::new(&this.diff_comment_input).w_full())
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("diff-comment-cancel")
+                            .small()
+                            .ghost()
+                            .label("取消")
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_diff_comment(cx))),
+                    )
+                    .child(
+                        Button::new("diff-comment-submit")
+                            .small()
+                            .primary()
+                            .label("评论")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.submit_diff_comment(window, cx)
+                            })),
+                    ),
+            )
+            .into_any_element(),
+    )
 }
 
 /// diff 行号栏（该侧无行号时留空）。
@@ -1507,44 +1580,6 @@ fn number_gutter(number: Option<usize>, theme: &ui::Colors) -> AnyElement {
                 .text_xs()
                 .font_family(theme.mono_font_family.clone())
                 .text_color(theme.muted_foreground),
-        )
-        .into_any_element()
-}
-
-/// 审查视图底部：选中统计与引用到会话输入框。
-///
-/// 引用而非直接发送：文件引用复制文件路径、代码块引用复制代码块内容到会话输入框
-/// （docs/PRD.md「改动审查」）。
-fn diff_footer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    let theme = ui::Colors::of(cx.theme());
-    let selected_files = this.diff_selected_files.len();
-    let selected_hunks = this.diff_selected_hunks.len();
-    h_flex()
-        .gap_2()
-        .items_center()
-        .child(
-            Label::new(format!(
-                "已选 {selected_files} 文件 · {selected_hunks} 代码块"
-            ))
-            .text_xs()
-            .text_color(theme.muted_foreground),
-        )
-        .child(
-            Button::new("diff-clear-selection")
-                .small()
-                .label("清空选择")
-                .on_click(cx.listener(|this, _, _, cx| this.clear_diff_selection(cx))),
-        )
-        .child(div().flex_1())
-        .child(
-            Button::new("diff-reference-selected")
-                .small()
-                .primary()
-                .label("引用到输入框")
-                .tooltip("引用到会话输入框，补充指令后发送")
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.reference_diff_selection(window, cx)),
-                ),
         )
         .into_any_element()
 }
