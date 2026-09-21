@@ -11,7 +11,7 @@ use gpui_component::label::Label;
 use gpui_component::scroll::Scrollbar;
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
-use gpui_component::text::TextView;
+use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{
     h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Selectable, Sizable,
 };
@@ -678,6 +678,7 @@ fn user_bubble(
     if !images.is_empty() {
         width = width.max(px(280.));
     }
+    let code_foreground = cx.theme().accent_foreground;
     let theme = ui::Colors::of(cx.theme());
     div()
         .id(("user-row", timestamp))
@@ -701,6 +702,16 @@ fn user_bubble(
                 .when(!text.is_empty(), |bubble| {
                     bubble.child(
                         TextView::markdown(("umd", timestamp), text)
+                            .style(
+                                TextViewStyle::default()
+                                    .code_block(
+                                        StyleRefinement::default().text_color(code_foreground),
+                                    )
+                                    .inline_code(HighlightStyle {
+                                        color: Some(code_foreground),
+                                        ..Default::default()
+                                    }),
+                            )
                             .selectable(true)
                             .text_color(theme.primary_foreground),
                     )
