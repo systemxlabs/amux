@@ -1,6 +1,6 @@
 // 终端面板：终端列表 + xterm.js 视图（docs/PRD.md「主页面」、docs/DESIGN.md「终端视图」）。
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { Plus, X } from "lucide-react";
@@ -67,7 +67,7 @@ export function TerminalPanel() {
   const chunks = state.detail.terminalChunks;
 
   // 活动终端变化时重建实例：VT 网格无法跨实例迁移，重建后的完整输出由后续 chunk 写入
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = containerRef.current;
     if (container === null || activeTerminal === null) return;
     const tokens = getComputedStyle(document.documentElement);
@@ -92,17 +92,23 @@ export function TerminalPanel() {
     });
     termRef.current = term;
 
-    fit.fit();
-    term.focus();
-    void resizeTerminal(core, term.cols, term.rows);
-    restartTerminalStream(core);
-    const observer = new ResizeObserver(() => {
+    const fitAndResize = () => {
+      if (termRef.current !== term) return;
       fit.fit();
       void resizeTerminal(core, term.cols, term.rows);
+    };
+    fitAndResize();
+    const animationFrame = requestAnimationFrame(fitAndResize);
+    void document.fonts?.ready.then(fitAndResize);
+    term.focus();
+    restartTerminalStream(core);
+    const observer = new ResizeObserver(() => {
+      fitAndResize();
     });
     observer.observe(container);
 
     return () => {
+      cancelAnimationFrame(animationFrame);
       observer.disconnect();
       onData.dispose();
       term.dispose();
@@ -118,7 +124,12 @@ export function TerminalPanel() {
     for (const chunk of chunks) {
       if (chunk.seq <= processed) continue;
       if (chunk.reset) term.reset();
-      if (chunk.bytes.length > 0) term.write(chunk.bytes);
+      if (chunk.bytes.length > 0) {
+        term.write(chunk.bytes, () => {
+          term.scrollToBottom();
+          term.refresh(0, term.rows - 1);
+        });
+      }
       processed = chunk.seq;
     }
     processedSeqRef.current = processed;
