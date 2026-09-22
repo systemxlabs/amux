@@ -238,8 +238,8 @@ fn plan_selector(core: &Core, cx: &mut Context<AmuxApp>) -> Option<AnyElement> {
                 .small()
                 .label(ui::truncate(&plan.name, 18))
                 .on_click(cx.listener({
-                    let text = plan.plan.clone();
-                    move |this, _, window, cx| this.set_plan(text.clone(), window, cx)
+                    let plan = plan.clone();
+                    move |this, _, window, cx| this.set_plan(plan.clone(), window, cx)
                 })),
         );
     }
@@ -433,7 +433,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         for workspace in recent {
             let path = workspace.workspace.clone();
             let app = app.clone();
-            let value = path.clone();
+            let value = workspace.clone();
             let delete_app = app.clone();
             let delete_target = workspace.clone();
             rows = rows.child(

@@ -18,6 +18,9 @@ use crate::dialog::{self, FormTarget};
 use crate::state::{Core, SettingsTab, SharedCore};
 use crate::ui;
 
+#[derive(Clone)]
+struct ProjectOrderDrag(String);
+
 /// 内置智能体 API 格式的顺序（索引与单选组一一对应）。
 const API_FORMATS: [ApiFormat; 3] = [
     ApiFormat::ChatCompletions,
@@ -684,11 +687,21 @@ fn projects_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
         let name = project.name.clone();
         list = list.child(
             h_flex()
+                .id(SharedString::from(format!("project-card-{name}")))
                 .gap_2()
                 .items_center()
                 .p_2()
                 .bg(theme.muted)
                 .rounded_md()
+                .on_drag(ProjectOrderDrag(name.clone()), |_, _, _, cx| {
+                    cx.new(|_| Empty)
+                })
+                .on_drop(cx.listener({
+                    let target = name.clone();
+                    move |this, drag: &ProjectOrderDrag, _, cx| {
+                        this.reorder_project(drag.0.clone(), target.clone(), cx)
+                    }
+                }))
                 .child(
                     v_flex()
                         .flex_1()

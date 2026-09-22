@@ -40,6 +40,8 @@ const TREE_INDENT: f32 = 14.0;
 
 struct WorkspaceTreeResizeDrag;
 struct DiffTreeResizeDrag;
+#[derive(Clone)]
+struct SessionProjectDrag(ListEntry);
 
 /// 改动面板图标：文件 diff（文件轮廓内含 +/−）。gpui-component 默认图标集无
 /// 对应图标，SVG 由应用自有资产提供（main.rs `AmuxAssets`）。
@@ -90,24 +92,76 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
     }
 
     for (name, entries) in groups {
-        list = list.child(
-            h_flex().px_1().py_0p5().gap_1().items_center().child(
-                Label::new(name.unwrap_or_else(|| "未归属".to_string()))
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground),
-            ),
-        );
-        for entry in entries {
+        let project = name.clone();
+        let group_key = name.clone().unwrap_or_default();
+        let collapsed = this.collapsed_project_groups.contains(&group_key);
+        let loaded = this
+            .project_group_loaded
+            .get(&group_key)
+            .copied()
+            .unwrap_or(5);
+        let has_more = entries.len() > loaded;
+        let mut group = v_flex()
+            .w_full()
+            .gap_1()
+            .on_drop(cx.listener(move |this, drag: &SessionProjectDrag, _, cx| {
+                this.set_entry_project(drag.0.clone(), project.clone(), cx);
+            }))
+            .child(
+                Button::new(SharedString::from(format!("project-group-{group_key}")))
+                    .xsmall()
+                    .ghost()
+                    .w_full()
+                    .on_click(cx.listener({
+                        let key = group_key.clone();
+                        move |this, _, _, cx| this.toggle_project_group(key.clone(), cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_start()
+                            .gap_1()
+                            .child(
+                                Label::new(if collapsed { "▸" } else { "▾" })
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                Label::new(name.unwrap_or_else(|| "未归属".to_string()))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    ),
+            );
+        if collapsed {
+            list = list.child(group);
+            continue;
+        }
+        for entry in entries.into_iter().take(loaded) {
             match &entry {
                 ListEntry::Session(session) => {
-                    list = list.child(session_row(session, false, core, this, cx));
+                    group = group.child(session_row(session, false, core, this, cx));
                 }
                 ListEntry::Workflow(workflow) => {
-                    list = list.child(workflow_row(workflow, core, this, cx));
+                    group = group.child(workflow_row(workflow, core, this, cx));
                 }
             }
         }
+        if has_more {
+            group = group.child(
+                Button::new(SharedString::from(format!("project-more-{group_key}")))
+                    .xsmall()
+                    .ghost()
+                    .w_full()
+                    .label("显示更多")
+                    .on_click(cx.listener({
+                        let key = group_key.clone();
+                        move |this, _, _, cx| this.show_more_project_group(key.clone(), cx)
+                    })),
+            );
+        }
+        list = list.child(group);
     }
     if core.entries.is_empty() {
         list = list.child(
@@ -343,6 +397,7 @@ fn list_row(
     let row_id = format!("sess-row-{id}");
     let open_id = id.to_string();
     let toggle_workflow = matches!(entry, Some(ListEntry::Workflow(_)));
+    let draggable_entry = entry.clone();
     let entry = entry.clone();
     let app = cx.entity();
     let project_names: Vec<String> = projects
@@ -363,6 +418,13 @@ fn list_row(
             }
             this.open_entry(&open_id, cx);
         }))
+        .map(|this| {
+            if let Some(entry) = draggable_entry {
+                this.on_drag(SessionProjectDrag(entry), |_, _, _, cx| cx.new(|_| Empty))
+            } else {
+                this
+            }
+        })
         .context_menu(move |menu, _, _| {
             let Some(entry) = &entry else {
                 return menu;

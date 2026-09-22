@@ -140,18 +140,28 @@ export function NewSessionView() {
   };
 
   /** 选中已保存计划：填入输入框并收起上拉框。 */
-  const pickPlan = (name: string, text: string): void => {
+  const pickPlan = (item: (typeof state.settings.plans)[number]): void => {
     core.update((draft) => {
-      draft.newSession.plan = text;
-      draft.newSession.selectedPlan = name;
+      draft.newSession.plan = item.plan;
+      draft.newSession.selectedPlan = item.name;
+      draft.newSession.project =
+        item.lastUsedProject !== undefined &&
+        state.settings.projects.some((project) => project.name === item.lastUsedProject)
+          ? item.lastUsedProject
+          : undefined;
     });
     setPlanPopup(null);
   };
 
   /** 选中最近使用的工作目录：填入并收起浮层（选定项，不再联想）。 */
-  const pickRecentWorkspace = (value: string): void => {
+  const pickRecentWorkspace = (item: (typeof state.recentWorkspaces)[number]): void => {
     core.update((draft) => {
-      draft.newSession.workspace = value;
+      draft.newSession.workspace = item.workspace;
+      draft.newSession.project =
+        item.lastUsedProject !== undefined &&
+        state.settings.projects.some((project) => project.name === item.lastUsedProject)
+          ? item.lastUsedProject
+          : undefined;
       draft.newSession.suggestions = [];
     });
     setWorkspacePopup(null);
@@ -264,7 +274,7 @@ export function NewSessionView() {
                 >
                   <button
                     type="button"
-                    onClick={() => pickRecentWorkspace(item.workspace)}
+                    onClick={() => pickRecentWorkspace(item)}
                     className="min-w-0 flex-1 truncate px-2 py-2 text-left text-sm lg:py-1"
                   >
                     {item.workspace}
@@ -383,7 +393,7 @@ export function NewSessionView() {
                     type="button"
                     data-slot="plan-choice"
                     data-selected={selectedPlan === item.name ? "true" : "false"}
-                    onClick={() => pickPlan(item.name, item.plan)}
+                    onClick={() => pickPlan(item)}
                     className={cn(
                       "flex cursor-pointer flex-col items-start gap-1 px-2 py-2 text-left hover:bg-accent lg:py-1",
                       selectedPlan === item.name && "bg-accent",

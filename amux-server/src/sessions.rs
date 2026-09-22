@@ -149,10 +149,11 @@ impl SessionService {
         let config = Arc::clone(&self.config);
         let machine = machine.to_string();
         let workspace = workspace.to_string();
+        let project = session.project.clone();
         let to_store = session.clone();
         tokio::task::spawn_blocking(move || {
             let stored = store.insert_session(&to_store);
-            config.record_workspace(&machine, &workspace);
+            config.record_workspace(&machine, &workspace, project.as_deref());
             stored
         })
         .await

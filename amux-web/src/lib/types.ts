@@ -181,9 +181,18 @@ export type ConfigureWorkflowRequest = { title?: string; project?: string };
 export type OpAck = { ok: boolean };
 
 export type Skill = { name: string; description: string };
-export type WorkflowPlanItem = { name: string; plan: string };
+export type WorkflowPlanItem = {
+  name: string;
+  plan: string;
+  lastUsedProject?: string;
+};
 export type Project = { name: string; description: string };
-export type RecentWorkspace = { machine: string; workspace: string; lastUsed: number };
+export type RecentWorkspace = {
+  machine: string;
+  workspace: string;
+  lastUsedProject?: string;
+  lastUsed: number;
+};
 export type QuickCommand = { name: string; prompt: string };
 export type ApiFormat = "chat_completions" | "responses" | "messages";
 export type OrchestratorConfig = {

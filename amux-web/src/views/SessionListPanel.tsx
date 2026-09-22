@@ -3,7 +3,7 @@
 // 顶部「+」进入新建会话视图；普通会话与工作流会话统一排序，工作流会话可展开关联普通会话。
 // 会话按最近活跃倒序排列（最新在上），滚到最下方时按分页模型加载更早一页。
 
-import { Fragment, useEffect, useRef, useState, type ReactElement, type UIEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -26,14 +26,11 @@ import {
   showNewSession,
   toggleExpand,
 } from "../core/actions";
-import { loadOlderList } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
 import { canExpand, listRows } from "../lib/list";
-import { pageSizeForViewport } from "../lib/paging";
 import {
   entryCreatedAt,
   entryId,
-  entryProject,
   entryState,
   entryTitle,
   type ListEntry,
@@ -47,7 +44,6 @@ import { cn } from "../lib/utils";
 export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
   const core = useCore();
   const state = useCoreState();
-  const scrollRef = useRef<HTMLDivElement>(null);
   /** 本次行内重命名是否已由按键结束：结束时不再由 blur 重复提交 */
   const handledRef = useRef(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -60,7 +56,10 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
   } | null>(null);
   const [deleting, setDeleting] = useState<ListEntry | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(new Set());
-  const [loadedPerGroup, setLoadedPerGroup] = useState<Record<string, number>>({});
+  const [groupData, setGroupData] = useState<
+    Record<string, { entries: ListEntry[]; loaded: number; hasMore: boolean; loading: boolean }>
+  >({});
+  const loadedCountsRef = useRef<Record<string, number>>({});
   const [dragEntry, setDragEntry] = useState<ListEntry | null>(null);
 
   /** 组内首页条数（docs/PRD.md「会话列表视图」）。 */
@@ -75,8 +74,60 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     });
   };
 
-  const showMore = (key: string): void => {
-    setLoadedPerGroup((current) => ({ ...current, [key]: (current[key] ?? GROUP_PAGE) + GROUP_PAGE }));
+  const loadGroup = useCallback(
+    async (key: string, project: string | undefined, limit: number): Promise<void> => {
+      const client = core.client;
+      if (client === null) return;
+      loadedCountsRef.current[key] = limit;
+      setGroupData((current) => ({
+        ...current,
+        [key]: {
+          entries: current[key]?.entries ?? [],
+          loaded: current[key]?.loaded ?? 0,
+          hasMore: current[key]?.hasMore ?? false,
+          loading: true,
+        },
+      }));
+      try {
+        const [sessions, workflows] = await Promise.all([
+          client.sessions(limit, 0, project ?? ""),
+          client.workflows(limit, 0, project ?? ""),
+        ]);
+        const entries: ListEntry[] = [
+          ...sessions.sessions.map((session): ListEntry => ({ kind: "session", session })),
+          ...workflows.workflows.map((workflow): ListEntry => ({ kind: "workflow", workflow })),
+        ].sort(
+          (a, b) =>
+            entryCreatedAt(b) - entryCreatedAt(a) || entryId(a).localeCompare(entryId(b)),
+        );
+        setGroupData((current) => ({
+          ...current,
+          [key]: {
+            entries,
+            loaded: limit,
+            hasMore: sessions.hasMore || workflows.hasMore,
+            loading: false,
+          },
+        }));
+      } catch (error) {
+        setGroupData((current) => ({
+          ...current,
+          [key]: {
+            entries: current[key]?.entries ?? [],
+            loaded: current[key]?.loaded ?? 0,
+            hasMore: current[key]?.hasMore ?? false,
+            loading: false,
+          },
+        }));
+        core.failure(`加载项目会话失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    [core],
+  );
+
+  const showMore = (group: { key: string; project: string | undefined }): void => {
+    const current = groupData[group.key];
+    void loadGroup(group.key, group.project, (current?.loaded ?? GROUP_PAGE) + GROUP_PAGE);
   };
 
   const renderRow = (row: { entry: ListEntry; depth: number }): ReactElement => {
@@ -239,41 +290,6 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     { label: "删除", danger: true, onSelect: () => setDeleting(entry) },
   ];
 
-  // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算
-  useEffect(() => {
-    const node = scrollRef.current;
-    if (!node) return;
-    const updatePageSize = () => {
-      const size = pageSizeForViewport(node.clientHeight, node.scrollHeight, state.entries.length);
-      core.update((next) => {
-        next.listPaging.pageSize = size;
-      });
-    };
-    updatePageSize();
-    const observer = new ResizeObserver(updatePageSize);
-    observer.observe(node);
-    window.addEventListener("resize", updatePageSize);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", updatePageSize);
-    };
-  }, [core, state.entries.length]);
-
-  const handleScroll = (event: UIEvent<HTMLDivElement>): void => {
-    const node = event.currentTarget;
-    const pageSize = pageSizeForViewport(node.clientHeight, node.scrollHeight, state.entries.length);
-    if (pageSize !== state.listPaging.pageSize) {
-      core.update((next) => {
-        next.listPaging.pageSize = pageSize;
-      });
-    }
-    // 会话列表展示顺序为最新在前，更老页在靠近底部时拉取并预取一页
-    const nearBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 8;
-    if (nearBottom && state.listPaging.hasOlder && !state.listPaging.loadingOlder) {
-      void loadOlderList(core);
-    }
-  };
-
   // 按项目分组：项目组按配置顺序，未归属项目在列表末端（docs/PRD.md「会话列表视图」）。
   const groups: {
     key: string;
@@ -287,27 +303,35 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     entries: [],
   }));
   groups.push({ key: "project:", name: undefined, project: undefined, entries: [] });
-  for (const entry of state.entries) {
-    const project = entryProject(entry);
-    const group = groups.find((candidate) => candidate.project === project);
-    if (group) group.entries.push(entry);
-  }
-  for (const group of groups) {
-    group.entries.sort(
-      (a, b) =>
-        entryCreatedAt(b) - entryCreatedAt(a) || entryId(a).localeCompare(entryId(b)),
-    );
-  }
+  const projectsKey = groups.map((group) => `${group.project ?? ""}:${group.key}`).join("|");
+  useEffect(() => {
+    const projectGroups = [
+      ...state.settings.projects.map((project) => ({
+        key: `project:${project.name}`,
+        project: project.name as string | undefined,
+      })),
+      { key: "project:", project: undefined },
+    ];
+    for (const group of projectGroups) {
+      if (collapsedGroups.has(group.key)) continue;
+      void loadGroup(
+        group.key,
+        group.project,
+        loadedCountsRef.current[group.key] ?? GROUP_PAGE,
+      );
+    }
+  }, [collapsedGroups, loadGroup, projectsKey, state.entries, state.settings.projects]);
+
   const visibleGroups = groups.map((group) => {
     const collapsed = collapsedGroups.has(group.key);
-    const loaded = loadedPerGroup[group.key] ?? GROUP_PAGE;
-    const visibleEntries = collapsed ? [] : group.entries.slice(0, loaded);
+    const data = groupData[group.key];
+    const visibleEntries = collapsed ? [] : (data?.entries ?? []);
     return {
       ...group,
       collapsed,
-      loaded,
       rows: listRows(visibleEntries, new Set(state.expanded)),
-      hasMore: group.entries.length > loaded,
+      loading: data?.loading ?? false,
+      hasMore: data?.hasMore ?? false,
     };
   });
 
@@ -329,10 +353,8 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
         </Button>
       </div>
       <div
-        ref={scrollRef}
         data-slot="session-list"
         className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-2"
-        onScroll={handleScroll}
       >
         {visibleGroups.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">暂无会话</p>
@@ -367,7 +389,10 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                 )}
                 <span>{group.name ?? "未归属"}</span>
               </button>
-              {!group.collapsed && group.rows.length === 0 ? (
+              {!group.collapsed && group.loading && group.rows.length === 0 ? (
+                <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
+              ) : null}
+              {!group.collapsed && !group.loading && group.rows.length === 0 ? (
                 <p className="px-2 py-1 text-xs text-muted-foreground">暂无会话</p>
               ) : null}
               {!group.collapsed
@@ -380,7 +405,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                 <button
                   type="button"
                   data-slot="session-project-show-more"
-                  onClick={() => showMore(group.key)}
+                  onClick={() => showMore(group)}
                   className="cursor-pointer rounded-md px-2 py-1 text-center text-xs text-muted-foreground hover:bg-accent"
                 >
                   显示更多

@@ -16,6 +16,7 @@ import type {
   OrchestratorConfig,
   Project,
   QuickCommand,
+  RecentWorkspace,
   Session,
   SessionConfigOption,
   SessionPlanEntry,
@@ -149,7 +150,7 @@ export type CoreState = {
   inputDraft: string;
   newSession: NewSessionState;
   settings: SettingsState;
-  recentWorkspaces: { machine: string; workspace: string; lastUsed: number }[];
+  recentWorkspaces: RecentWorkspace[];
   attachments: Attachment[];
 };
 

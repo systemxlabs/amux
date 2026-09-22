@@ -1,6 +1,6 @@
 //! 根视图：窗口外壳（标题栏、三栏与拖拽调宽）、设置浮窗与轮询节拍。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,6 +129,10 @@ pub struct AmuxApp {
     pub diff_comment_input: Entity<InputState>,
     /// 改动审查：代码行拖动选择
     pub diff_line_selection: Option<diff::LineSelection>,
+    /// 会话列表：已折叠的项目组（空串表示未归属）
+    pub collapsed_project_groups: HashSet<String>,
+    /// 会话列表：各项目组当前显示的会话数
+    pub project_group_loaded: HashMap<String, usize>,
     /// 改动审查：改动区域滚动句柄（点击文件时定位）
     pub diff_scroll: ScrollHandle,
     /// 改动审查：文件树宽度
@@ -375,6 +379,8 @@ impl AmuxApp {
             diff_tree_visible: true,
             diff_comment_target: None,
             diff_line_selection: None,
+            collapsed_project_groups: HashSet::new(),
+            project_group_loaded: HashMap::new(),
             diff_scroll: ScrollHandle::new(),
             diff_tree_width: panels::DIFF_TREE_WIDTH,
             diff_tree_drag: None,
@@ -1069,12 +1075,21 @@ impl AmuxApp {
     /// 选定最近工作目录：填入并收起上下拉框（最近目录是选定项，不再联想）。
     pub fn select_recent_workspace(
         &mut self,
-        path: String,
+        target: RecentWorkspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspace_input
-            .update(cx, |state, cx| state.set_value(path, window, cx));
+        self.workspace_input.update(cx, |state, cx| {
+            state.set_value(target.workspace.clone(), window, cx)
+        });
+        self.with_core(|core| {
+            core.new_session.project = target.last_used_project.filter(|project| {
+                core.settings
+                    .projects
+                    .iter()
+                    .any(|candidate| &candidate.name == project)
+            });
+        });
         self.dismiss_workspace_popups(cx);
     }
 
@@ -1110,9 +1125,22 @@ impl AmuxApp {
     }
 
     /// 填入工作流计划（已保存计划）。
-    pub fn set_plan(&mut self, plan: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_plan(
+        &mut self,
+        plan: WorkflowPlanItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.plan_input
-            .update(cx, |state, cx| state.set_value(plan, window, cx));
+            .update(cx, |state, cx| state.set_value(plan.plan, window, cx));
+        self.with_core(|core| {
+            core.new_session.project = plan.last_used_project.filter(|project| {
+                core.settings
+                    .projects
+                    .iter()
+                    .any(|candidate| &candidate.name == project)
+            });
+        });
         cx.notify();
     }
 
@@ -1533,6 +1561,18 @@ impl AmuxApp {
         let form = self.with_core(|core| core.new_session.clone());
         let workspace = self.workspace_input.read(cx).value().trim().to_string();
         let plan = self.plan_input.read(cx).value().trim().to_string();
+        let selected_plan = if form.workflow_mode {
+            self.with_core(|core| {
+                core.settings
+                    .plans
+                    .iter()
+                    .find(|item| item.plan == plan)
+                    .map(|item| item.name.clone())
+            })
+        } else {
+            None
+        };
+        let plan_project = form.project.clone();
         let task = if form.workflow_mode {
             if plan.is_empty() {
                 return;
@@ -1569,6 +1609,14 @@ impl AmuxApp {
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(target) => {
+                        if let Some(plan_name) = selected_plan {
+                            let mut plans = this.with_core(|core| core.settings.plans.clone());
+                            if let Some(item) = plans.iter_mut().find(|item| item.name == plan_name)
+                            {
+                                item.last_used_project = plan_project;
+                                this.save_list(SettingsList::Plans(plans), cx);
+                            }
+                        }
                         this.with_core(|core| {
                             let workflow_mode = core.new_session.workflow_mode;
                             core.new_session = Default::default();
@@ -1883,6 +1931,19 @@ impl AmuxApp {
     /// 点击文件：右侧改动区域滚动到该文件。
     pub fn scroll_to_file(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.diff_scroll.scroll_to_top_of_item(ix);
+        cx.notify();
+    }
+
+    /// 折叠/展开会话列表项目组。
+    pub fn toggle_project_group(&mut self, key: String, cx: &mut Context<Self>) {
+        toggle_set(&mut self.collapsed_project_groups, key);
+        cx.notify();
+    }
+
+    /// 项目组末尾「显示更多」：该组多展示一页。
+    pub fn show_more_project_group(&mut self, key: String, cx: &mut Context<Self>) {
+        let loaded = self.project_group_loaded.entry(key).or_insert(5);
+        *loaded += 5;
         cx.notify();
     }
 
@@ -2379,7 +2440,18 @@ impl AmuxApp {
             return false;
         }
         let mut list = self.with_core(|core| core.settings.plans.clone());
-        let item = WorkflowPlanItem { name, plan };
+        let last_used_project = match &target {
+            FormTarget::New => None,
+            FormTarget::Edit(old) => list
+                .iter()
+                .find(|item| &item.name == old)
+                .and_then(|item| item.last_used_project.clone()),
+        };
+        let item = WorkflowPlanItem {
+            name,
+            plan,
+            last_used_project,
+        };
         match &target {
             FormTarget::New => list.push(item),
             FormTarget::Edit(old) => {
@@ -2567,6 +2639,20 @@ impl AmuxApp {
             }
         });
         cx.notify();
+    }
+
+    /// 项目卡片拖拽排序：把源项目移动到目标项目当前位置。
+    pub fn reorder_project(&mut self, from: String, target: String, cx: &mut Context<Self>) {
+        let list = self.with_core(|core| core.settings.projects.clone());
+        let Some(from_ix) = list.iter().position(|item| item.name == from) else {
+            return;
+        };
+        let Some(target_ix) = list.iter().position(|item| item.name == target) else {
+            return;
+        };
+        if from_ix != target_ix {
+            self.move_project(from, target_ix as isize - from_ix as isize, cx);
+        }
     }
 
     /// 保存内置智能体配置；保存结果以弹窗反馈（docs/DESIGN.md 连接/内置智能体设置）。

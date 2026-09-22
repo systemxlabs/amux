@@ -41,7 +41,9 @@ export function WorkflowPlansSection() {
     const next =
       form.index === null
         ? [...plans, { name, plan: form.plan }]
-        : plans.map((item, index) => (index === form.index ? { name, plan: form.plan } : item));
+        : plans.map((item, index) =>
+            index === form.index ? { ...item, name, plan: form.plan } : item,
+          );
     void savePlans(core, next);
     setForm(null);
   }

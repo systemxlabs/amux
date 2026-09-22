@@ -95,7 +95,23 @@ impl ConfigStore {
         if projects.len() == before {
             return Err(format!("项目不存在: {name}"));
         }
-        write_json(&self.path("projects"), &projects)
+        write_json(&self.path("projects"), &projects)?;
+
+        let mut plans = self.workflow_plans();
+        for plan in &mut plans {
+            if plan.last_used_project.as_deref() == Some(name) {
+                plan.last_used_project = None;
+            }
+        }
+        self.set_workflow_plans(&plans)?;
+
+        let mut recent = self.recent.lock();
+        for workspace in recent.iter_mut() {
+            if workspace.last_used_project.as_deref() == Some(name) {
+                workspace.last_used_project = None;
+            }
+        }
+        write_json(&recent_path(&self.home), &*recent)
     }
 
     /// 更新项目顺序（docs/DESIGN.md「Client-Server 通信」`POST /config/projects/order`）。
@@ -131,7 +147,7 @@ impl ConfigStore {
     }
 
     /// 记录最近工作目录：同一 (machine, workspace) 只保留最新一条，按时间倒序、只留最近若干条。
-    pub fn record_workspace(&self, machine: &str, workspace: &str) {
+    pub fn record_workspace(&self, machine: &str, workspace: &str, project: Option<&str>) {
         let now = now_ms();
         let mut recent = self.recent.lock();
         recent.retain(|item| !(item.machine == machine && item.workspace == workspace));
@@ -141,6 +157,7 @@ impl ConfigStore {
             RecentWorkspace {
                 machine: machine.to_string(),
                 workspace: workspace.to_string(),
+                last_used_project: project.map(str::to_string),
                 last_used: now,
             },
         );
@@ -227,12 +244,13 @@ mod tests {
             .unwrap();
         assert_eq!(store.skills().len(), 1);
 
-        store.record_workspace("pc", "/w1");
-        store.record_workspace("pc", "/w2");
-        store.record_workspace("pc", "/w1");
+        store.record_workspace("pc", "/w1", Some("project-a"));
+        store.record_workspace("pc", "/w2", None);
+        store.record_workspace("pc", "/w1", Some("project-a"));
         let recent = store.recent_workspaces();
         assert_eq!(recent.len(), 2, "同一 (machine, workspace) 只保留一条");
         assert_eq!(recent[0].workspace, "/w1", "最近使用的排在最前");
+        assert_eq!(recent[0].last_used_project.as_deref(), Some("project-a"));
 
         // 重新打开后仍能读回
         let reopened = ConfigStore::new(dir.path().to_path_buf());
@@ -245,13 +263,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(dir.path().to_path_buf());
 
-        store.record_workspace("pc", "/w1");
-        store.record_workspace("pc", "/w2");
+        store.record_workspace("pc", "/w1", None);
+        store.record_workspace("pc", "/w2", None);
 
         store
             .set_recent_workspaces(&[RecentWorkspace {
                 machine: "pc".into(),
                 workspace: "/w3".into(),
+                last_used_project: Some("project-a".into()),
                 last_used: 3,
             }])
             .unwrap();
@@ -265,11 +284,13 @@ mod tests {
             RecentWorkspace {
                 machine: "pc".into(),
                 workspace: "/dup".into(),
+                last_used_project: None,
                 last_used: 1,
             },
             RecentWorkspace {
                 machine: "pc".into(),
                 workspace: "/dup".into(),
+                last_used_project: None,
                 last_used: 2,
             },
         ];
@@ -300,10 +321,12 @@ mod tests {
             WorkflowPlanItem {
                 name: "w".into(),
                 plan: "p".into(),
+                last_used_project: None,
             },
             WorkflowPlanItem {
                 name: "w".into(),
                 plan: "p2".into(),
+                last_used_project: None,
             },
         ];
         assert!(

@@ -43,7 +43,9 @@ export function listRows(entries: readonly ListEntry[], expanded: ReadonlySet<st
   for (const entry of entries) {
     rows.push({ entry, depth: 0 });
     if (entry.kind !== "workflow" || !expanded.has(entry.workflow.id)) continue;
-    const linked = [...entry.workflow.linkedSessions].sort((a, b) => b.updatedAt - a.updatedAt);
+    const linked = [...entry.workflow.linkedSessions].sort(
+      (a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id),
+    );
     for (const session of linked) {
       rows.push({ entry: { kind: "session", session }, depth: 1 });
     }

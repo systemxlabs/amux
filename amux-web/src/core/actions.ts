@@ -364,8 +364,19 @@ export async function createWorkflow(core: Core): Promise<void> {
   if (!core.client) return;
   const plan = core.state.newSession.plan.trim();
   if (plan === "") return;
+  const selectedPlan = core.state.newSession.selectedPlan;
+  const project = core.state.newSession.project;
   try {
-    const workflow = await core.client.createWorkflow(plan, null, core.state.newSession.project);
+    const workflow = await core.client.createWorkflow(plan, null, project);
+    if (selectedPlan !== null) {
+      const plans = core.state.settings.plans.map((item) =>
+        item.name === selectedPlan ? { ...item, lastUsedProject: project } : item,
+      );
+      await core.client.setWorkflowPlans(plans);
+      core.update((state) => {
+        state.settings.plans = plans;
+      });
+    }
     core.update((state) => {
       state.newSession = { ...initialNewSession(), mode: state.newSession.mode };
     });

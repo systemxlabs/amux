@@ -109,7 +109,11 @@ impl Store {
             .sessions_all()
             .into_iter()
             .filter(|session| !linked.contains(&session.id))
-            .filter(|session| project.is_none() || session.project.as_deref() == project)
+            .filter(|session| match project {
+                None => true,
+                Some("") => session.project.is_none(),
+                Some(project) => session.project.as_deref() == Some(project),
+            })
             .collect();
         let has_more = all.len() > offset + limit;
         let page = all.into_iter().skip(offset).take(limit).collect();
@@ -431,14 +435,17 @@ impl Store {
         let conn = self.workflows.lock();
         let mut stmt = match conn.prepare(
             "SELECT id, title, state, plan, project, created_at, updated_at FROM workflows
+             WHERE (?3 IS NULL OR (?3 = '' AND project IS NULL) OR project = ?3)
              ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return (Vec::new(), false),
         };
-        let rows = stmt.query_map(params![(limit + 1) as i64, offset as i64], row_to_workflow);
+        let rows = stmt.query_map(
+            params![(limit + 1) as i64, offset as i64, project],
+            row_to_workflow,
+        );
         let mut workflows = collect(rows);
-        workflows.retain(|row| project.is_none() || row.project.as_deref() == project);
         let has_more = workflows.len() > limit;
         workflows.truncate(limit);
         (workflows, has_more)
@@ -715,21 +722,44 @@ mod tests {
     }
 
     #[test]
-    fn linked_sessions_sorted_by_session_updated_at() {
+    fn linked_sessions_sorted_by_session_created_at() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        for (id, updated_at) in [("s1", 100u64), ("s2", 300), ("s3", 200)] {
+        for (id, created_at) in [("s1", 100u64), ("s2", 300), ("s3", 200)] {
             let mut s = session(id, "pc", "codex");
-            s.updated_at = updated_at;
+            s.created_at = created_at;
             store.insert_session(&s).unwrap();
         }
         store.insert_workflow("w1", "wf", SessionState::Idle, "plan", None, 1);
-        // 按任意顺序关联，返回时应按各自最近活跃倒序
+        // 按任意顺序关联，返回时应按创建时间倒序
         store.link_session("w1", "s3");
         store.link_session("w1", "s1");
         store.link_session("w1", "s2");
 
         assert_eq!(store.linked_sessions("w1"), ["s2", "s3", "s1"]);
+    }
+
+    #[test]
+    fn workflows_page_filters_project_before_pagination() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_workflow("a1", "a1", SessionState::Idle, "p", Some("p"), 10);
+        store.insert_workflow("b1", "b1", SessionState::Idle, "q", Some("q"), 9);
+        store.insert_workflow("a2", "a2", SessionState::Idle, "p", Some("p"), 8);
+
+        let (first, has_more) = store.workflows_page(1, 0, Some("p"));
+        assert_eq!(
+            first.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a1"]
+        );
+        assert!(has_more);
+
+        let (second, has_more) = store.workflows_page(1, 1, Some("p"));
+        assert_eq!(
+            second.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a2"]
+        );
+        assert!(!has_more);
     }
 
     #[test]

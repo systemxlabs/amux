@@ -313,6 +313,9 @@ pub struct Skill {
 pub struct WorkflowPlanItem {
     pub name: String,
     pub plan: String,
+    /// 最近一次使用该计划时选择的项目
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_project: Option<String>,
 }
 
 /// 项目配置项。
@@ -343,6 +346,9 @@ pub struct UpdateProjectRequest {
 pub struct RecentWorkspace {
     pub machine: String,
     pub workspace: String,
+    /// 最近一次使用该工作目录时选择的项目
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_project: Option<String>,
     pub last_used: u64,
 }
 
