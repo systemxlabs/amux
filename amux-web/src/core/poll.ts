@@ -618,7 +618,8 @@ export async function refreshSettings(core: Core, tab: SettingsTab): Promise<voi
     case "orchestrator":
       return refreshOrchestrator(core);
     case "quickCommands":
-      return refreshQuickCommands(core);
+      await Promise.all([refreshQuickCommands(core), refreshProjects(core)]);
+      return;
     case "skills":
       return refreshSkills(core);
     case "plans":

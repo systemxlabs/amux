@@ -364,6 +364,9 @@ pub struct RecentWorkspace {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuickCommand {
+    /// 所属项目；None = 通用快捷指令
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub name: String,
     pub prompt: String,
 }

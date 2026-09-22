@@ -139,6 +139,10 @@ export function InteractionView() {
     : state.settings.orchestrator.status === "ready" && state.settings.orchestrator.config !== null;
   const workdir = isSession && detail.session ? rootDir(detail.session) : "";
   const workflowPlan = !isSession && detail.workflow ? detail.workflow.plan : "";
+  const project = detail.session?.project ?? detail.workflow?.project;
+  const quickCommands = state.settings.quickCommands.filter(
+    (command) => command.project === undefined || command.project === project,
+  );
 
   // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算（不只是滚动事件）
   useEffect(() => {
@@ -276,14 +280,14 @@ export function InteractionView() {
         </div>
       ) : null}
 
-      {state.settings.quickCommands.length > 0 ? (
+      {quickCommands.length > 0 ? (
         <div
           data-slot="quick-command-bar"
           className="flex flex-wrap gap-1 border-t border-border px-3 py-2"
         >
-          {state.settings.quickCommands.map((command) => (
+          {quickCommands.map((command) => (
             <Button
-              key={command.name}
+              key={JSON.stringify([command.project ?? null, command.name])}
               data-slot="quick-command-button"
               variant="secondary"
               size="sm"

@@ -193,7 +193,7 @@ export type RecentWorkspace = {
   lastUsedProject?: string;
   lastUsed: number;
 };
-export type QuickCommand = { name: string; prompt: string };
+export type QuickCommand = { project?: string; name: string; prompt: string };
 export type ApiFormat = "chat_completions" | "responses" | "messages";
 export type OrchestratorConfig = {
   apiFormat: ApiFormat;

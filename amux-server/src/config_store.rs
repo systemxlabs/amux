@@ -52,7 +52,17 @@ impl ConfigStore {
     }
 
     pub fn set_quick_commands(&self, commands: &[QuickCommand]) -> Result<(), String> {
-        reject_duplicate_names(commands, |item| &item.name, "快捷指令")?;
+        let mut seen = std::collections::HashSet::new();
+        for command in commands {
+            let key = (command.project.as_deref(), command.name.as_str());
+            if !seen.insert(key) {
+                return Err(format!(
+                    "快捷指令重复: {}:{}",
+                    command.project.as_deref().unwrap_or("通用"),
+                    command.name
+                ));
+            }
+        }
         write_json(&self.path("quick_commands"), commands)
     }
 
@@ -87,7 +97,7 @@ impl ConfigStore {
         write_json(&self.path("projects"), &projects)
     }
 
-    /// 删除指定项目。
+    /// 删除指定项目，并级联删除绑定到该项目的快捷指令。
     pub fn delete_project(&self, name: &str) -> Result<(), String> {
         let mut projects = self.projects();
         let before = projects.len();
@@ -96,6 +106,10 @@ impl ConfigStore {
             return Err(format!("项目不存在: {name}"));
         }
         write_json(&self.path("projects"), &projects)?;
+
+        let mut commands = self.quick_commands();
+        commands.retain(|command| command.project.as_deref() != Some(name));
+        self.set_quick_commands(&commands)?;
 
         let mut plans = self.workflow_plans();
         for plan in &mut plans {
@@ -170,7 +184,7 @@ impl ConfigStore {
     }
 }
 
-/// 配置项 name 必须唯一（docs/DESIGN.md 各「存储」一节）。
+/// 技能、工作流计划等配置项的 name 必须唯一（docs/DESIGN.md 各「存储」一节）。
 fn reject_duplicate_names<T>(
     items: &[T],
     name: impl Fn(&T) -> &str,
@@ -336,17 +350,71 @@ mod tests {
 
         let commands = [
             QuickCommand {
+                project: Some("project-a".into()),
                 name: "c".into(),
                 prompt: "a".into(),
             },
             QuickCommand {
+                project: Some("project-a".into()),
                 name: "c".into(),
                 prompt: "b".into(),
             },
         ];
         assert!(
             store.set_quick_commands(&commands).is_err(),
-            "快捷指令 name 重复应报错"
+            "同一项目下快捷指令 name 重复应报错"
         );
+
+        let same_name_in_different_projects = [
+            QuickCommand {
+                project: Some("project-a".into()),
+                name: "c".into(),
+                prompt: "a".into(),
+            },
+            QuickCommand {
+                project: Some("project-b".into()),
+                name: "c".into(),
+                prompt: "b".into(),
+            },
+        ];
+        assert!(
+            store
+                .set_quick_commands(&same_name_in_different_projects)
+                .is_ok(),
+            "不同项目下快捷指令可以同名"
+        );
+    }
+
+    #[test]
+    fn deleting_project_removes_its_quick_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+        store
+            .add_project(&Project {
+                name: "project-a".into(),
+                description: String::new(),
+            })
+            .unwrap();
+        store
+            .set_quick_commands(&[
+                QuickCommand {
+                    project: Some("project-a".into()),
+                    name: "项目指令".into(),
+                    prompt: "project".into(),
+                },
+                QuickCommand {
+                    project: None,
+                    name: "通用指令".into(),
+                    prompt: "general".into(),
+                },
+            ])
+            .unwrap();
+
+        store.delete_project("project-a").unwrap();
+
+        let commands = store.quick_commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].project, None);
+        assert_eq!(commands[0].name, "通用指令");
     }
 }

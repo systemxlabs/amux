@@ -16,12 +16,12 @@ use amux_common::domain::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::*;
-use gpui_component::input::{InputEvent, InputState, Paste};
+use gpui_component::input::{Input, InputEvent, InputState, Paste};
 use gpui_component::label::Label;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme, Disableable as _, GlobalState, Root, Sizable, TitleBar,
-    WindowExt as _,
+    h_flex, v_flex, ActiveTheme, Disableable as _, GlobalState, Root, Selectable, Sizable,
+    TitleBar, WindowExt as _,
 };
 use parking_lot::Mutex;
 
@@ -99,6 +99,8 @@ pub struct AmuxApp {
     pub orch_effort: Entity<InputState>,
     pub quick_name: Entity<InputState>,
     pub quick_prompt: Entity<InputState>,
+    /// 快捷指令表单当前选择的项目；None = 通用
+    pub quick_command_project: Option<String>,
     pub skill_name: Entity<InputState>,
     pub skill_desc: Entity<InputState>,
     pub plan_name: Entity<InputState>,
@@ -357,6 +359,7 @@ impl AmuxApp {
             orch_effort,
             quick_name,
             quick_prompt,
+            quick_command_project: None,
             skill_name,
             skill_desc,
             plan_name,
@@ -1115,7 +1118,7 @@ impl AmuxApp {
     ) {
         match tab {
             crate::state::SettingsTab::QuickCommands => {
-                self.open_quick_command_form(FormTarget::New, window, cx)
+                self.open_quick_command_form(QuickCommandFormTarget::New, window, cx)
             }
             crate::state::SettingsTab::Skills => self.open_skill_form(FormTarget::New, window, cx),
             crate::state::SettingsTab::WorkflowPlans => {
@@ -1707,17 +1710,46 @@ impl AmuxApp {
             let result = match &entry {
                 ListEntry::Session(session) => {
                     client
-                        .configure_session(&session.id, None, None, Some(project))
+                        .configure_session(&session.id, None, None, Some(project.clone()))
                         .await
                 }
                 ListEntry::Workflow(workflow) => {
                     client
-                        .configure_workflow(&workflow.id, None, Some(project))
+                        .configure_workflow(&workflow.id, None, Some(project.clone()))
                         .await
                 }
             };
             match result {
-                Ok(()) => core.lock().last.list = None,
+                Ok(()) => {
+                    let mut core = core.lock();
+                    core.last.list = None;
+                    match &entry {
+                        ListEntry::Session(session) => {
+                            if core
+                                .view
+                                .session
+                                .as_ref()
+                                .is_some_and(|open| open.id == session.id)
+                            {
+                                if let Some(open) = core.view.session.as_mut() {
+                                    open.project = project;
+                                }
+                            }
+                        }
+                        ListEntry::Workflow(workflow) => {
+                            if core
+                                .view
+                                .workflow
+                                .as_ref()
+                                .is_some_and(|open| open.id == workflow.id)
+                            {
+                                if let Some(open) = core.view.workflow.as_mut() {
+                                    open.project = project;
+                                }
+                            }
+                        }
+                    }
+                }
                 Err(error) => core.lock().error(format!("设置所属项目失败：{error}")),
             }
         });
@@ -2232,54 +2264,101 @@ impl AmuxApp {
     }
 
     /// 打开快捷指令表单弹窗（新增或编辑）。
-    pub fn open_quick_command_form(
+    pub(crate) fn open_quick_command_form(
         &mut self,
-        target: FormTarget,
+        target: QuickCommandFormTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let editing = match &target {
-            FormTarget::New => None,
-            FormTarget::Edit(name) => self.with_core(|core| {
+            QuickCommandFormTarget::New => None,
+            QuickCommandFormTarget::Edit { project, name } => self.with_core(|core| {
                 core.settings
                     .quick_commands
                     .iter()
-                    .find(|item| &item.name == name)
+                    .find(|item| item.project.as_ref() == project.as_ref() && &item.name == name)
                     .cloned()
             }),
         };
-        if let FormTarget::Edit(_) = target {
+        if matches!(&target, QuickCommandFormTarget::Edit { .. }) {
             let Some(command) = editing else { return };
+            self.quick_command_project = command.project.clone();
             self.quick_name
                 .update(cx, |state, cx| state.set_value(command.name, window, cx));
             self.quick_prompt
                 .update(cx, |state, cx| state.set_value(command.prompt, window, cx));
         } else {
+            self.quick_command_project = None;
             self.quick_name
                 .update(cx, |state, cx| state.set_value(String::new(), window, cx));
             self.quick_prompt
                 .update(cx, |state, cx| state.set_value(String::new(), window, cx));
         }
         let title = match &target {
-            FormTarget::New => "新增快捷指令",
-            FormTarget::Edit(_) => "编辑快捷指令",
+            QuickCommandFormTarget::New => "新增快捷指令",
+            QuickCommandFormTarget::Edit { .. } => "编辑快捷指令",
         };
-        dialog::form(
+        let app = cx.entity();
+        let projects: Vec<String> = self.with_core(|core| {
+            core.settings
+                .projects
+                .iter()
+                .map(|project| project.name.clone())
+                .collect()
+        });
+        dialog::form_with_content(
             window,
             cx,
             title,
             "保存",
             32.5,
-            vec![
-                ("指令名称", self.quick_name.clone()),
-                ("指令内容", self.quick_prompt.clone()),
-            ],
+            move |cx| {
+                app.update(cx, |this, cx| {
+                    let muted = cx.theme().muted_foreground;
+                    let mut project_buttons = h_flex().flex_wrap().gap_1();
+                    for name in &projects {
+                        let selected = this.quick_command_project.as_deref() == Some(name);
+                        project_buttons = project_buttons.child(
+                            Button::new(SharedString::from(format!("qc-project-{name}")))
+                                .small()
+                                .label(ui::truncate(name, 24))
+                                .selected(selected)
+                                .on_click(cx.listener({
+                                    let name = name.clone();
+                                    move |this, _, _, cx| {
+                                        this.quick_command_project =
+                                            (!selected).then(|| name.clone());
+                                        cx.notify();
+                                    }
+                                })),
+                        );
+                    }
+                    v_flex()
+                        .gap_2()
+                        .child(Label::new("项目").text_sm().text_color(muted))
+                        .child(project_buttons)
+                        .child(
+                            Label::new("不选择项目即为通用快捷指令")
+                                .text_xs()
+                                .text_color(muted),
+                        )
+                        .child(Label::new("指令名称").text_sm().text_color(muted))
+                        .child(Input::new(&this.quick_name).w_full())
+                        .child(Label::new("指令内容").text_sm().text_color(muted))
+                        .child(Input::new(&this.quick_prompt).w_full())
+                        .into_any_element()
+                })
+            },
             move |this, cx| this.save_quick_command(target.clone(), cx),
         );
     }
 
     /// 保存快捷指令（新增或编辑）；校验未通过时保留弹窗。
-    pub fn save_quick_command(&mut self, target: FormTarget, cx: &mut Context<Self>) -> bool {
+    fn save_quick_command(
+        &mut self,
+        target: QuickCommandFormTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let name = self.quick_name.read(cx).value().trim().to_string();
         let prompt = self.quick_prompt.read(cx).value().to_string();
         if name.is_empty() {
@@ -2293,31 +2372,56 @@ impl AmuxApp {
             return false;
         }
         let mut list = self.with_core(|core| core.settings.quick_commands.clone());
-        let command = QuickCommand { name, prompt };
-        match &target {
-            FormTarget::New => list.push(command),
-            FormTarget::Edit(old) => {
-                if let Some(item) = list.iter_mut().find(|item| &item.name == old) {
-                    *item = command;
-                }
-            }
+        let project = self.quick_command_project.clone();
+        let target_index = match &target {
+            QuickCommandFormTarget::New => None,
+            QuickCommandFormTarget::Edit {
+                project: old_project,
+                name: old_name,
+            } => list.iter().position(|item| {
+                item.project.as_ref() == old_project.as_ref() && &item.name == old_name
+            }),
+        };
+        if list.iter().enumerate().any(|(index, item)| {
+            Some(index) != target_index
+                && item.project.as_ref() == project.as_ref()
+                && item.name == name
+        }) {
+            self.with_core(|core| core.warning("同一项目下的指令名称已存在"));
+            cx.notify();
+            return false;
+        }
+        let command = QuickCommand {
+            project,
+            name,
+            prompt,
+        };
+        if let Some(index) = target_index {
+            list[index] = command;
+        } else {
+            list.push(command);
         }
         self.save_list(SettingsList::QuickCommands(list), cx);
         true
     }
 
     /// 删除快捷指令（弹窗确认）。
-    pub fn delete_quick_command(
+    pub(crate) fn delete_quick_command(
         &mut self,
+        project: Option<String>,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let label = match &project {
+            Some(project) => format!("项目「{project}」中的快捷指令「{name}」"),
+            None => format!("通用快捷指令「{name}」"),
+        };
         dialog::confirm(
             window,
             cx,
             "删除快捷指令",
-            format!("快捷指令「{name}」将被删除，此操作不可撤销。"),
+            format!("{label}将被删除，此操作不可撤销。"),
             "删除",
             ButtonVariant::Danger,
             move |this, cx| {
@@ -2325,7 +2429,9 @@ impl AmuxApp {
                     core.settings
                         .quick_commands
                         .iter()
-                        .filter(|item| item.name != name)
+                        .filter(|item| {
+                            item.project.as_ref() != project.as_ref() || item.name != name
+                        })
                         .cloned()
                         .collect()
                 });
@@ -2643,7 +2749,9 @@ impl AmuxApp {
             window,
             cx,
             "删除项目",
-            format!("项目「{name}」将被删除，其下会话将回到未归属，此操作不可撤销。"),
+            format!(
+                "项目「{name}」将被删除，其下会话将回到未归属，项目快捷指令将一并删除，此操作不可撤销。"
+            ),
             "删除",
             ButtonVariant::Danger,
             move |this, _cx| {
@@ -2656,6 +2764,9 @@ impl AmuxApp {
                         Ok(()) => {
                             let mut core = core.lock();
                             core.settings.projects.retain(|item| item.name != name);
+                            core.settings
+                                .quick_commands
+                                .retain(|item| item.project.as_deref() != Some(name.as_str()));
                         }
                         Err(error) => core.lock().error(format!("删除项目失败：{error}")),
                     }
@@ -2865,6 +2976,15 @@ pub enum SettingsList {
     Plans(Vec<WorkflowPlanItem>),
     RecentWorkspaces(Vec<RecentWorkspace>),
     Projects(Vec<Project>),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum QuickCommandFormTarget {
+    New,
+    Edit {
+        project: Option<String>,
+        name: String,
+    },
 }
 
 impl AmuxApp {

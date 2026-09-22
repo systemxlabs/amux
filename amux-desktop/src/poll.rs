@@ -566,7 +566,10 @@ pub async fn refresh_settings(client: &Client, core: &SharedCore, tab: SettingsT
         SettingsTab::Connection => {}
         SettingsTab::Machines => refresh_machines(client, core).await,
         SettingsTab::Orchestrator => refresh_orchestrator(client, core).await,
-        SettingsTab::QuickCommands => refresh_quick_commands(client, core).await,
+        SettingsTab::QuickCommands => {
+            refresh_quick_commands(client, core).await;
+            refresh_projects(client, core).await;
+        }
         SettingsTab::Skills => refresh_skills(client, core).await,
         SettingsTab::WorkflowPlans => refresh_plans(client, core).await,
         SettingsTab::Projects => refresh_projects(client, core).await,

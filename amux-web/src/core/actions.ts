@@ -253,6 +253,9 @@ export async function setEntryProject(
           (candidate) => candidate.kind === "session" && candidate.session.id === entry.session.id,
         );
         if (item?.kind === "session") item.session.project = project;
+        if (state.detail.session?.id === entry.session.id) {
+          state.detail.session.project = project;
+        }
       });
     } else {
       await core.client.configureWorkflow(entry.workflow.id, null, project ?? null);
@@ -262,6 +265,9 @@ export async function setEntryProject(
             candidate.kind === "workflow" && candidate.workflow.id === entry.workflow.id,
         );
         if (item?.kind === "workflow") item.workflow.project = project;
+        if (state.detail.workflow?.id === entry.workflow.id) {
+          state.detail.workflow.project = project;
+        }
       });
     }
     core.success("已更新会话所属项目");
@@ -304,13 +310,16 @@ export async function updateProject(
   }
 }
 
-/** 删除项目：其下会话回到未归属（服务端处理）。 */
+/** 删除项目：其下会话回到未归属，项目快捷指令一并删除（服务端处理）。 */
 export async function deleteProject(core: Core, name: string): Promise<void> {
   if (!core.client) return;
   try {
     await core.client.deleteProject(name);
     core.update((state) => {
       state.settings.projects = state.settings.projects.filter((item) => item.name !== name);
+      state.settings.quickCommands = state.settings.quickCommands.filter(
+        (item) => item.project !== name,
+      );
     });
     core.success("项目已删除");
     await refreshList(core);

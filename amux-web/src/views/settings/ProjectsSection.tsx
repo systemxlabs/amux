@@ -196,7 +196,9 @@ export function ProjectsSection() {
         open={removing !== null}
         title="删除项目"
         description={
-          removing === null ? undefined : `删除「${removing}」后其下会话将回到未归属，确认？`
+          removing === null
+            ? undefined
+            : `删除「${removing}」后其下会话将回到未归属，项目快捷指令将一并删除，确认？`
         }
         onConfirm={() => {
           if (removing !== null) void deleteProject(core, removing);

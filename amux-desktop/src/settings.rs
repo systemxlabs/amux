@@ -12,7 +12,7 @@ use gpui_component::{
     Selectable, Sizable,
 };
 
-use crate::app::{AmuxApp, CloseSettingsOverlay};
+use crate::app::{AmuxApp, CloseSettingsOverlay, QuickCommandFormTarget};
 use crate::client::Client;
 use crate::dialog::{self, FormTarget};
 use crate::state::{Core, SettingsTab, SharedCore};
@@ -467,6 +467,8 @@ fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     let mut list = v_flex().gap_2();
     for command in &core.settings.quick_commands {
         let name = command.name.clone();
+        let project = command.project.clone();
+        let key = format!("{project:?}-{name}");
         list = list.child(
             h_flex()
                 .gap_2()
@@ -485,6 +487,14 @@ fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                                 .text_color(theme.foreground),
                         )
                         .child(
+                            Label::new(match &project {
+                                Some(project) => format!("项目：{project}"),
+                                None => "通用".to_string(),
+                            })
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                        )
+                        .child(
                             Label::new(command.prompt.clone())
                                 .text_xs()
                                 .line_clamp(2)
@@ -492,14 +502,18 @@ fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                         ),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("qc-edit-{name}")))
+                    Button::new(SharedString::from(format!("qc-edit-{key}")))
                         .small()
                         .label("编辑")
                         .on_click(cx.listener({
                             let name = name.clone();
+                            let project = project.clone();
                             move |this, _, window, cx| {
                                 this.open_quick_command_form(
-                                    FormTarget::Edit(name.clone()),
+                                    QuickCommandFormTarget::Edit {
+                                        project: project.clone(),
+                                        name: name.clone(),
+                                    },
                                     window,
                                     cx,
                                 )
@@ -507,13 +521,14 @@ fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                         })),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("qc-del-{name}")))
+                    Button::new(SharedString::from(format!("qc-del-{key}")))
                         .small()
                         .label("删除")
                         .on_click(cx.listener({
                             let name = name.clone();
+                            let project = project.clone();
                             move |this, _, window, cx| {
-                                this.delete_quick_command(name.clone(), window, cx)
+                                this.delete_quick_command(project.clone(), name.clone(), window, cx)
                             }
                         })),
                 ),

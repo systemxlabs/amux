@@ -870,9 +870,26 @@ fn input_bar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyE
 /// 快捷指令：点击即作为用户输入发送（docs/PRD.md「快捷指令」）。
 fn quick_buttons(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     let mut row = h_flex().flex_wrap().gap_1();
-    for command in core.settings.quick_commands.clone() {
+    let project = core
+        .view
+        .session
+        .as_ref()
+        .and_then(|session| session.project.as_deref())
+        .or_else(|| {
+            core.view
+                .workflow
+                .as_ref()
+                .and_then(|workflow| workflow.project.as_deref())
+        });
+    for command in core
+        .settings
+        .quick_commands
+        .iter()
+        .filter(|command| command.project.is_none() || command.project.as_deref() == project)
+        .cloned()
+    {
         row = row.child(
-            Button::new(format!("qc-{}", command.name))
+            Button::new(format!("qc-{:?}-{}", command.project, command.name))
                 .small()
                 .ghost()
                 .label(ui::truncate(&command.name, 16))

@@ -20,7 +20,12 @@ import { useCore, useCoreState } from "../../core/store";
 import { truncate } from "../../lib/format";
 
 /** 表单状态：`index === null` 表示新增。 */
-type FormState = { index: number | null; name: string; prompt: string };
+type FormState = {
+  index: number | null;
+  project?: string;
+  name: string;
+  prompt: string;
+};
 
 export function QuickCommandsSection() {
   const core = useCore();
@@ -33,16 +38,23 @@ export function QuickCommandsSection() {
     if (form === null) return;
     const name = form.name.trim();
     if (name === "") return;
-    // Server 要求名称唯一
-    if (commands.some((item, index) => item.name === name && index !== form.index)) {
-      core.failure("名称已存在");
+    // Server 要求同一项目下名称唯一
+    if (
+      commands.some(
+        (item, index) =>
+          item.project === form.project && item.name === name && index !== form.index,
+      )
+    ) {
+      core.failure("同一项目下的名称已存在");
       return;
     }
     const next =
       form.index === null
-        ? [...commands, { name, prompt: form.prompt }]
+        ? [...commands, { project: form.project, name, prompt: form.prompt }]
         : commands.map((item, index) =>
-            index === form.index ? { name, prompt: form.prompt } : item,
+            index === form.index
+              ? { project: form.project, name, prompt: form.prompt }
+              : item,
           );
     void saveQuickCommands(core, next);
     setForm(null);
@@ -65,7 +77,9 @@ export function QuickCommandsSection() {
           size="icon"
           data-slot="quick-command-add"
           aria-label="新增快捷指令"
-          onClick={() => setForm({ index: null, name: "", prompt: "" })}
+          onClick={() =>
+            setForm({ index: null, project: undefined, name: "", prompt: "" })
+          }
         >
           +
         </Button>
@@ -75,16 +89,30 @@ export function QuickCommandsSection() {
       ) : (
         <div className="flex flex-col gap-3">
           {commands.map((command, index) => (
-            <Card key={command.name} data-slot="quick-command-card" className="gap-2">
+            <Card
+              key={JSON.stringify([command.project ?? null, command.name])}
+              data-slot="quick-command-card"
+              className="gap-2"
+            >
               <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
-                <CardTitle>{command.name}</CardTitle>
+                <div className="min-w-0">
+                  <CardTitle>{command.name}</CardTitle>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {command.project === undefined ? "通用" : `项目：${command.project}`}
+                  </div>
+                </div>
                 <div className="flex flex-wrap items-center gap-1.5">
                   <Button
                     variant="outline"
                     size="sm"
                     data-slot="quick-command-edit"
                     onClick={() =>
-                      setForm({ index, name: command.name, prompt: command.prompt })
+                      setForm({
+                        index,
+                        project: command.project,
+                        name: command.name,
+                        prompt: command.prompt,
+                      })
                     }
                   >
                     编辑
@@ -111,6 +139,34 @@ export function QuickCommandsSection() {
           <DialogHeader>
             <DialogTitle>{form?.index === null ? "新增快捷指令" : "编辑快捷指令"}</DialogTitle>
           </DialogHeader>
+          <div className="flex flex-col gap-1.5">
+            <Label>项目</Label>
+            <div className="flex flex-wrap gap-1">
+              {state.settings.projects.map((project) => {
+                const selected = form?.project === project.name;
+                return (
+                  <Button
+                    key={project.name}
+                    type="button"
+                    variant={selected ? "secondary" : "outline"}
+                    size="sm"
+                    data-slot="quick-command-form-project"
+                    aria-pressed={selected}
+                    onClick={() =>
+                      setForm(
+                        form === null
+                          ? form
+                          : { ...form, project: selected ? undefined : project.name },
+                      )
+                    }
+                  >
+                    {project.name}
+                  </Button>
+                );
+              })}
+            </div>
+            <div className="text-xs text-muted-foreground">不选择项目即为通用快捷指令</div>
+          </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="quick-command-form-name">名称</Label>
             <Input

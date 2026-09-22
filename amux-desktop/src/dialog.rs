@@ -71,28 +71,50 @@ pub fn form(
     fields: Vec<(&'static str, Entity<InputState>)>,
     on_save: impl Fn(&mut AmuxApp, &mut Context<AmuxApp>) -> bool + 'static,
 ) {
+    let muted_foreground = cx.theme().muted_foreground;
+    form_with_content(
+        window,
+        cx,
+        title,
+        ok_label,
+        width_rems,
+        move |_| {
+            let mut body = v_flex().gap_2();
+            for (label, input) in &fields {
+                body = body
+                    .child(Label::new(*label).text_sm().text_color(muted_foreground))
+                    .child(Input::new(input).w_full());
+            }
+            body.into_any_element()
+        },
+        on_save,
+    );
+}
+
+/// 表单弹窗，内容由调用方按最新应用状态重建。
+pub fn form_with_content(
+    window: &mut Window,
+    cx: &mut Context<AmuxApp>,
+    title: &'static str,
+    ok_label: &'static str,
+    width_rems: f32,
+    content: impl Fn(&mut App) -> AnyElement + 'static,
+    on_save: impl Fn(&mut AmuxApp, &mut Context<AmuxApp>) -> bool + 'static,
+) {
     let app = cx.entity();
+    let content = Rc::new(content);
     let on_save = Rc::new(on_save);
     let width = rems(width_rems).to_pixels(window.rem_size());
-    let muted_foreground = cx.theme().muted_foreground;
     window.open_dialog(cx, move |dialog, _, _| {
         let save = Rc::clone(&on_save);
         let save_app = app.clone();
         let ok_app = app.clone();
         let ok_save = Rc::clone(&on_save);
-        let fields = fields.clone();
+        let content = Rc::clone(&content);
         dialog
             .title(title)
             .width(width)
-            .content(move |content, _, _| {
-                let mut body = v_flex().gap_2();
-                for (label, input) in &fields {
-                    body = body
-                        .child(Label::new(*label).text_sm().text_color(muted_foreground))
-                        .child(Input::new(input).w_full());
-                }
-                content.child(body)
-            })
+            .content(move |content_area, _, cx| content_area.child(content(cx)))
             .footer(
                 h_flex()
                     .justify_end()

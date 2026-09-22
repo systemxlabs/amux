@@ -17,6 +17,7 @@ import {
   cancelOpen,
   createWorkflow,
   deleteRecentWorkspace,
+  deleteProject,
   openEntry,
   openTerminal,
   sendPrompt,
@@ -54,6 +55,32 @@ function workflow(): Workflow {
 
 const sessionEntry: ListEntry = { kind: "session", session: session() };
 const workflowEntry: ListEntry = { kind: "workflow", workflow: workflow() };
+
+it("删除项目时同步移除其快捷指令", async () => {
+  const core = new Core();
+  core.state.settings.projects = [
+    { name: "project-a", description: "" },
+    { name: "project-b", description: "" },
+  ];
+  core.state.settings.quickCommands = [
+    { project: "project-a", name: "项目指令", prompt: "a" },
+    { project: "project-b", name: "项目指令", prompt: "b" },
+    { name: "通用指令", prompt: "general" },
+  ];
+  core.client = {
+    deleteProject: async (): Promise<void> => {},
+    sessions: async (): Promise<SessionList> => ({ sessions: [], hasMore: false }),
+    workflows: async (): Promise<WorkflowList> => ({ workflows: [], hasMore: false }),
+  } as unknown as ApiClient;
+
+  await deleteProject(core, "project-a");
+
+  expect(core.state.settings.projects.map((project) => project.name)).toEqual(["project-b"]);
+  expect(core.state.settings.quickCommands).toEqual([
+    { project: "project-b", name: "项目指令", prompt: "b" },
+    { name: "通用指令", prompt: "general" },
+  ]);
+});
 
 it("删除最近工作目录：仅保留剩余项并全量保存", async () => {
   const core = new Core();

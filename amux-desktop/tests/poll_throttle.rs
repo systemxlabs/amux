@@ -32,7 +32,7 @@ fn stub(path: &str) -> &'static str {
         }
         "/machines/pc/agents" => r#"[{"name":"codex","available":true}]"#,
         "/config/workflows/" => r#"[{"name":"plan","plan":"做点什么"}]"#,
-        "/config/quick_commands/" => r#"[{"name":"qc","prompt":"快点做"}]"#,
+        "/config/quick_commands/" => r#"[{"project":"project-a","name":"qc","prompt":"快点做"}]"#,
         "/config/skills/" => r#"[{"name":"skill","description":"描述"}]"#,
         "/config/recent_workspaces/" => {
             r#"[{"machine":"pc","workspace":"/tmp/proj","lastUsed":1}]"#
@@ -214,5 +214,9 @@ async fn interaction_load_fetches_agents_and_quick_commands() {
     assert_eq!(hit_count(&hits, "/config/agent/"), 1);
     let core = core.lock();
     assert_eq!(core.settings.quick_commands.len(), 1);
+    assert_eq!(
+        core.settings.quick_commands[0].project.as_deref(),
+        Some("project-a")
+    );
     assert!(core.settings.agents[0].1[0].available);
 }
