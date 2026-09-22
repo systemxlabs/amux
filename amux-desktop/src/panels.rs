@@ -72,7 +72,13 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
     // 未归属项目不单独成组，在项目组之后以分隔线引导（docs/PRD.md「会话列表视图」）。
     for project in core.settings.projects.clone() {
         let group_key = project.name.clone();
+        let group_label = if project.description.trim().is_empty() {
+            project.name.clone()
+        } else {
+            format!("{} · {}", project.name, project.description)
+        };
         let collapsed = core.collapsed_project_groups.contains(&group_key);
+        let drag_project = group_key.clone();
         let group_state = core.project_groups.get(&group_key);
         let entries = group_state
             .map(|group| group.entries.as_slice())
@@ -83,7 +89,7 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
             .w_full()
             .gap_1()
             .on_drop(cx.listener(move |this, drag: &SessionProjectDrag, _, cx| {
-                this.set_entry_project(drag.0.clone(), Some(project.name.clone()), cx);
+                this.set_entry_project(drag.0.clone(), Some(drag_project.clone()), cx);
             }))
             .child(
                 Button::new(SharedString::from(format!("project-group-{group_key}")))
@@ -105,10 +111,13 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                                     .text_color(theme.muted_foreground),
                             )
                             .child(
-                                Label::new(group_key.clone())
+                                Label::new(group_label)
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(foreground),
+                                    .text_color(foreground)
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate(),
                             ),
                     ),
             );
