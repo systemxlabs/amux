@@ -158,6 +158,8 @@ describe("ApiClient", () => {
     replies = [
       { status: 200, body: JSON.stringify({ ok: true }) },
       { status: 200, body: JSON.stringify({ ok: true }) },
+      { status: 200, body: JSON.stringify({ ok: true }) },
+      { status: 200, body: JSON.stringify({ ok: true }) },
     ];
     const client = new ApiClient(base, "tk");
     await client.promptSession("s1", [{ type: "text", text: "你好" }]);
@@ -176,6 +178,12 @@ describe("ApiClient", () => {
     expect(JSON.parse(seen.at(-1)!.body)).toEqual({
       config: { configId: "model", type: "value_id", value: "gpt-5" },
     });
+
+    await client.configureSession("s1", null, null, null);
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ project: null });
+
+    await client.configureWorkflow("w1", null, null);
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ project: null });
   });
 
   it("对话历史保留服务端返回的条目与时序号", async () => {

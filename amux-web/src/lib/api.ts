@@ -151,7 +151,7 @@ export class ApiClient {
     id: string,
     title: string | null,
     config: SessionConfigSetting | null,
-    project?: string,
+    project?: string | null,
   ): Promise<void> {
     const body: ConfigureSessionRequest = {};
     if (title !== null) body.title = title;
@@ -291,7 +291,7 @@ export class ApiClient {
     return this.delete(`/workflows/${encodeURIComponent(id)}`);
   }
 
-  configureWorkflow(id: string, title: string | null, project?: string): Promise<void> {
+  configureWorkflow(id: string, title: string | null, project?: string | null): Promise<void> {
     const body: ConfigureWorkflowRequest = {};
     if (title !== null) body.title = title;
     if (project !== undefined) body.project = project;

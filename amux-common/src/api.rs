@@ -127,9 +127,13 @@ pub struct ConfigureSessionRequest {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<SessionConfigSetting>,
-    /// 所属项目；None 不修改
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<String>,
+    /// 所属项目；None 不修改，Some(None) = 未归属
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nullable_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub project: Option<Option<String>>,
 }
 
 /// `GET /sessions/<id>/history` 响应。
@@ -294,9 +298,13 @@ pub struct CreateWorkflowRequest {
 pub struct ConfigureWorkflowRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// 所属项目；None 不修改
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<String>,
+    /// 所属项目；None 不修改，Some(None) = 未归属
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nullable_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub project: Option<Option<String>>,
 }
 
 /// 技能配置项。
@@ -431,6 +439,14 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// `null` 表示显式设置为未归属；字段缺失时由 `default` 保留为 `None`。
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +481,29 @@ mod tests {
         let json = serde_json::to_value(&output).unwrap();
         assert!(json.get("truncated").is_none());
         assert_eq!(json["nextCursor"], 3);
+    }
+
+    #[test]
+    fn configure_project_distinguishes_omitted_null_and_assigned() {
+        let omitted: ConfigureSessionRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(omitted.project, None);
+
+        let unassigned: ConfigureSessionRequest =
+            serde_json::from_value(serde_json::json!({ "project": null })).unwrap();
+        assert_eq!(unassigned.project, Some(None));
+        let unassigned_json = serde_json::to_value(ConfigureSessionRequest {
+            title: None,
+            config: None,
+            project: Some(None),
+        })
+        .unwrap();
+        assert_eq!(unassigned_json["project"], serde_json::Value::Null);
+
+        let assigned: ConfigureWorkflowRequest =
+            serde_json::from_value(serde_json::json!({ "project": "项目 A" })).unwrap();
+        assert_eq!(assigned.project, Some(Some("项目 A".to_string())));
+        assert_eq!(serde_json::to_value(assigned).unwrap()["project"], "项目 A");
     }
 
     /// Nano 认证的 _meta 载荷：编码后能无损还原，字段名按 docs/DESIGN.md「ACP 认证」。

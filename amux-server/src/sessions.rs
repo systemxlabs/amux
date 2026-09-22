@@ -213,13 +213,13 @@ impl SessionService {
         id: &str,
         title: Option<String>,
         config: Option<SessionConfigSetting>,
-        project: Option<String>,
+        project: Option<Option<String>>,
     ) -> Result<(), String> {
         if let Some(title) = title {
             self.store.set_title(id, &title);
         }
         if let Some(project) = project {
-            self.store.set_session_project(id, Some(&project));
+            self.store.set_session_project(id, project.as_deref());
         }
         if let Some(config) = config {
             let session = self.get(id)?;

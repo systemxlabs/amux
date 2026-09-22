@@ -247,7 +247,7 @@ export async function setEntryProject(
   if (!core.client) return;
   try {
     if (entry.kind === "session") {
-      await core.client.configureSession(entry.session.id, null, null, project);
+      await core.client.configureSession(entry.session.id, null, null, project ?? null);
       core.update((state) => {
         const item = state.entries.find(
           (candidate) => candidate.kind === "session" && candidate.session.id === entry.session.id,
@@ -255,7 +255,7 @@ export async function setEntryProject(
         if (item?.kind === "session") item.session.project = project;
       });
     } else {
-      await core.client.configureWorkflow(entry.workflow.id, null, project);
+      await core.client.configureWorkflow(entry.workflow.id, null, project ?? null);
       core.update((state) => {
         const item = state.entries.find(
           (candidate) =>

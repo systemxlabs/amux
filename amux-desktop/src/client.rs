@@ -151,7 +151,7 @@ impl Client {
         id: &str,
         title: Option<String>,
         config: Option<SessionConfigSetting>,
-        project: Option<String>,
+        project: Option<Option<String>>,
     ) -> Result<(), String> {
         self.post_empty(
             &format!("/sessions/{id}/configure"),
@@ -358,7 +358,7 @@ impl Client {
         &self,
         id: &str,
         title: Option<String>,
-        project: Option<String>,
+        project: Option<Option<String>>,
     ) -> Result<(), String> {
         self.post_empty(
             &format!("/workflows/{id}/configure"),

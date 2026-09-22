@@ -153,13 +153,13 @@ impl WorkflowService {
         &self,
         id: &str,
         title: Option<String>,
-        project: Option<String>,
+        project: Option<Option<String>>,
     ) -> Result<(), String> {
         if let Some(title) = title {
             self.store.set_workflow_title(id, &title);
         }
         if let Some(project) = project {
-            self.store.set_workflow_project(id, Some(&project));
+            self.store.set_workflow_project(id, project.as_deref());
         }
         Ok(())
     }

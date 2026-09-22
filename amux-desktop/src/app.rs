@@ -1707,11 +1707,13 @@ impl AmuxApp {
             let result = match &entry {
                 ListEntry::Session(session) => {
                     client
-                        .configure_session(&session.id, None, None, project)
+                        .configure_session(&session.id, None, None, Some(project))
                         .await
                 }
                 ListEntry::Workflow(workflow) => {
-                    client.configure_workflow(&workflow.id, None, project).await
+                    client
+                        .configure_workflow(&workflow.id, None, Some(project))
+                        .await
                 }
             };
             match result {
