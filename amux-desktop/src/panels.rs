@@ -79,6 +79,9 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         .collect();
     for project in groups {
         let group_key = project.clone().unwrap_or_default();
+        if group_key.is_empty() && !core.settings.projects.is_empty() {
+            list = list.child(div().w_full().border_t_1().border_color(sidebar_border));
+        }
         let collapsed = core.collapsed_project_groups.contains(&group_key);
         let group_state = core.project_groups.get(&group_key);
         let entries = group_state

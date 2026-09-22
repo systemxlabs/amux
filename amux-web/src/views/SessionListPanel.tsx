@@ -388,58 +388,65 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
           <p className="py-4 text-center text-sm text-muted-foreground">暂无会话</p>
         ) : (
           visibleGroups.map((group) => (
-            <div
-              key={group.key}
-              data-slot="session-project-group"
-              data-project={group.name ?? ""}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (dragEntry !== null) {
-                  const entry = dragEntry;
-                  setDragEntry(null);
-                  void setEntryProject(core, entry, group.project);
-                }
-              }}
-              className="flex flex-col gap-0.5"
-            >
-              <button
-                type="button"
-                data-slot="session-project-group-header"
-                aria-expanded={!group.collapsed}
-                onClick={() => toggleGroup(group.key)}
-                className="flex cursor-pointer items-center gap-1 rounded-md px-1 py-1 text-sm font-semibold text-foreground hover:bg-accent"
+            <Fragment key={group.key}>
+              {group.project === undefined && state.settings.projects.length > 0 ? (
+                <div
+                  data-slot="session-project-separator"
+                  className="my-1 border-t border-border"
+                />
+              ) : null}
+              <div
+                data-slot="session-project-group"
+                data-project={group.name ?? ""}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (dragEntry !== null) {
+                    const entry = dragEntry;
+                    setDragEntry(null);
+                    void setEntryProject(core, entry, group.project);
+                  }
+                }}
+                className="flex flex-col gap-0.5"
               >
-                {group.collapsed ? (
-                  <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                ) : (
-                  <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                )}
-                <span className="min-w-0 truncate">{group.name ?? "未归属"}</span>
-              </button>
-              {!group.collapsed && group.loading && group.rows.length === 0 ? (
-                <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
-              ) : null}
-              {!group.collapsed && !group.loading && group.rows.length === 0 ? (
-                <p className="px-2 py-1 text-xs text-muted-foreground">暂无会话</p>
-              ) : null}
-              {!group.collapsed
-                ? group.rows.map((row, index) => {
-                    const element = renderRow(row);
-                    return <Fragment key={index}>{element}</Fragment>;
-                  })
-                : null}
-              {!group.collapsed && group.project !== undefined && group.hasMore ? (
                 <button
                   type="button"
-                  data-slot="session-project-show-more"
-                  onClick={() => showMore(group)}
-                  className="cursor-pointer rounded-md px-2 py-1 text-center text-xs text-muted-foreground hover:bg-accent"
+                  data-slot="session-project-group-header"
+                  aria-expanded={!group.collapsed}
+                  onClick={() => toggleGroup(group.key)}
+                  className="flex cursor-pointer items-center gap-1 rounded-md px-1 py-1 text-sm font-semibold text-foreground hover:bg-accent"
                 >
-                  显示更多
+                  {group.collapsed ? (
+                    <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="min-w-0 truncate">{group.name ?? "未归属"}</span>
                 </button>
-              ) : null}
-            </div>
+                {!group.collapsed && group.loading && group.rows.length === 0 ? (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
+                ) : null}
+                {!group.collapsed && !group.loading && group.rows.length === 0 ? (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">暂无会话</p>
+                ) : null}
+                {!group.collapsed
+                  ? group.rows.map((row, index) => {
+                      const element = renderRow(row);
+                      return <Fragment key={index}>{element}</Fragment>;
+                    })
+                  : null}
+                {!group.collapsed && group.project !== undefined && group.hasMore ? (
+                  <button
+                    type="button"
+                    data-slot="session-project-show-more"
+                    onClick={() => showMore(group)}
+                    className="cursor-pointer rounded-md px-2 py-1 text-center text-xs text-muted-foreground hover:bg-accent"
+                  >
+                    显示更多
+                  </button>
+                ) : null}
+              </div>
+            </Fragment>
           ))
         )}
       </div>
