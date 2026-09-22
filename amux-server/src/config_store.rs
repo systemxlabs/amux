@@ -1,4 +1,4 @@
-//! 配置存储：`<amux_home>/config/*.json`（技能、工作流计划、常用工作目录、快捷指令、内置智能体）。
+//! 配置存储：`<amux_home>/config/*.json`（技能、工作流计划、最近工作目录、快捷指令、内置智能体）。
 //!
 //! 读写为低频操作，不做并发与原子写入处理（docs/DESIGN.md 各「存储」一节）。
 
@@ -11,12 +11,12 @@ use parking_lot::Mutex;
 
 use crate::timestamps::now_ms;
 
-/// 常用工作目录保留条数。
+/// 最近工作目录保留条数。
 const RECENT_WORKSPACE_LIMIT: usize = 30;
 
 pub struct ConfigStore {
     home: PathBuf,
-    /// 常用工作目录在内存中维护（读改写频繁于其他配置）
+    /// 最近工作目录在内存中维护（读改写频繁于其他配置）
     recent: Mutex<Vec<RecentWorkspace>>,
 }
 
@@ -68,7 +68,14 @@ impl ConfigStore {
         self.recent.lock().clone()
     }
 
-    /// 记录常用工作目录：同一 (machine, workspace) 只保留最新一条，按时间倒序、只留最近若干条。
+    /// 全量更新最近工作目录（docs/DESIGN.md「Client-Server 通信」PUT 接口）。
+    pub fn set_recent_workspaces(&self, workspaces: &[RecentWorkspace]) -> Result<(), String> {
+        reject_duplicate_workspaces(workspaces)?;
+        *self.recent.lock() = workspaces.to_vec();
+        write_json(&recent_path(&self.home), workspaces)
+    }
+
+    /// 记录最近工作目录：同一 (machine, workspace) 只保留最新一条，按时间倒序、只留最近若干条。
     pub fn record_workspace(&self, machine: &str, workspace: &str) {
         let now = now_ms();
         let mut recent = self.recent.lock();
@@ -102,6 +109,21 @@ fn reject_duplicate_names<T>(
         let name = name(item);
         if !seen.insert(name) {
             return Err(format!("{kind} name 重复: {name}"));
+        }
+    }
+    Ok(())
+}
+
+/// 最近目录项 (machine, workspace) 组合必须唯一（docs/DESIGN.md「最近工作目录存储」）。
+fn reject_duplicate_workspaces(workspaces: &[RecentWorkspace]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for item in workspaces {
+        let key = (item.machine.as_str(), item.workspace.as_str());
+        if !seen.insert(key) {
+            return Err(format!(
+                "最近工作目录重复: {}:{}",
+                item.machine, item.workspace
+            ));
         }
     }
     Ok(())
@@ -161,6 +183,45 @@ mod tests {
         let reopened = ConfigStore::new(dir.path().to_path_buf());
         assert_eq!(reopened.recent_workspaces().len(), 2);
         assert_eq!(reopened.skills()[0].name, "opencli");
+    }
+
+    #[test]
+    fn recent_workspaces_full_update_persists_and_rejects_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+
+        store.record_workspace("pc", "/w1");
+        store.record_workspace("pc", "/w2");
+
+        store
+            .set_recent_workspaces(&[RecentWorkspace {
+                machine: "pc".into(),
+                workspace: "/w3".into(),
+                last_used: 3,
+            }])
+            .unwrap();
+        assert_eq!(store.recent_workspaces().len(), 1);
+        assert_eq!(store.recent_workspaces()[0].workspace, "/w3");
+
+        let reopened = ConfigStore::new(dir.path().to_path_buf());
+        assert_eq!(reopened.recent_workspaces()[0].workspace, "/w3");
+
+        let duplicates = [
+            RecentWorkspace {
+                machine: "pc".into(),
+                workspace: "/dup".into(),
+                last_used: 1,
+            },
+            RecentWorkspace {
+                machine: "pc".into(),
+                workspace: "/dup".into(),
+                last_used: 2,
+            },
+        ];
+        assert!(
+            store.set_recent_workspaces(&duplicates).is_err(),
+            "(machine, workspace) 重复应报错"
+        );
     }
 
     #[test]

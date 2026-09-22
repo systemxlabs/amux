@@ -392,6 +392,14 @@ impl Client {
         self.get_json(path::CONFIG_RECENT_WORKSPACES).await
     }
 
+    pub async fn set_recent_workspaces(
+        &self,
+        workspaces: &[RecentWorkspace],
+    ) -> Result<(), String> {
+        self.put_empty(path::CONFIG_RECENT_WORKSPACES, &workspaces)
+            .await
+    }
+
     pub async fn quick_commands(&self) -> Result<Vec<QuickCommand>, String> {
         self.get_json(path::CONFIG_QUICK_COMMANDS).await
     }

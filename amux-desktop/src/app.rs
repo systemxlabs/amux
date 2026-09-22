@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amux_common::api::{
-    Agent, ApiFormat, CreateSessionRequest, OrchestratorConfig, QuickCommand, SessionConfigSetting,
-    Skill, WorkflowPlanItem,
+    Agent, ApiFormat, CreateSessionRequest, OrchestratorConfig, QuickCommand, RecentWorkspace,
+    SessionConfigSetting, Skill, WorkflowPlanItem,
 };
 use amux_common::domain::{
     ContentBlock, GitDiffHunk, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
@@ -796,7 +796,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 打开新建会话视图：实时拉取机器、agents 与常用工作目录
+    /// 打开新建会话视图：实时拉取机器、agents 与最近工作目录
     /// （docs/DESIGN.md「新建会话视图」）。
     pub fn open_new_session(&mut self, cx: &mut Context<Self>) {
         self.dialog_scroll_on_entry = true;
@@ -1039,6 +1039,20 @@ impl AmuxApp {
             }
         });
         cx.notify();
+    }
+
+    /// 删除最近工作目录项：移除后全量保存（docs/PRD.md「新建会话视图」删除按钮「x」）。
+    pub fn delete_recent_workspace(&mut self, target: RecentWorkspace, cx: &mut Context<Self>) {
+        let list = self.with_core(|core| {
+            core.recent_workspaces
+                .iter()
+                .filter(|item| {
+                    !(item.machine == target.machine && item.workspace == target.workspace)
+                })
+                .cloned()
+                .collect()
+        });
+        self.save_list(SettingsList::RecentWorkspaces(list), cx);
     }
 
     /// 选定最近工作目录：填入并收起上下拉框（最近目录是选定项，不再联想）。
@@ -2035,6 +2049,7 @@ impl AmuxApp {
                 SettingsList::Skills(list) => client.set_skills(list).await,
                 SettingsList::QuickCommands(list) => client.set_quick_commands(list).await,
                 SettingsList::Plans(list) => client.set_workflow_plans(list).await,
+                SettingsList::RecentWorkspaces(list) => client.set_recent_workspaces(list).await,
             };
             match result {
                 Ok(()) => {
@@ -2044,6 +2059,7 @@ impl AmuxApp {
                         SettingsList::Skills(list) => core.settings.skills = list,
                         SettingsList::QuickCommands(list) => core.settings.quick_commands = list,
                         SettingsList::Plans(list) => core.settings.plans = list,
+                        SettingsList::RecentWorkspaces(list) => core.recent_workspaces = list,
                     }
                 }
                 Err(error) => core.lock().error(format!("保存失败：{error}")),
@@ -2505,6 +2521,7 @@ pub enum SettingsList {
     Skills(Vec<Skill>),
     QuickCommands(Vec<QuickCommand>),
     Plans(Vec<WorkflowPlanItem>),
+    RecentWorkspaces(Vec<RecentWorkspace>),
 }
 
 impl AmuxApp {

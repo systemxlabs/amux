@@ -114,7 +114,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/workflows/{id}/ongoing_activity", get(workflow_ongoing))
         .route("/config/skills/", get(get_skills).put(put_skills))
         .route("/config/workflows/", get(get_plans).put(put_plans))
-        .route("/config/recent_workspaces/", get(get_recent_workspaces))
+        .route(
+            "/config/recent_workspaces/",
+            get(get_recent_workspaces).put(put_recent_workspaces),
+        )
         .route(
             "/config/quick_commands/",
             get(get_quick_commands).put(put_quick_commands),
@@ -660,6 +663,17 @@ async fn put_plans(
 
 async fn get_recent_workspaces(State(state): State<Arc<AppState>>) -> Json<Vec<RecentWorkspace>> {
     Json(state.config.recent_workspaces())
+}
+
+async fn put_recent_workspaces(
+    State(state): State<Arc<AppState>>,
+    Json(workspaces): Json<Vec<RecentWorkspace>>,
+) -> ApiResult<OpAck> {
+    state
+        .config
+        .set_recent_workspaces(&workspaces)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
 }
 
 async fn get_quick_commands(State(state): State<Arc<AppState>>) -> Json<Vec<QuickCommand>> {

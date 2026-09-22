@@ -651,7 +651,7 @@ export async function refreshRecentWorkspaces(core: Core): Promise<void> {
       state.recentWorkspaces = recent;
     });
   } catch {
-    // 常用工作目录仅为便利信息，失败不打扰用户
+    // 最近工作目录仅为便利信息，失败不打扰用户
   }
 }
 

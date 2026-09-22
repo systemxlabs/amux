@@ -16,6 +16,7 @@ import type {
 import {
   cancelOpen,
   createWorkflow,
+  deleteRecentWorkspace,
   openEntry,
   openTerminal,
   sendPrompt,
@@ -53,6 +54,29 @@ function workflow(): Workflow {
 
 const sessionEntry: ListEntry = { kind: "session", session: session() };
 const workflowEntry: ListEntry = { kind: "workflow", workflow: workflow() };
+
+it("删除最近工作目录：仅保留剩余项并全量保存", async () => {
+  const core = new Core();
+  core.state.recentWorkspaces = [
+    { machine: "localpc", workspace: "/w1", lastUsed: 1 },
+    { machine: "localpc", workspace: "/w2", lastUsed: 2 },
+  ];
+  const sent: unknown[] = [];
+  core.client = {
+    setRecentWorkspaces: async (list: unknown[]): Promise<void> => {
+      sent.push(list);
+    },
+  } as unknown as ApiClient;
+
+  await deleteRecentWorkspace(core, "localpc", "/w1");
+
+  expect(sent).toEqual([
+    [{ machine: "localpc", workspace: "/w2", lastUsed: 2 }],
+  ]);
+  expect(core.state.recentWorkspaces).toEqual([
+    { machine: "localpc", workspace: "/w2", lastUsed: 2 },
+  ]);
+});
 
 it("重新打开新建视图收起面板，创建失败保留模式和完整草稿", async () => {
   const core = new Core();

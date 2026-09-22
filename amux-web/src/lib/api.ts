@@ -329,6 +329,10 @@ export class ApiClient {
     return this.getJson("/config/recent_workspaces/");
   }
 
+  setRecentWorkspaces(workspaces: RecentWorkspace[]): Promise<void> {
+    return this.putEmpty("/config/recent_workspaces/", workspaces);
+  }
+
   quickCommands(): Promise<QuickCommand[]> {
     return this.getJson("/config/quick_commands/");
   }

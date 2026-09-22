@@ -1,5 +1,6 @@
 //! 中间面板：新建会话视图与会话交互视图（对话、实时活动、输入区、会话选项）。
 
+use amux_common::api::RecentWorkspace;
 use amux_common::domain::{HistoryItem, SessionConfigKind, SessionConfigOptionValue, SessionState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -336,12 +337,12 @@ fn hint_text(text: &str, cx: &Context<AmuxApp>) -> AnyElement {
 /// 输入框失焦或点击浮层之外则上下拉框都收起；没有最近目录时就是普通输入框
 /// （docs/PRD.md「新建会话视图」）。
 fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    let recent: Vec<String> = core
+    let recent: Vec<RecentWorkspace> = core
         .recent_workspaces
         .iter()
         .filter(|workspace| core.new_session.machine.as_deref() == Some(workspace.machine.as_str()))
         .take(RECENT_WORKSPACE_LIMIT)
-        .map(|workspace| workspace.workspace.clone())
+        .cloned()
         .collect();
 
     let theme = ui::Colors::of(cx.theme());
@@ -398,9 +399,12 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             .min_h_0()
             .p(px(SUGGEST_PADDING))
             .overflow_y_scrollbar();
-        for path in recent {
+        for workspace in recent {
+            let path = workspace.workspace.clone();
             let app = app.clone();
             let value = path.clone();
+            let delete_app = app.clone();
+            let delete_target = workspace.clone();
             rows = rows.child(
                 div()
                     .id(SharedString::from(format!("ns-workspace-recent-{path}")))
@@ -409,6 +413,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     .flex_shrink_0()
                     .flex()
                     .items_center()
+                    .gap_1()
                     .px_2()
                     .rounded_sm()
                     .cursor_pointer()
@@ -422,9 +427,24 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     })
                     .child(
                         Label::new(path.clone())
+                            .flex_1()
+                            .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis_start(),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("ns-recent-del-{path}")))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("删除最近工作目录")
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                delete_app.update(cx, |this, cx| {
+                                    this.delete_recent_workspace(delete_target.clone(), cx)
+                                });
+                            }),
                     ),
             );
         }

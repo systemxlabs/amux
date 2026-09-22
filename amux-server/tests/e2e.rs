@@ -546,7 +546,28 @@ async fn server_daemon_agent_end_to_end() {
             .unwrap()
             .iter()
             .any(|item| item["machine"] == MACHINE),
-        "建会话后应记录常用工作目录"
+        "建会话后应记录最近工作目录"
+    );
+
+    // 最近工作目录全量更新
+    let recent = client.get("/config/recent_workspaces/").await;
+    let mut recent = recent.as_array().unwrap().clone();
+    recent.push(json!({
+        "machine": "other-pc",
+        "workspace": "/tmp/amux",
+        "lastUsed": 1729000000000_i64,
+    }));
+    client
+        .put_ok("/config/recent_workspaces/", json!(recent))
+        .await;
+    let updated = client.get("/config/recent_workspaces/").await;
+    assert!(
+        updated
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["machine"] == "other-pc"),
+        "PUT 全量更新后应包含新机器"
     );
 
     // 工作流会话：创建与查询（关联会话由编排智能体建立）

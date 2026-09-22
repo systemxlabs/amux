@@ -296,7 +296,7 @@ pub struct WorkflowPlanItem {
     pub plan: String,
 }
 
-/// 常用工作目录配置项。
+/// 最近工作目录配置项。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecentWorkspace {

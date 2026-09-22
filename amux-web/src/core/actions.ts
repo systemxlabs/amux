@@ -216,6 +216,27 @@ export async function renameEntry(core: Core, entry: ListEntry, title: string): 
 
 // ---------- 新建会话 ----------
 
+/** 删除最近工作目录项：从列表移除并全量保存（docs/PRD.md「新建会话视图」删除按钮「x」）。 */
+export async function deleteRecentWorkspace(
+  core: Core,
+  machine: string,
+  workspace: string,
+): Promise<void> {
+  if (!core.client) return;
+  const next = core.state.recentWorkspaces.filter(
+    (item) => !(item.machine === machine && item.workspace === workspace),
+  );
+  try {
+    await core.client.setRecentWorkspaces(next);
+    core.update((state) => {
+      state.recentWorkspaces = next;
+    });
+    core.success("已删除最近工作目录");
+  } catch (error) {
+    core.failure(`删除最近工作目录失败：${messageOf(error)}`);
+  }
+}
+
 /** 普通模式创建会话。 */
 export async function createSession(core: Core): Promise<void> {
   if (!core.client) return;

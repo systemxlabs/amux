@@ -12,7 +12,13 @@ import { Label } from "../components/ui/label";
 import { Switch } from "../components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Textarea } from "../components/ui/textarea";
-import { createSession, createWorkflow, openSettings, updateWorkspaceInput } from "../core/actions";
+import {
+  createSession,
+  createWorkflow,
+  deleteRecentWorkspace,
+  openSettings,
+  updateWorkspaceInput,
+} from "../core/actions";
 import { refreshWorkflowSetup } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
 import { truncate } from "../lib/format";
@@ -249,17 +255,30 @@ export function NewSessionView() {
               className="absolute bottom-full left-0 z-10 mb-1 flex w-full flex-col overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg"
             >
               {recent.map((item) => (
-                <button
-                  key={item.workspace}
-                  type="button"
+                <div
+                  key={`${item.machine}:${item.workspace}`}
                   data-slot="recent-workspace"
                   // 阻止默认行为以免输入框失焦（失焦会收起浮层，点击就落不到这一项上）
                   onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => pickRecentWorkspace(item.workspace)}
-                  className="cursor-pointer truncate px-2 py-2 text-left text-sm hover:bg-accent lg:py-1"
+                  className="flex cursor-pointer items-center hover:bg-accent"
                 >
-                  {item.workspace}
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => pickRecentWorkspace(item.workspace)}
+                    className="min-w-0 flex-1 truncate px-2 py-2 text-left text-sm lg:py-1"
+                  >
+                    {item.workspace}
+                  </button>
+                  <button
+                    type="button"
+                    data-slot="recent-workspace-delete"
+                    aria-label={`删除 ${item.workspace}`}
+                    onClick={() => void deleteRecentWorkspace(core, item.machine, item.workspace)}
+                    className="shrink-0 px-2 py-2 text-muted-foreground hover:text-foreground lg:py-1"
+                  >
+                    ×
+                  </button>
+                </div>
               ))}
             </div>
           ) : null}
