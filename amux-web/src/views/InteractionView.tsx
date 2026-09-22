@@ -277,6 +277,7 @@ export function InteractionView() {
               data-slot="quick-command-button"
               variant="secondary"
               size="sm"
+              title={command.prompt}
               onClick={() => void quickSend(command.prompt)}
             >
               {command.name}

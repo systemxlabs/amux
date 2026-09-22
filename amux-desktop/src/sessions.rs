@@ -850,6 +850,7 @@ fn quick_buttons(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .small()
                 .ghost()
                 .label(ui::truncate(&command.name, 16))
+                .tooltip(command.prompt.clone())
                 .on_click(cx.listener({
                     let prompt = command.prompt.clone();
                     move |this, _, _, cx| this.send_quick_command(prompt.clone(), cx)
