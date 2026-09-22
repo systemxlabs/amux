@@ -68,12 +68,12 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/machines/<machine_name>/list_dir` | 分页查看指定路径文件夹列表 |
 | GET `/machines/<machine_name>/read_file` | 分页查看指定路径文本文件内容 |
 | POST `/sessions` | 新建一个普通会话 |
-| GET `/sessions` | 分页查询最近活跃的非关联普通会话列表 |
+| GET `/sessions` | 分页查询非关联普通会话列表，可指定项目 |
 | GET `/sessions/<session_id>` | 查询指定普通会话 |
 | POST `/sessions/<session_id>` | 往指定普通会话发送指令 |
 | DELETE `/sessions/<session_id>` | 删除指定普通会话 |
 | POST `/sessions/<session_id>/cancel` | 取消指定普通会话 |
-| POST `/sessions/<session_id>/configure` | 配置指定普通会话：会话标题，会话选项等 |
+| POST `/sessions/<session_id>/configure` | 配置指定普通会话：会话标题、会话选项、所属项目等 |
 | GET `/sessions/<session_id>/config_options` | 获取指定普通会话的会话选项 |
 | GET `/sessions/<session_id>/slash_commands` | 获取指定普通会话的斜杠命令 |
 | GET `/sessions/<session_id>/plan` | 获取指定普通会话的 agent 计划 |
@@ -89,11 +89,11 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | DELETE `/sessions/<session_id>/terminals/<terminal_id>` | 关闭指定终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>/resize` | 调整指定终端窗口大小 |
 | POST `/workflows` | 新建一个工作流会话 |
-| GET `/workflows` | 分页查询最近活跃的工作流会话列表，包含关联普通会话 |
+| GET `/workflows` | 分页查询工作流会话列表，可指定项目，结果包含关联普通会话 |
 | GET `/workflows/<workflow_id>` | 查询指定工作流会话 |
 | POST `/workflows/<workflow_id>` | 往指定工作流会话发送指令 |
 | DELETE `/workflows/<workflow_id>` | 删除指定工作流会话，级联删除关联普通会话 |
-| POST `/workflows/<workflow_id>/configure` | 配置指定工作流会话：会话标题等 |
+| POST `/workflows/<workflow_id>/configure` | 配置指定工作流会话：会话标题、所属项目等 |
 | GET `/workflows/<workflow_id>/history` | 分页查询指定工作流会话的对话历史 |
 | GET `/workflows/<workflow_id>/activities` | 分页查询指定工作流会话的活动历史 |
 | GET `/workflows/<workflow_id>/ongoing_activity` | 查询指定工作流会话正在进行中的活动 |
@@ -107,6 +107,11 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | PUT `/config/quick_commands/` | 全量更新所有快捷指令 |
 | GET `/config/agent/` | 查询内置智能体配置 |
 | PUT `/config/agent/` | 更新内置智能体配置 |
+| GET `/config/projects/` | 查询所有配置的项目 |
+| POST `/config/projects/` | 新建项目 |
+| POST `/config/projects/order` | 更新项目顺序 |
+| PUT `/config/projects/<project_name>` | 更新指定项目 |
+| DELETE `/config/projects/<project_name>` | 删除指定项目 |
 
 ## Daemon
 
@@ -308,6 +313,7 @@ Server 作为 ACP client 与 Agents 通信
     id TEXT PRIMARY KEY,             -- 会话 ID
     state TEXT NOT NULL,             -- 会话状态
     title TEXT,                      -- 会话标题
+    project TEXT,                    -- 所属项目
     workspace TEXT NOT NULL,         -- 工作目录
     worktree_dir TEXT,               -- worktree 目录
     machine TEXT NOT NULL,           -- 所属机器
@@ -421,6 +427,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     title TEXT,                       -- 会话标题
     state TEXT NOT NULL,              -- 会话状态
     plan TEXT NOT NULL,               -- 执行计划
+    project TEXT,                     -- 所属项目
     created_at INTEGER NOT NULL,      -- 创建时间
     updated_at INTEGER NOT NULL       -- 更新时间
   );
@@ -490,6 +497,19 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 }
 ```
 读写为低频操作，无需考虑并发和原子写入问题。
+
+### 项目存储
+
+存储在 `~/.amux/config/projects.json` 路径，格式为
+```json
+[
+  {
+    "name": "项目 A",
+    "description": "xxx"
+  }
+]
+```
+注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 ## 应用
 
