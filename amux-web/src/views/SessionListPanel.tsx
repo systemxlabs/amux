@@ -417,7 +417,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                   ) : (
                     <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
                   )}
-                  <span className="min-w-0 flex-1 truncate">{group.label}</span>
+                  <span className="min-w-0 flex-1 truncate text-left">{group.label}</span>
                 </button>
                 {!group.collapsed && group.loading && group.rows.length === 0 ? (
                   <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
