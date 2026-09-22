@@ -7,6 +7,7 @@ use gpui_component::button::*;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
 use gpui_component::radio::RadioGroup;
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{
     h_flex, v_flex, ActiveTheme, Disableable as _, FocusTrapElement as _, Icon, IconName,
     Selectable, Sizable,
@@ -162,7 +163,7 @@ fn render_content(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
         SettingsTab::Connection => connection_tab(this, cx),
         SettingsTab::Machines => machines_tab(this, cx),
         SettingsTab::Orchestrator => orchestrator_tab(this, cx),
-        SettingsTab::QuickCommands => quick_commands_tab(core, cx),
+        SettingsTab::QuickCommands => quick_commands_tab(core, this, cx),
         SettingsTab::Skills => skills_tab(core, cx),
         SettingsTab::WorkflowPlans => plans_tab(core, cx),
         SettingsTab::Projects => projects_tab(core, cx),
@@ -462,10 +463,53 @@ fn orchestrator_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement
 }
 
 /// 快捷指令：卡片列表（名称 + 内容 + 编辑/删除），右上角「+」新增。
-fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+fn quick_commands_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
+    let projects: Vec<String> = core
+        .settings
+        .projects
+        .iter()
+        .map(|project| project.name.clone())
+        .collect();
+    let active_project = this
+        .quick_command_tab
+        .clone()
+        .filter(|project| projects.contains(project));
+    let tab_projects: Vec<Option<String>> = std::iter::once(None)
+        .chain(projects.iter().cloned().map(Some))
+        .collect();
+    let selected_ix = active_project
+        .as_ref()
+        .and_then(|project| projects.iter().position(|candidate| candidate == project))
+        .map_or(0, |index| index + 1);
+    let selected_project = tab_projects[selected_ix].clone();
+    let click_projects: Vec<Option<String>> = tab_projects.clone();
+    let mut tabs = TabBar::new("quick-command-tabs")
+        .w_full()
+        .small()
+        .segmented()
+        .menu(true)
+        .selected_index(selected_ix)
+        .on_click(
+            cx.listener(move |this: &mut AmuxApp, index: &usize, _, cx| {
+                this.quick_command_tab = click_projects[*index].clone();
+                cx.notify();
+            }),
+        )
+        .child(Tab::new().label("通用"));
+    for project in &projects {
+        tabs = tabs.child(Tab::new().label(project.clone()));
+    }
+
     let mut list = v_flex().gap_2();
-    for command in &core.settings.quick_commands {
+    let mut has_commands = false;
+    for command in core
+        .settings
+        .quick_commands
+        .iter()
+        .filter(|command| command.project == selected_project)
+    {
+        has_commands = true;
         let name = command.name.clone();
         let project = command.project.clone();
         let key = format!("{project:?}-{name}");
@@ -485,14 +529,6 @@ fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.foreground),
-                        )
-                        .child(
-                            Label::new(match &project {
-                                Some(project) => format!("项目：{project}"),
-                                None => "通用".to_string(),
-                            })
-                            .text_xs()
-                            .text_color(theme.muted_foreground),
                         )
                         .child(
                             Label::new(command.prompt.clone())
@@ -534,14 +570,18 @@ fn quick_commands_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 ),
         );
     }
-    if core.settings.quick_commands.is_empty() {
+    if !has_commands {
+        let message = match selected_project {
+            Some(project) => format!("项目「{project}」还没有快捷指令。"),
+            None => "还没有通用快捷指令。".to_string(),
+        };
         list = list.child(
-            Label::new("还没有快捷指令。添加后会显示在会话输入区上方。")
+            Label::new(message)
                 .text_sm()
                 .text_color(theme.muted_foreground),
         );
     }
-    list.into_any_element()
+    v_flex().gap_2().child(tabs).child(list).into_any_element()
 }
 
 /// 技能：卡片两层（名称/描述 + 编辑/删除，安装/更新/卸载），右上角「+」新增。

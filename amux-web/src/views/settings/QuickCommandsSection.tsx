@@ -1,6 +1,6 @@
 // 快捷指令设置（docs/PRD.md「快捷指令设置」）。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Button } from "../../components/ui/button";
@@ -15,6 +15,7 @@ import {
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
 import { Label } from "../../components/ui/label";
+import { Tabs, TabsList, TabsTrigger } from "../../components/ui/tabs";
 import { saveQuickCommands } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 import { truncate } from "../../lib/format";
@@ -27,12 +28,35 @@ type FormState = {
   prompt: string;
 };
 
+const GENERAL_TAB = "general";
+
+function projectTab(name: string): string {
+  return `project:${name}`;
+}
+
 export function QuickCommandsSection() {
   const core = useCore();
   const state = useCoreState();
   const commands = state.settings.quickCommands;
+  const projects = state.settings.projects;
+  const [activeProject, setActiveProject] = useState<string | undefined>(undefined);
   const [form, setForm] = useState<FormState | null>(null);
   const [removing, setRemoving] = useState<number | null>(null);
+  const selectedProject =
+    activeProject !== undefined &&
+    projects.some((project) => project.name === activeProject)
+      ? activeProject
+      : undefined;
+  const visibleCommands = commands.filter((command) => command.project === selectedProject);
+
+  useEffect(() => {
+    if (
+      activeProject !== undefined &&
+      !projects.some((project) => project.name === activeProject)
+    ) {
+      setActiveProject(undefined);
+    }
+  }, [activeProject, projects]);
 
   function submit(): void {
     if (form === null) return;
@@ -78,60 +102,80 @@ export function QuickCommandsSection() {
           data-slot="quick-command-add"
           aria-label="新增快捷指令"
           onClick={() =>
-            setForm({ index: null, project: undefined, name: "", prompt: "" })
+            setForm({
+              index: null,
+              project: selectedProject,
+              name: "",
+              prompt: "",
+            })
           }
         >
           +
         </Button>
       </div>
-      {commands.length === 0 ? (
+      <Tabs
+        value={selectedProject === undefined ? GENERAL_TAB : projectTab(selectedProject)}
+        onValueChange={(value) =>
+          setActiveProject(
+            value === GENERAL_TAB ? undefined : value.replace(/^project:/, ""),
+          )
+        }
+      >
+        <TabsList className="max-w-full overflow-x-auto">
+          <TabsTrigger value={GENERAL_TAB}>通用</TabsTrigger>
+          {projects.map((project) => (
+            <TabsTrigger key={project.name} value={projectTab(project.name)}>
+              {project.name}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
+      {visibleCommands.length === 0 ? (
         <div className="text-xs text-muted-foreground">暂无快捷指令</div>
       ) : (
         <div className="flex flex-col gap-3">
-          {commands.map((command, index) => (
-            <Card
-              key={JSON.stringify([command.project ?? null, command.name])}
-              data-slot="quick-command-card"
-              className="gap-2"
-            >
-              <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
-                <div className="min-w-0">
+          {visibleCommands.map((command) => {
+            const index = commands.indexOf(command);
+            return (
+              <Card
+                key={JSON.stringify([command.project ?? null, command.name])}
+                data-slot="quick-command-card"
+                className="gap-2"
+              >
+                <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
                   <CardTitle>{command.name}</CardTitle>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {command.project === undefined ? "通用" : `项目：${command.project}`}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      data-slot="quick-command-edit"
+                      onClick={() =>
+                        setForm({
+                          index,
+                          project: command.project,
+                          name: command.name,
+                          prompt: command.prompt,
+                        })
+                      }
+                    >
+                      编辑
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      data-slot="quick-command-delete"
+                      onClick={() => setRemoving(index)}
+                    >
+                      删除
+                    </Button>
                   </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    data-slot="quick-command-edit"
-                    onClick={() =>
-                      setForm({
-                        index,
-                        project: command.project,
-                        name: command.name,
-                        prompt: command.prompt,
-                      })
-                    }
-                  >
-                    编辑
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    data-slot="quick-command-delete"
-                    onClick={() => setRemoving(index)}
-                  >
-                    删除
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent className="text-xs text-muted-foreground">
-                {truncate(command.prompt, 80)}
-              </CardContent>
-            </Card>
-          ))}
+                </CardHeader>
+                <CardContent className="text-xs text-muted-foreground">
+                  {truncate(command.prompt, 80)}
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       )}
       <Dialog open={form !== null} onOpenChange={(next) => (!next ? setForm(null) : undefined)}>
@@ -142,7 +186,7 @@ export function QuickCommandsSection() {
           <div className="flex flex-col gap-1.5">
             <Label>项目</Label>
             <div className="flex flex-wrap gap-1">
-              {state.settings.projects.map((project) => {
+              {projects.map((project) => {
                 const selected = form?.project === project.name;
                 return (
                   <Button

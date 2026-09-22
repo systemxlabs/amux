@@ -101,6 +101,8 @@ pub struct AmuxApp {
     pub quick_prompt: Entity<InputState>,
     /// 快捷指令表单当前选择的项目；None = 通用
     pub quick_command_project: Option<String>,
+    /// 快捷指令设置当前查看的项目；None = 通用
+    pub quick_command_tab: Option<String>,
     pub skill_name: Entity<InputState>,
     pub skill_desc: Entity<InputState>,
     pub plan_name: Entity<InputState>,
@@ -360,6 +362,7 @@ impl AmuxApp {
             quick_name,
             quick_prompt,
             quick_command_project: None,
+            quick_command_tab: None,
             skill_name,
             skill_desc,
             plan_name,
@@ -2288,7 +2291,15 @@ impl AmuxApp {
             self.quick_prompt
                 .update(cx, |state, cx| state.set_value(command.prompt, window, cx));
         } else {
-            self.quick_command_project = None;
+            let project = self.quick_command_tab.clone().filter(|project| {
+                self.with_core(|core| {
+                    core.settings
+                        .projects
+                        .iter()
+                        .any(|candidate| &candidate.name == project)
+                })
+            });
+            self.quick_command_project = project;
             self.quick_name
                 .update(cx, |state, cx| state.set_value(String::new(), window, cx));
             self.quick_prompt
@@ -2755,6 +2766,9 @@ impl AmuxApp {
             "删除",
             ButtonVariant::Danger,
             move |this, _cx| {
+                if this.quick_command_tab.as_deref() == Some(name.as_str()) {
+                    this.quick_command_tab = None;
+                }
                 let name = name.clone();
                 let client = this.with_core(|core| core.client.clone());
                 let Some(client) = client else { return };
