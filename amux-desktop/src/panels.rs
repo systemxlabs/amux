@@ -1286,6 +1286,21 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
         )
         .child(div().flex_1())
         .child(
+            h_flex()
+                .gap_1()
+                .child(
+                    Label::new(format!("+{additions}"))
+                        .text_xs()
+                        .text_color(theme.success),
+                )
+                .child(Label::new("/").text_xs().text_color(theme.muted_foreground))
+                .child(
+                    Label::new(format!("-{deletions}"))
+                        .text_xs()
+                        .text_color(theme.danger),
+                ),
+        )
+        .child(
             Button::new("diff-toggle-changes")
                 .small()
                 .ghost()
@@ -1300,21 +1315,6 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
                     "折叠 diff"
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_all_diffs(cx))),
-        )
-        .child(
-            h_flex()
-                .gap_1()
-                .child(
-                    Label::new(format!("+{additions}"))
-                        .text_xs()
-                        .text_color(theme.success),
-                )
-                .child(Label::new("/").text_xs().text_color(theme.muted_foreground))
-                .child(
-                    Label::new(format!("-{deletions}"))
-                        .text_xs()
-                        .text_color(theme.danger),
-                ),
         );
 
     let body = if not_repo {

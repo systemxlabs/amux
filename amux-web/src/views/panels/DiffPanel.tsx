@@ -548,6 +548,11 @@ export function DiffPanel() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <span data-slot="diff-line-count" className="text-xs">
+            <span className="text-success">+{additions}</span>
+            <span className="text-muted-foreground">/</span>
+            <span className="text-danger">-{deletions}</span>
+          </span>
           <Button
             type="button"
             variant="ghost"
@@ -559,11 +564,6 @@ export function DiffPanel() {
           >
             {diffsCollapsed ? <PanelRightOpen /> : <PanelRightClose />}
           </Button>
-          <span data-slot="diff-line-count" className="text-xs">
-            <span className="text-success">+{additions}</span>
-            <span className="text-muted-foreground">/</span>
-            <span className="text-danger">-{deletions}</span>
-          </span>
         </div>
       </div>
       {body}
