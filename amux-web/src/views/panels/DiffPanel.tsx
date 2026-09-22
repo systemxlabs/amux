@@ -77,6 +77,20 @@ function sameHunk(a: DiffLineRef, b: DiffLineRef): boolean {
   return a.path === b.path && a.hunkIndex === b.hunkIndex;
 }
 
+function lineRefFromElement(element: Element | null): DiffLineRef | null {
+  const line = element?.closest<HTMLElement>("[data-diff-line]");
+  if (line == null) return null;
+  const path = line.dataset.diffFile;
+  const hunkIndex = Number(line.dataset.diffHunk);
+  const lineIndex = Number(line.dataset.diffLineIndex);
+  if (path === undefined || Number.isNaN(hunkIndex) || Number.isNaN(lineIndex)) return null;
+  return { path, hunkIndex, lineIndex };
+}
+
+function lineRefAtPoint(x: number, y: number): DiffLineRef | null {
+  return lineRefFromElement(document.elementFromPoint(x, y));
+}
+
 function commentMessage(target: DiffCommentTarget, comment: string): string {
   if (target.kind === "file") return `${target.path} ${comment}`;
   return `\`\`\`\n${target.code}\n\`\`\`\n${comment}`;
@@ -217,6 +231,8 @@ export function DiffPanel() {
   const [dragRange, setDragRange] = useState<DiffDrag | null>(null);
   const [hoveredGutter, setHoveredGutter] = useState<string | null>(null);
   const dragRef = useRef<DiffDrag | null>(null);
+  const dragPointerRef = useRef<number | null>(null);
+  const pointerCleanupRef = useRef<(() => void) | null>(null);
 
   // 打开时刷新一次（docs/DESIGN.md「改动审查视图」）：会话切换时重新拉取
   useEffect(() => {
@@ -231,6 +247,9 @@ export function DiffPanel() {
     setDragRange(null);
     setHoveredGutter(null);
     dragRef.current = null;
+    dragPointerRef.current = null;
+    pointerCleanupRef.current?.();
+    pointerCleanupRef.current = null;
     const client = core.client;
     if (client === null || sessionId === null) return;
     let cancelled = false;
@@ -246,6 +265,8 @@ export function DiffPanel() {
       cancelled = true;
     };
   }, [core, sessionId]);
+
+  useEffect(() => () => pointerCleanupRef.current?.(), []);
 
   const files = diff?.files ?? [];
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
@@ -289,45 +310,66 @@ export function DiffPanel() {
   };
 
   const lineRefAt = (event: ReactPointerEvent<HTMLDivElement>): DiffLineRef | null => {
-    const direct = (event.target as HTMLElement).closest<HTMLElement>("[data-diff-line]");
-    const underPointer = document
-      .elementFromPoint(event.clientX, event.clientY)
-      ?.closest<HTMLElement>("[data-diff-line]");
-    const element = direct ?? underPointer;
-    if (element == null) return null;
-    const path = element.dataset.diffFile;
-    const hunkIndex = Number(element.dataset.diffHunk);
-    const lineIndex = Number(element.dataset.diffLineIndex);
-    if (path === undefined || Number.isNaN(hunkIndex) || Number.isNaN(lineIndex)) return null;
-    return { path, hunkIndex, lineIndex };
+    const direct = event.target instanceof Element ? lineRefFromElement(event.target) : null;
+    return direct ?? lineRefAtPoint(event.clientX, event.clientY);
   };
 
   const beginCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
     const gutter = (event.target as HTMLElement).closest("[data-diff-gutter]");
     if (gutter === null) return;
     const line = lineRefAt(event);
     if (line === null) return;
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+    pointerCleanupRef.current?.();
     const drag = { start: line, end: line };
     dragRef.current = drag;
+    dragPointerRef.current = event.pointerId;
     setDragRange(drag);
+
+    let cleanup = () => {};
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== dragPointerRef.current) return;
+      const next = lineRefAtPoint(moveEvent.clientX, moveEvent.clientY);
+      if (next !== null) extendCodeSelection(next);
+    };
+    const onPointerUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== dragPointerRef.current) return;
+      const next = lineRefAtPoint(upEvent.clientX, upEvent.clientY);
+      if (next !== null) extendCodeSelection(next);
+      const current = dragRef.current;
+      dragPointerRef.current = null;
+      cleanup();
+      if (current !== null) finishCodeSelection(current);
+    };
+    const onPointerCancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId !== dragPointerRef.current) return;
+      dragPointerRef.current = null;
+      cleanup();
+      cancelComment();
+    };
+    cleanup = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
+      if (pointerCleanupRef.current === cleanup) pointerCleanupRef.current = null;
+    };
+    pointerCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
   };
 
-  const extendCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const extendCodeSelection = (line: DiffLineRef) => {
     const current = dragRef.current;
-    if (current === null) return;
-    const line = lineRefAt(event);
-    if (line === null || !sameHunk(current.start, line)) return;
+    if (current === null || !sameHunk(current.start, line)) return;
     const drag = { ...current, end: line };
     dragRef.current = drag;
     setDragRange(drag);
   };
 
-  const finishCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
-    extendCodeSelection(event);
-    const drag = dragRef.current;
-    if (drag === null) return;
+  const finishCodeSelection = (drag: DiffDrag) => {
     const file = files.find((item) => item.path === drag.start.path);
     const hunk = file?.hunks[drag.start.hunkIndex];
     if (hunk === undefined) {
@@ -350,9 +392,6 @@ export function DiffPanel() {
       code,
     });
     setCommentText("");
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
   };
 
   let body: ReactNode;
@@ -389,9 +428,6 @@ export function DiffPanel() {
             data-slot="diff-content"
             className="select-none"
             onPointerDown={beginCodeSelection}
-            onPointerMove={extendCodeSelection}
-            onPointerUp={finishCodeSelection}
-            onPointerCancel={cancelComment}
           >
             {files.map((file, index) => (
               <div
@@ -466,7 +502,7 @@ export function DiffPanel() {
                               >
                                 <span
                                   data-diff-gutter="true"
-                                  className="relative flex w-6 shrink-0 cursor-pointer items-center justify-center text-muted-foreground"
+                                  className="relative flex w-6 shrink-0 cursor-pointer touch-none items-center justify-center text-muted-foreground"
                                   onPointerEnter={() => setHoveredGutter(gutterKey)}
                                   onPointerLeave={() =>
                                     setHoveredGutter((current) =>
