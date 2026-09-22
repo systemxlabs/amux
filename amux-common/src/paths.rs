@@ -23,6 +23,11 @@ pub fn logs_dir() -> PathBuf {
     amux_home().join("logs")
 }
 
+/// Daemon 锁目录：`<amux_home>/daemon`。
+pub fn daemon_dir() -> PathBuf {
+    amux_home().join("daemon")
+}
+
 /// 配置文件路径：`<amux_home>/config/<name>.json`。
 pub fn config_file(name: &str) -> PathBuf {
     amux_home().join("config").join(format!("{name}.json"))
@@ -39,6 +44,7 @@ mod tests {
         assert!(home.ends_with(".amux") || std::env::var("AMUX_HOME").is_ok());
         assert!(worktrees_dir().ends_with("worktrees"));
         assert!(logs_dir().ends_with("logs"));
+        assert!(daemon_dir().ends_with("daemon"));
         assert!(config_file("skills").ends_with("config/skills.json"));
     }
 }
