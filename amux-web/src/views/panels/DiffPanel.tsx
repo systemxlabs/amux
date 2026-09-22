@@ -282,6 +282,8 @@ export function DiffPanel() {
   const openFileComment = (path: string) => {
     setCommentTarget({ kind: "file", path });
     setCommentText("");
+    setDragRange(null);
+    dragRef.current = null;
   };
 
   const submitComment = async () => {
@@ -294,6 +296,7 @@ export function DiffPanel() {
     if (ok) {
       setCommentTarget(null);
       setCommentText("");
+      setDragRange(null);
     }
   };
 
@@ -311,39 +314,34 @@ export function DiffPanel() {
     if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
     const drag = { start: line, end: line };
     dragRef.current = drag;
     dragPointerRef.current = event.pointerId;
     setDragRange(drag);
   };
 
-  const extendCodeSelectionAtPoint = (event: ReactPointerEvent<HTMLSpanElement>) => {
+  const extendCodeSelectionAtEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerId !== dragPointerRef.current) return;
-    event.preventDefault();
-    const next = lineRefAtPoint(event.clientX, event.clientY);
+    const direct =
+      event.target instanceof Element ? lineRefFromElement(event.target) : null;
+    const next = direct ?? lineRefAtPoint(event.clientX, event.clientY);
     if (next !== null) extendCodeSelection(next);
   };
 
-  const finishCodeSelectionAtPoint = (event: ReactPointerEvent<HTMLSpanElement>) => {
+  const finishCodeSelectionAtEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerId !== dragPointerRef.current) return;
-    event.preventDefault();
-    const next = lineRefAtPoint(event.clientX, event.clientY);
+    const direct =
+      event.target instanceof Element ? lineRefFromElement(event.target) : null;
+    const next = direct ?? lineRefAtPoint(event.clientX, event.clientY);
     if (next !== null) extendCodeSelection(next);
     const current = dragRef.current;
     dragPointerRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
     if (current !== null) finishCodeSelection(current);
   };
 
-  const cancelCodeSelection = (event: ReactPointerEvent<HTMLSpanElement>) => {
+  const cancelCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerId !== dragPointerRef.current) return;
     dragPointerRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
     cancelComment();
   };
 
@@ -369,7 +367,6 @@ export function DiffPanel() {
       .map((line) => `${linePrefix(line.kind)}${line.text}`)
       .join("\n");
     dragRef.current = null;
-    setDragRange(null);
     setCommentTarget({
       kind: "code",
       path: drag.start.path,
@@ -413,6 +410,9 @@ export function DiffPanel() {
           <div
             data-slot="diff-content"
             className="select-none"
+            onPointerMove={extendCodeSelectionAtEvent}
+            onPointerUp={finishCodeSelectionAtEvent}
+            onPointerCancel={cancelCodeSelection}
           >
             {files.map((file, index) => (
               <div
@@ -475,6 +475,13 @@ export function DiffPanel() {
                                 data-diff-file={file.path}
                                 data-diff-hunk={hunkIx}
                                 data-diff-line-index={lineIx}
+                                onPointerEnter={() =>
+                                  extendCodeSelection({
+                                    path: file.path,
+                                    hunkIndex: hunkIx,
+                                    lineIndex: lineIx,
+                                  })
+                                }
                                 className={cn(
                                   "flex whitespace-pre font-mono text-xs",
                                   line.kind === "add" && "bg-diff-add",
@@ -495,9 +502,6 @@ export function DiffPanel() {
                                       lineIndex: lineIx,
                                     })
                                   }
-                                  onPointerMove={extendCodeSelectionAtPoint}
-                                  onPointerUp={finishCodeSelectionAtPoint}
-                                  onPointerCancel={cancelCodeSelection}
                                   onPointerEnter={() => setHoveredGutter(gutterKey)}
                                   onPointerLeave={() =>
                                     setHoveredGutter((current) =>
