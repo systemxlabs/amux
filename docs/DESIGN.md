@@ -492,12 +492,13 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 ```json
 [
   {
+    "project": "project1",
     "name": "Commit & Push",
     "prompt": "提交并推送当前工作区的更改：为改动写一条简洁的 commit message，commit 后 push。"
   }
 ]
 ```
-注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
+注意 (project, name) 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 ### 内置智能体配置存储
 
