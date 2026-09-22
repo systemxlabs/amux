@@ -1106,6 +1106,8 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
         && files
             .iter()
             .all(|file| this.diff_collapsed_files.contains(&file.path));
+    let additions: u32 = files.iter().map(|file| file.additions).sum();
+    let deletions: u32 = files.iter().map(|file| file.deletions).sum();
 
     // 工具栏（docs/PRD.md「改动审查视图」）：折叠/展开文件树按钮左对齐，折叠/展开 diff
     // 区域按钮右对齐
@@ -1130,6 +1132,11 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_tree(cx))),
         )
+        .child(
+            Label::new(format!("{} 个文件", files.len()))
+                .text_xs()
+                .text_color(theme.muted_foreground),
+        )
         .child(div().flex_1())
         .child(
             Button::new("diff-toggle-changes")
@@ -1146,6 +1153,21 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
                     "折叠 diff"
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_all_diffs(cx))),
+        )
+        .child(
+            h_flex()
+                .gap_1()
+                .child(
+                    Label::new(format!("+{additions}"))
+                        .text_xs()
+                        .text_color(theme.success),
+                )
+                .child(Label::new("/").text_xs().text_color(theme.muted_foreground))
+                .child(
+                    Label::new(format!("-{deletions}"))
+                        .text_xs()
+                        .text_color(theme.danger),
+                ),
         );
 
     let body = if not_repo {

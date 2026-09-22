@@ -3,6 +3,7 @@
 // 面板打开时拉取一次改动，不定时刷新；折叠状态只存在于本地。
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 
 import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
@@ -209,6 +210,8 @@ export function DiffPanel() {
 
   const files = diff?.files ?? [];
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
+  const additions = files.reduce((total, file) => total + file.additions, 0);
+  const deletions = files.reduce((total, file) => total + file.deletions, 0);
 
   const toggleDir = (key: string) => {
     setCollapsedDirs((prev) =>
@@ -447,24 +450,40 @@ export function DiffPanel() {
       {/* 工具栏（docs/PRD.md「改动审查视图」）：折叠/展开文件树按钮左对齐，
           折叠/展开 diff 区域按钮右对齐（折叠后仅显示文件名） */}
       <div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          data-slot="diff-toggle-tree"
-          onClick={() => setTreeVisible((prev) => !prev)}
-        >
-          {treeVisible ? "折叠文件树" : "展开文件树"}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          data-slot="diff-toggle-changes"
-          onClick={() => setDiffsCollapsed((prev) => !prev)}
-        >
-          {diffsCollapsed ? "展开 diff 区域" : "折叠 diff 区域"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            data-slot="diff-toggle-tree"
+            aria-label={treeVisible ? "折叠文件树" : "展开文件树"}
+            title={treeVisible ? "折叠文件树" : "展开文件树"}
+            onClick={() => setTreeVisible((prev) => !prev)}
+          >
+            {treeVisible ? <PanelLeftClose /> : <PanelLeftOpen />}
+          </Button>
+          <span data-slot="diff-file-count" className="text-xs text-muted-foreground">
+            {files.length} 个文件
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            data-slot="diff-toggle-changes"
+            aria-label={diffsCollapsed ? "展开 diff 区域" : "折叠 diff 区域"}
+            title={diffsCollapsed ? "展开 diff 区域" : "折叠 diff 区域"}
+            onClick={() => setDiffsCollapsed((prev) => !prev)}
+          >
+            {diffsCollapsed ? <PanelRightOpen /> : <PanelRightClose />}
+          </Button>
+          <span data-slot="diff-line-count" className="text-xs">
+            <span className="text-success">+{additions}</span>
+            <span className="text-muted-foreground">/</span>
+            <span className="text-danger">-{deletions}</span>
+          </span>
+        </div>
       </div>
       {body}
     </div>
