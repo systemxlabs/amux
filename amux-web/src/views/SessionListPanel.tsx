@@ -1,7 +1,7 @@
 // 会话列表视图（docs/PRD.md「会话列表视图」、docs/DESIGN.md「会话列表视图」）。
 //
 // 顶部「+」进入新建会话视图；普通会话与工作流会话统一排序，工作流会话可展开关联普通会话。
-// 会话按创建时间倒序排列（最新在上）；未归属组滚到最下方时加载更早一页。
+// 会话按创建时间倒序排列（最新在上）；未归属会话区域滚到最下方时加载更早一页。
 
 import {
   Fragment,
@@ -44,7 +44,7 @@ import {
 } from "../lib/types";
 import { cn } from "../lib/utils";
 
-/** 普通项目组首页 5 条，未归属项目首页 20 条（docs/PRD.md「会话列表视图」）。 */
+/** 普通项目组首页 5 条，未归属会话首页 20 条（docs/PRD.md「会话列表视图」）。 */
 const PROJECT_GROUP_PAGE = 5;
 const UNASSIGNED_GROUP_PAGE = 20;
 
@@ -147,11 +147,10 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     void loadGroup(group.key, group.project, (current?.loaded ?? page) + page);
   };
 
-  /** 未归属组滚到列表底部时加载下一页；普通项目组仍由「显示更多」推进。 */
+  /** 未归属会话区域滚到列表底部时加载下一页；普通项目组仍由「显示更多」推进。 */
   const handleScroll = (event: UIEvent<HTMLDivElement>): void => {
     const node = event.currentTarget;
     if (node.scrollTop + node.clientHeight < node.scrollHeight - 8) return;
-    if (collapsedGroups.has("project:")) return;
     const current = groupData["project:"];
     if (current === undefined || current.loading || !current.hasMore) return;
     void loadGroup("project:", undefined, current.loaded + 20);
@@ -317,29 +316,22 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     { label: "删除", danger: true, onSelect: () => setDeleting(entry) },
   ];
 
-  // 按项目分组：项目组按配置顺序，未归属项目在列表末端（docs/PRD.md「会话列表视图」）。
-  const groups: {
-    key: string;
-    name: string | undefined;
-    project: string | undefined;
-    entries: ListEntry[];
-  }[] = state.settings.projects.map((project) => ({
+  // 项目组按配置顺序展示；未归属项目不单独成组（docs/PRD.md「会话列表视图」）。
+  const projectGroups = state.settings.projects.map((project) => ({
     key: `project:${project.name}`,
     name: project.name,
     project: project.name,
-    entries: [],
   }));
-  groups.push({ key: "project:", name: undefined, project: undefined, entries: [] });
-  const projectsKey = groups.map((group) => `${group.project ?? ""}:${group.key}`).join("|");
+  const projectsKey = projectGroups.map((group) => `${group.project}:${group.key}`).join("|");
   useEffect(() => {
-    const projectGroups = [
+    const loadGroups = [
       ...state.settings.projects.map((project) => ({
         key: `project:${project.name}`,
         project: project.name as string | undefined,
       })),
       { key: "project:", project: undefined },
     ];
-    for (const group of projectGroups) {
+    for (const group of loadGroups) {
       if (collapsedGroups.has(group.key)) continue;
       void loadGroup(
         group.key,
@@ -349,7 +341,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     }
   }, [collapsedGroups, loadGroup, projectsKey, state.entries, state.settings.projects]);
 
-  const visibleGroups = groups.map((group) => {
+  const visibleProjectGroups = projectGroups.map((group) => {
     const collapsed = collapsedGroups.has(group.key);
     const data = groupData[group.key];
     const visibleEntries = collapsed ? [] : (data?.entries ?? []);
@@ -361,6 +353,10 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       hasMore: data?.hasMore ?? false,
     };
   });
+  const unassignedData = groupData["project:"];
+  const unassignedRows = listRows(unassignedData?.entries ?? [], new Set(state.expanded));
+  const unassignedLoading = unassignedData?.loading ?? true;
+  const showUnassigned = unassignedLoading || unassignedRows.length > 0;
 
   return (
     <div data-slot="session-list-panel" className="flex h-full min-h-0 flex-col">
@@ -384,20 +380,15 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
         className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-2"
         onScroll={handleScroll}
       >
-        {visibleGroups.length === 0 ? (
+        {visibleProjectGroups.length === 0 && !showUnassigned ? (
           <p className="py-4 text-center text-sm text-muted-foreground">暂无会话</p>
         ) : (
-          visibleGroups.map((group) => (
-            <Fragment key={group.key}>
-              {group.project === undefined && state.settings.projects.length > 0 ? (
-                <div
-                  data-slot="session-project-separator"
-                  className="my-1 border-t border-border"
-                />
-              ) : null}
+          <>
+            {visibleProjectGroups.map((group) => (
               <div
+                key={group.key}
                 data-slot="session-project-group"
-                data-project={group.name ?? ""}
+                data-project={group.name}
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={(event) => {
                   event.preventDefault();
@@ -421,7 +412,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                   ) : (
                     <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
                   )}
-                  <span className="min-w-0 truncate">{group.name ?? "未归属"}</span>
+                  <span className="min-w-0 truncate">{group.name}</span>
                 </button>
                 {!group.collapsed && group.loading && group.rows.length === 0 ? (
                   <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
@@ -435,7 +426,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                       return <Fragment key={index}>{element}</Fragment>;
                     })
                   : null}
-                {!group.collapsed && group.project !== undefined && group.hasMore ? (
+                {!group.collapsed && group.hasMore ? (
                   <button
                     type="button"
                     data-slot="session-project-show-more"
@@ -446,8 +437,40 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                   </button>
                 ) : null}
               </div>
-            </Fragment>
-          ))
+            ))}
+            {showUnassigned ? (
+              <div
+                data-slot="session-unassigned"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (dragEntry !== null) {
+                    const entry = dragEntry;
+                    setDragEntry(null);
+                    void setEntryProject(core, entry, undefined);
+                  }
+                }}
+                className="flex flex-col gap-0.5"
+              >
+                {state.settings.projects.length > 0 ? (
+                  <div
+                    data-slot="session-project-separator"
+                    className="my-1 border-t border-border"
+                  />
+                ) : null}
+                {unassignedLoading && unassignedRows.length === 0 ? (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
+                ) : null}
+                {unassignedRows.map((row, index) => {
+                  const element = renderRow(row);
+                  return <Fragment key={index}>{element}</Fragment>;
+                })}
+                {unassignedLoading && unassignedRows.length > 0 ? (
+                  <p className="px-2 py-1 text-center text-xs text-muted-foreground">加载中…</p>
+                ) : null}
+              </div>
+            ) : null}
+          </>
         )}
       </div>
       <ContextMenu state={menu} onClose={() => setMenu(null)} />

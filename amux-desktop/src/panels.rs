@@ -69,19 +69,9 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         .overflow_y_scroll()
         .gap_1();
 
-    // 按项目分组展示，未归属项目在列表末端（docs/PRD.md「会话列表视图」）。
-    let groups: Vec<Option<String>> = core
-        .settings
-        .projects
-        .iter()
-        .map(|project| Some(project.name.clone()))
-        .chain(std::iter::once(None))
-        .collect();
-    for project in groups {
-        let group_key = project.clone().unwrap_or_default();
-        if group_key.is_empty() && !core.settings.projects.is_empty() {
-            list = list.child(div().w_full().border_t_1().border_color(sidebar_border));
-        }
+    // 未归属项目不单独成组，在项目组之后以分隔线引导（docs/PRD.md「会话列表视图」）。
+    for project in core.settings.projects.clone() {
+        let group_key = project.name.clone();
         let collapsed = core.collapsed_project_groups.contains(&group_key);
         let group_state = core.project_groups.get(&group_key);
         let entries = group_state
@@ -93,7 +83,7 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
             .w_full()
             .gap_1()
             .on_drop(cx.listener(move |this, drag: &SessionProjectDrag, _, cx| {
-                this.set_entry_project(drag.0.clone(), project.clone(), cx);
+                this.set_entry_project(drag.0.clone(), Some(project.name.clone()), cx);
             }))
             .child(
                 Button::new(SharedString::from(format!("project-group-{group_key}")))
@@ -115,14 +105,10 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                                     .text_color(theme.muted_foreground),
                             )
                             .child(
-                                Label::new(if group_key.is_empty() {
-                                    "未归属".to_string()
-                                } else {
-                                    group_key.clone()
-                                })
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(foreground),
+                                Label::new(group_key.clone())
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(foreground),
                             ),
                     ),
             );
@@ -161,7 +147,7 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                     .child(Spinner::new().xsmall().color(theme.muted_foreground)),
             );
         }
-        if !group_key.is_empty() && has_more {
+        if has_more {
             group = group.child(
                 Button::new(SharedString::from(format!("project-more-{group_key}")))
                     .xsmall()
@@ -175,6 +161,47 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
             );
         }
         list = list.child(group);
+    }
+
+    let unassigned_state = core.project_groups.get("");
+    let unassigned_entries = unassigned_state
+        .map(|group| group.entries.as_slice())
+        .unwrap_or_default();
+    let unassigned_loading = unassigned_state.is_none_or(|group| group.loading);
+    if unassigned_loading || !unassigned_entries.is_empty() {
+        let mut unassigned = v_flex().w_full().gap_1().on_drop(cx.listener(
+            |this, drag: &SessionProjectDrag, _, cx| {
+                this.set_entry_project(drag.0.clone(), None, cx);
+            },
+        ));
+        if !core.settings.projects.is_empty() {
+            unassigned = unassigned.child(div().w_full().border_t_1().border_color(sidebar_border));
+        }
+        if unassigned_loading && unassigned_entries.is_empty() {
+            unassigned = unassigned.child(
+                h_flex()
+                    .px_1()
+                    .child(Spinner::new().xsmall().color(theme.muted_foreground)),
+            );
+        }
+        for entry in unassigned_entries {
+            match entry {
+                ListEntry::Session(session) => {
+                    unassigned = unassigned.child(session_row(session, false, core, this, cx));
+                }
+                ListEntry::Workflow(workflow) => {
+                    unassigned = unassigned.child(workflow_row(workflow, core, this, cx));
+                }
+            }
+        }
+        if unassigned_loading && !unassigned_entries.is_empty() {
+            unassigned = unassigned.child(
+                h_flex()
+                    .justify_center()
+                    .child(Spinner::new().xsmall().color(theme.muted_foreground)),
+            );
+        }
+        list = list.child(unassigned);
     }
     if core.entries.is_empty()
         && !core
