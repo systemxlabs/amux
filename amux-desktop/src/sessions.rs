@@ -13,6 +13,7 @@ use gpui_component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::text::{TextView, TextViewStyle};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     h_flex, v_flex, ActiveTheme, Disableable as _, ElementExt as _, Icon, IconName, Selectable,
     Sizable,
@@ -623,6 +624,31 @@ fn session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> A
                         .flex_1()
                         .min_w_0()
                         .truncate(),
+                )
+            },
+        )
+        .when_some(
+            core.view
+                .workflow
+                .as_ref()
+                .map(|workflow| workflow.plan.clone())
+                .filter(|plan| !plan.is_empty()),
+            |header, plan| {
+                header.child(
+                    div()
+                        .id("interaction-workflow-plan")
+                        .flex_1()
+                        .min_w_0()
+                        .tooltip({
+                            let plan = plan.clone();
+                            move |window, cx| Tooltip::new(plan.clone()).build(window, cx)
+                        })
+                        .child(
+                            Label::new(plan)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate(),
+                        ),
                 )
             },
         );

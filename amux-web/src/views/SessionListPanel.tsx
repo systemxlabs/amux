@@ -417,9 +417,6 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                 {!group.collapsed && group.loading && group.rows.length === 0 ? (
                   <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
                 ) : null}
-                {!group.collapsed && !group.loading && group.rows.length === 0 ? (
-                  <p className="px-2 py-1 text-xs text-muted-foreground">暂无会话</p>
-                ) : null}
                 {!group.collapsed
                   ? group.rows.map((row, index) => {
                       const element = renderRow(row);

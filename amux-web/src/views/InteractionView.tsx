@@ -138,6 +138,7 @@ export function InteractionView() {
         ?.agents.find((agent) => agent.name === detail.session?.agent)?.available ?? false)
     : state.settings.orchestrator.status === "ready" && state.settings.orchestrator.config !== null;
   const workdir = isSession && detail.session ? rootDir(detail.session) : "";
+  const workflowPlan = !isSession && detail.workflow ? detail.workflow.plan : "";
 
   // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算（不只是滚动事件）
   useEffect(() => {
@@ -238,9 +239,18 @@ export function InteractionView() {
           <span
             data-slot="interaction-workdir"
             title={workdir}
-            className="min-w-0 max-w-full truncate text-xs text-muted-foreground"
+            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
           >
             {workdir}
+          </span>
+        ) : null}
+        {!isSession && workflowPlan !== "" ? (
+          <span
+            data-slot="interaction-workflow-plan"
+            title={workflowPlan}
+            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+          >
+            {workflowPlan}
           </span>
         ) : null}
       </header>

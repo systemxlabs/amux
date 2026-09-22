@@ -122,13 +122,6 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                     .px_1()
                     .child(Spinner::new().xsmall().color(theme.muted_foreground)),
             );
-        } else if !loading && entries.is_empty() {
-            group = group.child(
-                Label::new("暂无会话")
-                    .px_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground),
-            );
         }
         for entry in entries {
             match entry {
