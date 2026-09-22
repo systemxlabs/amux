@@ -722,6 +722,34 @@ mod tests {
     }
 
     #[test]
+    fn sessions_page_filters_unassigned_before_pagination() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        for (id, project, created_at) in
+            [("s1", None, 10u64), ("p1", Some("p"), 9), ("s2", None, 8)]
+        {
+            let mut row = session(id, "pc", "codex");
+            row.project = project.map(str::to_string);
+            row.created_at = created_at;
+            store.insert_session(&row).unwrap();
+        }
+
+        let (first, has_more) = store.sessions_page(1, 0, Some(""));
+        assert_eq!(
+            first.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["s1"]
+        );
+        assert!(has_more);
+
+        let (second, has_more) = store.sessions_page(1, 1, Some(""));
+        assert_eq!(
+            second.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["s2"]
+        );
+        assert!(!has_more);
+    }
+
+    #[test]
     fn linked_sessions_sorted_by_session_created_at() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -755,6 +783,29 @@ mod tests {
         assert!(has_more);
 
         let (second, has_more) = store.workflows_page(1, 1, Some("p"));
+        assert_eq!(
+            second.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a2"]
+        );
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn workflows_page_filters_unassigned_before_pagination() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_workflow("a1", "a1", SessionState::Idle, "p", None, 10);
+        store.insert_workflow("b1", "b1", SessionState::Idle, "q", Some("q"), 9);
+        store.insert_workflow("a2", "a2", SessionState::Idle, "p", None, 8);
+
+        let (first, has_more) = store.workflows_page(1, 0, Some(""));
+        assert_eq!(
+            first.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a1"]
+        );
+        assert!(has_more);
+
+        let (second, has_more) = store.workflows_page(1, 1, Some(""));
         assert_eq!(
             second.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["a2"]

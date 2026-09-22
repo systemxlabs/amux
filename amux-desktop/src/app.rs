@@ -1,6 +1,6 @@
 //! 根视图：窗口外壳（标题栏、三栏与拖拽调宽）、设置浮窗与轮询节拍。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,10 +129,6 @@ pub struct AmuxApp {
     pub diff_comment_input: Entity<InputState>,
     /// 改动审查：代码行拖动选择
     pub diff_line_selection: Option<diff::LineSelection>,
-    /// 会话列表：已折叠的项目组（空串表示未归属）
-    pub collapsed_project_groups: HashSet<String>,
-    /// 会话列表：各项目组当前显示的会话数
-    pub project_group_loaded: HashMap<String, usize>,
     /// 改动审查：改动区域滚动句柄（点击文件时定位）
     pub diff_scroll: ScrollHandle,
     /// 改动审查：文件树宽度
@@ -379,8 +375,6 @@ impl AmuxApp {
             diff_tree_visible: true,
             diff_comment_target: None,
             diff_line_selection: None,
-            collapsed_project_groups: HashSet::new(),
-            project_group_loaded: HashMap::new(),
             diff_scroll: ScrollHandle::new(),
             diff_tree_width: panels::DIFF_TREE_WIDTH,
             diff_tree_drag: None,
@@ -523,13 +517,23 @@ impl AmuxApp {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
 
-        let handle = self.list_scroll.clone();
-        let loaded = self.with_core(|core| core.entries.len());
-        if self.sync_list_paging(&handle, loaded, false, |core| &mut core.list_paging) {
+        let load_unassigned = {
+            let core = self.core.lock();
+            core.project_groups.get("").is_some_and(|group| {
+                !core.collapsed_project_groups.contains("")
+                    && group.has_more
+                    && !group.loading
+                    && self.list_scroll.max_offset().y.as_f32()
+                        + self.list_scroll.offset().y.as_f32()
+                        <= 48.0
+            })
+        };
+        if load_unassigned {
             let core = Arc::clone(&self.core);
             let client = client.clone();
-            self.runtime
-                .spawn(async move { poll::load_older_sessions(&client, &core).await });
+            self.runtime.spawn(async move {
+                poll::load_more_project_group(&client, &core, String::new(), None).await
+            });
         }
 
         let Some(target) = self.with_core(|core| core.open.clone()) else {
@@ -1936,14 +1940,58 @@ impl AmuxApp {
 
     /// 折叠/展开会话列表项目组。
     pub fn toggle_project_group(&mut self, key: String, cx: &mut Context<Self>) {
-        toggle_set(&mut self.collapsed_project_groups, key);
+        let expanded = {
+            let mut core = self.core.lock();
+            if core.collapsed_project_groups.remove(&key) {
+                true
+            } else {
+                core.collapsed_project_groups.insert(key.clone());
+                false
+            }
+        };
+        if expanded {
+            self.load_project_group(key, cx);
+        }
         cx.notify();
     }
 
     /// 项目组末尾「显示更多」：该组多展示一页。
     pub fn show_more_project_group(&mut self, key: String, cx: &mut Context<Self>) {
-        let loaded = self.project_group_loaded.entry(key).or_insert(5);
-        *loaded += 5;
+        let (client, project) = {
+            let core = self.core.lock();
+            let Some(client) = core.client.clone() else {
+                return;
+            };
+            let project = (!key.is_empty()).then(|| key.clone());
+            (client, project)
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            poll::load_more_project_group(&client, &core, key, project).await
+        });
+        cx.notify();
+    }
+
+    /// 展开项目组时立即加载其已保存的分页窗口。
+    fn load_project_group(&mut self, key: String, cx: &mut Context<Self>) {
+        let (client, project, limit) = {
+            let core = self.core.lock();
+            let Some(client) = core.client.clone() else {
+                return;
+            };
+            let project = (!key.is_empty()).then(|| key.clone());
+            let page = poll::project_group_page_size(project.as_deref());
+            let limit = core
+                .project_groups
+                .get(&key)
+                .map(|group| group.loaded.max(page))
+                .unwrap_or(page);
+            (client, project, limit)
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            poll::refresh_project_group(&client, &core, key, project, limit).await
+        });
         cx.notify();
     }
 

@@ -4,9 +4,11 @@
 //! 设置类数据（机器/agents、内置智能体、计划、快捷指令、技能）不做定时刷新，
 //! 由视图打开时调用 [`refresh_new_session`] / [`refresh_interaction`] / [`refresh_settings`] 实时拉取。
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use amux_common::domain::{Activity, ContentBlock, HistoryItem};
+use futures_util::future::join_all;
 
 use crate::client::Client;
 use crate::state::{
@@ -71,77 +73,162 @@ fn core_due(
     core.due(pick(&core.last), interval)
 }
 
-/// 会话列表刷新：重取已加载窗口（普通会话与工作流会话各 `list_loaded` 条）。
+/// 普通项目组首页条数（docs/PRD.md「会话列表视图」）。
+const PROJECT_GROUP_PAGE: usize = 5;
+/// 未归属项目首页条数（docs/PRD.md「会话列表视图」）。
+const UNASSIGNED_GROUP_PAGE: usize = 20;
+
+/// 会话列表刷新：重取所有已展开项目组的已加载窗口。
 ///
-/// 窗口贴着最新一端，删改与排序变化都在整窗重取后自然生效（docs/DESIGN.md
-/// 「会话列表刷新机制」）。
+/// 折叠组不加载；窗口贴着最新一端，删改与排序变化都在整窗重取后自然生效
+/// （docs/PRD.md「会话列表视图」、docs/DESIGN.md「会话列表刷新机制」）。
 async fn refresh_list(client: &Client, core: &SharedCore) {
-    let limit = {
+    let groups: Vec<(String, Option<String>)> = {
         let core = core.lock();
-        core.list_loaded.max(core.list_paging.page_size)
+        let mut groups: Vec<(String, Option<String>)> = core
+            .settings
+            .projects
+            .iter()
+            .map(|project| (project.name.clone(), Some(project.name.clone())))
+            .collect();
+        groups.push((String::new(), None));
+        groups
+            .into_iter()
+            .filter(|(key, _)| !core.collapsed_project_groups.contains(key))
+            .collect()
     };
-    let sessions = client.sessions(limit, 0, None).await;
-    let workflows = client.workflows(limit, 0, None).await;
-    let (sessions, workflows) = match (sessions, workflows) {
-        (Ok(sessions), Ok(workflows)) => (sessions, workflows),
-        (Err(error), _) | (_, Err(error)) => {
-            let mut core = core.lock();
-            core.last.list = Some(Instant::now());
-            core.status = ConnectionStatus::Failed(error);
-            return;
-        }
-    };
-    let has_older = sessions.has_more || workflows.has_more;
-    let mut entries: Vec<ListEntry> = Vec::new();
-    entries.extend(sessions.sessions.into_iter().map(ListEntry::Session));
-    entries.extend(workflows.workflows.into_iter().map(ListEntry::Workflow));
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
+    join_all(groups.into_iter().map(|(key, project)| {
+        let limit = {
+            let core = core.lock();
+            let page = project_group_page_size(project.as_deref());
+            core.project_groups
+                .get(&key)
+                .map(|group| group.loaded.max(page))
+                .unwrap_or(page)
+        };
+        refresh_project_group(client, core, key, project, limit)
+    }))
+    .await;
+
     let mut core = core.lock();
     core.last.list = Some(Instant::now());
-    core.entries = entries;
-    core.list_loaded = limit;
-    core.list_paging.has_older = has_older;
+    let configured: HashSet<String> = core
+        .settings
+        .projects
+        .iter()
+        .map(|project| project.name.clone())
+        .collect();
+    core.project_groups
+        .retain(|key, _| key.is_empty() || configured.contains(key));
+    sync_entries(&mut core);
 }
 
-/// 会话列表更早一页：两个来源各取一页并合并到窗口（docs/DESIGN.md「会话列表滚动机制」）。
-pub async fn load_older_sessions(client: &Client, core: &SharedCore) {
-    let (offset, limit) = {
+/// 拉取并替换一个项目组的加载窗口。
+pub async fn refresh_project_group(
+    client: &Client,
+    core: &SharedCore,
+    key: String,
+    project: Option<String>,
+    limit: usize,
+) {
+    let request = {
         let mut core = core.lock();
-        let loaded = core.list_loaded;
-        match begin_older_page(&mut core.list_paging, loaded) {
-            Some(page) => page,
-            None => return,
-        }
+        let group = core.project_groups.entry(key.clone()).or_default();
+        group.request += 1;
+        group.loading = true;
+        group.request
     };
-    let sessions = client.sessions(limit, offset, None).await;
-    let workflows = client.workflows(limit, offset, None).await;
-    let (sessions, workflows) = match (sessions, workflows) {
-        (Ok(sessions), Ok(workflows)) => (sessions, workflows),
-        _ => {
-            core.lock().list_paging.loading_older = false;
-            return;
-        }
+    let result = fetch_project_group(client, project.as_deref(), limit.max(1)).await;
+    let mut core = core.lock();
+    let Some(group) = core.project_groups.get_mut(&key) else {
+        return;
     };
-    let has_older = sessions.has_more || workflows.has_more;
-    let page: Vec<ListEntry> = sessions
+    if group.request != request {
+        return;
+    }
+    group.loading = false;
+    match result {
+        Ok((entries, has_more)) => {
+            group.entries = entries;
+            group.loaded = limit.max(1);
+            group.has_more = has_more;
+        }
+        Err(error) => core.error(format!("加载项目会话失败：{error}")),
+    }
+    sync_entries(&mut core);
+}
+
+/// 项目组「显示更多」或未归属组滚动分页：扩大一组的目标窗口。
+pub async fn load_more_project_group(
+    client: &Client,
+    core: &SharedCore,
+    key: String,
+    project: Option<String>,
+) {
+    let limit = {
+        let core = core.lock();
+        let page = project_group_page_size(project.as_deref());
+        core.project_groups
+            .get(&key)
+            .map(|group| group.loaded.max(page) + page)
+            .unwrap_or(page)
+    };
+    refresh_project_group(client, core, key, project, limit).await;
+}
+
+pub fn project_group_page_size(project: Option<&str>) -> usize {
+    if project.is_none() {
+        UNASSIGNED_GROUP_PAGE
+    } else {
+        PROJECT_GROUP_PAGE
+    }
+}
+
+/// 两个来源各取首页，按创建时间合并后截断为一个项目的首页窗口。
+async fn fetch_project_group(
+    client: &Client,
+    project: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<ListEntry>, bool), String> {
+    let project = project.or(Some(""));
+    let (sessions, workflows) = tokio::join!(
+        client.sessions(limit, 0, project),
+        client.workflows(limit, 0, project),
+    );
+    let sessions = sessions?;
+    let workflows = workflows?;
+    let has_more = sessions.has_more || workflows.has_more;
+    let mut entries: Vec<ListEntry> = sessions
         .sessions
         .into_iter()
         .map(ListEntry::Session)
         .chain(workflows.workflows.into_iter().map(ListEntry::Workflow))
         .collect();
-    let mut core = core.lock();
-    core.list_paging.loading_older = false;
-    core.list_paging.has_older = has_older;
-    core.list_loaded = offset + limit;
-    for entry in page {
-        // 已加载过的条目（翻页之间发生更新或位移）按 id 覆盖，避免重复
-        match core.entries.iter_mut().find(|item| item.id() == entry.id()) {
-            Some(existing) => *existing = entry,
-            None => core.entries.push(entry),
-        }
-    }
-    core.entries
-        .sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
+    entries.sort_by(|left, right| {
+        right
+            .created_at()
+            .cmp(&left.created_at())
+            .then_with(|| left.id().cmp(right.id()))
+    });
+    entries.truncate(limit);
+    Ok((entries, has_more))
+}
+
+fn sync_entries(core: &mut Core) {
+    let mut seen = HashSet::new();
+    let mut entries: Vec<ListEntry> = core
+        .project_groups
+        .values()
+        .flat_map(|group| group.entries.iter().cloned())
+        .filter(|entry| seen.insert(entry.id().to_string()))
+        .collect();
+    entries.sort_by(|left, right| {
+        right
+            .created_at()
+            .cmp(&left.created_at())
+            .then_with(|| left.id().cmp(right.id()))
+    });
+    core.entries = entries;
 }
 
 /// 打开会话的视图数据：按各自周期刷新（会话详情与工作目录视图只在打开时刷新一次，
@@ -529,7 +616,9 @@ async fn refresh_skills(client: &Client, core: &SharedCore) {
 
 async fn refresh_projects(client: &Client, core: &SharedCore) {
     if let Ok(projects) = client.projects().await {
-        core.lock().settings.projects = projects;
+        let mut core = core.lock();
+        core.settings.projects = projects;
+        core.last.list = None;
     }
 }
 

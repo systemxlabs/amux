@@ -2,7 +2,6 @@
 //! 会话详情 / 会话活动 / 会话计划 / 终端）。
 
 use amux_common::api::{Project, Session, Terminal, TerminalState, Workflow};
-use std::cmp::Reverse;
 
 use amux_common::domain::{Activity, GitDiffFile, GitDiffLineKind, SessionState};
 use gpui::prelude::FluentBuilder as _;
@@ -71,36 +70,22 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         .gap_1();
 
     // 按项目分组展示，未归属项目在列表末端（docs/PRD.md「会话列表视图」）。
-    let mut groups: Vec<(Option<String>, Vec<ListEntry>)> = core
+    let groups: Vec<Option<String>> = core
         .settings
         .projects
         .iter()
-        .map(|project| (Some(project.name.clone()), Vec::new()))
+        .map(|project| Some(project.name.clone()))
+        .chain(std::iter::once(None))
         .collect();
-    groups.push((None, Vec::new()));
-    for entry in core.entries.clone() {
-        let project = entry.project().map(str::to_string);
-        if let Some((_, entries)) = groups
-            .iter_mut()
-            .find(|(group, _)| group.as_deref() == project.as_deref())
-        {
-            entries.push(entry);
-        }
-    }
-    for (_, entries) in groups.iter_mut() {
-        entries.sort_by_key(|entry| Reverse(entry.created_at()));
-    }
-
-    for (name, entries) in groups {
-        let project = name.clone();
-        let group_key = name.clone().unwrap_or_default();
-        let collapsed = this.collapsed_project_groups.contains(&group_key);
-        let loaded = this
-            .project_group_loaded
-            .get(&group_key)
-            .copied()
-            .unwrap_or(5);
-        let has_more = entries.len() > loaded;
+    for project in groups {
+        let group_key = project.clone().unwrap_or_default();
+        let collapsed = core.collapsed_project_groups.contains(&group_key);
+        let group_state = core.project_groups.get(&group_key);
+        let entries = group_state
+            .map(|group| group.entries.as_slice())
+            .unwrap_or_default();
+        let loading = group_state.is_none_or(|group| group.loading);
+        let has_more = group_state.is_some_and(|group| group.has_more);
         let mut group = v_flex()
             .w_full()
             .gap_1()
@@ -127,10 +112,14 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                                     .text_color(theme.muted_foreground),
                             )
                             .child(
-                                Label::new(name.unwrap_or_else(|| "未归属".to_string()))
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.muted_foreground),
+                                Label::new(if group_key.is_empty() {
+                                    "未归属".to_string()
+                                } else {
+                                    group_key.clone()
+                                })
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.muted_foreground),
                             ),
                     ),
             );
@@ -138,8 +127,22 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
             list = list.child(group);
             continue;
         }
-        for entry in entries.into_iter().take(loaded) {
-            match &entry {
+        if loading && entries.is_empty() {
+            group = group.child(
+                h_flex()
+                    .px_1()
+                    .child(Spinner::new().xsmall().color(theme.muted_foreground)),
+            );
+        } else if !loading && entries.is_empty() {
+            group = group.child(
+                Label::new("暂无会话")
+                    .px_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground),
+            );
+        }
+        for entry in entries {
+            match entry {
                 ListEntry::Session(session) => {
                     group = group.child(session_row(session, false, core, this, cx));
                 }
@@ -148,7 +151,14 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                 }
             }
         }
-        if has_more {
+        if loading && !entries.is_empty() {
+            group = group.child(
+                h_flex()
+                    .justify_center()
+                    .child(Spinner::new().xsmall().color(theme.muted_foreground)),
+            );
+        }
+        if !group_key.is_empty() && has_more {
             group = group.child(
                 Button::new(SharedString::from(format!("project-more-{group_key}")))
                     .xsmall()
@@ -163,7 +173,12 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         }
         list = list.child(group);
     }
-    if core.entries.is_empty() {
+    if core.entries.is_empty()
+        && !core
+            .project_groups
+            .values()
+            .any(|group| group.loading || !group.entries.is_empty())
+    {
         list = list.child(
             Label::new("暂无会话")
                 .text_sm()

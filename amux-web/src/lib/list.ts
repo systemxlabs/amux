@@ -1,7 +1,14 @@
 // 会话列表：普通会话与工作流会话统一按最近活跃排序，工作流会话可展开其关联普通会话
 // （docs/PRD.md「会话列表视图」）。
 
-import { entryId, entryUpdatedAt, type ListEntry, type Session, type Workflow } from "./types";
+import {
+  entryCreatedAt,
+  entryId,
+  entryUpdatedAt,
+  type ListEntry,
+  type Session,
+  type Workflow,
+} from "./types";
 import type { Paging } from "./paging";
 
 /** 按最近活跃倒序排列（同刻按标识稳定排序，避免抖动）。 */
@@ -28,6 +35,30 @@ export function buildListWindow(
     ...workflows.map((workflow): ListEntry => ({ kind: "workflow", workflow })),
   ];
   return { entries: sortEntries(page), paging: { ...paging, hasOlder: hasMore } };
+}
+
+/**
+ * 项目组窗口：两个来源各取首页，按创建时间合并后截断为项目组的可见条数。
+ * 未归属组与普通项目组使用不同的 limit（docs/PRD.md「会话列表视图」）。
+ */
+export function buildProjectGroupWindow(
+  sessions: readonly Session[],
+  workflows: readonly Workflow[],
+  limit: number,
+  sessionsHaveMore: boolean,
+  workflowsHaveMore: boolean,
+): { entries: ListEntry[]; hasMore: boolean } {
+  const entries: ListEntry[] = [
+    ...sessions.map((session): ListEntry => ({ kind: "session", session })),
+    ...workflows.map((workflow): ListEntry => ({ kind: "workflow", workflow })),
+  ].sort(
+    (a, b) =>
+      entryCreatedAt(b) - entryCreatedAt(a) || entryId(a).localeCompare(entryId(b)),
+  );
+  return {
+    entries: entries.slice(0, limit),
+    hasMore: entries.length > limit || sessionsHaveMore || workflowsHaveMore,
+  };
 }
 
 /** 列表行：工作流会话展开后其关联普通会话紧随其后（深度 1），不影响其他条目的位置。 */

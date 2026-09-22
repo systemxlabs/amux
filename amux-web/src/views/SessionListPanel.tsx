@@ -1,9 +1,17 @@
 // 会话列表视图（docs/PRD.md「会话列表视图」、docs/DESIGN.md「会话列表视图」）。
 //
 // 顶部「+」进入新建会话视图；普通会话与工作流会话统一排序，工作流会话可展开关联普通会话。
-// 会话按最近活跃倒序排列（最新在上），滚到最下方时按分页模型加载更早一页。
+// 会话按创建时间倒序排列（最新在上）；未归属组滚到最下方时加载更早一页。
 
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type UIEvent,
+} from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -27,15 +35,22 @@ import {
   toggleExpand,
 } from "../core/actions";
 import { useCore, useCoreState } from "../core/store";
-import { canExpand, listRows } from "../lib/list";
+import { buildProjectGroupWindow, canExpand, listRows } from "../lib/list";
 import {
-  entryCreatedAt,
   entryId,
   entryState,
   entryTitle,
   type ListEntry,
 } from "../lib/types";
 import { cn } from "../lib/utils";
+
+/** 普通项目组首页 5 条，未归属项目首页 20 条（docs/PRD.md「会话列表视图」）。 */
+const PROJECT_GROUP_PAGE = 5;
+const UNASSIGNED_GROUP_PAGE = 20;
+
+function projectPageSize(project: string | undefined): number {
+  return project === undefined ? UNASSIGNED_GROUP_PAGE : PROJECT_GROUP_PAGE;
+}
 
 /**
  * `onNavigate`：窄视口下会话列表在抽屉浮层里，选中会话或新建会话后要收起它，
@@ -60,10 +75,8 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     Record<string, { entries: ListEntry[]; loaded: number; hasMore: boolean; loading: boolean }>
   >({});
   const loadedCountsRef = useRef<Record<string, number>>({});
+  const loadingGroupsRef = useRef(new Set<string>());
   const [dragEntry, setDragEntry] = useState<ListEntry | null>(null);
-
-  /** 组内首页条数（docs/PRD.md「会话列表视图」）。 */
-  const GROUP_PAGE = 5;
 
   const toggleGroup = (key: string): void => {
     setCollapsedGroups((current) => {
@@ -77,8 +90,8 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
   const loadGroup = useCallback(
     async (key: string, project: string | undefined, limit: number): Promise<void> => {
       const client = core.client;
-      if (client === null) return;
-      loadedCountsRef.current[key] = limit;
+      if (client === null || loadingGroupsRef.current.has(key)) return;
+      loadingGroupsRef.current.add(key);
       setGroupData((current) => ({
         ...current,
         [key]: {
@@ -93,19 +106,20 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
           client.sessions(limit, 0, project ?? ""),
           client.workflows(limit, 0, project ?? ""),
         ]);
-        const entries: ListEntry[] = [
-          ...sessions.sessions.map((session): ListEntry => ({ kind: "session", session })),
-          ...workflows.workflows.map((workflow): ListEntry => ({ kind: "workflow", workflow })),
-        ].sort(
-          (a, b) =>
-            entryCreatedAt(b) - entryCreatedAt(a) || entryId(a).localeCompare(entryId(b)),
+        const window = buildProjectGroupWindow(
+          sessions.sessions,
+          workflows.workflows,
+          limit,
+          sessions.hasMore,
+          workflows.hasMore,
         );
+        loadedCountsRef.current[key] = limit;
         setGroupData((current) => ({
           ...current,
           [key]: {
-            entries,
+            entries: window.entries,
             loaded: limit,
-            hasMore: sessions.hasMore || workflows.hasMore,
+            hasMore: window.hasMore,
             loading: false,
           },
         }));
@@ -120,6 +134,8 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
           },
         }));
         core.failure(`加载项目会话失败：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        loadingGroupsRef.current.delete(key);
       }
     },
     [core],
@@ -127,7 +143,18 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
 
   const showMore = (group: { key: string; project: string | undefined }): void => {
     const current = groupData[group.key];
-    void loadGroup(group.key, group.project, (current?.loaded ?? GROUP_PAGE) + GROUP_PAGE);
+    const page = projectPageSize(group.project);
+    void loadGroup(group.key, group.project, (current?.loaded ?? page) + page);
+  };
+
+  /** 未归属组滚到列表底部时加载下一页；普通项目组仍由「显示更多」推进。 */
+  const handleScroll = (event: UIEvent<HTMLDivElement>): void => {
+    const node = event.currentTarget;
+    if (node.scrollTop + node.clientHeight < node.scrollHeight - 8) return;
+    if (collapsedGroups.has("project:")) return;
+    const current = groupData["project:"];
+    if (current === undefined || current.loading || !current.hasMore) return;
+    void loadGroup("project:", undefined, current.loaded + 20);
   };
 
   const renderRow = (row: { entry: ListEntry; depth: number }): ReactElement => {
@@ -317,7 +344,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       void loadGroup(
         group.key,
         group.project,
-        loadedCountsRef.current[group.key] ?? GROUP_PAGE,
+        loadedCountsRef.current[group.key] ?? projectPageSize(group.project),
       );
     }
   }, [collapsedGroups, loadGroup, projectsKey, state.entries, state.settings.projects]);
@@ -330,7 +357,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       ...group,
       collapsed,
       rows: listRows(visibleEntries, new Set(state.expanded)),
-      loading: data?.loading ?? false,
+      loading: data?.loading ?? !collapsed,
       hasMore: data?.hasMore ?? false,
     };
   });
@@ -355,6 +382,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       <div
         data-slot="session-list"
         className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-2"
+        onScroll={handleScroll}
       >
         {visibleGroups.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">暂无会话</p>
@@ -401,7 +429,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                     return <Fragment key={index}>{element}</Fragment>;
                   })
                 : null}
-              {!group.collapsed && group.hasMore ? (
+              {!group.collapsed && group.project !== undefined && group.hasMore ? (
                 <button
                   type="button"
                   data-slot="session-project-show-more"

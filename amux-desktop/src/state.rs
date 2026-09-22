@@ -1,6 +1,6 @@
 //! 应用状态：连接、会话列表、当前会话视图、设置面板与轮询节拍。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,18 @@ pub enum ConnectionStatus {
 pub enum ListEntry {
     Session(Session),
     Workflow(Workflow),
+}
+
+/// 一个项目组当前已加载的会话及分页状态。
+#[derive(Debug, Clone, Default)]
+pub struct ProjectGroupState {
+    pub entries: Vec<ListEntry>,
+    /// 当前目标窗口条数；未归属组与普通项目组的页大小不同。
+    pub loaded: usize,
+    pub has_more: bool,
+    pub loading: bool,
+    /// 防止较慢的旧请求覆盖较新的分页结果。
+    pub request: u64,
 }
 
 impl ListEntry {
@@ -465,6 +477,10 @@ pub struct Core {
     pub client: Option<Client>,
     pub status: ConnectionStatus,
     pub entries: Vec<ListEntry>,
+    /// 会话列表项目组；空串为未归属项目（docs/PRD.md「会话列表视图」）。
+    pub project_groups: HashMap<String, ProjectGroupState>,
+    /// 已折叠的项目组；折叠组不加载会话。
+    pub collapsed_project_groups: HashSet<String>,
     pub new_session: NewSessionForm,
     pub recent_workspaces: Vec<RecentWorkspace>,
     pub open: Option<OpenTarget>,
@@ -476,10 +492,6 @@ pub struct Core {
     pub loaded_view: Option<ViewKey>,
     /// 待投递的提示（后台任务无窗口，只能排队等节拍投递）
     pub notes: VecDeque<Note>,
-    /// 会话列表分页：每页从普通会话与工作流会话各拉取的条目数
-    pub list_loaded: usize,
-    /// 会话列表分页状态
-    pub list_paging: Paging,
     /// 当前打开的右侧面板
     pub side_panel: Option<SidePanel>,
     /// 工作流会话展开的关联普通会话列表
@@ -504,6 +516,8 @@ impl Default for Core {
             client: None,
             status: ConnectionStatus::Unconfigured,
             entries: Vec::new(),
+            project_groups: HashMap::new(),
+            collapsed_project_groups: HashSet::new(),
             new_session: NewSessionForm::default(),
             recent_workspaces: Vec::new(),
             open: None,
@@ -513,8 +527,6 @@ impl Default for Core {
             settings: SettingsData::default(),
             loaded_view: None,
             notes: VecDeque::new(),
-            list_loaded: DEFAULT_PAGE_SIZE,
-            list_paging: Paging::default(),
             side_panel: None,
             expanded_workflows: HashSet::new(),
             last: Ticks::default(),

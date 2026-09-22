@@ -2,11 +2,22 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildListWindow, canExpand, listRows, sortEntries } from "./list";
+import {
+  buildListWindow,
+  buildProjectGroupWindow,
+  canExpand,
+  listRows,
+  sortEntries,
+} from "./list";
 import { newPaging } from "./paging";
 import type { ListEntry, Session, Workflow } from "./types";
 
-function session(id: string, updatedAt: number, state: Session["state"] = "idle"): Session {
+function session(
+  id: string,
+  updatedAt: number,
+  state: Session["state"] = "idle",
+  createdAt = 1,
+): Session {
   return {
     id,
     machine: "localpc",
@@ -15,18 +26,23 @@ function session(id: string, updatedAt: number, state: Session["state"] = "idle"
     state,
     workspace: "/w",
     worktreeDir: "",
-    createdAt: 1,
+    createdAt,
     updatedAt,
   };
 }
 
-function workflow(id: string, updatedAt: number, linked: Session[]): Workflow {
+function workflow(
+  id: string,
+  updatedAt: number,
+  linked: Session[],
+  createdAt = 1,
+): Workflow {
   return {
     id,
     title: id,
     state: "idle",
     plan: "计划",
-    createdAt: 1,
+    createdAt,
     updatedAt,
     linkedSessions: linked,
   };
@@ -73,6 +89,36 @@ describe("buildListWindow", () => {
       "alive",
       "kept",
     ]);
+  });
+});
+
+describe("buildProjectGroupWindow", () => {
+  it("两个来源按创建时间统一排序，并截断为项目组窗口", () => {
+    const result = buildProjectGroupWindow(
+      [session("s1", 100, "idle", 300), session("s2", 100, "idle", 100)],
+      [workflow("w1", 100, [], 200)],
+      2,
+      false,
+      false,
+    );
+    expect(
+      result.entries.map((entry) =>
+        entry.kind === "session" ? entry.session.id : entry.workflow.id,
+      ),
+    ).toEqual(["s1", "w1"]);
+    expect(result.hasMore).toBe(true);
+  });
+
+  it("任一来源仍有更早页时保留加载更多状态", () => {
+    const result = buildProjectGroupWindow(
+      [session("s1", 100)],
+      [],
+      20,
+      true,
+      false,
+    );
+    expect(result.entries).toHaveLength(1);
+    expect(result.hasMore).toBe(true);
   });
 });
 
