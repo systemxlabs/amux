@@ -448,106 +448,109 @@ export function DiffPanel() {
                     onSubmit={() => void submitComment()}
                   />
                 ) : null}
-                {!diffsCollapsed &&
-                  file.hunks.map((hunk, hunkIx) => {
-                    const numbers = lineNumbers(hunk);
-                    const selectedLines =
-                      dragRange !== null &&
-                      dragRange.start.path === file.path &&
-                      dragRange.start.hunkIndex === hunkIx
-                        ? [
-                            Math.min(dragRange.start.lineIndex, dragRange.end.lineIndex),
-                            Math.max(dragRange.start.lineIndex, dragRange.end.lineIndex),
-                          ]
-                        : null;
-                    return (
-                      <div key={hunkIx}>
-                        <div className="flex px-2 font-mono text-xs text-muted-foreground">
-                          <span className="min-w-0 flex-1">{hunk.header}</span>
-                        </div>
-                        {hunk.lines.map((line, lineIx) => {
-                          const lineNumber = numbers[lineIx];
-                          const gutterKey = `${file.path}:${hunkIx}:${lineIx}`;
-                          return (
-                            <Fragment key={lineIx}>
-                              <div
-                                data-slot="diff-line"
-                                data-diff-file={file.path}
-                                data-diff-hunk={hunkIx}
-                                data-diff-line-index={lineIx}
-                                onPointerEnter={() =>
-                                  extendCodeSelection({
-                                    path: file.path,
-                                    hunkIndex: hunkIx,
-                                    lineIndex: lineIx,
-                                  })
-                                }
-                                className={cn(
-                                  "flex whitespace-pre font-mono text-xs",
-                                  line.kind === "add" && "bg-diff-add",
-                                  line.kind === "remove" && "bg-diff-remove",
-                                  selectedLines !== null &&
-                                    lineIx >= selectedLines[0] &&
-                                    lineIx <= selectedLines[1] &&
-                                    "ring-1 ring-inset ring-primary/60",
-                                )}
-                              >
-                                <span
-                                  data-diff-gutter="true"
-                                  className="relative flex w-6 shrink-0 cursor-pointer touch-none items-center justify-center text-muted-foreground"
-                                  onPointerDown={(event) =>
-                                    beginCodeSelection(event, {
+                {!diffsCollapsed ? (
+                  <div data-slot="diff-file-scroll" className="overflow-x-auto">
+                    {file.hunks.map((hunk, hunkIx) => {
+                      const numbers = lineNumbers(hunk);
+                      const selectedLines =
+                        dragRange !== null &&
+                        dragRange.start.path === file.path &&
+                        dragRange.start.hunkIndex === hunkIx
+                          ? [
+                              Math.min(dragRange.start.lineIndex, dragRange.end.lineIndex),
+                              Math.max(dragRange.start.lineIndex, dragRange.end.lineIndex),
+                            ]
+                          : null;
+                      return (
+                        <div key={hunkIx}>
+                          <div className="flex w-max min-w-full px-2 font-mono text-xs text-muted-foreground">
+                            <span className="min-w-0 flex-1">{hunk.header}</span>
+                          </div>
+                          {hunk.lines.map((line, lineIx) => {
+                            const lineNumber = numbers[lineIx];
+                            const gutterKey = `${file.path}:${hunkIx}:${lineIx}`;
+                            return (
+                              <Fragment key={lineIx}>
+                                <div
+                                  data-slot="diff-line"
+                                  data-diff-file={file.path}
+                                  data-diff-hunk={hunkIx}
+                                  data-diff-line-index={lineIx}
+                                  onPointerEnter={() =>
+                                    extendCodeSelection({
                                       path: file.path,
                                       hunkIndex: hunkIx,
                                       lineIndex: lineIx,
                                     })
                                   }
-                                  onPointerEnter={() => setHoveredGutter(gutterKey)}
-                                  onPointerLeave={() =>
-                                    setHoveredGutter((current) =>
-                                      current === gutterKey ? null : current,
-                                    )
-                                  }
-                                >
-                                  {hoveredGutter === gutterKey ? (
-                                    <Plus className="size-3 text-primary" />
-                                  ) : (
-                                    (lineNumber.old ?? "")
-                                  )}
-                                </span>
-                                <span className="w-9 shrink-0 px-2 text-right text-muted-foreground">
-                                  {lineNumber.new ?? ""}
-                                </span>
-                                <span
                                   className={cn(
-                                    "w-4 shrink-0 text-center font-semibold",
-                                    line.kind === "add" && "text-success",
-                                    line.kind === "remove" && "text-danger",
+                                    "flex w-max min-w-full whitespace-pre font-mono text-xs",
+                                    line.kind === "add" && "bg-diff-add",
+                                    line.kind === "remove" && "bg-diff-remove",
+                                    selectedLines !== null &&
+                                      lineIx >= selectedLines[0] &&
+                                      lineIx <= selectedLines[1] &&
+                                      "ring-1 ring-inset ring-primary/60",
                                   )}
                                 >
-                                  {linePrefix(line.kind)}
-                                </span>
-                                <span>{line.text}</span>
-                              </div>
-                              {commentTarget?.kind === "code" &&
-                              commentTarget.path === file.path &&
-                              commentTarget.hunkIndex === hunkIx &&
-                              commentTarget.endLine === lineIx ? (
-                                <CommentComposer
-                                  target={commentTarget}
-                                  value={commentText}
-                                  sending={commentSending}
-                                  onChange={setCommentText}
-                                  onCancel={cancelComment}
-                                  onSubmit={() => void submitComment()}
-                                />
-                              ) : null}
-                            </Fragment>
-                          );
-                        })}
-                      </div>
-                    );
-                  })}
+                                  <span
+                                    data-diff-gutter="true"
+                                    className="relative flex w-6 shrink-0 cursor-pointer touch-none items-center justify-center text-muted-foreground"
+                                    onPointerDown={(event) =>
+                                      beginCodeSelection(event, {
+                                        path: file.path,
+                                        hunkIndex: hunkIx,
+                                        lineIndex: lineIx,
+                                      })
+                                    }
+                                    onPointerEnter={() => setHoveredGutter(gutterKey)}
+                                    onPointerLeave={() =>
+                                      setHoveredGutter((current) =>
+                                        current === gutterKey ? null : current,
+                                      )
+                                    }
+                                  >
+                                    {hoveredGutter === gutterKey ? (
+                                      <Plus className="size-3 text-primary" />
+                                    ) : (
+                                      (lineNumber.old ?? "")
+                                    )}
+                                  </span>
+                                  <span className="w-9 shrink-0 px-2 text-right text-muted-foreground">
+                                    {lineNumber.new ?? ""}
+                                  </span>
+                                  <span
+                                    className={cn(
+                                      "w-4 shrink-0 text-center font-semibold",
+                                      line.kind === "add" && "text-success",
+                                      line.kind === "remove" && "text-danger",
+                                    )}
+                                  >
+                                    {linePrefix(line.kind)}
+                                  </span>
+                                  <span>{line.text}</span>
+                                </div>
+                                {commentTarget?.kind === "code" &&
+                                commentTarget.path === file.path &&
+                                commentTarget.hunkIndex === hunkIx &&
+                                commentTarget.endLine === lineIx ? (
+                                  <CommentComposer
+                                    target={commentTarget}
+                                    value={commentText}
+                                    sending={commentSending}
+                                    onChange={setCommentText}
+                                    onCancel={cancelComment}
+                                    onSubmit={() => void submitComment()}
+                                  />
+                                ) : null}
+                              </Fragment>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -555,7 +558,7 @@ export function DiffPanel() {
         treeSlot="diff-tree"
         contentSlot="diff-files"
         treeClassName="max-h-[40%] min-h-0 overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none"
-        contentClassName="min-h-0 flex-1 overflow-auto rounded-md bg-muted/20 lg:h-full"
+        contentClassName="min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-md bg-muted/20 lg:h-full"
         contentCollapsed={diffsCollapsed}
       />
     );

@@ -2869,9 +2869,14 @@ pub enum SettingsList {
 
 impl AmuxApp {
     /// 主页面：会话列表 + 中间面板 + 悬浮按钮 + 右侧面板。
-    fn render_main_page(&mut self, core: &Core, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_main_page(
+        &mut self,
+        core: &Core,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let has_open = core.open.is_some();
-        let panel = self.render_panel(cx);
+        let panel = self.render_panel(window, cx);
         let sidebar = self.render_sidebar(cx);
         let main = sessions::render_main(core, self, cx);
         let rail = self.render_rail(cx);
@@ -2963,7 +2968,7 @@ impl AmuxApp {
     }
 
     /// 右侧面板：左侧拖拽手柄 + 面板内容（手柄不计入面板宽度）。
-    fn render_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let core = self.core.lock().clone();
         let panel = core.side_panel?;
         let theme = cx.theme();
@@ -3004,7 +3009,7 @@ impl AmuxApp {
                         .w(px(self.panel_width))
                         .h_full()
                         .min_w_0()
-                        .child(panels::render_panel(&core, panel, self, cx)),
+                        .child(panels::render_panel(&core, panel, self, window, cx)),
                 )
                 .into_any_element(),
         )
@@ -3029,7 +3034,7 @@ impl Render for AmuxApp {
         // 连接中整页转圈；连不上 Server 时进入登录页面，连接成功后切到主页面
         // （docs/PRD.md「登录页面」）
         if core.status == ConnectionStatus::Online {
-            root = root.child(self.render_main_page(&core, cx));
+            root = root.child(self.render_main_page(&core, window, cx));
             if core.settings_open {
                 root = root.child(settings::render_overlay(&core, self, cx));
             }

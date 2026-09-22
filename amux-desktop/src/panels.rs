@@ -609,6 +609,7 @@ pub fn render_panel(
     core: &Core,
     panel: SidePanel,
     this: &mut AmuxApp,
+    window: &mut Window,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
@@ -622,7 +623,7 @@ pub fn render_panel(
         .child(panel_header(panel, cx))
         .child(match panel {
             SidePanel::Workspace => workspace_panel(core, this, cx),
-            SidePanel::Diff => diff_review(core, this, cx),
+            SidePanel::Diff => diff_review(core, this, window, cx),
             SidePanel::Detail => detail_panel(core, cx),
             SidePanel::Activities => activities_panel(core, this, cx),
             SidePanel::Plan => plan_panel(core, this, cx),
@@ -1275,7 +1276,12 @@ fn terminal_tab(
 // ---------- 改动审查视图 ----------
 
 /// 改动审查视图：工具栏 + 文件树 + inline 改动 + 文件/代码评论。
-fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+fn diff_review(
+    core: &Core,
+    this: &mut AmuxApp,
+    window: &mut Window,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let files = core
         .view
@@ -1395,7 +1401,7 @@ fn diff_review(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
             );
         }
         content
-            .child(diff_inline(&files, this, cx))
+            .child(diff_inline(&files, this, window, cx))
             .into_any_element()
     };
     v_flex()
@@ -1504,7 +1510,12 @@ fn push_tree_rows(
 }
 
 /// 右侧 inline 改动：文件头 + hunk（行内容）+ 选择。
-fn diff_inline(files: &[GitDiffFile], this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+fn diff_inline(
+    files: &[GitDiffFile],
+    this: &mut AmuxApp,
+    window: &mut Window,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
     let mut pane = v_flex()
         .id("diff-inline")
         .flex_1()
@@ -1516,7 +1527,7 @@ fn diff_inline(files: &[GitDiffFile], this: &mut AmuxApp, cx: &mut Context<AmuxA
 
     for file in files {
         let collapsed = this.diff_collapsed_files.contains(&file.path);
-        pane = pane.child(diff_file_block(file, collapsed, this, cx));
+        pane = pane.child(diff_file_block(file, collapsed, this, window, cx));
     }
     div()
         .id("diff-scroll-wrap")
@@ -1542,6 +1553,7 @@ fn diff_file_block(
     file: &GitDiffFile,
     collapsed: bool,
     this: &mut AmuxApp,
+    window: &mut Window,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
@@ -1618,10 +1630,18 @@ fn diff_file_block(
     }
 
     if !collapsed {
+        // 每个文件保留独立横向位置；限制滚动轴后，纵向滚轮仍交给外层改动列表。
+        let scroll_key = SharedString::from(format!("diff-file-scroll-{}", file.path));
+        let scroll_handle = window
+            .use_keyed_state(scroll_key, cx, |_, _| ScrollHandle::default())
+            .read(cx)
+            .clone();
+        let mut hunks = v_flex().flex_none().min_w_full();
         for hunk in &file.hunks {
-            block = block.child(
+            hunks = hunks.child(
                 h_flex()
-                    .w_full()
+                    .flex_none()
+                    .min_w_full()
                     .h(rems(1.75))
                     .items_center()
                     .gap_2()
@@ -1631,6 +1651,8 @@ fn diff_file_block(
                         Label::new(hunk.header.clone())
                             .text_xs()
                             .font_family(theme.mono_font_family.clone())
+                            .whitespace_nowrap()
+                            .flex_shrink_0()
                             .text_color(theme.primary),
                     ),
             );
@@ -1642,7 +1664,8 @@ fn diff_file_block(
                 .id(SharedString::from(format!(
                     "diff-hunk-lines-{path}-{hunk_header}"
                 )))
-                .w_full()
+                .flex_none()
+                .min_w_full()
                 .on_drag_move::<diff::LineRef>(cx.listener({
                     let path = path.clone();
                     let hunk_header = hunk_header.clone();
@@ -1721,7 +1744,8 @@ fn diff_file_block(
                     SharedString::from(format!("diff-line-{}-{}-{index}", file.path, hunk.header));
                 lines = lines.child(
                     h_flex()
-                        .w_full()
+                        .flex_none()
+                        .min_w_full()
                         .h(rems(1.375))
                         .items_center()
                         .group(group_id.clone())
@@ -1784,8 +1808,23 @@ fn diff_file_block(
                     }
                 }
             }
-            block = block.child(lines);
+            hunks = hunks.child(lines);
         }
+        block = block.child(
+            div()
+                .id(SharedString::from(format!(
+                    "diff-file-scroll-{}",
+                    file.path
+                )))
+                .relative()
+                .w_full()
+                .flex()
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis()
+                .track_scroll(&scroll_handle)
+                .child(hunks)
+                .horizontal_scrollbar(&scroll_handle),
+        );
     }
     block.into_any_element()
 }
