@@ -134,6 +134,8 @@ Daemon 启动和关闭由用户手动执行，启动参数包括
 - `--server`: Server 的 WebSocket 地址
 - `--token`：认证 token
 
+Daemon 启动时对 `~/.amux/daemon/<机器名 URL 编码>.lock` 锁文件加排他锁，加锁失败则打印日志并退出，持锁进程退出（含崩溃）时锁自动释放。
+
 Daemon 关闭时，关闭所有已启动的 Agents。
 
 ### Agent 发现
