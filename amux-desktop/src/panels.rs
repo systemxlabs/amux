@@ -1593,6 +1593,65 @@ fn diff_file_block(
                     ),
             );
             let numbers = diff::line_numbers(&hunk.header, &hunk.lines);
+            let path = file.path.clone();
+            let hunk_header = hunk.header.clone();
+            let line_count = hunk.lines.len();
+            let mut lines = v_flex()
+                .id(SharedString::from(format!(
+                    "diff-hunk-lines-{path}-{hunk_header}"
+                )))
+                .w_full()
+                .on_drag_move::<diff::LineRef>(cx.listener({
+                    let path = path.clone();
+                    let hunk_header = hunk_header.clone();
+                    move |this, event: &DragMoveEvent<diff::LineRef>, window, cx| {
+                        let start = event.drag(cx);
+                        if start.path != path || start.hunk_header != hunk_header {
+                            return;
+                        }
+                        let Some(line) = diff_line_index_at(event, line_count, window) else {
+                            return;
+                        };
+                        this.extend_diff_line_selection(
+                            diff::LineRef {
+                                path: path.clone(),
+                                hunk_header: hunk_header.clone(),
+                                line,
+                            },
+                            cx,
+                        );
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener({
+                        let hunk = hunk.clone();
+                        let path = path.clone();
+                        let hunk_header = hunk_header.clone();
+                        move |this, _, window, cx| {
+                            let Some(selection) = this.diff_line_selection.as_ref() else {
+                                return;
+                            };
+                            if selection.start.path != path
+                                || selection.start.hunk_header != hunk_header
+                            {
+                                return;
+                            }
+                            this.finish_diff_line_selection(hunk.clone(), window, cx);
+                        }
+                    }),
+                )
+                .on_drop::<diff::LineRef>(cx.listener({
+                    let hunk = hunk.clone();
+                    let path = path.clone();
+                    let hunk_header = hunk_header.clone();
+                    move |this, start: &diff::LineRef, window, cx| {
+                        if start.path != path || start.hunk_header != hunk_header {
+                            return;
+                        }
+                        this.finish_diff_line_selection(hunk.clone(), window, cx);
+                    }
+                }));
             for (index, line) in hunk.lines.iter().enumerate() {
                 // 行底色取自共享主题（docs/DESIGN.md「共享主题」，与 Web 端同一取值）
                 let (background, marker, marker_color) = match line.kind {
@@ -1618,7 +1677,7 @@ fn diff_file_block(
                 };
                 let group_id =
                     SharedString::from(format!("diff-line-{}-{}-{index}", file.path, hunk.header));
-                block = block.child(
+                lines = lines.child(
                     h_flex()
                         .w_full()
                         .h(rems(1.375))
@@ -1632,27 +1691,19 @@ fn diff_file_block(
                                 this.extend_diff_line_selection(line_ref.clone(), cx)
                             }
                         }))
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener({
-                                let hunk = hunk.clone();
-                                let line_ref = line_ref.clone();
-                                move |this, _, window, cx| {
-                                    this.extend_diff_line_selection(line_ref.clone(), cx);
-                                    this.finish_diff_line_selection(hunk.clone(), window, cx)
-                                }
-                            }),
-                        )
                         .child(
-                            diff_line_gutter(numbers.old, group_id, &theme).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener({
-                                    let line_ref = line_ref.clone();
-                                    move |this, _, _, cx| {
-                                        this.begin_diff_line_selection(line_ref.clone(), cx)
-                                    }
-                                }),
-                            ),
+                            diff_line_gutter(numbers.old, group_id.clone(), &theme)
+                                .id(group_id)
+                                .on_drag(line_ref.clone(), |_, _, _, cx| cx.new(|_| Empty))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener({
+                                        let line_ref = line_ref.clone();
+                                        move |this, _, _, cx| {
+                                            this.begin_diff_line_selection(line_ref.clone(), cx)
+                                        }
+                                    }),
+                                ),
                         )
                         .child(number_gutter(numbers.new, &theme))
                         .child(
@@ -1687,10 +1738,11 @@ fn diff_file_block(
                     if let Some(composer) =
                         diff_comment_composer(&file.path, Some(&hunk.header), this, cx)
                     {
-                        block = block.child(composer);
+                        lines = lines.child(composer);
                     }
                 }
             }
+            block = block.child(lines);
         }
     }
     block.into_any_element()
@@ -1750,6 +1802,23 @@ fn diff_comment_composer(
             )
             .into_any_element(),
     )
+}
+
+/// 拖拽指针当前所在的 diff 行：行高固定，按相对容器顶部的距离换算。
+fn diff_line_index_at(
+    event: &DragMoveEvent<diff::LineRef>,
+    line_count: usize,
+    window: &Window,
+) -> Option<usize> {
+    if line_count == 0 || !event.bounds.contains(&event.event.position) {
+        return None;
+    }
+    let row_height = rems(1.375).to_pixels(window.rem_size()).as_f32();
+    if row_height <= 0.0 {
+        return None;
+    }
+    let offset = (event.event.position.y - event.bounds.origin.y).as_f32();
+    Some(((offset / row_height).floor() as usize).min(line_count - 1))
 }
 
 /// 行号栏：悬停显示「⊕」，从这里开始拖动选择代码行。
