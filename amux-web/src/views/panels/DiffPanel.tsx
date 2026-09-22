@@ -232,7 +232,6 @@ export function DiffPanel() {
   const [hoveredGutter, setHoveredGutter] = useState<string | null>(null);
   const dragRef = useRef<DiffDrag | null>(null);
   const dragPointerRef = useRef<number | null>(null);
-  const pointerCleanupRef = useRef<(() => void) | null>(null);
 
   // 打开时刷新一次（docs/DESIGN.md「改动审查视图」）：会话切换时重新拉取
   useEffect(() => {
@@ -248,8 +247,6 @@ export function DiffPanel() {
     setHoveredGutter(null);
     dragRef.current = null;
     dragPointerRef.current = null;
-    pointerCleanupRef.current?.();
-    pointerCleanupRef.current = null;
     const client = core.client;
     if (client === null || sessionId === null) return;
     let cancelled = false;
@@ -265,8 +262,6 @@ export function DiffPanel() {
       cancelled = true;
     };
   }, [core, sessionId]);
-
-  useEffect(() => () => pointerCleanupRef.current?.(), []);
 
   const files = diff?.files ?? [];
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
@@ -309,56 +304,47 @@ export function DiffPanel() {
     dragRef.current = null;
   };
 
-  const lineRefAt = (event: ReactPointerEvent<HTMLDivElement>): DiffLineRef | null => {
-    const direct = event.target instanceof Element ? lineRefFromElement(event.target) : null;
-    return direct ?? lineRefAtPoint(event.clientX, event.clientY);
-  };
-
-  const beginCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const beginCodeSelection = (
+    event: ReactPointerEvent<HTMLSpanElement>,
+    line: DiffLineRef,
+  ) => {
     if (event.button !== 0) return;
-    const gutter = (event.target as HTMLElement).closest("[data-diff-gutter]");
-    if (gutter === null) return;
-    const line = lineRefAt(event);
-    if (line === null) return;
     event.preventDefault();
     event.stopPropagation();
-    pointerCleanupRef.current?.();
+    event.currentTarget.setPointerCapture(event.pointerId);
     const drag = { start: line, end: line };
     dragRef.current = drag;
     dragPointerRef.current = event.pointerId;
     setDragRange(drag);
+  };
 
-    let cleanup = () => {};
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      if (moveEvent.pointerId !== dragPointerRef.current) return;
-      const next = lineRefAtPoint(moveEvent.clientX, moveEvent.clientY);
-      if (next !== null) extendCodeSelection(next);
-    };
-    const onPointerUp = (upEvent: PointerEvent) => {
-      if (upEvent.pointerId !== dragPointerRef.current) return;
-      const next = lineRefAtPoint(upEvent.clientX, upEvent.clientY);
-      if (next !== null) extendCodeSelection(next);
-      const current = dragRef.current;
-      dragPointerRef.current = null;
-      cleanup();
-      if (current !== null) finishCodeSelection(current);
-    };
-    const onPointerCancel = (cancelEvent: PointerEvent) => {
-      if (cancelEvent.pointerId !== dragPointerRef.current) return;
-      dragPointerRef.current = null;
-      cleanup();
-      cancelComment();
-    };
-    cleanup = () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerCancel);
-      if (pointerCleanupRef.current === cleanup) pointerCleanupRef.current = null;
-    };
-    pointerCleanupRef.current = cleanup;
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerCancel);
+  const extendCodeSelectionAtPoint = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    if (event.pointerId !== dragPointerRef.current) return;
+    event.preventDefault();
+    const next = lineRefAtPoint(event.clientX, event.clientY);
+    if (next !== null) extendCodeSelection(next);
+  };
+
+  const finishCodeSelectionAtPoint = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    if (event.pointerId !== dragPointerRef.current) return;
+    event.preventDefault();
+    const next = lineRefAtPoint(event.clientX, event.clientY);
+    if (next !== null) extendCodeSelection(next);
+    const current = dragRef.current;
+    dragPointerRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (current !== null) finishCodeSelection(current);
+  };
+
+  const cancelCodeSelection = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    if (event.pointerId !== dragPointerRef.current) return;
+    dragPointerRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    cancelComment();
   };
 
   const extendCodeSelection = (line: DiffLineRef) => {
@@ -427,7 +413,6 @@ export function DiffPanel() {
           <div
             data-slot="diff-content"
             className="select-none"
-            onPointerDown={beginCodeSelection}
           >
             {files.map((file, index) => (
               <div
@@ -503,6 +488,16 @@ export function DiffPanel() {
                                 <span
                                   data-diff-gutter="true"
                                   className="relative flex w-6 shrink-0 cursor-pointer touch-none items-center justify-center text-muted-foreground"
+                                  onPointerDown={(event) =>
+                                    beginCodeSelection(event, {
+                                      path: file.path,
+                                      hunkIndex: hunkIx,
+                                      lineIndex: lineIx,
+                                    })
+                                  }
+                                  onPointerMove={extendCodeSelectionAtPoint}
+                                  onPointerUp={finishCodeSelectionAtPoint}
+                                  onPointerCancel={cancelCodeSelection}
                                   onPointerEnter={() => setHoveredGutter(gutterKey)}
                                   onPointerLeave={() =>
                                     setHoveredGutter((current) =>
