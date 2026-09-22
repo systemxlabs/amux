@@ -756,9 +756,9 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
                     IconName::PanelRightOpen
                 })
                 .tooltip(if this.workspace_content_visible {
-                    "折叠内容"
+                    "折叠内容区域"
                 } else {
-                    "展开内容"
+                    "展开内容区域"
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_workspace_content(cx))),
         );

@@ -4,6 +4,7 @@
 // 有剩余页时展示「加载更多」入口。
 
 import { useCallback, useEffect, useState } from "react";
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 
 import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
@@ -314,20 +315,24 @@ export function WorkspacePanel() {
         <Button
           type="button"
           variant="ghost"
-          size="sm"
+          size="icon"
           data-slot="workspace-toggle-tree"
+          aria-label={treeVisible ? "折叠文件树" : "展开文件树"}
+          title={treeVisible ? "折叠文件树" : "展开文件树"}
           onClick={() => setTreeVisible((prev) => !prev)}
         >
-          {treeVisible ? "折叠文件树" : "展开文件树"}
+          {treeVisible ? <PanelLeftClose /> : <PanelLeftOpen />}
         </Button>
         <Button
           type="button"
           variant="ghost"
-          size="sm"
+          size="icon"
           data-slot="workspace-toggle-content"
+          aria-label={contentVisible ? "折叠内容区域" : "展开内容区域"}
+          title={contentVisible ? "折叠内容区域" : "展开内容区域"}
           onClick={() => setContentVisible((prev) => !prev)}
         >
-          {contentVisible ? "折叠内容区域" : "展开内容区域"}
+          {contentVisible ? <PanelRightClose /> : <PanelRightOpen />}
         </Button>
       </div>
       {/* 窄视口下文件树与内容上下排布；宽屏可通过分割线调整左右宽度 */}
