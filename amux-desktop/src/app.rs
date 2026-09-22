@@ -1942,6 +1942,7 @@ impl AmuxApp {
             diff::CommentTarget::Code {
                 path: selection.start.path,
                 hunk_header: hunk.header,
+                end_line: end,
                 code,
             },
             window,

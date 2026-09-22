@@ -1539,22 +1539,16 @@ fn diff_file_block(
                     hunk_header: hunk.header.clone(),
                     line: index,
                 };
+                let group_id =
+                    SharedString::from(format!("diff-line-{}-{}-{index}", file.path, hunk.header));
                 block = block.child(
                     h_flex()
                         .w_full()
                         .h(rems(1.375))
                         .items_center()
+                        .group(group_id.clone())
                         .bg(background)
                         .when(selected, |row| row.border_l_2().border_color(theme.primary))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener({
-                                let line_ref = line_ref.clone();
-                                move |this, _, _, cx| {
-                                    this.begin_diff_line_selection(line_ref.clone(), cx)
-                                }
-                            }),
-                        )
                         .on_mouse_move(cx.listener({
                             let line_ref = line_ref.clone();
                             move |this, _, _, cx| {
@@ -1572,7 +1566,17 @@ fn diff_file_block(
                                 }
                             }),
                         )
-                        .child(number_gutter(numbers.old, &theme))
+                        .child(
+                            diff_line_gutter(numbers.old, group_id, &theme).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let line_ref = line_ref.clone();
+                                    move |this, _, _, cx| {
+                                        this.begin_diff_line_selection(line_ref.clone(), cx)
+                                    }
+                                }),
+                            ),
+                        )
                         .child(number_gutter(numbers.new, &theme))
                         .child(
                             div().w(rems(1.5)).h_full().flex().justify_center().child(
@@ -1591,10 +1595,24 @@ fn diff_file_block(
                                 .flex_shrink_0(),
                         ),
                 );
-            }
-            if let Some(composer) = diff_comment_composer(&file.path, Some(&hunk.header), this, cx)
-            {
-                block = block.child(composer);
+                let comment_below = matches!(
+                    this.diff_comment_target.as_ref(),
+                    Some(diff::CommentTarget::Code {
+                        path,
+                        hunk_header,
+                        end_line,
+                        ..
+                    }) if path == &file.path
+                        && hunk_header == &hunk.header
+                        && *end_line == index
+                );
+                if comment_below {
+                    if let Some(composer) =
+                        diff_comment_composer(&file.path, Some(&hunk.header), this, cx)
+                    {
+                        block = block.child(composer);
+                    }
+                }
             }
         }
     }
@@ -1655,6 +1673,41 @@ fn diff_comment_composer(
             )
             .into_any_element(),
     )
+}
+
+/// 行号栏：悬停显示「⊕」，从这里开始拖动选择代码行。
+fn diff_line_gutter(number: Option<usize>, group_id: SharedString, theme: &ui::Colors) -> Div {
+    div()
+        .w(rems(3.))
+        .h_full()
+        .px_2()
+        .relative()
+        .flex()
+        .justify_end()
+        .cursor_pointer()
+        .border_r_1()
+        .border_color(theme.border.opacity(0.45))
+        .child(
+            div()
+                .group_hover(group_id.clone(), |label| label.opacity(0.))
+                .child(
+                    Label::new(number.map(|n| n.to_string()).unwrap_or_default())
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.muted_foreground),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(0.)
+                .group_hover(group_id, |plus| plus.opacity(1.))
+                .child(Icon::new(IconName::Plus).xsmall().text_color(theme.primary)),
+        )
 }
 
 /// diff 行号栏（该侧无行号时留空）。

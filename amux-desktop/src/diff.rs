@@ -72,6 +72,7 @@ pub enum CommentTarget {
     Code {
         path: String,
         hunk_header: String,
+        end_line: usize,
         code: String,
     },
 }
@@ -128,6 +129,7 @@ mod tests {
         let code = CommentTarget::Code {
             path: "src/a.rs".into(),
             hunk_header: "@@ -1,2 +1,2 @@".into(),
+            end_line: 1,
             code: "-let old = 1;\n+let new = 1;".into(),
         };
         assert_eq!(

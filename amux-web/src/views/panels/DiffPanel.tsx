@@ -2,15 +2,20 @@
 //
 // 面板打开时拉取一次改动，不定时刷新；折叠状态只存在于本地。
 
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
 
 import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
 import { sendPrompt } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 import { buildDiffTree, type DiffNode } from "../../lib/difftree";
-import type { GitChangeStatus, GitDiffLine, GitDiffResult } from "../../lib/types";
+import type {
+  GitChangeStatus,
+  GitDiffHunk,
+  GitDiffLine,
+  GitDiffResult,
+} from "../../lib/types";
 import { cn } from "../../lib/utils";
 
 const STATUS_LABEL: Record<GitChangeStatus, string> = {
@@ -29,9 +34,41 @@ function linePrefix(kind: GitDiffLine["kind"]): string {
   return " ";
 }
 
+function lineNumbers(hunk: GitDiffHunk): { old: number | null; new: number | null }[] {
+  const parts = hunk.header.split(/\s+/);
+  const parse = (value: string | undefined, sign: "+" | "-"): number => {
+    const raw = value?.startsWith(sign) ? value.slice(1) : "";
+    return Number(raw.split(",", 1)[0]) || 1;
+  };
+  let old = parse(parts[1], "-");
+  let next = parse(parts[2], "+");
+  return hunk.lines.map((line) => {
+    if (line.kind === "add") {
+      const numbers = { old: null, new: next };
+      next += 1;
+      return numbers;
+    }
+    if (line.kind === "remove") {
+      const numbers = { old, new: null };
+      old += 1;
+      return numbers;
+    }
+    const numbers = { old, new: next };
+    old += 1;
+    next += 1;
+    return numbers;
+  });
+}
+
 type DiffCommentTarget =
   | { kind: "file"; path: string }
-  | { kind: "code"; path: string; hunkIndex: number; code: string };
+  | {
+      kind: "code";
+      path: string;
+      hunkIndex: number;
+      endLine: number;
+      code: string;
+    };
 
 type DiffLineRef = { path: string; hunkIndex: number; lineIndex: number };
 type DiffDrag = { start: DiffLineRef; end: DiffLineRef };
@@ -178,6 +215,7 @@ export function DiffPanel() {
   const [commentText, setCommentText] = useState("");
   const [commentSending, setCommentSending] = useState(false);
   const [dragRange, setDragRange] = useState<DiffDrag | null>(null);
+  const [hoveredGutter, setHoveredGutter] = useState<string | null>(null);
   const dragRef = useRef<DiffDrag | null>(null);
 
   // 打开时刷新一次（docs/DESIGN.md「改动审查视图」）：会话切换时重新拉取
@@ -191,6 +229,7 @@ export function DiffPanel() {
     setCommentText("");
     setCommentSending(false);
     setDragRange(null);
+    setHoveredGutter(null);
     dragRef.current = null;
     const client = core.client;
     if (client === null || sessionId === null) return;
@@ -264,6 +303,8 @@ export function DiffPanel() {
   };
 
   const beginCodeSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gutter = (event.target as HTMLElement).closest("[data-diff-gutter]");
+    if (gutter === null) return;
     const line = lineRefAt(event);
     if (line === null) return;
     event.preventDefault();
@@ -301,7 +342,13 @@ export function DiffPanel() {
       .join("\n");
     dragRef.current = null;
     setDragRange(null);
-    setCommentTarget({ kind: "code", path: drag.start.path, hunkIndex: drag.start.hunkIndex, code });
+    setCommentTarget({
+      kind: "code",
+      path: drag.start.path,
+      hunkIndex: drag.start.hunkIndex,
+      endLine: end,
+      code,
+    });
     setCommentText("");
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -382,6 +429,7 @@ export function DiffPanel() {
                 ) : null}
                 {!diffsCollapsed &&
                   file.hunks.map((hunk, hunkIx) => {
+                    const numbers = lineNumbers(hunk);
                     const selectedLines =
                       dragRange !== null &&
                       dragRange.start.path === file.path &&
@@ -396,39 +444,72 @@ export function DiffPanel() {
                         <div className="flex px-2 font-mono text-xs text-muted-foreground">
                           <span className="min-w-0 flex-1">{hunk.header}</span>
                         </div>
-                        {hunk.lines.map((line, lineIx) => (
-                          <div
-                            key={lineIx}
-                            data-slot="diff-line"
-                            data-diff-file={file.path}
-                            data-diff-hunk={hunkIx}
-                            data-diff-line-index={lineIx}
-                            className={cn(
-                              "cursor-text whitespace-pre px-2 font-mono text-xs",
-                              line.kind === "add" && "bg-diff-add",
-                              line.kind === "remove" && "bg-diff-remove",
-                              selectedLines !== null &&
-                                lineIx >= selectedLines[0] &&
-                                lineIx <= selectedLines[1] &&
-                                "ring-1 ring-inset ring-primary/60",
-                            )}
-                          >
-                            {linePrefix(line.kind)}
-                            {line.text}
-                          </div>
-                        ))}
-                        {commentTarget?.kind === "code" &&
-                        commentTarget.path === file.path &&
-                        commentTarget.hunkIndex === hunkIx ? (
-                          <CommentComposer
-                            target={commentTarget}
-                            value={commentText}
-                            sending={commentSending}
-                            onChange={setCommentText}
-                            onCancel={cancelComment}
-                            onSubmit={() => void submitComment()}
-                          />
-                        ) : null}
+                        {hunk.lines.map((line, lineIx) => {
+                          const lineNumber = numbers[lineIx];
+                          const gutterKey = `${file.path}:${hunkIx}:${lineIx}`;
+                          return (
+                            <Fragment key={lineIx}>
+                              <div
+                                data-slot="diff-line"
+                                data-diff-file={file.path}
+                                data-diff-hunk={hunkIx}
+                                data-diff-line-index={lineIx}
+                                className={cn(
+                                  "flex whitespace-pre font-mono text-xs",
+                                  line.kind === "add" && "bg-diff-add",
+                                  line.kind === "remove" && "bg-diff-remove",
+                                  selectedLines !== null &&
+                                    lineIx >= selectedLines[0] &&
+                                    lineIx <= selectedLines[1] &&
+                                    "ring-1 ring-inset ring-primary/60",
+                                )}
+                              >
+                                <span
+                                  data-diff-gutter="true"
+                                  className="relative flex w-6 shrink-0 cursor-pointer items-center justify-center text-muted-foreground"
+                                  onPointerEnter={() => setHoveredGutter(gutterKey)}
+                                  onPointerLeave={() =>
+                                    setHoveredGutter((current) =>
+                                      current === gutterKey ? null : current,
+                                    )
+                                  }
+                                >
+                                  {hoveredGutter === gutterKey ? (
+                                    <Plus className="size-3 text-primary" />
+                                  ) : (
+                                    (lineNumber.old ?? "")
+                                  )}
+                                </span>
+                                <span className="w-9 shrink-0 px-2 text-right text-muted-foreground">
+                                  {lineNumber.new ?? ""}
+                                </span>
+                                <span
+                                  className={cn(
+                                    "w-4 shrink-0 text-center font-semibold",
+                                    line.kind === "add" && "text-success",
+                                    line.kind === "remove" && "text-danger",
+                                  )}
+                                >
+                                  {linePrefix(line.kind)}
+                                </span>
+                                <span>{line.text}</span>
+                              </div>
+                              {commentTarget?.kind === "code" &&
+                              commentTarget.path === file.path &&
+                              commentTarget.hunkIndex === hunkIx &&
+                              commentTarget.endLine === lineIx ? (
+                                <CommentComposer
+                                  target={commentTarget}
+                                  value={commentText}
+                                  sending={commentSending}
+                                  onChange={setCommentText}
+                                  onCancel={cancelComment}
+                                  onSubmit={() => void submitComment()}
+                                />
+                              ) : null}
+                            </Fragment>
+                          );
+                        })}
                       </div>
                     );
                   })}
