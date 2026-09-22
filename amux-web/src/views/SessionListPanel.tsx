@@ -457,7 +457,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                 {hasProjects ? (
                   <div
                     data-slot="session-project-separator"
-                    className="my-1 border-t border-border"
+                    className="my-2 border-t border-border"
                   />
                 ) : null}
                 {unassignedLoading && unassignedRows.length === 0 ? (

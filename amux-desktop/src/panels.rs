@@ -178,7 +178,13 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
             },
         ));
         if has_projects {
-            unassigned = unassigned.child(div().w_full().border_t_1().border_color(sidebar_border));
+            unassigned = unassigned.child(
+                div()
+                    .my_1()
+                    .w_full()
+                    .border_t_1()
+                    .border_color(sidebar_border),
+            );
         }
         if unassigned_loading && unassigned_entries.is_empty() {
             unassigned = unassigned.child(
