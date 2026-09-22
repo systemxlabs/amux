@@ -11,6 +11,7 @@ import type {
   ListEntry,
   OpenTarget,
   OrchestratorConfig,
+  Project,
   QuickCommand,
   Session,
   Skill,
@@ -205,7 +206,7 @@ export async function renameEntry(core: Core, entry: ListEntry, title: string): 
     if (entry.kind === "session") {
       await core.client.configureSession(entry.session.id, title, null);
     } else {
-      await core.client.configureWorkflow(entry.workflow.id, title);
+      await core.client.configureWorkflow(entry.workflow.id, title, undefined);
     }
     core.success("标题已更新");
     await refreshList(core);
@@ -237,16 +238,116 @@ export async function deleteRecentWorkspace(
   }
 }
 
+/** 拖拽/移动会话到指定项目（None 置为未归属，docs/PRD.md「会话列表视图」）。 */
+export async function setEntryProject(
+  core: Core,
+  entry: ListEntry,
+  project: string | undefined,
+): Promise<void> {
+  if (!core.client) return;
+  try {
+    if (entry.kind === "session") {
+      await core.client.configureSession(entry.session.id, null, null, project);
+      core.update((state) => {
+        const item = state.entries.find(
+          (candidate) => candidate.kind === "session" && candidate.session.id === entry.session.id,
+        );
+        if (item?.kind === "session") item.session.project = project;
+      });
+    } else {
+      await core.client.configureWorkflow(entry.workflow.id, null, project);
+      core.update((state) => {
+        const item = state.entries.find(
+          (candidate) =>
+            candidate.kind === "workflow" && candidate.workflow.id === entry.workflow.id,
+        );
+        if (item?.kind === "workflow") item.workflow.project = project;
+      });
+    }
+    core.success("已更新会话所属项目");
+    await refreshList(core);
+  } catch (error) {
+    core.failure(`设置会话所属项目失败：${messageOf(error)}`);
+  }
+}
+
+/** 新建项目（docs/PRD.md「项目管理设置」）。 */
+export async function createProject(core: Core, name: string, description: string): Promise<void> {
+  if (!core.client) return;
+  try {
+    await core.client.createProject({ name, description });
+    core.update((state) => {
+      state.settings.projects.push({ name, description });
+    });
+    core.success("项目已创建");
+  } catch (error) {
+    core.failure(`创建项目失败：${messageOf(error)}`);
+  }
+}
+
+/** 更新项目描述（名称不可修改）。 */
+export async function updateProject(
+  core: Core,
+  name: string,
+  description: string,
+): Promise<void> {
+  if (!core.client) return;
+  try {
+    await core.client.updateProject(name, description);
+    core.update((state) => {
+      const item = state.settings.projects.find((candidate) => candidate.name === name);
+      if (item) item.description = description;
+    });
+    core.success("项目已更新");
+  } catch (error) {
+    core.failure(`更新项目失败：${messageOf(error)}`);
+  }
+}
+
+/** 删除项目：其下会话回到未归属（服务端处理）。 */
+export async function deleteProject(core: Core, name: string): Promise<void> {
+  if (!core.client) return;
+  try {
+    await core.client.deleteProject(name);
+    core.update((state) => {
+      state.settings.projects = state.settings.projects.filter((item) => item.name !== name);
+    });
+    core.success("项目已删除");
+    await refreshList(core);
+  } catch (error) {
+    core.failure(`删除项目失败：${messageOf(error)}`);
+  }
+}
+
+/** 更新项目顺序（docs/PRD.md「项目管理设置」拖拽调整顺序）。 */
+export async function setProjectOrder(core: Core, names: string[]): Promise<void> {
+  if (!core.client) return;
+  const current = core.state.settings.projects;
+  try {
+    await core.client.setProjectOrder(names);
+    const byName = new Map(current.map((item) => [item.name, item]));
+    core.update((state) => {
+      state.settings.projects = names
+        .map((name) => byName.get(name))
+        .filter((item): item is Project => item !== undefined);
+    });
+    core.success("项目顺序已更新");
+  } catch (error) {
+    core.failure(`更新项目顺序失败：${messageOf(error)}`);
+  }
+}
+
 /** 普通模式创建会话。 */
 export async function createSession(core: Core): Promise<void> {
   if (!core.client) return;
-  const { machine, agent, workspace, useWorktree } = core.state.newSession;
+  const { machine, agent, workspace, useWorktree, project } = core.state.newSession;
   try {
     const session = await core.client.createSession({
       machine,
       agent,
       workspace,
       useWorktree,
+      project,
     });
     core.update((state) => {
       state.newSession = { ...initialNewSession(), mode: state.newSession.mode };
@@ -264,7 +365,7 @@ export async function createWorkflow(core: Core): Promise<void> {
   const plan = core.state.newSession.plan.trim();
   if (plan === "") return;
   try {
-    const workflow = await core.client.createWorkflow(plan, null);
+    const workflow = await core.client.createWorkflow(plan, null, core.state.newSession.project);
     core.update((state) => {
       state.newSession = { ...initialNewSession(), mode: state.newSession.mode };
     });

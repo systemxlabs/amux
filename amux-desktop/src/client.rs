@@ -115,9 +115,17 @@ impl Client {
         self.post_json("/sessions", request).await
     }
 
-    pub async fn sessions(&self, limit: usize, offset: usize) -> Result<SessionList, String> {
-        self.get_json(&format!("/sessions?limit={limit}&offset={offset}"))
-            .await
+    pub async fn sessions(
+        &self,
+        limit: usize,
+        offset: usize,
+        project: Option<&str>,
+    ) -> Result<SessionList, String> {
+        let mut query = format!("limit={limit}&offset={offset}");
+        if let Some(project) = project {
+            query.push_str(&format!("&project={}", urlencode(project)));
+        }
+        self.get_json(&format!("/sessions?{query}")).await
     }
 
     pub async fn session(&self, id: &str) -> Result<Session, String> {
@@ -143,10 +151,15 @@ impl Client {
         id: &str,
         title: Option<String>,
         config: Option<SessionConfigSetting>,
+        project: Option<String>,
     ) -> Result<(), String> {
         self.post_empty(
             &format!("/sessions/{id}/configure"),
-            &ConfigureSessionRequest { title, config },
+            &ConfigureSessionRequest {
+                title,
+                config,
+                project,
+            },
         )
         .await
     }
@@ -302,20 +315,30 @@ impl Client {
         &self,
         plan: &str,
         title: Option<String>,
+        project: Option<String>,
     ) -> Result<Workflow, String> {
         self.post_json(
             "/workflows",
             &CreateWorkflowRequest {
                 plan: plan.to_string(),
                 title,
+                project,
             },
         )
         .await
     }
 
-    pub async fn workflows(&self, limit: usize, offset: usize) -> Result<WorkflowList, String> {
-        self.get_json(&format!("/workflows?limit={limit}&offset={offset}"))
-            .await
+    pub async fn workflows(
+        &self,
+        limit: usize,
+        offset: usize,
+        project: Option<&str>,
+    ) -> Result<WorkflowList, String> {
+        let mut query = format!("limit={limit}&offset={offset}");
+        if let Some(project) = project {
+            query.push_str(&format!("&project={}", urlencode(project)));
+        }
+        self.get_json(&format!("/workflows?{query}")).await
     }
 
     pub async fn workflow(&self, id: &str) -> Result<Workflow, String> {
@@ -331,10 +354,15 @@ impl Client {
         self.delete(&format!("/workflows/{id}")).await
     }
 
-    pub async fn configure_workflow(&self, id: &str, title: Option<String>) -> Result<(), String> {
+    pub async fn configure_workflow(
+        &self,
+        id: &str,
+        title: Option<String>,
+        project: Option<String>,
+    ) -> Result<(), String> {
         self.post_empty(
             &format!("/workflows/{id}/configure"),
-            &ConfigureWorkflowRequest { title },
+            &ConfigureWorkflowRequest { title, project },
         )
         .await
     }
@@ -386,6 +414,35 @@ impl Client {
 
     pub async fn set_workflow_plans(&self, plans: &[WorkflowPlanItem]) -> Result<(), String> {
         self.put_empty(path::CONFIG_WORKFLOWS, &plans).await
+    }
+
+    pub async fn projects(&self) -> Result<Vec<Project>, String> {
+        self.get_json(path::CONFIG_PROJECTS).await
+    }
+
+    pub async fn create_project(&self, project: &Project) -> Result<(), String> {
+        self.post_empty(path::CONFIG_PROJECTS, project).await
+    }
+
+    pub async fn update_project(&self, name: &str, description: &str) -> Result<(), String> {
+        self.put_empty(
+            &format!("{}{}", path::CONFIG_PROJECTS, urlencode(name)),
+            &serde_json::json!({ "description": description }),
+        )
+        .await
+    }
+
+    pub async fn delete_project(&self, name: &str) -> Result<(), String> {
+        self.delete(&format!("{}{}", path::CONFIG_PROJECTS, urlencode(name)))
+            .await
+    }
+
+    pub async fn set_project_order(&self, names: &[String]) -> Result<(), String> {
+        self.post_empty(
+            &format!("{}order", path::CONFIG_PROJECTS),
+            &serde_json::json!({ "names": names }),
+        )
+        .await
     }
 
     pub async fn recent_workspaces(&self) -> Result<Vec<RecentWorkspace>, String> {

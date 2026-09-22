@@ -13,6 +13,7 @@ import { OrchestratorSection } from "./OrchestratorSection";
 import { QuickCommandsSection } from "./QuickCommandsSection";
 import { SkillsSection } from "./SkillsSection";
 import { WorkflowPlansSection } from "./WorkflowPlansSection";
+import { ProjectsSection } from "./ProjectsSection";
 
 /** 分类导航（数组顺序即展示顺序）。 */
 const TABS: { tab: SettingsTab; label: string }[] = [
@@ -22,6 +23,7 @@ const TABS: { tab: SettingsTab; label: string }[] = [
   { tab: "quickCommands", label: "快捷指令" },
   { tab: "skills", label: "技能管理" },
   { tab: "plans", label: "工作流计划" },
+  { tab: "projects", label: "项目管理" },
 ];
 
 function section(tab: SettingsTab) {
@@ -38,6 +40,8 @@ function section(tab: SettingsTab) {
       return <SkillsSection />;
     case "plans":
       return <WorkflowPlansSection />;
+    case "projects":
+      return <ProjectsSection />;
   }
 }
 

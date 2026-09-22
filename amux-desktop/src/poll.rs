@@ -80,8 +80,8 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
         let core = core.lock();
         core.list_loaded.max(core.list_paging.page_size)
     };
-    let sessions = client.sessions(limit, 0).await;
-    let workflows = client.workflows(limit, 0).await;
+    let sessions = client.sessions(limit, 0, None).await;
+    let workflows = client.workflows(limit, 0, None).await;
     let (sessions, workflows) = match (sessions, workflows) {
         (Ok(sessions), Ok(workflows)) => (sessions, workflows),
         (Err(error), _) | (_, Err(error)) => {
@@ -113,8 +113,8 @@ pub async fn load_older_sessions(client: &Client, core: &SharedCore) {
             None => return,
         }
     };
-    let sessions = client.sessions(limit, offset).await;
-    let workflows = client.workflows(limit, offset).await;
+    let sessions = client.sessions(limit, offset, None).await;
+    let workflows = client.workflows(limit, offset, None).await;
     let (sessions, workflows) = match (sessions, workflows) {
         (Ok(sessions), Ok(workflows)) => (sessions, workflows),
         _ => {
@@ -408,6 +408,7 @@ pub async fn refresh_new_session(client: &Client, core: &SharedCore) {
         core.lock().recent_workspaces = recent;
     }
     refresh_plans(client, core).await;
+    refresh_projects(client, core).await;
 }
 
 /// 进入工作流模式时检查内置智能体是否已配置。
@@ -481,6 +482,7 @@ pub async fn refresh_settings(client: &Client, core: &SharedCore, tab: SettingsT
         SettingsTab::QuickCommands => refresh_quick_commands(client, core).await,
         SettingsTab::Skills => refresh_skills(client, core).await,
         SettingsTab::WorkflowPlans => refresh_plans(client, core).await,
+        SettingsTab::Projects => refresh_projects(client, core).await,
     }
 }
 
@@ -522,6 +524,12 @@ async fn refresh_quick_commands(client: &Client, core: &SharedCore) {
 async fn refresh_skills(client: &Client, core: &SharedCore) {
     if let Ok(skills) = client.skills().await {
         core.lock().settings.skills = skills;
+    }
+}
+
+async fn refresh_projects(client: &Client, core: &SharedCore) {
+    if let Ok(projects) = client.projects().await {
+        core.lock().settings.projects = projects;
     }
 }
 

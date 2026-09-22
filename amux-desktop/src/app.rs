@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amux_common::api::{
-    Agent, ApiFormat, CreateSessionRequest, OrchestratorConfig, QuickCommand, RecentWorkspace,
-    SessionConfigSetting, Skill, WorkflowPlanItem,
+    Agent, ApiFormat, CreateSessionRequest, OrchestratorConfig, Project, QuickCommand,
+    RecentWorkspace, SessionConfigSetting, Skill, WorkflowPlanItem,
 };
 use amux_common::domain::{
     ContentBlock, GitDiffHunk, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
@@ -103,6 +103,8 @@ pub struct AmuxApp {
     pub skill_desc: Entity<InputState>,
     pub plan_name: Entity<InputState>,
     pub plan_plan: Entity<InputState>,
+    pub project_name: Entity<InputState>,
+    pub project_desc: Entity<InputState>,
     /// 终端 VT 网格（本地维护屏幕内容与光标；输入经 `send_terminal_input` 上行）
     pub terminal: terminal_view::TerminalScreen,
     /// 终端焦点：按键经它派发（Tab/Shift+Tab 走 action，其余走 key_down）
@@ -322,6 +324,13 @@ impl AmuxApp {
                 .multi_line(true)
                 .auto_grow(3, 8)
         });
+        let project_name = cx.new(|cx| InputState::new(window, cx));
+        let project_desc = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("项目描述")
+                .multi_line(true)
+                .auto_grow(2, 6)
+        });
         let diff_comment_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("输入评论")
@@ -352,6 +361,8 @@ impl AmuxApp {
             skill_desc,
             plan_name,
             plan_plan,
+            project_name,
+            project_desc,
             diff_comment_input,
             terminal: terminal_view::TerminalScreen::default(),
             terminal_focus: cx.focus_handle(),
@@ -1091,6 +1102,9 @@ impl AmuxApp {
             crate::state::SettingsTab::WorkflowPlans => {
                 self.open_plan_form(FormTarget::New, window, cx)
             }
+            crate::state::SettingsTab::Projects => {
+                self.open_project_form(FormTarget::New, window, cx)
+            }
             _ => {}
         }
     }
@@ -1487,7 +1501,10 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             let setting = SessionConfigSetting { config_id, value };
-            if let Err(error) = client.configure_session(&id, None, Some(setting)).await {
+            if let Err(error) = client
+                .configure_session(&id, None, Some(setting), None)
+                .await
+            {
                 core.lock().error(format!("会话选项设置失败：{error}"));
             }
         });
@@ -1522,7 +1539,7 @@ impl AmuxApp {
             }
             self.runtime.spawn(async move {
                 client
-                    .create_workflow(&plan, None)
+                    .create_workflow(&plan, None, form.project.clone())
                     .await
                     .map(|workflow| OpenTarget::Workflow(workflow.id))
             })
@@ -1538,6 +1555,7 @@ impl AmuxApp {
                 agent,
                 workspace,
                 use_worktree: form.use_worktree,
+                project: form.project.clone(),
             };
             self.runtime.spawn(async move {
                 client
@@ -1610,12 +1628,43 @@ impl AmuxApp {
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             let result = match &target {
-                OpenTarget::Session(id) => client.configure_session(id, Some(title), None).await,
-                OpenTarget::Workflow(id) => client.configure_workflow(id, Some(title)).await,
+                OpenTarget::Session(id) => {
+                    client.configure_session(id, Some(title), None, None).await
+                }
+                OpenTarget::Workflow(id) => client.configure_workflow(id, Some(title), None).await,
             };
             match result {
                 Ok(()) => core.lock().last.list = None,
                 Err(error) => core.lock().error(format!("重命名失败：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
+    /// 设置会话所属项目（None = 未归属；docs/PRD.md「会话列表视图」拖拽/菜单切换项目）。
+    pub fn set_entry_project(
+        &mut self,
+        entry: ListEntry,
+        project: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = match &entry {
+                ListEntry::Session(session) => {
+                    client
+                        .configure_session(&session.id, None, None, project)
+                        .await
+                }
+                ListEntry::Workflow(workflow) => {
+                    client.configure_workflow(&workflow.id, None, project).await
+                }
+            };
+            match result {
+                Ok(()) => core.lock().last.list = None,
+                Err(error) => core.lock().error(format!("设置所属项目失败：{error}")),
             }
         });
         cx.notify();
@@ -2050,6 +2099,7 @@ impl AmuxApp {
                 SettingsList::QuickCommands(list) => client.set_quick_commands(list).await,
                 SettingsList::Plans(list) => client.set_workflow_plans(list).await,
                 SettingsList::RecentWorkspaces(list) => client.set_recent_workspaces(list).await,
+                SettingsList::Projects(_) => Ok(()),
             };
             match result {
                 Ok(()) => {
@@ -2060,6 +2110,7 @@ impl AmuxApp {
                         SettingsList::QuickCommands(list) => core.settings.quick_commands = list,
                         SettingsList::Plans(list) => core.settings.plans = list,
                         SettingsList::RecentWorkspaces(list) => core.recent_workspaces = list,
+                        SettingsList::Projects(_) => {}
                     }
                 }
                 Err(error) => core.lock().error(format!("保存失败：{error}")),
@@ -2363,6 +2414,160 @@ impl AmuxApp {
         );
     }
 
+    /// 打开项目表单弹窗（新增 / 编辑）。
+    pub fn open_project_form(
+        &mut self,
+        target: FormTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editing = match &target {
+            FormTarget::New => None,
+            FormTarget::Edit(name) => self.with_core(|core| {
+                core.settings
+                    .projects
+                    .iter()
+                    .find(|item| &item.name == name)
+                    .cloned()
+            }),
+        };
+        if let Some(project) = editing {
+            self.project_name
+                .update(cx, |state, cx| state.set_value(project.name, window, cx));
+            self.project_desc.update(cx, |state, cx| {
+                state.set_value(project.description, window, cx)
+            });
+        } else {
+            self.project_name
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+            self.project_desc
+                .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        }
+        let title = match &target {
+            FormTarget::New => "新增项目",
+            FormTarget::Edit(_) => "编辑项目",
+        };
+        // 编辑时项目名称不可修改（docs/PRD.md「项目管理」）
+        let fields = match &target {
+            FormTarget::New => vec![
+                ("项目名称", self.project_name.clone()),
+                ("项目描述", self.project_desc.clone()),
+            ],
+            FormTarget::Edit(_) => vec![("项目描述", self.project_desc.clone())],
+        };
+        dialog::form(
+            window,
+            cx,
+            title,
+            "保存",
+            30.0,
+            fields,
+            move |this, cx| this.save_project(target.clone(), cx),
+        );
+    }
+
+    /// 保存项目（新增或编辑）。
+    pub fn save_project(&mut self, target: FormTarget, cx: &mut Context<Self>) -> bool {
+        let name = self.project_name.read(cx).value().trim().to_string();
+        let description = self.project_desc.read(cx).value().trim().to_string();
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return false };
+        let core = Arc::clone(&self.core);
+        match &target {
+            FormTarget::New => {
+                if name.is_empty() {
+                    self.with_core(|core| core.warning("请输入项目名称"));
+                    cx.notify();
+                    return false;
+                }
+                let project = Project { name, description };
+                self.runtime.spawn(async move {
+                    match client.create_project(&project).await {
+                        Ok(()) => {
+                            core.lock().settings.projects.push(project);
+                        }
+                        Err(error) => core.lock().error(format!("保存项目失败：{error}")),
+                    }
+                });
+            }
+            FormTarget::Edit(old) => {
+                let old = old.clone();
+                let description = description.clone();
+                self.runtime.spawn(async move {
+                    match client.update_project(&old, &description).await {
+                        Ok(()) => {
+                            let mut core = core.lock();
+                            if let Some(item) = core
+                                .settings
+                                .projects
+                                .iter_mut()
+                                .find(|item| item.name == *old)
+                            {
+                                item.description = description;
+                            }
+                        }
+                        Err(error) => core.lock().error(format!("保存项目失败：{error}")),
+                    }
+                });
+            }
+        }
+        true
+    }
+
+    /// 删除项目：确认后删除，并让其下会话回到未归属（docs/PRD.md「项目管理」）。
+    pub fn delete_project(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        dialog::confirm(
+            window,
+            cx,
+            "删除项目",
+            format!("项目「{name}」将被删除，其下会话将回到未归属，此操作不可撤销。"),
+            "删除",
+            ButtonVariant::Danger,
+            move |this, _cx| {
+                let name = name.clone();
+                let client = this.with_core(|core| core.client.clone());
+                let Some(client) = client else { return };
+                let core = Arc::clone(&this.core);
+                this.runtime.spawn(async move {
+                    match client.delete_project(&name).await {
+                        Ok(()) => {
+                            let mut core = core.lock();
+                            core.settings.projects.retain(|item| item.name != name);
+                        }
+                        Err(error) => core.lock().error(format!("删除项目失败：{error}")),
+                    }
+                });
+            },
+        );
+    }
+
+    /// 调整项目顺序（上移 / 下移）并落盘。
+    pub fn move_project(&mut self, name: String, delta: isize, cx: &mut Context<Self>) {
+        let list = self.with_core(|core| core.settings.projects.clone());
+        let Some(index) = list.iter().position(|item| item.name == name) else {
+            return;
+        };
+        let target = index as isize + delta;
+        if target < 0 || target as usize >= list.len() {
+            return;
+        }
+        let mut next = list;
+        next.swap(index, target as usize);
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let core = Arc::clone(&self.core);
+        let names: Vec<String> = next.iter().map(|item| item.name.clone()).collect();
+        self.runtime.spawn(async move {
+            match client.set_project_order(&names).await {
+                Ok(()) => {
+                    core.lock().settings.projects = next;
+                }
+                Err(error) => core.lock().error(format!("调整项目顺序失败：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
     /// 保存内置智能体配置；保存结果以弹窗反馈（docs/DESIGN.md 连接/内置智能体设置）。
     pub fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
@@ -2522,6 +2727,7 @@ pub enum SettingsList {
     QuickCommands(Vec<QuickCommand>),
     Plans(Vec<WorkflowPlanItem>),
     RecentWorkspaces(Vec<RecentWorkspace>),
+    Projects(Vec<Project>),
 }
 
 impl AmuxApp {

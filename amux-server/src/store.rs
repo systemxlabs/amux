@@ -21,6 +21,8 @@ impl Store {
         std::fs::create_dir_all(home).map_err(|e| format!("创建 {} 失败: {e}", home.display()))?;
         let sessions = open_db(&home.join("session.sqlite"), SESSION_SCHEMA)?;
         let workflows = open_db(&home.join("workflow.sqlite"), WORKFLOW_SCHEMA)?;
+        ensure_column(&sessions, "sessions", "project", "TEXT")?;
+        ensure_column(&workflows, "workflows", "project", "TEXT")?;
         // Server 重启后残留的「工作中」不再有 agent 侧 turn 支撑，统一回到空闲
         sessions
             .execute(
@@ -46,12 +48,13 @@ impl Store {
         self.sessions
             .lock()
             .execute(
-                "INSERT INTO sessions (id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
+                "INSERT INTO sessions (id, state, title, project, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10)",
                 params![
                     session.id,
                     session.state.as_str(),
                     session.title,
+                    session.project.as_deref(),
                     session.workspace,
                     session.worktree_dir,
                     session.machine,
@@ -68,7 +71,7 @@ impl Store {
         self.sessions
             .lock()
             .query_row(
-                "SELECT id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+                "SELECT id, state, title, project, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 row_to_session,
@@ -82,8 +85,8 @@ impl Store {
     pub fn sessions_all(&self) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
-             FROM sessions ORDER BY updated_at DESC",
+            "SELECT id, state, title, project, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+             FROM sessions ORDER BY created_at DESC",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return Vec::new(),
@@ -93,14 +96,20 @@ impl Store {
     }
 
     /// 会话列表：排除被工作流关联的会话（docs/DESIGN.md：`GET /sessions` 只出非关联会话）。
-    /// 会话量级小，关联标记在 Rust 侧过滤。
-    pub fn sessions_page(&self, limit: usize, offset: usize) -> (Vec<Session>, bool) {
+    /// 会话量级小，关联标记在 Rust 侧过滤；`project` 指定时只返回该项目的会话。
+    pub fn sessions_page(
+        &self,
+        limit: usize,
+        offset: usize,
+        project: Option<&str>,
+    ) -> (Vec<Session>, bool) {
         let linked: std::collections::HashSet<String> =
             self.linked_session_ids().into_iter().collect();
         let all: Vec<Session> = self
             .sessions_all()
             .into_iter()
             .filter(|session| !linked.contains(&session.id))
+            .filter(|session| project.is_none() || session.project.as_deref() == project)
             .collect();
         let has_more = all.len() > offset + limit;
         let page = all.into_iter().skip(offset).take(limit).collect();
@@ -122,7 +131,7 @@ impl Store {
     pub fn sessions_of_agent(&self, machine: &str, agent: &str) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, state, title, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+            "SELECT id, state, title, project, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions WHERE machine = ?1 AND agent = ?2",
         ) {
             Ok(stmt) => stmt,
@@ -390,12 +399,13 @@ impl Store {
         title: &str,
         state: SessionState,
         plan: &str,
+        project: Option<&str>,
         created_at: u64,
     ) {
         let _ = self.workflows.lock().execute(
-            "INSERT INTO workflows (id, title, state, plan, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id, title, state.as_str(), plan, created_at as i64],
+            "INSERT INTO workflows (id, title, state, plan, project, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id, title, state.as_str(), plan, project, created_at as i64],
         );
     }
 
@@ -403,7 +413,7 @@ impl Store {
         self.workflows
             .lock()
             .query_row(
-                "SELECT id, title, state, plan, created_at, updated_at FROM workflows WHERE id = ?1",
+                "SELECT id, title, state, plan, project, created_at, updated_at FROM workflows WHERE id = ?1",
                 params![id],
                 row_to_workflow,
             )
@@ -412,17 +422,23 @@ impl Store {
             .flatten()
     }
 
-    pub fn workflows_page(&self, limit: usize, offset: usize) -> (Vec<WorkflowRow>, bool) {
+    pub fn workflows_page(
+        &self,
+        limit: usize,
+        offset: usize,
+        project: Option<&str>,
+    ) -> (Vec<WorkflowRow>, bool) {
         let conn = self.workflows.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, title, state, plan, created_at, updated_at FROM workflows
-             ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
+            "SELECT id, title, state, plan, project, created_at, updated_at FROM workflows
+             ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return (Vec::new(), false),
         };
         let rows = stmt.query_map(params![(limit + 1) as i64, offset as i64], row_to_workflow);
         let mut workflows = collect(rows);
+        workflows.retain(|row| project.is_none() || row.project.as_deref() == project);
         let has_more = workflows.len() > limit;
         workflows.truncate(limit);
         (workflows, has_more)
@@ -446,6 +462,34 @@ impl Store {
         let _ = self.workflows.lock().execute(
             "UPDATE workflows SET updated_at = ?2 WHERE id = ?1",
             params![id, now_ms() as i64],
+        );
+    }
+
+    /// 更新普通会话所属项目（None = 未归属）。
+    pub fn set_session_project(&self, id: &str, project: Option<&str>) {
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET project = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, project, now_ms() as i64],
+        );
+    }
+
+    /// 更新工作流会话所属项目（None = 未归属）。
+    pub fn set_workflow_project(&self, id: &str, project: Option<&str>) {
+        let _ = self.workflows.lock().execute(
+            "UPDATE workflows SET project = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, project, now_ms() as i64],
+        );
+    }
+
+    /// 项目删除后，其下所有会话回到未归属（docs/PRD.md「项目管理」）。
+    pub fn unassign_project(&self, project: &str) {
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET project = NULL WHERE project = ?1",
+            params![project],
+        );
+        let _ = self.workflows.lock().execute(
+            "UPDATE workflows SET project = NULL WHERE project = ?1",
+            params![project],
         );
     }
 
@@ -474,25 +518,25 @@ impl Store {
             }
         };
 
-        // 关联普通会话按其自身最近活跃（updated_at）排序（docs/PRD.md「工作流会话」）。
+        // 关联普通会话按创建时间倒序排序（docs/PRD.md「会话列表视图」）。
         let mut sessions: Vec<(String, u64)> = ids
             .into_iter()
             .filter_map(|session_id| {
-                let updated_at = self
+                let created_at = self
                     .sessions
                     .lock()
                     .query_row(
-                        "SELECT updated_at FROM sessions WHERE id = ?1",
+                        "SELECT created_at FROM sessions WHERE id = ?1",
                         params![session_id],
                         |row| row.get::<_, i64>(0),
                     )
                     .optional()
                     .ok()
                     .flatten()?;
-                Some((session_id, updated_at as u64))
+                Some((session_id, created_at as u64))
             })
             .collect();
-        sessions.sort_by_key(|(_, updated_at)| std::cmp::Reverse(*updated_at));
+        sessions.sort_by_key(|(_, created_at)| std::cmp::Reverse(*created_at));
         sessions.into_iter().map(|(id, _)| id).collect()
     }
 }
@@ -504,6 +548,7 @@ pub struct WorkflowRow {
     pub title: String,
     pub state: SessionState,
     pub plan: String,
+    pub project: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -514,6 +559,7 @@ const SESSION_SCHEMA: &str = "
         id TEXT PRIMARY KEY,
         state TEXT NOT NULL,
         title TEXT,
+        project TEXT,
         workspace TEXT NOT NULL,
         worktree_dir TEXT,
         machine TEXT NOT NULL,
@@ -548,6 +594,7 @@ const WORKFLOW_SCHEMA: &str = "
         title TEXT,
         state TEXT NOT NULL,
         plan TEXT NOT NULL,
+        project TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );
@@ -556,6 +603,32 @@ const WORKFLOW_SCHEMA: &str = "
         session_id TEXT NOT NULL,
         PRIMARY KEY (workflow_id, session_id)
     );";
+
+/// 为已有数据库补充新增列（老库无 project 列时）。
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("读取 {table} 表结构失败: {e}"))?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("读取 {table} 表结构失败: {e}"))?
+        .flatten()
+        .collect();
+    if columns.iter().any(|name| name == column) {
+        return Ok(());
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("为 {table} 补充 {column} 列失败: {e}"))
+}
 
 fn open_db(path: &Path, schema: &str) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("打开 {} 失败: {e}", path.display()))?;
@@ -570,12 +643,13 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         id: row.get(0)?,
         state: amux_common::domain::parse_session_state(&state).unwrap_or(SessionState::Idle),
         title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        workspace: row.get(3)?,
-        worktree_dir: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-        machine: row.get(5)?,
-        agent: row.get(6)?,
-        created_at: row.get::<_, i64>(8)? as u64,
-        updated_at: row.get::<_, i64>(9)? as u64,
+        project: row.get(3)?,
+        workspace: row.get(4)?,
+        worktree_dir: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        machine: row.get(6)?,
+        agent: row.get(7)?,
+        created_at: row.get::<_, i64>(9)? as u64,
+        updated_at: row.get::<_, i64>(10)? as u64,
     })
 }
 
@@ -586,8 +660,9 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRow> {
         title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
         state: amux_common::domain::parse_session_state(&state).unwrap_or(SessionState::Idle),
         plan: row.get(3)?,
-        created_at: row.get::<_, i64>(4)? as u64,
-        updated_at: row.get::<_, i64>(5)? as u64,
+        project: row.get(4)?,
+        created_at: row.get::<_, i64>(5)? as u64,
+        updated_at: row.get::<_, i64>(6)? as u64,
     })
 }
 
@@ -613,6 +688,7 @@ mod tests {
             agent: agent.into(),
             title: String::new(),
             state: SessionState::Idle,
+            project: None,
             workspace: "/tmp".into(),
             worktree_dir: String::new(),
             created_at: 1,
@@ -626,10 +702,10 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         store.insert_session(&session("s1", "pc", "codex")).unwrap();
         store.insert_session(&session("s2", "pc", "codex")).unwrap();
-        store.insert_workflow("w1", "wf", SessionState::Idle, "plan", 1);
+        store.insert_workflow("w1", "wf", SessionState::Idle, "plan", None, 1);
         store.link_session("w1", "s2");
 
-        let (page, has_more) = store.sessions_page(10, 0);
+        let (page, has_more) = store.sessions_page(10, 0, None);
         assert_eq!(
             page.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             ["s1"]
@@ -647,7 +723,7 @@ mod tests {
             s.updated_at = updated_at;
             store.insert_session(&s).unwrap();
         }
-        store.insert_workflow("w1", "wf", SessionState::Idle, "plan", 1);
+        store.insert_workflow("w1", "wf", SessionState::Idle, "plan", None, 1);
         // 按任意顺序关联，返回时应按各自最近活跃倒序
         store.link_session("w1", "s3");
         store.link_session("w1", "s1");

@@ -1,7 +1,9 @@
 //! 左侧面板（会话列表）、中间面板右缘的悬浮按钮栏、右侧面板（工作目录 / 文件改动 /
 //! 会话详情 / 会话活动 / 会话计划 / 终端）。
 
-use amux_common::api::{Session, Terminal, TerminalState, Workflow};
+use amux_common::api::{Project, Session, Terminal, TerminalState, Workflow};
+use std::cmp::Reverse;
+
 use amux_common::domain::{Activity, GitDiffFile, GitDiffLineKind, SessionState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -65,13 +67,45 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         .track_scroll(&this.list_scroll)
         .overflow_y_scroll()
         .gap_1();
+
+    // 按项目分组展示，未归属项目在列表末端（docs/PRD.md「会话列表视图」）。
+    let mut groups: Vec<(Option<String>, Vec<ListEntry>)> = core
+        .settings
+        .projects
+        .iter()
+        .map(|project| (Some(project.name.clone()), Vec::new()))
+        .collect();
+    groups.push((None, Vec::new()));
     for entry in core.entries.clone() {
-        match &entry {
-            ListEntry::Session(session) => {
-                list = list.child(session_row(session, false, core, this, cx));
-            }
-            ListEntry::Workflow(workflow) => {
-                list = list.child(workflow_row(workflow, core, this, cx));
+        let project = entry.project().map(str::to_string);
+        if let Some((_, entries)) = groups
+            .iter_mut()
+            .find(|(group, _)| group.as_deref() == project.as_deref())
+        {
+            entries.push(entry);
+        }
+    }
+    for (_, entries) in groups.iter_mut() {
+        entries.sort_by_key(|entry| Reverse(entry.created_at()));
+    }
+
+    for (name, entries) in groups {
+        list = list.child(
+            h_flex().px_1().py_0p5().gap_1().items_center().child(
+                Label::new(name.unwrap_or_else(|| "未归属".to_string()))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground),
+            ),
+        );
+        for entry in entries {
+            match &entry {
+                ListEntry::Session(session) => {
+                    list = list.child(session_row(session, false, core, this, cx));
+                }
+                ListEntry::Workflow(workflow) => {
+                    list = list.child(workflow_row(workflow, core, this, cx));
+                }
             }
         }
     }
@@ -174,7 +208,7 @@ fn session_row(
         )
         .child(busy_indicator(session.state, theme.primary));
 
-    list_row(row, &id, selected, Some(entry), cx).into_any_element()
+    list_row(row, &id, selected, Some(entry), &core.settings.projects, cx).into_any_element()
 }
 
 /// 工作流会话行：标题 + 右侧展开开关和工作中转圈 + 关联普通会话。
@@ -251,7 +285,14 @@ fn workflow_row(
     v_flex()
         .gap_1()
         .p_1()
-        .child(list_row(header, &id, selected, Some(entry), cx))
+        .child(list_row(
+            header,
+            &id,
+            selected,
+            Some(entry),
+            &core.settings.projects,
+            cx,
+        ))
         .child(children)
         .into_any_element()
 }
@@ -292,6 +333,7 @@ fn list_row(
     id: &str,
     selected: bool,
     entry: Option<ListEntry>,
+    projects: &[Project],
     cx: &mut Context<AmuxApp>,
 ) -> impl IntoElement {
     let theme = ui::Colors::of(cx.theme());
@@ -303,6 +345,10 @@ fn list_row(
     let toggle_workflow = matches!(entry, Some(ListEntry::Workflow(_)));
     let entry = entry.clone();
     let app = cx.entity();
+    let project_names: Vec<String> = projects
+        .iter()
+        .map(|project| project.name.clone())
+        .collect();
     div()
         .id(SharedString::from(row_id))
         .relative()
@@ -325,17 +371,41 @@ fn list_row(
             let rename_app = app.clone();
             let delete_entry = entry.clone();
             let delete_app = app.clone();
-            menu.item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
-                let rename_id = rename_id.clone();
-                rename_app.update(cx, |this, cx| this.begin_rename(&rename_id, window, cx));
-            }))
-            .item(
-                PopupMenuItem::new("删除会话").on_click(move |_, window, cx| {
-                    delete_app.update(cx, |this, cx| {
-                        this.confirm_delete(delete_entry.clone(), window, cx)
-                    });
+            let mut menu = menu
+                .item(PopupMenuItem::new("重命名").on_click(move |_, window, cx| {
+                    let rename_id = rename_id.clone();
+                    rename_app.update(cx, |this, cx| this.begin_rename(&rename_id, window, cx));
+                }))
+                .item(
+                    PopupMenuItem::new("删除会话").on_click(move |_, window, cx| {
+                        delete_app.update(cx, |this, cx| {
+                            this.confirm_delete(delete_entry.clone(), window, cx)
+                        });
+                    }),
+                );
+            let set_app = app.clone();
+            let set_entry = entry.clone();
+            menu = menu.item(
+                PopupMenuItem::new("移动到未归属").on_click(move |_, _window, cx| {
+                    let entry = set_entry.clone();
+                    let app = set_app.clone();
+                    app.update(cx, |this, cx| this.set_entry_project(entry, None, cx));
                 }),
-            )
+            );
+            for name in &project_names {
+                let name = name.clone();
+                let app = app.clone();
+                let entry = entry.clone();
+                menu = menu.item(PopupMenuItem::new(format!("移动到「{name}」")).on_click(
+                    move |_, _window, cx| {
+                        let app = app.clone();
+                        let entry = entry.clone();
+                        let name = name.clone();
+                        app.update(cx, |this, cx| this.set_entry_project(entry, Some(name), cx));
+                    },
+                ));
+            }
+            menu
         })
         .child(row)
 }

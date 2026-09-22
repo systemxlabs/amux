@@ -151,6 +151,7 @@ fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
         .gap_3()
         .child(row)
         .child(workspace_picker(core, this, cx))
+        .child(field("项目", project_selector(core, cx), cx))
         .child(
             Checkbox::new("ns-worktree-toggle")
                 .label("使用 worktree")
@@ -243,6 +244,36 @@ fn plan_selector(core: &Core, cx: &mut Context<AmuxApp>) -> Option<AnyElement> {
         );
     }
     Some(row.into_any_element())
+}
+
+/// 项目选择：选项按钮组，点击已选项可回到未归属（docs/PRD.md「新建会话视图」）。
+fn project_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let selected = core.new_session.project.clone();
+    let mut row = h_flex().flex_wrap().gap_1();
+    row = row.child(
+        Button::new("ns-project-none")
+            .small()
+            .label("未归属")
+            .selected(selected.is_none())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.with_core(|core| core.new_session.project = None);
+                cx.notify();
+            })),
+    );
+    for project in core.settings.projects.clone() {
+        let name = project.name.clone();
+        row = row.child(
+            Button::new(format!("ns-project-{name}"))
+                .small()
+                .label(ui::truncate(&name, 24))
+                .selected(selected.as_deref() == Some(name.as_str()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.with_core(|core| core.new_session.project = Some(name.clone()));
+                    cx.notify();
+                })),
+        );
+    }
+    row.into_any_element()
 }
 
 /// 表单字段：灰标签 + 控件。

@@ -115,6 +115,7 @@ export type Session = {
   agent: string;
   title: string;
   state: SessionState;
+  project?: string;
   workspace: string;
   worktreeDir: string;
   createdAt: number;
@@ -127,11 +128,13 @@ export type CreateSessionRequest = {
   agent: string;
   workspace: string;
   useWorktree: boolean;
+  project?: string;
 };
 export type PromptRequest = { input: ContentBlock[] };
 export type ConfigureSessionRequest = {
   title?: string;
   config?: SessionConfigSetting;
+  project?: string;
 };
 
 export type HistoryPage = {
@@ -165,19 +168,21 @@ export type Workflow = {
   title: string;
   state: SessionState;
   plan: string;
+  project?: string;
   createdAt: number;
   updatedAt: number;
   linkedSessions: Session[];
 };
 export type WorkflowList = { workflows: Workflow[]; hasMore: boolean };
-export type CreateWorkflowRequest = { plan: string; title?: string };
-export type ConfigureWorkflowRequest = { title?: string };
+export type CreateWorkflowRequest = { plan: string; title?: string; project?: string };
+export type ConfigureWorkflowRequest = { title?: string; project?: string };
 
 /** 管理类操作的通用应答。 */
 export type OpAck = { ok: boolean };
 
 export type Skill = { name: string; description: string };
 export type WorkflowPlanItem = { name: string; plan: string };
+export type Project = { name: string; description: string };
 export type RecentWorkspace = { machine: string; workspace: string; lastUsed: number };
 export type QuickCommand = { name: string; prompt: string };
 export type ApiFormat = "chat_completions" | "responses" | "messages";
@@ -218,6 +223,14 @@ export function entryState(entry: ListEntry): SessionState {
 
 export function entryTitle(entry: ListEntry): string {
   return entry.kind === "session" ? entry.session.title : entry.workflow.title;
+}
+
+export function entryCreatedAt(entry: ListEntry): number {
+  return entry.kind === "session" ? entry.session.createdAt : entry.workflow.createdAt;
+}
+
+export function entryProject(entry: ListEntry): string | undefined {
+  return entry.kind === "session" ? entry.session.project : entry.workflow.project;
 }
 
 /** 会话列表条目关联的普通会话（仅工作流会话有）。 */

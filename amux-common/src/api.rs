@@ -22,6 +22,7 @@ pub mod path {
     pub const CONFIG_RECENT_WORKSPACES: &str = "/config/recent_workspaces/";
     pub const CONFIG_QUICK_COMMANDS: &str = "/config/quick_commands/";
     pub const CONFIG_AGENT: &str = "/config/agent/";
+    pub const CONFIG_PROJECTS: &str = "/config/projects/";
 }
 
 /// 一台已连接的机器（`machine.info` 透传）。
@@ -57,6 +58,9 @@ pub struct Session {
     /// 会话标题：默认取首条指令截断，用户可修改
     pub title: String,
     pub state: SessionState,
+    /// 所属项目；None = 未归属项目
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     /// 用户指定的工作目录
     pub workspace: String,
     /// worktree 目录；空串 = 未启用 worktree
@@ -94,6 +98,9 @@ pub struct CreateSessionRequest {
     pub workspace: String,
     #[serde(default)]
     pub use_worktree: bool,
+    /// 所属项目；None = 未归属项目
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// `POST /sessions/<id>` 请求：发送指令。
@@ -120,6 +127,9 @@ pub struct ConfigureSessionRequest {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<SessionConfigSetting>,
+    /// 所属项目；None 不修改
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// `GET /sessions/<id>/history` 响应。
@@ -248,6 +258,9 @@ pub struct Workflow {
     pub title: String,
     pub state: SessionState,
     pub plan: String,
+    /// 所属项目；None = 未归属项目
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     /// 关联普通会话
@@ -270,6 +283,9 @@ pub struct CreateWorkflowRequest {
     /// 缺省取计划截断
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// 所属项目；None = 未归属项目
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// `POST /workflows/<id>/configure` 请求。
@@ -278,6 +294,9 @@ pub struct CreateWorkflowRequest {
 pub struct ConfigureWorkflowRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// 所属项目；None 不修改
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// 技能配置项。
@@ -294,6 +313,28 @@ pub struct Skill {
 pub struct WorkflowPlanItem {
     pub name: String,
     pub plan: String,
+}
+
+/// 项目配置项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub name: String,
+    pub description: String,
+}
+
+/// 项目排序请求（`POST /config/projects/order`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectOrderRequest {
+    pub names: Vec<String>,
+}
+
+/// 项目更新请求（`PUT /config/projects/<name>`）：项目名称不可修改。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProjectRequest {
+    pub description: String,
 }
 
 /// 最近工作目录配置项。
@@ -396,6 +437,7 @@ mod tests {
             agent: "codex".into(),
             title: "标题".into(),
             state: SessionState::Idle,
+            project: None,
             workspace: "/w".into(),
             worktree_dir: String::new(),
             created_at: 1,

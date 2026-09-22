@@ -51,6 +51,21 @@ impl ListEntry {
         }
     }
 
+    pub fn created_at(&self) -> u64 {
+        match self {
+            ListEntry::Session(session) => session.created_at,
+            ListEntry::Workflow(workflow) => workflow.created_at,
+        }
+    }
+
+    /// 所属项目；None = 未归属项目。
+    pub fn project(&self) -> Option<&str> {
+        match self {
+            ListEntry::Session(session) => session.project.as_deref(),
+            ListEntry::Workflow(workflow) => workflow.project.as_deref(),
+        }
+    }
+
     pub fn title(&self) -> String {
         match self {
             ListEntry::Session(session) => session.title.clone(),
@@ -261,6 +276,7 @@ pub struct NewSessionForm {
     pub workflow_mode: bool,
     pub machine: Option<String>,
     pub agent: Option<String>,
+    pub project: Option<String>,
     pub use_worktree: bool,
     /// 工作目录输入框的前缀匹配目录项
     pub suggestions: Vec<FsEntry>,
@@ -387,16 +403,18 @@ pub enum SettingsTab {
     QuickCommands,
     Skills,
     WorkflowPlans,
+    Projects,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 6] = [
+    pub const ALL: [SettingsTab; 7] = [
         SettingsTab::Connection,
         SettingsTab::Machines,
         SettingsTab::Orchestrator,
         SettingsTab::QuickCommands,
         SettingsTab::Skills,
         SettingsTab::WorkflowPlans,
+        SettingsTab::Projects,
     ];
 
     pub fn label(self) -> &'static str {
@@ -407,6 +425,7 @@ impl SettingsTab {
             SettingsTab::QuickCommands => "快捷指令",
             SettingsTab::Skills => "技能管理",
             SettingsTab::WorkflowPlans => "工作流计划",
+            SettingsTab::Projects => "项目管理",
         }
     }
 
@@ -420,6 +439,7 @@ impl SettingsTab {
             SettingsTab::QuickCommands => IconName::Play,
             SettingsTab::Skills => IconName::BookOpen,
             SettingsTab::WorkflowPlans => IconName::File,
+            SettingsTab::Projects => IconName::Folder,
         }
     }
 }
@@ -432,6 +452,7 @@ pub struct SettingsData {
     pub skills: Vec<Skill>,
     pub plans: Vec<WorkflowPlanItem>,
     pub quick_commands: Vec<QuickCommand>,
+    pub projects: Vec<Project>,
     pub orchestrator: Option<OrchestratorConfig>,
     /// 内置智能体配置是否已拉取过：区分「未配置」与「尚未拉取」
     pub orchestrator_loaded: bool,

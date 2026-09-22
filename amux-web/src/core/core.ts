@@ -14,6 +14,7 @@ import type {
   Machine,
   OpenTarget,
   OrchestratorConfig,
+  Project,
   QuickCommand,
   Session,
   SessionConfigOption,
@@ -54,6 +55,8 @@ export type NewSessionState = {
   machine: string;
   /** 选中的 agent 名；空串 = 未选 */
   agent: string;
+  /** 选中的项目；undefined/空串 = 未归属 */
+  project?: string;
   workspace: string;
   useWorktree: boolean;
   /** 工作流模式：计划内容（手输或选择已保存计划） */
@@ -81,7 +84,8 @@ export type SettingsTab =
   | "orchestrator"
   | "quickCommands"
   | "skills"
-  | "plans";
+  | "plans"
+  | "projects";
 
 /**
  * 内置智能体配置的读取状态：只有 `ready` 才表示配置已确认
@@ -102,6 +106,7 @@ export type SettingsState = {
   quickCommands: QuickCommand[];
   skills: Skill[];
   plans: WorkflowPlanItem[];
+  projects: Project[];
 };
 
 /** 终端输出增量（供 xterm.js 写入）。 */
@@ -174,6 +179,7 @@ export function initialNewSession(): NewSessionState {
     mode: "normal",
     machine: "",
     agent: "",
+    project: undefined,
     workspace: "",
     useWorktree: false,
     plan: "",
@@ -194,6 +200,7 @@ export function initialSettings(): SettingsState {
     quickCommands: [],
     skills: [],
     plans: [],
+    projects: [],
   };
 }
 

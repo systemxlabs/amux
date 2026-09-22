@@ -1,11 +1,11 @@
-//! 配置存储：`<amux_home>/config/*.json`（技能、工作流计划、最近工作目录、快捷指令、内置智能体）。
+//! 配置存储：`<amux_home>/config/*.json`（技能、工作流计划、最近工作目录、项目、快捷指令、内置智能体）。
 //!
 //! 读写为低频操作，不做并发与原子写入处理（docs/DESIGN.md 各「存储」一节）。
 
 use std::path::PathBuf;
 
 use amux_common::api::{
-    OrchestratorConfig, QuickCommand, RecentWorkspace, Skill, WorkflowPlanItem,
+    OrchestratorConfig, Project, QuickCommand, RecentWorkspace, Skill, WorkflowPlanItem,
 };
 use parking_lot::Mutex;
 
@@ -62,6 +62,61 @@ impl ConfigStore {
 
     pub fn set_orchestrator(&self, config: &OrchestratorConfig) -> Result<(), String> {
         write_json(&self.path("agent"), config)
+    }
+    pub fn projects(&self) -> Vec<Project> {
+        read_json::<Vec<Project>>(&self.path("projects")).unwrap_or_default()
+    }
+
+    /// 新建项目；name 必须唯一（docs/DESIGN.md「项目存储」）。
+    pub fn add_project(&self, project: &Project) -> Result<(), String> {
+        let mut projects = self.projects();
+        if projects.iter().any(|item| item.name == project.name) {
+            return Err(format!("项目 name 重复: {}", project.name));
+        }
+        projects.push(project.clone());
+        write_json(&self.path("projects"), &projects)
+    }
+
+    /// 更新指定项目描述；项目名称不支持修改（docs/PRD.md「项目管理」）。
+    pub fn update_project(&self, name: &str, description: &str) -> Result<(), String> {
+        let mut projects = self.projects();
+        let Some(item) = projects.iter_mut().find(|item| item.name == name) else {
+            return Err(format!("项目不存在: {name}"));
+        };
+        item.description = description.to_string();
+        write_json(&self.path("projects"), &projects)
+    }
+
+    /// 删除指定项目。
+    pub fn delete_project(&self, name: &str) -> Result<(), String> {
+        let mut projects = self.projects();
+        let before = projects.len();
+        projects.retain(|item| item.name != name);
+        if projects.len() == before {
+            return Err(format!("项目不存在: {name}"));
+        }
+        write_json(&self.path("projects"), &projects)
+    }
+
+    /// 更新项目顺序（docs/DESIGN.md「Client-Server 通信」`POST /config/projects/order`）。
+    pub fn set_project_order(&self, names: &[String]) -> Result<(), String> {
+        let mut projects = self.projects();
+        let by_name: std::collections::HashMap<&str, Project> = projects
+            .iter()
+            .map(|item| (item.name.as_str(), item.clone()))
+            .collect();
+        if names.len() != by_name.len() {
+            return Err("项目顺序与现有项目数量不一致".into());
+        }
+        let mut next = Vec::with_capacity(names.len());
+        for name in names {
+            match by_name.get(name.as_str()) {
+                Some(project) => next.push(project.clone()),
+                None => return Err(format!("项目不存在: {name}")),
+            }
+        }
+        projects = next;
+        write_json(&self.path("projects"), &projects)
     }
 
     pub fn recent_workspaces(&self) -> Vec<RecentWorkspace> {

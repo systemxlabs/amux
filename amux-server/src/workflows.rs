@@ -74,11 +74,16 @@ impl WorkflowService {
         }
     }
 
-    pub async fn create(&self, plan: &str, title: Option<String>) -> Result<Workflow, String> {
+    pub async fn create(
+        &self,
+        plan: &str,
+        title: Option<String>,
+        project: Option<&str>,
+    ) -> Result<Workflow, String> {
         let id = Uuid::new_v4().to_string();
         let title = title.unwrap_or_else(|| generate_title(plan));
         self.store
-            .insert_workflow(&id, &title, SessionState::Idle, plan, now_ms());
+            .insert_workflow(&id, &title, SessionState::Idle, plan, project, now_ms());
         self.get(&id)
     }
 
@@ -89,14 +94,20 @@ impl WorkflowService {
             title: row.title,
             state: row.state,
             plan: row.plan,
+            project: row.project,
             created_at: row.created_at,
             updated_at: row.updated_at,
             linked_sessions: self.linked_sessions(id),
         })
     }
 
-    pub fn list(&self, limit: usize, offset: usize) -> (Vec<Workflow>, bool) {
-        let (rows, has_more) = self.store.workflows_page(limit, offset);
+    pub fn list(
+        &self,
+        limit: usize,
+        offset: usize,
+        project: Option<&str>,
+    ) -> (Vec<Workflow>, bool) {
+        let (rows, has_more) = self.store.workflows_page(limit, offset, project);
         (
             rows.into_iter()
                 .map(|row| Workflow {
@@ -105,6 +116,7 @@ impl WorkflowService {
                     title: row.title,
                     state: row.state,
                     plan: row.plan,
+                    project: row.project,
                     created_at: row.created_at,
                     updated_at: row.updated_at,
                 })
@@ -132,9 +144,22 @@ impl WorkflowService {
         Ok(())
     }
 
-    pub fn configure(&self, id: &str, title: Option<String>) -> Result<(), String> {
+    /// 项目删除后，其下所有工作流会话回到未归属（docs/PRD.md「项目管理」）。
+    pub fn unassign_project(&self, project: &str) {
+        self.store.unassign_project(project);
+    }
+
+    pub fn configure(
+        &self,
+        id: &str,
+        title: Option<String>,
+        project: Option<String>,
+    ) -> Result<(), String> {
         if let Some(title) = title {
             self.store.set_workflow_title(id, &title);
+        }
+        if let Some(project) = project {
+            self.store.set_workflow_project(id, Some(&project));
         }
         Ok(())
     }
@@ -680,7 +705,7 @@ impl WorkflowTools {
                     .unwrap_or(false);
                 let session = services
                     .sessions
-                    .create(&machine, &agent, &cwd, worktree)
+                    .create(&machine, &agent, &cwd, worktree, None)
                     .await?;
                 services.link_session(&self.workflow_id, &session.id);
                 Ok(format!(
@@ -720,7 +745,7 @@ impl WorkflowTools {
                     .and_then(|value| serde_json::from_value::<SessionConfigSetting>(value).ok());
                 services
                     .sessions
-                    .configure(&session_id, title, config)
+                    .configure(&session_id, title, config, None)
                     .await?;
                 Ok(format!("已更新 {session_id} 配置"))
             }
@@ -1152,7 +1177,7 @@ mod tests {
     async fn transcript_serves_history_and_activities() {
         let dir = tempfile::tempdir().unwrap();
         let service = test_service(dir.path());
-        let workflow = service.create("计划", None).await.unwrap();
+        let workflow = service.create("计划", None, None).await.unwrap();
         service.runs.lock().entry(workflow.id.clone()).or_default();
         let tools = WorkflowTools {
             service: Arc::clone(&service),
@@ -1240,7 +1265,7 @@ mod tests {
     async fn restore_history_fills_expired_results_and_thinking() {
         let dir = tempfile::tempdir().unwrap();
         let service = test_service(dir.path());
-        let workflow = service.create("计划", None).await.unwrap();
+        let workflow = service.create("计划", None, None).await.unwrap();
         for line in [
             TranscriptLine::User {
                 content: vec![ContentBlock::Text {
@@ -1301,7 +1326,7 @@ mod tests {
         let home = dir.path();
         let workflow = {
             let service = test_service(home);
-            let workflow = service.create("计划", None).await.unwrap();
+            let workflow = service.create("计划", None, None).await.unwrap();
             for line in [
                 TranscriptLine::User {
                     content: vec![ContentBlock::Text {

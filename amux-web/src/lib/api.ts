@@ -20,6 +20,7 @@ import type {
   OpAck,
   OrchestratorConfig,
   Plan,
+  Project,
   PromptRequest,
   QuickCommand,
   RecentWorkspace,
@@ -124,8 +125,10 @@ export class ApiClient {
     return this.postJson("/sessions", request);
   }
 
-  sessions(limit: number, offset: number): Promise<SessionList> {
-    return this.getJson(`/sessions?${query({ limit, offset })}`);
+  sessions(limit: number, offset: number, project?: string): Promise<SessionList> {
+    const params = { limit, offset };
+    if (project !== undefined) Object.assign(params, { project });
+    return this.getJson(`/sessions?${query(params)}`);
   }
 
   session(id: string): Promise<Session> {
@@ -148,10 +151,12 @@ export class ApiClient {
     id: string,
     title: string | null,
     config: SessionConfigSetting | null,
+    project?: string,
   ): Promise<void> {
     const body: ConfigureSessionRequest = {};
     if (title !== null) body.title = title;
     if (config !== null) body.config = config;
+    if (project !== undefined) body.project = project;
     return this.postEmpty(`/sessions/${encodeURIComponent(id)}/configure`, body);
   }
 
@@ -262,13 +267,16 @@ export class ApiClient {
 
   // ---------- 工作流会话 ----------
 
-  createWorkflow(plan: string, title: string | null): Promise<Workflow> {
+  createWorkflow(plan: string, title: string | null, project?: string): Promise<Workflow> {
     const body: CreateWorkflowRequest = title === null ? { plan } : { plan, title };
+    if (project !== undefined) body.project = project;
     return this.postJson("/workflows", body);
   }
 
-  workflows(limit: number, offset: number): Promise<WorkflowList> {
-    return this.getJson(`/workflows?${query({ limit, offset })}`);
+  workflows(limit: number, offset: number, project?: string): Promise<WorkflowList> {
+    const params = { limit, offset };
+    if (project !== undefined) Object.assign(params, { project });
+    return this.getJson(`/workflows?${query(params)}`);
   }
 
   workflow(id: string): Promise<Workflow> {
@@ -283,8 +291,10 @@ export class ApiClient {
     return this.delete(`/workflows/${encodeURIComponent(id)}`);
   }
 
-  configureWorkflow(id: string, title: string): Promise<void> {
-    const body: ConfigureWorkflowRequest = { title };
+  configureWorkflow(id: string, title: string | null, project?: string): Promise<void> {
+    const body: ConfigureWorkflowRequest = {};
+    if (title !== null) body.title = title;
+    if (project !== undefined) body.project = project;
     return this.postEmpty(`/workflows/${encodeURIComponent(id)}/configure`, body);
   }
 
@@ -308,6 +318,26 @@ export class ApiClient {
   }
 
   // ---------- 配置 ----------
+
+  projects(): Promise<Project[]> {
+    return this.getJson("/config/projects/");
+  }
+
+  createProject(project: Project): Promise<void> {
+    return this.postEmpty("/config/projects/", project);
+  }
+
+  updateProject(name: string, description: string): Promise<void> {
+    return this.putEmpty(`/config/projects/${encodeURIComponent(name)}`, { description });
+  }
+
+  deleteProject(name: string): Promise<void> {
+    return this.delete(`/config/projects/${encodeURIComponent(name)}`);
+  }
+
+  setProjectOrder(names: string[]): Promise<void> {
+    return this.postEmpty("/config/projects/order", { names });
+  }
 
   skills(): Promise<Skill[]> {
     return this.getJson("/config/skills/");

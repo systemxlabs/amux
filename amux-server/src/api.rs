@@ -12,7 +12,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 
@@ -26,6 +26,9 @@ pub struct Page {
     pub limit: Option<usize>,
     #[serde(default)]
     pub offset: Option<usize>,
+    /// 按所属项目过滤（`GET /sessions`、`GET /workflows`）。
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 impl Page {
@@ -117,6 +120,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/config/recent_workspaces/",
             get(get_recent_workspaces).put(put_recent_workspaces),
+        )
+        .route("/config/projects/", get(get_projects).post(create_project))
+        .route("/config/projects/order", post(set_project_order))
+        .route(
+            "/config/projects/{name}",
+            put(update_project).delete(delete_project),
         )
         .route(
             "/config/quick_commands/",
@@ -258,6 +267,7 @@ async fn create_session(
             &request.agent,
             &request.workspace,
             request.use_worktree,
+            request.project.as_deref(),
         )
         .await
         .map(Json)
@@ -268,9 +278,11 @@ async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(page): Query<Page>,
 ) -> Json<SessionList> {
-    let (sessions, has_more) = state
-        .sessions
-        .list(page.limit(SESSION_LIST_DEFAULT_LIMIT), page.offset());
+    let (sessions, has_more) = state.sessions.list(
+        page.limit(SESSION_LIST_DEFAULT_LIMIT),
+        page.offset(),
+        page.project.as_deref(),
+    );
     Json(SessionList { sessions, has_more })
 }
 
@@ -325,7 +337,7 @@ async fn configure_session(
 ) -> ApiResult<OpAck> {
     state
         .sessions
-        .configure(&id, request.title, request.config)
+        .configure(&id, request.title, request.config, request.project)
         .await
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
@@ -524,7 +536,7 @@ async fn create_workflow(
 ) -> ApiResult<Workflow> {
     state
         .workflows
-        .create(&request.plan, request.title)
+        .create(&request.plan, request.title, request.project.as_deref())
         .await
         .map(Json)
         .map_err(bad_request)
@@ -534,9 +546,11 @@ async fn list_workflows(
     State(state): State<Arc<AppState>>,
     Query(page): Query<Page>,
 ) -> Json<WorkflowList> {
-    let (workflows, has_more) = state
-        .workflows
-        .list(page.limit(SESSION_LIST_DEFAULT_LIMIT), page.offset());
+    let (workflows, has_more) = state.workflows.list(
+        page.limit(SESSION_LIST_DEFAULT_LIMIT),
+        page.offset(),
+        page.project.as_deref(),
+    );
     Json(WorkflowList {
         workflows,
         has_more,
@@ -582,7 +596,7 @@ async fn configure_workflow(
 ) -> ApiResult<OpAck> {
     state
         .workflows
-        .configure(&id, request.title)
+        .configure(&id, request.title, request.project)
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
 }
@@ -674,6 +688,57 @@ async fn put_recent_workspaces(
         .set_recent_workspaces(&workspaces)
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
+}
+
+// ---------- 项目管理 ----------
+
+async fn get_projects(State(state): State<Arc<AppState>>) -> Json<Vec<Project>> {
+    Json(state.config.projects())
+}
+
+async fn create_project(
+    State(state): State<Arc<AppState>>,
+    Json(project): Json<Project>,
+) -> ApiResult<OpAck> {
+    state
+        .config
+        .add_project(&project)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn set_project_order(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ProjectOrderRequest>,
+) -> ApiResult<OpAck> {
+    state
+        .config
+        .set_project_order(&request.names)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn update_project(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(request): Json<UpdateProjectRequest>,
+) -> ApiResult<OpAck> {
+    state
+        .config
+        .update_project(&name, &request.description)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn delete_project(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<OpAck> {
+    state.config.delete_project(&name).map_err(bad_request)?;
+    // 项目删除后，其下会话回到未归属（docs/PRD.md「项目管理」）
+    state.sessions.unassign_project(&name);
+    state.workflows.unassign_project(&name);
+    Ok(Json(OpAck { ok: true }))
 }
 
 async fn get_quick_commands(State(state): State<Arc<AppState>>) -> Json<Vec<QuickCommand>> {

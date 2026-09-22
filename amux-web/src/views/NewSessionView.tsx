@@ -307,6 +307,37 @@ export function NewSessionView() {
         </div>
       </div>
 
+      <div className="flex flex-col gap-2">
+        <Label>项目</Label>
+        <div data-slot="project-group" className="flex flex-wrap gap-1">
+          <OptionButton
+            slot="machine-option"
+            selected={state.newSession.project === undefined}
+            onClick={() =>
+              core.update((draft) => {
+                draft.newSession.project = undefined;
+              })
+            }
+          >
+            未归属
+          </OptionButton>
+          {state.settings.projects.map((project) => (
+            <OptionButton
+              key={project.name}
+              slot="machine-option"
+              selected={state.newSession.project === project.name}
+              onClick={() =>
+                core.update((draft) => {
+                  draft.newSession.project = project.name;
+                })
+              }
+            >
+              {project.name}
+            </OptionButton>
+          ))}
+        </div>
+      </div>
+
       <div className="flex items-center justify-between">
         <Label>使用 worktree</Label>
         <Switch

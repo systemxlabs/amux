@@ -100,9 +100,14 @@ impl SessionService {
             .ok_or_else(|| "会话不存在".to_string())
     }
 
-    /// 会话列表分页：最近活跃的非关联普通会话（`GET /sessions`）。
-    pub fn list(&self, limit: usize, offset: usize) -> (Vec<Session>, bool) {
-        self.store.sessions_page(limit, offset)
+    /// 会话列表分页：非关联普通会话（`GET /sessions`）；`project` 指定时只返回该项目会话。
+    pub fn list(&self, limit: usize, offset: usize, project: Option<&str>) -> (Vec<Session>, bool) {
+        self.store.sessions_page(limit, offset, project)
+    }
+
+    /// 项目删除后，其下所有会话回到未归属（docs/PRD.md「项目管理」）。
+    pub fn unassign_project(&self, project: &str) {
+        self.store.unassign_project(project);
     }
 
     pub fn agent_session_id(&self, id: &str) -> Option<String> {
@@ -120,6 +125,7 @@ impl SessionService {
         agent: &str,
         workspace: &str,
         use_worktree: bool,
+        project: Option<&str>,
     ) -> Result<Session, String> {
         let worktree_dir = if use_worktree {
             self.machines.worktree_new(machine, workspace).await?
@@ -133,6 +139,7 @@ impl SessionService {
             agent: agent.to_string(),
             title: String::new(),
             state: SessionState::Idle,
+            project: project.map(str::to_string),
             workspace: workspace.to_string(),
             worktree_dir,
             created_at: now,
@@ -205,9 +212,13 @@ impl SessionService {
         id: &str,
         title: Option<String>,
         config: Option<SessionConfigSetting>,
+        project: Option<String>,
     ) -> Result<(), String> {
         if let Some(title) = title {
             self.store.set_title(id, &title);
+        }
+        if let Some(project) = project {
+            self.store.set_session_project(id, Some(&project));
         }
         if let Some(config) = config {
             let session = self.get(id)?;
@@ -740,6 +751,7 @@ mod tests {
             agent: "codex".into(),
             title: String::new(),
             state,
+            project: None,
             workspace: "/tmp".into(),
             worktree_dir: String::new(),
             created_at: 1,

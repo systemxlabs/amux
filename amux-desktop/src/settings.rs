@@ -162,6 +162,7 @@ fn render_content(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
         SettingsTab::QuickCommands => quick_commands_tab(core, cx),
         SettingsTab::Skills => skills_tab(core, cx),
         SettingsTab::WorkflowPlans => plans_tab(core, cx),
+        SettingsTab::Projects => projects_tab(core, cx),
     };
     v_flex()
         .id("settings-content")
@@ -206,6 +207,7 @@ fn tab_action(core: &Core, cx: &mut Context<AmuxApp>) -> Option<AnyElement> {
         SettingsTab::QuickCommands => ("qc-add", "添加快捷指令"),
         SettingsTab::Skills => ("skill-add", "添加技能"),
         SettingsTab::WorkflowPlans => ("plan-add", "添加计划"),
+        SettingsTab::Projects => ("project-add", "添加项目"),
         _ => return None,
     };
     Some(
@@ -228,6 +230,7 @@ fn tab_heading(tab: SettingsTab) -> (&'static str, &'static str) {
         SettingsTab::QuickCommands => ("快捷指令", "自定义快捷指令，在会话输入区上方一键发送"),
         SettingsTab::Skills => ("技能管理", "集中管理各机器各 agent 上的技能"),
         SettingsTab::WorkflowPlans => ("工作流计划", "可复用的工作流计划，发起工作流会话时选用"),
+        SettingsTab::Projects => ("项目管理", "项目用于将普通会话与工作流会话分组聚合展示"),
     }
 }
 
@@ -672,6 +675,91 @@ fn plans_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     list.into_any_element()
 }
 
+/// 项目管理：卡片列表（名称 + 描述 + 编辑/删除 + 上移/下移调整顺序），右上角「+」新增。
+fn projects_tab(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let mut list = v_flex().gap_2();
+    let count = core.settings.projects.len();
+    for (index, project) in core.settings.projects.iter().enumerate() {
+        let name = project.name.clone();
+        list = list.child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .p_2()
+                .bg(theme.muted)
+                .rounded_md()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            Label::new(name.clone())
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground),
+                        )
+                        .child(
+                            Label::new(project.description.clone())
+                                .text_xs()
+                                .line_clamp(2)
+                                .text_color(theme.muted_foreground),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("project-up-{name}")))
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::ChevronUp)
+                        .disabled(index == 0)
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, _, cx| this.move_project(name.clone(), -1, cx)
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("project-down-{name}")))
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::ChevronDown)
+                        .disabled(index + 1 >= count)
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, _, cx| this.move_project(name.clone(), 1, cx)
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("project-edit-{name}")))
+                        .small()
+                        .label("编辑")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| {
+                                this.open_project_form(FormTarget::Edit(name.clone()), window, cx)
+                            }
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("project-del-{name}")))
+                        .small()
+                        .label("删除")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| this.delete_project(name.clone(), window, cx)
+                        })),
+                ),
+        );
+    }
+    if core.settings.projects.is_empty() {
+        list = list.child(
+            Label::new("还没有项目。点击右上角 + 创建一个项目。")
+                .text_sm()
+                .text_color(theme.muted_foreground),
+        );
+    }
+    list.into_any_element()
+}
+
 /// 技能安装/更新/卸载：在指定机器与 agent 上创建临时目录普通会话并发送指令
 /// （docs/DESIGN.md「技能操作」）。
 pub fn manage_skill(
@@ -704,6 +792,7 @@ pub fn manage_skill(
                 agent,
                 workspace,
                 use_worktree: false,
+                project: None,
             })
             .await
         {

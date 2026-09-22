@@ -560,7 +560,12 @@ export async function refreshTerminalList(core: Core): Promise<void> {
 
 /** 新建视图打开时刷新，不依赖当前表单模式。 */
 export async function refreshNewSession(core: Core): Promise<void> {
-  await Promise.all([refreshMachines(core), refreshRecentWorkspaces(core), refreshPlans(core)]);
+  await Promise.all([
+    refreshMachines(core),
+    refreshRecentWorkspaces(core),
+    refreshPlans(core),
+    refreshProjects(core),
+  ]);
 }
 
 /** 进入工作流模式时检查内置智能体是否已配置。 */
@@ -618,6 +623,21 @@ export async function refreshSettings(core: Core, tab: SettingsTab): Promise<voi
       return refreshSkills(core);
     case "plans":
       return refreshPlans(core);
+    case "projects":
+      return refreshProjects(core);
+  }
+}
+
+export async function refreshProjects(core: Core): Promise<void> {
+  const client = core.client;
+  if (!client) return;
+  try {
+    const projects = await client.projects();
+    core.update((state) => {
+      state.settings.projects = projects;
+    });
+  } catch (error) {
+    core.failure(`读取项目失败：${messageOf(error)}`);
   }
 }
 
