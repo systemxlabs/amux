@@ -408,14 +408,14 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                 data-slot="session-project-group-header"
                 aria-expanded={!group.collapsed}
                 onClick={() => toggleGroup(group.key)}
-                className="flex cursor-pointer items-center gap-1 rounded-md px-1 py-1 text-xs font-medium text-muted-foreground hover:bg-accent"
+                className="flex cursor-pointer items-center gap-1 rounded-md px-1 py-1 text-sm font-semibold text-foreground hover:bg-accent"
               >
                 {group.collapsed ? (
-                  <ChevronRight className="size-3.5" />
+                  <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
                 ) : (
-                  <ChevronDown className="size-3.5" />
+                  <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
                 )}
-                <span>{group.name ?? "未归属"}</span>
+                <span className="min-w-0 truncate">{group.name ?? "未归属"}</span>
               </button>
               {!group.collapsed && group.loading && group.rows.length === 0 ? (
                 <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>

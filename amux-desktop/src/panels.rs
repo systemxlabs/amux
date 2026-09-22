@@ -117,9 +117,9 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                                 } else {
                                     group_key.clone()
                                 })
-                                .text_xs()
+                                .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.muted_foreground),
+                                .text_color(foreground),
                             ),
                     ),
             );
