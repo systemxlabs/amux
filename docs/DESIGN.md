@@ -130,7 +130,7 @@ Daemon 常驻于每个机器上，主要负责 ACP 多路复用和执行与机�
 ### Daemon 启动
 
 Daemon 启动和关闭由用户手动执行，启动参数包括
-- `--machine`：机器名称
+- `--machine`：机器名称，不得有路径分隔符
 - `--server`: Server 的 WebSocket 地址
 - `--token`：认证 token
 
