@@ -101,7 +101,8 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | PUT `/config/skills/` | 全量更新所有技能 |
 | GET `/config/workflows/` | 查询所有配置的工作流计划 |
 | PUT `/config/workflows/` | 全量更新所有工作流计划 |
-| GET `/config/recent_workspaces/` | 查询所有配置的常用工作目录 |
+| GET `/config/recent_workspaces/` | 查询所有配置的最近工作目录 |
+| PUT `/config/recent_workspaces/` | 全量更新所有最近工作目录 |
 | GET `/config/quick_commands/` | 查询所有配置的快捷指令 |
 | PUT `/config/quick_commands/` | 全量更新所有快捷指令 |
 | GET `/config/agent/` | 查询内置智能体配置 |
@@ -455,7 +456,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
-### 常用工作目录存储
+### 最近工作目录存储
 
 存储在 `~/.amux/config/recent_workspaces.json` 路径，格式为
 ```json
@@ -494,7 +495,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 ### 新建会话视图
 
-打开新建会话视图时，实时拉取机器、agents、常用工作目录和工作流计划，不定时刷新。
+打开新建会话视图时，实时拉取机器、agents、最近作目录和工作流计划，不定时刷新。
 
 当在工作目录输入框输入时，实时拉取全部目录项（不包括文件）进行前缀匹配
 - 在输入目录边界处，如 `/`、`/home/` 和 `/home/tom/`，触发拉取该目录的全部目录项
