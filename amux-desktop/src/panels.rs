@@ -161,13 +161,14 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         .map(|group| group.entries.as_slice())
         .unwrap_or_default();
     let unassigned_loading = unassigned_state.is_none_or(|group| group.loading);
-    if unassigned_loading || !unassigned_entries.is_empty() {
+    let has_projects = !core.settings.projects.is_empty();
+    if has_projects || unassigned_loading || !unassigned_entries.is_empty() {
         let mut unassigned = v_flex().w_full().gap_1().on_drop(cx.listener(
             |this, drag: &SessionProjectDrag, _, cx| {
                 this.set_entry_project(drag.0.clone(), None, cx);
             },
         ));
-        if !core.settings.projects.is_empty() {
+        if has_projects {
             unassigned = unassigned.child(div().w_full().border_t_1().border_color(sidebar_border));
         }
         if unassigned_loading && unassigned_entries.is_empty() {
@@ -193,6 +194,9 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                     .justify_center()
                     .child(Spinner::new().xsmall().color(theme.muted_foreground)),
             );
+        }
+        if has_projects && !unassigned_loading && unassigned_entries.is_empty() {
+            unassigned = unassigned.child(div().w_full().h_4());
         }
         list = list.child(unassigned);
     }

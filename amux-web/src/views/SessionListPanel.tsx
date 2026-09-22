@@ -356,7 +356,8 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
   const unassignedData = groupData["project:"];
   const unassignedRows = listRows(unassignedData?.entries ?? [], new Set(state.expanded));
   const unassignedLoading = unassignedData?.loading ?? true;
-  const showUnassigned = unassignedLoading || unassignedRows.length > 0;
+  const hasProjects = state.settings.projects.length > 0;
+  const showUnassigned = hasProjects || unassignedLoading || unassignedRows.length > 0;
 
   return (
     <div data-slot="session-list-panel" className="flex h-full min-h-0 flex-col">
@@ -447,9 +448,9 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
                     void setEntryProject(core, entry, undefined);
                   }
                 }}
-                className="flex flex-col gap-0.5"
+                className="flex min-h-6 flex-col gap-0.5"
               >
-                {state.settings.projects.length > 0 ? (
+                {hasProjects ? (
                   <div
                     data-slot="session-project-separator"
                     className="my-1 border-t border-border"
