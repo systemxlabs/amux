@@ -451,7 +451,13 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 存储在 `~/.amux/config/workflows.json` 路径，格式为
 ```json
-[{ "name": "amux开发工作流", "plan": "xxx" }]
+[
+  {
+    "name": "amux开发工作流",
+    "plan": "xxx",
+    "lastUsedProject": "project1"
+  }
+]
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
@@ -467,7 +473,14 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 存储在 `~/.amux/config/recent_workspaces.json` 路径，格式为
 ```json
-[{ "machine": "localpc", "workspace": "/home/linwei/workspace/amux", "lastUsed": 1729000000000 }]
+[
+  {
+    "machine": "localpc",
+    "workspace": "/home/linwei/workspace/amux",
+    "lastUsedProject": "project1",
+    "lastUsed": 1729000000000
+  }
+]
 ```
 注意 (machine, workspace) 组合必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
