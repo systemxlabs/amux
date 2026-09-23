@@ -7,6 +7,7 @@ import {
   buildProjectGroupWindow,
   canExpand,
   listRows,
+  sameListEntries,
   sortEntries,
 } from "./list";
 import { newPaging } from "./paging";
@@ -60,6 +61,17 @@ describe("sortEntries", () => {
       "w",
       "s-old",
     ]);
+  });
+});
+
+describe("sameListEntries", () => {
+  it("内容相同返回 true，条目或字段变化返回 false", () => {
+    const before: ListEntry[] = [{ kind: "session", session: session("s1", 100) }];
+    const same: ListEntry[] = [{ kind: "session", session: session("s1", 100) }];
+    const changed: ListEntry[] = [{ kind: "session", session: session("s1", 200) }];
+
+    expect(sameListEntries(before, same)).toBe(true);
+    expect(sameListEntries(before, changed)).toBe(false);
   });
 });
 

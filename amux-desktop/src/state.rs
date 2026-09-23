@@ -30,7 +30,7 @@ pub enum ConnectionStatus {
 }
 
 /// 会话列表条目：普通会话或工作流会话（含其关联普通会话）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ListEntry {
     Session(Session),
     Workflow(Workflow),
@@ -43,7 +43,10 @@ pub struct ProjectGroupState {
     /// 当前目标窗口条数；未归属组与普通项目组的页大小不同。
     pub loaded: usize,
     pub has_more: bool,
+    /// 请求是否正在进行（用于防重复加载和空态判断）
     pub loading: bool,
+    /// 是否向用户展示加载状态；后台静默刷新期间为 false
+    pub loading_visible: bool,
     /// 防止较慢的旧请求覆盖较新的分页结果。
     pub request: u64,
 }

@@ -139,6 +139,8 @@ export type CoreState = {
   error: string | null;
   notice: Notice | null;
   entries: ListEntry[];
+  /** 会话列表成功刷新的版本号；项目列表据此执行静默刷新 */
+  listRefreshVersion: number;
   listPaging: Paging;
   /** 展开的工作流会话 id */
   expanded: string[];
@@ -211,6 +213,7 @@ export function initialState(): CoreState {
     error: null,
     notice: null,
     entries: [],
+    listRefreshVersion: 0,
     listPaging: newPaging(),
     expanded: [],
     middle: "new",

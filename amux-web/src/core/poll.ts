@@ -15,7 +15,7 @@ import {
   trimNewest,
   trimOldest,
 } from "../lib/paging";
-import { buildListWindow, sortEntries } from "../lib/list";
+import { buildListWindow, sameListEntries, sortEntries } from "../lib/list";
 import { decodeBase64 } from "../lib/terminal";
 import { ApiError } from "../lib/api";
 import type { Core, SettingsTab } from "./core";
@@ -103,8 +103,11 @@ export async function refreshList(core: Core): Promise<void> {
         workflows.workflows,
         sessions.hasMore || workflows.hasMore,
       );
-      state.entries = window.entries;
+      if (!sameListEntries(state.entries, window.entries)) {
+        state.entries = window.entries;
+      }
       state.listPaging = window.paging;
+      state.listRefreshVersion += 1;
     });
   } catch (error) {
     core.failure(`刷新会话列表失败：${messageOf(error)}`);

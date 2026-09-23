@@ -83,7 +83,7 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         let entries = group_state
             .map(|group| group.entries.as_slice())
             .unwrap_or_default();
-        let loading = group_state.is_none_or(|group| group.loading);
+        let loading = group_state.is_none_or(|group| group.loading_visible);
         let has_more = group_state.is_some_and(|group| group.has_more);
         let mut group = v_flex()
             .w_full()
@@ -169,7 +169,7 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
     let unassigned_entries = unassigned_state
         .map(|group| group.entries.as_slice())
         .unwrap_or_default();
-    let unassigned_loading = unassigned_state.is_none_or(|group| group.loading);
+    let unassigned_loading = unassigned_state.is_none_or(|group| group.loading_visible);
     let has_projects = !core.settings.projects.is_empty();
     if has_projects || unassigned_loading || !unassigned_entries.is_empty() {
         let mut unassigned = v_flex().w_full().gap_1().on_drop(cx.listener(

@@ -19,6 +19,17 @@ export function sortEntries(entries: readonly ListEntry[]): ListEntry[] {
   });
 }
 
+/** 列表条目及内容是否完全相同，用于后台刷新时避免无变化的重渲染。 */
+export function sameListEntries(
+  left: readonly ListEntry[],
+  right: readonly ListEntry[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((entry, index) => JSON.stringify(entry) === JSON.stringify(right[index]))
+  );
+}
+
 /**
  * 会话列表刷新窗口：用最新一窗普通会话与工作流会话重建已加载窗口。
  *

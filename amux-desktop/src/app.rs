@@ -2027,7 +2027,7 @@ impl AmuxApp {
         };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            poll::refresh_project_group(&client, &core, key, project, limit).await
+            poll::refresh_project_group(&client, &core, key, project, limit, true).await
         });
         cx.notify();
     }

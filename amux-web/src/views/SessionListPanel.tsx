@@ -35,7 +35,12 @@ import {
   toggleExpand,
 } from "../core/actions";
 import { useCore, useCoreState } from "../core/store";
-import { buildProjectGroupWindow, canExpand, listRows } from "../lib/list";
+import {
+  buildProjectGroupWindow,
+  canExpand,
+  listRows,
+  sameListEntries,
+} from "../lib/list";
 import {
   entryId,
   entryState,
@@ -47,6 +52,8 @@ import { cn } from "../lib/utils";
 /** 普通项目组首页 5 条，未归属会话首页 20 条（docs/PRD.md「会话列表视图」）。 */
 const PROJECT_GROUP_PAGE = 5;
 const UNASSIGNED_GROUP_PAGE = 20;
+
+type LoadGroupOptions = { background?: boolean };
 
 function projectPageSize(project: string | undefined): number {
   return project === undefined ? UNASSIGNED_GROUP_PAGE : PROJECT_GROUP_PAGE;
@@ -88,19 +95,27 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
   };
 
   const loadGroup = useCallback(
-    async (key: string, project: string | undefined, limit: number): Promise<void> => {
+    async (
+      key: string,
+      project: string | undefined,
+      limit: number,
+      options: LoadGroupOptions = {},
+    ): Promise<void> => {
       const client = core.client;
       if (client === null || loadingGroupsRef.current.has(key)) return;
+      const background = options.background === true;
       loadingGroupsRef.current.add(key);
-      setGroupData((current) => ({
-        ...current,
-        [key]: {
-          entries: current[key]?.entries ?? [],
-          loaded: current[key]?.loaded ?? 0,
-          hasMore: current[key]?.hasMore ?? false,
-          loading: true,
-        },
-      }));
+      if (!background) {
+        setGroupData((current) => ({
+          ...current,
+          [key]: {
+            entries: current[key]?.entries ?? [],
+            loaded: current[key]?.loaded ?? 0,
+            hasMore: current[key]?.hasMore ?? false,
+            loading: true,
+          },
+        }));
+      }
       try {
         const [sessions, workflows] = await Promise.all([
           client.sessions(limit, 0, project ?? ""),
@@ -114,26 +129,41 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
           workflows.hasMore,
         );
         loadedCountsRef.current[key] = limit;
-        setGroupData((current) => ({
-          ...current,
-          [key]: {
+        setGroupData((current) => {
+          const previous = current[key];
+          const next = {
             entries: window.entries,
             loaded: limit,
             hasMore: window.hasMore,
             loading: false,
-          },
-        }));
+          };
+          if (
+            previous !== undefined &&
+            previous.loaded === next.loaded &&
+            previous.hasMore === next.hasMore &&
+            !previous.loading &&
+            sameListEntries(previous.entries, next.entries)
+          ) {
+            return current;
+          }
+          return { ...current, [key]: next };
+        });
       } catch (error) {
-        setGroupData((current) => ({
-          ...current,
-          [key]: {
-            entries: current[key]?.entries ?? [],
-            loaded: current[key]?.loaded ?? 0,
-            hasMore: current[key]?.hasMore ?? false,
-            loading: false,
-          },
-        }));
-        core.failure(`加载项目会话失败：${error instanceof Error ? error.message : String(error)}`);
+        setGroupData((current) => {
+          if (background && current[key] !== undefined) return current;
+          return {
+            ...current,
+            [key]: {
+              entries: current[key]?.entries ?? [],
+              loaded: current[key]?.loaded ?? 0,
+              hasMore: current[key]?.hasMore ?? false,
+              loading: false,
+            },
+          };
+        });
+        if (!background) {
+          core.failure(`加载项目会话失败：${error instanceof Error ? error.message : String(error)}`);
+        }
       } finally {
         loadingGroupsRef.current.delete(key);
       }
@@ -337,13 +367,21 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     ];
     for (const group of loadGroups) {
       if (collapsedGroups.has(group.key)) continue;
+      const background = loadedCountsRef.current[group.key] !== undefined;
       void loadGroup(
         group.key,
         group.project,
         loadedCountsRef.current[group.key] ?? projectPageSize(group.project),
+        { background },
       );
     }
-  }, [collapsedGroups, loadGroup, projectsKey, state.entries, state.settings.projects]);
+  }, [
+    collapsedGroups,
+    loadGroup,
+    projectsKey,
+    state.listRefreshVersion,
+    state.settings.projects,
+  ]);
 
   const visibleProjectGroups = projectGroups.map((group) => {
     const collapsed = collapsedGroups.has(group.key);

@@ -8,6 +8,7 @@ import { newPaging } from "../lib/paging";
 import type {
   ContextInfo,
   HistoryPage,
+  ListEntry,
   Session,
   SessionList,
   Workflow,
@@ -94,6 +95,22 @@ describe("refreshList", () => {
       ),
     ).toEqual(["alive"]);
     expect(core.state.listPaging.hasOlder).toBe(true);
+    expect(core.state.listRefreshVersion).toBe(1);
+  });
+
+  it("刷新内容未变化时保留原列表引用", async () => {
+    const original: ListEntry = { kind: "session", session: session("s1", 100) };
+    const core = new Core();
+    core.state.entries = [original];
+    core.client = fakeClient(
+      { sessions: [session("s1", 100)], hasMore: false },
+      { workflows: [], hasMore: false },
+    );
+
+    await refreshList(core);
+
+    expect(core.state.entries[0]).toBe(original);
+    expect(core.state.listRefreshVersion).toBe(1);
   });
 
   it("普通请求失败时保留登录状态并提示错误", async () => {

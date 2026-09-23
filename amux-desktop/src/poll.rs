@@ -98,15 +98,14 @@ async fn refresh_list(client: &Client, core: &SharedCore) {
             .collect()
     };
     join_all(groups.into_iter().map(|(key, project)| {
-        let limit = {
+        let (limit, show_loading) = {
             let core = core.lock();
             let page = project_group_page_size(project.as_deref());
-            core.project_groups
-                .get(&key)
-                .map(|group| group.loaded.max(page))
-                .unwrap_or(page)
+            core.project_groups.get(&key).map_or((page, true), |group| {
+                (group.loaded.max(page), group.loaded == 0)
+            })
         };
-        refresh_project_group(client, core, key, project, limit)
+        refresh_project_group(client, core, key, project, limit, show_loading)
     }))
     .await;
 
@@ -130,12 +129,14 @@ pub async fn refresh_project_group(
     key: String,
     project: Option<String>,
     limit: usize,
+    show_loading: bool,
 ) {
     let request = {
         let mut core = core.lock();
         let group = core.project_groups.entry(key.clone()).or_default();
         group.request += 1;
         group.loading = true;
+        group.loading_visible |= show_loading;
         group.request
     };
     let result = fetch_project_group(client, project.as_deref(), limit.max(1)).await;
@@ -147,15 +148,24 @@ pub async fn refresh_project_group(
         return;
     }
     group.loading = false;
+    group.loading_visible = false;
+    let mut list_changed = false;
     match result {
         Ok((entries, has_more)) => {
-            group.entries = entries;
+            let entries_changed = group.entries != entries;
+            let has_more_changed = group.has_more != has_more;
+            if entries_changed {
+                group.entries = entries;
+            }
             group.loaded = limit.max(1);
             group.has_more = has_more;
+            list_changed = entries_changed || has_more_changed;
         }
         Err(error) => core.error(format!("加载项目会话失败：{error}")),
     }
-    sync_entries(&mut core);
+    if list_changed {
+        sync_entries(&mut core);
+    }
 }
 
 /// 项目组「显示更多」或未归属组滚动分页：扩大一组的目标窗口。
@@ -173,7 +183,7 @@ pub async fn load_more_project_group(
             .map(|group| group.loaded.max(page) + page)
             .unwrap_or(page)
     };
-    refresh_project_group(client, core, key, project, limit).await;
+    refresh_project_group(client, core, key, project, limit, true).await;
 }
 
 pub fn project_group_page_size(project: Option<&str>) -> usize {
