@@ -37,8 +37,8 @@ fn launch_spec(agent: &str) -> Option<LaunchSpec> {
 fn is_installed(agent: &str) -> bool {
     match agent {
         amux_common::api::NANO_AGENT => true,
-        // codex 经 npx 启动：需要 codex CLI 与 npx 同时可用
-        "codex" => in_path("codex") && in_path("npx"),
+        // codex 经 npx 启动：需要 codex CLI、npx 与 bun 同时可用
+        "codex" => in_path("codex") && in_path("npx") && in_path("bun"),
         _ => false,
     }
 }
