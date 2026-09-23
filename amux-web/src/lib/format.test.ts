@@ -2,7 +2,15 @@
 
 import { describe, expect, it } from "vitest";
 
-import { activityBarText, activitySummary, blocksText, formatTime, oneLine, truncate } from "./format";
+import {
+  activityBarText,
+  activityDetail,
+  activitySummary,
+  blocksText,
+  formatTime,
+  oneLine,
+  truncate,
+} from "./format";
 
 describe("formatTime", () => {
   it("按本地时间输出到秒", () => {
@@ -37,7 +45,7 @@ describe("blocksText", () => {
 });
 
 describe("activitySummary", () => {
-  it("工具调用优先展示标题，换行折叠为一行", () => {
+  it("工具调用展示工具名和可选标题，换行折叠为一行", () => {
     expect(
       activitySummary({
         kind: "tool_call",
@@ -47,7 +55,7 @@ describe("activitySummary", () => {
         tool_name: "read_file",
         title: "读取\nsrc/lib.rs",
       }),
-    ).toBe("读取 src/lib.rs");
+    ).toBe("read_file(读取 src/lib.rs)");
   });
 
   it("无标题时退回工具名；思考与错误取各自内容", () => {
@@ -80,13 +88,37 @@ describe("activityBarText", () => {
         tool_name: "read_file",
         title: "读取 src/lib.rs",
       }),
-    ).toBe("工具调用 读取 src/lib.rs");
+    ).toBe("工具调用 read_file(读取 src/lib.rs)");
     expect(activityBarText({ kind: "thinking", id: "a2", timestamp: 1, thinking: "先看看" })).toBe(
       "思考 先看看",
     );
     expect(activityBarText({ kind: "error", id: "a3", timestamp: 1, error: "调用失败" })).toBe(
       "错误 调用失败",
     );
+  });
+});
+
+describe("activityDetail", () => {
+  it("工具调用参数另起一行，无标题和参数时只展示工具名", () => {
+    expect(
+      activityDetail({
+        kind: "tool_call",
+        id: "a1",
+        timestamp: 1,
+        tool_call_id: "tc1",
+        tool_name: "prompt_session",
+        parameters: '{"session":"s1"}',
+      }),
+    ).toBe('prompt_session\n{"session":"s1"}');
+    expect(
+      activityDetail({
+        kind: "tool_call",
+        id: "a2",
+        timestamp: 2,
+        tool_call_id: "tc2",
+        tool_name: "list_agents",
+      }),
+    ).toBe("list_agents");
   });
 });
 

@@ -252,8 +252,9 @@ pub fn activity_kind_detail(activity: &Activity) -> (String, String) {
             let body = parameters.clone().unwrap_or_default();
             let mut detail = tool_name.clone();
             if !title.trim().is_empty() {
-                detail.push('\n');
-                detail.push_str(&title);
+                detail.push('(');
+                detail.push_str(title.trim());
+                detail.push(')');
             }
             if !body.trim().is_empty() {
                 detail.push('\n');
@@ -265,23 +266,10 @@ pub fn activity_kind_detail(activity: &Activity) -> (String, String) {
     }
 }
 
-/// 实时活动条文案（无进行中活动为 `None`）：`<活动类型> <活动内容>`，内容只折叠空白，由布局截断。
+/// 实时活动条文案（无进行中活动为 `None`）：使用与会话活动视图一致的内容格式。
 pub fn activity_bar_text(current: Option<&Activity>) -> Option<String> {
-    match current? {
-        Activity::Thinking { thinking, .. } => Some(format!("思考 {}", one_line(thinking))),
-        Activity::ToolCall {
-            tool_name, title, ..
-        } => {
-            let title = one_line(title.as_deref().unwrap_or(""));
-            let content = if title.is_empty() {
-                tool_name.clone()
-            } else {
-                format!("{tool_name} {title}")
-            };
-            Some(format!("工具调用 {content}"))
-        }
-        Activity::Error { error, .. } => Some(format!("错误 {}", one_line(error))),
-    }
+    let (kind, detail) = activity_kind_detail(current?);
+    Some(format!("{kind} {}", one_line(&detail)))
 }
 
 /// 活动时间戳。

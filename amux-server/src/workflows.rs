@@ -637,7 +637,7 @@ impl Tools for WorkflowTools {
                 timestamp: now_ms(),
                 tool_call_id: call.id.to_string(),
                 tool_name: call.function.name.clone(),
-                title: tool_title(&call.function.name, &call.function.arguments),
+                title: None,
                 parameters: Some(call.function.arguments.to_string()),
             },
         );
@@ -781,27 +781,6 @@ impl WorkflowTools {
             Err(format!("{session_id} 不是本工作流的关联普通会话"))
         }
     }
-}
-
-/// 工具调用的展示标题（活动历史中与工具名并列展示；不入盘，读 transcript 时重建）。
-fn tool_title(name: &str, arguments: &serde_json::Value) -> Option<String> {
-    let session = string_arg(arguments, "session").unwrap_or_else(|_| "会话".to_string());
-    Some(match name {
-        "list_agents" => "列出机器与 agent".to_string(),
-        "list_sessions" => "列出关联普通会话".to_string(),
-        "create_session" => format!(
-            "创建普通会话 {}@{}",
-            string_arg(arguments, "machine").unwrap_or_default(),
-            string_arg(arguments, "agent").unwrap_or_default()
-        ),
-        "prompt_session" => format!("向 {session} 下发指令"),
-        "cancel_session" => format!("取消 {session} 进行中的工作"),
-        "configure_session" => format!("配置 {session}"),
-        "get_session_config_options" => format!("读取 {session} 会话选项"),
-        "read_session_history" => format!("读取 {session} 对话内容"),
-        "read_session_activities" => format!("读取 {session} 活动内容"),
-        _ => return None,
-    })
 }
 
 /// 工具调用的参数（transcript 中以 JSON 字符串存放）转回 JSON 值。
@@ -1042,17 +1021,14 @@ impl TranscriptLine {
                 tool_call_id,
                 tool_name,
                 parameters,
-            } => {
-                let title = tool_title(&tool_name, &parse_arguments(&parameters));
-                Some(Activity::ToolCall {
-                    id,
-                    timestamp,
-                    tool_call_id,
-                    tool_name,
-                    title,
-                    parameters: Some(parameters),
-                })
-            }
+            } => Some(Activity::ToolCall {
+                id,
+                timestamp,
+                tool_call_id,
+                tool_name,
+                title: None,
+                parameters: Some(parameters),
+            }),
             TranscriptLine::Error { timestamp, error } => Some(Activity::Error {
                 id,
                 timestamp,
@@ -1216,7 +1192,7 @@ mod tests {
                 assert_eq!(id, "line-1");
                 assert_eq!(tool_call_id, "call_001");
                 assert_eq!(tool_name, "prompt_session");
-                assert_eq!(title.as_deref(), Some("向 s1 下发指令"));
+                assert_eq!(title, &None);
                 assert_eq!(
                     parameters.as_deref(),
                     Some(r#"{"session":"s1","prompt":"跑测试"}"#)

@@ -45,7 +45,7 @@ export function activitySummary(activity: Activity): string {
     case "thinking":
       return oneLine(activity.thinking);
     case "tool_call":
-      return oneLine(activity.title ?? activity.tool_name);
+      return oneLine(activityContent(activity));
     case "error":
       return oneLine(activity.error);
   }
@@ -61,15 +61,19 @@ export function activityDetail(activity: Activity): string {
   switch (activity.kind) {
     case "thinking":
       return activity.thinking;
-    case "tool_call": {
-      const parts = [`工具：${activity.tool_name}`];
-      if (activity.title) parts.push(activity.title);
-      if (activity.parameters) parts.push(activity.parameters);
-      return parts.join("\n");
-    }
+    case "tool_call":
+      return activityContent(activity);
     case "error":
       return activity.error;
   }
+}
+
+/** 工具调用内容：`tool_name(tool_title)` + 可选参数。 */
+function activityContent(activity: Extract<Activity, { kind: "tool_call" }>): string {
+  let content = activity.tool_name;
+  if (activity.title) content += `(${activity.title})`;
+  if (activity.parameters) content += `\n${activity.parameters}`;
+  return content;
 }
 
 /** 活动类型标签。 */
