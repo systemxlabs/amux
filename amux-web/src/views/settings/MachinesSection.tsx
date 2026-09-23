@@ -73,26 +73,30 @@ export function MachinesSection() {
                         data-slot="agent-row"
                         className="flex items-center justify-between gap-2 rounded-md border border-border px-2 py-1 text-xs"
                       >
-                        <span>{agent.name}</span>
-                        <div className="flex items-center gap-2">
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="min-w-0 truncate">{agent.name}</span>
                           <span className="text-muted-foreground">
                             {agent.available ? "可用" : "不可用"}
                           </span>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            data-slot="agent-restart"
-                            onClick={() =>
-                              setPending({
-                                kind: "restart",
-                                machine: machine.name,
-                                agent: agent.name,
-                              })
-                            }
-                          >
-                            重启
-                          </Button>
+                          <span className="text-muted-foreground">
+                            打开会话 {agent.openedSessions}
+                          </span>
                         </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="shrink-0"
+                          data-slot="agent-restart"
+                          onClick={() =>
+                            setPending({
+                              kind: "restart",
+                              machine: machine.name,
+                              agent: agent.name,
+                            })
+                          }
+                        >
+                          重启
+                        </Button>
                       </div>
                     ))}
                   </div>

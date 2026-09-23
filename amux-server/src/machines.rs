@@ -95,9 +95,15 @@ impl MachineHub {
         Ok(discovered
             .agents
             .into_iter()
-            .map(|agent| Agent {
-                available: agent.running && machine.has_connection(&agent.name),
-                name: agent.name,
+            .map(|agent| {
+                let connection = machine.connection(&agent.name);
+                Agent {
+                    available: agent.running && connection.is_some(),
+                    opened_sessions: connection
+                        .as_ref()
+                        .map_or(0, |connection| connection.opened_session_count()),
+                    name: agent.name,
+                }
             })
             .collect())
     }

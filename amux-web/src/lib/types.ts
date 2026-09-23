@@ -93,7 +93,11 @@ export type Machine = {
   version: string;
 };
 
-export type Agent = { name: string; available: boolean };
+export type Agent = {
+  name: string;
+  available: boolean;
+  openedSessions: number;
+};
 
 export type Session = {
   id: string;

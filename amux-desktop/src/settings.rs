@@ -379,12 +379,23 @@ fn machine_card(
                 .gap_2()
                 .items_center()
                 .child(
-                    Label::new(agent_name.clone())
-                        .text_sm()
-                        .text_color(theme.foreground),
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Label::new(agent_name.clone())
+                                .text_sm()
+                                .text_color(theme.foreground),
+                        )
+                        .child(ui::availability_tag(agent.available, &theme))
+                        .child(
+                            Label::new(format!("打开会话 {}", agent.opened_sessions))
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        ),
                 )
-                .child(ui::availability_tag(agent.available, &theme))
-                .child(div().flex_1())
                 .child(
                     Button::new(SharedString::from(format!(
                         "restart-agent-{machine_name}-{agent_name}"

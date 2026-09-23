@@ -7,7 +7,7 @@
 //!
 //! 通知一律翻译为 [`AcpEvent`] 交给会话层落盘与驱动工作流，本模块不碰存储。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
 
@@ -133,6 +133,7 @@ pub struct AgentConnection {
     calls: mpsc::Sender<Call>,
     /// Agent 是否在 initialize 时声明支持 `session/delete`。
     supports_delete: bool,
+    opened_sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AgentConnection {
@@ -217,6 +218,10 @@ impl AgentConnection {
         rx.await.map_err(|_| "ACP 连接已关闭".to_string())?
     }
 
+    pub fn opened_session_count(&self) -> usize {
+        self.opened_sessions.lock().len()
+    }
+
     fn send(&self, call: Call) -> Result<(), String> {
         self.calls
             .try_send(call)
@@ -246,11 +251,13 @@ pub async fn connect(
 ) -> Result<Arc<AgentConnection>, String> {
     let (calls_tx, mut calls_rx) = mpsc::channel::<Call>(64);
     let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, String>>();
+    let opened_sessions = Arc::new(Mutex::new(HashSet::new()));
     let machine_name = machine.to_string();
     let agent_name = agent.to_string();
     let buffers = Arc::new(Mutex::new(
         HashMap::<(String, String), Vec<ContentBlock>>::new(),
     ));
+    let task_opened_sessions = Arc::clone(&opened_sessions);
 
     tokio::spawn(async move {
         let transport = DaemonTransport { outgoing, incoming };
@@ -331,7 +338,7 @@ pub async fn connect(
                     }
 
                     while let Some(call) = calls_rx.recv().await {
-                        handle_call(call, &cx).await;
+                        handle_call(call, &cx, &task_opened_sessions).await;
                     }
                     Ok(())
                 }
@@ -347,6 +354,7 @@ pub async fn connect(
     Ok(Arc::new(AgentConnection {
         calls: calls_tx,
         supports_delete,
+        opened_sessions,
     }))
 }
 
@@ -380,16 +388,19 @@ impl ConnectTo<Client> for DaemonTransport {
     }
 }
 
-async fn handle_call(call: Call, cx: &V2ConnectionTo<Agent>) {
+async fn handle_call(
+    call: Call,
+    cx: &V2ConnectionTo<Agent>,
+    opened_sessions: &Mutex<HashSet<String>>,
+) {
     match call {
         Call::NewSession { cwd, reply } => {
             let result = request(cx, NewSessionRequest::new(cwd))
                 .await
                 .map(|response| {
-                    (
-                        response.session_id.to_string(),
-                        config_options(response.config_options),
-                    )
+                    let session_id = response.session_id.to_string();
+                    opened_sessions.lock().insert(session_id.clone());
+                    (session_id, config_options(response.config_options))
                 });
             let _ = reply.send(result);
         }
@@ -398,9 +409,12 @@ async fn handle_call(call: Call, cx: &V2ConnectionTo<Agent>) {
             cwd,
             reply,
         } => {
-            let result = request(cx, ResumeSessionRequest::new(agent_session_id, cwd))
+            let result = request(cx, ResumeSessionRequest::new(agent_session_id.clone(), cwd))
                 .await
-                .map(|response| config_options(response.config_options));
+                .map(|response| {
+                    opened_sessions.lock().insert(agent_session_id);
+                    config_options(response.config_options)
+                });
             let _ = reply.send(result);
         }
         Call::Prompt {
@@ -421,17 +435,23 @@ async fn handle_call(call: Call, cx: &V2ConnectionTo<Agent>) {
             }
         }
         Call::Close { agent_session_id } => {
-            if let Err(error) = request(cx, CloseSessionRequest::new(agent_session_id)).await {
+            if let Err(error) =
+                request(cx, CloseSessionRequest::new(agent_session_id.clone())).await
+            {
                 log::warn!("session/close 失败: {error}");
+            } else {
+                opened_sessions.lock().remove(&agent_session_id);
             }
         }
         Call::Delete {
             agent_session_id,
             reply,
         } => {
-            let result = request(cx, DeleteSessionRequest::new(agent_session_id))
+            let result = request(cx, DeleteSessionRequest::new(agent_session_id.clone()))
                 .await
-                .map(|_| ());
+                .map(|_| {
+                    opened_sessions.lock().remove(&agent_session_id);
+                });
             let _ = reply.send(result);
         }
         Call::SetConfigOption {

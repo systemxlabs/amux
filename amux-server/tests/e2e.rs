@@ -65,15 +65,15 @@ fn daemon_binary() -> PathBuf {
     path
 }
 
-/// 假 bin 目录：`codex`（发现用）与 `npx`（启动 agent 时改为运行模拟 agent）。
+/// 假 bin 目录：`codex`（发现用）与 `bunx`（启动 agent 时改为运行模拟 agent）。
 fn fake_bin(mock_agent: &Path, state_file: &Path) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("amux-e2e-bin-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let codex = dir.join("codex");
     std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
-    let npx = dir.join("npx");
+    let bunx = dir.join("bunx");
     std::fs::write(
-        &npx,
+        &bunx,
         format!(
             "#!/bin/sh\nexec '{}' '{}'\n",
             mock_agent.display(),
@@ -81,7 +81,7 @@ fn fake_bin(mock_agent: &Path, state_file: &Path) -> PathBuf {
         ),
     )
     .unwrap();
-    for file in [codex, npx] {
+    for file in [codex, bunx] {
         let mut permissions = std::fs::metadata(&file).unwrap().permissions();
         #[cfg(unix)]
         {
@@ -405,6 +405,18 @@ async fn server_daemon_agent_end_to_end() {
     assert_eq!(session["machine"], MACHINE);
     assert_eq!(session["agent"], "codex");
 
+    let agents = client.get(&format!("/machines/{MACHINE}/agents")).await;
+    let codex = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["name"] == "codex")
+        .expect("应有 codex");
+    assert_eq!(
+        codex["openedSessions"], 1,
+        "打开但可能空闲的 ACP session 应计入打开会话数: {agents:?}"
+    );
+
     // 活动：思考与工具调用按 upsert 合并为两条
     let activities = poll(
         || {
@@ -590,6 +602,24 @@ async fn server_daemon_agent_end_to_end() {
         client.get_status(&format!("/sessions/{session_id}")).await,
         reqwest::StatusCode::NOT_FOUND
     );
+    poll(
+        || {
+            let client = &client;
+            async move {
+                let agents = client
+                    .try_get(&format!("/machines/{MACHINE}/agents"))
+                    .await?;
+                agents
+                    .as_array()?
+                    .iter()
+                    .find(|agent| agent["name"] == "codex")
+                    .filter(|agent| agent["openedSessions"] == 0)
+                    .cloned()
+            }
+        },
+        "关闭 ACP session 后打开会话数归零",
+    )
+    .await;
     assert_eq!(
         client.delete(&format!("/workflows/{workflow_id}")).await,
         reqwest::StatusCode::OK

@@ -38,12 +38,15 @@ pub struct Machine {
     pub version: String,
 }
 
-/// 某机器上的一个 agent：名称与可用性（可用 = agent 已启动且 ACP 已初始化）。
+/// 某机器上的一个 agent。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
     pub name: String,
+    /// 可用 = agent 已启动且 ACP 已初始化。
     pub available: bool,
+    /// 已成功创建或恢复到该 agent 的打开会话数。
+    pub opened_sessions: usize,
 }
 
 /// 普通会话元数据。
