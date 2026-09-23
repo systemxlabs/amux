@@ -335,7 +335,7 @@ Server 作为 ACP client 与 Agents 通信
     updated_at INTEGER NOT NULL      -- 更新时间
   );
   ```
-- 对话历史：存储在 `~/.amux/session.sqlite` 文件中
+- 对话历史：存储在 `~/.amux/sessions/<session_id>/transcript.sqlite` 文件中
   - Server 在往 Agent 发送 `session/prompt` 成功后，应立即给用户消息赋予消息 ID 并落盘，忽略 Agent 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
   ```SQL
   CREATE TABLE IF NOT EXISTS messages (
@@ -348,7 +348,7 @@ Server 作为 ACP client 与 Agents 通信
     PRIMARY KEY (session_id, message_id)
   );
   ```
-- 活动历史：存储在 `~/.amux/session.sqlite` 文件中
+- 活动历史：存储在 `~/.amux/sessions/<session_id>/transcript.sqlite` 文件中
   ```
   CREATE TABLE IF NOT EXISTS activities (
     session_id TEXT NOT NULL,      -- Amux 普通会话 ID
