@@ -491,7 +491,10 @@ export async function addFiles(core: Core, files: FileList | File[]): Promise<vo
       const pending: PendingAttachment = {
         block: {
           type: "resource_link",
-          uri: uploaded.uri,
+          uri:
+            target.kind === "session"
+              ? client.sessionAttachmentUri(target.id, uploaded.name)
+              : client.workflowAttachmentUri(target.id, uploaded.name),
           name: file.name,
           mimeType: file.type || undefined,
         },

@@ -165,7 +165,6 @@ export type TerminalOutput = { data: string; nextCursor: number; truncated?: boo
 
 export type Attachment = {
   name: string;
-  uri: string;
   size: number;
   createdAt: number;
 };

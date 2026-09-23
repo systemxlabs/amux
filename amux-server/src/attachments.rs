@@ -46,7 +46,6 @@ impl AttachmentStore {
         owner: AttachmentOwner<'_>,
         original_name: &str,
         bytes: &[u8],
-        public_url: &str,
     ) -> Result<Attachment, String> {
         if bytes.is_empty() {
             return Err("附件内容为空".into());
@@ -74,7 +73,6 @@ impl AttachmentStore {
         let created_at = now_ms();
         Ok(Attachment {
             name: name.clone(),
-            uri: public_uri(public_url, owner, &name),
             size: bytes.len() as u64,
             created_at,
         })
@@ -85,7 +83,6 @@ impl AttachmentStore {
         owner: AttachmentOwner<'_>,
         limit: usize,
         offset: usize,
-        public_url: Option<&str>,
     ) -> Result<AttachmentList, String> {
         let dir = self.directory(owner);
         let entries = match fs::read_dir(&dir) {
@@ -118,9 +115,6 @@ impl AttachmentStore {
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |duration| duration.as_millis() as u64);
             attachments.push(Attachment {
-                uri: public_url
-                    .map(|base| public_uri(base, owner, &name))
-                    .unwrap_or_default(),
                 name,
                 size: metadata.len(),
                 created_at,
@@ -180,16 +174,6 @@ impl AttachmentStore {
     }
 }
 
-fn public_uri(public_url: &str, owner: AttachmentOwner<'_>, name: &str) -> String {
-    format!(
-        "{}/{}/{}/attachments/{}",
-        public_url.trim_end_matches('/'),
-        owner.kind(),
-        owner.id(),
-        name
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,35 +184,19 @@ mod tests {
         let store = AttachmentStore::new(dir.path().to_path_buf());
         let owner = AttachmentOwner::Session("session-1");
 
-        let saved = store
-            .save(owner, "report.PDF", b"hello", "https://amux.example.com/")
-            .unwrap();
+        let saved = store.save(owner, "report.PDF", b"hello").unwrap();
         assert!(saved.name.ends_with(".PDF"));
-        assert_eq!(
-            saved.uri,
-            format!(
-                "https://amux.example.com/sessions/session-1/attachments/{}",
-                saved.name
-            )
-        );
         assert_eq!(saved.size, 5);
 
-        let page = store
-            .list(owner, 50, 0, Some("https://amux.example.com"))
-            .unwrap();
+        let page = store.list(owner, 50, 0).unwrap();
         assert_eq!(page.attachments.len(), 1);
         assert_eq!(page.attachments[0].name, saved.name);
         assert_eq!(page.attachments[0].size, saved.size);
-        assert_eq!(page.attachments[0].uri, saved.uri);
         assert!(!page.has_more);
         assert_eq!(store.read(owner, &saved.name).unwrap(), b"hello");
 
         store.delete(owner, &saved.name).unwrap();
-        assert!(store
-            .list(owner, 50, 0, None)
-            .unwrap()
-            .attachments
-            .is_empty());
+        assert!(store.list(owner, 50, 0).unwrap().attachments.is_empty());
     }
 
     #[test]
@@ -238,16 +206,9 @@ mod tests {
         let owner = AttachmentOwner::Workflow("workflow-1");
 
         assert!(store
-            .save(
-                owner,
-                "large.bin",
-                &vec![0; MAX_ATTACHMENT_BYTES + 1],
-                "https://amux.example.com"
-            )
+            .save(owner, "large.bin", &vec![0; MAX_ATTACHMENT_BYTES + 1])
             .is_err());
-        let saved = store
-            .save(owner, "plain", b"x", "https://amux.example.com")
-            .unwrap();
+        let saved = store.save(owner, "plain", b"x").unwrap();
         assert!(!saved.name.contains('.'));
         assert!(store.read(owner, "../plain").is_err());
     }

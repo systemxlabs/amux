@@ -15,5 +15,4 @@ pub struct AppState {
     pub sessions: Arc<SessionService>,
     pub workflows: Arc<WorkflowService>,
     pub attachments: Arc<AttachmentStore>,
-    pub public_url: Option<String>,
 }

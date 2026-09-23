@@ -1405,6 +1405,14 @@ impl AmuxApp {
                 };
                 match result {
                     Ok(attachment) => {
+                        let uri = match &target {
+                            OpenTarget::Session(id) => {
+                                client.session_attachment_uri(id, &attachment.name)
+                            }
+                            OpenTarget::Workflow(id) => {
+                                client.workflow_attachment_uri(id, &attachment.name)
+                            }
+                        };
                         let target_changed =
                             core.lock().open.as_ref().is_none_or(|open| open != &target);
                         if target_changed {
@@ -1426,7 +1434,7 @@ impl AmuxApp {
                         }
                         core.composer_attachments.push(PendingAttachment {
                             block: ContentBlock::ResourceLink {
-                                uri: attachment.uri,
+                                uri,
                                 name: name.clone(),
                                 mime_type: None,
                                 title: None,
@@ -1545,6 +1553,14 @@ impl AmuxApp {
             };
             match result {
                 Ok(attachment) => {
+                    let uri = match &target {
+                        OpenTarget::Session(id) => {
+                            client.session_attachment_uri(id, &attachment.name)
+                        }
+                        OpenTarget::Workflow(id) => {
+                            client.workflow_attachment_uri(id, &attachment.name)
+                        }
+                    };
                     let target_changed =
                         core.lock().open.as_ref().is_none_or(|open| open != &target);
                     if target_changed {
@@ -1566,7 +1582,7 @@ impl AmuxApp {
                     }
                     core.composer_attachments.push(PendingAttachment {
                         block: ContentBlock::ResourceLink {
-                            uri: attachment.uri,
+                            uri,
                             name: filename.clone(),
                             mime_type,
                             title: None,

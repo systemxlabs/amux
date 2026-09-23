@@ -22,6 +22,8 @@ export function AttachmentsPanel() {
   const core = useCore();
   const state = useCoreState();
   const detail = state.detail;
+  const target = state.open;
+  const client = core.client;
   const [confirmingDeleteAll, setConfirmingDeleteAll] = useState(false);
 
   const loadMoreIfNeeded = (element: HTMLDivElement): void => {
@@ -63,44 +65,52 @@ export function AttachmentsPanel() {
           <div className="py-4 text-center text-sm text-muted-foreground">暂无附件</div>
         ) : (
           <div className="flex flex-col gap-2">
-            {detail.attachments.map((attachment) => (
-              <div
-                key={attachment.name}
-                data-slot="attachment-item"
-                className="flex items-center gap-2 rounded-md border border-border p-2"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm" title={attachment.name}>
-                    {attachment.name}
+            {detail.attachments.map((attachment) => {
+              const uri =
+                target === null || client === null
+                  ? ""
+                  : target.kind === "session"
+                    ? client.sessionAttachmentUri(target.id, attachment.name)
+                    : client.workflowAttachmentUri(target.id, attachment.name);
+              return (
+                <div
+                  key={attachment.name}
+                  data-slot="attachment-item"
+                  className="flex items-center gap-2 rounded-md border border-border p-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm" title={attachment.name}>
+                      {attachment.name}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {formatSize(attachment.size)}
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    {formatSize(attachment.size)}
-                  </div>
+                  <a
+                    href={uri || undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`下载 ${attachment.name}`}
+                    className={
+                      uri === ""
+                        ? "rounded-md p-2 opacity-50"
+                        : "rounded-md p-2 hover:bg-accent"
+                    }
+                  >
+                    <ArrowDownToLine className="size-4" />
+                  </a>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`删除 ${attachment.name}`}
+                    onClick={() => void deleteAttachment(core, attachment.name)}
+                  >
+                    <Trash2 />
+                  </Button>
                 </div>
-                <a
-                  href={attachment.uri || undefined}
-                  target="_blank"
-                  rel="noreferrer"
-                  aria-label={`下载 ${attachment.name}`}
-                  className={
-                    attachment.uri === ""
-                      ? "rounded-md p-2 opacity-50"
-                      : "rounded-md p-2 hover:bg-accent"
-                  }
-                >
-                  <ArrowDownToLine className="size-4" />
-                </a>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={`删除 ${attachment.name}`}
-                  onClick={() => void deleteAttachment(core, attachment.name)}
-                >
-                  <Trash2 />
-                </Button>
-              </div>
-            ))}
+              );
+            })}
             {detail.attachmentsLoading ? (
               <div className="py-2 text-center text-xs text-muted-foreground">加载中…</div>
             ) : null}

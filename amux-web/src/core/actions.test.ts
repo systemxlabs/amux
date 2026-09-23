@@ -63,10 +63,11 @@ it("附件上传成功后以待发送 ResourceLink 保存，不再内联文件�
   core.client = {
     uploadSessionAttachment: async () => ({
       name: "uuid.txt",
-      uri: "https://amux.example.com/sessions/s1/attachments/uuid.txt",
       size: 5,
       createdAt: 1,
     }),
+    sessionAttachmentUri: () =>
+      "https://amux.example.com/sessions/s1/attachments/uuid.txt",
   } as unknown as ApiClient;
 
   await addFiles(core, [new File(["hello"], "note.txt", { type: "text/plain" })]);

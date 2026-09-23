@@ -927,7 +927,15 @@ fn attachments_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>)
     } else {
         for attachment in &detail.attachments {
             let name = attachment.name.clone();
-            let uri = attachment.uri.clone();
+            let uri = match (&core.open, core.client.as_ref()) {
+                (Some(OpenTarget::Session(id)), Some(client)) => {
+                    client.session_attachment_uri(id, &attachment.name)
+                }
+                (Some(OpenTarget::Workflow(id)), Some(client)) => {
+                    client.workflow_attachment_uri(id, &attachment.name)
+                }
+                _ => String::new(),
+            };
             list = list.child(
                 h_flex()
                     .w_full()

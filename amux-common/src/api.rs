@@ -260,8 +260,6 @@ pub struct TerminalOutput {
 pub struct Attachment {
     /// Server 存储文件名（`<uuid>.<后缀>`）
     pub name: String,
-    /// 公共下载地址；Server 未配置 public URL 时为空
-    pub uri: String,
     pub size: u64,
     pub created_at: u64,
 }

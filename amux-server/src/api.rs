@@ -564,12 +564,7 @@ async fn list_session_attachments(
     state.sessions.get(&id).map_err(not_found)?;
     state
         .attachments
-        .list(
-            AttachmentOwner::Session(&id),
-            page.limit(50),
-            page.offset(),
-            state.public_url.as_deref(),
-        )
+        .list(AttachmentOwner::Session(&id), page.limit(50), page.offset())
         .map(Json)
         .map_err(bad_request)
 }
@@ -715,7 +710,6 @@ async fn list_workflow_attachments(
             AttachmentOwner::Workflow(&id),
             page.limit(50),
             page.offset(),
-            state.public_url.as_deref(),
         )
         .map(Json)
         .map_err(bad_request)
@@ -969,10 +963,6 @@ fn not_found(message: String) -> (StatusCode, String) {
     (StatusCode::NOT_FOUND, message)
 }
 
-fn service_unavailable(message: String) -> (StatusCode, String) {
-    (StatusCode::SERVICE_UNAVAILABLE, message)
-}
-
 fn upload_attachment(
     state: &AppState,
     owner: AttachmentOwner<'_>,
@@ -982,13 +972,9 @@ fn upload_attachment(
     if body.len() > MAX_ATTACHMENT_BYTES {
         return Err(bad_request("单个附件不得超过 20 MB".into()));
     }
-    let public_url = state
-        .public_url
-        .as_deref()
-        .ok_or_else(|| service_unavailable("Server 未配置附件公共地址".into()))?;
     state
         .attachments
-        .save(owner, filename, &body, public_url)
+        .save(owner, filename, &body)
         .map(Json)
         .map_err(bad_request)
 }

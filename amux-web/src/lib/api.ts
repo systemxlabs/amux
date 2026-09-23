@@ -218,6 +218,12 @@ export class ApiClient {
     return this.uploadAttachment(`/sessions/${encodeURIComponent(id)}/attachments`, file);
   }
 
+  sessionAttachmentUri(id: string, name: string): string {
+    return this.absoluteUrl(
+      `/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
+    );
+  }
+
   deleteSessionAttachment(id: string, name: string): Promise<void> {
     return this.delete(
       `/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
@@ -349,6 +355,12 @@ export class ApiClient {
     return this.uploadAttachment(`/workflows/${encodeURIComponent(id)}/attachments`, file);
   }
 
+  workflowAttachmentUri(id: string, name: string): string {
+    return this.absoluteUrl(
+      `/workflows/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
+    );
+  }
+
   deleteWorkflowAttachment(id: string, name: string): Promise<void> {
     return this.delete(
       `/workflows/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
@@ -425,6 +437,12 @@ export class ApiClient {
 
   private url(path: string): string {
     return `${this.baseUrl}${path}`;
+  }
+
+  private absoluteUrl(path: string): string {
+    return this.baseUrl === ""
+      ? new URL(path, globalThis.location.origin).toString()
+      : this.url(path);
   }
 
   private async send(path: string, init: RequestInit): Promise<Response> {

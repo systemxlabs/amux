@@ -59,9 +59,6 @@ struct Args {
     /// web 静态文件目录；未传则静态资源请求返回 404
     #[arg(long)]
     web: Option<String>,
-    /// 公共地址；未传则附件上传返回 503
-    #[arg(long)]
-    public_url: Option<String>,
 }
 
 #[tokio::main]
@@ -125,7 +122,6 @@ async fn run(args: Args) -> Result<(), String> {
         sessions,
         workflows,
         attachments,
-        public_url: args.public_url,
     });
     // 鉴权只对命中 API 路由的请求生效：浏览器加载页面时无法携带 Authorization 头，
     // 静态资源与未命中路径必须免鉴权，否则 Web 应用无法加载、

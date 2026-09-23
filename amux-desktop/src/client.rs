@@ -244,6 +244,22 @@ impl Client {
             .await
     }
 
+    pub fn session_attachment_uri(&self, id: &str, name: &str) -> String {
+        format!(
+            "{}/sessions/{id}/attachments/{}",
+            self.base,
+            urlencode(name)
+        )
+    }
+
+    pub fn workflow_attachment_uri(&self, id: &str, name: &str) -> String {
+        format!(
+            "{}/workflows/{id}/attachments/{}",
+            self.base,
+            urlencode(name)
+        )
+    }
+
     pub async fn delete_session_attachment(&self, id: &str, name: &str) -> Result<(), String> {
         self.delete(&format!("/sessions/{id}/attachments/{}", urlencode(name)))
             .await
