@@ -153,14 +153,14 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 | agent | 发现方式 |
 |---|---|
 | nano | 已内置 |
-| codex | 本机装有 `codex` CLI & npx 可用 & bun 可用 |
+| codex | 本机装有 `codex` CLI & bunx 可用 |
 
 ### Agent 启动
 
 | agent | 启动方式 |
 |---|---|
 | nano | 进程内启动 |
-| codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @nyssance/codex-acp-v2` |
+| codex | `INITIAL_AGENT_MODE=agent-full-access bunx -y @nyssance/codex-acp-v2` |
 
 ### Nano 智能体
 
