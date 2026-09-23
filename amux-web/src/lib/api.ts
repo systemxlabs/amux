@@ -214,8 +214,16 @@ export class ApiClient {
     );
   }
 
-  uploadSessionAttachment(id: string, file: File): Promise<Attachment> {
-    return this.uploadAttachment(`/sessions/${encodeURIComponent(id)}/attachments`, file);
+  uploadSessionAttachment(
+    id: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<Attachment> {
+    return this.uploadAttachment(
+      `/sessions/${encodeURIComponent(id)}/attachments`,
+      file,
+      signal,
+    );
   }
 
   sessionAttachmentUri(id: string, name: string): string {
@@ -351,8 +359,16 @@ export class ApiClient {
     );
   }
 
-  uploadWorkflowAttachment(id: string, file: File): Promise<Attachment> {
-    return this.uploadAttachment(`/workflows/${encodeURIComponent(id)}/attachments`, file);
+  uploadWorkflowAttachment(
+    id: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<Attachment> {
+    return this.uploadAttachment(
+      `/workflows/${encodeURIComponent(id)}/attachments`,
+      file,
+      signal,
+    );
   }
 
   workflowAttachmentUri(id: string, name: string): string {
@@ -488,12 +504,17 @@ export class ApiClient {
     await decode<OpAck>(await this.send(path, { method: "DELETE" }));
   }
 
-  private async uploadAttachment(path: string, file: File): Promise<Attachment> {
+  private async uploadAttachment(
+    path: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<Attachment> {
     return decode<Attachment>(
       await this.send(`${path}?${query({ filename: file.name })}`, {
         method: "POST",
         headers: { "content-type": file.type || "application/octet-stream" },
         body: file,
+        signal,
       }),
     );
   }

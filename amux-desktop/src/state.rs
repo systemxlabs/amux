@@ -1,6 +1,7 @@
 //! 应用状态：连接、会话列表、当前会话视图、设置面板与轮询节拍。
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -320,14 +321,50 @@ pub fn matching_prefix(entries: Vec<FsEntry>, prefix: &str) -> Vec<FsEntry> {
         .collect()
 }
 
-/// 待发送附件：拖拽或粘贴得到的文件/图片，随消息一并作为内容块发送。
-#[derive(Debug, Clone)]
+/// 待发送附件的上传来源；重试时从这里重新读取内容。
+#[derive(Clone)]
+pub enum AttachmentSource {
+    Path(PathBuf),
+    Bytes(Arc<[u8]>),
+}
+
+/// 待发送附件的上传状态。
+#[derive(Clone)]
+pub enum PendingAttachmentStatus {
+    Uploading {
+        abort: Option<tokio::task::AbortHandle>,
+    },
+    Failed(String),
+    Uploaded {
+        block: ContentBlock,
+        remote_name: String,
+    },
+}
+
+/// 输入区附件项。
+#[derive(Clone)]
 pub struct PendingAttachment {
-    pub block: ContentBlock,
-    /// 输入区展示用的短标签
+    pub id: u64,
     pub label: String,
-    /// Server 附件名；用于移除尚未发送的附件
-    pub remote_name: String,
+    pub mime_type: Option<String>,
+    pub source: AttachmentSource,
+    pub status: PendingAttachmentStatus,
+}
+
+/// 输入区附件项标识：仅用于同一窗口内的异步任务回填。
+pub fn next_attachment_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 清空输入区附件，并取消尚未完成的上传任务。
+pub fn clear_composer_attachments(core: &mut Core) {
+    for attachment in core.composer_attachments.drain(..) {
+        if let PendingAttachmentStatus::Uploading { abort: Some(abort) } = attachment.status {
+            abort.abort();
+        }
+    }
 }
 
 /// 右侧面板分类（PRD 右侧面板）。

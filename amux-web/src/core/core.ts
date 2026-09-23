@@ -56,9 +56,14 @@ export type Notice = { kind: "success" | "error"; text: string };
 
 /** 待发送附件（已上传到 Server，发送时使用其公共 URI）。 */
 export type PendingAttachment = {
-  block: ContentBlock;
+  id: string;
   label: string;
-  remoteName: string;
+  file: File;
+  status: "uploading" | "failed" | "uploaded";
+  controller?: AbortController;
+  error?: string;
+  block?: ContentBlock;
+  remoteName?: string;
 };
 
 /** 新建会话视图状态（docs/PRD.md「新建会话视图」）。 */

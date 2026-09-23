@@ -21,6 +21,7 @@ import {
   deleteProject,
   openEntry,
   openTerminal,
+  retryAttachment,
   sendPrompt,
   showNewSession,
   toggleSidePanel,
@@ -72,8 +73,11 @@ it("附件上传成功后以待发送 ResourceLink 保存，不再内联文件�
 
   await addFiles(core, [new File(["hello"], "note.txt", { type: "text/plain" })]);
 
-  expect(core.state.attachments).toEqual([
-    {
+  expect(core.state.attachments).toHaveLength(1);
+  expect(core.state.attachments[0]).toMatchObject({
+      id: expect.any(String),
+      file: expect.any(File),
+      status: "uploaded",
       block: {
         type: "resource_link",
         uri: "https://amux.example.com/sessions/s1/attachments/uuid.txt",
@@ -82,8 +86,32 @@ it("附件上传成功后以待发送 ResourceLink 保存，不再内联文件�
       },
       label: "note.txt",
       remoteName: "uuid.txt",
+  });
+});
+
+it("附件上传失败后保留文件并可重试", async () => {
+  const core = new Core();
+  core.state.open = { kind: "session", id: "s1" };
+  let attempts = 0;
+  core.client = {
+    uploadSessionAttachment: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("network down");
+      return { name: "uuid.txt", size: 5, createdAt: 1 };
     },
-  ]);
+    sessionAttachmentUri: () =>
+      "https://amux.example.com/sessions/s1/attachments/uuid.txt",
+  } as unknown as ApiClient;
+
+  await addFiles(core, [new File(["hello"], "note.txt", { type: "text/plain" })]);
+  expect(core.state.attachments[0]?.status).toBe("failed");
+  expect(core.state.attachments[0]?.error).toContain("network down");
+
+  await retryAttachment(core, core.state.attachments[0]!.id);
+  expect(core.state.attachments[0]).toMatchObject({
+    status: "uploaded",
+    remoteName: "uuid.txt",
+  });
 });
 
 it("删除项目时同步移除其快捷指令", async () => {
@@ -268,8 +296,11 @@ describe("sendPrompt", () => {
     core.update((state) => {
       state.attachments = [
         {
+          id: "pending-1",
+          file: new File(["draft"], "draft.txt", { type: "text/plain" }),
           block: { type: "text", text: "draft.txt" },
           label: "draft.txt",
+          status: "uploaded",
           remoteName: "remote.txt",
         },
       ];

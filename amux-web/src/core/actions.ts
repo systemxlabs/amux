@@ -116,6 +116,7 @@ export function showNewSession(core: Core): void {
   core.update((state) => {
     state.middle = "new";
     state.sidePanel = null;
+    for (const attachment of state.attachments) attachment.controller?.abort();
     state.attachments = [];
   });
   void refreshNewSession(core);
@@ -139,6 +140,7 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
   core.update((state) => {
     state.open = target;
     state.middle = "interaction";
+    for (const attachment of state.attachments) attachment.controller?.abort();
     state.attachments = [];
     // 工作目录/改动审查/计划/终端仅普通会话有：切到不适用的会话时关闭面板
     // （docs/PRD.md「主页面」；否则会留下关闭按钮都已隐藏的空白面板）
@@ -465,66 +467,131 @@ export async function updateWorkspaceInput(core: Core, text: string): Promise<vo
 
 // ---------- 会话交互 ----------
 
+function nextAttachmentId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+function updatePendingAttachment(
+  core: Core,
+  id: string,
+  update: (attachment: PendingAttachment) => void,
+): void {
+  core.update((state) => {
+    const attachment = state.attachments.find((item) => item.id === id);
+    if (attachment !== undefined) update(attachment);
+  });
+}
+
+async function uploadPendingAttachment(core: Core, id: string): Promise<void> {
+  const attachment = core.state.attachments.find((item) => item.id === id);
+  const target = core.state.open;
+  const client = core.client;
+  if (attachment === undefined || target === null || client === null) return;
+  const controller = new AbortController();
+  updatePendingAttachment(core, id, (item) => {
+    item.status = "uploading";
+    item.error = undefined;
+    item.controller = controller;
+  });
+  try {
+    const uploaded =
+      target.kind === "session"
+        ? await client.uploadSessionAttachment(target.id, attachment.file, controller.signal)
+        : await client.uploadWorkflowAttachment(target.id, attachment.file, controller.signal);
+    if (core.state.open?.kind !== target.kind || core.state.open.id !== target.id) {
+      if (target.kind === "session") {
+        await client.deleteSessionAttachment(target.id, uploaded.name);
+      } else {
+        await client.deleteWorkflowAttachment(target.id, uploaded.name);
+      }
+      core.update((state) => {
+        state.attachments = state.attachments.filter((item) => item.id !== id);
+      });
+      return;
+    }
+    if (!core.state.attachments.some((item) => item.id === id)) {
+      if (target.kind === "session") {
+        await client.deleteSessionAttachment(target.id, uploaded.name);
+      } else {
+        await client.deleteWorkflowAttachment(target.id, uploaded.name);
+      }
+      return;
+    }
+    updatePendingAttachment(core, id, (item) => {
+      item.status = "uploaded";
+      item.controller = undefined;
+      item.remoteName = uploaded.name;
+      item.block = {
+        type: "resource_link",
+        uri:
+          target.kind === "session"
+            ? client.sessionAttachmentUri(target.id, uploaded.name)
+            : client.workflowAttachmentUri(target.id, uploaded.name),
+        name: item.label,
+        mimeType: item.file.type || undefined,
+      };
+    });
+    if (core.state.sidePanel === "attachments") {
+      void refreshAttachments(core);
+    }
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    updatePendingAttachment(core, id, (item) => {
+      item.status = "failed";
+      item.controller = undefined;
+      item.error = messageOf(error);
+    });
+  }
+}
+
 /** 附件上传到 Server 后，以公共 URI 的 Resource Link 加入提示词。 */
 export async function addFiles(core: Core, files: FileList | File[]): Promise<void> {
   const target = core.state.open;
-  const client = core.client;
-  if (target === null || client === null) return;
+  if (target === null || core.client === null) return;
+  const ids: string[] = [];
   for (const file of files) {
     if (file.size > 20 * 1024 * 1024) {
       core.failure(`附件「${file.name}」超过 20 MB`);
       continue;
     }
-    try {
-      const uploaded =
-        target.kind === "session"
-          ? await client.uploadSessionAttachment(target.id, file)
-          : await client.uploadWorkflowAttachment(target.id, file);
-      if (core.state.open?.kind !== target.kind || core.state.open.id !== target.id) {
-        if (target.kind === "session") {
-          await client.deleteSessionAttachment(target.id, uploaded.name);
-        } else {
-          await client.deleteWorkflowAttachment(target.id, uploaded.name);
-        }
-        continue;
-      }
-      const pending: PendingAttachment = {
-        block: {
-          type: "resource_link",
-          uri:
-            target.kind === "session"
-              ? client.sessionAttachmentUri(target.id, uploaded.name)
-              : client.workflowAttachmentUri(target.id, uploaded.name),
-          name: file.name,
-          mimeType: file.type || undefined,
+    const id = nextAttachmentId();
+    core.update((state) => {
+      state.attachments = [
+        ...state.attachments,
+        {
+          id,
+          label: file.name,
+          file,
+          status: "uploading",
         },
-        label: file.name,
-        remoteName: uploaded.name,
-      };
-      core.update((state) => {
-        state.attachments = [...state.attachments, pending];
-      });
-      if (core.state.sidePanel === "attachments") {
-        void refreshAttachments(core);
-      }
-    } catch (error) {
-      core.failure(`上传附件失败：${messageOf(error)}`);
-    }
+      ];
+    });
+    ids.push(id);
   }
+  await Promise.all(ids.map((id) => uploadPendingAttachment(core, id)));
 }
 
-export async function removeAttachment(core: Core, index: number): Promise<void> {
-  const attachment = core.state.attachments[index];
+export async function retryAttachment(core: Core, id: string): Promise<void> {
+  await uploadPendingAttachment(core, id);
+}
+
+export async function removeAttachment(core: Core, id: string): Promise<void> {
+  const attachment = core.state.attachments.find((item) => item.id === id);
   const target = core.state.open;
   if (attachment === undefined || target === null || core.client === null) return;
+  attachment.controller?.abort();
   core.update((state) => {
-    state.attachments = state.attachments.filter((_, at) => at !== index);
+    state.attachments = state.attachments.filter((item) => item.id !== id);
   });
+  if (attachment.status !== "uploaded" || attachment.remoteName === undefined) return;
   try {
     if (target.kind === "session") {
       await core.client.deleteSessionAttachment(target.id, attachment.remoteName);
     } else {
       await core.client.deleteWorkflowAttachment(target.id, attachment.remoteName);
+    }
+    if (core.state.sidePanel === "attachments") {
+      await refreshAttachments(core);
     }
   } catch (error) {
     core.failure(`删除附件失败：${messageOf(error)}`);
@@ -631,6 +698,7 @@ export async function deleteAllAttachments(core: Core): Promise<void> {
     core.update((state) => {
       state.detail.attachments = [];
       state.detail.attachmentsHasMore = false;
+      for (const attachment of state.attachments) attachment.controller?.abort();
       state.attachments = [];
     });
   } catch (error) {
@@ -646,10 +714,21 @@ export async function sendPrompt(
 ): Promise<boolean> {
   const target = core.state.open;
   if (!core.client || !target) return false;
+  if (
+    includeAttachments &&
+    core.state.attachments.some((attachment) => attachment.status !== "uploaded")
+  ) {
+    core.failure("请等待附件上传完成或处理上传失败项");
+    return false;
+  }
   const input: ContentBlock[] = [];
   if (text !== "") input.push({ type: "text", text });
   if (includeAttachments) {
-    input.push(...core.state.attachments.map((attachment) => attachment.block));
+    input.push(
+      ...core.state.attachments.flatMap((attachment) =>
+        attachment.block === undefined ? [] : [attachment.block],
+      ),
+    );
   }
   if (input.length === 0) return false;
   try {

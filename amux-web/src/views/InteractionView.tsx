@@ -2,7 +2,7 @@
 // 快捷指令栏、输入区（Enter 发送 / Shift+Enter 换行、斜杠命令上拉框、附件）、会话选项。
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Paperclip, SendHorizontal, Square } from "lucide-react";
+import { AlertCircle, LoaderCircle, Paperclip, RotateCw, SendHorizontal, Square } from "lucide-react";
 
 import { Markdown } from "../components/Markdown";
 import { Button } from "../components/ui/button";
@@ -15,7 +15,14 @@ import {
 } from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
 import { Textarea } from "../components/ui/textarea";
-import { addFiles, cancelOpen, removeAttachment, sendPrompt, setConfigOption } from "../core/actions";
+import {
+  addFiles,
+  cancelOpen,
+  removeAttachment,
+  retryAttachment,
+  sendPrompt,
+  setConfigOption,
+} from "../core/actions";
 import { loadNewerHistory, loadOlderHistory } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
 import { activityBarText, formatTime } from "../lib/format";
@@ -142,6 +149,9 @@ export function InteractionView() {
   const project = detail.session?.project ?? detail.workflow?.project;
   const quickCommands = state.settings.quickCommands.filter(
     (command) => command.project === undefined || command.project === project,
+  );
+  const attachmentsReady = state.attachments.every(
+    (attachment) => attachment.status === "uploaded",
   );
 
   // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算（不只是滚动事件）
@@ -328,18 +338,39 @@ export function InteractionView() {
 
         {state.attachments.length > 0 ? (
           <div className="mb-2 flex flex-wrap gap-1">
-            {state.attachments.map((attachment, index) => (
+            {state.attachments.map((attachment) => (
               <span
-                key={attachment.remoteName}
+                key={attachment.id}
                 data-slot="attachment-chip"
-                className="flex items-center gap-1 rounded-sm bg-muted px-2 py-0.5 text-xs"
+                data-status={attachment.status}
+                className={cn(
+                  "flex items-center gap-1 rounded-sm bg-muted px-2 py-0.5 text-xs",
+                  attachment.status === "failed" && "text-destructive",
+                )}
+                title={attachment.error}
               >
+                {attachment.status === "uploading" ? (
+                  <LoaderCircle className="size-3 animate-spin" aria-label="上传中" />
+                ) : null}
+                {attachment.status === "failed" ? (
+                  <AlertCircle className="size-3" aria-label="上传失败" />
+                ) : null}
                 {attachment.label}
+                {attachment.status === "failed" ? (
+                  <button
+                    type="button"
+                    aria-label="重试上传"
+                    className="-my-1 p-1 leading-none"
+                    onClick={() => void retryAttachment(core, attachment.id)}
+                  >
+                    <RotateCw className="size-3" />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   aria-label="移除附件"
                   className="-my-1 px-1 py-1 text-sm leading-none lg:my-0 lg:text-xs"
-                  onClick={() => void removeAttachment(core, index)}
+                  onClick={() => void removeAttachment(core, attachment.id)}
                 >
                   ×
                 </button>
@@ -446,7 +477,12 @@ export function InteractionView() {
                 <Square className="size-3" />
                 取消
               </Button>
-              <Button data-slot="send-button" size="sm" onClick={() => void send()}>
+              <Button
+                data-slot="send-button"
+                size="sm"
+                disabled={!attachmentsReady}
+                onClick={() => void send()}
+              >
                 <SendHorizontal className="size-3" />
                 发送
               </Button>

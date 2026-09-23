@@ -20,7 +20,7 @@ use gpui_component::{
 };
 
 use crate::app::{AmuxApp, InputResizeDrag, INPUT_RESIZE_HANDLE_HEIGHT};
-use crate::state::{Core, SettingsTab};
+use crate::state::{Core, PendingAttachmentStatus, SettingsTab};
 use crate::ui;
 
 /// 消息气泡宽度上下限（下限需容纳时间戳行）。
@@ -960,10 +960,57 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let transparent = gpui::transparent_black();
     let pending_attachments = this.with_core(|core| core.composer_attachments.clone());
     let attachment_count = pending_attachments.len();
+    let attachments_ready = pending_attachments
+        .iter()
+        .all(|attachment| matches!(&attachment.status, PendingAttachmentStatus::Uploaded { .. }));
 
     let mut chips = h_flex().flex_wrap().gap_1();
     for (index, attachment) in pending_attachments.iter().enumerate() {
         let label = attachment.label.clone();
+        let uploading = matches!(
+            &attachment.status,
+            PendingAttachmentStatus::Uploading { .. }
+        );
+        let failed = matches!(&attachment.status, PendingAttachmentStatus::Failed(_));
+        let mut content = h_flex().w_full().items_center().gap_1().overflow_hidden();
+        if uploading {
+            content = content.child(Spinner::new().xsmall().color(theme.muted_foreground));
+        }
+        content = content.child(
+            Label::new(ui::truncate(&label, 32))
+                .text_xs()
+                .text_color(if failed {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                })
+                .truncate(),
+        );
+        if failed {
+            let id = attachment.id;
+            content = content.child(
+                Button::new(SharedString::from(format!("attachment-retry-{id}")))
+                    .xsmall()
+                    .ghost()
+                    .label("重试")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.retry_attachment(id, cx);
+                    })),
+            );
+        }
+        content = content.child(
+            Button::new(SharedString::from(format!(
+                "attachment-remove-{}",
+                attachment.id
+            )))
+            .xsmall()
+            .ghost()
+            .icon(IconName::Close)
+            .tooltip("移除附件")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.remove_attachment(index, cx);
+            })),
+        );
         chips = chips.child(
             div()
                 .id(("attachment-chip", index))
@@ -973,26 +1020,7 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .rounded_full()
                 .bg(theme.muted)
                 .hover(|chip| chip.bg(theme.secondary_hover))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(index, cx)))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap_1()
-                        .overflow_hidden()
-                        .child(
-                            Icon::new(IconName::Close)
-                                .xsmall()
-                                .text_color(theme.muted_foreground),
-                        )
-                        .child(
-                            Label::new(ui::truncate(&label, 32))
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .truncate(),
-                        ),
-                ),
+                .child(content),
         );
     }
 
@@ -1091,6 +1119,7 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
                                 .small()
                                 .primary()
                                 .label("发送")
+                                .disabled(!attachments_ready)
                                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                         ),
                 ),

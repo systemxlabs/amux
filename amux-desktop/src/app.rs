@@ -34,8 +34,10 @@ use crate::poll;
 use crate::sessions;
 use crate::settings;
 use crate::state::{
-    matching_prefix, ConnectionStatus, Core, DirectoryListing, ListEntry, OpenTarget, Paging,
-    PendingAttachment, SharedCore, SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
+    clear_composer_attachments, matching_prefix, next_attachment_id, AttachmentSource,
+    ConnectionStatus, Core, DirectoryListing, ListEntry, OpenTarget, Paging, PendingAttachment,
+    PendingAttachmentStatus, SharedCore, SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
 };
 use crate::terminal_view;
 use crate::theme::SIDEBAR_WIDTH;
@@ -871,7 +873,7 @@ impl AmuxApp {
                 core.side_panel = None;
             }
         });
-        self.with_core(|core| core.composer_attachments.clear());
+        self.with_core(clear_composer_attachments);
         self.diff_collapsed_files.clear();
         self.diff_collapsed_dirs.clear();
         self.diff_comment_target = None;
@@ -1316,7 +1318,14 @@ impl AmuxApp {
     /// 发送输入框内容：文本与附件一并作为用户输入发出。
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().trim().to_string();
-        if text.is_empty() && self.with_core(|core| core.composer_attachments.is_empty()) {
+        let attachments = self.with_core(|core| core.composer_attachments.clone());
+        if text.is_empty() && attachments.is_empty() {
+            return;
+        }
+        if attachments.iter().any(|attachment| {
+            !matches!(&attachment.status, PendingAttachmentStatus::Uploaded { .. })
+        }) {
+            self.with_core(|core| core.warning("请等待附件上传完成或处理上传失败项"));
             return;
         }
         let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -1324,10 +1333,14 @@ impl AmuxApp {
             blocks.push(ContentBlock::Text { text });
         }
         blocks.extend(
-            self.with_core(|core| std::mem::take(&mut core.composer_attachments))
+            attachments
                 .into_iter()
-                .map(|attachment| attachment.block),
+                .filter_map(|attachment| match attachment.status {
+                    PendingAttachmentStatus::Uploaded { block, .. } => Some(block),
+                    _ => None,
+                }),
         );
+        self.with_core(|core| core.composer_attachments.clear());
         self.input
             .update(cx, |state, cx| state.set_value(String::new(), window, cx));
         self.slash_selected = 0;
@@ -1360,7 +1373,7 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 拖入的文件上传到 Server，成功后再加入待发送附件。
+    /// 拖入的文件立即加入输入区并开始上传。
     pub fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         for path in paths {
             let name = path
@@ -1378,75 +1391,17 @@ impl AmuxApp {
                 }
                 _ => {}
             }
-            let target = self.with_core(|core| core.open.clone());
-            let client = self.with_core(|core| core.client.clone());
-            let (Some(target), Some(client)) = (target, client) else {
-                self.with_core(|core| core.warning("请先打开会话"));
-                return;
-            };
-            let core = Arc::clone(&self.core);
-            let path = path.clone();
-            self.runtime.spawn(async move {
-                let bytes = match tokio::fs::read(&path).await {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        core.lock()
-                            .error(format!("读取附件「{name}」失败：{error}"));
-                        return;
-                    }
-                };
-                let result = match &target {
-                    OpenTarget::Session(id) => {
-                        client.upload_session_attachment(id, &name, bytes).await
-                    }
-                    OpenTarget::Workflow(id) => {
-                        client.upload_workflow_attachment(id, &name, bytes).await
-                    }
-                };
-                match result {
-                    Ok(attachment) => {
-                        let uri = match &target {
-                            OpenTarget::Session(id) => {
-                                client.session_attachment_uri(id, &attachment.name)
-                            }
-                            OpenTarget::Workflow(id) => {
-                                client.workflow_attachment_uri(id, &attachment.name)
-                            }
-                        };
-                        let target_changed =
-                            core.lock().open.as_ref().is_none_or(|open| open != &target);
-                        if target_changed {
-                            let _ = match &target {
-                                OpenTarget::Session(id) => {
-                                    client.delete_session_attachment(id, &attachment.name).await
-                                }
-                                OpenTarget::Workflow(id) => {
-                                    client
-                                        .delete_workflow_attachment(id, &attachment.name)
-                                        .await
-                                }
-                            };
-                            return;
-                        }
-                        let mut core = core.lock();
-                        if core.side_panel == Some(SidePanel::Attachments) {
-                            core.view.detail.attachments.insert(0, attachment.clone());
-                        }
-                        core.composer_attachments.push(PendingAttachment {
-                            block: ContentBlock::ResourceLink {
-                                uri,
-                                name: name.clone(),
-                                mime_type: None,
-                                title: None,
-                                description: None,
-                            },
-                            label: name,
-                            remote_name: attachment.name,
-                        });
-                    }
-                    Err(error) => core.lock().error(format!("上传附件失败：{error}")),
-                }
+            let id = next_attachment_id();
+            self.with_core(|core| {
+                core.composer_attachments.push(PendingAttachment {
+                    id,
+                    label: name,
+                    mime_type: None,
+                    source: AttachmentSource::Path(path.clone()),
+                    status: PendingAttachmentStatus::Uploading { abort: None },
+                });
             });
+            self.start_pending_attachment_upload(id);
         }
         cx.notify();
     }
@@ -1476,7 +1431,7 @@ impl AmuxApp {
             (ix < core.composer_attachments.len()).then(|| core.composer_attachments.remove(ix))
         });
         if let Some(attachment) = removed {
-            self.delete_pending_attachment(attachment.remote_name);
+            self.cleanup_removed_attachment(attachment);
         }
         cx.notify();
     }
@@ -1484,7 +1439,7 @@ impl AmuxApp {
     pub fn clear_attachments(&mut self, cx: &mut Context<Self>) {
         let attachments = self.with_core(|core| std::mem::take(&mut core.composer_attachments));
         for attachment in attachments {
-            self.delete_pending_attachment(attachment.remote_name);
+            self.cleanup_removed_attachment(attachment);
         }
         cx.notify();
     }
@@ -1506,7 +1461,7 @@ impl AmuxApp {
                     self.upload_composer_attachment(
                         format!("clipboard.{extension}"),
                         image.bytes.to_vec(),
-                        Some(mime_type),
+                        mime_type,
                     );
                     attached = true;
                 }
@@ -1523,81 +1478,174 @@ impl AmuxApp {
         }
     }
 
-    fn upload_composer_attachment(
-        &mut self,
-        filename: String,
-        bytes: Vec<u8>,
-        mime_type: Option<String>,
-    ) {
+    fn upload_composer_attachment(&mut self, filename: String, bytes: Vec<u8>, mime_type: String) {
         if bytes.len() > 20 * 1024 * 1024 {
             self.with_core(|core| core.warning(format!("附件「{filename}」超过 20 MB")));
             return;
         }
-        let target = self.with_core(|core| core.open.clone());
-        let client = self.with_core(|core| core.client.clone());
-        let (Some(target), Some(client)) = (target, client) else {
+        let id = next_attachment_id();
+        self.with_core(|core| {
+            core.composer_attachments.push(PendingAttachment {
+                id,
+                label: filename,
+                mime_type: Some(mime_type),
+                source: AttachmentSource::Bytes(Arc::from(bytes)),
+                status: PendingAttachmentStatus::Uploading { abort: None },
+            });
+        });
+        self.start_pending_attachment_upload(id);
+    }
+
+    fn start_pending_attachment_upload(&mut self, id: u64) {
+        let (attachment, target, client) = self.with_core(|core| {
+            (
+                core.composer_attachments
+                    .iter()
+                    .find(|attachment| attachment.id == id)
+                    .cloned(),
+                core.open.clone(),
+                core.client.clone(),
+            )
+        });
+        let (Some(attachment), Some(target), Some(client)) = (attachment, target, client) else {
             self.with_core(|core| core.warning("请先打开会话"));
             return;
         };
         let core = Arc::clone(&self.core);
-        self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(async move {
+            let bytes = match attachment.source {
+                AttachmentSource::Path(path) => match tokio::fs::read(&path).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        update_attachment_status(
+                            &core,
+                            id,
+                            PendingAttachmentStatus::Failed(format!("读取文件失败：{error}")),
+                        );
+                        return;
+                    }
+                },
+                AttachmentSource::Bytes(bytes) => bytes.to_vec(),
+            };
             let result = match &target {
                 OpenTarget::Session(id) => {
-                    client.upload_session_attachment(id, &filename, bytes).await
+                    client
+                        .upload_session_attachment(id, &attachment.label, bytes)
+                        .await
                 }
                 OpenTarget::Workflow(id) => {
                     client
-                        .upload_workflow_attachment(id, &filename, bytes)
+                        .upload_workflow_attachment(id, &attachment.label, bytes)
                         .await
                 }
             };
             match result {
-                Ok(attachment) => {
+                Ok(uploaded) => {
                     let uri = match &target {
                         OpenTarget::Session(id) => {
-                            client.session_attachment_uri(id, &attachment.name)
+                            client.session_attachment_uri(id, &uploaded.name)
                         }
                         OpenTarget::Workflow(id) => {
-                            client.workflow_attachment_uri(id, &attachment.name)
+                            client.workflow_attachment_uri(id, &uploaded.name)
                         }
                     };
-                    let target_changed =
-                        core.lock().open.as_ref().is_none_or(|open| open != &target);
-                    if target_changed {
+                    if core.lock().open.as_ref() != Some(&target) {
                         let _ = match &target {
                             OpenTarget::Session(id) => {
-                                client.delete_session_attachment(id, &attachment.name).await
+                                client.delete_session_attachment(id, &uploaded.name).await
                             }
                             OpenTarget::Workflow(id) => {
-                                client
-                                    .delete_workflow_attachment(id, &attachment.name)
-                                    .await
+                                client.delete_workflow_attachment(id, &uploaded.name).await
+                            }
+                        };
+                        core.lock()
+                            .composer_attachments
+                            .retain(|attachment| attachment.id != id);
+                        return;
+                    }
+                    if !core
+                        .lock()
+                        .composer_attachments
+                        .iter()
+                        .any(|attachment| attachment.id == id)
+                    {
+                        let _ = match &target {
+                            OpenTarget::Session(id) => {
+                                client.delete_session_attachment(id, &uploaded.name).await
+                            }
+                            OpenTarget::Workflow(id) => {
+                                client.delete_workflow_attachment(id, &uploaded.name).await
                             }
                         };
                         return;
                     }
                     let mut core = core.lock();
                     if core.side_panel == Some(SidePanel::Attachments) {
-                        core.view.detail.attachments.insert(0, attachment.clone());
+                        core.view.detail.attachments.insert(0, uploaded.clone());
                     }
-                    core.composer_attachments.push(PendingAttachment {
-                        block: ContentBlock::ResourceLink {
-                            uri,
-                            name: filename.clone(),
-                            mime_type,
-                            title: None,
-                            description: None,
-                        },
-                        label: filename,
-                        remote_name: attachment.name,
-                    });
+                    if let Some(attachment) = core
+                        .composer_attachments
+                        .iter_mut()
+                        .find(|attachment| attachment.id == id)
+                    {
+                        attachment.status = PendingAttachmentStatus::Uploaded {
+                            block: ContentBlock::ResourceLink {
+                                uri,
+                                name: attachment.label.clone(),
+                                mime_type: attachment.mime_type.clone(),
+                                title: None,
+                                description: None,
+                            },
+                            remote_name: uploaded.name,
+                        };
+                    }
                 }
-                Err(error) => core.lock().error(format!("上传附件失败：{error}")),
+                Err(error) => {
+                    update_attachment_status(&core, id, PendingAttachmentStatus::Failed(error))
+                }
+            }
+        });
+        let abort = handle.abort_handle();
+        drop(handle);
+        self.with_core(|core| {
+            if let Some(attachment) = core
+                .composer_attachments
+                .iter_mut()
+                .find(|attachment| attachment.id == id)
+            {
+                if matches!(attachment.status, PendingAttachmentStatus::Uploading { .. }) {
+                    attachment.status = PendingAttachmentStatus::Uploading { abort: Some(abort) };
+                }
             }
         });
     }
 
-    fn delete_pending_attachment(&self, name: String) {
+    pub fn retry_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.with_core(|core| {
+            if let Some(attachment) = core
+                .composer_attachments
+                .iter_mut()
+                .find(|attachment| attachment.id == id)
+            {
+                attachment.status = PendingAttachmentStatus::Uploading { abort: None };
+            }
+        });
+        self.start_pending_attachment_upload(id);
+        cx.notify();
+    }
+
+    fn cleanup_removed_attachment(&self, attachment: PendingAttachment) {
+        match attachment.status {
+            PendingAttachmentStatus::Uploading { abort: Some(abort) } => abort.abort(),
+            PendingAttachmentStatus::Uploaded { remote_name, .. } => {
+                self.delete_uploaded_attachment(remote_name)
+            }
+            PendingAttachmentStatus::Uploading { abort: None }
+            | PendingAttachmentStatus::Failed(_) => {}
+        }
+    }
+
+    fn delete_uploaded_attachment(&self, name: String) {
         if name.is_empty() {
             return;
         }
@@ -2087,8 +2135,13 @@ impl AmuxApp {
                         .detail
                         .attachments
                         .retain(|item| item.name != name);
-                    core.composer_attachments
-                        .retain(|item| item.remote_name != name);
+                    core.composer_attachments.retain(|item| {
+                        !matches!(
+                            &item.status,
+                            PendingAttachmentStatus::Uploaded { remote_name, .. }
+                                if remote_name == &name
+                        )
+                    });
                 }
                 Err(error) => core.lock().error(format!("删除附件失败：{error}")),
             }
@@ -2125,7 +2178,7 @@ impl AmuxApp {
                             }
                             core.view.detail.attachments.clear();
                             core.view.detail.attachments_has_more = false;
-                            core.composer_attachments.clear();
+                            clear_composer_attachments(&mut core);
                         }
                         Err(error) => core.lock().error(format!("删除全部附件失败：{error}")),
                     }
@@ -3685,6 +3738,17 @@ fn toggle_set<T: std::hash::Hash + Eq>(set: &mut HashSet<T>, value: T) {
 }
 
 /// 将文件树宽度限制在面板可容纳的左右最小宽度之间。
+fn update_attachment_status(core: &SharedCore, id: u64, status: PendingAttachmentStatus) {
+    if let Some(attachment) = core
+        .lock()
+        .composer_attachments
+        .iter_mut()
+        .find(|attachment| attachment.id == id)
+    {
+        attachment.status = status;
+    }
+}
+
 fn tree_width(width: f32, panel_width: f32) -> f32 {
     let min = panels::TREE_MIN_WIDTH.min(panel_width / 2.0);
     let max = (panel_width - min - panels::TREE_RESIZE_HANDLE_WIDTH).max(min);
