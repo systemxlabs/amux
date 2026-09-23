@@ -247,8 +247,8 @@ impl WorkflowService {
 
     /// 推送一条用户消息：运行中进 steer，空闲则起一轮调度。
     fn push_user(self: &Arc<Self>, workflow_id: &str, content: Vec<ContentBlock>) {
-        // 编排对话只承载文本，非文本块不进模型上下文
-        let text = blocks_text(&content);
+        // 用户消息按 ACP ContentBlock 全部进入模型上下文，不丢弃资源链接等非文本块
+        let text = content_to_text(&content);
         let mut runs = self.runs.lock();
         let state = runs.entry(workflow_id.to_string()).or_default();
         if state.history.is_empty() {
@@ -458,7 +458,7 @@ impl WorkflowService {
                 }
                 TranscriptLine::User { content, .. } => {
                     settle_turn(&mut messages, &mut thinking, &mut calls);
-                    messages.push(Message::user(blocks_text(&content)));
+                    messages.push(Message::user(content_to_text(&content)));
                 }
                 TranscriptLine::Agent { content, .. } => {
                     let text = blocks_text(&content);
@@ -719,11 +719,8 @@ impl WorkflowTools {
             "prompt_session" => {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
-                let prompt = string_arg(&arguments, "prompt")?;
-                services
-                    .sessions
-                    .prompt(&session_id, vec![ContentBlock::Text { text: prompt }])
-                    .await?;
+                let input = prompt_session_input(&arguments)?;
+                services.sessions.prompt(&session_id, input).await?;
                 Ok(format!("已向 {session_id} 下发指令"))
             }
             "cancel_session" => {
@@ -788,6 +785,18 @@ fn parse_arguments(parameters: &str) -> serde_json::Value {
     serde_json::from_str(parameters).unwrap_or_default()
 }
 
+/// 解析 `prompt_session` 的指令参数：优先 `content`（ACP ContentBlock 数组），否则退回 `prompt` 文本。
+fn prompt_session_input(arguments: &serde_json::Value) -> Result<Vec<ContentBlock>, String> {
+    if let Some(content) = arguments.get("content") {
+        serde_json::from_value(content.clone())
+            .map_err(|error| format!("content 不是有效的 ACP ContentBlock 数组: {error}"))
+    } else {
+        Ok(vec![ContentBlock::Text {
+            text: string_arg(arguments, "prompt")?,
+        }])
+    }
+}
+
 fn string_arg(arguments: &serde_json::Value, key: &str) -> Result<String, String> {
     arguments
         .get(key)
@@ -845,14 +854,20 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "prompt_session".into(),
-            description: "向指定关联普通会话下发指令".into(),
+            description: "向指定关联普通会话下发指令，支持 ACP ContentBlock 数组".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "session": string("关联普通会话 id"),
-                    "prompt": string("指令内容")
+                    "content": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "description": "ACP ContentBlock 数组（Text、ResourceLink 等）；与 prompt 二选一，提供时优先"
+                    },
+                    "prompt": string("指令文本；未提供 content 时使用")
                 },
-                "required": ["session", "prompt"]
+                "required": ["session"],
+                "anyOf": [{ "required": ["content"] }, { "required": ["prompt"] }]
             }),
         },
         ToolDefinition {
@@ -1050,6 +1065,19 @@ fn blocks_text(content: &[ContentBlock]) -> String {
         .collect()
 }
 
+/// 用户内容块转模型可见文本：文本块原样输出，非文本块以 JSON 呈现，不丢弃任何内容块。
+fn content_to_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.clone(),
+            other => serde_json::to_string(other)
+                .unwrap_or_else(|error| format!("[无法序列化内容块: {error}]")),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn append_line(path: &PathBuf, value: &impl serde::Serialize) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1121,6 +1149,64 @@ mod tests {
         assert_eq!(
             page_arg(&serde_json::json!({ "limit": "x" })),
             (PAGE_LIMIT, 0)
+        );
+    }
+
+    #[test]
+    fn content_to_text_keeps_all_blocks() {
+        let text = content_to_text(&[
+            ContentBlock::Text {
+                text: "看看这个".into(),
+            },
+            ContentBlock::ResourceLink {
+                uri: "file:///dir/a.rs".into(),
+                name: "a.rs".into(),
+                mime_type: None,
+                title: None,
+                description: None,
+            },
+        ]);
+        assert!(text.contains("看看这个"), "文本块被丢弃: {text}");
+        assert!(
+            text.contains("file:///dir/a.rs"),
+            "ResourceLink 被丢弃: {text}"
+        );
+        assert!(text.contains("a.rs"), "ResourceLink name 被丢弃: {text}");
+    }
+
+    #[test]
+    fn prompt_session_input_accepts_content_blocks_or_text() {
+        assert_eq!(
+            prompt_session_input(&serde_json::json!({ "prompt": "跑测试" })).unwrap(),
+            vec![ContentBlock::Text {
+                text: "跑测试".into(),
+            }]
+        );
+        let blocks = prompt_session_input(&serde_json::json!({
+            "content": [
+                { "type": "text", "text": "看附件" },
+                { "type": "resource_link", "uri": "file:///dir/a.rs", "name": "a.rs" },
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            blocks,
+            vec![
+                ContentBlock::Text {
+                    text: "看附件".into(),
+                },
+                ContentBlock::ResourceLink {
+                    uri: "file:///dir/a.rs".into(),
+                    name: "a.rs".into(),
+                    mime_type: None,
+                    title: None,
+                    description: None,
+                },
+            ]
+        );
+        assert!(
+            prompt_session_input(&serde_json::json!({ "content": { "type": "text" } })).is_err(),
+            "content 不是数组时应报错"
         );
     }
 
