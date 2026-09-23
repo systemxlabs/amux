@@ -88,6 +88,11 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/terminals/<terminal_id>` | SSE 流式输出指定终端输出内容 |
 | DELETE `/sessions/<session_id>/terminals/<terminal_id>` | 关闭指定终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>/resize` | 调整指定终端窗口大小 |
+| GET `/sessions/<session_id>/attachments` | 分页获取附件列表 |
+| POST `/sessions/<session_id>/attachments` | 上传一个附件 |
+| DELETE `/sessions/<session_id>/attachments` | 删除会话所有附件 |
+| GET `/sessions/<session_id>/attachments/<attachment_name>` | 下载指定附件，无鉴权 |
+| DELETE `/sessions/<session_id>/attachments/<attachment_name>` | 删除指定附件 |
 | POST `/workflows` | 新建一个工作流会话 |
 | GET `/workflows` | 分页查询工作流会话列表，可指定项目，结果包含关联普通会话 |
 | GET `/workflows/<workflow_id>` | 查询指定工作流会话 |
@@ -97,6 +102,11 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/workflows/<workflow_id>/history` | 分页查询指定工作流会话的对话历史 |
 | GET `/workflows/<workflow_id>/activities` | 分页查询指定工作流会话的活动历史 |
 | GET `/workflows/<workflow_id>/ongoing_activity` | 查询指定工作流会话正在进行中的活动 |
+| GET `/workflows/<workflow_id>/attachments` | 分页获取附件列表 |
+| POST `/workflows/<workflow_id>/attachments` | 上传一个附件 |
+| DELETE `/workflows/<workflow_id>/attachments` | 删除会话所有附件 |
+| GET `/workflows/<workflow_id>/attachments/<attachment_name>` | 下载指定附件，无鉴权 |
+| DELETE `/workflows/<workflow_id>/attachments/<attachment_name>` | 删除指定附件 |
 | GET `/config/skills/` | 查询所有配置的技能 |
 | PUT `/config/skills/` | 全量更新所有技能 |
 | GET `/config/workflows/` | 查询所有配置的工作流计划 |
@@ -244,6 +254,7 @@ Server 启动和关闭由用户手动执行，启动参数包括
 - `--port`: 监听端口，默认为 `34567`
 - `--token`：认证 token，必传
 - `--web`：web 静态文件目录，未传则静态资源请求返回 404
+- `--public-url`: 公共地址，未传则附件上传下载返回 503
 
 Server 的 WebSocket 监听地址为 `ws://<host>:<port>/daemon`。
 
@@ -527,6 +538,12 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
+### 附件存储
+
+普通会话附件存储在 `~/.amux/sessions/<session_id>/attachments/` 目录下，工作流会话附件存储在 `~/.amux/workflows/<workflow_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`。
+
+会话删除时，删除其对应的所有附件。
+
 ## 应用
 
 ### 新建会话视图
@@ -558,6 +575,8 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 - 快捷指令、会话选项和斜杠命令在视图打开时获取一次，不定时刷新
 
 对话滚动机制：按滚动位置计算应展示的页并拉取，预取上下相邻两页缓冲。页大小随面板可视高度自适应调整。
+
+附件均不直接内联到提示词中，而是上传至 Server，返回附件公共 URI，将其作为 Resource Link 加到提示词中，单个附件最大不得超过 20 MB
 
 ### 活动视图
 
