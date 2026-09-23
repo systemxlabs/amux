@@ -19,7 +19,7 @@ amux-common.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "time", "sync"] }
 reqwest.workspace = true
 futures-util.workspace = true
 parking_lot.workspace = true

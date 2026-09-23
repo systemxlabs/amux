@@ -5,6 +5,8 @@
 import type {
   ActivitiesPage,
   Agent,
+  Attachment,
+  AttachmentList,
   ConfigOptions,
   ConfigureSessionRequest,
   ContextInfo,
@@ -206,6 +208,26 @@ export class ApiClient {
     return this.getJson(`/sessions/${encodeURIComponent(id)}/diff`);
   }
 
+  sessionAttachments(id: string, limit: number, offset: number): Promise<AttachmentList> {
+    return this.getJson(
+      `/sessions/${encodeURIComponent(id)}/attachments?${query({ limit: clamp(limit), offset })}`,
+    );
+  }
+
+  uploadSessionAttachment(id: string, file: File): Promise<Attachment> {
+    return this.uploadAttachment(`/sessions/${encodeURIComponent(id)}/attachments`, file);
+  }
+
+  deleteSessionAttachment(id: string, name: string): Promise<void> {
+    return this.delete(
+      `/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
+    );
+  }
+
+  deleteSessionAttachments(id: string): Promise<void> {
+    return this.delete(`/sessions/${encodeURIComponent(id)}/attachments`);
+  }
+
   // ---------- 终端 ----------
 
   async openTerminal(id: string, cwd: string | null, cols: number, rows: number): Promise<string> {
@@ -317,6 +339,26 @@ export class ApiClient {
     return response.activity ?? null;
   }
 
+  workflowAttachments(id: string, limit: number, offset: number): Promise<AttachmentList> {
+    return this.getJson(
+      `/workflows/${encodeURIComponent(id)}/attachments?${query({ limit: clamp(limit), offset })}`,
+    );
+  }
+
+  uploadWorkflowAttachment(id: string, file: File): Promise<Attachment> {
+    return this.uploadAttachment(`/workflows/${encodeURIComponent(id)}/attachments`, file);
+  }
+
+  deleteWorkflowAttachment(id: string, name: string): Promise<void> {
+    return this.delete(
+      `/workflows/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
+    );
+  }
+
+  deleteWorkflowAttachments(id: string): Promise<void> {
+    return this.delete(`/workflows/${encodeURIComponent(id)}/attachments`);
+  }
+
   // ---------- 配置 ----------
 
   projects(): Promise<Project[]> {
@@ -426,6 +468,16 @@ export class ApiClient {
 
   private async delete(path: string): Promise<void> {
     await decode<OpAck>(await this.send(path, { method: "DELETE" }));
+  }
+
+  private async uploadAttachment(path: string, file: File): Promise<Attachment> {
+    return decode<Attachment>(
+      await this.send(`${path}?${query({ filename: file.name })}`, {
+        method: "POST",
+        headers: { "content-type": file.type || "application/octet-stream" },
+        body: file,
+      }),
+    );
   }
 }
 

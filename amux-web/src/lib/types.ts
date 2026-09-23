@@ -163,6 +163,14 @@ export type Terminal = {
 };
 export type TerminalOutput = { data: string; nextCursor: number; truncated?: boolean };
 
+export type Attachment = {
+  name: string;
+  uri: string;
+  size: number;
+  createdAt: number;
+};
+export type AttachmentList = { attachments: Attachment[]; hasMore: boolean };
+
 export type Workflow = {
   id: string;
   title: string;

@@ -5,6 +5,7 @@
 
 import { useCoreState } from "../../core/store";
 import { ActivitiesPanel } from "./ActivitiesPanel";
+import { AttachmentsPanel } from "./AttachmentsPanel";
 import { DetailsPanel } from "./DetailsPanel";
 import { DiffPanel } from "./DiffPanel";
 import { PlanPanel } from "./PlanPanel";
@@ -27,6 +28,8 @@ export function SidePanelView() {
         return <DetailsPanel />;
       case "activities":
         return <ActivitiesPanel />;
+      case "attachments":
+        return <AttachmentsPanel />;
       case "plan":
         return <PlanPanel />;
       case "terminal":

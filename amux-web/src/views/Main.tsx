@@ -15,6 +15,7 @@ import {
   Info,
   ListTodo,
   Menu,
+  Paperclip,
   Settings as SettingsIcon,
   SquareTerminal,
   X,
@@ -83,6 +84,7 @@ export function Main() {
     { panel: "diff", label: "改动审查", icon: FileDiff },
     { panel: "details", label: "会话详情", icon: Info },
     { panel: "activities", label: "会话活动", icon: ActivityIcon },
+    { panel: "attachments", label: "附件", icon: Paperclip },
     { panel: "plan", label: "会话计划", icon: ListTodo },
     { panel: "terminal", label: "终端", icon: SquareTerminal },
   ];

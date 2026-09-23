@@ -958,10 +958,11 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let danger = theme.danger;
     let transparent = gpui::transparent_black();
-    let attachment_count = this.attachments.len();
+    let pending_attachments = this.with_core(|core| core.composer_attachments.clone());
+    let attachment_count = pending_attachments.len();
 
     let mut chips = h_flex().flex_wrap().gap_1();
-    for (index, attachment) in this.attachments.iter().enumerate() {
+    for (index, attachment) in pending_attachments.iter().enumerate() {
         let label = attachment.label.clone();
         chips = chips.child(
             div()

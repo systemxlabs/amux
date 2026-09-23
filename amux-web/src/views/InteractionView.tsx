@@ -330,7 +330,7 @@ export function InteractionView() {
           <div className="mb-2 flex flex-wrap gap-1">
             {state.attachments.map((attachment, index) => (
               <span
-                key={`${attachment.label}-${index}`}
+                key={attachment.remoteName}
                 data-slot="attachment-chip"
                 className="flex items-center gap-1 rounded-sm bg-muted px-2 py-0.5 text-xs"
               >
@@ -339,7 +339,7 @@ export function InteractionView() {
                   type="button"
                   aria-label="移除附件"
                   className="-my-1 px-1 py-1 text-sm leading-none lg:my-0 lg:text-xs"
-                  onClick={() => removeAttachment(core, index)}
+                  onClick={() => void removeAttachment(core, index)}
                 >
                   ×
                 </button>

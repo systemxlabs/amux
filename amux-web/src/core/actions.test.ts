@@ -14,6 +14,7 @@ import type {
   WorkflowList,
 } from "../lib/types";
 import {
+  addFiles,
   cancelOpen,
   createWorkflow,
   deleteRecentWorkspace,
@@ -55,6 +56,34 @@ function workflow(): Workflow {
 
 const sessionEntry: ListEntry = { kind: "session", session: session() };
 const workflowEntry: ListEntry = { kind: "workflow", workflow: workflow() };
+
+it("附件上传成功后以待发送 ResourceLink 保存，不再内联文件内容", async () => {
+  const core = new Core();
+  core.state.open = { kind: "session", id: "s1" };
+  core.client = {
+    uploadSessionAttachment: async () => ({
+      name: "uuid.txt",
+      uri: "https://amux.example.com/sessions/s1/attachments/uuid.txt",
+      size: 5,
+      createdAt: 1,
+    }),
+  } as unknown as ApiClient;
+
+  await addFiles(core, [new File(["hello"], "note.txt", { type: "text/plain" })]);
+
+  expect(core.state.attachments).toEqual([
+    {
+      block: {
+        type: "resource_link",
+        uri: "https://amux.example.com/sessions/s1/attachments/uuid.txt",
+        name: "note.txt",
+        mimeType: "text/plain",
+      },
+      label: "note.txt",
+      remoteName: "uuid.txt",
+    },
+  ]);
+});
 
 it("删除项目时同步移除其快捷指令", async () => {
   const core = new Core();
@@ -236,7 +265,13 @@ describe("sendPrompt", () => {
 
   function withAttachments(core: Core): void {
     core.update((state) => {
-      state.attachments = [{ block: { type: "text", text: "draft.txt" }, label: "draft.txt" }];
+      state.attachments = [
+        {
+          block: { type: "text", text: "draft.txt" },
+          label: "draft.txt",
+          remoteName: "remote.txt",
+        },
+      ];
     });
   }
 

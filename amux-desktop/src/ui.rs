@@ -111,13 +111,14 @@ pub fn truncate(text: &str, max_chars: usize) -> String {
     out.replace('\n', " ")
 }
 
-/// 内容块列表 → 文本；非文本块忽略，多个文本块以换行分隔。
+/// 内容块列表 → 文本；附件显示为名称，多个内容块以换行分隔。
 pub fn blocks_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.clone()),
-            _ => None,
+            ContentBlock::ResourceLink { name, .. } => Some(format!("[附件 {name}]")),
+            ContentBlock::Resource { uri, .. } => uri.as_ref().map(|uri| format!("[附件 {uri}]")),
         })
         .collect::<Vec<_>>()
         .join("\n")

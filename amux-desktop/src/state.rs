@@ -245,6 +245,9 @@ pub const MAX_PAGE_SIZE: usize = 200;
 pub struct SessionView {
     pub history: Vec<HistoryItem>,
     pub activities: Vec<Activity>,
+    pub attachments: Vec<Attachment>,
+    pub attachments_has_more: bool,
+    pub attachments_loading: bool,
     pub plan: Vec<SessionPlanEntry>,
     pub config_options: Vec<SessionConfigOption>,
     pub slash_commands: Vec<SlashCommand>,
@@ -319,10 +322,12 @@ pub fn matching_prefix(entries: Vec<FsEntry>, prefix: &str) -> Vec<FsEntry> {
 
 /// 待发送附件：拖拽或粘贴得到的文件/图片，随消息一并作为内容块发送。
 #[derive(Debug, Clone)]
-pub struct Attachment {
+pub struct PendingAttachment {
     pub block: ContentBlock,
     /// 输入区展示用的短标签
     pub label: String,
+    /// Server 附件名；用于移除尚未发送的附件
+    pub remote_name: String,
 }
 
 /// 右侧面板分类（PRD 右侧面板）。
@@ -332,16 +337,18 @@ pub enum SidePanel {
     Diff,
     Detail,
     Activities,
+    Attachments,
     Plan,
     Terminal,
 }
 
 impl SidePanel {
-    pub const ALL: [SidePanel; 6] = [
+    pub const ALL: [SidePanel; 7] = [
         SidePanel::Workspace,
         SidePanel::Diff,
         SidePanel::Detail,
         SidePanel::Activities,
+        SidePanel::Attachments,
         SidePanel::Plan,
         SidePanel::Terminal,
     ];
@@ -355,7 +362,11 @@ impl SidePanel {
     }
 
     pub fn is_available(self, is_workflow: bool) -> bool {
-        !is_workflow || matches!(self, SidePanel::Detail | SidePanel::Activities)
+        !is_workflow
+            || matches!(
+                self,
+                SidePanel::Detail | SidePanel::Activities | SidePanel::Attachments
+            )
     }
 
     pub fn label(self) -> &'static str {
@@ -364,6 +375,7 @@ impl SidePanel {
             SidePanel::Diff => "文件改动",
             SidePanel::Detail => "会话详情",
             SidePanel::Activities => "会话活动",
+            SidePanel::Attachments => "附件",
             SidePanel::Plan => "会话计划",
             SidePanel::Terminal => "终端",
         }
@@ -376,6 +388,7 @@ impl SidePanel {
             SidePanel::Diff => "改动",
             SidePanel::Detail => "详情",
             SidePanel::Activities => "活动",
+            SidePanel::Attachments => "附件",
             SidePanel::Plan => "计划",
             SidePanel::Terminal => "终端",
         }
@@ -388,6 +401,7 @@ impl SidePanel {
             SidePanel::Diff => 560.0,
             SidePanel::Detail => 360.0,
             SidePanel::Activities => 400.0,
+            SidePanel::Attachments => 400.0,
             SidePanel::Plan => 360.0,
             SidePanel::Terminal => 560.0,
         }
@@ -486,6 +500,8 @@ pub struct Core {
     pub collapsed_project_groups: HashSet<String>,
     pub new_session: NewSessionForm,
     pub recent_workspaces: Vec<RecentWorkspace>,
+    /// 输入区待发送附件
+    pub composer_attachments: Vec<PendingAttachment>,
     pub open: Option<OpenTarget>,
     pub view: OpenView,
     pub settings_open: bool,
@@ -523,6 +539,7 @@ impl Default for Core {
             collapsed_project_groups: HashSet::new(),
             new_session: NewSessionForm::default(),
             recent_workspaces: Vec::new(),
+            composer_attachments: Vec::new(),
             open: None,
             view: OpenView::default(),
             settings_open: false,

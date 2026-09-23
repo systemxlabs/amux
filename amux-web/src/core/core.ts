@@ -7,6 +7,7 @@ import { clearToken } from "../lib/token";
 import type {
   Activity,
   Agent,
+  Attachment,
   ContentBlock,
   FsEntry,
   HistoryItem,
@@ -34,7 +35,14 @@ export type ConnectionStatus = "connecting" | "offline" | "failed" | "online";
 export type MiddleView = "new" | "interaction";
 
 /** 右侧面板。 */
-export type SidePanel = "workspace" | "diff" | "details" | "activities" | "plan" | "terminal";
+export type SidePanel =
+  | "workspace"
+  | "diff"
+  | "details"
+  | "activities"
+  | "attachments"
+  | "plan"
+  | "terminal";
 
 /** 仅普通会话有的右侧面板（docs/PRD.md「主页面」）。 */
 const SESSION_ONLY_PANELS: readonly SidePanel[] = ["workspace", "diff", "plan", "terminal"];
@@ -46,8 +54,12 @@ export function panelAvailable(panel: SidePanel, target: OpenTarget): boolean {
 
 export type Notice = { kind: "success" | "error"; text: string };
 
-/** 待发送附件（拖拽或粘贴得到）。 */
-export type Attachment = { block: ContentBlock; label: string };
+/** 待发送附件（已上传到 Server，发送时使用其公共 URI）。 */
+export type PendingAttachment = {
+  block: ContentBlock;
+  label: string;
+  remoteName: string;
+};
 
 /** 新建会话视图状态（docs/PRD.md「新建会话视图」）。 */
 export type NewSessionState = {
@@ -125,6 +137,9 @@ export type DetailState = {
   configOptions: SessionConfigOption[];
   slashCommands: SlashCommand[];
   ongoing: Activity | null;
+  attachments: Attachment[];
+  attachmentsHasMore: boolean;
+  attachmentsLoading: boolean;
   contextSize: number;
   contextWindowSize: number;
   terminals: Terminal[];
@@ -153,7 +168,7 @@ export type CoreState = {
   newSession: NewSessionState;
   settings: SettingsState;
   recentWorkspaces: RecentWorkspace[];
-  attachments: Attachment[];
+  attachments: PendingAttachment[];
 };
 
 export function initialDetail(): DetailState {
@@ -168,6 +183,9 @@ export function initialDetail(): DetailState {
     configOptions: [],
     slashCommands: [],
     ongoing: null,
+    attachments: [],
+    attachmentsHasMore: false,
+    attachmentsLoading: false,
     contextSize: 0,
     contextWindowSize: 0,
     terminals: [],

@@ -19,7 +19,7 @@ import type {
 } from "../lib/types";
 import { entryTitle, rootDir } from "../lib/types";
 import { initialNewSession, panelAvailable } from "./core";
-import type { Attachment, Core, SidePanel } from "./core";
+import type { Core, PendingAttachment, SidePanel } from "./core";
 import {
   refreshHistory,
   refreshInteraction,
@@ -158,10 +158,12 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
 /** 切换右侧面板（再次点击收起）。 */
 export function toggleSidePanel(core: Core, panel: SidePanel): void {
   let opened = false;
+  let openedPanel: SidePanel | null = null;
   core.update((state) => {
     const next = state.sidePanel === panel ? null : panel;
     state.sidePanel = next;
-    opened = next === "terminal";
+    opened = next === "terminal" || next === "attachments";
+    openedPanel = next;
     if (next === "terminal") {
       state.detail.terminalSeq += 1;
       state.detail.terminalChunks = [
@@ -173,7 +175,8 @@ export function toggleSidePanel(core: Core, panel: SidePanel): void {
   core.resetTicks();
   core.last.list = Date.now();
   // 终端视图打开时从 Server 拉取一次终端列表（docs/DESIGN.md「终端视图」）
-  if (opened) void refreshTerminalList(core);
+  if (opened && openedPanel === "terminal") void refreshTerminalList(core);
+  if (opened && openedPanel === "attachments") void refreshAttachments(core);
 }
 
 /** 删除会话（工作流会话连同关联普通会话，由 Server 级联）。 */
@@ -462,37 +465,174 @@ export async function updateWorkspaceInput(core: Core, text: string): Promise<vo
 
 // ---------- 会话交互 ----------
 
-/** 附件：图片按 blob（base64）发送，文本文件按 text 发送；uri 保留文件名供历史展示。 */
-export async function attachmentFromFile(file: File): Promise<Attachment> {
-  if (file.type.startsWith("image/")) {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    return {
-      block: { type: "resource", mimeType: file.type, uri: file.name, blob: encodeBase64(bytes) },
-      label: file.name,
-    };
-  }
-  return {
-    block: {
-      type: "resource",
-      mimeType: file.type || "text/plain",
-      uri: file.name,
-      text: await file.text(),
-    },
-    label: file.name,
-  };
-}
-
+/** 附件上传到 Server 后，以公共 URI 的 Resource Link 加入提示词。 */
 export async function addFiles(core: Core, files: FileList | File[]): Promise<void> {
-  const attachments = await Promise.all([...files].map(attachmentFromFile));
-  core.update((state) => {
-    state.attachments = [...state.attachments, ...attachments];
-  });
+  const target = core.state.open;
+  const client = core.client;
+  if (target === null || client === null) return;
+  for (const file of files) {
+    if (file.size > 20 * 1024 * 1024) {
+      core.failure(`附件「${file.name}」超过 20 MB`);
+      continue;
+    }
+    try {
+      const uploaded =
+        target.kind === "session"
+          ? await client.uploadSessionAttachment(target.id, file)
+          : await client.uploadWorkflowAttachment(target.id, file);
+      if (core.state.open?.kind !== target.kind || core.state.open.id !== target.id) {
+        if (target.kind === "session") {
+          await client.deleteSessionAttachment(target.id, uploaded.name);
+        } else {
+          await client.deleteWorkflowAttachment(target.id, uploaded.name);
+        }
+        continue;
+      }
+      const pending: PendingAttachment = {
+        block: {
+          type: "resource_link",
+          uri: uploaded.uri,
+          name: file.name,
+          mimeType: file.type || undefined,
+        },
+        label: file.name,
+        remoteName: uploaded.name,
+      };
+      core.update((state) => {
+        state.attachments = [...state.attachments, pending];
+      });
+      if (core.state.sidePanel === "attachments") {
+        void refreshAttachments(core);
+      }
+    } catch (error) {
+      core.failure(`上传附件失败：${messageOf(error)}`);
+    }
+  }
 }
 
-export function removeAttachment(core: Core, index: number): void {
+export async function removeAttachment(core: Core, index: number): Promise<void> {
+  const attachment = core.state.attachments[index];
+  const target = core.state.open;
+  if (attachment === undefined || target === null || core.client === null) return;
   core.update((state) => {
     state.attachments = state.attachments.filter((_, at) => at !== index);
   });
+  try {
+    if (target.kind === "session") {
+      await core.client.deleteSessionAttachment(target.id, attachment.remoteName);
+    } else {
+      await core.client.deleteWorkflowAttachment(target.id, attachment.remoteName);
+    }
+  } catch (error) {
+    core.failure(`删除附件失败：${messageOf(error)}`);
+  }
+}
+
+const ATTACHMENTS_PAGE_SIZE = 50;
+
+/** 会话附件面板打开时刷新第一页。 */
+export async function refreshAttachments(core: Core): Promise<void> {
+  const target = core.state.open;
+  const client = core.client;
+  if (target === null || client === null) return;
+  core.update((state) => {
+    state.detail.attachmentsLoading = true;
+  });
+  try {
+    const page =
+      target.kind === "session"
+        ? await client.sessionAttachments(target.id, ATTACHMENTS_PAGE_SIZE, 0)
+        : await client.workflowAttachments(target.id, ATTACHMENTS_PAGE_SIZE, 0);
+    core.update((state) => {
+      if (state.open?.kind !== target.kind || state.open.id !== target.id) return;
+      state.detail.attachments = page.attachments;
+      state.detail.attachmentsHasMore = page.hasMore;
+      state.detail.attachmentsLoading = false;
+    });
+  } catch (error) {
+    core.update((state) => {
+      state.detail.attachmentsLoading = false;
+    });
+    core.failure(`读取附件失败：${messageOf(error)}`);
+  }
+}
+
+/** 加载下一页附件。 */
+export async function loadMoreAttachments(core: Core): Promise<void> {
+  const target = core.state.open;
+  const client = core.client;
+  if (
+    target === null ||
+    client === null ||
+    core.state.detail.attachmentsLoading ||
+    !core.state.detail.attachmentsHasMore
+  ) {
+    return;
+  }
+  const offset = core.state.detail.attachments.length;
+  core.update((state) => {
+    state.detail.attachmentsLoading = true;
+  });
+  try {
+    const page =
+      target.kind === "session"
+        ? await client.sessionAttachments(target.id, ATTACHMENTS_PAGE_SIZE, offset)
+        : await client.workflowAttachments(target.id, ATTACHMENTS_PAGE_SIZE, offset);
+    core.update((state) => {
+      if (state.open?.kind !== target.kind || state.open.id !== target.id) return;
+      state.detail.attachments = [...state.detail.attachments, ...page.attachments];
+      state.detail.attachmentsHasMore = page.hasMore;
+      state.detail.attachmentsLoading = false;
+    });
+  } catch (error) {
+    core.update((state) => {
+      state.detail.attachmentsLoading = false;
+    });
+    core.failure(`加载更多附件失败：${messageOf(error)}`);
+  }
+}
+
+/** 删除一个已保存附件。 */
+export async function deleteAttachment(core: Core, name: string): Promise<void> {
+  const target = core.state.open;
+  const client = core.client;
+  if (target === null || client === null) return;
+  try {
+    if (target.kind === "session") {
+      await client.deleteSessionAttachment(target.id, name);
+    } else {
+      await client.deleteWorkflowAttachment(target.id, name);
+    }
+    core.update((state) => {
+      state.attachments = state.attachments.filter(
+        (attachment) => attachment.remoteName !== name,
+      );
+    });
+    await refreshAttachments(core);
+  } catch (error) {
+    core.failure(`删除附件失败：${messageOf(error)}`);
+  }
+}
+
+/** 删除当前会话全部附件。 */
+export async function deleteAllAttachments(core: Core): Promise<void> {
+  const target = core.state.open;
+  const client = core.client;
+  if (target === null || client === null) return;
+  try {
+    if (target.kind === "session") {
+      await client.deleteSessionAttachments(target.id);
+    } else {
+      await client.deleteWorkflowAttachments(target.id);
+    }
+    core.update((state) => {
+      state.detail.attachments = [];
+      state.detail.attachmentsHasMore = false;
+      state.attachments = [];
+    });
+  } catch (error) {
+    core.failure(`删除全部附件失败：${messageOf(error)}`);
+  }
 }
 
 /** 仅输入框发送会消费待发送附件。 */

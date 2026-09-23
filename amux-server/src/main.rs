@@ -5,6 +5,7 @@
 
 mod acp;
 mod api;
+mod attachments;
 mod config_store;
 mod events;
 mod frames;
@@ -28,6 +29,7 @@ use axum::response::{IntoResponse, Response};
 use clap::Parser;
 use tokio::sync::mpsc;
 
+use crate::attachments::AttachmentStore;
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
 use crate::sessions::SessionService;
@@ -57,6 +59,9 @@ struct Args {
     /// web 静态文件目录；未传则静态资源请求返回 404
     #[arg(long)]
     web: Option<String>,
+    /// 公共地址；未传则附件上传返回 503
+    #[arg(long)]
+    public_url: Option<String>,
 }
 
 #[tokio::main]
@@ -74,6 +79,7 @@ async fn run(args: Args) -> Result<(), String> {
     let store = Arc::new(Store::open(&home)?);
     let config = Arc::new(ConfigStore::new(home.clone()));
     let terminals = Arc::new(TerminalCache::new());
+    let attachments = Arc::new(AttachmentStore::new(home.clone()));
     let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
 
     let machines = MachineHub::new(
@@ -118,14 +124,16 @@ async fn run(args: Args) -> Result<(), String> {
         machines,
         sessions,
         workflows,
+        attachments,
+        public_url: args.public_url,
     });
     // 鉴权只对命中 API 路由的请求生效：浏览器加载页面时无法携带 Authorization 头，
     // 静态资源与未命中路径必须免鉴权，否则 Web 应用无法加载、
     // 未传 --web 时的 404 也会被鉴权中间件改写成 401（docs/DESIGN.md「Web 应用」）。
-    let api = api::router(Arc::clone(&state)).route_layer(middleware::from_fn_with_state(
-        Arc::clone(&state),
-        authorize,
-    ));
+    let authenticated = api::router(Arc::clone(&state)).route_layer(
+        middleware::from_fn_with_state(Arc::clone(&state), authorize),
+    );
+    let api = authenticated.merge(api::public_router(Arc::clone(&state)));
     let app = web::routes(api, args.web.as_deref());
 
     let listener = tokio::net::TcpListener::bind((args.host.as_str(), args.port))

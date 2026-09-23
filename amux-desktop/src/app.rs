@@ -34,8 +34,8 @@ use crate::poll;
 use crate::sessions;
 use crate::settings;
 use crate::state::{
-    matching_prefix, Attachment, ConnectionStatus, Core, DirectoryListing, ListEntry, OpenTarget,
-    Paging, SharedCore, SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
+    matching_prefix, ConnectionStatus, Core, DirectoryListing, ListEntry, OpenTarget, Paging,
+    PendingAttachment, SharedCore, SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
 };
 use crate::terminal_view;
 use crate::theme::SIDEBAR_WIDTH;
@@ -115,8 +115,6 @@ pub struct AmuxApp {
     pub terminal_focus: FocusHandle,
     /// 当前终端 SSE 连接与任务；视图关闭或终端切换时 abort。
     terminal_stream: Option<(TerminalStreamKey, tokio::task::JoinHandle<()>)>,
-    /// 待发送附件（拖拽/粘贴产生）
-    pub attachments: Vec<Attachment>,
     /// 斜杠命令上拉框中高亮项
     pub slash_selected: usize,
     /// 斜杠命令上拉框是否被 Esc 收起
@@ -146,6 +144,8 @@ pub struct AmuxApp {
     pub dialog_scroll_on_entry: bool,
     /// 活动历史滚动句柄
     pub activities_scroll: ScrollHandle,
+    /// 附件列表滚动句柄
+    pub attachments_scroll: ScrollHandle,
     /// 活动视图打开时是否尚需贴到最新一条（进入时默认滚动到底部）
     pub activities_scroll_on_entry: bool,
     /// 计划面板滚动句柄
@@ -262,7 +262,7 @@ impl AmuxApp {
                 .update_in(cx, |this, window, cx| {
                     this.sync_view_data();
                     this.sync_terminal_stream();
-                    this.sync_paging();
+                    this.sync_paging(cx);
                     this.sync_orchestrator_form(window, cx);
                     this.flush_notes(window, cx);
                     cx.notify();
@@ -373,7 +373,6 @@ impl AmuxApp {
             terminal: terminal_view::TerminalScreen::default(),
             terminal_focus: cx.focus_handle(),
             terminal_stream: None,
-            attachments: Vec::new(),
             slash_selected: 0,
             slash_dismissed: false,
             diff_collapsed_files: HashSet::new(),
@@ -388,6 +387,7 @@ impl AmuxApp {
             dialog_scroll: ScrollHandle::new(),
             dialog_scroll_on_entry: true,
             activities_scroll: ScrollHandle::new(),
+            attachments_scroll: ScrollHandle::new(),
             activities_scroll_on_entry: false,
             plan_scroll: ScrollHandle::new(),
             expanded_activities: HashSet::new(),
@@ -519,7 +519,7 @@ impl AmuxApp {
 
     /// 滚动分页：按各列表的滚动位置写入页大小并预取相邻一页，插入更早一页后锚定滚动位置
     /// （docs/DESIGN.md「会话列表滚动机制」「对话滚动机制」「活动列表滚动机制」）。
-    fn sync_paging(&mut self) {
+    fn sync_paging(&mut self, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
 
@@ -571,6 +571,20 @@ impl AmuxApp {
                 self.runtime.spawn(async move {
                     poll::load_older_activities(&client, &core, &target).await
                 });
+            }
+        }
+        if self.with_core(|core| core.side_panel == Some(SidePanel::Attachments)) {
+            let (has_more, loading) = self.with_core(|core| {
+                (
+                    core.view.detail.attachments_has_more,
+                    core.view.detail.attachments_loading,
+                )
+            });
+            let near_bottom = self.attachments_scroll.max_offset().y.as_f32()
+                + self.attachments_scroll.offset().y.as_f32()
+                <= 48.0;
+            if has_more && !loading && near_bottom {
+                self.load_more_attachments(cx);
             }
         }
     }
@@ -857,7 +871,7 @@ impl AmuxApp {
                 core.side_panel = None;
             }
         });
-        self.attachments.clear();
+        self.with_core(|core| core.composer_attachments.clear());
         self.diff_collapsed_files.clear();
         self.diff_collapsed_dirs.clear();
         self.diff_comment_target = None;
@@ -1302,7 +1316,7 @@ impl AmuxApp {
     /// 发送输入框内容：文本与附件一并作为用户输入发出。
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().trim().to_string();
-        if text.is_empty() && self.attachments.is_empty() {
+        if text.is_empty() && self.with_core(|core| core.composer_attachments.is_empty()) {
             return;
         }
         let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -1310,7 +1324,7 @@ impl AmuxApp {
             blocks.push(ContentBlock::Text { text });
         }
         blocks.extend(
-            std::mem::take(&mut self.attachments)
+            self.with_core(|core| std::mem::take(&mut core.composer_attachments))
                 .into_iter()
                 .map(|attachment| attachment.block),
         );
@@ -1346,22 +1360,84 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 拖入的文件作为资源链接附件。
+    /// 拖入的文件上传到 Server，成功后再加入待发送附件。
     pub fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         for path in paths {
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
-            self.attachments.push(Attachment {
-                block: ContentBlock::ResourceLink {
-                    uri: format!("file://{}", path.display()),
-                    name: name.clone(),
-                    mime_type: None,
-                    title: None,
-                    description: None,
-                },
-                label: name,
+            match std::fs::metadata(path) {
+                Ok(metadata) if metadata.len() > 20 * 1024 * 1024 => {
+                    self.with_core(|core| core.warning(format!("附件「{name}」超过 20 MB")));
+                    continue;
+                }
+                Err(error) => {
+                    self.with_core(|core| core.warning(format!("读取附件「{name}」失败：{error}")));
+                    continue;
+                }
+                _ => {}
+            }
+            let target = self.with_core(|core| core.open.clone());
+            let client = self.with_core(|core| core.client.clone());
+            let (Some(target), Some(client)) = (target, client) else {
+                self.with_core(|core| core.warning("请先打开会话"));
+                return;
+            };
+            let core = Arc::clone(&self.core);
+            let path = path.clone();
+            self.runtime.spawn(async move {
+                let bytes = match tokio::fs::read(&path).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        core.lock()
+                            .error(format!("读取附件「{name}」失败：{error}"));
+                        return;
+                    }
+                };
+                let result = match &target {
+                    OpenTarget::Session(id) => {
+                        client.upload_session_attachment(id, &name, bytes).await
+                    }
+                    OpenTarget::Workflow(id) => {
+                        client.upload_workflow_attachment(id, &name, bytes).await
+                    }
+                };
+                match result {
+                    Ok(attachment) => {
+                        let target_changed =
+                            core.lock().open.as_ref().is_none_or(|open| open != &target);
+                        if target_changed {
+                            let _ = match &target {
+                                OpenTarget::Session(id) => {
+                                    client.delete_session_attachment(id, &attachment.name).await
+                                }
+                                OpenTarget::Workflow(id) => {
+                                    client
+                                        .delete_workflow_attachment(id, &attachment.name)
+                                        .await
+                                }
+                            };
+                            return;
+                        }
+                        let mut core = core.lock();
+                        if core.side_panel == Some(SidePanel::Attachments) {
+                            core.view.detail.attachments.insert(0, attachment.clone());
+                        }
+                        core.composer_attachments.push(PendingAttachment {
+                            block: ContentBlock::ResourceLink {
+                                uri: attachment.uri,
+                                name: name.clone(),
+                                mime_type: None,
+                                title: None,
+                                description: None,
+                            },
+                            label: name,
+                            remote_name: attachment.name,
+                        });
+                    }
+                    Err(error) => core.lock().error(format!("上传附件失败：{error}")),
+                }
             });
         }
         cx.notify();
@@ -1388,14 +1464,20 @@ impl AmuxApp {
     }
 
     pub fn remove_attachment(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix < self.attachments.len() {
-            self.attachments.remove(ix);
+        let removed = self.with_core(|core| {
+            (ix < core.composer_attachments.len()).then(|| core.composer_attachments.remove(ix))
+        });
+        if let Some(attachment) = removed {
+            self.delete_pending_attachment(attachment.remote_name);
         }
         cx.notify();
     }
 
     pub fn clear_attachments(&mut self, cx: &mut Context<Self>) {
-        self.attachments.clear();
+        let attachments = self.with_core(|core| std::mem::take(&mut core.composer_attachments));
+        for attachment in attachments {
+            self.delete_pending_attachment(attachment.remote_name);
+        }
         cx.notify();
     }
 
@@ -1408,18 +1490,16 @@ impl AmuxApp {
         for entry in clipboard.entries() {
             match entry {
                 ClipboardEntry::Image(image) if !image.bytes.is_empty() => {
-                    self.attachments.push(Attachment {
-                        block: ContentBlock::Resource {
-                            mime_type: image.format.mime_type().to_string(),
-                            uri: None,
-                            text: None,
-                            blob: Some(base64::Engine::encode(
-                                &base64::engine::general_purpose::STANDARD,
-                                &image.bytes,
-                            )),
-                        },
-                        label: "粘贴的图片".to_string(),
-                    });
+                    let mime_type = image.format.mime_type().to_string();
+                    let extension = mime_type
+                        .strip_prefix("image/")
+                        .unwrap_or("png")
+                        .replace("jpeg", "jpg");
+                    self.upload_composer_attachment(
+                        format!("clipboard.{extension}"),
+                        image.bytes.to_vec(),
+                        Some(mime_type),
+                    );
                     attached = true;
                 }
                 ClipboardEntry::ExternalPaths(paths) => {
@@ -1433,6 +1513,100 @@ impl AmuxApp {
             cx.stop_propagation();
             cx.notify();
         }
+    }
+
+    fn upload_composer_attachment(
+        &mut self,
+        filename: String,
+        bytes: Vec<u8>,
+        mime_type: Option<String>,
+    ) {
+        if bytes.len() > 20 * 1024 * 1024 {
+            self.with_core(|core| core.warning(format!("附件「{filename}」超过 20 MB")));
+            return;
+        }
+        let target = self.with_core(|core| core.open.clone());
+        let client = self.with_core(|core| core.client.clone());
+        let (Some(target), Some(client)) = (target, client) else {
+            self.with_core(|core| core.warning("请先打开会话"));
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = match &target {
+                OpenTarget::Session(id) => {
+                    client.upload_session_attachment(id, &filename, bytes).await
+                }
+                OpenTarget::Workflow(id) => {
+                    client
+                        .upload_workflow_attachment(id, &filename, bytes)
+                        .await
+                }
+            };
+            match result {
+                Ok(attachment) => {
+                    let target_changed =
+                        core.lock().open.as_ref().is_none_or(|open| open != &target);
+                    if target_changed {
+                        let _ = match &target {
+                            OpenTarget::Session(id) => {
+                                client.delete_session_attachment(id, &attachment.name).await
+                            }
+                            OpenTarget::Workflow(id) => {
+                                client
+                                    .delete_workflow_attachment(id, &attachment.name)
+                                    .await
+                            }
+                        };
+                        return;
+                    }
+                    let mut core = core.lock();
+                    if core.side_panel == Some(SidePanel::Attachments) {
+                        core.view.detail.attachments.insert(0, attachment.clone());
+                    }
+                    core.composer_attachments.push(PendingAttachment {
+                        block: ContentBlock::ResourceLink {
+                            uri: attachment.uri,
+                            name: filename.clone(),
+                            mime_type,
+                            title: None,
+                            description: None,
+                        },
+                        label: filename,
+                        remote_name: attachment.name,
+                    });
+                }
+                Err(error) => core.lock().error(format!("上传附件失败：{error}")),
+            }
+        });
+    }
+
+    fn delete_pending_attachment(&self, name: String) {
+        if name.is_empty() {
+            return;
+        }
+        let target = self.with_core(|core| core.open.clone());
+        let client = self.with_core(|core| core.client.clone());
+        let (Some(target), Some(client)) = (target, client) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = match target {
+                OpenTarget::Session(id) => client.delete_session_attachment(&id, &name).await,
+                OpenTarget::Workflow(id) => client.delete_workflow_attachment(&id, &name).await,
+            };
+            match result {
+                Ok(()) => {
+                    core.lock()
+                        .view
+                        .detail
+                        .attachments
+                        .retain(|item| item.name != name);
+                }
+                Err(error) => core.lock().error(format!("删除附件失败：{error}")),
+            }
+        });
     }
 
     /// 斜杠命令上拉框候选：输入 `/前缀` 时按前缀匹配（docs/PRD.md 输入区）。
@@ -1794,9 +1968,155 @@ impl AmuxApp {
             SidePanel::Terminal => self.open_terminal(cx),
             SidePanel::Diff => self.refresh_diff(cx),
             SidePanel::Detail => self.refresh_context(cx),
+            SidePanel::Attachments => self.load_attachments(cx),
             _ => {}
         }
         cx.notify();
+    }
+
+    /// 打开附件面板时刷新第一页。
+    pub fn load_attachments(&mut self, cx: &mut Context<Self>) {
+        let (client, target) = self.with_core(|core| (core.client.clone(), core.open.clone()));
+        let (Some(client), Some(target)) = (client, target) else {
+            return;
+        };
+        self.with_core(|core| core.view.detail.attachments_loading = true);
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = match &target {
+                OpenTarget::Session(id) => client.session_attachments(id, 50, 0).await,
+                OpenTarget::Workflow(id) => client.workflow_attachments(id, 50, 0).await,
+            };
+            match result {
+                Ok(page) => {
+                    let mut core = core.lock();
+                    if core.open.as_ref() != Some(&target) {
+                        return;
+                    }
+                    core.view.detail.attachments = page.attachments;
+                    core.view.detail.attachments_has_more = page.has_more;
+                    core.view.detail.attachments_loading = false;
+                }
+                Err(error) => {
+                    core.lock().view.detail.attachments_loading = false;
+                    core.lock().error(format!("读取附件失败：{error}"));
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    /// 加载附件下一页。
+    pub fn load_more_attachments(&mut self, cx: &mut Context<Self>) {
+        let (client, target, offset, loading, has_more) = self.with_core(|core| {
+            (
+                core.client.clone(),
+                core.open.clone(),
+                core.view.detail.attachments.len(),
+                core.view.detail.attachments_loading,
+                core.view.detail.attachments_has_more,
+            )
+        });
+        let (Some(client), Some(target)) = (client, target) else {
+            return;
+        };
+        if loading || !has_more {
+            return;
+        }
+        self.with_core(|core| core.view.detail.attachments_loading = true);
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = match &target {
+                OpenTarget::Session(id) => client.session_attachments(id, 50, offset).await,
+                OpenTarget::Workflow(id) => client.workflow_attachments(id, 50, offset).await,
+            };
+            match result {
+                Ok(page) => {
+                    let mut core = core.lock();
+                    if core.open.as_ref() != Some(&target) {
+                        return;
+                    }
+                    core.view.detail.attachments.extend(page.attachments);
+                    core.view.detail.attachments_has_more = page.has_more;
+                    core.view.detail.attachments_loading = false;
+                }
+                Err(error) => {
+                    core.lock().view.detail.attachments_loading = false;
+                    core.lock().error(format!("加载更多附件失败：{error}"));
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    /// 删除一个已保存附件。
+    pub fn delete_attachment(&mut self, name: String, cx: &mut Context<Self>) {
+        let (client, target) = self.with_core(|core| (core.client.clone(), core.open.clone()));
+        let (Some(client), Some(target)) = (client, target) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = match &target {
+                OpenTarget::Session(id) => client.delete_session_attachment(id, &name).await,
+                OpenTarget::Workflow(id) => client.delete_workflow_attachment(id, &name).await,
+            };
+            match result {
+                Ok(()) => {
+                    let mut core = core.lock();
+                    if core.open.as_ref() != Some(&target) {
+                        return;
+                    }
+                    core.view
+                        .detail
+                        .attachments
+                        .retain(|item| item.name != name);
+                    core.composer_attachments
+                        .retain(|item| item.remote_name != name);
+                }
+                Err(error) => core.lock().error(format!("删除附件失败：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
+    /// 删除当前会话全部附件。
+    pub fn delete_all_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        dialog::confirm(
+            window,
+            cx,
+            "删除全部附件",
+            "当前会话的全部附件将被删除，此操作不可撤销。".into(),
+            "删除",
+            ButtonVariant::Danger,
+            move |this, cx| {
+                let (client, target) =
+                    this.with_core(|core| (core.client.clone(), core.open.clone()));
+                let (Some(client), Some(target)) = (client, target) else {
+                    return;
+                };
+                let core = Arc::clone(&this.core);
+                this.runtime.spawn(async move {
+                    let result = match &target {
+                        OpenTarget::Session(id) => client.delete_session_attachments(id).await,
+                        OpenTarget::Workflow(id) => client.delete_workflow_attachments(id).await,
+                    };
+                    match result {
+                        Ok(()) => {
+                            let mut core = core.lock();
+                            if core.open.as_ref() != Some(&target) {
+                                return;
+                            }
+                            core.view.detail.attachments.clear();
+                            core.view.detail.attachments_has_more = false;
+                            core.composer_attachments.clear();
+                        }
+                        Err(error) => core.lock().error(format!("删除全部附件失败：{error}")),
+                    }
+                });
+                cx.notify();
+            },
+        );
     }
 
     /// 打开终端面板：刷新终端列表并选中当前（或首个）终端；没有终端时不自动新建

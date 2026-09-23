@@ -578,6 +578,7 @@ fn rail_button(
         SidePanel::Diff => FileDiffIcon.into(),
         SidePanel::Detail => IconName::Info.into(),
         SidePanel::Activities => IconName::Inbox.into(),
+        SidePanel::Attachments => IconName::File.into(),
         SidePanel::Plan => IconName::Map.into(),
         SidePanel::Terminal => IconName::SquareTerminal.into(),
     };
@@ -620,6 +621,7 @@ pub fn render_panel(
             SidePanel::Diff => diff_review(core, this, window, cx),
             SidePanel::Detail => detail_panel(core, cx),
             SidePanel::Activities => activities_panel(core, this, cx),
+            SidePanel::Attachments => attachments_panel(core, this, cx),
             SidePanel::Plan => plan_panel(core, this, cx),
             SidePanel::Terminal => terminal_panel(core, this, cx),
         })
@@ -638,6 +640,7 @@ fn panel_header(panel: SidePanel, cx: &mut Context<AmuxApp>) -> AnyElement {
             Label::new(match panel {
                 SidePanel::Activities => "会话活动历史",
                 SidePanel::Diff => "改动审查",
+                SidePanel::Attachments => "附件",
                 other => other.label(),
             })
             .font_weight(FontWeight::SEMIBOLD)
@@ -903,6 +906,124 @@ fn workspace_nodes(
         );
     }
     rows
+}
+
+/// 会话附件：可滚动列表、下载、删除单项与删除全部。
+fn attachments_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let detail = &core.view.detail;
+    let mut list = v_flex()
+        .id("attachments-list")
+        .flex_1()
+        .min_h_0()
+        .gap_2()
+        .p_3()
+        .track_scroll(&this.attachments_scroll)
+        .overflow_y_scroll();
+    if detail.attachments_loading && detail.attachments.is_empty() {
+        list = list.child(ui::empty_hint("正在加载附件…", &theme));
+    } else if detail.attachments.is_empty() {
+        list = list.child(ui::empty_hint("暂无附件", &theme));
+    } else {
+        for attachment in &detail.attachments {
+            let name = attachment.name.clone();
+            let uri = attachment.uri.clone();
+            list = list.child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .p_2()
+                    .bg(theme.muted)
+                    .rounded_md()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Label::new(name.clone())
+                                    .text_sm()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .truncate(),
+                            )
+                            .child(
+                                Label::new(format_attachment_size(attachment.size))
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("attachment-download-{name}")))
+                            .small()
+                            .ghost()
+                            .label("下载")
+                            .disabled(uri.is_empty())
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                if !uri.is_empty() {
+                                    cx.open_url(&uri);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("attachment-delete-{name}")))
+                            .small()
+                            .ghost()
+                            .label("删除")
+                            .on_click(cx.listener({
+                                let name = name.clone();
+                                move |this, _, _, cx| {
+                                    this.delete_attachment(name.clone(), cx);
+                                }
+                            })),
+                    ),
+            );
+        }
+        if detail.attachments_loading {
+            list = list.child(
+                h_flex()
+                    .justify_center()
+                    .child(Spinner::new().xsmall().color(theme.muted_foreground)),
+            );
+        }
+    }
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .child(
+            h_flex()
+                .flex_none()
+                .items_center()
+                .justify_between()
+                .px_3()
+                .pb_2()
+                .child(
+                    Label::new(format!("{} 个附件", detail.attachments.len()))
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    Button::new("attachments-delete-all")
+                        .small()
+                        .ghost()
+                        .label("删除全部")
+                        .disabled(detail.attachments.is_empty())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.delete_all_attachments(window, cx)
+                        })),
+                ),
+        )
+        .child(list)
+        .into_any_element()
+}
+
+fn format_attachment_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// 会话详情面板：会话元信息（工作流会话额外展示关联普通会话）。

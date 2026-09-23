@@ -222,6 +222,37 @@ impl Client {
         self.get_json(&format!("/sessions/{id}/diff")).await
     }
 
+    pub async fn session_attachments(
+        &self,
+        id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<AttachmentList, String> {
+        self.get_json(&format!(
+            "/sessions/{id}/attachments?limit={limit}&offset={offset}"
+        ))
+        .await
+    }
+
+    pub async fn upload_session_attachment(
+        &self,
+        id: &str,
+        filename: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Attachment, String> {
+        self.upload_attachment(&format!("/sessions/{id}/attachments"), filename, bytes)
+            .await
+    }
+
+    pub async fn delete_session_attachment(&self, id: &str, name: &str) -> Result<(), String> {
+        self.delete(&format!("/sessions/{id}/attachments/{}", urlencode(name)))
+            .await
+    }
+
+    pub async fn delete_session_attachments(&self, id: &str) -> Result<(), String> {
+        self.delete(&format!("/sessions/{id}/attachments")).await
+    }
+
     // ---------- 终端 ----------
 
     pub async fn open_terminal(
@@ -398,6 +429,37 @@ impl Client {
         Ok(response.activity)
     }
 
+    pub async fn workflow_attachments(
+        &self,
+        id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<AttachmentList, String> {
+        self.get_json(&format!(
+            "/workflows/{id}/attachments?limit={limit}&offset={offset}"
+        ))
+        .await
+    }
+
+    pub async fn upload_workflow_attachment(
+        &self,
+        id: &str,
+        filename: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Attachment, String> {
+        self.upload_attachment(&format!("/workflows/{id}/attachments"), filename, bytes)
+            .await
+    }
+
+    pub async fn delete_workflow_attachment(&self, id: &str, name: &str) -> Result<(), String> {
+        self.delete(&format!("/workflows/{id}/attachments/{}", urlencode(name)))
+            .await
+    }
+
+    pub async fn delete_workflow_attachments(&self, id: &str) -> Result<(), String> {
+        self.delete(&format!("/workflows/{id}/attachments")).await
+    }
+
     // ---------- 配置 ----------
 
     pub async fn skills(&self) -> Result<Vec<Skill>, String> {
@@ -535,6 +597,28 @@ impl Client {
             .await
             .map_err(|error| format!("请求失败: {error}"))?;
         ensure_success(response).await
+    }
+
+    async fn upload_attachment(
+        &self,
+        path: &str,
+        filename: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Attachment, String> {
+        let response = self
+            .http
+            .post(format!(
+                "{}{path}?filename={}",
+                self.base,
+                urlencode(filename)
+            ))
+            .bearer_auth(&self.token)
+            .header("content-type", "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|error| format!("请求失败: {error}"))?;
+        decode(response).await
     }
 }
 

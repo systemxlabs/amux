@@ -254,6 +254,26 @@ pub struct TerminalOutput {
     pub truncated: bool,
 }
 
+/// 会话附件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    /// Server 存储文件名（`<uuid>.<后缀>`）
+    pub name: String,
+    /// 公共下载地址；Server 未配置 public URL 时为空
+    pub uri: String,
+    pub size: u64,
+    pub created_at: u64,
+}
+
+/// 附件分页列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentList {
+    pub attachments: Vec<Attachment>,
+    pub has_more: bool,
+}
+
 /// 工作流会话。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

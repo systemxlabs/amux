@@ -8,14 +8,16 @@ use std::time::Duration;
 
 use amux_common::api::*;
 use amux_common::domain::{SESSION_LIST_DEFAULT_LIMIT, SESSION_PAGE_DEFAULT_LIMIT};
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use crate::attachments::{AttachmentOwner, MAX_ATTACHMENT_BYTES};
 use crate::state::AppState;
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
@@ -63,6 +65,11 @@ pub struct ReadFile {
     pub offset: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UploadAttachment {
+    pub filename: String,
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/daemon", get(daemon))
@@ -104,6 +111,16 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/sessions/{id}/terminals/{terminal}/resize",
             post(resize_terminal),
         )
+        .route(
+            "/sessions/{id}/attachments",
+            get(list_session_attachments)
+                .post(upload_session_attachment)
+                .delete(delete_session_attachments),
+        )
+        .route(
+            "/sessions/{id}/attachments/{name}",
+            axum::routing::delete(delete_session_attachment),
+        )
         .route("/workflows", post(create_workflow).get(list_workflows))
         .route(
             "/workflows/{id}",
@@ -115,6 +132,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/workflows/{id}/history", get(workflow_history))
         .route("/workflows/{id}/activities", get(workflow_activities))
         .route("/workflows/{id}/ongoing_activity", get(workflow_ongoing))
+        .route(
+            "/workflows/{id}/attachments",
+            get(list_workflow_attachments)
+                .post(upload_workflow_attachment)
+                .delete(delete_workflow_attachments),
+        )
+        .route(
+            "/workflows/{id}/attachments/{name}",
+            axum::routing::delete(delete_workflow_attachment),
+        )
         .route("/config/skills/", get(get_skills).put(put_skills))
         .route("/config/workflows/", get(get_plans).put(put_plans))
         .route(
@@ -136,6 +163,19 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_orchestrator).put(put_orchestrator),
         )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .with_state(state)
+}
+
+pub fn public_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route(
+            "/sessions/{id}/attachments/{name}",
+            get(download_session_attachment),
+        )
+        .route(
+            "/workflows/{id}/attachments/{name}",
+            get(download_workflow_attachment),
+        )
         .with_state(state)
 }
 
@@ -322,12 +362,11 @@ async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
-    state
-        .sessions
-        .delete(&id)
-        .await
-        .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+    state.sessions.delete(&id).await.map_err(bad_request)?;
+    if let Err(error) = state.attachments.delete_all(AttachmentOwner::Session(&id)) {
+        log::warn!("删除会话附件失败（{id}）: {error}");
+    }
+    Ok(Json(OpAck { ok: true }))
 }
 
 async fn configure_session(
@@ -515,6 +554,73 @@ async fn close_terminal(
         .map_err(bad_request)
 }
 
+// ---------- 会话附件 ----------
+
+async fn list_session_attachments(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(page): Query<Page>,
+) -> ApiResult<AttachmentList> {
+    state.sessions.get(&id).map_err(not_found)?;
+    state
+        .attachments
+        .list(
+            AttachmentOwner::Session(&id),
+            page.limit(50),
+            page.offset(),
+            state.public_url.as_deref(),
+        )
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn upload_session_attachment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(upload): Query<UploadAttachment>,
+    body: Bytes,
+) -> ApiResult<Attachment> {
+    state.sessions.get(&id).map_err(not_found)?;
+    upload_attachment(
+        &state,
+        AttachmentOwner::Session(&id),
+        &upload.filename,
+        body,
+    )
+}
+
+async fn delete_session_attachments(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    state.sessions.get(&id).map_err(not_found)?;
+    state
+        .attachments
+        .delete_all(AttachmentOwner::Session(&id))
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn delete_session_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<OpAck> {
+    state.sessions.get(&id).map_err(not_found)?;
+    state
+        .attachments
+        .delete(AttachmentOwner::Session(&id), &name)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn download_session_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    state.sessions.get(&id).map_err(not_found)?;
+    download_attachment(&state, AttachmentOwner::Session(&id), &name)
+}
+
 async fn resize_terminal(
     State(state): State<Arc<AppState>>,
     Path((id, terminal)): Path<(String, String)>,
@@ -581,12 +687,85 @@ async fn delete_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<OpAck> {
+    let workflow = state.workflows.get(&id).map_err(not_found)?;
+    state.workflows.delete(&id).await.map_err(bad_request)?;
+    if let Err(error) = state.attachments.delete_all(AttachmentOwner::Workflow(&id)) {
+        log::warn!("删除工作流附件失败（{id}）: {error}");
+    }
+    for session in workflow.linked_sessions {
+        if let Err(error) = state
+            .attachments
+            .delete_all(AttachmentOwner::Session(&session.id))
+        {
+            log::warn!("删除关联会话附件失败（{}）: {error}", session.id);
+        }
+    }
+    Ok(Json(OpAck { ok: true }))
+}
+
+async fn list_workflow_attachments(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(page): Query<Page>,
+) -> ApiResult<AttachmentList> {
+    state.workflows.get(&id).map_err(not_found)?;
     state
-        .workflows
-        .delete(&id)
-        .await
+        .attachments
+        .list(
+            AttachmentOwner::Workflow(&id),
+            page.limit(50),
+            page.offset(),
+            state.public_url.as_deref(),
+        )
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn upload_workflow_attachment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(upload): Query<UploadAttachment>,
+    body: Bytes,
+) -> ApiResult<Attachment> {
+    state.workflows.get(&id).map_err(not_found)?;
+    upload_attachment(
+        &state,
+        AttachmentOwner::Workflow(&id),
+        &upload.filename,
+        body,
+    )
+}
+
+async fn delete_workflow_attachments(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    state.workflows.get(&id).map_err(not_found)?;
+    state
+        .attachments
+        .delete_all(AttachmentOwner::Workflow(&id))
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
+}
+
+async fn delete_workflow_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<OpAck> {
+    state.workflows.get(&id).map_err(not_found)?;
+    state
+        .attachments
+        .delete(AttachmentOwner::Workflow(&id), &name)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn download_workflow_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    state.workflows.get(&id).map_err(not_found)?;
+    download_attachment(&state, AttachmentOwner::Workflow(&id), &name)
 }
 
 async fn configure_workflow(
@@ -788,4 +967,45 @@ fn bad_request(message: String) -> (StatusCode, String) {
 
 fn not_found(message: String) -> (StatusCode, String) {
     (StatusCode::NOT_FOUND, message)
+}
+
+fn service_unavailable(message: String) -> (StatusCode, String) {
+    (StatusCode::SERVICE_UNAVAILABLE, message)
+}
+
+fn upload_attachment(
+    state: &AppState,
+    owner: AttachmentOwner<'_>,
+    filename: &str,
+    body: Bytes,
+) -> ApiResult<Attachment> {
+    if body.len() > MAX_ATTACHMENT_BYTES {
+        return Err(bad_request("单个附件不得超过 20 MB".into()));
+    }
+    let public_url = state
+        .public_url
+        .as_deref()
+        .ok_or_else(|| service_unavailable("Server 未配置附件公共地址".into()))?;
+    state
+        .attachments
+        .save(owner, filename, &body, public_url)
+        .map(Json)
+        .map_err(bad_request)
+}
+
+fn download_attachment(
+    state: &AppState,
+    owner: AttachmentOwner<'_>,
+    name: &str,
+) -> Result<Response, (StatusCode, String)> {
+    let bytes = state.attachments.read(owner, name).map_err(not_found)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .body(Body::from(bytes))
+        .map_err(|error| bad_request(format!("构造下载响应失败: {error}")))
 }
