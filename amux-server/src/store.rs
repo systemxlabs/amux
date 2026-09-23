@@ -1,8 +1,11 @@
-//! 持久化：会话/对话/活动（`session.sqlite`）与工作流（`workflow.sqlite`）。
+//! 持久化：会话元数据（`session.sqlite`）、会话 transcript（每会话一个
+//! `transcript.sqlite`）与工作流（`workflow.sqlite`）。
 //!
-//! 单写者：连接由 `Mutex` 保护，所有查询同步执行（SQLite 本地文件，量级小）。
+//! 各连接由 `Mutex` 保护；SQLite 查询同步执行（本地文件，量级小）。
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use amux_common::api::Session;
 use amux_common::domain::{Activity, HistoryItem, SessionState};
@@ -11,14 +14,64 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::timestamps::now_ms;
 
+const TRANSCRIPT_CACHE_LIMIT: usize = 64;
+
+struct CachedTranscript {
+    connection: Arc<Mutex<Connection>>,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct TranscriptCache {
+    entries: HashMap<String, CachedTranscript>,
+    clock: u64,
+}
+
+impl TranscriptCache {
+    fn get(&mut self, session_id: &str) -> Option<Arc<Mutex<Connection>>> {
+        self.clock = self.clock.wrapping_add(1);
+        let entry = self.entries.get_mut(session_id)?;
+        entry.last_used = self.clock;
+        Some(Arc::clone(&entry.connection))
+    }
+
+    fn insert(&mut self, session_id: String, connection: Arc<Mutex<Connection>>) {
+        self.clock = self.clock.wrapping_add(1);
+        if self.entries.len() >= TRANSCRIPT_CACHE_LIMIT {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(session_id, _)| session_id.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            session_id,
+            CachedTranscript {
+                connection,
+                last_used: self.clock,
+            },
+        );
+    }
+
+    fn remove(&mut self, session_id: &str) {
+        self.entries.remove(session_id);
+    }
+}
+
 pub struct Store {
+    home: PathBuf,
     sessions: Mutex<Connection>,
     workflows: Mutex<Connection>,
+    transcripts: Mutex<TranscriptCache>,
 }
 
 impl Store {
     pub fn open(home: &Path) -> Result<Self, String> {
-        std::fs::create_dir_all(home).map_err(|e| format!("创建 {} 失败: {e}", home.display()))?;
+        let home = home.to_path_buf();
+        std::fs::create_dir_all(&home).map_err(|e| format!("创建 {} 失败: {e}", home.display()))?;
         let sessions = open_db(&home.join("session.sqlite"), SESSION_SCHEMA)?;
         let workflows = open_db(&home.join("workflow.sqlite"), WORKFLOW_SCHEMA)?;
         ensure_column(&sessions, "sessions", "project", "TEXT")?;
@@ -37,9 +90,44 @@ impl Store {
             )
             .map_err(|e| format!("重置工作流状态失败: {e}"))?;
         Ok(Self {
+            home,
             sessions: Mutex::new(sessions),
             workflows: Mutex::new(workflows),
+            transcripts: Mutex::new(TranscriptCache::default()),
         })
+    }
+
+    fn session_dir(&self, session_id: &str) -> PathBuf {
+        self.home.join("sessions").join(session_id)
+    }
+
+    fn transcript_path(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("transcript.sqlite")
+    }
+
+    /// 获取会话 transcript 连接；连接按会话缓存，避免流式写入时重复打开数据库。
+    fn transcript(
+        &self,
+        session_id: &str,
+        create: bool,
+    ) -> Result<Option<Arc<Mutex<Connection>>>, String> {
+        let mut transcripts = self.transcripts.lock();
+        if let Some(transcript) = transcripts.get(session_id) {
+            return Ok(Some(transcript));
+        }
+
+        let path = self.transcript_path(session_id);
+        if !create && !path.is_file() {
+            return Ok(None);
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("会话 transcript 路径无效: {}", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建 {} 失败: {error}", parent.display()))?;
+        let transcript = Arc::new(Mutex::new(open_db(&path, TRANSCRIPT_SCHEMA)?));
+        transcripts.insert(session_id.to_string(), Arc::clone(&transcript));
+        Ok(Some(transcript))
     }
 
     // ---------- 普通会话 ----------
@@ -205,12 +293,18 @@ impl Store {
     pub fn delete_session(&self, id: &str) {
         let conn = self.sessions.lock();
         let _ = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]);
-        let _ = conn.execute("DELETE FROM messages WHERE session_id = ?1", params![id]);
-        let _ = conn.execute("DELETE FROM activities WHERE session_id = ?1", params![id]);
+        drop(conn);
         let _ = self.workflows.lock().execute(
             "DELETE FROM workflow_linked_sessions WHERE session_id = ?1",
             params![id],
         );
+        self.transcripts.lock().remove(id);
+        let dir = self.session_dir(id);
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("删除会话数据目录 {} 失败: {error}", dir.display());
+            }
+        }
     }
 
     /// 标记关联会话（供 `GET /sessions` 排除）。
@@ -231,7 +325,15 @@ impl Store {
         content: &str,
         created_at: u64,
     ) {
-        let _ = self.sessions.lock().execute(
+        let transcript = match self.transcript(session_id, true) {
+            Ok(Some(transcript)) => transcript,
+            Err(error) => {
+                log::warn!("打开会话 transcript 失败（{session_id}）: {error}");
+                return;
+            }
+            Ok(None) => return,
+        };
+        let _ = transcript.lock().execute(
             "INSERT INTO messages (session_id, message_id, role, content, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)
              ON CONFLICT(session_id, message_id) DO UPDATE SET content = ?4, updated_at = ?6",
@@ -252,7 +354,15 @@ impl Store {
         limit: usize,
         offset: usize,
     ) -> (Vec<HistoryItem>, bool) {
-        let conn = self.sessions.lock();
+        let transcript = match self.transcript(session_id, false) {
+            Ok(Some(transcript)) => transcript,
+            Err(error) => {
+                log::warn!("打开会话 transcript 失败（{session_id}）: {error}");
+                return (Vec::new(), false);
+            }
+            Ok(None) => return (Vec::new(), false),
+        };
+        let conn = transcript.lock();
         let mut stmt = match conn.prepare(
             "SELECT message_id, role, content, created_at, updated_at FROM messages
              WHERE session_id = ?1 ORDER BY updated_at DESC, message_id DESC LIMIT ?2 OFFSET ?3",
@@ -314,7 +424,15 @@ impl Store {
         content: &str,
         created_at: u64,
     ) {
-        let _ = self.sessions.lock().execute(
+        let transcript = match self.transcript(session_id, true) {
+            Ok(Some(transcript)) => transcript,
+            Err(error) => {
+                log::warn!("打开会话 transcript 失败（{session_id}）: {error}");
+                return;
+            }
+            Ok(None) => return,
+        };
+        let _ = transcript.lock().execute(
             "INSERT INTO activities (session_id, activity_id, kind, content, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)
              ON CONFLICT(session_id, activity_id) DO UPDATE SET content = ?4, updated_at = ?6",
@@ -335,7 +453,15 @@ impl Store {
         limit: usize,
         offset: usize,
     ) -> (Vec<Activity>, bool) {
-        let conn = self.sessions.lock();
+        let transcript = match self.transcript(session_id, false) {
+            Ok(Some(transcript)) => transcript,
+            Err(error) => {
+                log::warn!("打开会话 transcript 失败（{session_id}）: {error}");
+                return (Vec::new(), false);
+            }
+            Ok(None) => return (Vec::new(), false),
+        };
+        let conn = transcript.lock();
         let mut stmt = match conn.prepare(
             "SELECT activity_id, content FROM activities WHERE session_id = ?1
              ORDER BY updated_at DESC, activity_id DESC LIMIT ?2 OFFSET ?3",
@@ -367,8 +493,8 @@ impl Store {
 
     /// 会话最近一次活动时间（`activities` 表最新一条；从未有活动时为 `None`）。
     pub fn last_activity_at(&self, session_id: &str) -> Option<u64> {
-        let at: Option<i64> = self
-            .sessions
+        let transcript = self.transcript(session_id, false).ok()??;
+        let at: Option<i64> = transcript
             .lock()
             .query_row(
                 "SELECT MAX(updated_at) FROM activities WHERE session_id = ?1",
@@ -382,7 +508,8 @@ impl Store {
 
     /// 最近一条活动（进行中活动展示用）。
     pub fn latest_activity(&self, session_id: &str) -> Option<Activity> {
-        self.sessions
+        let transcript = self.transcript(session_id, false).ok()??;
+        let content = transcript
             .lock()
             .query_row(
                 "SELECT content FROM activities WHERE session_id = ?1 ORDER BY updated_at DESC LIMIT 1",
@@ -391,8 +518,8 @@ impl Store {
             )
             .optional()
             .ok()
-            .flatten()
-            .and_then(|content| serde_json::from_str(&content).ok())
+            .flatten();
+        content.and_then(|content| serde_json::from_str(&content).ok())
     }
 
     // ---------- 工作流会话 ----------
@@ -560,7 +687,7 @@ pub struct WorkflowRow {
     pub updated_at: u64,
 }
 
-/// `session.sqlite` 表结构。
+/// 中心 `session.sqlite` 表结构。
 const SESSION_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -574,7 +701,10 @@ const SESSION_SCHEMA: &str = "
         agent_session_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
-    );
+    );";
+
+/// 每会话 `transcript.sqlite` 表结构。
+const TRANSCRIPT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS messages (
         session_id TEXT NOT NULL,
         message_id TEXT NOT NULL,
@@ -850,5 +980,47 @@ mod tests {
         let (older, has_more) = store.messages_page("s1", 2, 2);
         assert_eq!(older.len(), 2);
         assert!(has_more);
+    }
+
+    #[test]
+    fn transcript_is_isolated_per_session_and_deleted_with_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_session(&session("s1", "pc", "codex")).unwrap();
+        store.insert_session(&session("s2", "pc", "codex")).unwrap();
+
+        assert!(!store.transcript_path("s1").exists());
+        assert_eq!(store.messages_page("s1", 10, 0).0.len(), 0);
+        assert_eq!(store.activities_page("s1", 10, 0).0.len(), 0);
+        assert!(!store.transcript_path("s1").exists());
+
+        for session_id in ["s1", "s2"] {
+            store.upsert_message(
+                session_id,
+                "m1",
+                "user",
+                r#"[{"type":"text","text":"hi"}]"#,
+                1,
+            );
+            store.upsert_activity(
+                session_id,
+                "a1",
+                "thinking",
+                r#"{"kind":"thinking","id":"a1","timestamp":1,"thinking":"x"}"#,
+                1,
+            );
+        }
+
+        assert!(store.transcript_path("s1").is_file());
+        assert!(store.transcript_path("s2").is_file());
+        assert_eq!(store.messages_page("s1", 10, 0).0.len(), 1);
+        assert_eq!(store.activities_page("s1", 10, 0).0.len(), 1);
+
+        store.delete_session("s1");
+
+        assert!(!store.session_dir("s1").exists());
+        assert_eq!(store.messages_page("s1", 10, 0).0.len(), 0);
+        assert_eq!(store.messages_page("s2", 10, 0).0.len(), 1);
+        assert_eq!(store.activities_page("s2", 10, 0).0.len(), 1);
     }
 }
