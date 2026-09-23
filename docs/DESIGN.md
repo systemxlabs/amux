@@ -254,7 +254,7 @@ Server 启动和关闭由用户手动执行，启动参数包括
 - `--port`: 监听端口，默认为 `34567`
 - `--token`：认证 token，必传
 - `--web`：web 静态文件目录，未传则静态资源请求返回 404
-- `--public-url`: 公共地址，未传则附件上传下载返回 503
+- `--public-url`: 公共地址，未传则附件上传 503
 
 Server 的 WebSocket 监听地址为 `ws://<host>:<port>/daemon`。
 
