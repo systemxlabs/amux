@@ -64,6 +64,21 @@ const SUGGEST_PADDING: f32 = 4.0;
 const RECENT_WORKSPACE_LIMIT: usize = 20;
 
 fn new_session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    // PRD「新建会话视图」：无连接机器时整个视图仅展示居中提示
+    if core.settings.machines.is_empty() {
+        return v_flex()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .child(
+                Label::new("请运行 amux-daemon 程序将机器连接至服务器")
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .into_any_element();
+    }
+
     let workflow_mode = core.new_session.workflow_mode;
     let card = v_flex()
         .w_full()
@@ -128,14 +143,8 @@ fn mode_switch(workflow_mode: bool, cx: &mut Context<AmuxApp>) -> impl IntoEleme
         }))
 }
 
-/// 普通模式：无连接机器时仅提示，否则机器 / 智能体 / 工作目录 / worktree / 创建。
+/// 普通模式表单：机器 / 智能体 / 工作目录 / worktree / 创建。
 fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    if core.settings.machines.is_empty() {
-        return Label::new("请运行 amux-daemon 程序将机器连接至服务器")
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .into_any_element();
-    }
     let machine = core.new_session.machine.clone();
     // 机器与智能体同一行；工作目录另起一行（其输入框占满整行）
     let mut row = h_flex().flex_wrap().gap_6().items_start();
