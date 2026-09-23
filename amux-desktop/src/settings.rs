@@ -1,5 +1,6 @@
 //! 设置浮窗：分类导航 + 连接设置 / 机器管理 / 内置智能体 / 快捷指令 / 技能管理 / 工作流计划。
 
+use agent_client_protocol::schema::v2::TextContent;
 use amux_common::api::{ApiFormat, Machine, Skill};
 use amux_common::domain::ContentBlock;
 use gpui::*;
@@ -875,7 +876,10 @@ pub fn manage_skill(
             skill.name, action, skill.description
         );
         if let Err(error) = client
-            .prompt(&session.id, vec![ContentBlock::Text { text: prompt }])
+            .prompt(
+                &session.id,
+                vec![ContentBlock::Text(TextContent::new(prompt))],
+            )
             .await
         {
             core.lock().error(format!("发送技能指令失败：{error}"));

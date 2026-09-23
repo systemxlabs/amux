@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use agent_client_protocol::schema::v2::TextContent;
 use amux_common::domain::{Activity, ContentBlock, HistoryItem};
 use futures_util::future::join_all;
 
@@ -672,9 +673,9 @@ pub async fn cancel(client: &Client, target: &OpenTarget) -> Result<(), String> 
             client
                 .prompt_workflow(
                     id,
-                    vec![ContentBlock::Text {
-                        text: "取消当前进行中的全部工作".to_string(),
-                    }],
+                    vec![ContentBlock::Text(TextContent::new(
+                        "取消当前进行中的全部工作".to_string(),
+                    ))],
                 )
                 .await
         }

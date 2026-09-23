@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_client_protocol::schema::v2::{MediaType, ResourceLink, TextContent};
 use amux_common::api::{
     Agent, ApiFormat, CreateSessionRequest, OrchestratorConfig, Project, QuickCommand,
     RecentWorkspace, SessionConfigSetting, Skill, WorkflowPlanItem,
@@ -1330,7 +1331,7 @@ impl AmuxApp {
         }
         let mut blocks: Vec<ContentBlock> = Vec::new();
         if !text.is_empty() {
-            blocks.push(ContentBlock::Text { text });
+            blocks.push(ContentBlock::Text(TextContent::new(text)));
         }
         blocks.extend(
             attachments
@@ -1349,7 +1350,7 @@ impl AmuxApp {
 
     /// 快捷指令：把预设提示词直接作为用户输入发送（docs/PRD.md「快捷指令」）。
     pub fn send_quick_command(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_blocks(vec![ContentBlock::Text { text: prompt }], cx);
+        self.send_blocks(vec![ContentBlock::Text(TextContent::new(prompt))], cx);
     }
 
     /// 内容块作为用户输入发往当前会话。
@@ -1589,13 +1590,10 @@ impl AmuxApp {
                         .find(|attachment| attachment.id == id)
                     {
                         attachment.status = PendingAttachmentStatus::Uploaded {
-                            block: ContentBlock::ResourceLink {
-                                uri,
-                                name: attachment.label.clone(),
-                                mime_type: attachment.mime_type.clone(),
-                                title: None,
-                                description: None,
-                            },
+                            block: ContentBlock::ResourceLink(
+                                ResourceLink::new(attachment.label.clone(), uri)
+                                    .mime_type(attachment.mime_type.clone().map(MediaType::new)),
+                            ),
                             remote_name: uploaded.name,
                         };
                     }
@@ -2506,9 +2504,9 @@ impl AmuxApp {
             .update(cx, |state, cx| state.set_value(String::new(), window, cx));
         self.diff_line_selection = None;
         self.send_blocks(
-            vec![ContentBlock::Text {
-                text: target.message(&comment),
-            }],
+            vec![ContentBlock::Text(TextContent::new(
+                target.message(&comment),
+            ))],
             cx,
         );
     }

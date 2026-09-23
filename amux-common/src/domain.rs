@@ -48,35 +48,8 @@ pub enum StateChangeReason {
     Aborted,
 }
 
-/// prompt 输入内容块。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlock {
-    Text {
-        text: String,
-    },
-    #[serde(rename_all = "camelCase")]
-    Resource {
-        mime_type: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        uri: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        text: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        blob: Option<String>,
-    },
-    #[serde(rename_all = "camelCase")]
-    ResourceLink {
-        uri: String,
-        name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        mime_type: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        title: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-    },
-}
+// 复用 ACP 官方 ContentBlock 类型做序列化/反序列化，HTTP、存储与 ACP 交互共用同一表示。
+pub use agent_client_protocol::schema::v2::ContentBlock;
 
 /// 对话历史条目：用户输入与 agent 输出。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -501,7 +474,10 @@ mod tests {
 
     #[test]
     fn content_block_is_tagged_by_type() {
-        let text = serde_json::to_string(&ContentBlock::Text { text: "hi".into() }).unwrap();
+        let text = serde_json::to_string(&ContentBlock::Text(
+            agent_client_protocol::schema::v2::TextContent::new("hi"),
+        ))
+        .unwrap();
         assert_eq!(text, r#"{"type":"text","text":"hi"}"#);
     }
 

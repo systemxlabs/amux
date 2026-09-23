@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use agent_client_protocol::schema::v2::TextContent;
 use amux_common::api::{Session, SessionConfigSetting, Workflow};
 use amux_common::domain::{
     generate_title, Activity, ContentBlock, HistoryItem, SessionConfigOption, SessionState,
@@ -15,7 +16,8 @@ use amux_common::domain::{
 };
 use parking_lot::Mutex;
 use rig_core::completion::message::{
-    AssistantContent, Reasoning, ToolCall, ToolFunction, ToolResultContent, UserContent,
+    AssistantContent, Audio, AudioMediaType, DocumentSourceKind, Image, ImageMediaType, MimeType,
+    Reasoning, Text as RigText, ToolCall, ToolFunction, ToolResultContent, UserContent,
 };
 use rig_core::completion::{Message, ToolDefinition};
 use uuid::Uuid;
@@ -40,8 +42,8 @@ const KEPT_TOOL_RESULT_ROUNDS: usize = 5;
 struct RunState {
     /// 模型对话上下文：进程启动后首次交互从 transcript 恢复，之后在内存中维护
     history: Vec<Message>,
-    /// 待注入的 steer 用户消息
-    steers: Vec<String>,
+    /// 待注入的 steer 用户消息（完整 ACP ContentBlock）
+    steers: Vec<Vec<ContentBlock>>,
     running: bool,
     /// 最近一次活动（进行中活动展示用）
     ongoing: Option<Activity>,
@@ -242,13 +244,15 @@ impl WorkflowService {
             state_label(new_state),
             reason_label(reason)
         );
-        self.push_user(&workflow_id, vec![ContentBlock::Text { text: message }]);
+        self.push_user(
+            &workflow_id,
+            vec![ContentBlock::Text(TextContent::new(message))],
+        );
     }
 
     /// 推送一条用户消息：运行中进 steer，空闲则起一轮调度。
     fn push_user(self: &Arc<Self>, workflow_id: &str, content: Vec<ContentBlock>) {
-        // 用户消息按 ACP ContentBlock 全部进入模型上下文，不丢弃资源链接等非文本块
-        let text = content_to_text(&content);
+        // 用户消息完整进入模型上下文：Image/Audio 映射为对应多模态内容，其余以文本/JSON 呈现
         let mut runs = self.runs.lock();
         let state = runs.entry(workflow_id.to_string()).or_default();
         if state.history.is_empty() {
@@ -258,16 +262,16 @@ impl WorkflowService {
         self.append(
             workflow_id,
             &TranscriptLine::User {
-                content,
+                content: content.clone(),
                 timestamp: now_ms(),
             },
         );
         self.store.touch_workflow(workflow_id);
         if state.running {
-            state.steers.push(text);
+            state.steers.push(content);
             return;
         }
-        state.history.push(Message::user(text));
+        state.history.push(content_to_user_message(&content));
         drop(runs);
         self.spawn_run(workflow_id.to_string());
     }
@@ -298,7 +302,7 @@ impl WorkflowService {
                     self.append(
                         workflow_id,
                         &TranscriptLine::Agent {
-                            content: vec![ContentBlock::Text { text }],
+                            content: vec![ContentBlock::Text(TextContent::new(text))],
                             timestamp: now_ms(),
                         },
                     );
@@ -368,8 +372,8 @@ impl WorkflowService {
             }
             let mut runs = self.runs.lock();
             let state = runs.entry(workflow_id.to_string()).or_default();
-            for steer in steers {
-                state.history.push(Message::user(format!("用户：{steer}")));
+            for blocks in steers {
+                state.history.push(content_to_user_message(&blocks));
             }
         }
     }
@@ -458,7 +462,7 @@ impl WorkflowService {
                 }
                 TranscriptLine::User { content, .. } => {
                     settle_turn(&mut messages, &mut thinking, &mut calls);
-                    messages.push(Message::user(content_to_text(&content)));
+                    messages.push(content_to_user_message(&content));
                 }
                 TranscriptLine::Agent { content, .. } => {
                     let text = blocks_text(&content);
@@ -595,7 +599,7 @@ impl Tools for WorkflowTools {
         };
         let messages: Vec<Message> = std::mem::take(&mut state.steers)
             .into_iter()
-            .map(|text| Message::user(format!("用户：{text}")))
+            .map(|blocks| content_to_user_message(&blocks))
             .collect();
         // 请求补丁不写入 rig 自己的对话，内存上下文要自己记下 steer
         state.history.extend(messages.iter().cloned());
@@ -719,8 +723,14 @@ impl WorkflowTools {
             "prompt_session" => {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
-                let input = prompt_session_input(&arguments)?;
-                services.sessions.prompt(&session_id, input).await?;
+                let prompt = string_arg(&arguments, "prompt")?;
+                services
+                    .sessions
+                    .prompt(
+                        &session_id,
+                        vec![ContentBlock::Text(TextContent::new(prompt))],
+                    )
+                    .await?;
                 Ok(format!("已向 {session_id} 下发指令"))
             }
             "cancel_session" => {
@@ -785,18 +795,6 @@ fn parse_arguments(parameters: &str) -> serde_json::Value {
     serde_json::from_str(parameters).unwrap_or_default()
 }
 
-/// 解析 `prompt_session` 的指令参数：优先 `content`（ACP ContentBlock 数组），否则退回 `prompt` 文本。
-fn prompt_session_input(arguments: &serde_json::Value) -> Result<Vec<ContentBlock>, String> {
-    if let Some(content) = arguments.get("content") {
-        serde_json::from_value(content.clone())
-            .map_err(|error| format!("content 不是有效的 ACP ContentBlock 数组: {error}"))
-    } else {
-        Ok(vec![ContentBlock::Text {
-            text: string_arg(arguments, "prompt")?,
-        }])
-    }
-}
-
 fn string_arg(arguments: &serde_json::Value, key: &str) -> Result<String, String> {
     arguments
         .get(key)
@@ -854,20 +852,14 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "prompt_session".into(),
-            description: "向指定关联普通会话下发指令，支持 ACP ContentBlock 数组".into(),
+            description: "向指定关联普通会话下发指令".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "session": string("关联普通会话 id"),
-                    "content": {
-                        "type": "array",
-                        "items": { "type": "object" },
-                        "description": "ACP ContentBlock 数组（Text、ResourceLink 等）；与 prompt 二选一，提供时优先"
-                    },
-                    "prompt": string("指令文本；未提供 content 时使用")
+                    "prompt": string("指令内容")
                 },
-                "required": ["session"],
-                "anyOf": [{ "required": ["content"] }, { "required": ["prompt"] }]
+                "required": ["session", "prompt"]
             }),
         },
         ToolDefinition {
@@ -1059,10 +1051,48 @@ fn blocks_text(content: &[ContentBlock]) -> String {
     content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Text(text) => Some(text.text.as_str()),
             _ => None,
         })
         .collect()
+}
+
+/// 用户内容块转 rig `Message`：Image/Audio 映射为多模态内容，不能被映射的以 JSON 文本呈现，不丢弃消息。
+fn content_to_user_message(blocks: &[ContentBlock]) -> Message {
+    Message::User {
+        content: blocks.iter().filter_map(block_to_user_content).collect(),
+    }
+}
+
+/// ACP ContentBlock → rig UserContent；无法映射的块以 JSON 文本呈现，保证不丢弃。
+fn block_to_user_content(block: &ContentBlock) -> Option<UserContent> {
+    match block {
+        ContentBlock::Text(text) => Some(UserContent::Text(RigText::new(&text.text))),
+        ContentBlock::Image(image) => match ImageMediaType::from_mime_type(&image.mime_type.0) {
+            Some(media_type) => Some(UserContent::Image(Image {
+                data: DocumentSourceKind::base64(&image.data),
+                media_type: Some(media_type),
+                detail: None,
+                additional_params: None,
+            })),
+            None => Some(UserContent::Text(RigText::new(content_to_text(
+                std::slice::from_ref(block),
+            )))),
+        },
+        ContentBlock::Audio(audio) => match AudioMediaType::from_mime_type(&audio.mime_type.0) {
+            Some(media_type) => Some(UserContent::Audio(Audio {
+                data: DocumentSourceKind::base64(&audio.data),
+                media_type: Some(media_type),
+                additional_params: None,
+            })),
+            None => Some(UserContent::Text(RigText::new(content_to_text(
+                std::slice::from_ref(block),
+            )))),
+        },
+        _ => Some(UserContent::Text(RigText::new(content_to_text(
+            std::slice::from_ref(block),
+        )))),
+    }
 }
 
 /// 用户内容块转模型可见文本：文本块原样输出，非文本块以 JSON 呈现，不丢弃任何内容块。
@@ -1070,7 +1100,7 @@ fn content_to_text(content: &[ContentBlock]) -> String {
     content
         .iter()
         .map(|block| match block {
-            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::Text(text) => text.text.clone(),
             other => serde_json::to_string(other)
                 .unwrap_or_else(|error| format!("[无法序列化内容块: {error}]")),
         })
@@ -1111,6 +1141,7 @@ fn read_lines(path: &PathBuf) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v2::ResourceLink;
 
     #[test]
     fn tool_definitions_cover_documented_tools() {
@@ -1155,16 +1186,8 @@ mod tests {
     #[test]
     fn content_to_text_keeps_all_blocks() {
         let text = content_to_text(&[
-            ContentBlock::Text {
-                text: "看看这个".into(),
-            },
-            ContentBlock::ResourceLink {
-                uri: "file:///dir/a.rs".into(),
-                name: "a.rs".into(),
-                mime_type: None,
-                title: None,
-                description: None,
-            },
+            ContentBlock::Text(TextContent::new("看看这个")),
+            ContentBlock::ResourceLink(ResourceLink::new("a.rs", "file:///dir/a.rs")),
         ]);
         assert!(text.contains("看看这个"), "文本块被丢弃: {text}");
         assert!(
@@ -1175,47 +1198,9 @@ mod tests {
     }
 
     #[test]
-    fn prompt_session_input_accepts_content_blocks_or_text() {
-        assert_eq!(
-            prompt_session_input(&serde_json::json!({ "prompt": "跑测试" })).unwrap(),
-            vec![ContentBlock::Text {
-                text: "跑测试".into(),
-            }]
-        );
-        let blocks = prompt_session_input(&serde_json::json!({
-            "content": [
-                { "type": "text", "text": "看附件" },
-                { "type": "resource_link", "uri": "file:///dir/a.rs", "name": "a.rs" },
-            ]
-        }))
-        .unwrap();
-        assert_eq!(
-            blocks,
-            vec![
-                ContentBlock::Text {
-                    text: "看附件".into(),
-                },
-                ContentBlock::ResourceLink {
-                    uri: "file:///dir/a.rs".into(),
-                    name: "a.rs".into(),
-                    mime_type: None,
-                    title: None,
-                    description: None,
-                },
-            ]
-        );
-        assert!(
-            prompt_session_input(&serde_json::json!({ "content": { "type": "text" } })).is_err(),
-            "content 不是数组时应报错"
-        );
-    }
-
-    #[test]
     fn transcript_lines_match_documented_shape() {
         let user = TranscriptLine::User {
-            content: vec![ContentBlock::Text {
-                text: "你好".into(),
-            }],
+            content: vec![ContentBlock::Text(TextContent::new("你好"))],
             timestamp: 7,
         };
         assert_eq!(
@@ -1249,9 +1234,7 @@ mod tests {
         service.append(
             &workflow.id,
             &TranscriptLine::User {
-                content: vec![ContentBlock::Text {
-                    text: "启动".into(),
-                }],
+                content: vec![ContentBlock::Text(TextContent::new("启动"))],
                 timestamp: 1,
             },
         );
@@ -1301,9 +1284,7 @@ mod tests {
         service.append(
             &workflow.id,
             &TranscriptLine::Agent {
-                content: vec![ContentBlock::Text {
-                    text: "已下发".into(),
-                }],
+                content: vec![ContentBlock::Text(TextContent::new("已下发"))],
                 timestamp: 4,
             },
         );
@@ -1330,9 +1311,7 @@ mod tests {
         let workflow = service.create("计划", None, None).await.unwrap();
         for line in [
             TranscriptLine::User {
-                content: vec![ContentBlock::Text {
-                    text: "启动".into(),
-                }],
+                content: vec![ContentBlock::Text(TextContent::new("启动"))],
                 timestamp: 1,
             },
             TranscriptLine::ToolCall {
@@ -1350,15 +1329,11 @@ mod tests {
                 error: "模型调用失败: xxx".into(),
             },
             TranscriptLine::Agent {
-                content: vec![ContentBlock::Text {
-                    text: "已启动".into(),
-                }],
+                content: vec![ContentBlock::Text(TextContent::new("已启动"))],
                 timestamp: 5,
             },
             TranscriptLine::User {
-                content: vec![ContentBlock::Text {
-                    text: "继续".into(),
-                }],
+                content: vec![ContentBlock::Text(TextContent::new("继续"))],
                 timestamp: 6,
             },
         ] {
@@ -1391,9 +1366,7 @@ mod tests {
             let workflow = service.create("计划", None, None).await.unwrap();
             for line in [
                 TranscriptLine::User {
-                    content: vec![ContentBlock::Text {
-                        text: "上一轮".into(),
-                    }],
+                    content: vec![ContentBlock::Text(TextContent::new("上一轮"))],
                     timestamp: 1,
                 },
                 TranscriptLine::ToolCall {
@@ -1403,9 +1376,7 @@ mod tests {
                     parameters: "{}".into(),
                 },
                 TranscriptLine::Agent {
-                    content: vec![ContentBlock::Text {
-                        text: "上次输出".into(),
-                    }],
+                    content: vec![ContentBlock::Text(TextContent::new("上次输出"))],
                     timestamp: 3,
                 },
             ] {
@@ -1417,9 +1388,7 @@ mod tests {
         let service = test_service(home);
         service.push_user(
             &workflow.id,
-            vec![ContentBlock::Text {
-                text: "新输入".into(),
-            }],
+            vec![ContentBlock::Text(TextContent::new("新输入"))],
         );
 
         let history = service

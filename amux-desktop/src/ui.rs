@@ -1,5 +1,6 @@
 //! 共享渲染助手：时间格式化、气泡宽度估算、活动文案、状态标签与空态。
 
+use agent_client_protocol::schema::v2::EmbeddedResourceResource;
 use amux_common::domain::{Activity, ContentBlock, SessionConfigKind, SessionConfigOption};
 use gpui::*;
 use gpui_component::label::Label;
@@ -116,9 +117,21 @@ pub fn blocks_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.clone()),
-            ContentBlock::ResourceLink { name, .. } => Some(format!("[附件 {name}]")),
-            ContentBlock::Resource { uri, .. } => uri.as_ref().map(|uri| format!("[附件 {uri}]")),
+            ContentBlock::Text(text) => Some(text.text.clone()),
+            ContentBlock::ResourceLink(link) => Some(format!("[附件 {}]", link.name)),
+            ContentBlock::Resource(embedded) => {
+                let uri = match &embedded.resource {
+                    EmbeddedResourceResource::TextResourceContents(contents) => {
+                        Some(contents.uri.as_str())
+                    }
+                    EmbeddedResourceResource::BlobResourceContents(contents) => {
+                        Some(contents.uri.as_str())
+                    }
+                    _ => None,
+                };
+                uri.map(|uri| format!("[附件 {uri}]"))
+            }
+            _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -130,12 +143,8 @@ pub fn message_images(blocks: &[ContentBlock]) -> Vec<Image> {
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Resource {
-                mime_type,
-                blob: Some(blob),
-                ..
-            } => {
-                let format = match mime_type.as_str() {
+            ContentBlock::Image(image) => {
+                let format = match image.mime_type.0.as_ref() {
                     "image/png" => ImageFormat::Png,
                     "image/jpeg" => ImageFormat::Jpeg,
                     "image/gif" => ImageFormat::Gif,
@@ -144,7 +153,26 @@ pub fn message_images(blocks: &[ContentBlock]) -> Vec<Image> {
                     _ => return None,
                 };
                 let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(blob)
+                    .decode(&image.data)
+                    .ok()?;
+                Some(Image::from_bytes(format, bytes))
+            }
+            ContentBlock::Resource(embedded) => {
+                let EmbeddedResourceResource::BlobResourceContents(contents) = &embedded.resource
+                else {
+                    return None;
+                };
+                let mime_type = contents.mime_type.as_ref()?.0.as_ref();
+                let format = match mime_type {
+                    "image/png" => ImageFormat::Png,
+                    "image/jpeg" => ImageFormat::Jpeg,
+                    "image/gif" => ImageFormat::Gif,
+                    "image/webp" => ImageFormat::Webp,
+                    "image/bmp" => ImageFormat::Bmp,
+                    _ => return None,
+                };
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&contents.blob)
                     .ok()?;
                 Some(Image::from_bytes(format, bytes))
             }

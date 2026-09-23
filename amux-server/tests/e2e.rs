@@ -630,9 +630,11 @@ async fn prompt_accepts_body_above_axum_default_limit() {
         .json(&json!({
             "input": [{
                 "type": "resource",
-                "mimeType": "image/png",
-                "uri": "large.png",
-                "blob": blob,
+                "resource": {
+                    "blob": blob,
+                    "uri": "large.png",
+                    "mimeType": "image/png",
+                },
             }],
         }))
         .send()

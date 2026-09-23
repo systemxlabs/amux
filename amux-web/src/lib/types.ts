@@ -1,24 +1,10 @@
 // 与 amux-common::api / amux-common::domain 的 JSON 表示手工对齐（camelCase，除少数按 serde 原样输出）。
 
-export type SessionState = "idle" | "busy";
+import type { ContentBlock } from "@agentclientprotocol/sdk";
 
-export type ContentBlock =
-  | { type: "text"; text: string }
-  | {
-      type: "resource";
-      mimeType: string;
-      uri?: string;
-      text?: string;
-      blob?: string;
-    }
-  | {
-      type: "resource_link";
-      uri: string;
-      name: string;
-      mimeType?: string;
-      title?: string;
-      description?: string;
-    };
+export type { ContentBlock };
+
+export type SessionState = "idle" | "busy";
 
 export type HistoryItem = {
   role: "user" | "agent";

@@ -12,16 +12,15 @@ use std::io;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v2::{
-    AvailableCommand, AvailableCommandInput, BlobResourceContents, CancelSessionNotification,
-    ClientCapabilities, CloseSessionRequest, ContentBlock as AcpContentBlock, DeleteSessionRequest,
-    EmbeddedResource, EmbeddedResourceResource, IdleStateUpdate, Implementation, InitializeRequest,
-    MediaType, NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
+    AvailableCommand, AvailableCommandInput, CancelSessionNotification, ClientCapabilities,
+    CloseSessionRequest, DeleteSessionRequest, IdleStateUpdate, Implementation, InitializeRequest,
+    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
     PlanUpdateContent, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResourceLink, ResumeSessionRequest, SelectedPermissionOutcome,
+    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
     SessionConfigKind as AcpSessionConfigKind, SessionConfigOption as AcpSessionConfigOption,
     SessionConfigOptionValue as AcpSessionConfigOptionValue, SessionConfigSelectOptions,
     SessionUpdate, SetSessionConfigOptionRequest, StateUpdate, StopReason, TextContent,
-    TextResourceContents, ToolCallUpdate, UpdateSessionNotification,
+    ToolCallUpdate, UpdateSessionNotification,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{Agent, Client, ConnectTo, JsonRpcRequest, Lines, V2ConnectionTo};
@@ -45,11 +44,11 @@ pub enum AcpEvent {
         state: SessionState,
         reason: StateChangeReason,
     },
-    /// agent 消息整条内容（按 message_id upsert）
+    /// agent 消息整条内容（按 message_id upsert，ACP ContentBlock 数组）
     Message {
         agent_session_id: String,
         message_id: String,
-        text: String,
+        content: Vec<ContentBlock>,
     },
     /// 思考活动整条内容（按 message_id upsert）
     Thinking {
@@ -249,7 +248,9 @@ pub async fn connect(
     let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, String>>();
     let machine_name = machine.to_string();
     let agent_name = agent.to_string();
-    let buffers = Arc::new(Mutex::new(HashMap::<(String, String), String>::new()));
+    let buffers = Arc::new(Mutex::new(
+        HashMap::<(String, String), Vec<ContentBlock>>::new(),
+    ));
 
     tokio::spawn(async move {
         let transport = DaemonTransport { outgoing, incoming };
@@ -407,8 +408,7 @@ async fn handle_call(call: Call, cx: &V2ConnectionTo<Agent>) {
             input,
             reply,
         } => {
-            let blocks = input.iter().filter_map(acp_content_block).collect();
-            let result = request(cx, PromptRequest::new(agent_session_id, blocks))
+            let result = request(cx, PromptRequest::new(agent_session_id, input))
                 .await
                 .map(|_| ());
             let _ = reply.send(result);
@@ -463,10 +463,10 @@ async fn request<R: JsonRpcRequest>(
         .map_err(|error| error.to_string())
 }
 
-/// ACP 通知 → 事件（文本按 messageId upsert 累积）。
+/// ACP 通知 → 事件（消息内容按 messageId 累积为 ACP ContentBlock 数组）。
 fn translate(
     notification: &UpdateSessionNotification,
-    buffers: &Mutex<HashMap<(String, String), String>>,
+    buffers: &Mutex<HashMap<(String, String), Vec<ContentBlock>>>,
     events: &mpsc::Sender<AcpEvent>,
 ) {
     let session_id = notification.session_id.to_string();
@@ -476,42 +476,61 @@ fn translate(
         // 用户消息由 Server 落盘（DESIGN：忽略 agent 回放的 user_message*）
         SessionUpdate::UserMessageChunk(_) | SessionUpdate::UserMessage(_) => {}
         SessionUpdate::AgentMessageChunk(chunk) => {
-            if let Some(text) = text_of(&chunk.content) {
-                let merged = append(buffers, &session_id, &chunk.message_id.to_string(), &text);
-                out.push(AcpEvent::Message {
-                    agent_session_id: session_id.clone(),
-                    message_id: chunk.message_id.to_string(),
-                    text: merged,
-                });
-            }
+            let merged = append_block(
+                buffers,
+                &session_id,
+                &chunk.message_id.to_string(),
+                &chunk.content,
+            );
+            out.push(AcpEvent::Message {
+                agent_session_id: session_id.clone(),
+                message_id: chunk.message_id.to_string(),
+                content: merged,
+            });
         }
         SessionUpdate::AgentMessage(message) => {
-            if let Some(text) = snapshot_text(&message.content) {
-                let merged = replace(buffers, &session_id, &message.message_id.to_string(), text);
+            if let Some(blocks) = snapshot_blocks(&message.content) {
+                let merged = replace_blocks(
+                    buffers,
+                    &session_id,
+                    &message.message_id.to_string(),
+                    blocks.clone(),
+                );
                 out.push(AcpEvent::Message {
                     agent_session_id: session_id.clone(),
                     message_id: message.message_id.to_string(),
-                    text: merged,
+                    content: merged,
                 });
             }
         }
         SessionUpdate::AgentThoughtChunk(chunk) => {
             if let Some(text) = text_of(&chunk.content) {
-                let merged = append(buffers, &session_id, &chunk.message_id.to_string(), &text);
+                let merged = append_block(
+                    buffers,
+                    &session_id,
+                    &chunk.message_id.to_string(),
+                    &ContentBlock::Text(TextContent::new(text)),
+                );
                 out.push(AcpEvent::Thinking {
                     agent_session_id: session_id.clone(),
                     message_id: chunk.message_id.to_string(),
-                    text: merged,
+                    text: join_text(&merged).unwrap_or_default(),
                 });
             }
         }
         SessionUpdate::AgentThought(thought) => {
             if let Some(text) = snapshot_text(&thought.content) {
-                let merged = replace(buffers, &session_id, &thought.message_id.to_string(), text);
+                let blocks = text.map(|text| vec![ContentBlock::Text(TextContent::new(text))]);
+                let merged = replace_blocks(
+                    buffers,
+                    &session_id,
+                    &thought.message_id.to_string(),
+                    blocks,
+                );
                 out.push(AcpEvent::Thinking {
                     agent_session_id: session_id.clone(),
                     message_id: thought.message_id.to_string(),
-                    text: merged,
+                    text: join_text(&merged).unwrap_or_default(),
                 });
             }
         }
@@ -577,32 +596,32 @@ fn translate(
     }
 }
 
-fn append(
-    buffers: &Mutex<HashMap<(String, String), String>>,
+fn append_block(
+    buffers: &Mutex<HashMap<(String, String), Vec<ContentBlock>>>,
     session_id: &str,
     message_id: &str,
-    text: &str,
-) -> String {
+    block: &ContentBlock,
+) -> Vec<ContentBlock> {
     let mut buffers = buffers.lock();
     let entry = buffers
         .entry((session_id.to_string(), message_id.to_string()))
         .or_default();
-    entry.push_str(text);
+    entry.push(block.clone());
     entry.clone()
 }
 
-fn replace(
-    buffers: &Mutex<HashMap<(String, String), String>>,
+fn replace_blocks(
+    buffers: &Mutex<HashMap<(String, String), Vec<ContentBlock>>>,
     session_id: &str,
     message_id: &str,
-    text: Option<String>,
-) -> String {
-    let text = text.unwrap_or_default();
+    blocks: Option<Vec<ContentBlock>>,
+) -> Vec<ContentBlock> {
+    let blocks = blocks.unwrap_or_default();
     buffers.lock().insert(
         (session_id.to_string(), message_id.to_string()),
-        text.clone(),
+        blocks.clone(),
     );
-    text
+    blocks
 }
 
 fn tool_call_event(session_id: &str, update: &ToolCallUpdate) -> Option<AcpEvent> {
@@ -633,19 +652,29 @@ fn tool_call_event(session_id: &str, update: &ToolCallUpdate) -> Option<AcpEvent
     })
 }
 
-fn text_of(block: &AcpContentBlock) -> Option<String> {
+fn text_of(block: &ContentBlock) -> Option<String> {
     match block {
-        AcpContentBlock::Text(text) => Some(text.text.clone()),
+        ContentBlock::Text(text) => Some(text.text.clone()),
         _ => None,
     }
 }
 
-fn join_text(blocks: &[AcpContentBlock]) -> Option<String> {
+fn join_text(blocks: &[ContentBlock]) -> Option<String> {
     let text: String = blocks.iter().filter_map(text_of).collect();
     (!text.is_empty()).then_some(text)
 }
 
-fn snapshot_text(content: &MaybeUndefined<Vec<AcpContentBlock>>) -> Option<Option<String>> {
+fn snapshot_blocks(
+    content: &MaybeUndefined<Vec<ContentBlock>>,
+) -> Option<Option<Vec<ContentBlock>>> {
+    match content {
+        MaybeUndefined::Undefined => None,
+        MaybeUndefined::Null => Some(None),
+        MaybeUndefined::Value(blocks) => Some(Some(blocks.clone())),
+    }
+}
+
+fn snapshot_text(content: &MaybeUndefined<Vec<ContentBlock>>) -> Option<Option<String>> {
     match content {
         MaybeUndefined::Undefined => None,
         MaybeUndefined::Null => Some(None),
@@ -806,45 +835,6 @@ fn plan_entries(entries: &[agent_client_protocol::schema::v2::PlanEntry]) -> Vec
         .collect()
 }
 
-/// amux ContentBlock → 专用 ACP ContentBlock。
-fn acp_content_block(block: &ContentBlock) -> Option<AcpContentBlock> {
-    match block {
-        ContentBlock::Text { text } => Some(AcpContentBlock::Text(TextContent::new(text.clone()))),
-        ContentBlock::Resource {
-            mime_type,
-            uri,
-            text,
-            blob,
-        } => {
-            let uri = uri.clone().unwrap_or_default();
-            let media_type = (!mime_type.is_empty()).then(|| MediaType::new(mime_type.clone()));
-            let resource = if let Some(blob) = blob {
-                EmbeddedResourceResource::BlobResourceContents(
-                    BlobResourceContents::new(blob.clone(), uri.clone()).mime_type(media_type),
-                )
-            } else {
-                EmbeddedResourceResource::TextResourceContents(
-                    TextResourceContents::new(text.clone().unwrap_or_default(), uri.clone())
-                        .mime_type(media_type),
-                )
-            };
-            Some(AcpContentBlock::Resource(EmbeddedResource::new(resource)))
-        }
-        ContentBlock::ResourceLink {
-            uri,
-            name,
-            mime_type,
-            title,
-            description,
-        } => Some(AcpContentBlock::ResourceLink(
-            ResourceLink::new(name.clone(), uri.clone())
-                .mime_type(mime_type.clone().map(MediaType::new))
-                .title(title.clone())
-                .description(description.clone()),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,11 +876,30 @@ mod tests {
     #[test]
     fn chunk_text_is_accumulated_per_message() {
         let buffers = Mutex::new(HashMap::new());
-        assert_eq!(append(&buffers, "s1", "m1", "he"), "he");
-        assert_eq!(append(&buffers, "s1", "m1", "llo"), "hello");
-        assert_eq!(append(&buffers, "s1", "m2", "x"), "x");
-        // 整条快照替换累积内容；清空后为空串
-        assert_eq!(replace(&buffers, "s1", "m1", None), "");
+        let blocks = append_block(
+            &buffers,
+            "s1",
+            "m1",
+            &ContentBlock::Text(TextContent::new("he")),
+        );
+        assert_eq!(join_text(&blocks), Some("he".to_string()));
+        let blocks = append_block(
+            &buffers,
+            "s1",
+            "m1",
+            &ContentBlock::Text(TextContent::new("llo")),
+        );
+        assert_eq!(join_text(&blocks), Some("hello".to_string()));
+        let blocks = append_block(
+            &buffers,
+            "s1",
+            "m2",
+            &ContentBlock::Text(TextContent::new("x")),
+        );
+        assert_eq!(join_text(&blocks), Some("x".to_string()));
+        // 整条快照替换累积内容；清空后为无文本
+        let blocks = replace_blocks(&buffers, "s1", "m1", None);
+        assert_eq!(join_text(&blocks), None);
     }
 
     #[test]

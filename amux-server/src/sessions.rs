@@ -181,7 +181,7 @@ impl SessionService {
         let text: String = input
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.clone()),
+                ContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
             .collect();
@@ -545,11 +545,10 @@ impl SessionService {
             AcpEvent::Message {
                 agent_session_id,
                 message_id,
-                text,
+                content,
             } => {
                 let session = self.session_of_agent(&agent_session_id)?;
-                let blocks = vec![ContentBlock::Text { text }];
-                let content = serde_json::to_string(&blocks).unwrap_or_default();
+                let content = serde_json::to_string(&content).unwrap_or_default();
                 self.store
                     .upsert_message(&session.id, &message_id, "agent", &content, now_ms());
                 self.store.touch(&session.id);
