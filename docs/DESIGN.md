@@ -342,7 +342,7 @@ Server 作为 ACP client 与 Agents 通信
     session_id TEXT NOT NULL,      -- Amux 普通会话 ID
     message_id TEXT NOT NULL,      -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 Agent 提供
     role TEXT NOT NULL,            -- user / agent
-    content TEXT NOT NULL,         -- 消息内容，以 json 格式存放
+    content TEXT NOT NULL,         -- 消息内容，以 ACP ContentBlock 数组格式转 json 后存放
     created_at INTEGER NOT NULL,   -- 创建时间
     updated_at INTEGER NOT NULL,   -- 更新时间
     PRIMARY KEY (session_id, message_id)
@@ -396,7 +396,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 | `list_agents` | 已连接机器及各机器的 agent 列表 |
 | `list_sessions` | 本工作流的关联普通会话列表，会话包含会话ID、状态等尽可能多的信息 |
 | `create_session` | 创建关联普通会话 |
-| `prompt_session` | 向指定关联普通会话下发指令 |
+| `prompt_session` | 向指定关联普通会话下发指令，支持 ContentBlock 数组 |
 | `cancel_session` | 取消指定关联普通会话进行中的工作 |
 | `configure_session` | 配置指定关联普通会话：会话标题，会话选项等 |
 | `get_session_config_options` | 获取指定关联普通会话的会话选项 |
@@ -452,6 +452,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   ```
 - 对话和活动历史：存储在 `~/.amux/workflows/<workflow_id>_transcript.jsonl` 文件中，包含用户输入、工作流智能体输出、工具调用、thinking、执行错误，不包含工具结果
   ```json
+  // content 为 ACP ContentBlock 数组
   {"kind": "user", "content": [ ... ], "timestamp": 1725800000000}
   {"kind": "agent", "content": [ ... ], "timestamp": 1725800001000}
   {"kind": "thinking", "timestamp": 1694230800000, "thinking": "先查看目录结构…"}
