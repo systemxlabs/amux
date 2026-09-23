@@ -153,7 +153,7 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 | agent | 发现方式 |
 |---|---|
 | nano | 已内置 |
-| codex | 本机装有 `codex` CLI 且 npx 可用 |
+| codex | 本机装有 `codex` CLI & npx 可用 & bun 可用 |
 
 ### Agent 启动
 
