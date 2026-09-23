@@ -3,6 +3,7 @@ import { useRef, useState, type CSSProperties, type PointerEvent, type ReactNode
 import { cn } from "../lib/utils";
 
 const MIN_PANE_WIDTH = 120;
+const DEFAULT_TREE_WIDTH = "33%";
 
 type DragState = {
   pointerId: number;
@@ -73,7 +74,7 @@ export function ResizableTreePane({
 
   const style = resizable
     ? ({
-        "--resizable-tree-width": treeWidth === null ? "50%" : `${treeWidth}px`,
+        "--resizable-tree-width": treeWidth === null ? DEFAULT_TREE_WIDTH : `${treeWidth}px`,
       } as CSSProperties)
     : undefined;
 
