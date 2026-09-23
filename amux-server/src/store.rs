@@ -592,6 +592,14 @@ impl Store {
         );
     }
 
+    pub fn set_workflow_title_if_empty(&self, id: &str, title: &str) {
+        let _ = self.workflows.lock().execute(
+            "UPDATE workflows SET title = ?2, updated_at = ?3
+             WHERE id = ?1 AND (title IS NULL OR title = '')",
+            params![id, title, now_ms() as i64],
+        );
+    }
+
     pub fn touch_workflow(&self, id: &str) {
         let _ = self.workflows.lock().execute(
             "UPDATE workflows SET updated_at = ?2 WHERE id = ?1",

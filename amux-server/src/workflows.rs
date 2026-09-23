@@ -83,7 +83,7 @@ impl WorkflowService {
         project: Option<&str>,
     ) -> Result<Workflow, String> {
         let id = Uuid::new_v4().to_string();
-        let title = title.unwrap_or_else(|| generate_title(plan));
+        let title = title.unwrap_or_default();
         self.store
             .insert_workflow(&id, &title, SessionState::Idle, plan, project, now_ms());
         self.get(&id)
@@ -141,7 +141,13 @@ impl WorkflowService {
         id: &str,
         input: Vec<ContentBlock>,
     ) -> Result<(), String> {
-        self.get(id)?;
+        let workflow = self.get(id)?;
+        if workflow.title.is_empty() {
+            let title = generate_title(&blocks_text(&input));
+            if !title.is_empty() {
+                self.store.set_workflow_title_if_empty(id, &title);
+            }
+        }
         self.push_user(id, input);
         Ok(())
     }
@@ -1162,6 +1168,41 @@ mod tests {
         ] {
             assert!(names.contains(&expected.to_string()), "缺少工具 {expected}");
         }
+    }
+
+    #[tokio::test]
+    async fn workflow_title_comes_from_first_user_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let workflow = service
+            .create("这里是很长的执行计划", None, None)
+            .await
+            .unwrap();
+        assert_eq!(workflow.title, "");
+
+        service
+            .prompt(
+                &workflow.id,
+                vec![ContentBlock::Text(TextContent::new("先实现登录功能"))],
+            )
+            .await
+            .unwrap();
+        assert_eq!(service.get(&workflow.id).unwrap().title, "先实现登录功能");
+
+        service
+            .prompt(
+                &workflow.id,
+                vec![ContentBlock::Text(TextContent::new("再补充测试"))],
+            )
+            .await
+            .unwrap();
+        assert_eq!(service.get(&workflow.id).unwrap().title, "先实现登录功能");
+
+        let titled = service
+            .create("计划", Some("手动标题".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(titled.title, "手动标题");
     }
 
     #[test]
