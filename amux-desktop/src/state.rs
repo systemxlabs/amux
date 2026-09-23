@@ -336,7 +336,7 @@ pub enum PendingAttachmentStatus {
     },
     Failed(String),
     Uploaded {
-        block: ContentBlock,
+        block: Arc<ContentBlock>,
         remote_name: String,
     },
 }

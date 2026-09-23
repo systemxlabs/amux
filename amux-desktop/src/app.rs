@@ -1337,7 +1337,7 @@ impl AmuxApp {
             attachments
                 .into_iter()
                 .filter_map(|attachment| match attachment.status {
-                    PendingAttachmentStatus::Uploaded { block, .. } => Some(block),
+                    PendingAttachmentStatus::Uploaded { block, .. } => Some(block.as_ref().clone()),
                     _ => None,
                 }),
         );
@@ -1590,10 +1590,10 @@ impl AmuxApp {
                         .find(|attachment| attachment.id == id)
                     {
                         attachment.status = PendingAttachmentStatus::Uploaded {
-                            block: ContentBlock::ResourceLink(
+                            block: Arc::new(ContentBlock::ResourceLink(
                                 ResourceLink::new(attachment.label.clone(), uri)
                                     .mime_type(attachment.mime_type.clone().map(MediaType::new)),
-                            ),
+                            )),
                             remote_name: uploaded.name,
                         };
                     }
