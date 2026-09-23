@@ -1165,6 +1165,33 @@ mod tests {
     }
 
     #[test]
+    fn prompt_session_only_accepts_text_prompt() {
+        let definition = tool_definitions()
+            .into_iter()
+            .find(|definition| definition.name == "prompt_session")
+            .expect("缺少 prompt_session");
+        let properties = definition.parameters["properties"]
+            .as_object()
+            .expect("properties 应为对象");
+        assert_eq!(
+            properties.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["session", "prompt"]
+        );
+        assert_eq!(
+            definition.parameters["required"],
+            serde_json::json!(["session", "prompt"])
+        );
+        assert!(
+            string_arg(
+                &serde_json::json!({ "session": "s1", "content": [{ "type": "text", "text": "x" }] }),
+                "prompt"
+            )
+            .is_err(),
+            "content 不能替代 prompt"
+        );
+    }
+
+    #[test]
     fn page_arg_parses_limit_and_offset_with_defaults() {
         assert_eq!(page_arg(&serde_json::json!({})), (PAGE_LIMIT, 0));
         assert_eq!(

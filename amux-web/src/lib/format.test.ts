@@ -29,7 +29,10 @@ describe("blocksText", () => {
       blocksText([
         { type: "text", text: "看这个 " },
         { type: "resource_link", uri: "file:///a.rs", name: "a.rs", title: "a.rs" },
-        { type: "resource", mimeType: "text/plain", uri: "file:///b.rs" },
+        {
+          type: "resource",
+          resource: { blob: "AAAA", mimeType: "text/plain", uri: "file:///b.rs" },
+        },
       ]),
     ).toBe("看这个 [引用 a.rs][资源 file:///b.rs]");
   });
@@ -37,10 +40,25 @@ describe("blocksText", () => {
   it("资源块的文本内容与图片 blob 不再退化为通用标签", () => {
     expect(
       blocksText([
-        { type: "resource", mimeType: "text/plain", uri: "a.txt", text: "hello\nworld" },
-        { type: "resource", mimeType: "image/png", uri: "pic.png", blob: "AAAA" },
+        {
+          type: "resource",
+          resource: { mimeType: "text/plain", uri: "a.txt", text: "hello\nworld" },
+        },
+        {
+          type: "resource",
+          resource: { mimeType: "image/png", uri: "pic.png", blob: "AAAA" },
+        },
       ]),
     ).toBe("hello\nworld[图片 pic.png]");
+  });
+
+  it("图片与音频块保留可识别标签", () => {
+    expect(
+      blocksText([
+        { type: "image", data: "AAAA", mimeType: "image/png", uri: "pic.png" },
+        { type: "audio", data: "AAAA", mimeType: "audio/wav" },
+      ]),
+    ).toBe("[图片 pic.png][音频]");
   });
 });
 

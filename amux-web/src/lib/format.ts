@@ -23,12 +23,22 @@ export function blocksText(blocks: readonly ContentBlock[]): string {
       switch (block.type) {
         case "text":
           return block.text;
-        case "resource":
-          if (block.text) return block.text;
-          if (block.blob) return block.uri ? `[图片 ${block.uri}]` : "[图片]";
-          return block.uri ? `[资源 ${block.uri}]` : "[资源]";
+        case "image":
+          return block.uri ? `[图片 ${block.uri}]` : "[图片]";
+        case "audio":
+          return "[音频]";
+        case "resource": {
+          const resource = block.resource;
+          if ("text" in resource) return resource.text;
+          if (resource.mimeType?.startsWith("image/")) {
+            return `[图片 ${resource.uri}]`;
+          }
+          return `[资源 ${resource.uri}]`;
+        }
         case "resource_link":
           return `[引用 ${block.title ?? block.name}]`;
+        default:
+          return `[${(block as { type: string }).type}]`;
       }
     })
     .join("");

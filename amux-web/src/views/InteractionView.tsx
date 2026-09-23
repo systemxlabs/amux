@@ -541,56 +541,78 @@ function BlockContent({ block }: { block: ContentBlock }) {
   switch (block.type) {
     case "text":
       return <Markdown text={block.text} />;
-    case "resource":
-      if (block.blob && block.mimeType.startsWith("image/")) {
-        return (
-          <div className="flex flex-col gap-1">
-            {block.uri ? (
+    case "image":
+      return (
+        <div className="flex flex-col gap-1">
+          {block.uri ? (
+            <span data-slot="message-resource-name" className="text-xs opacity-80">
+              {block.uri}
+            </span>
+          ) : null}
+          <img
+            data-slot="message-image"
+            alt={block.uri ?? "图片附件"}
+            src={`data:${block.mimeType};base64,${block.data}`}
+            className="max-h-60 w-full rounded object-contain"
+          />
+        </div>
+      );
+    case "audio":
+      return (
+        <audio
+          data-slot="message-audio"
+          controls
+          src={`data:${block.mimeType};base64,${block.data}`}
+          className="max-w-full"
+        />
+      );
+    case "resource": {
+      const resource = block.resource;
+      if ("blob" in resource) {
+        if (resource.mimeType?.startsWith("image/")) {
+          return (
+            <div className="flex flex-col gap-1">
               <span data-slot="message-resource-name" className="text-xs opacity-80">
-                {block.uri}
+                {resource.uri}
               </span>
-            ) : null}
-            <img
-              data-slot="message-resource-image"
-              alt={block.uri ?? "图片附件"}
-              src={`data:${block.mimeType};base64,${block.blob}`}
-              className="max-h-60 w-full rounded object-contain"
-            />
-          </div>
-        );
-      }
-      if (block.text) {
-        return (
-          <div className="flex flex-col gap-1">
-            {block.uri ? (
-              <span data-slot="message-resource-name" className="text-xs opacity-80">
-                {block.uri}
-              </span>
-            ) : null}
-            <p data-slot="message-resource-text" className="whitespace-pre-wrap">
-              {block.text}
-            </p>
-          </div>
-        );
-      }
-      if (block.uri) {
+              <img
+                data-slot="message-resource-image"
+                alt={resource.uri}
+                src={`data:${resource.mimeType};base64,${resource.blob}`}
+                className="max-h-60 w-full rounded object-contain"
+              />
+            </div>
+          );
+        }
         return (
           <a
             data-slot="message-resource-link"
-            href={block.uri}
+            href={resource.uri}
             className="whitespace-pre-wrap underline"
           >
-            [资源 {block.uri}]
+            [资源 {resource.uri}]
           </a>
         );
       }
-      return <span>[资源]</span>;
+      return (
+        <div className="flex flex-col gap-1">
+          <span data-slot="message-resource-name" className="text-xs opacity-80">
+            {resource.uri}
+          </span>
+          <p data-slot="message-resource-text" className="whitespace-pre-wrap">
+            {resource.text}
+          </p>
+        </div>
+      );
+    }
     case "resource_link":
       return (
         <a data-slot="message-resource-link" href={block.uri} className="whitespace-pre-wrap underline">
           [引用 {block.title ?? block.name}]
         </a>
       );
+    default:
+      return <span>[{(block as { type: string }).type}]</span>;
   }
 }
 
