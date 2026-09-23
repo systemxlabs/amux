@@ -13,8 +13,14 @@ pub fn machine_info(name: &str) -> MachineInfo {
     }
 }
 
-/// 主机名：优先环境变量，其次 `/etc/hostname`，都取不到时用 `unknown`。
+/// 主机名：优先系统 API，其次环境变量与 `/etc/hostname`，都取不到时用 `unknown`。
 fn hostname() -> String {
+    let value = gethostname::gethostname();
+    let value = value.to_string_lossy();
+    let value = value.trim();
+    if !value.is_empty() {
+        return value.to_string();
+    }
     if let Ok(value) = std::env::var("HOSTNAME") {
         if !value.is_empty() {
             return value;
@@ -37,6 +43,7 @@ mod tests {
         assert_eq!(info.name, "localpc");
         assert!(!info.os.is_empty());
         assert!(!info.arch.is_empty());
+        assert_ne!(info.hostname, "unknown");
         assert!(!info.temp_dir.is_empty(), "技能操作要用机器的系统临时目录");
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
     }
