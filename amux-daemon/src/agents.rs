@@ -25,8 +25,8 @@ const KNOWN_AGENTS: &[&str] = &[amux_common::api::NANO_AGENT, "codex"];
 fn launch_spec(agent: &str) -> Option<LaunchSpec> {
     match agent {
         "codex" => Some(LaunchSpec {
-            program: "npx",
-            args: &["-y", "@nyssance/codex-acp-v2"],
+            program: "bunx",
+            args: &["@nyssance/codex-acp-v2"],
             env: &[("INITIAL_AGENT_MODE", "agent-full-access")],
         }),
         _ => None,
@@ -37,8 +37,8 @@ fn launch_spec(agent: &str) -> Option<LaunchSpec> {
 fn is_installed(agent: &str) -> bool {
     match agent {
         amux_common::api::NANO_AGENT => true,
-        // codex 经 npx 启动：需要 codex CLI、npx 与 bun 同时可用
-        "codex" => in_path("codex") && in_path("npx") && in_path("bun"),
+        // codex 经 bunx 启动：需要 codex CLI 与 bunx 同时可用
+        "codex" => in_path("codex") && in_path("bunx"),
         _ => false,
     }
 }
