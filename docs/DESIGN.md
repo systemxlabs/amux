@@ -62,7 +62,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | 方法 | 描述 |
 |---|---|
 | GET `/machines` | 查询所有已连接机器，包含机器信息 |
-| GET `/machines/<machine_name>/agents` | 查询当前机器的 agents，包含名称、状态和活跃 ACP 会话数 |
+| GET `/machines/<machine_name>/agents` | 查询当前机器的 agents，包含名称、状态和打开会话数 |
 | POST `/machines/<machine_name>/agents/rediscover` | 重新发现 agents |
 | POST `/machines/<machine_name>/agents/<agent_name>/restart` | 重启指定 agent |
 | GET `/machines/<machine_name>/list_dir` | 分页查看指定路径文件夹列表 |
