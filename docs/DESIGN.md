@@ -396,7 +396,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 | `list_agents` | 已连接机器及各机器的 agent 列表 |
 | `list_sessions` | 本工作流的关联普通会话列表，会话包含会话ID、状态等尽可能多的信息 |
 | `create_session` | 创建关联普通会话 |
-| `prompt_session` | 向指定关联普通会话下发指令，支持 ContentBlock 数组 |
+| `prompt_session` | 向指定关联普通会话下发指令 |
 | `cancel_session` | 取消指定关联普通会话进行中的工作 |
 | `configure_session` | 配置指定关联普通会话：会话标题，会话选项等 |
 | `get_session_config_options` | 获取指定关联普通会话的会话选项 |
