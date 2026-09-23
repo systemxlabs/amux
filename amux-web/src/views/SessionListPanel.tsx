@@ -214,9 +214,6 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
         onDragEnd={() => setDragEntry(null)}
         onClick={() => {
           onNavigate();
-          if (entry.kind === "workflow" && canExpand(entry)) {
-            toggleExpand(core, entry.workflow.id);
-          }
           void openEntry(core, entry);
         }}
         onContextMenu={(event) => {
