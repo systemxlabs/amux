@@ -398,15 +398,15 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 | 工具 | 描述 |
 |---|---|
-| `list_agents` | 已连接机器及各机器的 agent 列表 |
-| `list_sessions` | 本工作流的关联普通会话列表，会话包含会话ID、状态等尽可能多的信息 |
-| `create_session` | 创建关联普通会话用于调度智能体执行任务 |
-| `prompt_session` | 向指定关联普通会话以用户消息方式下发指令 |
+| `list_agents` | 查询各机器的 agent 列表，包括 agent 状态 |
+| `list_sessions` | 查询关联普通会话列表，包含会话 ID、状态、标题、工作目录、worktree 目录、机器、agent 信息 |
+| `create_session` | 创建关联普通会话用于调度智能体执行任务，需指定机器、agent、工作目录、是否开启 worktree，若开启 worktree，系统自动创建 worktree 并让执行智能体在 worktree 目录工作 |
+| `prompt_session` | 向指定关联普通会话以用户角色下发指令 |
 | `cancel_session` | 取消指定关联普通会话进行中的工作 |
 | `configure_session` | 配置指定关联普通会话的会话标题和会话选项 |
-| `get_session_config_options` | 获取指定关联普通会话的会话选项，例如模型、推理级别 |
-| `read_session_history` | 分页读取关联普通会话对话内容，包含用户消息和 agent 输出 |
-| `read_session_activities` | 分页读取关联普通会话活动内容，包含 agent 思考、工具调用和错误 |
+| `get_session_config_options` | 获取指定关联普通会话支持的会话选项，例如模型、推理级别，不同执行智能体可能支持不同的选项 |
+| `read_session_history` | 分页读取关联普通会话对话内容，包含用户消息和执行智能体输出消息 |
+| `read_session_activities` | 分页读取关联普通会话活动内容，包含执行智能体的思考、工具调用和错误 |
 
 工作流智能体实现应支持 steer，当工作流会话处于工作中时，接收的用户消息以 steer 方式注入。
 
