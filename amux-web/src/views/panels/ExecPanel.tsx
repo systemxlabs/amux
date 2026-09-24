@@ -1,4 +1,4 @@
-// 工作目录视图：文件树 + 文件内容（docs/PRD.md「工作目录视图」、docs/DESIGN.md「工作目录视图」）。
+// 执行目录视图：文件树 + 文件内容（docs/PRD.md「执行目录视图」、docs/DESIGN.md「执行目录视图」）。
 //
 // 每一级目录项都在节点展开时实时拉取，不做缓存也不定时刷新；目录与文件内容都按分页续拉，
 // 有剩余页时展示「加载更多」入口。
@@ -10,7 +10,7 @@ import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
 import { useCore, useCoreState } from "../../core/store";
 import type { FsEntry } from "../../lib/types";
-import { rootDir } from "../../lib/types";
+import { execDir } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { isInSubtree } from "../../lib/workspace";
 
@@ -78,7 +78,7 @@ function TreeNodes({
               type="button"
               variant="ghost"
               size="sm"
-              data-slot="workspace-node"
+              data-slot="exec-node"
               data-dir={entry.isDir ? "true" : "false"}
               className={cn(
                 "w-full justify-start font-normal",
@@ -126,7 +126,7 @@ function TreeNodes({
                         type="button"
                         variant="ghost"
                         size="sm"
-                        data-slot="workspace-load-more-dir"
+                        data-slot="exec-load-more-dir"
                         className="w-full justify-start font-normal text-muted-foreground"
                         style={{ paddingLeft: `${20 + depth * 12}px` }}
                         onClick={() => onLoadMoreDir(entry.path)}
@@ -145,12 +145,12 @@ function TreeNodes({
   );
 }
 
-export function WorkspacePanel() {
+export function ExecPanel() {
   const core = useCore();
   const state = useCoreState();
   const session = state.detail.session;
   const machine = session?.machine ?? null;
-  const root = session === null ? null : rootDir(session);
+  const root = session === null ? null : execDir(session);
 
   const [treeVisible, setTreeVisible] = useState(true);
   const [contentVisible, setContentVisible] = useState(true);
@@ -250,7 +250,7 @@ export function WorkspacePanel() {
     const open = expanded.includes(path);
     if (open) {
       // 折叠即丢弃整棵子树（展开状态与已加载目录项）：不保留任何缓存，
-      // 再次展开时父目录与逐级子目录都重新拉取（docs/DESIGN.md「工作目录视图」）
+      // 再次展开时父目录与逐级子目录都重新拉取（docs/DESIGN.md「执行目录视图」）
       setExpanded((prev) => prev.filter((item) => !isInSubtree(item, path)));
       setLevels((prev) =>
         Object.fromEntries(Object.entries(prev).filter(([key]) => !isInSubtree(key, path))),
@@ -316,7 +316,7 @@ export function WorkspacePanel() {
           type="button"
           variant="ghost"
           size="icon"
-          data-slot="workspace-toggle-tree"
+          data-slot="exec-toggle-tree"
           aria-label={treeVisible ? "折叠文件树" : "展开文件树"}
           title={treeVisible ? "折叠文件树" : "展开文件树"}
           onClick={() => setTreeVisible((prev) => !prev)}
@@ -327,7 +327,7 @@ export function WorkspacePanel() {
           type="button"
           variant="ghost"
           size="icon"
-          data-slot="workspace-toggle-content"
+          data-slot="exec-toggle-content"
           aria-label={contentVisible ? "折叠内容区域" : "展开内容区域"}
           title={contentVisible ? "折叠内容区域" : "展开内容区域"}
           onClick={() => setContentVisible((prev) => !prev)}
@@ -337,7 +337,7 @@ export function WorkspacePanel() {
       </div>
       {/* 窄视口下文件树与内容上下排布；宽屏可通过分割线调整左右宽度 */}
       <ResizableTreePane
-        label="调整工作目录文件树与内容宽度"
+        label="调整执行目录文件树与内容宽度"
         tree={
           treeVisible ? (
             <>
@@ -368,7 +368,7 @@ export function WorkspacePanel() {
                           type="button"
                           variant="ghost"
                           size="sm"
-                          data-slot="workspace-load-more-dir"
+                          data-slot="exec-load-more-dir"
                           className="w-full justify-start font-normal text-muted-foreground"
                           onClick={() => loadDirMore(root)}
                         >
@@ -402,7 +402,7 @@ export function WorkspacePanel() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        data-slot="workspace-load-more-file"
+                        data-slot="exec-load-more-file"
                         onClick={() => void loadMoreFile()}
                       >
                         加载更多…
@@ -419,8 +419,8 @@ export function WorkspacePanel() {
             </>
           ) : null
         }
-        treeSlot="workspace-tree"
-        contentSlot="workspace-content"
+        treeSlot="exec-tree"
+        contentSlot="exec-content"
         treeClassName={cn(
           "min-h-0 max-h-[45%] overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none",
           !contentVisible && "lg:flex-1",

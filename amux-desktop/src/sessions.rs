@@ -624,10 +624,10 @@ fn session_view(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> A
             core.view
                 .session
                 .as_ref()
-                .map(|session| session.root_dir().to_string()),
-            |header, workdir| {
+                .map(|session| session.exec_dir().to_string()),
+            |header, exec_dir| {
                 header.child(
-                    Label::new(workdir)
+                    Label::new(exec_dir)
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .flex_1()

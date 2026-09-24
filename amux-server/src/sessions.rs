@@ -335,7 +335,7 @@ impl SessionService {
         let session = self.get(id)?;
         self.ensure_worktree(&session).await;
         self.machines
-            .git_diff(&session.machine, &self.work_dir(&session), base)
+            .git_diff(&session.machine, &self.exec_dir(&session), base)
             .await
     }
 
@@ -343,7 +343,7 @@ impl SessionService {
         let session = self.get(id)?;
         self.ensure_worktree(&session).await;
         self.machines
-            .git_branches(&session.machine, &self.work_dir(&session))
+            .git_branches(&session.machine, &self.exec_dir(&session))
             .await
     }
 
@@ -357,7 +357,7 @@ impl SessionService {
         rows: u16,
     ) -> Result<String, String> {
         let session = self.get(id)?;
-        let cwd = cwd.unwrap_or_else(|| self.work_dir(&session));
+        let cwd = cwd.unwrap_or_else(|| self.exec_dir(&session));
         let terminal_id = self
             .machines
             .terminal_open(
@@ -437,8 +437,8 @@ impl SessionService {
 
     // ---------- 内部 ----------
 
-    /// 会话的工作目录：启用 worktree 时用 worktree 目录。
-    pub fn work_dir(&self, session: &Session) -> String {
+    /// 会话的执行目录：启用 worktree 时用 worktree 目录。
+    pub fn exec_dir(&self, session: &Session) -> String {
         if session.worktree_dir.is_empty() {
             session.workspace.clone()
         } else {
@@ -449,7 +449,7 @@ impl SessionService {
     /// 惰性创建/恢复 agent 侧会话；resume 失败只记错误活动，不改元数据。
     pub async fn ensure_agent_session(&self, session: &Session) -> Result<(), String> {
         self.ensure_worktree(session).await;
-        let cwd = self.work_dir(session);
+        let cwd = self.exec_dir(session);
         let conn = self.machines.acp(&session.machine, &session.agent).await?;
         let resumed = self.caches.resumed.lock().contains(&session.id);
         match self.store.agent_session_id(&session.id) {

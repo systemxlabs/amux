@@ -729,11 +729,11 @@ impl WorkflowTools {
                     .await?;
                 services.link_session(&self.workflow_id, &session.id);
                 Ok(format!(
-                    "已创建关联普通会话 {} （{}@{}, 工作目录 {}）",
+                    "已创建关联普通会话 {} （{}@{}, 执行目录 {}）",
                     session.id,
                     agent,
                     machine,
-                    services.sessions.work_dir(&session)
+                    services.sessions.exec_dir(&session)
                 ))
             }
             "prompt_session" => {

@@ -36,8 +36,8 @@ use crate::sessions;
 use crate::settings;
 use crate::state::{
     clear_composer_attachments, matching_prefix, next_attachment_id, AttachmentSource,
-    ConnectionStatus, Core, DirectoryListing, ListEntry, OpenTarget, Paging, PendingAttachment,
-    PendingAttachmentStatus, SharedCore, SidePanel, WorkspaceNode, DEFAULT_PAGE_SIZE,
+    ConnectionStatus, Core, DirectoryListing, ExecNode, ListEntry, OpenTarget, Paging,
+    PendingAttachment, PendingAttachmentStatus, SharedCore, SidePanel, DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
 };
 use crate::terminal_view;
@@ -159,16 +159,16 @@ pub struct AmuxApp {
     pub workspace_recent_open: bool,
     /// 新建会话工作目录输入框的窗口坐标（浮层按输入框边缘锚定）
     pub workspace_input_bounds: Option<Bounds<Pixels>>,
-    /// 工作目录面板当前查看的文件路径
-    pub workspace_file: Option<String>,
-    /// 工作目录面板中文件树区域是否展开
-    pub workspace_tree_visible: bool,
-    /// 工作目录面板中文件内容区域是否展开
-    pub workspace_content_visible: bool,
-    /// 工作目录面板：文件树宽度
-    pub workspace_tree_width: f32,
-    /// 工作目录面板：文件树宽度拖拽起点（指针 x, 起始宽度）
-    workspace_tree_drag: Option<(f32, f32)>,
+    /// 执行目录面板当前查看的文件路径
+    pub exec_file: Option<String>,
+    /// 执行目录面板中文件树区域是否展开
+    pub exec_tree_visible: bool,
+    /// 执行目录面板中文件内容区域是否展开
+    pub exec_content_visible: bool,
+    /// 执行目录面板：文件树宽度
+    pub exec_tree_width: f32,
+    /// 执行目录面板：文件树宽度拖拽起点（指针 x, 起始宽度）
+    exec_tree_drag: Option<(f32, f32)>,
     /// 输入框高度（拖拽调整，docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）
     pub composer_height: f32,
     /// 输入框高度拖拽起点（指针 y, 起始高度）
@@ -396,11 +396,11 @@ impl AmuxApp {
             expanded_activities: HashSet::new(),
             workspace_recent_open: false,
             workspace_input_bounds: None,
-            workspace_file: None,
-            workspace_tree_visible: true,
-            workspace_content_visible: true,
-            workspace_tree_width: panels::WORKSPACE_TREE_WIDTH,
-            workspace_tree_drag: None,
+            exec_file: None,
+            exec_tree_visible: true,
+            exec_content_visible: true,
+            exec_tree_width: panels::EXEC_TREE_WIDTH,
+            exec_tree_drag: None,
             composer_height: INPUT_DEFAULT_HEIGHT,
             composer_drag: None,
             sidebar_width: SIDEBAR_WIDTH,
@@ -749,11 +749,11 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 查看文件内容（工作目录面板）。
+    /// 查看文件内容（执行目录面板）。
     pub fn read_file(&mut self, machine: String, path: String, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
-        self.workspace_file = Some(path.clone());
+        self.exec_file = Some(path.clone());
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             match client.read_file(&machine, &path, 400, 0).await {
@@ -880,8 +880,8 @@ impl AmuxApp {
         self.diff_comment_target = None;
         self.diff_line_selection = None;
         self.expanded_activities.clear();
-        self.workspace_file = None;
-        self.workspace_tree_visible = true;
+        self.exec_file = None;
+        self.exec_tree_visible = true;
         self.dialog_scroll_on_entry = true;
         self.activities_scroll_on_entry = true;
         self.load_view_data();
@@ -1014,15 +1014,15 @@ impl AmuxApp {
         self.terminal_stream = Some((key, task));
     }
 
-    /// 加载工作目录树根节点；每次打开面板都实时拉取，不缓存
-    /// （docs/DESIGN.md「工作目录视图」）。
-    pub fn load_workspace(&mut self, cx: &mut Context<Self>) {
+    /// 加载执行目录树根节点；每次打开面板都实时拉取，不缓存
+    /// （docs/DESIGN.md「执行目录视图」）。
+    pub fn load_exec_dir(&mut self, cx: &mut Context<Self>) {
         let (client, target) = self.with_core(|core| {
             let target = core
                 .view
                 .session
                 .as_ref()
-                .map(|session| (session.machine.clone(), session.root_dir().to_string()));
+                .map(|session| (session.machine.clone(), session.exec_dir().to_string()));
             (core.client.clone(), target)
         });
         let (Some(client), Some((machine, path))) = (client, target) else {
@@ -1033,20 +1033,20 @@ impl AmuxApp {
             match client.list_dir(&machine, Some(&path), 500, 0, false).await {
                 Ok(result) => {
                     let mut core = core.lock();
-                    core.view.detail.workspace_tree =
-                        result.entries.into_iter().map(WorkspaceNode::new).collect();
+                    core.view.detail.exec_tree =
+                        result.entries.into_iter().map(ExecNode::new).collect();
                 }
-                Err(error) => core.lock().error(format!("读取工作目录失败：{error}")),
+                Err(error) => core.lock().error(format!("读取执行目录失败：{error}")),
             }
         });
         cx.notify();
     }
 
-    /// 展开/折叠工作目录树节点；展开时实时拉取子目录项，不缓存
-    /// （docs/DESIGN.md「工作目录视图」）。
-    pub fn toggle_workspace_dir(&mut self, path: String, cx: &mut Context<Self>) {
+    /// 展开/折叠执行目录树节点；展开时实时拉取子目录项，不缓存
+    /// （docs/DESIGN.md「执行目录视图」）。
+    pub fn toggle_exec_dir(&mut self, path: String, cx: &mut Context<Self>) {
         let (client, machine, expanded) = self.with_core(|core| {
-            let expanded = WorkspaceNode::find_mut(&mut core.view.detail.workspace_tree, &path)
+            let expanded = ExecNode::find_mut(&mut core.view.detail.exec_tree, &path)
                 .map(|node| {
                     node.expanded = !node.expanded;
                     if !node.expanded {
@@ -1072,11 +1072,9 @@ impl AmuxApp {
             match client.list_dir(&machine, Some(&path), 500, 0, false).await {
                 Ok(result) => {
                     let mut core = core.lock();
-                    if let Some(node) =
-                        WorkspaceNode::find_mut(&mut core.view.detail.workspace_tree, &path)
-                    {
+                    if let Some(node) = ExecNode::find_mut(&mut core.view.detail.exec_tree, &path) {
                         node.children =
-                            Some(result.entries.into_iter().map(WorkspaceNode::new).collect());
+                            Some(result.entries.into_iter().map(ExecNode::new).collect());
                     }
                 }
                 Err(error) => core.lock().error(format!("读取目录失败：{error}")),
@@ -2007,7 +2005,7 @@ impl AmuxApp {
         self.open_side_panel(panel, cx);
     }
 
-    /// 打开右侧面板：面板数据立即刷新，工作目录、会话详情与终端在打开时加载。
+    /// 打开右侧面板：面板数据立即刷新，执行目录、会话详情与终端在打开时加载。
     pub fn open_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
         let previous = self.with_core(|core| core.side_panel);
         self.with_core(|core| {
@@ -2026,7 +2024,7 @@ impl AmuxApp {
             self.panel_width = panel.default_width();
         }
         match panel {
-            SidePanel::Workspace => self.load_workspace(cx),
+            SidePanel::ExecDir => self.load_exec_dir(cx),
             SidePanel::Terminal => self.open_terminal(cx),
             SidePanel::Diff => self.refresh_diff(cx),
             SidePanel::Detail => self.refresh_context(cx),
@@ -2347,30 +2345,30 @@ impl AmuxApp {
         cx.notify();
     }
 
-    /// 折叠/展开工作目录面板的文件树区域。
-    pub fn toggle_workspace_tree(&mut self, cx: &mut Context<Self>) {
-        self.workspace_tree_visible = !self.workspace_tree_visible;
+    /// 折叠/展开执行目录面板的文件树区域。
+    pub fn toggle_exec_tree(&mut self, cx: &mut Context<Self>) {
+        self.exec_tree_visible = !self.exec_tree_visible;
         cx.notify();
     }
 
     /// 折叠/展开整个文件树区域。
-    /// 折叠/展开工作目录视图的文件内容区域（docs/PRD.md「工作目录视图」）。
-    pub fn toggle_workspace_content(&mut self, cx: &mut Context<Self>) {
-        self.workspace_content_visible = !self.workspace_content_visible;
+    /// 折叠/展开执行目录视图的文件内容区域（docs/PRD.md「执行目录视图」）。
+    pub fn toggle_exec_content(&mut self, cx: &mut Context<Self>) {
+        self.exec_content_visible = !self.exec_content_visible;
         cx.notify();
     }
 
-    /// 记录工作目录文件树宽度拖拽起点。
-    pub fn begin_workspace_tree_resize(&mut self, pointer_x: f32) {
-        self.workspace_tree_drag = Some((pointer_x, self.workspace_tree_width));
+    /// 记录执行目录文件树宽度拖拽起点。
+    pub fn begin_exec_tree_resize(&mut self, pointer_x: f32) {
+        self.exec_tree_drag = Some((pointer_x, self.exec_tree_width));
     }
 
-    /// 调整工作目录文件树宽度（docs/PRD.md「工作目录视图」）。
-    pub fn resize_workspace_tree(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
-        let Some((origin, initial)) = self.workspace_tree_drag else {
+    /// 调整执行目录文件树宽度（docs/PRD.md「执行目录视图」）。
+    pub fn resize_exec_tree(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
+        let Some((origin, initial)) = self.exec_tree_drag else {
             return;
         };
-        self.workspace_tree_width = tree_width(initial + pointer_x - origin, self.panel_width);
+        self.exec_tree_width = tree_width(initial + pointer_x - origin, self.panel_width);
         cx.notify();
     }
 

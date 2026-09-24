@@ -80,7 +80,7 @@ export function Main() {
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
   const panels: { panel: SidePanel; label: string; icon: typeof Info }[] = [
-    { panel: "workspace", label: "工作目录", icon: FolderTree },
+    { panel: "exec", label: "执行目录", icon: FolderTree },
     { panel: "diff", label: "改动审查", icon: FileDiff },
     { panel: "details", label: "会话详情", icon: Info },
     { panel: "activities", label: "会话活动", icon: ActivityIcon },

@@ -1,4 +1,4 @@
-//! 左侧面板（会话列表）、中间面板右缘的悬浮按钮栏、右侧面板（工作目录 / 文件改动 /
+//! 左侧面板（会话列表）、中间面板右缘的悬浮按钮栏、右侧面板（执行目录 / 文件改动 /
 //! 会话详情 / 会话活动 / 会话计划 / 终端）。
 
 use amux_common::api::{Project, Session, Terminal, TerminalState, Workflow};
@@ -21,20 +21,20 @@ use crate::app::AmuxApp;
 use crate::diff;
 use crate::difftree::{self, DiffNode};
 use crate::sessions;
-use crate::state::{Core, ListEntry, OpenTarget, SidePanel, WorkspaceNode};
+use crate::state::{Core, ExecNode, ListEntry, OpenTarget, SidePanel};
 use crate::terminal_view;
 use crate::theme;
 use crate::ui;
 
 /// 改动审查视图左侧文件树宽度。
 pub(crate) const DIFF_TREE_WIDTH: f32 = 168.0;
-/// 工作目录树宽度。
-pub(crate) const WORKSPACE_TREE_WIDTH: f32 = 196.0;
+/// 执行目录树宽度。
+pub(crate) const EXEC_TREE_WIDTH: f32 = 196.0;
 /// 文件树可拖拽到的最小宽度。
 pub(crate) const TREE_MIN_WIDTH: f32 = 120.0;
 /// 文件树与内容之间的拖拽手柄宽度。
 pub(crate) const TREE_RESIZE_HANDLE_WIDTH: f32 = 5.0;
-/// 工作目录树中每层缩进。
+/// 执行目录树中每层缩进。
 const TREE_INDENT: f32 = 14.0;
 
 struct WorkspaceTreeResizeDrag;
@@ -574,7 +574,7 @@ fn rail_button(
 ) -> AnyElement {
     let label = panel.short_label();
     let icon: Icon = match panel {
-        SidePanel::Workspace => IconName::FolderOpen.into(),
+        SidePanel::ExecDir => IconName::FolderOpen.into(),
         SidePanel::Diff => FileDiffIcon.into(),
         SidePanel::Detail => IconName::Info.into(),
         SidePanel::Activities => IconName::Inbox.into(),
@@ -617,7 +617,7 @@ pub fn render_panel(
         .border_color(theme.border)
         .child(panel_header(panel, cx))
         .child(match panel {
-            SidePanel::Workspace => workspace_panel(core, this, cx),
+            SidePanel::ExecDir => exec_panel(core, this, cx),
             SidePanel::Diff => diff_review(core, this, window, cx),
             SidePanel::Detail => detail_panel(core, cx),
             SidePanel::Activities => activities_panel(core, this, cx),
@@ -628,7 +628,7 @@ pub fn render_panel(
         .into_any_element()
 }
 
-/// 面板标题栏（标题 + 关闭按钮）；改动面板与工作目录面板的工具栏由各自视图渲染。
+/// 面板标题栏（标题 + 关闭按钮）；改动面板与执行目录面板的工具栏由各自视图渲染。
 fn panel_header(panel: SidePanel, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let header = h_flex()
@@ -662,17 +662,17 @@ fn panel_header(panel: SidePanel, cx: &mut Context<AmuxApp>) -> AnyElement {
         .into_any_element()
 }
 
-/// 工作目录面板：左侧文件树 + 右侧文件内容。
-fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+/// 执行目录面板：左侧文件树 + 右侧文件内容。
+fn exec_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let root = core
         .view
         .session
         .as_ref()
-        .map(|session| (session.machine.clone(), session.root_dir().to_string()));
+        .map(|session| (session.machine.clone(), session.exec_dir().to_string()));
     let mut tree = v_flex()
-        .id("workspace-tree")
-        .w(px(this.workspace_tree_width))
+        .id("exec-tree")
+        .w(px(this.exec_tree_width))
         .h_full()
         .flex_none()
         .min_h_0()
@@ -683,8 +683,8 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
         .overflow_y_scroll();
     match &root {
         Some((machine, _)) => {
-            tree = tree.children(workspace_nodes(
-                &core.view.detail.workspace_tree,
+            tree = tree.children(exec_nodes(
+                &core.view.detail.exec_tree,
                 machine,
                 0,
                 this,
@@ -706,7 +706,7 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
         // 文本文件内容以围栏块渲染（等宽、保留空白）
         Some(text) => {
             content = content.child(
-                TextView::markdown("workspace-file-content", format!("```text\n{text}\n```"))
+                TextView::markdown("exec-file-content", format!("```text\n{text}\n```"))
                     .selectable(true),
             );
         }
@@ -719,7 +719,7 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
         }
     }
 
-    // 工具栏（docs/PRD.md「工作目录视图」）：折叠/展开文件树按钮左对齐，折叠/展开内容
+    // 工具栏（docs/PRD.md「执行目录视图」）：折叠/展开文件树按钮左对齐，折叠/展开内容
     // 区域按钮右对齐
     let toolbar = h_flex()
         .items_center()
@@ -727,48 +727,48 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
         .px_3()
         .pb_2()
         .child(
-            Button::new("workspace-toggle-tree")
+            Button::new("exec-toggle-tree")
                 .small()
                 .ghost()
-                .icon(if this.workspace_tree_visible {
+                .icon(if this.exec_tree_visible {
                     IconName::PanelLeftClose
                 } else {
                     IconName::PanelLeftOpen
                 })
-                .tooltip(if this.workspace_tree_visible {
+                .tooltip(if this.exec_tree_visible {
                     "折叠文件树"
                 } else {
                     "展开文件树"
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_workspace_tree(cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_exec_tree(cx))),
         )
         .child(div().flex_1())
         .child(
-            Button::new("workspace-toggle-content")
+            Button::new("exec-toggle-content")
                 .small()
                 .ghost()
-                .icon(if this.workspace_content_visible {
+                .icon(if this.exec_content_visible {
                     IconName::PanelRightClose
                 } else {
                     IconName::PanelRightOpen
                 })
-                .tooltip(if this.workspace_content_visible {
+                .tooltip(if this.exec_content_visible {
                     "折叠内容区域"
                 } else {
                     "展开内容区域"
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_workspace_content(cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_exec_content(cx))),
         );
 
     let mut body = h_flex().flex_1().min_h_0().gap_1().px_3().pb_3();
-    if this.workspace_tree_visible {
+    if this.exec_tree_visible {
         body = body.child(tree);
-        if this.workspace_content_visible {
+        if this.exec_content_visible {
             let border = theme.border;
             let primary = theme.primary;
             body = body.child(
                 div()
-                    .id("workspace-tree-resize-handle")
+                    .id("exec-tree-resize-handle")
                     .w(px(TREE_RESIZE_HANDLE_WIDTH))
                     .h_full()
                     .flex_none()
@@ -778,19 +778,19 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _, _| {
-                            this.begin_workspace_tree_resize(event.position.x.as_f32());
+                            this.begin_exec_tree_resize(event.position.x.as_f32());
                         }),
                     )
                     .on_drag(WorkspaceTreeResizeDrag, |_, _, _, cx| cx.new(|_| Empty))
                     .on_drag_move(cx.listener(
                         |this, event: &DragMoveEvent<WorkspaceTreeResizeDrag>, _, cx| {
-                            this.resize_workspace_tree(event.event.position.x.as_f32(), cx);
+                            this.resize_exec_tree(event.event.position.x.as_f32(), cx);
                         },
                     )),
             );
         }
     }
-    if this.workspace_content_visible {
+    if this.exec_content_visible {
         body = body.child(content);
     }
     v_flex()
@@ -802,9 +802,9 @@ fn workspace_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -
         .into_any_element()
 }
 
-/// 工作目录树行：目录可折叠/展开（首次展开拉取子目录），文件可查看内容。
-fn workspace_nodes(
-    nodes: &[WorkspaceNode],
+/// 执行目录树行：目录可折叠/展开（首次展开拉取子目录），文件可查看内容。
+fn exec_nodes(
+    nodes: &[ExecNode],
     machine: &str,
     depth: usize,
     this: &mut AmuxApp,
@@ -817,47 +817,44 @@ fn workspace_nodes(
         let indent = rems(0.5 + depth as f32 * (TREE_INDENT / 16.0));
         if entry.is_dir {
             rows.push(
-                Button::new(SharedString::from(format!(
-                    "workspace-entry-{}",
-                    entry.path
-                )))
-                .small()
-                .ghost()
-                .w_full()
-                .on_click(cx.listener({
-                    let path = entry.path.clone();
-                    move |this, _, _, cx| this.toggle_workspace_dir(path.clone(), cx)
-                }))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .justify_start()
-                        .gap_1p5()
-                        .pl(indent)
-                        .child(
-                            Icon::new(if node.expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .xsmall()
-                            .flex_none()
-                            .text_color(theme.muted_foreground),
-                        )
-                        .child(
-                            Label::new(entry.name.clone())
-                                .text_sm()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate(),
-                        ),
-                )
-                .into_any_element(),
+                Button::new(SharedString::from(format!("exec-entry-{}", entry.path)))
+                    .small()
+                    .ghost()
+                    .w_full()
+                    .on_click(cx.listener({
+                        let path = entry.path.clone();
+                        move |this, _, _, cx| this.toggle_exec_dir(path.clone(), cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_start()
+                            .gap_1p5()
+                            .pl(indent)
+                            .child(
+                                Icon::new(if node.expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall()
+                                .flex_none()
+                                .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                Label::new(entry.name.clone())
+                                    .text_sm()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate(),
+                            ),
+                    )
+                    .into_any_element(),
             );
             if node.expanded {
                 match &node.children {
                     Some(children) => {
-                        rows.extend(workspace_nodes(children, machine, depth + 1, this, cx))
+                        rows.extend(exec_nodes(children, machine, depth + 1, this, cx))
                     }
                     None => rows.push(
                         Label::new("加载中…")
@@ -869,9 +866,9 @@ fn workspace_nodes(
             }
             continue;
         }
-        let selected = this.workspace_file.as_deref() == Some(entry.path.as_str());
+        let selected = this.exec_file.as_deref() == Some(entry.path.as_str());
         rows.push(
-            Button::new(SharedString::from(format!("workspace-file-{}", entry.path)))
+            Button::new(SharedString::from(format!("exec-file-{}", entry.path)))
                 .small()
                 .ghost()
                 .w_full()
@@ -1049,7 +1046,7 @@ fn detail_panel(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
             .child(ui::info_row("Agent", &session.agent, &theme))
             .child(ui::info_row("工作目录", &session.workspace, &theme));
         if !session.worktree_dir.is_empty() {
-            body = body.child(ui::info_row("worktree", &session.worktree_dir, &theme));
+            body = body.child(ui::info_row("worktree 目录", &session.worktree_dir, &theme));
         }
         body = body
             .child(ui::info_row(
@@ -1504,7 +1501,7 @@ fn diff_review(
         );
 
     let body = if not_repo {
-        ui::empty_hint("当前工作目录不是 git 仓库", &theme).into_any_element()
+        ui::empty_hint("当前执行目录不是 git 仓库", &theme).into_any_element()
     } else if !loaded {
         ui::empty_hint("正在加载改动…", &theme).into_any_element()
     } else if files.is_empty() {

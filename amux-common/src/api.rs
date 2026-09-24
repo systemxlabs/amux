@@ -74,8 +74,8 @@ pub struct Session {
 }
 
 impl Session {
-    /// 会话实际使用的根目录：启用 worktree 时为 worktree 目录，否则为工作目录。
-    pub fn root_dir(&self) -> &str {
+    /// 会话实际执行目录：启用 worktree 时为 worktree 目录，否则为工作目录。
+    pub fn exec_dir(&self) -> &str {
         if self.worktree_dir.is_empty() {
             &self.workspace
         } else {

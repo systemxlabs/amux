@@ -1,4 +1,4 @@
-// 路径与工作目录联想（docs/DESIGN.md「新建会话视图」、docs/PRD.md「工作目录视图」）。
+// 路径与工作目录联想（docs/DESIGN.md「新建会话视图」、docs/PRD.md「执行目录视图」）。
 
 import type { FsEntry } from "./types";
 

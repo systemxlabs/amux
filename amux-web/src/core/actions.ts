@@ -17,7 +17,7 @@ import type {
   Skill,
   WorkflowPlanItem,
 } from "../lib/types";
-import { entryTitle, rootDir } from "../lib/types";
+import { entryTitle, execDir } from "../lib/types";
 import { initialNewSession, panelAvailable } from "./core";
 import type { Core, PendingAttachment, SidePanel } from "./core";
 import {
@@ -142,7 +142,7 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
     state.middle = "interaction";
     for (const attachment of state.attachments) attachment.controller?.abort();
     state.attachments = [];
-    // 工作目录/改动审查/计划/终端仅普通会话有：切到不适用的会话时关闭面板
+    // 执行目录/改动审查/计划/终端仅普通会话有：切到不适用的会话时关闭面板
     // （docs/PRD.md「主页面」；否则会留下关闭按钮都已隐藏的空白面板）
     if (state.sidePanel !== null && !panelAvailable(state.sidePanel, target)) {
       state.sidePanel = null;
@@ -794,7 +794,7 @@ export async function setConfigOption(
 
 // ---------- 终端 ----------
 
-/** 打开终端：以会话工作目录为 cwd，返回的终端立即成为活动终端。 */
+/** 打开终端：以会话执行目录为 cwd，返回的终端立即成为活动终端。 */
 export async function openTerminal(core: Core, cols: number, rows: number): Promise<void> {
   const target = core.state.open;
   if (!core.client || !target || target.kind !== "session") return;
@@ -802,7 +802,7 @@ export async function openTerminal(core: Core, cols: number, rows: number): Prom
   try {
     const terminalId = await core.client.openTerminal(
       target.id,
-      session ? rootDir(session) : null,
+      session ? execDir(session) : null,
       cols,
       rows,
     );

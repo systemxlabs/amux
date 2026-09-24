@@ -108,16 +108,16 @@ pub enum ViewKey {
     Settings(SettingsTab),
 }
 
-/// 工作目录树节点：目录项不缓存，展开时才拉取子节点
+/// 执行目录树节点：目录项不缓存，展开时才拉取子节点
 /// （`children` 为 `None` 表示当前无内容，展开时需实时拉取）。
 #[derive(Debug, Clone)]
-pub struct WorkspaceNode {
+pub struct ExecNode {
     pub entry: FsEntry,
     pub expanded: bool,
-    pub children: Option<Vec<WorkspaceNode>>,
+    pub children: Option<Vec<ExecNode>>,
 }
 
-impl WorkspaceNode {
+impl ExecNode {
     pub fn new(entry: FsEntry) -> Self {
         Self {
             entry,
@@ -127,7 +127,7 @@ impl WorkspaceNode {
     }
 
     /// 按绝对路径查找节点，用于把异步加载结果回填到树上。
-    pub fn find_mut<'a>(nodes: &'a mut [WorkspaceNode], path: &str) -> Option<&'a mut Self> {
+    pub fn find_mut<'a>(nodes: &'a mut [ExecNode], path: &str) -> Option<&'a mut Self> {
         for node in nodes {
             if node.entry.path == path {
                 return Some(node);
@@ -267,8 +267,8 @@ pub struct SessionView {
     pub activities_paging: Paging,
     /// 终端输出字节（按 SSE 事件增量累积；truncated 时整体替换）
     pub terminal_output: TerminalBuffer,
-    /// 工作目录树的根节点（懒加载子目录）
-    pub workspace_tree: Vec<WorkspaceNode>,
+    /// 执行目录树的根节点（懒加载子目录）
+    pub exec_tree: Vec<ExecNode>,
     /// 最近查看的文件内容
     pub file_content: Option<String>,
 }
@@ -373,7 +373,7 @@ pub fn clear_composer_attachments(core: &mut Core) {
 /// 右侧面板分类（PRD 右侧面板）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidePanel {
-    Workspace,
+    ExecDir,
     Diff,
     Detail,
     Activities,
@@ -384,7 +384,7 @@ pub enum SidePanel {
 
 impl SidePanel {
     pub const ALL: [SidePanel; 7] = [
-        SidePanel::Workspace,
+        SidePanel::ExecDir,
         SidePanel::Diff,
         SidePanel::Detail,
         SidePanel::Activities,
@@ -393,7 +393,7 @@ impl SidePanel {
         SidePanel::Terminal,
     ];
 
-    /// 当前会话类型下可用的面板：工作目录/文件改动/会话计划/终端仅普通会话展示（docs/PRD.md）。
+    /// 当前会话类型下可用的面板：执行目录/文件改动/会话计划/终端仅普通会话展示（docs/PRD.md）。
     pub fn for_session(is_workflow: bool) -> Vec<SidePanel> {
         SidePanel::ALL
             .into_iter()
@@ -411,7 +411,7 @@ impl SidePanel {
 
     pub fn label(self) -> &'static str {
         match self {
-            SidePanel::Workspace => "工作目录",
+            SidePanel::ExecDir => "执行目录",
             SidePanel::Diff => "文件改动",
             SidePanel::Detail => "会话详情",
             SidePanel::Activities => "会话活动",
@@ -424,7 +424,7 @@ impl SidePanel {
     /// 悬浮按钮栏上的短标签。
     pub fn short_label(self) -> &'static str {
         match self {
-            SidePanel::Workspace => "目录",
+            SidePanel::ExecDir => "目录",
             SidePanel::Diff => "改动",
             SidePanel::Detail => "详情",
             SidePanel::Activities => "活动",
@@ -437,7 +437,7 @@ impl SidePanel {
     /// 面板默认宽度（逻辑像素）；改动与终端需要横向空间，故更宽。
     pub fn default_width(self) -> f32 {
         match self {
-            SidePanel::Workspace => 520.0,
+            SidePanel::ExecDir => 520.0,
             SidePanel::Diff => 560.0,
             SidePanel::Detail => 360.0,
             SidePanel::Activities => 400.0,

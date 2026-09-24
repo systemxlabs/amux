@@ -216,8 +216,8 @@ export type ListEntry =
   | { kind: "session"; session: Session }
   | { kind: "workflow"; workflow: Workflow };
 
-/** 会话实际根目录：启用 worktree 时为 worktree 目录。 */
-export function rootDir(session: Session): string {
+/** 会话实际执行目录：启用 worktree 时为 worktree 目录。 */
+export function execDir(session: Session): string {
   return session.worktreeDir ? session.worktreeDir : session.workspace;
 }
 

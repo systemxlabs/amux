@@ -36,7 +36,7 @@ export type MiddleView = "new" | "interaction";
 
 /** 右侧面板。 */
 export type SidePanel =
-  | "workspace"
+  | "exec"
   | "diff"
   | "details"
   | "activities"
@@ -45,7 +45,7 @@ export type SidePanel =
   | "terminal";
 
 /** 仅普通会话有的右侧面板（docs/PRD.md「主页面」）。 */
-const SESSION_ONLY_PANELS: readonly SidePanel[] = ["workspace", "diff", "plan", "terminal"];
+const SESSION_ONLY_PANELS: readonly SidePanel[] = ["exec", "diff", "plan", "terminal"];
 
 /** 右侧面板是否适用于该会话：普通会话专属面板在工作流会话下不展示。 */
 export function panelAvailable(panel: SidePanel, target: OpenTarget): boolean {

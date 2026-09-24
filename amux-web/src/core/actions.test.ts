@@ -1,5 +1,5 @@
 // 会话列表与对话的主动刷新（docs/DESIGN.md「会话列表刷新机制」）与打开会话时的面板收敛
-// （docs/PRD.md「主页面」：工作目录、改动审查、计划、终端仅普通会话展示）。
+// （docs/PRD.md「主页面」：执行目录、改动审查、计划、终端仅普通会话展示）。
 
 import { describe, expect, it } from "vitest";
 
@@ -166,7 +166,7 @@ it("删除最近工作目录：仅保留剩余项并全量保存", async () => {
 it("重新打开新建视图收起面板，创建失败保留模式和完整草稿", async () => {
   const core = new Core();
   core.state.middle = "interaction";
-  core.state.sidePanel = "workspace";
+  core.state.sidePanel = "exec";
   core.state.newSession = {
     ...core.state.newSession,
     mode: "workflow",
@@ -194,7 +194,7 @@ it("重新打开新建视图收起面板，创建失败保留模式和完整草�
 describe("openEntry", () => {
   it("切到工作流会话时关闭仅普通会话有的面板", async () => {
     const core = new Core();
-    core.state.sidePanel = "workspace";
+  core.state.sidePanel = "exec";
 
     await openEntry(core, workflowEntry);
 

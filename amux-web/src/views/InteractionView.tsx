@@ -28,7 +28,7 @@ import { useCore, useCoreState } from "../core/store";
 import { activityBarText, formatTime } from "../lib/format";
 import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
-import { rootDir } from "../lib/types";
+import { execDir } from "../lib/types";
 import type { ContentBlock, HistoryItem, SessionConfigOption } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useIsMobile } from "../lib/viewport";
@@ -144,7 +144,7 @@ export function InteractionView() {
         .find((entry) => entry.machine === detail.session?.machine)
         ?.agents.find((agent) => agent.name === detail.session?.agent)?.available ?? false)
     : state.settings.orchestrator.status === "ready" && state.settings.orchestrator.config !== null;
-  const workdir = isSession && detail.session ? rootDir(detail.session) : "";
+  const execDirPath = isSession && detail.session ? execDir(detail.session) : "";
   const workflowPlan = !isSession && detail.workflow ? detail.workflow.plan : "";
   const project = detail.session?.project ?? detail.workflow?.project;
   const quickCommands = state.settings.quickCommands.filter(
@@ -249,13 +249,13 @@ export function InteractionView() {
           />
           {available ? "可用" : "不可用"}
         </span>
-        {isSession && workdir !== "" ? (
+        {isSession && execDirPath !== "" ? (
           <span
-            data-slot="interaction-workdir"
-            title={workdir}
+            data-slot="interaction-exec-dir"
+            title={execDirPath}
             className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
           >
-            {workdir}
+            {execDirPath}
           </span>
         ) : null}
         {!isSession && workflowPlan !== "" ? (

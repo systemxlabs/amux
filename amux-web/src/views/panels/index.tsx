@@ -10,7 +10,7 @@ import { DetailsPanel } from "./DetailsPanel";
 import { DiffPanel } from "./DiffPanel";
 import { PlanPanel } from "./PlanPanel";
 import { TerminalPanel } from "./TerminalPanel";
-import { WorkspacePanel } from "./WorkspacePanel";
+import { ExecPanel } from "./ExecPanel";
 
 export function SidePanelView() {
   const state = useCoreState();
@@ -20,8 +20,8 @@ export function SidePanelView() {
 
   const body = () => {
     switch (panel) {
-      case "workspace":
-        return <WorkspacePanel />;
+      case "exec":
+        return <ExecPanel />;
       case "diff":
         return <DiffPanel />;
       case "details":

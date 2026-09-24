@@ -242,7 +242,7 @@ fn sync_entries(core: &mut Core) {
     core.entries = entries;
 }
 
-/// 打开会话的视图数据：按各自周期刷新（会话详情与工作目录视图只在打开时刷新一次，
+/// 打开会话的视图数据：按各自周期刷新（会话详情与执行目录视图只在打开时刷新一次，
 /// 由 UI 打开面板时直接拉取，见 docs/DESIGN.md「应用」）。
 async fn refresh_open(
     client: &Client,

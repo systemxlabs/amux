@@ -436,7 +436,7 @@ export function DiffPanel() {
   } else if (diff === null) {
     body = <Hint text="正在加载改动…" />;
   } else if (diff.notRepo === true) {
-    body = <Hint text="当前工作目录不是 git 仓库" />;
+    body = <Hint text="当前执行目录不是 git 仓库" />;
   } else if (files.length === 0) {
     body = <Hint text="暂无改动" />;
   } else {
