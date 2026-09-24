@@ -47,7 +47,7 @@ export function InteractionView() {
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const heightBeforeLoad = useRef<number | null>(null);
+  const previousHeight = useRef(0);
   const scrollOnEntry = useRef(true);
   const followingBottom = useRef(true);
   const previousTarget = useRef<string | null>(null);
@@ -92,7 +92,7 @@ export function InteractionView() {
       previousTarget.current = targetKey;
       scrollOnEntry.current = true;
       followingBottom.current = true;
-      heightBeforeLoad.current = null;
+      previousHeight.current = 0;
     }
     const element = listRef.current;
     // 打开时历史异步加载；首次有消息再定位，不能在空列表上消耗此次滚动。
@@ -108,19 +108,23 @@ export function InteractionView() {
     });
   }, [core, target?.kind, target?.id]);
 
-  // 更早一页插入后把原首条目保持在原位置（docs/DESIGN.md「对话滚动机制」）
-  useEffect(() => {
+  // 更早一页插入后，在浏览器绘制前把原首条目保持在原位置
+  // （docs/DESIGN.md「对话滚动机制」）。
+  useLayoutEffect(() => {
     const element = listRef.current;
     if (!element) return;
-    if (detail.historyPaging.shift === null) return;
-    if (heightBeforeLoad.current !== null) {
-      element.scrollTop += element.scrollHeight - heightBeforeLoad.current;
-      heightBeforeLoad.current = null;
+    const height = element.scrollHeight;
+    const shift = detail.historyPaging.shift;
+    if (shift !== null) {
+      if (shift > 0 && previousHeight.current > 0) {
+        element.scrollTop += height - previousHeight.current;
+      }
+      core.update((next) => {
+        next.detail.historyPaging.shift = null;
+      });
     }
-    core.update((next) => {
-      next.detail.historyPaging.shift = null;
-    });
-  }, [core, detail.historyPaging.shift]);
+    previousHeight.current = height;
+  }, [core, detail.history, detail.historyPaging.shift]);
 
   const slashMatches = useMemo(
     () => matchSlashCommands(detail.slashCommands, draft),
@@ -201,7 +205,6 @@ export function InteractionView() {
       detail.historyPaging.hasOlder &&
       !detail.historyPaging.loadingOlder
     ) {
-      heightBeforeLoad.current = element.scrollHeight;
       void loadOlderHistory(core);
     }
     if (
@@ -209,7 +212,6 @@ export function InteractionView() {
       detail.historyPaging.hasNewer &&
       !detail.historyPaging.loadingNewer
     ) {
-      heightBeforeLoad.current = element.scrollHeight;
       void loadNewerHistory(core);
     }
   };
@@ -270,10 +272,12 @@ export function InteractionView() {
       </header>
 
       {/* pr-12：为悬浮按钮留出空间，消息气泡不会被按钮遮挡 */}
+      {/* 头部插入由本视图手动补偿；保留浏览器原生锚定会重复补偿并造成跳动。 */}
       <div
         ref={listRef}
         data-slot="history-list"
         className="min-h-0 flex-1 overflow-y-auto p-3 pr-12"
+        style={{ overflowAnchor: "none" }}
         onScroll={onScroll}
       >
         {detail.history.map((item) => (
