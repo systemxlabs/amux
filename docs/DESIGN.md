@@ -82,8 +82,8 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/history` | 分页查询指定普通会话的对话历史 |
 | GET `/sessions/<session_id>/activities` | 分页查询指定普通会话的活动历史 |
 | GET `/sessions/<session_id>/ongoing_activity` | 查询指定普通会话正在进行中的活动 |
-| GET `/sessions/<session_id>/diff` | 查询普通会话工作目录改动 diff |
-| GET `/sessions/<session_id>/branches` | 查询普通会话工作目录本地分支列表 |
+| GET `/sessions/<session_id>/diff` | 查询普通会话执行目录改动 diff |
+| GET `/sessions/<session_id>/branches` | 查询普通会话执行目录本地分支列表 |
 | POST `/sessions/<session_id>/terminals` | 打开指定普通会话一个终端 |
 | GET `/sessions/<session_id>/terminals` | 查询指定普通会话所有打开的终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>` | 向指定终端输入内容 |
@@ -373,7 +373,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 普通会话创建时若指定了 worktree 方式，则创建 worktree，普通会话被删除时，其关联的 worktree 也应一并删除。
 
-当普通会话超过 7 天不活跃时，自动清理其关联的 worktree，但不要清理其会话的 worktree 相关元数据，后续可按需（如用户向该会话输入新指令、查看会话工作目录）在同一目录重建 worktree。
+当普通会话超过 7 天不活跃时，自动清理其关联的 worktree，但不要清理其会话的 worktree 相关元数据，后续可按需（如用户向该会话输入新指令、查看会话执行目录）在同一目录重建 worktree。
 
 ### 工作流智能体
 
@@ -601,7 +601,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 终端每次打开时，从 Server 获取一次终端列表，不在列表中的终端从应用中移除掉，终端列表不做周期性轮询刷新。
 
-### 工作目录视图
+### 执行目录视图
 
 实时拉取每一级目录项，不进行任何缓存，也不定时刷新。
 
