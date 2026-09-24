@@ -1426,6 +1426,7 @@ fn diff_review(
             .all(|file| this.diff_collapsed_files.contains(&file.path));
     let additions: u32 = files.iter().map(|file| file.additions).sum();
     let deletions: u32 = files.iter().map(|file| file.deletions).sum();
+    let changed_lines = additions + deletions;
 
     // 工具栏（docs/PRD.md「改动审查视图」）：折叠/展开文件树按钮左对齐，折叠/展开 diff
     // 区域按钮右对齐
@@ -1452,6 +1453,11 @@ fn diff_review(
         )
         .child(
             Label::new(format!("{} 个文件", files.len()))
+                .text_xs()
+                .text_color(theme.muted_foreground),
+        )
+        .child(
+            Label::new(format!("{changed_lines} 行变更"))
                 .text_xs()
                 .text_color(theme.muted_foreground),
         )
@@ -1711,6 +1717,11 @@ fn diff_file_block(
                             .whitespace_nowrap()
                             .flex_shrink_0(),
                     ),
+            )
+            .child(
+                Label::new(format!("{} 行变更", file.additions + file.deletions))
+                    .text_xs()
+                    .text_color(theme.muted_foreground),
             )
             .child(
                 Label::new(format!("+{}", file.additions))

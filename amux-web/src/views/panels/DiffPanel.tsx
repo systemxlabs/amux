@@ -267,6 +267,7 @@ export function DiffPanel() {
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
   const additions = files.reduce((total, file) => total + file.additions, 0);
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
+  const changedLines = additions + deletions;
 
   const toggleDir = (key: string) => {
     setCollapsedDirs((prev) =>
@@ -425,8 +426,10 @@ export function DiffPanel() {
                   <span className="min-w-0 flex-1 truncate">{file.path}</span>
                   <span className="shrink-0">{STATUS_LABEL[file.status]}</span>
                   <span className="shrink-0 text-muted-foreground">
-                    +{file.additions}/-{file.deletions}
+                    {file.additions + file.deletions} 行变更
                   </span>
+                  <span className="shrink-0 text-success">+{file.additions}</span>
+                  <span className="shrink-0 text-destructive">-{file.deletions}</span>
                   <Button
                     type="button"
                     variant="ghost"
@@ -523,7 +526,7 @@ export function DiffPanel() {
                                     className={cn(
                                       "w-4 shrink-0 text-center font-semibold",
                                       line.kind === "add" && "text-success",
-                                      line.kind === "remove" && "text-danger",
+                                      line.kind === "remove" && "text-destructive",
                                     )}
                                   >
                                     {linePrefix(line.kind)}
@@ -584,12 +587,15 @@ export function DiffPanel() {
           <span data-slot="diff-file-count" className="text-xs text-muted-foreground">
             {files.length} 个文件
           </span>
+          <span data-slot="diff-total-line-count" className="text-xs text-muted-foreground">
+            {changedLines} 行变更
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <span data-slot="diff-line-count" className="text-xs">
             <span className="text-success">+{additions}</span>
             <span className="text-muted-foreground">/</span>
-            <span className="text-danger">-{deletions}</span>
+            <span className="text-destructive">-{deletions}</span>
           </span>
           <Button
             type="button"
