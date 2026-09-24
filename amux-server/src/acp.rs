@@ -115,6 +115,7 @@ enum Call {
     },
     Close {
         agent_session_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Delete {
         agent_session_id: String,
@@ -183,10 +184,26 @@ impl AgentConnection {
         })
     }
 
-    pub async fn close(&self, agent_session_id: &str) {
-        let _ = self.send(Call::Close {
-            agent_session_id: agent_session_id.to_string(),
-        });
+    pub async fn close(&self, agent_session_id: &str) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.calls
+            .send(Call::Close {
+                agent_session_id: agent_session_id.to_string(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "ACP 连接已关闭".to_string())?;
+        rx.await.map_err(|_| "ACP 连接已关闭".to_string())?
+    }
+
+    /// 关闭该 ACP 连接当前打开的全部会话。
+    pub async fn close_all(&self) {
+        let sessions: Vec<_> = self.opened_sessions.lock().iter().cloned().collect();
+        for agent_session_id in sessions {
+            if let Err(error) = self.close(&agent_session_id).await {
+                log::warn!("session/close 失败（{agent_session_id}）: {error}");
+            }
+        }
     }
 
     pub async fn delete(&self, agent_session_id: &str) -> Result<(), String> {
@@ -434,14 +451,17 @@ async fn handle_call(
                 log::warn!("session/cancel 发送失败: {error}");
             }
         }
-        Call::Close { agent_session_id } => {
-            if let Err(error) =
-                request(cx, CloseSessionRequest::new(agent_session_id.clone())).await
-            {
-                log::warn!("session/close 失败: {error}");
-            } else {
-                opened_sessions.lock().remove(&agent_session_id);
-            }
+        Call::Close {
+            agent_session_id,
+            reply,
+        } => {
+            let result = request(cx, CloseSessionRequest::new(agent_session_id.clone()))
+                .await
+                .map(|_| {
+                    opened_sessions.lock().remove(&agent_session_id);
+                })
+                .map_err(|error| format!("session/close 失败: {error}"));
+            let _ = reply.send(result);
         }
         Call::Delete {
             agent_session_id,

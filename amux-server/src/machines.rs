@@ -24,6 +24,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
+use futures_util::future::join_all;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
@@ -267,6 +268,23 @@ impl MachineHub {
             return Ok(conn);
         }
         self.connect_agent(&machine, agent).await
+    }
+
+    /// 关闭所有已打开会话，供 Server 退出时清理 Agent 侧资源。
+    pub async fn close_all_sessions(&self) {
+        let machines: Vec<_> = self.machines.lock().values().cloned().collect();
+        let connections: Vec<_> = machines
+            .into_iter()
+            .flat_map(|machine| {
+                machine
+                    .agents
+                    .lock()
+                    .values()
+                    .filter_map(|slot| slot.conn.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        join_all(connections.iter().map(|connection| connection.close_all())).await;
     }
 
     // ---------- Daemon 连接 ----------

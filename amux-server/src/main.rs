@@ -137,8 +137,39 @@ async fn run(args: Args) -> Result<(), String> {
         .map_err(|error| format!("监听 {}:{} 失败: {error}", args.host, args.port))?;
     log::info!("amux-server 监听 {}:{}", args.host, args.port);
     axum::serve(listener, app)
+        .with_graceful_shutdown({
+            let machines = state.machines.clone();
+            async move {
+                shutdown_signal().await;
+                log::info!("Server 关闭：关闭所有打开的 Agent 侧会话");
+                machines.close_all_sessions().await;
+            }
+        })
         .await
         .map_err(|error| format!("服务失败: {error}"))
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    let Ok(mut sigint) = signal(SignalKind::interrupt()) else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    tokio::select! {
+        _ = sigterm.recv() => {}
+        _ = sigint.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// 认证：所有请求（含 Daemon 握手）都必须携带 `Authorization: Bearer <token>`。

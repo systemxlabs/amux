@@ -16,6 +16,7 @@ tokio = { workspace = true, features = [
     "macros",
     "rt-multi-thread",
     "net",
+    "signal",
     "sync",
     "time",
 ] }
@@ -31,6 +32,7 @@ rig-core.workspace = true
 rig-agent.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 tempfile.workspace = true
 reqwest.workspace = true
 # 编排工具循环用脚本化 completion model 驱动（rig 的 test-utils 仅在测试构建启用）

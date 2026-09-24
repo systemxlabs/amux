@@ -34,6 +34,28 @@ struct Process {
     child: Child,
 }
 
+impl Process {
+    #[cfg(unix)]
+    fn terminate(&self) {
+        // SAFETY: child.id() 返回当前子进程 PID；SIGTERM 仅发送给该进程。
+        let result = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
+        assert_eq!(result, 0, "发送 SIGTERM 失败");
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_exit(&mut self) {
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("查询子进程状态失败") {
+                assert!(status.success(), "子进程异常退出: {status}");
+                return;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "等待子进程退出超时");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 impl Drop for Process {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -67,7 +89,7 @@ fn daemon_binary() -> PathBuf {
 
 /// 假 bin 目录：`codex`（发现用）与 `bunx`（启动 agent 时改为运行模拟 agent）。
 fn fake_bin(mock_agent: &Path, state_file: &Path) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("amux-e2e-bin-{}", std::process::id()));
+    let dir = state_file.parent().expect("状态文件目录").join("bin");
     std::fs::create_dir_all(&dir).unwrap();
     let codex = dir.join("codex");
     std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
@@ -623,6 +645,99 @@ async fn server_daemon_agent_end_to_end() {
     assert_eq!(
         client.delete(&format!("/workflows/{workflow_id}")).await,
         reqwest::StatusCode::OK
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn server_shutdown_closes_all_open_agent_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let state_file = home.path().join("mock_state");
+    let bin = fake_bin(Path::new(env!("CARGO_BIN_EXE_mock_acp")), &state_file);
+    let port = free_port();
+
+    let mut server = spawn_server(port, home.path());
+    let client = Client {
+        http: reqwest::Client::new(),
+        base: format!("http://127.0.0.1:{port}"),
+    };
+    poll(
+        || {
+            let client = &client;
+            async move {
+                client
+                    .http
+                    .get(format!("{}/machines", client.base))
+                    .send()
+                    .await
+                    .ok()
+            }
+        },
+        "server 监听",
+    )
+    .await;
+
+    let _daemon = spawn_daemon(port, home.path(), &[&bin]);
+    poll(
+        || async {
+            let agents = client
+                .try_get(&format!("/machines/{MACHINE}/agents"))
+                .await?;
+            agents
+                .as_array()?
+                .iter()
+                .any(|agent| agent["name"] == "codex" && agent["available"] == true)
+                .then_some(())
+        },
+        "codex 可用",
+    )
+    .await;
+
+    for _ in 0..2 {
+        let session = client
+            .post_ok(
+                "/sessions",
+                json!({
+                    "machine": MACHINE,
+                    "agent": "codex",
+                    "workspace": workspace.path().to_string_lossy(),
+                }),
+            )
+            .await;
+        let session_id = session["id"].as_str().unwrap();
+        client
+            .get(&format!("/sessions/{session_id}/config_options"))
+            .await;
+    }
+
+    poll(
+        || async {
+            let agents = client
+                .try_get(&format!("/machines/{MACHINE}/agents"))
+                .await?;
+            agents
+                .as_array()?
+                .iter()
+                .find(|agent| agent["name"] == "codex")
+                .filter(|agent| agent["openedSessions"] == 2)
+                .cloned()
+        },
+        "两个 agent 侧会话均已打开",
+    )
+    .await;
+
+    server.terminate();
+    server.wait_for_exit().await;
+
+    let calls = std::fs::read_to_string(format!("{}.calls", state_file.display())).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "session/close")
+            .count(),
+        2,
+        "Server 关闭时应关闭所有打开的 Agent 侧会话: {calls:?}"
     );
 }
 

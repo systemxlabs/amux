@@ -255,7 +255,9 @@ impl SessionService {
             }
             if let Some(agent_session_id) = agent_session_id {
                 if let Ok(conn) = machines.acp(&machine, &agent).await {
-                    conn.close(&agent_session_id).await;
+                    if let Err(error) = conn.close(&agent_session_id).await {
+                        log::warn!("session/close 失败（{agent_session_id}）: {error}");
+                    }
                     let _ = conn.delete(&agent_session_id).await;
                 }
             }
@@ -699,7 +701,9 @@ impl SessionService {
             {
                 if let Some(agent_session_id) = self.store.agent_session_id(&session.id) {
                     if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
-                        conn.close(&agent_session_id).await;
+                        if let Err(error) = conn.close(&agent_session_id).await {
+                            log::warn!("session/close 失败（{agent_session_id}）: {error}");
+                        }
                         self.caches.forget(&session.id);
                         log::info!("会话长时间无活动，已关闭 agent 侧会话: {}", session.id);
                     }
