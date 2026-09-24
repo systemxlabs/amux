@@ -23,8 +23,21 @@ pub struct Client {
 
 impl Client {
     pub fn new(connection: &Connection) -> Self {
+        Self::with_http(reqwest::Client::new(), connection)
+    }
+
+    #[cfg(test)]
+    fn new_without_proxy(connection: &Connection) -> Self {
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("构建测试 HTTP 客户端失败");
+        Self::with_http(http, connection)
+    }
+
+    fn with_http(http: reqwest::Client, connection: &Connection) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http,
             base: connection.base_url(),
             token: connection.token.clone(),
         }
@@ -787,12 +800,12 @@ mod tests {
             server: format!("http://{addr}"),
             token: "tk".into(),
         };
-        let client = Client::new(&connection);
+        let client = Client::new_without_proxy(&connection);
         let machines = client.machines().await.unwrap();
         assert_eq!(machines[0].name, "localpc");
         client.ping().await.unwrap();
 
-        let wrong = Client::new(&Connection {
+        let wrong = Client::new_without_proxy(&Connection {
             server: format!("http://{addr}"),
             token: "bad".into(),
         });

@@ -5,7 +5,7 @@
 //!
 //! 放在 `tests/`：库内联测试会触发组件宏的深度展开，编译期爆栈。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use amux_desktop::client::Client;
 use amux_desktop::config::Connection;
@@ -30,7 +30,7 @@ fn stub(path: &str) -> &'static str {
         "/machines" => {
             r#"[{"name":"pc","os":"linux","arch":"x86_64","hostname":"pc","tempDir":"/tmp","version":"0.1.0"}]"#
         }
-        "/machines/pc/agents" => r#"[{"name":"codex","available":true}]"#,
+        "/machines/pc/agents" => r#"[{"name":"codex","available":true,"openedSessions":0}]"#,
         "/config/workflows/" => r#"[{"name":"plan","plan":"做点什么"}]"#,
         "/config/quick_commands/" => r#"[{"project":"project-a","name":"qc","prompt":"快点做"}]"#,
         "/config/skills/" => r#"[{"name":"skill","description":"描述"}]"#,
@@ -48,6 +48,12 @@ fn stub(path: &str) -> &'static str {
 async fn start_stub() -> (String, Arc<Mutex<Vec<String>>>) {
     use axum::http::StatusCode;
     use axum::Router;
+
+    static LOCAL_PROXY_BYPASS: Once = Once::new();
+    LOCAL_PROXY_BYPASS.call_once(|| {
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        std::env::set_var("no_proxy", "127.0.0.1,localhost");
+    });
 
     let hits: Arc<Mutex<Vec<String>>> = Arc::default();
     let recorded = Arc::clone(&hits);
