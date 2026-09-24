@@ -21,7 +21,8 @@ use gix::diff::blob::unified_diff::{ConsumeHunk, ContextSize, DiffLineKind, Hunk
 use gix::diff::blob::{ResourceKind, UnifiedDiff};
 
 use amux_common::domain::{
-    GitChangeStatus, GitDiffFile, GitDiffHunk, GitDiffLine, GitDiffLineKind, GitDiffResult,
+    GitBranch, GitBranchListResult, GitChangeStatus, GitDiffFile, GitDiffHunk, GitDiffLine,
+    GitDiffLineKind, GitDiffResult,
 };
 
 #[derive(Default)]
@@ -272,7 +273,7 @@ impl GitRunner {
 
     /// 结构化 diff：gitoxide 实现。
     /// cwd 非 git 仓库时返回 `not_repo` 标记。
-    pub fn diff(&self, cwd: &str) -> GitDiffResult {
+    pub fn diff(&self, cwd: &str, base: &str) -> GitDiffResult {
         let empty = || GitDiffResult {
             files: Vec::new(),
             not_repo: false,
@@ -295,13 +296,57 @@ impl GitRunner {
             };
         };
         // 无提交（unborn HEAD）时 `git diff HEAD` 失败 → 空结果
-        let Ok(head_tree) = repo.head_tree() else {
+        let Ok(head) = repo.head_commit() else {
             return empty();
         };
+        let baseline_tree = if base != "HEAD" {
+            let Ok(merge_base) = run(cwd, &["merge-base", base, "HEAD"]) else {
+                return empty();
+            };
+            let Ok(merge_base) = gix::ObjectId::from_hex(merge_base.trim().as_bytes()) else {
+                return empty();
+            };
+            let Ok(object) = repo.find_object(merge_base) else {
+                return empty();
+            };
+            let Ok(commit) = object.peel_to_commit() else {
+                return empty();
+            };
+            let Ok(baseline_tree) = commit.tree() else {
+                return empty();
+            };
+            baseline_tree
+        } else {
+            let Ok(head_tree) = head.tree() else {
+                return empty();
+            };
+            head_tree
+        };
 
-        // 收集变更路径：TreeIndex（HEAD vs index，staged）+ IndexWorktree（index vs 工作区，unstaged）。
+        // 收集变更路径：指定的 merge-base vs HEAD（已提交）+ HEAD vs index（staged）
+        // + index vs 工作区（unstaged）。
         // 重命名检测关闭：重命名显示为删除+新增（`git diff --no-renames` 语义）。
         let mut paths = BTreeSet::<BString>::new();
+        if base != "HEAD" {
+            let Ok(head_tree) = head.tree() else {
+                return empty();
+            };
+            let Ok(mut changes) = baseline_tree.changes() else {
+                return empty();
+            };
+            changes.options(|options| {
+                options.track_rewrites(None);
+            });
+            if changes
+                .for_each_to_obtain_tree(&head_tree, |change| {
+                    paths.insert(change.location().into());
+                    Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(()))
+                })
+                .is_err()
+            {
+                return empty();
+            }
+        }
         let status = match repo.status(gix::progress::Discard).map(|s| {
             s.untracked_files(gix::status::UntrackedFiles::Files)
                 .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
@@ -367,7 +412,7 @@ impl GitRunner {
         let mut files = Vec::new();
         for p in &paths {
             let p_str = p.to_str_lossy().into_owned();
-            let old = head_tree
+            let old = baseline_tree
                 .lookup_entry_by_path(gix::path::from_bstr(p))
                 .ok()
                 .flatten()
@@ -387,7 +432,18 @@ impl GitRunner {
                     // blob diff 资源缓存只增不减，逐文件释放以免大 diff 时内存无界增长
                     cache.clear_resource_cache_keep_allocation();
                     match fp {
-                        Some(fp) => fp,
+                        Some(fp) => {
+                            if fp.hunks.is_empty() {
+                                let old_bytes = repo
+                                    .find_blob(*old_id)
+                                    .map(|blob| blob.data.to_vec())
+                                    .unwrap_or_default();
+                                if worktree_bytes(&abs).as_deref() == Some(old_bytes.as_slice()) {
+                                    continue;
+                                }
+                            }
+                            fp
+                        }
                         None => continue,
                     }
                 }
@@ -423,6 +479,46 @@ impl GitRunner {
             files,
             not_repo: false,
         }
+    }
+
+    /// 查询本地分支，并标记 worktree 源分支与仓库默认分支。
+    pub fn branches(&self, cwd: &str) -> Result<GitBranchListResult, String> {
+        let repo = gix::discover(cwd).map_err(|error| format!("不是 git 仓库: {cwd}: {error}"))?;
+        let current = repo
+            .head_name()
+            .ok()
+            .flatten()
+            .map(|name| name.shorten().to_str_lossy().into_owned());
+        let worktree_source = if repo.kind() == gix::repository::Kind::LinkedWorkTree {
+            repo.main_repo()
+                .ok()
+                .and_then(|main| main.head_name().ok().flatten())
+                .map(|name| name.shorten().to_str_lossy().into_owned())
+        } else {
+            None
+        };
+        let mut names = Vec::new();
+        for reference in repo
+            .references()
+            .map_err(|error| format!("读取分支失败: {error}"))?
+            .local_branches()
+            .map_err(|error| format!("读取本地分支失败: {error}"))?
+        {
+            let reference = reference.map_err(|error| format!("读取本地分支失败: {error}"))?;
+            names.push(reference.name().shorten().to_str_lossy().into_owned());
+        }
+        names.sort();
+        let default = default_branch(cwd, &names, current.as_deref());
+        Ok(GitBranchListResult {
+            branches: names
+                .into_iter()
+                .map(|name| GitBranch {
+                    is_worktree_source: worktree_source.as_deref() == Some(name.as_str()),
+                    is_default: default.as_deref() == Some(name.as_str()),
+                    name,
+                })
+                .collect(),
+        })
     }
 
     /// 新建 worktree：目录约定 `<amux_home>/worktrees/<仓库目录名>-<随机串>/`。
@@ -549,6 +645,33 @@ fn worktree_suffix() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..5].to_string()
 }
 
+/// 默认分支优先取远端 origin/HEAD，其次取常见的 main/master，最后回退当前分支。
+fn default_branch(cwd: &str, branches: &[String], current: Option<&str>) -> Option<String> {
+    if let Ok(remote_head) = run(
+        cwd,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) {
+        if let Some(name) = remote_head.trim().strip_prefix("origin/") {
+            if branches.iter().any(|branch| branch == name) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    for candidate in ["main", "master"] {
+        if branches.iter().any(|branch| branch == candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    current
+        .filter(|name| branches.iter().any(|branch| branch == name))
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,7 +700,8 @@ mod tests {
     fn init_repo() -> std::path::PathBuf {
         let dir = unique_dir("amux-git");
         std::fs::create_dir_all(&dir).unwrap();
-        git(&dir, &["init", "-b", "main", "-q"]);
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["checkout", "-b", "main", "-q"]);
         git(&dir, &["config", "user.email", "t@t"]);
         git(&dir, &["config", "user.name", "t"]);
         std::fs::write(dir.join("a.txt"), "line1\nline2\n").unwrap();
@@ -593,7 +717,7 @@ mod tests {
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
         git(&dir, &["add", "new.txt"]);
         let r = GitRunner::new();
-        let st = r.diff(dir.to_str().unwrap());
+        let st = r.diff(dir.to_str().unwrap(), "HEAD");
         assert!(!st.not_repo);
         assert!(st
             .files
@@ -619,7 +743,7 @@ mod tests {
     fn diff_includes_untracked_files() {
         let dir = init_repo();
         std::fs::write(dir.join("untracked.txt"), "not staged\n").unwrap();
-        let result = GitRunner::new().diff(dir.to_str().unwrap());
+        let result = GitRunner::new().diff(dir.to_str().unwrap(), "HEAD");
         let file = result
             .files
             .iter()
@@ -639,7 +763,7 @@ mod tests {
 
         std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("untracked-link")).unwrap();
         let runner = GitRunner::new();
-        let diff = runner.diff(dir.to_str().unwrap());
+        let diff = runner.diff(dir.to_str().unwrap(), "HEAD");
         let untracked = diff
             .files
             .iter()
@@ -650,7 +774,7 @@ mod tests {
 
         std::fs::remove_file(dir.join("a.txt")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("a.txt")).unwrap();
-        let diff = runner.diff(dir.to_str().unwrap());
+        let diff = runner.diff(dir.to_str().unwrap(), "HEAD");
         let replaced = diff
             .files
             .iter()
@@ -664,7 +788,9 @@ mod tests {
     fn non_repo_marks_not_repo() {
         let dir = unique_dir("amux-plain");
         std::fs::create_dir_all(&dir).unwrap();
-        let st = GitRunner::new().diff(dir.to_str().unwrap()).not_repo;
+        let st = GitRunner::new()
+            .diff(dir.to_str().unwrap(), "HEAD")
+            .not_repo;
         assert!(st);
     }
 
@@ -674,7 +800,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "line1\nCHANGED\nline3\n").unwrap();
         std::fs::write(dir.join("new.txt"), "hello\nworld\n").unwrap();
         git(&dir, &["add", "new.txt"]);
-        let d = GitRunner::new().diff(dir.to_str().unwrap());
+        let d = GitRunner::new().diff(dir.to_str().unwrap(), "HEAD");
         assert!(!d.not_repo);
         let a = d.files.iter().find(|f| f.path == "a.txt").expect("a.txt");
         assert_eq!(a.additions, 2);
@@ -690,6 +816,78 @@ mod tests {
             .expect("new.txt");
         assert!(matches!(n.status, GitChangeStatus::Added));
         assert_eq!(n.additions, 2);
+    }
+
+    #[test]
+    fn diff_uses_merge_base_of_requested_branch_and_head() {
+        let dir = init_repo();
+        git(&dir, &["branch", "base"]);
+        std::fs::write(dir.join("a.txt"), "line1\nmain change\n").unwrap();
+        git(&dir, &["add", "a.txt"]);
+        git(&dir, &["commit", "-m", "main change", "-q"]);
+
+        git(&dir, &["checkout", "base", "-q"]);
+        std::fs::write(dir.join("base-only.txt"), "base only\n").unwrap();
+        git(&dir, &["add", "base-only.txt"]);
+        git(&dir, &["commit", "-m", "base change", "-q"]);
+        git(&dir, &["checkout", "main", "-q"]);
+
+        let diff = GitRunner::new().diff(dir.to_str().unwrap(), "base");
+        assert!(
+            diff.files.iter().any(|file| file.path == "a.txt"),
+            "应包含基准分支 merge-base 之后的 HEAD 提交内容: {diff:?}"
+        );
+        assert!(
+            !diff.files.iter().any(|file| file.path == "base-only.txt"),
+            "不应反向包含基准分支独有提交: {diff:?}"
+        );
+    }
+
+    #[test]
+    fn diff_omits_files_reverted_to_selected_base() {
+        let dir = init_repo();
+        git(&dir, &["branch", "base"]);
+        std::fs::write(dir.join("a.txt"), "line1\ncommitted change\n").unwrap();
+        git(&dir, &["add", "a.txt"]);
+        git(&dir, &["commit", "-m", "change", "-q"]);
+        std::fs::write(dir.join("a.txt"), "line1\nline2\n").unwrap();
+
+        let diff = GitRunner::new().diff(dir.to_str().unwrap(), "base");
+        assert!(
+            !diff.files.iter().any(|file| file.path == "a.txt"),
+            "恢复到基准内容后不应显示空 diff: {diff:?}"
+        );
+    }
+
+    #[test]
+    fn branches_mark_default_and_worktree_source() {
+        let repo = init_repo();
+        git(&repo, &["branch", "feature"]);
+        let runner = GitRunner::new();
+        let branches = runner.branches(repo.to_str().unwrap()).unwrap();
+        let main = branches
+            .branches
+            .iter()
+            .find(|branch| branch.name == "main")
+            .unwrap();
+        assert!(main.is_default);
+
+        let root = unique_dir("amux-branches-worktree");
+        let target = worktree_dir_for(repo.to_str().unwrap(), &root).unwrap();
+        runner
+            .add_worktree(repo.to_str().unwrap(), &target)
+            .unwrap();
+        let branches = runner.branches(target.to_str().unwrap()).unwrap();
+        let main = branches
+            .branches
+            .iter()
+            .find(|branch| branch.name == "main")
+            .unwrap();
+        assert!(main.is_default);
+        assert!(main.is_worktree_source);
+
+        runner.worktree_remove(repo.to_str().unwrap(), target.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 目录约定：`<worktrees 根>/<仓库目录名>-<5 字符随机串>`。

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use amux_common::api::*;
 use amux_common::domain::{
-    Activity, ContentBlock, FsEntry, GitDiffResult, HistoryItem, SessionConfigOption,
+    Activity, ContentBlock, FsEntry, GitBranch, GitDiffResult, HistoryItem, SessionConfigOption,
     SessionPlanEntry, SlashCommand,
 };
 
@@ -256,6 +256,9 @@ pub struct SessionView {
     pub context_size: u64,
     pub context_window_size: u64,
     pub diff: Option<GitDiffResult>,
+    pub diff_branches: Vec<GitBranch>,
+    pub diff_base: String,
+    pub diff_request_seq: u64,
     pub terminals: Vec<Terminal>,
     pub active_terminal: Option<String>,
     /// 对话历史分页（窗口为最新的若干条）

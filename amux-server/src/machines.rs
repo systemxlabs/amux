@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use amux_common::api::Agent;
 use amux_common::daemon::{
-    header, method, notify, AcpForward, AgentListResult, AgentParams, GitRepoParams, MachineInfo,
-    WorktreePathParams, WorktreeResult,
+    header, method, notify, AcpForward, AgentListResult, AgentParams, GitDiffParams, GitRepoParams,
+    MachineInfo, WorktreePathParams, WorktreeResult,
 };
 use amux_common::domain::{
-    FsListParams, FsListResult, FsReadParams, FsReadResult, GitDiffResult, OpResult,
-    TerminalExitNotification, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
+    FsListParams, FsListResult, FsReadParams, FsReadResult, GitBranchListResult, GitDiffResult,
+    OpResult, TerminalExitNotification, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
     TerminalOpenResult, TerminalOutputNotification, TerminalResizeParams,
 };
 use amux_common::jsonrpc::{JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
@@ -153,10 +153,31 @@ impl MachineHub {
             .await
     }
 
-    pub async fn git_diff(&self, machine: &str, repo: &str) -> Result<GitDiffResult, String> {
+    pub async fn git_diff(
+        &self,
+        machine: &str,
+        repo: &str,
+        base: &str,
+    ) -> Result<GitDiffResult, String> {
         self.machine(machine)?
             .request(
                 method::GIT_DIFF,
+                GitDiffParams {
+                    repo: repo.to_string(),
+                    base: base.to_string(),
+                },
+            )
+            .await
+    }
+
+    pub async fn git_branches(
+        &self,
+        machine: &str,
+        repo: &str,
+    ) -> Result<GitBranchListResult, String> {
+        self.machine(machine)?
+            .request(
+                method::GIT_BRANCHES,
                 GitRepoParams {
                     repo: repo.to_string(),
                 },

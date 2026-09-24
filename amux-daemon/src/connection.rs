@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amux_common::daemon::{
-    header, method, notify, AcpForward, AgentParams, GitRepoParams, WorktreeListResult,
-    WorktreePathParams, WorktreeResult,
+    header, method, notify, AcpForward, AgentParams, GitDiffParams, GitRepoParams,
+    WorktreeListResult, WorktreePathParams, WorktreeResult,
 };
 use amux_common::domain::{
     FsListParams, FsReadParams, OpResult, TerminalIdParams, TerminalInputParams,
@@ -246,8 +246,15 @@ async fn execute(
             to_value(OpResult::ok())
         }
         method::GIT_DIFF => {
+            let params: GitDiffParams = decode(params)?;
+            if params.base.trim().is_empty() {
+                return Err(RpcError::invalid_params("base 不能为空"));
+            }
+            to_value(daemon.git.diff(&params.repo, &params.base))
+        }
+        method::GIT_BRANCHES => {
             let params: GitRepoParams = decode(params)?;
-            to_value(daemon.git.diff(&params.repo))
+            to_value(daemon.git.branches(&params.repo).map_err(RpcError::git)?)
         }
         method::GIT_WORKTREE_NEW => {
             let params: GitRepoParams = decode(params)?;

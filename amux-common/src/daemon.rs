@@ -13,6 +13,7 @@ pub mod method {
     /// 启动（未启动）或重启（已启动）指定 agent
     pub const AGENT_RESTART: &str = "agent.restart";
     pub const GIT_DIFF: &str = "git.diff";
+    pub const GIT_BRANCHES: &str = "git.branches";
     pub const GIT_WORKTREE_NEW: &str = "git.worktree.new";
     pub const GIT_WORKTREE_RESUME: &str = "git.worktree.resume";
     pub const GIT_WORKTREE_LIST: &str = "git.worktree.list";
@@ -109,11 +110,19 @@ pub struct AcpForward {
     pub raw: String,
 }
 
-/// 以仓库根目录为目标的 git 参数（`git.diff` / `git.worktree.new` / `git.worktree.list`）。
+/// 以仓库根目录为目标的 git 参数（`git.branches` / `git.worktree.new` / `git.worktree.list`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitRepoParams {
     pub repo: String,
+}
+
+/// `git.diff` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffParams {
+    pub repo: String,
+    pub base: String,
 }
 
 /// `git.worktree.new` / `git.worktree.resume` 结果。

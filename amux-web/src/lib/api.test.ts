@@ -198,6 +198,34 @@ describe("ApiClient", () => {
     expect(page.hasMore).toBe(false);
   });
 
+  it("diff 编码基准分支，branches 解析分支标记", async () => {
+    replies = [
+      { status: 200, body: JSON.stringify({ files: [] }) },
+      {
+        status: 200,
+        body: JSON.stringify({
+          branches: [
+            { name: "main", isWorktreeSource: true, isDefault: true },
+            { name: "feature/login", isWorktreeSource: false, isDefault: false },
+          ],
+        }),
+      },
+    ];
+    const client = new ApiClient(base, "tk");
+    await client.diff("s1", "feature/login");
+    const diffUrl = new URL(seen.at(-1)!.url, base);
+    expect(diffUrl.pathname).toBe("/sessions/s1/diff");
+    expect(diffUrl.searchParams.get("base")).toBe("feature/login");
+
+    const result = await client.branches("s1");
+    expect(seen.at(-1)?.url).toBe("/sessions/s1/branches");
+    expect(result.branches[0]).toEqual({
+      name: "main",
+      isWorktreeSource: true,
+      isDefault: true,
+    });
+  });
+
   it("终端 SSE 携带认证并逐事件解析输出", async () => {
     const client = new ApiClient(base, "tk");
     const outputs: { data: string; nextCursor: number }[] = [];

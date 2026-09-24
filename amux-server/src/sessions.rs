@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use amux_common::api::{Session, SessionConfigSetting, Terminal as ApiTerminal};
 use amux_common::domain::{
-    generate_title, Activity, ContentBlock, FsListParams, HistoryItem, SessionConfigOption,
-    SessionPlanEntry, SessionState, SlashCommand, StateChangeReason, TerminalOpenParams,
-    TerminalResizeParams,
+    generate_title, Activity, ContentBlock, FsListParams, GitBranchListResult, HistoryItem,
+    SessionConfigOption, SessionPlanEntry, SessionState, SlashCommand, StateChangeReason,
+    TerminalOpenParams, TerminalResizeParams,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -327,11 +327,23 @@ impl SessionService {
     }
 
     /// 工作目录 diff（worktree 会话以 worktree 目录为准）。
-    pub async fn diff(&self, id: &str) -> Result<amux_common::domain::GitDiffResult, String> {
+    pub async fn diff(
+        &self,
+        id: &str,
+        base: &str,
+    ) -> Result<amux_common::domain::GitDiffResult, String> {
         let session = self.get(id)?;
         self.ensure_worktree(&session).await;
         self.machines
-            .git_diff(&session.machine, &self.work_dir(&session))
+            .git_diff(&session.machine, &self.work_dir(&session), base)
+            .await
+    }
+
+    pub async fn branches(&self, id: &str) -> Result<GitBranchListResult, String> {
+        let session = self.get(id)?;
+        self.ensure_worktree(&session).await;
+        self.machines
+            .git_branches(&session.machine, &self.work_dir(&session))
             .await
     }
 

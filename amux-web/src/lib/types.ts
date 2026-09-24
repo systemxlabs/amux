@@ -69,6 +69,12 @@ export type GitDiffFile = {
   hunks: GitDiffHunk[];
 };
 export type GitDiffResult = { files: GitDiffFile[]; notRepo?: boolean };
+export type GitBranch = {
+  name: string;
+  isWorktreeSource: boolean;
+  isDefault: boolean;
+};
+export type GitBranchListResult = { branches: GitBranch[] };
 
 export type FsEntry = { name: string; path: string; isDir: boolean; size: number };
 export type FsListResult = {

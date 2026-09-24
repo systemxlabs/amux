@@ -115,6 +115,25 @@ fn fake_bin(mock_agent: &Path, state_file: &Path) -> PathBuf {
     dir
 }
 
+fn init_git_repo(path: &Path) {
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .status()
+            .expect("执行 git 失败");
+        assert!(status.success(), "git {:?} 失败", args);
+    };
+    run(&["init", "-q"]);
+    run(&["checkout", "-b", "main", "-q"]);
+    run(&["config", "user.email", "t@t"]);
+    run(&["config", "user.name", "t"]);
+    std::fs::write(path.join("tracked.txt"), "initial\n").unwrap();
+    run(&["add", "tracked.txt"]);
+    run(&["commit", "-m", "init", "-q"]);
+}
+
 fn spawn_server(port: u16, home: &Path) -> Process {
     let child = Command::new(env!("CARGO_BIN_EXE_amux-server"))
         .args([
@@ -288,6 +307,7 @@ async fn server_daemon_agent_end_to_end() {
         _ => TestHome::Temp(tempfile::tempdir().unwrap()),
     };
     let workspace = tempfile::tempdir().unwrap();
+    init_git_repo(workspace.path());
     let state_file = home.path().join("mock_state");
     let bin = fake_bin(Path::new(env!("CARGO_BIN_EXE_mock_acp")), &state_file);
     let port = free_port();
@@ -376,6 +396,49 @@ async fn server_daemon_agent_end_to_end() {
         .await;
     let session_id = session["id"].as_str().unwrap().to_string();
     assert_eq!(session["state"], "idle");
+
+    // 分支列表与指定基准分支的 diff 经 Server、Daemon 到 Git 的完整链路。
+    let branches = client
+        .get(&format!("/sessions/{session_id}/branches"))
+        .await;
+    assert!(
+        branches["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| {
+                branch["name"] == "main"
+                    && branch["isDefault"] == true
+                    && branch["isWorktreeSource"] == false
+            }),
+        "{branches}"
+    );
+    assert_eq!(
+        client
+            .get_status(&format!("/sessions/{session_id}/diff"))
+            .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "diff 缺少 base 时应拒绝请求"
+    );
+    assert_eq!(
+        client
+            .get_status(&format!("/sessions/{session_id}/diff?base="))
+            .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "diff 的 base 为空时应拒绝请求"
+    );
+    std::fs::write(workspace.path().join("tracked.txt"), "changed\n").unwrap();
+    let diff = client
+        .get(&format!("/sessions/{session_id}/diff?base=main"))
+        .await;
+    assert!(
+        diff["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["path"] == "tracked.txt"),
+        "{diff}"
+    );
 
     // 发指令：用户消息立即落盘，agent 输出与活动随后到达
     client

@@ -15,6 +15,7 @@ import type {
   ConfigureWorkflowRequest,
   FsListResult,
   FsReadResult,
+  GitBranchListResult,
   GitDiffResult,
   HistoryPage,
   Machine,
@@ -204,8 +205,12 @@ export class ApiClient {
     return response.activity ?? null;
   }
 
-  diff(id: string): Promise<GitDiffResult> {
-    return this.getJson(`/sessions/${encodeURIComponent(id)}/diff`);
+  diff(id: string, base: string): Promise<GitDiffResult> {
+    return this.getJson(`/sessions/${encodeURIComponent(id)}/diff?${query({ base })}`);
+  }
+
+  branches(id: string): Promise<GitBranchListResult> {
+    return this.getJson(`/sessions/${encodeURIComponent(id)}/branches`);
   }
 
   sessionAttachments(id: string, limit: number, offset: number): Promise<AttachmentList> {

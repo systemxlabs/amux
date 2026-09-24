@@ -7,10 +7,18 @@ import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus } 
 
 import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../components/ui/select";
 import { sendPrompt } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 import { buildDiffTree, type DiffNode } from "../../lib/difftree";
 import type {
+  GitBranch,
   GitChangeStatus,
   GitDiffHunk,
   GitDiffLine,
@@ -32,6 +40,22 @@ function linePrefix(kind: GitDiffLine["kind"]): string {
   if (kind === "add") return "+";
   if (kind === "remove") return "-";
   return " ";
+}
+
+function preferredDiffBase(branches: readonly GitBranch[], useWorktree: boolean): string {
+  if (useWorktree) {
+    const source = branches.find((branch) => branch.isWorktreeSource);
+    if (source !== undefined) return source.name;
+  }
+  return branches.find((branch) => branch.isDefault)?.name ?? "HEAD";
+}
+
+function branchLabel(branch: GitBranch): string {
+  const marks = [
+    branch.isWorktreeSource ? "worktree 源分支" : "",
+    branch.isDefault ? "默认分支" : "",
+  ].filter(Boolean);
+  return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
 }
 
 function lineNumbers(hunk: GitDiffHunk): { old: number | null; new: number | null }[] {
@@ -219,6 +243,8 @@ export function DiffPanel() {
   const sessionId = state.open?.kind === "session" ? state.open.id : null;
 
   const [diff, setDiff] = useState<GitDiffResult | null>(null);
+  const [branches, setBranches] = useState<GitBranch[]>([]);
+  const [base, setBase] = useState("HEAD");
   const [error, setError] = useState<string | null>(null);
   const [treeVisible, setTreeVisible] = useState(true);
   /** 折叠全部文件改动：折叠后仅显示文件名（docs/PRD.md「改动审查视图」） */
@@ -232,10 +258,14 @@ export function DiffPanel() {
   const [hoveredGutter, setHoveredGutter] = useState<string | null>(null);
   const dragRef = useRef<DiffDrag | null>(null);
   const dragPointerRef = useRef<number | null>(null);
+  const diffRequestRef = useRef(0);
+  const useWorktree = (state.detail.session?.worktreeDir ?? "") !== "";
 
   // 打开时刷新一次（docs/DESIGN.md「改动审查视图」）：会话切换时重新拉取
   useEffect(() => {
     setDiff(null);
+    setBranches([]);
+    setBase("HEAD");
     setError(null);
     setDiffsCollapsed(false);
     setCollapsedDirs([]);
@@ -247,27 +277,49 @@ export function DiffPanel() {
     setHoveredGutter(null);
     dragRef.current = null;
     dragPointerRef.current = null;
+    const request = ++diffRequestRef.current;
     const client = core.client;
     if (client === null || sessionId === null) return;
     let cancelled = false;
-    client.diff(sessionId).then(
-      (result) => {
-        if (!cancelled) setDiff(result);
-      },
-      (cause: unknown) => {
-        if (!cancelled) setError(messageOf(cause));
-      },
-    );
+    void (async () => {
+      const branchResult = await client.branches(sessionId).catch(() => ({ branches: [] }));
+      if (cancelled || request !== diffRequestRef.current) return;
+      const selected = preferredDiffBase(branchResult.branches, useWorktree);
+      setBranches(branchResult.branches);
+      setBase(selected);
+      try {
+        const result = await client.diff(sessionId, selected);
+        if (!cancelled && request === diffRequestRef.current) setDiff(result);
+      } catch (cause) {
+        if (!cancelled && request === diffRequestRef.current) setError(messageOf(cause));
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [core, sessionId]);
+  }, [core, sessionId, useWorktree]);
 
   const files = diff?.files ?? [];
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
   const additions = files.reduce((total, file) => total + file.additions, 0);
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
   const changedLines = additions + deletions;
+
+  const selectBase = (value: string) => {
+    if (sessionId === null || value === base) return;
+    setBase(value);
+    const request = ++diffRequestRef.current;
+    const client = core.client;
+    if (client === null) return;
+    client.diff(sessionId, value).then(
+      (result) => {
+        if (request === diffRequestRef.current) setDiff(result);
+      },
+      (cause: unknown) => {
+        if (request === diffRequestRef.current) setError(messageOf(cause));
+      },
+    );
+  };
 
   const toggleDir = (key: string) => {
     setCollapsedDirs((prev) =>
@@ -571,8 +623,8 @@ export function DiffPanel() {
     <div className="flex h-full min-h-0 flex-col">
       {/* 工具栏（docs/PRD.md「改动审查视图」）：折叠/展开文件树按钮左对齐，
           折叠/展开 diff 区域按钮右对齐（折叠后仅显示文件名） */}
-      <div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2">
-        <div className="flex items-center gap-2">
+      <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
           <Button
             type="button"
             variant="ghost"
@@ -591,7 +643,24 @@ export function DiffPanel() {
             {changedLines} 行变更
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <Select value={base} onValueChange={selectBase}>
+          <SelectTrigger
+            data-slot="diff-base-select"
+            aria-label="选择基准分支"
+            className="h-8 max-w-40 lg:max-w-56"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="HEAD">HEAD（当前提交）</SelectItem>
+            {branches.map((branch) => (
+              <SelectItem key={branch.name} value={branch.name}>
+                {branchLabel(branch)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <div className="flex min-w-0 items-center justify-end gap-2">
           <span data-slot="diff-line-count" className="text-xs">
             <span className="text-success">+{additions}</span>
             <span className="text-muted-foreground">/</span>

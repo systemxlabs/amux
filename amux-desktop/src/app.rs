@@ -11,8 +11,8 @@ use amux_common::api::{
     RecentWorkspace, SessionConfigSetting, Skill, WorkflowPlanItem,
 };
 use amux_common::domain::{
-    ContentBlock, GitDiffHunk, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
-    SlashCommand,
+    ContentBlock, GitBranch, GitDiffHunk, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionValue, SlashCommand,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -2261,15 +2261,71 @@ impl AmuxApp {
 
     /// 刷新改动 diff。
     pub fn refresh_diff(&mut self, cx: &mut Context<Self>) {
-        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
+        let (client, open, use_worktree, request) = self.with_core(|core| {
+            core.view.detail.diff_request_seq = core.view.detail.diff_request_seq.wrapping_add(1);
+            (
+                core.client.clone(),
+                core.open.clone(),
+                core.view
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !session.worktree_dir.is_empty()),
+                core.view.detail.diff_request_seq,
+            )
+        });
         let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
             return;
         };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            match client.diff(&id).await {
-                Ok(diff) => core.lock().view.detail.diff = Some(diff),
-                Err(error) => core.lock().error(format!("无法加载改动：{error}")),
+            let branches = client
+                .branches(&id)
+                .await
+                .map(|result| result.branches)
+                .unwrap_or_default();
+            let base = preferred_diff_base(&branches, use_worktree);
+            let result = client.diff(&id, &base).await;
+            let mut core = core.lock();
+            if core.open != Some(OpenTarget::Session(id))
+                || core.view.detail.diff_request_seq != request
+            {
+                return;
+            }
+            core.view.detail.diff_branches = branches;
+            core.view.detail.diff_base = base;
+            match result {
+                Ok(diff) => core.view.detail.diff = Some(diff),
+                Err(error) => core.error(format!("无法加载改动：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
+    /// 切换改动审查基准分支并刷新 diff。
+    pub fn select_diff_base(&mut self, base: String, cx: &mut Context<Self>) {
+        let (client, open, request) = self.with_core(|core| {
+            core.view.detail.diff_request_seq = core.view.detail.diff_request_seq.wrapping_add(1);
+            core.view.detail.diff_base = base.clone();
+            (
+                core.client.clone(),
+                core.open.clone(),
+                core.view.detail.diff_request_seq,
+            )
+        });
+        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = client.diff(&id, &base).await;
+            let mut core = core.lock();
+            if core.open == Some(OpenTarget::Session(id))
+                && core.view.detail.diff_request_seq == request
+            {
+                match result {
+                    Ok(diff) => core.view.detail.diff = Some(diff),
+                    Err(error) => core.error(format!("无法加载改动：{error}")),
+                }
             }
         });
         cx.notify();
@@ -3368,6 +3424,19 @@ impl AmuxApp {
             })
             .into_any_element()
     }
+}
+
+fn preferred_diff_base(branches: &[GitBranch], use_worktree: bool) -> String {
+    if use_worktree {
+        if let Some(branch) = branches.iter().find(|branch| branch.is_worktree_source) {
+            return branch.name.clone();
+        }
+    }
+    branches
+        .iter()
+        .find(|branch| branch.is_default)
+        .map(|branch| branch.name.clone())
+        .unwrap_or_else(|| "HEAD".to_string())
 }
 
 /// 设置页可全量保存的列表类配置。

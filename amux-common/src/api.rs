@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Activity, ContentBlock, GitDiffResult, HistoryItem, SessionConfigOption,
+    Activity, ContentBlock, GitBranchListResult, GitDiffResult, HistoryItem, SessionConfigOption,
     SessionConfigOptionValue, SessionPlanEntry, SessionState, SlashCommand,
 };
 
@@ -199,6 +199,7 @@ pub struct ContextInfo {
 
 /// `GET /sessions/<id>/diff` 响应。
 pub type DiffResponse = GitDiffResult;
+pub type BranchesResponse = GitBranchListResult;
 
 /// 终端状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

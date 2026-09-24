@@ -66,6 +66,11 @@ pub struct ReadFile {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DiffQuery {
+    pub base: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UploadAttachment {
     pub filename: String,
 }
@@ -97,6 +102,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sessions/{id}/activities", get(session_activities))
         .route("/sessions/{id}/ongoing_activity", get(session_ongoing))
         .route("/sessions/{id}/diff", get(session_diff))
+        .route("/sessions/{id}/branches", get(session_branches))
         .route(
             "/sessions/{id}/terminals",
             post(open_terminal).get(list_terminals),
@@ -471,10 +477,26 @@ async fn session_ongoing(
 async fn session_diff(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<DiffQuery>,
 ) -> ApiResult<DiffResponse> {
+    if query.base.trim().is_empty() {
+        return Err(bad_request("base 不能为空".to_string()));
+    }
     state
         .sessions
-        .diff(&id)
+        .diff(&id, &query.base)
+        .await
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn session_branches(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<BranchesResponse> {
+    state
+        .sessions
+        .branches(&id)
         .await
         .map(Json)
         .map_err(bad_request)

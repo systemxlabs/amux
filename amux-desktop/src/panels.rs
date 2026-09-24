@@ -3,13 +3,13 @@
 
 use amux_common::api::{Project, Session, Terminal, TerminalState, Workflow};
 
-use amux_common::domain::{Activity, GitDiffFile, GitDiffLineKind, SessionState};
+use amux_common::domain::{Activity, GitBranch, GitDiffFile, GitDiffLineKind, SessionState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::*;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
@@ -1430,11 +1430,9 @@ fn diff_review(
 
     // 工具栏（docs/PRD.md「改动审查视图」）：折叠/展开文件树按钮左对齐，折叠/展开 diff
     // 区域按钮右对齐
-    let toolbar = h_flex()
+    let left_toolbar = h_flex()
         .items_center()
         .gap_2()
-        .px_3()
-        .pb_2()
         .child(
             Button::new("diff-toggle-tree")
                 .small()
@@ -1460,22 +1458,20 @@ fn diff_review(
             Label::new(format!("{changed_lines} 行变更"))
                 .text_xs()
                 .text_color(theme.muted_foreground),
-        )
-        .child(div().flex_1())
+        );
+    let right_toolbar = h_flex()
+        .items_center()
+        .gap_1()
         .child(
-            h_flex()
-                .gap_1()
-                .child(
-                    Label::new(format!("+{additions}"))
-                        .text_xs()
-                        .text_color(theme.success),
-                )
-                .child(Label::new("/").text_xs().text_color(theme.muted_foreground))
-                .child(
-                    Label::new(format!("-{deletions}"))
-                        .text_xs()
-                        .text_color(theme.danger),
-                ),
+            Label::new(format!("+{additions}"))
+                .text_xs()
+                .text_color(theme.success),
+        )
+        .child(Label::new("/").text_xs().text_color(theme.muted_foreground))
+        .child(
+            Label::new(format!("-{deletions}"))
+                .text_xs()
+                .text_color(theme.danger),
         )
         .child(
             Button::new("diff-toggle-changes")
@@ -1492,6 +1488,19 @@ fn diff_review(
                     "折叠 diff"
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_all_diffs(cx))),
+        );
+    let toolbar = h_flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .pb_2()
+        .child(div().flex_1().min_w_0().child(left_toolbar))
+        .child(diff_base_menu(core, cx))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(h_flex().justify_end().child(right_toolbar)),
         );
 
     let body = if not_repo {
@@ -1543,6 +1552,64 @@ fn diff_review(
         .child(toolbar)
         .child(body)
         .into_any_element()
+}
+
+/// 改动审查基准分支选择器。
+fn diff_base_menu(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let current = if core.view.detail.diff_base.is_empty() {
+        "HEAD".to_string()
+    } else {
+        core.view.detail.diff_base.clone()
+    };
+    let branches = core.view.detail.diff_branches.clone();
+    let app = cx.entity();
+    Button::new("diff-base-select")
+        .small()
+        .outline()
+        .child(
+            div()
+                .max_w(rems(14.))
+                .line_height(relative(1.))
+                .truncate()
+                .child(current.clone()),
+        )
+        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+            let mut menu = menu;
+            let head_selected = current == "HEAD";
+            let head_app = app.clone();
+            menu = menu.item(
+                PopupMenuItem::new("HEAD（当前提交）")
+                    .checked(head_selected)
+                    .on_click(move |_, _, cx| {
+                        head_app
+                            .update(cx, |this, cx| this.select_diff_base("HEAD".to_string(), cx))
+                    }),
+            );
+            for branch in &branches {
+                let value = branch.name.clone();
+                let checked = current == value;
+                let branch_app = app.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(diff_branch_label(branch))
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            branch_app
+                                .update(cx, |this, cx| this.select_diff_base(value.clone(), cx))
+                        }),
+                );
+            }
+            menu
+        })
+        .into_any_element()
+}
+
+fn diff_branch_label(branch: &GitBranch) -> String {
+    match (branch.is_worktree_source, branch.is_default) {
+        (true, true) => format!("{}（worktree 源分支、默认分支）", branch.name),
+        (true, false) => format!("{}（worktree 源分支）", branch.name),
+        (false, true) => format!("{}（默认分支）", branch.name),
+        (false, false) => branch.name.clone(),
+    }
 }
 
 /// 左侧文件树：仅包含改动文件，点击文件滚动到对应改动。

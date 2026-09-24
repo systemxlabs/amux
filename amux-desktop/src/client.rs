@@ -2,8 +2,8 @@
 
 use amux_common::api::*;
 use amux_common::domain::{
-    Activity, ContentBlock, FsEntry, FsListResult, FsReadResult, GitDiffResult,
-    SessionConfigOption, SessionPlanEntry, SlashCommand,
+    Activity, ContentBlock, FsEntry, FsListResult, FsReadResult, GitBranchListResult,
+    GitDiffResult, SessionConfigOption, SessionPlanEntry, SlashCommand,
 };
 use futures_util::StreamExt as _;
 use serde::de::DeserializeOwned;
@@ -218,8 +218,13 @@ impl Client {
         Ok(response.activity)
     }
 
-    pub async fn diff(&self, id: &str) -> Result<GitDiffResult, String> {
-        self.get_json(&format!("/sessions/{id}/diff")).await
+    pub async fn diff(&self, id: &str, base: &str) -> Result<GitDiffResult, String> {
+        self.get_json(&format!("/sessions/{id}/diff?base={}", urlencode(base)))
+            .await
+    }
+
+    pub async fn branches(&self, id: &str) -> Result<GitBranchListResult, String> {
+        self.get_json(&format!("/sessions/{id}/branches")).await
     }
 
     pub async fn session_attachments(
