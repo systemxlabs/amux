@@ -694,12 +694,22 @@ impl WorkflowTools {
                     .iter()
                     .map(|session| {
                         format!(
-                            "{} ({}@{}): {} / 工作目录 {}",
+                            "{} ({}@{}): {} / 标题 {} / 工作目录 {} / worktree 目录 {}",
                             session.id,
                             session.agent,
                             session.machine,
                             state_label(session.state),
-                            services.sessions.work_dir(session)
+                            if session.title.is_empty() {
+                                "未命名"
+                            } else {
+                                session.title.as_str()
+                            },
+                            session.workspace,
+                            if session.worktree_dir.is_empty() {
+                                "未启用"
+                            } else {
+                                session.worktree_dir.as_str()
+                            }
                         )
                     })
                     .collect::<Vec<_>>()
@@ -834,17 +844,17 @@ fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "list_agents".into(),
-            description: "已连接机器及各机器的 agent 列表".into(),
+            description: "查询各机器的 agent 列表，包括 agent 状态".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDefinition {
             name: "list_sessions".into(),
-            description: "本工作流的关联普通会话列表，会话包含会话ID、状态等尽可能多的信息".into(),
+            description: "查询关联普通会话列表，包含会话 ID、状态、标题、工作目录、worktree 目录、机器、agent 信息".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDefinition {
             name: "create_session".into(),
-            description: "创建关联普通会话用于调度智能体执行任务".into(),
+            description: "创建关联普通会话用于调度智能体执行任务，需指定机器、agent、工作目录、是否开启 worktree，若开启 worktree，系统自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -858,7 +868,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "prompt_session".into(),
-            description: "向指定关联普通会话以用户消息方式下发指令".into(),
+            description: "向指定关联普通会话以用户角色下发指令".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -902,7 +912,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "get_session_config_options".into(),
-            description: "获取指定关联普通会话的会话选项，例如模型、推理级别".into(),
+            description: "获取指定关联普通会话支持的会话选项，例如模型、推理级别，不同执行智能体可能支持不同的选项".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": { "session": string("关联普通会话 id") },
@@ -911,7 +921,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "read_session_history".into(),
-            description: "分页读取关联普通会话对话内容，包含用户消息和 agent 输出".into(),
+            description: "分页读取关联普通会话对话内容，包含用户消息和执行智能体输出消息".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -924,7 +934,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "read_session_activities".into(),
-            description: "分页读取关联普通会话活动内容，包含 agent 思考、工具调用和错误".into(),
+            description: "分页读取关联普通会话活动内容，包含执行智能体的思考、工具调用和错误".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1167,6 +1177,44 @@ mod tests {
             "read_session_activities",
         ] {
             assert!(names.contains(&expected.to_string()), "缺少工具 {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_sessions_includes_documented_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let workflow = service.create("计划", None, None).await.unwrap();
+        let session = service
+            .sessions
+            .create("pc", "codex", "/repo", false, None)
+            .await
+            .unwrap();
+        service.link_session(&workflow.id, &session.id);
+        service
+            .sessions
+            .configure(&session.id, Some("修复登录".into()), None, None)
+            .await
+            .unwrap();
+
+        let tools = WorkflowTools {
+            service,
+            workflow_id: workflow.id,
+        };
+        let output = tools
+            .call("list_sessions", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        for expected in [
+            session.id.as_str(),
+            "codex@pc",
+            "空闲",
+            "标题 修复登录",
+            "工作目录 /repo",
+            "worktree 目录 未启用",
+        ] {
+            assert!(output.contains(expected), "缺少 {expected:?}: {output}");
         }
     }
 
