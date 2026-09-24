@@ -1423,7 +1423,6 @@ fn diff_review(
             .all(|file| this.diff_collapsed_files.contains(&file.path));
     let additions: u32 = files.iter().map(|file| file.additions).sum();
     let deletions: u32 = files.iter().map(|file| file.deletions).sum();
-    let changed_lines = additions + deletions;
 
     // 工具栏（docs/PRD.md「改动审查视图」）：折叠/展开文件树按钮左对齐，折叠/展开 diff
     // 区域按钮右对齐
@@ -1448,11 +1447,6 @@ fn diff_review(
         )
         .child(
             Label::new(format!("{} 个文件", files.len()))
-                .text_xs()
-                .text_color(theme.muted_foreground),
-        )
-        .child(
-            Label::new(format!("{changed_lines} 行变更"))
                 .text_xs()
                 .text_color(theme.muted_foreground),
         );
@@ -1750,11 +1744,6 @@ fn diff_file_block(
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
-    let status = match file.status {
-        amux_common::domain::GitChangeStatus::Added => ("A", theme.success),
-        amux_common::domain::GitChangeStatus::Deleted => ("D", theme.danger),
-        amux_common::domain::GitChangeStatus::Modified => ("M", theme.warning),
-    };
     let mut block = v_flex().w_full().child(
         h_flex()
             .w_full()
@@ -1783,11 +1772,6 @@ fn diff_file_block(
                     ),
             )
             .child(
-                Label::new(format!("{} 行变更", file.additions + file.deletions))
-                    .text_xs()
-                    .text_color(theme.muted_foreground),
-            )
-            .child(
                 Label::new(format!("+{}", file.additions))
                     .text_xs()
                     .text_color(theme.success),
@@ -1796,16 +1780,6 @@ fn diff_file_block(
                 Label::new(format!("-{}", file.deletions))
                     .text_xs()
                     .text_color(theme.danger),
-            )
-            .child(
-                gpui_component::tag::Tag::custom(
-                    status.1.opacity(0.14),
-                    status.1,
-                    status.1.opacity(0.35),
-                )
-                .small()
-                .rounded_full()
-                .child(Label::new(status.0).text_xs()),
             )
             .child(
                 Button::new(SharedString::from(format!(

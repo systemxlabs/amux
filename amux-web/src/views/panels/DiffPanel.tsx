@@ -19,18 +19,11 @@ import { useCore, useCoreState } from "../../core/store";
 import { buildDiffTree, type DiffNode } from "../../lib/difftree";
 import type {
   GitBranch,
-  GitChangeStatus,
   GitDiffHunk,
   GitDiffLine,
   GitDiffResult,
 } from "../../lib/types";
 import { cn } from "../../lib/utils";
-
-const STATUS_LABEL: Record<GitChangeStatus, string> = {
-  added: "新增",
-  modified: "修改",
-  deleted: "删除",
-};
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -303,7 +296,6 @@ export function DiffPanel() {
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
   const additions = files.reduce((total, file) => total + file.additions, 0);
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
-  const changedLines = additions + deletions;
 
   const selectBase = (value: string) => {
     if (sessionId === null || value === base) return;
@@ -476,10 +468,6 @@ export function DiffPanel() {
               >
                 <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-2 py-1 font-mono text-xs">
                   <span className="min-w-0 flex-1 truncate">{file.path}</span>
-                  <span className="shrink-0">{STATUS_LABEL[file.status]}</span>
-                  <span className="shrink-0 text-muted-foreground">
-                    {file.additions + file.deletions} 行变更
-                  </span>
                   <span className="shrink-0 text-success">+{file.additions}</span>
                   <span className="shrink-0 text-destructive">-{file.deletions}</span>
                   <Button
@@ -638,9 +626,6 @@ export function DiffPanel() {
           </Button>
           <span data-slot="diff-file-count" className="text-xs text-muted-foreground">
             {files.length} 个文件
-          </span>
-          <span data-slot="diff-total-line-count" className="text-xs text-muted-foreground">
-            {changedLines} 行变更
           </span>
         </div>
         <Select value={base} onValueChange={selectBase}>
