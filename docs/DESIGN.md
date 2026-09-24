@@ -137,7 +137,7 @@ Daemon 常驻于每个机器上，主要负责 ACP 多路复用和执行与机�
 - ACP：`agent-client-protocol` 官方 SDK
 - CLI: `clap`
 
-### Daemon 启动
+### Daemon 启动和关闭
 
 Daemon 启动和关闭由用户手动执行，启动参数包括
 - `--machine`：机器名称，不得有路径分隔符
@@ -247,7 +247,7 @@ Daemon 在内存中仅存储终端元信息，终端输出由 Server 侧缓存�
 - ACP：`agent-client-protocol` 官方 SDK
 - CLI: `clap`
 
-### Server 启动
+### Server 启动和关闭
 
 Server 启动和关闭由用户手动执行，启动参数包括
 - `--host`: 监听地址，默认为 `0.0.0.0`
@@ -256,6 +256,8 @@ Server 启动和关闭由用户手动执行，启动参数包括
 - `--web`：web 静态文件目录，未传则静态资源请求返回 404
 
 Server 的 WebSocket 监听地址为 `ws://<host>:<port>/daemon`。
+
+Server 关闭时，关闭所有打开的 Agent 侧会话。
 
 ### Agent 生命周期
 
