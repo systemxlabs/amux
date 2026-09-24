@@ -844,17 +844,17 @@ fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "list_agents".into(),
-            description: "查询各机器的 agent 列表，包括 agent 状态".into(),
+            description: "查询各机器的执行智能体列表，包括执行智能体状态（可用或不可用）".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDefinition {
             name: "list_sessions".into(),
-            description: "查询关联普通会话列表，包含会话 ID、状态、标题、工作目录、worktree 目录、机器、agent 信息".into(),
+            description: "查询关联普通会话列表，包含会话 ID、状态、标题、工作目录、worktree 目录、机器、执行智能体等信息".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDefinition {
             name: "create_session".into(),
-            description: "创建关联普通会话用于调度智能体执行任务，需指定机器、agent、工作目录、是否开启 worktree，若开启 worktree，系统自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
+            description: "创建关联普通会话用于调度智能体执行任务，需指定机器、执行智能体、工作目录、是否开启 worktree，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
