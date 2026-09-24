@@ -339,25 +339,21 @@ Server 作为 ACP client 与 Agents 通信
   - Server 在往 Agent 发送 `session/prompt` 成功后，应立即给用户消息赋予消息 ID 并落盘，忽略 Agent 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
   ```SQL
   CREATE TABLE IF NOT EXISTS messages (
-    session_id TEXT NOT NULL,      -- Amux 普通会话 ID
-    message_id TEXT NOT NULL,      -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 Agent 提供
+    message_id TEXT PRIMARY KEY,   -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 Agent 提供
     role TEXT NOT NULL,            -- user / agent
     content TEXT NOT NULL,         -- 消息内容，以 ACP ContentBlock 数组格式转 json 后存放
     created_at INTEGER NOT NULL,   -- 创建时间
-    updated_at INTEGER NOT NULL,   -- 更新时间
-    PRIMARY KEY (session_id, message_id)
+    updated_at INTEGER NOT NULL    -- 更新时间
   );
   ```
 - 活动历史：存储在 `~/.amux/sessions/<session_id>/transcript.sqlite` 文件中
   ```
   CREATE TABLE IF NOT EXISTS activities (
-    session_id TEXT NOT NULL,      -- Amux 普通会话 ID
-    activity_id TEXT NOT NULL,     -- toolCallId / thought message id / 本地生成的唯一 ID
+    activity_id TEXT PRIMARY KEY,  -- toolCallId / thought message id / 本地生成的唯一 ID
     kind TEXT NOT NULL,            -- 类别：tool_call / thinking / error
     content TEXT,                  -- 活动内容，以 json 格式存放
     created_at INTEGER NOT NULL,   -- 创建时间
-    updated_at INTEGER NOT NULL,   -- 更新时间
-    PRIMARY KEY (session_id, activity_id)
+    updated_at INTEGER NOT NULL    -- 更新时间
   );
   ```
 
