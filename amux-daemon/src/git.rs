@@ -57,14 +57,6 @@ fn run(cwd: &str, args: &[&str]) -> Result<String, GitError> {
     }
 }
 
-/// 把相对 cwd 的路径换算为仓库根相对路径（cwd 通常即仓库根，映射为恒等）。
-fn repo_relative_path(workdir: &Path, cwd: &str, p: &str) -> String {
-    match Path::new(cwd).strip_prefix(workdir) {
-        Ok(rel) if !rel.as_os_str().is_empty() => rel.join(p).to_string_lossy().into_owned(),
-        _ => p.to_string(),
-    }
-}
-
 /// 把仓库根相对路径换算为相对 cwd 的路径（diff 结果的 path 以 cwd 为基准）。
 fn cwd_relative_path(workdir: &Path, cwd: &str, repo_path: &str) -> String {
     match Path::new(cwd).strip_prefix(workdir) {
@@ -280,7 +272,7 @@ impl GitRunner {
 
     /// 结构化 diff：gitoxide 实现。
     /// cwd 非 git 仓库时返回 `not_repo` 标记。
-    pub fn diff(&self, cwd: &str, path: Option<&str>) -> GitDiffResult {
+    pub fn diff(&self, cwd: &str) -> GitDiffResult {
         let empty = || GitDiffResult {
             files: Vec::new(),
             not_repo: false,
@@ -359,12 +351,6 @@ impl GitRunner {
                 }
                 Err(_) => return empty(),
             }
-        }
-
-        if let Some(f) = path.map(|p| repo_relative_path(workdir, cwd, p)) {
-            let f = BString::from(f);
-            let prefix = format!("{f}/");
-            paths.retain(|p| p == &f || p.as_bytes().starts_with(prefix.as_bytes()));
         }
 
         let mut cache = match repo.diff_resource_cache(
@@ -607,7 +593,7 @@ mod tests {
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
         git(&dir, &["add", "new.txt"]);
         let r = GitRunner::new();
-        let st = r.diff(dir.to_str().unwrap(), None);
+        let st = r.diff(dir.to_str().unwrap());
         assert!(!st.not_repo);
         assert!(st
             .files
@@ -633,7 +619,7 @@ mod tests {
     fn diff_includes_untracked_files() {
         let dir = init_repo();
         std::fs::write(dir.join("untracked.txt"), "not staged\n").unwrap();
-        let result = GitRunner::new().diff(dir.to_str().unwrap(), None);
+        let result = GitRunner::new().diff(dir.to_str().unwrap());
         let file = result
             .files
             .iter()
@@ -653,7 +639,7 @@ mod tests {
 
         std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("untracked-link")).unwrap();
         let runner = GitRunner::new();
-        let diff = runner.diff(dir.to_str().unwrap(), None);
+        let diff = runner.diff(dir.to_str().unwrap());
         let untracked = diff
             .files
             .iter()
@@ -664,7 +650,7 @@ mod tests {
 
         std::fs::remove_file(dir.join("a.txt")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("a.txt")).unwrap();
-        let diff = runner.diff(dir.to_str().unwrap(), Some("a.txt"));
+        let diff = runner.diff(dir.to_str().unwrap());
         let replaced = diff
             .files
             .iter()
@@ -678,7 +664,7 @@ mod tests {
     fn non_repo_marks_not_repo() {
         let dir = unique_dir("amux-plain");
         std::fs::create_dir_all(&dir).unwrap();
-        let st = GitRunner::new().diff(dir.to_str().unwrap(), None).not_repo;
+        let st = GitRunner::new().diff(dir.to_str().unwrap()).not_repo;
         assert!(st);
     }
 
@@ -688,7 +674,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "line1\nCHANGED\nline3\n").unwrap();
         std::fs::write(dir.join("new.txt"), "hello\nworld\n").unwrap();
         git(&dir, &["add", "new.txt"]);
-        let d = GitRunner::new().diff(dir.to_str().unwrap(), None);
+        let d = GitRunner::new().diff(dir.to_str().unwrap());
         assert!(!d.not_repo);
         let a = d.files.iter().find(|f| f.path == "a.txt").expect("a.txt");
         assert_eq!(a.additions, 2);

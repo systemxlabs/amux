@@ -247,7 +247,7 @@ async fn execute(
         }
         method::GIT_DIFF => {
             let params: GitRepoParams = decode(params)?;
-            to_value(daemon.git.diff(&params.repo, None))
+            to_value(daemon.git.diff(&params.repo))
         }
         method::GIT_WORKTREE_NEW => {
             let params: GitRepoParams = decode(params)?;
