@@ -25,7 +25,8 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 | `machine.info` | 获取当前机器信息，包含操作系统、临时目录等 |
 | `agent.list` | 发现当前机器已安装的 agents，以及 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
-| `git.diff` | 查询指定仓库改动 diff |
+| `git.diff` | 查询指定仓库改动 diff，对基准分支与 HEAD 的 merge-base 后的工作区做三点对比，覆盖已提交与未提交改动及未跟踪文件 |
+| `git.branches` | 查询指定仓库本地分支，并标记 worktree 源分支、仓库默认分支 |
 | `git.worktree.new` | 从指定仓库创建一个 worktree |
 | `git.worktree.resume` | 从指定仓库指定路径恢复 worktree |
 | `git.worktree.list` | 查询指定仓库所有 worktrees |
@@ -82,6 +83,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/activities` | 分页查询指定普通会话的活动历史 |
 | GET `/sessions/<session_id>/ongoing_activity` | 查询指定普通会话正在进行中的活动 |
 | GET `/sessions/<session_id>/diff` | 查询普通会话工作目录改动 diff |
+| GET `/sessions/<session_id>/branches` | 查询普通会话工作目录本地分支列表 |
 | POST `/sessions/<session_id>/terminals` | 打开指定普通会话一个终端 |
 | GET `/sessions/<session_id>/terminals` | 查询指定普通会话所有打开的终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>` | 向指定终端输入内容 |
@@ -606,6 +608,10 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 ### 改动审查视图
 
 改动审查视图未打开时，不主动拉取改动内容。视图打开时，刷新一次，不定时刷新。
+
+改动审查视图基准分支优先顺序
+- 开启 worktree 会话：worktree 源分支 > 仓库默认分支 > HEAD
+- 未开启 worktree 会话：仓库默认分支 > HEAD
 
 ### 会话详情视图
 
