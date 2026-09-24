@@ -334,11 +334,10 @@ impl Store {
             Ok(None) => return,
         };
         let _ = transcript.lock().execute(
-            "INSERT INTO messages (session_id, message_id, role, content, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-             ON CONFLICT(session_id, message_id) DO UPDATE SET content = ?4, updated_at = ?6",
+            "INSERT INTO messages (message_id, role, content, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(message_id) DO UPDATE SET content = ?3, updated_at = ?5",
             params![
-                session_id,
                 message_id,
                 role,
                 content,
@@ -365,28 +364,25 @@ impl Store {
         let conn = transcript.lock();
         let mut stmt = match conn.prepare(
             "SELECT message_id, role, content, created_at, updated_at FROM messages
-             WHERE session_id = ?1 ORDER BY updated_at DESC, message_id DESC LIMIT ?2 OFFSET ?3",
+             ORDER BY updated_at DESC, message_id DESC LIMIT ?1 OFFSET ?2",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return (Vec::new(), false),
         };
-        let rows = stmt.query_map(
-            params![session_id, (limit + 1) as i64, offset as i64],
-            |row| {
-                let message_id: String = row.get(0)?;
-                let role: String = row.get(1)?;
-                let content: String = row.get(2)?;
-                let created_at: i64 = row.get(3)?;
-                let updated_at: i64 = row.get(4)?;
-                Ok((
-                    message_id,
-                    role,
-                    content,
-                    created_at as u64,
-                    updated_at as u64,
-                ))
-            },
-        );
+        let rows = stmt.query_map(params![(limit + 1) as i64, offset as i64], |row| {
+            let message_id: String = row.get(0)?;
+            let role: String = row.get(1)?;
+            let content: String = row.get(2)?;
+            let created_at: i64 = row.get(3)?;
+            let updated_at: i64 = row.get(4)?;
+            Ok((
+                message_id,
+                role,
+                content,
+                created_at as u64,
+                updated_at as u64,
+            ))
+        });
         let mut items: Vec<HistoryItem> = match rows {
             Ok(rows) => rows
                 .flatten()
@@ -433,11 +429,10 @@ impl Store {
             Ok(None) => return,
         };
         let _ = transcript.lock().execute(
-            "INSERT INTO activities (session_id, activity_id, kind, content, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-             ON CONFLICT(session_id, activity_id) DO UPDATE SET content = ?4, updated_at = ?6",
+            "INSERT INTO activities (activity_id, kind, content, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(activity_id) DO UPDATE SET content = ?3, updated_at = ?5",
             params![
-                session_id,
                 activity_id,
                 kind,
                 content,
@@ -463,16 +458,15 @@ impl Store {
         };
         let conn = transcript.lock();
         let mut stmt = match conn.prepare(
-            "SELECT activity_id, content FROM activities WHERE session_id = ?1
-             ORDER BY updated_at DESC, activity_id DESC LIMIT ?2 OFFSET ?3",
+            "SELECT activity_id, content FROM activities
+             ORDER BY updated_at DESC, activity_id DESC LIMIT ?1 OFFSET ?2",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return (Vec::new(), false),
         };
-        let rows = stmt.query_map(
-            params![session_id, (limit + 1) as i64, offset as i64],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        );
+        let rows = stmt.query_map(params![(limit + 1) as i64, offset as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        });
         let mut activities: Vec<Activity> = match rows {
             Ok(rows) => rows
                 .flatten()
@@ -496,11 +490,9 @@ impl Store {
         let transcript = self.transcript(session_id, false).ok()??;
         let at: Option<i64> = transcript
             .lock()
-            .query_row(
-                "SELECT MAX(updated_at) FROM activities WHERE session_id = ?1",
-                params![session_id],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(updated_at) FROM activities", [], |row| {
+                row.get(0)
+            })
             .ok()
             .flatten();
         at.map(|at| at as u64)
@@ -512,8 +504,8 @@ impl Store {
         let content = transcript
             .lock()
             .query_row(
-                "SELECT content FROM activities WHERE session_id = ?1 ORDER BY updated_at DESC LIMIT 1",
-                params![session_id],
+                "SELECT content FROM activities ORDER BY updated_at DESC LIMIT 1",
+                [],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -714,22 +706,18 @@ const SESSION_SCHEMA: &str = "
 /// 每会话 `transcript.sqlite` 表结构。
 const TRANSCRIPT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS messages (
-        session_id TEXT NOT NULL,
-        message_id TEXT NOT NULL,
+        message_id TEXT PRIMARY KEY,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (session_id, message_id)
+        updated_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS activities (
-        session_id TEXT NOT NULL,
-        activity_id TEXT NOT NULL,
+        activity_id TEXT PRIMARY KEY,
         kind TEXT NOT NULL,
         content TEXT,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (session_id, activity_id)
+        updated_at INTEGER NOT NULL
     );";
 
 /// `workflow.sqlite` 表结构。
