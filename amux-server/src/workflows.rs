@@ -854,7 +854,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "create_session".into(),
-            description: "创建关联普通会话用于调度智能体执行任务，需指定机器、执行智能体、工作目录、是否开启 worktree，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
+            description: "创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -868,7 +868,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "prompt_session".into(),
-            description: "向指定关联普通会话以用户角色下发指令".into(),
+            description: "向指定关联普通会话以用户角色发送消息，驱动执行智能体工作".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -880,7 +880,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "cancel_session".into(),
-            description: "取消指定关联普通会话进行中的工作".into(),
+            description: "取消指定关联普通会话中执行智能体正在进行中的工作，若无进行中的工作则立即返回成功".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": { "session": string("关联普通会话 id") },
@@ -912,7 +912,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "get_session_config_options".into(),
-            description: "获取指定关联普通会话支持的会话选项，例如模型、推理级别，不同执行智能体可能支持不同的选项".into(),
+            description: "获取指定关联普通会话中执行智能体支持的会话选项，例如模型、推理级别，不同执行智能体可能支持不同的选项".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": { "session": string("关联普通会话 id") },
