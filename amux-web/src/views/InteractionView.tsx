@@ -495,7 +495,10 @@ export function InteractionView() {
         </div>
 
         {isSession && detail.configOptions.length > 0 ? (
-          <div data-slot="session-options" className="mt-3 flex flex-wrap gap-3">
+          <div
+            data-slot="session-options"
+            className="mt-3 flex max-h-10 flex-wrap gap-3 overflow-x-hidden overflow-y-auto lg:max-h-7"
+          >
             {detail.configOptions.map((option) => (
               <SessionOption key={option.id} option={option} />
             ))}
