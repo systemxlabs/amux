@@ -26,8 +26,6 @@ use crate::ui;
 /// 消息气泡宽度上下限（下限需容纳时间戳行）。
 const BUBBLE_MIN_WIDTH: f32 = 132.0;
 const BUBBLE_MAX_WIDTH: f32 = 720.0;
-/// 会话选项单行高度；更多选项换行后在区域内纵向滚动。
-const CONFIG_OPTIONS_ROW_HEIGHT: f32 = 28.0;
 
 /// 中间面板：未打开会话时为新建会话视图，否则为会话交互视图。
 pub fn render_main(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
@@ -1225,37 +1223,44 @@ fn config_options(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
         return div().id("config-options-empty").into_any_element();
     }
     let mut row = h_flex()
-        .flex_wrap()
+        .w_full()
+        .min_w_0()
+        .flex_nowrap()
         .gap_x_3()
-        .gap_y_1()
         .items_center()
-        .max_h(px(CONFIG_OPTIONS_ROW_HEIGHT))
-        .overflow_y_scrollbar();
+        .overflow_x_scrollbar();
     for option in core.view.detail.config_options.clone() {
         let label = Label::new(option.name.clone())
             .text_sm()
-            .text_color(cx.theme().muted_foreground);
+            .text_color(cx.theme().muted_foreground)
+            .whitespace_nowrap();
         match &option.kind {
             SessionConfigKind::Boolean { current_value } => {
                 let id = option.id.clone();
                 row = row.child(
-                    h_flex().gap_1().items_center().child(label).child(
-                        Switch::new(format!("cfg-switch-{id}"))
-                            .small()
-                            .checked(*current_value)
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                this.apply_config_option(
-                                    id.clone(),
-                                    SessionConfigOptionValue::Boolean { value: *checked },
-                                    cx,
-                                )
-                            })),
-                    ),
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .items_center()
+                        .child(label)
+                        .child(
+                            Switch::new(format!("cfg-switch-{id}"))
+                                .small()
+                                .checked(*current_value)
+                                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                    this.apply_config_option(
+                                        id.clone(),
+                                        SessionConfigOptionValue::Boolean { value: *checked },
+                                        cx,
+                                    )
+                                })),
+                        ),
                 );
             }
             SessionConfigKind::Select { .. } => {
                 row = row.child(
                     h_flex()
+                        .flex_none()
                         .gap_1()
                         .items_center()
                         .child(label)
