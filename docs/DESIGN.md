@@ -16,7 +16,10 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 
 #### 认证
 
-在 Daemon 与 Server 建立 WebSocket 连接握手期间，Daemon 发送的握手请求需携带头部 `Authorization: Bearer <token>` 和 `amux-machine: <machine_name>`（URL 编码），Server 需要校验 token 是否正确，如不正确则握手失败，还需校验机器是否重名，若重名则握手失败。
+在 Daemon 与 Server 建立 WebSocket 连接握手期间，Daemon 发送的握手请求需携带头部：
+- `Authorization: Bearer <token>`：Server 需要校验 token 是否正确，如不正确则握手失败
+- `amux-machine: <machine_name>`（URL 编码）：Server 需要校验机器是否重名，若重名则握手失败
+- `amux-daemon-boot-time: <时间戳>`：amux-daemon 启动时间戳
 
 #### 协议
 
@@ -264,11 +267,15 @@ Server 关闭时，关闭所有打开的 Agent 侧会话。
 ### Agent 生命周期
 
 当 Daemon 与 Server 建立好连接后
-1. Server 发送命令让 Daemon 发现机器上已安装的 agents
-2. 如果 agent 未启动，则进行重新启动
-3. 如果 agent 已启动但 Server 内无该 agent 活跃 ACP 连接记录，则关闭该 agent，进行重新启动
-4. 如果 agent 已启动且 Server 内有该 agent 活跃 ACP 连接记录，则无需重新启动
-5. 通过 Daemon 与重新启动的 Agent 建立 ACP 连接和初始化，针对 Nano 智能体还需额外认证流程
+1. 读取当前 Daemon 启动时间，与上次连接读取的 Daemon 启动时间比较，判断是否重建 ACP 连接
+  - 若上次 Daemon 启动时间为空，则为重建
+  - 若上次 Daemon 启动时间不为空且不等于当前 Daemon 启动时间，则为重建
+  - 若上次 Daemon 启动时间不为空且等于当前 Daemon 启动时间，则为不重建
+2. 若为重建，则 Server 发送命令让 Daemon 发现机器上已安装的 agents 并逐个重启并执行 ACP 初始化
+3. 若为不重建
+  1. Server 发送命令让 Daemon 发现机器上已安装的 agents
+  2. 如果 agent 未启动，则启动 agent 并执行 ACP 初始化
+  3. 如果 agent 已启动，则直接复用 Server 侧持有的该 agent 的活跃 ACP 连接记录
 
 Server 可中途重启某一 Agent（无论是否已启动）。
 
