@@ -33,14 +33,14 @@ use agent_client_protocol::schema::v2::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
     CancelSessionNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
     ContentChunk, DeleteSessionRequest, DeleteSessionResponse, IdleStateUpdate, InitializeRequest,
-    InitializeResponse, MessageId, NewSessionRequest, NewSessionResponse, PermissionOption,
+    InitializeResponse, MessageId, Meta, NewSessionRequest, NewSessionResponse, PermissionOption,
     PermissionOptionKind, PlanEntry, PlanEntryPriority, PlanEntryStatus, PlanItems, PlanUpdate,
     PlanUpdateContent, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption,
     SessionConfigOptionValue, SessionDeleteCapabilities, SessionId, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StateUpdate, StopReason,
     TextCommandInput, ToolCallStatus, ToolCallUpdate, ToolKind, UpdateSessionNotification,
-    UsageUpdate, Meta,
+    UsageUpdate,
 };
 use agent_client_protocol::{Agent, Client, Result, Stdio, V2ConnectionTo};
 use serde_json::Value;

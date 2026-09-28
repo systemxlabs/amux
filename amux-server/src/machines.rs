@@ -425,7 +425,10 @@ impl MachineHub {
         writer.abort();
         {
             let mut ws = machine.ws.lock();
-            if ws.as_ref().is_some_and(|current| current.same_channel(&outgoing)) {
+            if ws
+                .as_ref()
+                .is_some_and(|current| current.same_channel(&outgoing))
+            {
                 *ws = None;
                 *machine.info.lock() = None;
             }
@@ -1014,9 +1017,9 @@ mod tests {
         let mut tasks = Vec::new();
         for _ in 0..4 {
             let hub = Arc::clone(&daemon.hub);
-            tasks.push(tokio::spawn(
-                async move { hub.acp("m", AGENT).await.map(|_| ()) },
-            ));
+            tasks.push(tokio::spawn(async move {
+                hub.acp("m", AGENT).await.map(|_| ())
+            }));
         }
         for task in tasks {
             task.await.unwrap().expect("并发取连接应成功");
