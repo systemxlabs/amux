@@ -351,6 +351,7 @@ Server 作为 ACP client 与 Agents 通信
   );
   ```
 - 活动历史：存储在 `~/.amux/sessions/<session_id>/transcript.sqlite` 文件中
+  - tool name：使用 ACP 工具调用事件的 `name` 字段，若为空则使用 `kind` 字段
   ```
   CREATE TABLE IF NOT EXISTS activities (
     activity_id TEXT PRIMARY KEY,  -- toolCallId / thought message id / 本地生成的唯一 ID
