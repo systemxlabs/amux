@@ -138,7 +138,9 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                 (session.shell.clone(), std::mem::take(&mut session.history), rx)
             };
             let history = Arc::new(Mutex::new(history));
-            responder.respond(PromptResponse::new())?;
+            responder.respond(PromptResponse::new(MessageId::new(
+                uuid::Uuid::new_v4().to_string(),
+            )))?;
             let tools = runtime::Events { cx: cx.clone(), id: request.session_id.clone() };
             tools.update(SessionUpdate::StateUpdate(StateUpdate::Running(RunningStateUpdate::new())));
             let nano = nano.clone();

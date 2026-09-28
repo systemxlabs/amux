@@ -278,14 +278,20 @@ pub fn activity_kind_detail(activity: &Activity) -> (String, String) {
         } => {
             let title = title.clone().unwrap_or_default();
             let body = parameters.clone().unwrap_or_default();
-            let mut detail = tool_name.clone();
+            let mut detail = String::new();
+            if !tool_name.trim().is_empty() {
+                detail.push_str(tool_name);
+            }
             if !title.trim().is_empty() {
-                detail.push('(');
+                if !detail.is_empty() {
+                    detail.push(' ');
+                }
                 detail.push_str(title.trim());
-                detail.push(')');
             }
             if !body.trim().is_empty() {
-                detail.push('\n');
+                if !detail.is_empty() {
+                    detail.push('\n');
+                }
                 detail.push_str(&body);
             }
             ("工具调用".to_string(), detail)

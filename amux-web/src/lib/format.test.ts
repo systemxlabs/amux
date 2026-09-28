@@ -73,7 +73,7 @@ describe("activitySummary", () => {
         tool_name: "read_file",
         title: "读取\nsrc/lib.rs",
       }),
-    ).toBe("read_file(读取 src/lib.rs)");
+    ).toBe("read_file 读取 src/lib.rs");
   });
 
   it("无标题时退回工具名；思考与错误取各自内容", () => {
@@ -106,7 +106,7 @@ describe("activityBarText", () => {
         tool_name: "read_file",
         title: "读取 src/lib.rs",
       }),
-    ).toBe("工具调用 read_file(读取 src/lib.rs)");
+    ).toBe("工具调用 read_file 读取 src/lib.rs");
     expect(activityBarText({ kind: "thinking", id: "a2", timestamp: 1, thinking: "先看看" })).toBe(
       "思考 先看看",
     );
@@ -128,6 +128,17 @@ describe("activityDetail", () => {
         parameters: '{"session":"s1"}',
       }),
     ).toBe('prompt_session\n{"session":"s1"}');
+    expect(
+      activityDetail({
+        kind: "tool_call",
+        id: "a3",
+        timestamp: 3,
+        tool_call_id: "tc3",
+        tool_name: "read_file",
+        title: "读取 src/lib.rs",
+        parameters: '{"path":"src/lib.rs"}',
+      }),
+    ).toBe('read_file 读取 src/lib.rs\n{"path":"src/lib.rs"}');
     expect(
       activityDetail({
         kind: "tool_call",

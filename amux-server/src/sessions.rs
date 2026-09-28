@@ -589,6 +589,7 @@ impl SessionService {
                 agent_session_id,
                 tool_call_id,
                 name,
+                kind,
                 title,
                 parameters,
             } => {
@@ -605,23 +606,7 @@ impl SessionService {
                             title: None,
                             parameters: None,
                         });
-                    if let Activity::ToolCall {
-                        tool_name,
-                        title: current_title,
-                        parameters: current_parameters,
-                        ..
-                    } = entry
-                    {
-                        if let Some(name) = name {
-                            *tool_name = name;
-                        }
-                        if let Some(title) = title {
-                            *current_title = Some(title);
-                        }
-                        if let Some(parameters) = parameters {
-                            *current_parameters = Some(parameters);
-                        }
-                    }
+                    apply_tool_call_patch(entry, name, kind, title, parameters);
                     serde_json::to_string(&*entry).unwrap_or_default()
                 };
                 self.store.upsert_activity(
@@ -756,6 +741,42 @@ fn should_close_idle_agent_session(idle_expired: bool, resumed: bool) -> bool {
     idle_expired && resumed
 }
 
+fn apply_tool_call_patch(
+    activity: &mut Activity,
+    name: Option<String>,
+    kind: Option<String>,
+    title: Option<String>,
+    parameters: Option<String>,
+) {
+    let Activity::ToolCall {
+        tool_name,
+        title: current_title,
+        parameters: current_parameters,
+        ..
+    } = activity
+    else {
+        return;
+    };
+
+    if let Some(name) = name {
+        if name.trim().is_empty() {
+            *tool_name = kind.unwrap_or_default();
+        } else {
+            *tool_name = name;
+        }
+    } else if tool_name.trim().is_empty() {
+        if let Some(kind) = kind {
+            *tool_name = kind;
+        }
+    }
+    if let Some(title) = title {
+        *current_title = Some(title);
+    }
+    if let Some(parameters) = parameters {
+        *current_parameters = Some(parameters);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +821,44 @@ mod tests {
     fn idle_agent_session_closes_only_while_resumed() {
         assert!(!should_close_idle_agent_session(true, false));
         assert!(should_close_idle_agent_session(true, true));
+    }
+
+    #[test]
+    fn tool_call_name_falls_back_to_kind() {
+        let mut activity = Activity::ToolCall {
+            id: "call-1".into(),
+            timestamp: 1,
+            tool_call_id: "call-1".into(),
+            tool_name: String::new(),
+            title: None,
+            parameters: None,
+        };
+
+        apply_tool_call_patch(
+            &mut activity,
+            None,
+            Some("read".into()),
+            Some("读取配置".into()),
+            None,
+        );
+        apply_tool_call_patch(&mut activity, Some("read_file".into()), None, None, None);
+        apply_tool_call_patch(&mut activity, None, Some("edit".into()), None, None);
+        apply_tool_call_patch(
+            &mut activity,
+            Some(String::new()),
+            Some("execute".into()),
+            None,
+            None,
+        );
+
+        let Activity::ToolCall {
+            tool_name, title, ..
+        } = activity
+        else {
+            panic!("应保持工具调用活动");
+        };
+        assert_eq!(tool_name, "execute");
+        assert_eq!(title.as_deref(), Some("读取配置"));
     }
 
     #[test]

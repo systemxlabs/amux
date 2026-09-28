@@ -61,6 +61,7 @@ pub enum AcpEvent {
         agent_session_id: String,
         tool_call_id: String,
         name: Option<String>,
+        kind: Option<String>,
         title: Option<String>,
         parameters: Option<String>,
     },
@@ -665,7 +666,12 @@ fn replace_blocks(
 }
 
 fn tool_call_event(session_id: &str, update: &ToolCallUpdate) -> Option<AcpEvent> {
-    let name = match &update.kind {
+    let name = match &update.name {
+        MaybeUndefined::Value(name) => Some(name.clone()),
+        MaybeUndefined::Null => Some(String::new()),
+        MaybeUndefined::Undefined => None,
+    };
+    let kind = match &update.kind {
         MaybeUndefined::Value(kind) => Some(tool_kind_str(kind)),
         MaybeUndefined::Null => Some(String::new()),
         MaybeUndefined::Undefined => None,
@@ -680,13 +686,14 @@ fn tool_call_event(session_id: &str, update: &ToolCallUpdate) -> Option<AcpEvent
         MaybeUndefined::Null => Some(String::new()),
         MaybeUndefined::Undefined => None,
     };
-    if name.is_none() && title.is_none() && parameters.is_none() {
+    if name.is_none() && kind.is_none() && title.is_none() && parameters.is_none() {
         return None;
     }
     Some(AcpEvent::ToolCall {
         agent_session_id: session_id.to_string(),
         tool_call_id: update.tool_call_id.to_string(),
-        name: name.filter(|value| !value.is_empty()),
+        name,
+        kind: kind.filter(|value| !value.is_empty()),
         title: title.filter(|value| !value.is_empty()),
         parameters: parameters.filter(|value| !value.is_empty()),
     })
@@ -735,6 +742,13 @@ fn stop_reason_reason(reason: Option<&StopReason>) -> StateChangeReason {
     }
 }
 
+fn tool_kind_str(kind: &agent_client_protocol::schema::v2::ToolKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "other".to_string())
+}
+
 /// 从 Nano 的 idle `_meta` 中提取模型错误详情。
 fn nano_error_message(idle: &IdleStateUpdate) -> Option<String> {
     idle.meta
@@ -764,13 +778,6 @@ fn pick_approve_option(options: &[PermissionOption]) -> Option<PermissionOptionI
             })
         })
         .map(|option| option.option_id.clone())
-}
-
-fn tool_kind_str(kind: &agent_client_protocol::schema::v2::ToolKind) -> String {
-    serde_json::to_value(kind)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .unwrap_or_else(|| "tool_call".to_string())
 }
 
 fn acp_config_value(value: &SessionConfigOptionValue) -> AcpSessionConfigOptionValue {
@@ -940,6 +947,38 @@ mod tests {
         // 整条快照替换累积内容；清空后为无文本
         let blocks = replace_blocks(&buffers, "s1", "m1", None);
         assert_eq!(join_text(&blocks), None);
+    }
+
+    #[test]
+    fn tool_call_event_uses_programmatic_name() {
+        let update = ToolCallUpdate::new("call-1")
+            .name("read_file")
+            .title("读取配置")
+            .kind(agent_client_protocol::schema::v2::ToolKind::Read);
+        let Some(AcpEvent::ToolCall { name, .. }) = tool_call_event("s1", &update) else {
+            panic!("应生成工具调用事件");
+        };
+        assert_eq!(name.as_deref(), Some("read_file"));
+    }
+
+    #[test]
+    fn tool_call_event_preserves_name_clear() {
+        let update = ToolCallUpdate::new("call-1").name(MaybeUndefined::Null);
+        let Some(AcpEvent::ToolCall { name, .. }) = tool_call_event("s1", &update) else {
+            panic!("清空名称也应生成工具调用事件");
+        };
+        assert_eq!(name.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn tool_call_event_carries_kind_for_fallback() {
+        let update =
+            ToolCallUpdate::new("call-1").kind(agent_client_protocol::schema::v2::ToolKind::Read);
+        let Some(AcpEvent::ToolCall { name, kind, .. }) = tool_call_event("s1", &update) else {
+            panic!("应生成工具调用事件");
+        };
+        assert!(name.is_none());
+        assert_eq!(kind.as_deref(), Some("read"));
     }
 
     #[test]

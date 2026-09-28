@@ -525,6 +525,7 @@ async fn server_daemon_agent_end_to_end() {
         .find(|item| item["kind"] == "tool_call")
         .expect("应有工具调用活动");
     assert_eq!(tool_call["tool_call_id"], "tc1");
+    assert_eq!(tool_call["tool_name"], "shell");
     assert_eq!(
         activities
             .iter()

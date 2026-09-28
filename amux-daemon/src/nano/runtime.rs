@@ -169,6 +169,7 @@ impl AgentHook for AcpHook {
     ) -> hook::ToolCallAction {
         self.events.update(SessionUpdate::ToolCallUpdate(
             ToolCallUpdate::new(event.tool_call_id.unwrap_or(event.internal_call_id))
+                .name(event.tool_name)
                 .title(shell_command(event.args))
                 .kind(ToolKind::Execute)
                 .status(ToolCallStatus::InProgress)
@@ -366,6 +367,8 @@ mod tests {
                 };
                 assert_eq!(start.tool_call_id, end.tool_call_id);
                 assert_eq!(end.tool_call_id.to_string(), "call-one");
+                assert_eq!(serde_json::to_value(start).unwrap()["name"], "shell");
+                assert!(serde_json::to_value(end).unwrap().get("name").is_none());
                 assert_eq!(
                     serde_json::to_value(start).unwrap()["title"],
                     "printf hello > result; printf hello"

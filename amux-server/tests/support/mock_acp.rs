@@ -302,7 +302,9 @@ async fn run(state_file: &str) -> Result<()> {
                     })
                     .unwrap_or_default();
                 // v2：立即受理，前台工作随后经 session/update 报告
-                responder.respond(PromptResponse::new())?;
+                responder.respond(PromptResponse::new(MessageId::new(
+                    uuid::Uuid::new_v4().to_string(),
+                )))?;
                 let state_file = state_prompt.clone();
                 let turn_cx = cx.clone();
                 cx.spawn(async move {
@@ -460,6 +462,7 @@ async fn run_turn(
         )),
     )?;
     let tool = ToolCallUpdate::new("tc1")
+        .name("shell")
         .title("运行 cargo test")
         .kind(ToolKind::Execute)
         .status(ToolCallStatus::InProgress);

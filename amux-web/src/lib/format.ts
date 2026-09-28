@@ -78,10 +78,10 @@ export function activityDetail(activity: Activity): string {
   }
 }
 
-/** 工具调用内容：`tool_name(tool_title)` + 可选参数。 */
+/** 工具调用内容：`tool_name tool_title` + 可选参数。 */
 function activityContent(activity: Extract<Activity, { kind: "tool_call" }>): string {
-  let content = activity.tool_name;
-  if (activity.title) content += `(${activity.title})`;
+  const heading = [activity.tool_name, activity.title].filter((part) => part).join(" ");
+  let content = heading;
   if (activity.parameters) content += `\n${activity.parameters}`;
   return content;
 }
