@@ -1,13 +1,13 @@
 //! 与 Server 的 WebSocket 连接：握手认证、请求分发、断线缓存重连。
 //!
 //! 连接生命周期（docs/DESIGN.md「Server-Daemon 通信」与「断线重连」）：
-//! - 握手期携带 `Authorization: Bearer <token>` 与 `amux-machine: <machine_name>`，
-//!   Server 校验失败则握手不成立
+//! - 握手期携带 `Authorization: Bearer <token>`、`amux-machine: <machine_name>` 与
+//!   `amux-daemon-boot-time: <时间戳>`，Server 校验失败则握手不成立
 //! - 连接断开后 Agent 与终端继续运行，出站帧进入 [`Outbox`] 缓存，重连后补发
 //! - 每隔 1 分钟尝试重连
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use amux_common::daemon::{
     header, method, notify, AcpForward, AgentParams, GitDiffParams, GitRepoParams,
@@ -44,6 +44,8 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 struct Daemon {
     machine: String,
+    /// 进程启动时间戳（毫秒 Unix 时间），握手时上报给 Server（docs/DESIGN.md「认证」）
+    boot_time: String,
     agents: Arc<AgentRegistry>,
     terminals: Arc<TerminalRegistry>,
     fs: FsBrowser,
@@ -54,6 +56,7 @@ struct Daemon {
 pub async fn run(machine_name: String, server: String, token: String) -> Result<(), String> {
     let daemon = Arc::new(Daemon {
         machine: machine_name,
+        boot_time: now_ms().to_string(),
         agents: AgentRegistry::new(),
         terminals: TerminalRegistry::new(),
         fs: FsBrowser::new(),
@@ -128,6 +131,11 @@ async fn connect_once(
             HeaderValue::from_str(&header::encode_machine(&daemon.machine))
                 .map_err(|error| format!("机器名编码失败: {error}"))?,
         );
+        headers.insert(
+            HeaderName::from_static(header::DAEMON_BOOT_TIME),
+            HeaderValue::from_str(&daemon.boot_time)
+                .map_err(|error| format!("启动时间戳非法: {error}"))?,
+        );
     }
 
     let (ws, _) = tokio_tungstenite::connect_async(request)
@@ -140,6 +148,14 @@ async fn connect_once(
     let result = receive_loop(&mut stream, daemon, outbox).await;
     drain.abort();
     result
+}
+
+/// 当前时间戳（毫秒 Unix 时间）。
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Server 的 Daemon 接入端点：`--server` 未指定路径时补 `/daemon`。

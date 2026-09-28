@@ -47,10 +47,15 @@ pub struct MachineHub {
     machines: Arc<Mutex<HashMap<String, Arc<Machine>>>>,
 }
 
+/// 一台机器的状态。生命周期跨越 WebSocket 重连：Daemon 断线期间保留 ACP 连接记录，
+/// 重连后若 Daemon 未重启则直接复用（docs/DESIGN.md「Agent 生命周期」）。
 struct Machine {
     name: String,
+    /// 当前 WebSocket 的下行通道；未接入时为空
+    ws: Mutex<Option<mpsc::Sender<String>>>,
     info: Mutex<Option<MachineInfo>>,
-    outgoing: mpsc::Sender<String>,
+    /// 最近一次握手读取的 Daemon 启动时间
+    daemon_boot_time: Mutex<Option<String>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>,
     next_id: AtomicU64,
     agents: Mutex<HashMap<String, AgentSlot>>,
@@ -88,6 +93,7 @@ impl MachineHub {
         self.machines
             .lock()
             .values()
+            .filter(|machine| machine.is_connected())
             .filter_map(|machine| machine.info.lock().clone())
             .collect()
     }
@@ -113,9 +119,10 @@ impl MachineHub {
     }
 
     /// 重新发现 agents：发现、启动未运行者、建立 ACP 连接，再回报最新状态。
+    /// 已启动且有活跃 ACP 连接记录的 agent 不重启。
     pub async fn rediscover(&self, machine_name: &str) -> Result<Vec<Agent>, String> {
         let machine = self.machine(machine_name)?;
-        self.start_agents(&machine).await?;
+        self.start_agents(&machine, false).await?;
         self.agents(machine_name).await
     }
 
@@ -318,7 +325,7 @@ impl MachineHub {
 
     // ---------- Daemon 连接 ----------
 
-    /// Daemon 握手与接入：校验 token、机器名与机器重名后升级为长连接
+    /// Daemon 握手与接入：校验 token、机器名、机器重名与 Daemon 启动时间后升级为长连接
     /// （docs/DESIGN.md「认证」：任一不满足即握手失败）。
     pub fn upgrade(&self, headers: &HeaderMap, ws: WebSocketUpgrade) -> Response {
         let token = headers
@@ -334,38 +341,43 @@ impl MachineHub {
             log::warn!("Daemon 握手被拒：缺少机器名或机器名编码非法");
             return StatusCode::BAD_REQUEST.into_response();
         };
-        if self.machines.lock().contains_key(&machine_name) {
+        // 重名只针对当前已接入的机器：断线的机器会保留状态等待重连
+        if self
+            .machines
+            .lock()
+            .get(&machine_name)
+            .is_some_and(|machine| machine.is_connected())
+        {
             log::warn!("Daemon 握手被拒：机器重名 {machine_name}");
             return StatusCode::CONFLICT.into_response();
         }
+        let Some(boot_time) = daemon_boot_time(headers) else {
+            log::warn!("Daemon 握手被拒：缺少 Daemon 启动时间");
+            return StatusCode::BAD_REQUEST.into_response();
+        };
 
         let hub = self.clone();
         ws.on_upgrade(move |socket| async move {
-            if let Err(error) = hub.serve(machine_name, socket).await {
+            if let Err(error) = hub.serve(machine_name, boot_time, socket).await {
                 log::warn!("Daemon 连接结束: {error}");
             }
         })
     }
 
-    async fn serve(self, machine_name: String, socket: WebSocket) -> Result<(), String> {
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(256);
-        let machine = Arc::new(Machine {
-            name: machine_name.clone(),
-            info: Mutex::new(None),
-            outgoing: outgoing_tx,
-            pending: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(0),
-            agents: Mutex::new(HashMap::new()),
-            connect_locks: Mutex::new(HashMap::new()),
-        });
-        self.machines
-            .lock()
-            .insert(machine_name.clone(), Arc::clone(&machine));
+    async fn serve(
+        self,
+        machine_name: String,
+        boot_time: String,
+        socket: WebSocket,
+    ) -> Result<(), String> {
+        let machine = self.machine_slot(&machine_name);
+        let (outgoing, mut frames) = mpsc::channel::<String>(256);
+        *machine.ws.lock() = Some(outgoing.clone());
         log::info!("Daemon 已接入: {machine_name}");
 
         let (mut sink, mut stream) = socket.split();
         let writer = tokio::spawn(async move {
-            while let Some(frame) = outgoing_rx.recv().await {
+            while let Some(frame) = frames.recv().await {
                 // ACP auth/login 帧包含模型 API Key，不记录下行载荷。
                 if sink.send(Message::Text(frame.into())).await.is_err() {
                     break;
@@ -386,8 +398,14 @@ impl MachineHub {
                     Ok(info) => *machine.info.lock() = Some(info),
                     Err(error) => log::warn!("machine.info 失败（{}）: {error}", machine.name),
                 }
-                // Agent 生命周期：发现 → 启动/重启 → 建立 ACP 连接与 initialize
-                if let Err(error) = hub.start_agents(&machine).await {
+                // Agent 生命周期：判定是否重建 ACP 连接 → 发现/启动/重启 → 建立连接与初始化
+                let rebuild = {
+                    let mut last = machine.daemon_boot_time.lock();
+                    let rebuild = last.as_deref() != Some(boot_time.as_str());
+                    *last = Some(boot_time.clone());
+                    rebuild
+                };
+                if let Err(error) = hub.start_agents(&machine, rebuild).await {
                     log::warn!("Agent 生命周期处理失败（{}）: {error}", machine.name);
                 }
             }
@@ -402,14 +420,42 @@ impl MachineHub {
             }
         }
 
+        // 断线只解绑 WebSocket：ACP 连接记录保留，重连后按「Agent 生命周期」判定复用。
+        // 仅解绑自己绑定过的通道，避免旧连接退出时覆盖新连接。
         writer.abort();
-        self.machines.lock().remove(&machine_name);
+        {
+            let mut ws = machine.ws.lock();
+            if ws.as_ref().is_some_and(|current| current.same_channel(&outgoing)) {
+                *ws = None;
+                *machine.info.lock() = None;
+            }
+        }
         let pending: Vec<_> = machine.pending.lock().drain().map(|(_, tx)| tx).collect();
         for tx in pending {
             let _ = tx.send(Err("Daemon 连接已断开".to_string()));
         }
         log::info!("Daemon 连接断开: {machine_name}");
         Ok(())
+    }
+
+    /// 取（必要时创建）机器状态；不校验是否已接入。
+    fn machine_slot(&self, name: &str) -> Arc<Machine> {
+        self.machines
+            .lock()
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                Arc::new(Machine {
+                    name: name.to_string(),
+                    ws: Mutex::new(None),
+                    info: Mutex::new(None),
+                    daemon_boot_time: Mutex::new(None),
+                    pending: Mutex::new(HashMap::new()),
+                    next_id: AtomicU64::new(0),
+                    agents: Mutex::new(HashMap::new()),
+                    connect_locks: Mutex::new(HashMap::new()),
+                })
+            })
+            .clone()
     }
 
     fn dispatch(&self, machine: &Arc<Machine>, text: &str) {
@@ -474,18 +520,20 @@ impl MachineHub {
         }
     }
 
-    /// Agent 生命周期：未启动 → 启动；已启动但 Server 无活跃 ACP 连接 → 重启；
-    /// 之后为需要连接的 agent 建立 ACP 连接并 initialize。
-    async fn start_agents(&self, machine: &Arc<Machine>) -> Result<(), String> {
+    /// Agent 生命周期（docs/DESIGN.md「Agent 生命周期」）：`rebuild` 时逐个重启 agent 并初始化；
+    /// 不重建时未启动的 agent 启动并初始化，已启动且 Server 持有活跃 ACP 连接记录的 agent 直接复用。
+    async fn start_agents(&self, machine: &Arc<Machine>, rebuild: bool) -> Result<(), String> {
         let list: AgentListResult = machine.request(method::AGENT_LIST, ()).await?;
         for agent in list.agents {
-            if agent.running && machine.has_connection(&agent.name) {
+            // 复用仅在不重建、agent 已启动且确有活跃连接记录时成立；
+            // 已启动但无记录（例如上次建立失败）只能换一个新进程，否则 initialize 会被拒。
+            if !rebuild && agent.running && machine.has_connection(&agent.name) {
                 continue;
             }
             // 同一 agent 的连接建立要串行化，避免与惰性连接（`acp`）同时 initialize
             let lock = machine.connect_lock(&agent.name);
             let _guard = lock.lock().await;
-            if agent.running && machine.has_connection(&agent.name) {
+            if !rebuild && agent.running && machine.has_connection(&agent.name) {
                 continue;
             }
             if let Err(error) = self.restart_and_connect(machine, &agent.name).await {
@@ -578,12 +626,18 @@ impl MachineHub {
         self.machines
             .lock()
             .get(name)
+            .filter(|machine| machine.is_connected())
             .cloned()
             .ok_or_else(|| "机器未连接".to_string())
     }
 }
 
 impl Machine {
+    /// Daemon 是否已接入（WebSocket 已绑定）。
+    fn is_connected(&self) -> bool {
+        self.ws.lock().is_some()
+    }
+
     /// 活跃 ACP 连接：连接任务已结束（calls 通道关闭）的不算，
     /// 否则会挡住「无活跃连接 → 重启 agent」的恢复路径。
     fn connection(&self, agent: &str) -> Option<Arc<AgentConnection>> {
@@ -611,10 +665,21 @@ impl Machine {
             .clone()
     }
 
+    /// 向当前 WebSocket 发一帧；未接入时丢弃这一帧。
+    ///
+    /// Daemon 断线期间 ACP 连接保留（重连后可复用），因此这里不能报错断开连接，
+    /// 否则连接任务会随之结束、复用无从谈起。
+    async fn send_to_daemon(&self, frame: String) -> bool {
+        let Some(ws) = self.ws.lock().clone() else {
+            return true;
+        };
+        ws.send(frame).await.is_ok()
+    }
+
     /// 该 agent 的出站通道：原始 ACP 消息 → `acp` 通知。
-    fn agent_outgoing(&self, agent: &str) -> mpsc::Sender<String> {
+    fn agent_outgoing(self: &Arc<Self>, agent: &str) -> mpsc::Sender<String> {
         let (tx, mut rx) = mpsc::channel::<String>(256);
-        let outgoing = self.outgoing.clone();
+        let machine = Arc::clone(self);
         let agent = agent.to_string();
         tokio::spawn(async move {
             while let Some(raw) = rx.recv().await {
@@ -625,9 +690,7 @@ impl Machine {
                         raw,
                     },
                 );
-                if outgoing.send(frame).await.is_err() {
-                    break;
-                }
+                machine.send_to_daemon(frame).await;
             }
         });
         tx
@@ -644,7 +707,11 @@ impl Machine {
         self.pending.lock().insert(id, tx);
         let frame = serde_json::to_string(&JsonRpcRequest::new(id, method, params))
             .map_err(|error| format!("请求序列化失败: {error}"))?;
-        if self.outgoing.send(frame).await.is_err() {
+        let Some(ws) = self.ws.lock().clone() else {
+            self.pending.lock().remove(&id);
+            return Err("Daemon 连接已断开".to_string());
+        };
+        if ws.send(frame).await.is_err() {
             self.pending.lock().remove(&id);
             return Err("Daemon 连接已关闭".to_string());
         }
@@ -677,6 +744,15 @@ fn machine_from_headers(headers: &HeaderMap) -> Option<String> {
     header::decode_machine(headers.get(header::MACHINE)?.to_str().ok()?)
 }
 
+/// 握手请求中的 Daemon 启动时间：用于判断是否需要重建 ACP 连接。
+fn daemon_boot_time(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::DAEMON_BOOT_TIME)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,88 +770,250 @@ mod tests {
         assert_eq!(machine_from_headers(&HeaderMap::new()), None);
     }
 
+    #[test]
+    fn daemon_boot_time_is_read_from_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::DAEMON_BOOT_TIME, "1790588263791".parse().unwrap());
+        assert_eq!(daemon_boot_time(&headers).as_deref(), Some("1790588263791"));
+        assert_eq!(daemon_boot_time(&HeaderMap::new()), None);
+        headers.insert(header::DAEMON_BOOT_TIME, "".parse().unwrap());
+        assert_eq!(daemon_boot_time(&headers), None);
+    }
+
     const AGENT: &str = "codex";
 
-    /// 伪 Daemon：应答 `agent.restart` 请求，并把 `initialize` 的应答写回连接入站流。
-    /// 返回按发生顺序记录的 Daemon 侧重启次数与 agent 侧初始化次数。
-    fn fake_daemon() -> (Arc<MachineHub>, Arc<Machine>, Arc<Mutex<Vec<String>>>) {
-        let (outgoing, mut frames) = mpsc::channel::<String>(16);
-        let machine = Arc::new(Machine {
-            name: "m".to_string(),
-            info: Mutex::new(None),
-            outgoing,
-            pending: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(0),
-            agents: Mutex::new(HashMap::new()),
-            connect_locks: Mutex::new(HashMap::new()),
-        });
-        let (events, _events_rx) = mpsc::channel(8);
-        let hub = Arc::new(MachineHub::new(
-            "token".to_string(),
-            events,
-            Arc::new(TerminalCache::new()),
-            Arc::new(crate::config_store::ConfigStore::new(
-                std::env::temp_dir().join("amux-machines-test"),
-            )),
-        ));
-        hub.machines
-            .lock()
-            .insert("m".to_string(), Arc::clone(&machine));
+    /// 伪 Daemon：应答 Server 的请求，把 `initialize` 的应答写回连接入站流，
+    /// 并按发生顺序记录每次「agent 重启」与「agent 初始化」。
+    struct FakeDaemon {
+        hub: Arc<MachineHub>,
+        machine: Arc<Machine>,
+        seen: Arc<Mutex<Vec<String>>>,
+        /// 伪 Daemon 上报的 agent 启动状态
+        running: bool,
+    }
 
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let daemon_hub = Arc::clone(&hub);
-        let daemon_machine = Arc::clone(&machine);
-        let daemon_seen = Arc::clone(&seen);
-        tokio::spawn(async move {
-            while let Some(frame) = frames.recv().await {
-                let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
-                match value["method"].as_str().unwrap_or_default() {
-                    method::AGENT_RESTART => {
-                        daemon_seen.lock().push("agent.restart".to_string());
-                        let response = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": value["id"],
-                            "result": serde_json::to_value(OpResult::ok()).unwrap(),
-                        });
-                        daemon_hub.dispatch(&daemon_machine, &response.to_string());
-                    }
-                    notify::ACP => {
-                        let raw = value["params"]["raw"].as_str().unwrap();
-                        let request: serde_json::Value = serde_json::from_str(raw).unwrap();
-                        assert_eq!(request["method"], "initialize", "伪 Daemon 只应答初始化");
-                        daemon_seen.lock().push("initialize".to_string());
-                        let response = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": request["id"],
-                            "result": serde_json::to_value(InitializeResponse::new(
-                                ProtocolVersion::V2,
-                                Implementation::new("fake-daemon", "0"),
-                            ))
-                            .unwrap(),
-                        });
-                        let inbound = daemon_machine
-                            .agents
-                            .lock()
-                            .get(AGENT)
-                            .map(|slot| slot.inbound.clone())
-                            .expect("连接入站流未登记");
-                        inbound.send(response.to_string()).await.unwrap();
-                    }
-                    other => panic!("伪 Daemon 收到未预期的帧: {other}"),
-                }
+    impl FakeDaemon {
+        fn new(running: bool) -> Self {
+            let (events, _events_rx) = mpsc::channel(8);
+            let hub = Arc::new(MachineHub::new(
+                "token".to_string(),
+                events,
+                Arc::new(TerminalCache::new()),
+                Arc::new(crate::config_store::ConfigStore::new(
+                    std::env::temp_dir().join("amux-machines-test"),
+                )),
+            ));
+            let machine = hub.machine_slot("m");
+            Self {
+                hub,
+                machine,
+                seen: Arc::new(Mutex::new(Vec::new())),
+                running,
             }
-        });
-        (hub, machine, seen)
+        }
+
+        /// 模拟一次 WebSocket 接入：绑定下行通道并开始处理 Server 的帧。
+        fn attach(&self) {
+            let (outgoing, mut frames) = mpsc::channel::<String>(16);
+            *self.machine.ws.lock() = Some(outgoing);
+            let hub = Arc::clone(&self.hub);
+            let machine = Arc::clone(&self.machine);
+            let seen = Arc::clone(&self.seen);
+            let running = self.running;
+            tokio::spawn(async move {
+                while let Some(frame) = frames.recv().await {
+                    respond(&hub, &machine, &seen, running, &frame).await;
+                }
+            });
+        }
+
+        /// 模拟 Daemon 断线：解绑 WebSocket，ACP 连接记录保留。
+        fn detach(&self) {
+            *self.machine.ws.lock() = None;
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen.lock().clone()
+        }
+    }
+
+    /// 处理一帧 Server → Daemon 的消息：请求直接应答，ACP 下行按 agent 送回连接入站流。
+    async fn respond(
+        hub: &Arc<MachineHub>,
+        machine: &Arc<Machine>,
+        seen: &Arc<Mutex<Vec<String>>>,
+        running: bool,
+        frame: &str,
+    ) {
+        let value: serde_json::Value = serde_json::from_str(frame).unwrap();
+        let result = match value["method"].as_str().unwrap_or_default() {
+            method::MACHINE_INFO => serde_json::to_value(MachineInfo {
+                name: "m".to_string(),
+                os: "linux".to_string(),
+                arch: "x86_64".to_string(),
+                hostname: "fake".to_string(),
+                temp_dir: "/tmp".to_string(),
+                version: "0".to_string(),
+            })
+            .unwrap(),
+            method::AGENT_LIST => serde_json::to_value(AgentListResult {
+                agents: vec![amux_common::daemon::DiscoveredAgent {
+                    name: AGENT.to_string(),
+                    running,
+                }],
+            })
+            .unwrap(),
+            method::AGENT_RESTART => {
+                seen.lock().push("agent.restart".to_string());
+                serde_json::to_value(OpResult::ok()).unwrap()
+            }
+            notify::ACP => {
+                let raw = value["params"]["raw"].as_str().unwrap();
+                let request: serde_json::Value = serde_json::from_str(raw).unwrap();
+                assert_eq!(request["method"], "initialize", "伪 Daemon 只应答初始化");
+                seen.lock().push("initialize".to_string());
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": serde_json::to_value(InitializeResponse::new(
+                        ProtocolVersion::V2,
+                        Implementation::new("fake-daemon", "0"),
+                    ))
+                    .unwrap(),
+                });
+                let inbound = machine
+                    .agents
+                    .lock()
+                    .get(AGENT)
+                    .map(|slot| slot.inbound.clone())
+                    .expect("连接入站流未登记");
+                inbound.send(response.to_string()).await.unwrap();
+                return;
+            }
+            other => panic!("伪 Daemon 收到未预期的帧: {other}"),
+        };
+        let response = serde_json::json!({"jsonrpc": "2.0", "id": value["id"], "result": result});
+        hub.dispatch(machine, &response.to_string());
+    }
+
+    /// 重建：Daemon 首次接入或已重启时，逐个重启 agent 并 initialize。
+    #[tokio::test]
+    async fn rebuild_restarts_agent_and_initializes() {
+        let daemon = FakeDaemon::new(true);
+        daemon.attach();
+        daemon
+            .hub
+            .start_agents(&daemon.machine, true)
+            .await
+            .unwrap();
+        assert_eq!(daemon.seen(), vec!["agent.restart", "initialize"]);
+    }
+
+    /// 不重建且 agent 已启动：复用活跃 ACP 连接，不重启也不重新 initialize。
+    #[tokio::test]
+    async fn reuse_keeps_existing_connection() {
+        let daemon = FakeDaemon::new(true);
+        daemon.attach();
+        daemon
+            .hub
+            .start_agents(&daemon.machine, true)
+            .await
+            .unwrap();
+        let before = daemon.machine.connection(AGENT).expect("应持有连接");
+
+        daemon
+            .hub
+            .start_agents(&daemon.machine, false)
+            .await
+            .unwrap();
+        let after = daemon.machine.connection(AGENT).expect("应复用连接");
+        assert!(Arc::ptr_eq(&before, &after), "复用应是同一条 ACP 连接");
+        assert_eq!(daemon.seen(), vec!["agent.restart", "initialize"]);
+    }
+
+    /// Daemon 重启（启动时间变化）：即使 Server 还留着连接记录也要重建。
+    #[tokio::test]
+    async fn daemon_restart_rebuilds_connection() {
+        let daemon = FakeDaemon::new(true);
+        daemon.attach();
+        daemon
+            .hub
+            .start_agents(&daemon.machine, true)
+            .await
+            .unwrap();
+        daemon
+            .hub
+            .start_agents(&daemon.machine, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            daemon.seen(),
+            vec!["agent.restart", "initialize", "agent.restart", "initialize"]
+        );
+    }
+
+    /// 不重建但 agent 未启动：启动 agent 并 initialize。
+    #[tokio::test]
+    async fn stopped_agent_is_started() {
+        let daemon = FakeDaemon::new(false);
+        daemon.attach();
+        daemon
+            .hub
+            .start_agents(&daemon.machine, false)
+            .await
+            .unwrap();
+        assert_eq!(daemon.seen(), vec!["agent.restart", "initialize"]);
+    }
+
+    /// 不重建、agent 已启动但没有活跃连接记录：只能换一个新进程再 initialize。
+    #[tokio::test]
+    async fn running_agent_without_record_is_restarted() {
+        let daemon = FakeDaemon::new(true);
+        daemon.attach();
+        daemon
+            .hub
+            .start_agents(&daemon.machine, false)
+            .await
+            .unwrap();
+        assert_eq!(daemon.seen(), vec!["agent.restart", "initialize"]);
+    }
+
+    /// WebSocket 断线不解绑 ACP 连接：机器从列表消失，但连接记录保留，重连后直接复用。
+    #[tokio::test]
+    async fn websocket_detach_keeps_connection_for_reuse() {
+        let daemon = FakeDaemon::new(true);
+        daemon.attach();
+        daemon
+            .hub
+            .start_agents(&daemon.machine, true)
+            .await
+            .unwrap();
+        let before = daemon.machine.connection(AGENT).expect("应持有连接");
+
+        daemon.detach();
+        assert!(daemon.hub.machines().is_empty(), "断线后不列入机器列表");
+        assert!(daemon.machine.connection(AGENT).is_some(), "连接记录应保留");
+
+        daemon.attach();
+        daemon
+            .hub
+            .start_agents(&daemon.machine, false)
+            .await
+            .unwrap();
+        let after = daemon.machine.connection(AGENT).expect("重连后应复用连接");
+        assert!(Arc::ptr_eq(&before, &after), "复用应是同一条 ACP 连接");
+        assert_eq!(daemon.seen(), vec!["agent.restart", "initialize"]);
     }
 
     /// 并发取连接只建立一次 ACP 连接：ACP v2 每条连接只允许一次 initialize，
     /// 向同一 agent 进程重复 initialize 会被拒绝且无法靠重试恢复。
     #[tokio::test]
     async fn concurrent_acp_opens_connection_once() {
-        let (hub, _machine, seen) = fake_daemon();
+        let daemon = FakeDaemon::new(true);
+        daemon.attach();
         let mut tasks = Vec::new();
         for _ in 0..4 {
-            let hub = Arc::clone(&hub);
+            let hub = Arc::clone(&daemon.hub);
             tasks.push(tokio::spawn(
                 async move { hub.acp("m", AGENT).await.map(|_| ()) },
             ));
@@ -783,25 +1021,25 @@ mod tests {
         for task in tasks {
             task.await.unwrap().expect("并发取连接应成功");
         }
-        assert_eq!(*seen.lock(), vec!["agent.restart", "initialize"]);
+        assert_eq!(daemon.seen(), vec!["agent.restart", "initialize"]);
     }
 
     /// 本地无活跃连接记录时必须先重启 agent 再 initialize（docs/DESIGN.md「Agent 生命周期」）：
     /// agent 进程只接受一次 initialize，不换进程的重试永远失败。
     #[tokio::test]
     async fn missing_connection_restarts_agent_before_initialize() {
-        let (hub, machine, seen) = fake_daemon();
-        hub.acp("m", AGENT).await.expect("首次连接应成功");
-        machine.drop_agent(AGENT);
-        hub.acp("m", AGENT).await.expect("无记录时应重启并重建连接");
+        let daemon = FakeDaemon::new(true);
+        daemon.attach();
+        daemon.hub.acp("m", AGENT).await.expect("首次连接应成功");
+        daemon.machine.drop_agent(AGENT);
+        daemon
+            .hub
+            .acp("m", AGENT)
+            .await
+            .expect("无记录时应重启并重建连接");
         assert_eq!(
-            *seen.lock(),
-            vec![
-                "agent.restart",
-                "initialize",
-                "agent.restart",
-                "initialize"
-            ]
+            daemon.seen(),
+            vec!["agent.restart", "initialize", "agent.restart", "initialize"]
         );
     }
 }

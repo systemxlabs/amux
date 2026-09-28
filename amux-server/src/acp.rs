@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_client_protocol::schema::v2::{
     AvailableCommand, AvailableCommandInput, CancelSessionNotification, ClientCapabilities,
@@ -499,13 +500,17 @@ async fn handle_call(
     }
 }
 
+/// 单次 ACP 请求的等待上限：Daemon 断线期间连接保留（重连后复用），
+/// 在途请求等不到应答，靠超时结束而不是永久挂起。
+const ACP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 async fn request<R: JsonRpcRequest>(
     cx: &V2ConnectionTo<Agent>,
     request: R,
 ) -> Result<R::Response, String> {
-    cx.send_request(request)
-        .block_task()
+    tokio::time::timeout(ACP_REQUEST_TIMEOUT, cx.send_request(request).block_task())
         .await
+        .map_err(|_| "ACP 请求超时".to_string())?
         .map_err(|error| error.to_string())
 }
 

@@ -42,6 +42,8 @@ pub mod header {
 
     pub const AUTHORIZATION: &str = "authorization";
     pub const MACHINE: &str = "amux-machine";
+    /// daemon 启动时间戳（毫秒 Unix 时间），Server 据此判断是否需要重建 ACP 连接
+    pub const DAEMON_BOOT_TIME: &str = "amux-daemon-boot-time";
 
     /// 头值转义集：保留 URL 非保留字符，其余按 UTF-8 字节转义
     /// （HTTP 头值只允许可见 ASCII，机器名可以含非 ASCII）。
