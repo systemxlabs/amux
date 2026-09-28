@@ -139,6 +139,11 @@ pub struct AgentConnection {
 }
 
 impl AgentConnection {
+    /// 连接任务是否仍在运行：calls 通道关闭说明连接已结束。
+    pub fn is_alive(&self) -> bool {
+        !self.calls.is_closed()
+    }
+
     pub async fn new_session(
         &self,
         cwd: &str,

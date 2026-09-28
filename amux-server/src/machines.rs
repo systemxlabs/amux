@@ -29,7 +29,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 use crate::acp::{self, AcpEvent, AgentConnection};
 use crate::frames;
@@ -54,6 +54,9 @@ struct Machine {
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>,
     next_id: AtomicU64,
     agents: Mutex<HashMap<String, AgentSlot>>,
+    /// 按 agent 串行化连接建立：一个 agent 只有一条 stdio 连接，
+    /// ACP v2 每条连接只允许一次 initialize，并发建立会让同一进程收到两次 initialize。
+    connect_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -119,16 +122,9 @@ impl MachineHub {
     /// 重启（或启动）指定 agent，并重建 ACP 连接。
     pub async fn restart_agent(&self, machine_name: &str, agent: &str) -> Result<(), String> {
         let machine = self.machine(machine_name)?;
-        machine
-            .request::<_, OpResult>(
-                method::AGENT_RESTART,
-                AgentParams {
-                    agent: agent.to_string(),
-                },
-            )
-            .await?;
-        machine.drop_agent(agent);
-        self.connect_agent(&machine, agent).await?;
+        let lock = machine.connect_lock(agent);
+        let _guard = lock.lock().await;
+        self.restart_and_connect(&machine, agent).await?;
         self.notify_agent_restarted(&machine, agent);
         Ok(())
     }
@@ -283,12 +279,24 @@ impl MachineHub {
     }
 
     /// 取（必要时建立）某 agent 的 ACP 连接。
+    ///
+    /// 本地没有活跃连接记录时必须先让 Daemon 重启 agent（docs/DESIGN.md「Agent 生命周期」）：
+    /// ACP v2 每条连接只允许一次 initialize，向已初始化的 agent 进程再发 initialize 会被拒绝，
+    /// 而该拒绝不会随重试消失，只能靠重启进程解决。
     pub async fn acp(&self, machine: &str, agent: &str) -> Result<Arc<AgentConnection>, String> {
         let machine = self.machine(machine)?;
         if let Some(conn) = machine.connection(agent) {
             return Ok(conn);
         }
-        self.connect_agent(&machine, agent).await
+        let lock = machine.connect_lock(agent);
+        let _guard = lock.lock().await;
+        // 等锁期间可能已有其它调用建立了连接
+        if let Some(conn) = machine.connection(agent) {
+            return Ok(conn);
+        }
+        let conn = self.restart_and_connect(&machine, agent).await?;
+        self.notify_agent_restarted(&machine, agent);
+        Ok(conn)
     }
 
     /// 关闭所有已打开会话，供 Server 退出时清理 Agent 侧资源。
@@ -348,6 +356,7 @@ impl MachineHub {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
             agents: Mutex::new(HashMap::new()),
+            connect_locks: Mutex::new(HashMap::new()),
         });
         self.machines
             .lock()
@@ -473,26 +482,15 @@ impl MachineHub {
             if agent.running && machine.has_connection(&agent.name) {
                 continue;
             }
-            if let Err(error) = machine
-                .request::<_, OpResult>(
-                    method::AGENT_RESTART,
-                    AgentParams {
-                        agent: agent.name.clone(),
-                    },
-                )
-                .await
-            {
-                log::warn!(
-                    "启动 agent 失败（{}@{}）: {error}",
-                    agent.name,
-                    machine.name
-                );
+            // 同一 agent 的连接建立要串行化，避免与惰性连接（`acp`）同时 initialize
+            let lock = machine.connect_lock(&agent.name);
+            let _guard = lock.lock().await;
+            if agent.running && machine.has_connection(&agent.name) {
                 continue;
             }
-            machine.drop_agent(&agent.name);
-            if let Err(error) = self.connect_agent(machine, &agent.name).await {
+            if let Err(error) = self.restart_and_connect(machine, &agent.name).await {
                 log::warn!(
-                    "建立 ACP 连接失败（{}@{}）: {error}",
+                    "重建 agent 连接失败（{}@{}）: {error}",
                     agent.name,
                     machine.name
                 );
@@ -501,6 +499,26 @@ impl MachineHub {
             self.notify_agent_restarted(machine, &agent.name);
         }
         Ok(())
+    }
+
+    /// 让 Daemon 关闭并重新启动 agent，随后重建 ACP 连接与 initialize。
+    ///
+    /// 调用方必须持有该 agent 的连接锁（见 `Machine::connect_lock`）。
+    async fn restart_and_connect(
+        &self,
+        machine: &Arc<Machine>,
+        agent: &str,
+    ) -> Result<Arc<AgentConnection>, String> {
+        machine
+            .request::<_, OpResult>(
+                method::AGENT_RESTART,
+                AgentParams {
+                    agent: agent.to_string(),
+                },
+            )
+            .await?;
+        machine.drop_agent(agent);
+        self.connect_agent(machine, agent).await
     }
 
     async fn connect_agent(
@@ -566,11 +584,14 @@ impl MachineHub {
 }
 
 impl Machine {
+    /// 活跃 ACP 连接：连接任务已结束（calls 通道关闭）的不算，
+    /// 否则会挡住「无活跃连接 → 重启 agent」的恢复路径。
     fn connection(&self, agent: &str) -> Option<Arc<AgentConnection>> {
         self.agents
             .lock()
             .get(agent)
             .and_then(|slot| slot.conn.clone())
+            .filter(|conn| conn.is_alive())
     }
 
     fn has_connection(&self, agent: &str) -> bool {
@@ -579,6 +600,15 @@ impl Machine {
 
     fn drop_agent(&self, agent: &str) {
         self.agents.lock().remove(agent);
+    }
+
+    /// 该 agent 的连接建立锁：同一 agent 的「重启 → initialize」必须互斥。
+    fn connect_lock(&self, agent: &str) -> Arc<AsyncMutex<()>> {
+        self.connect_locks
+            .lock()
+            .entry(agent.to_string())
+            .or_default()
+            .clone()
     }
 
     /// 该 agent 的出站通道：原始 ACP 消息 → `acp` 通知。
@@ -650,6 +680,8 @@ fn machine_from_headers(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v2::{Implementation, InitializeResponse};
+    use agent_client_protocol::schema::ProtocolVersion;
 
     #[test]
     fn machine_name_is_decoded_from_header() {
@@ -660,5 +692,116 @@ mod tests {
         );
         assert_eq!(machine_from_headers(&headers).as_deref(), Some("开发机 A"));
         assert_eq!(machine_from_headers(&HeaderMap::new()), None);
+    }
+
+    const AGENT: &str = "codex";
+
+    /// 伪 Daemon：应答 `agent.restart` 请求，并把 `initialize` 的应答写回连接入站流。
+    /// 返回按发生顺序记录的 Daemon 侧重启次数与 agent 侧初始化次数。
+    fn fake_daemon() -> (Arc<MachineHub>, Arc<Machine>, Arc<Mutex<Vec<String>>>) {
+        let (outgoing, mut frames) = mpsc::channel::<String>(16);
+        let machine = Arc::new(Machine {
+            name: "m".to_string(),
+            info: Mutex::new(None),
+            outgoing,
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(0),
+            agents: Mutex::new(HashMap::new()),
+            connect_locks: Mutex::new(HashMap::new()),
+        });
+        let (events, _events_rx) = mpsc::channel(8);
+        let hub = Arc::new(MachineHub::new(
+            "token".to_string(),
+            events,
+            Arc::new(TerminalCache::new()),
+            Arc::new(crate::config_store::ConfigStore::new(
+                std::env::temp_dir().join("amux-machines-test"),
+            )),
+        ));
+        hub.machines
+            .lock()
+            .insert("m".to_string(), Arc::clone(&machine));
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let daemon_hub = Arc::clone(&hub);
+        let daemon_machine = Arc::clone(&machine);
+        let daemon_seen = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Some(frame) = frames.recv().await {
+                let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                match value["method"].as_str().unwrap_or_default() {
+                    method::AGENT_RESTART => {
+                        daemon_seen.lock().push("agent.restart".to_string());
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": value["id"],
+                            "result": serde_json::to_value(OpResult::ok()).unwrap(),
+                        });
+                        daemon_hub.dispatch(&daemon_machine, &response.to_string());
+                    }
+                    notify::ACP => {
+                        let raw = value["params"]["raw"].as_str().unwrap();
+                        let request: serde_json::Value = serde_json::from_str(raw).unwrap();
+                        assert_eq!(request["method"], "initialize", "伪 Daemon 只应答初始化");
+                        daemon_seen.lock().push("initialize".to_string());
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request["id"],
+                            "result": serde_json::to_value(InitializeResponse::new(
+                                ProtocolVersion::V2,
+                                Implementation::new("fake-daemon", "0"),
+                            ))
+                            .unwrap(),
+                        });
+                        let inbound = daemon_machine
+                            .agents
+                            .lock()
+                            .get(AGENT)
+                            .map(|slot| slot.inbound.clone())
+                            .expect("连接入站流未登记");
+                        inbound.send(response.to_string()).await.unwrap();
+                    }
+                    other => panic!("伪 Daemon 收到未预期的帧: {other}"),
+                }
+            }
+        });
+        (hub, machine, seen)
+    }
+
+    /// 并发取连接只建立一次 ACP 连接：ACP v2 每条连接只允许一次 initialize，
+    /// 向同一 agent 进程重复 initialize 会被拒绝且无法靠重试恢复。
+    #[tokio::test]
+    async fn concurrent_acp_opens_connection_once() {
+        let (hub, _machine, seen) = fake_daemon();
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let hub = Arc::clone(&hub);
+            tasks.push(tokio::spawn(
+                async move { hub.acp("m", AGENT).await.map(|_| ()) },
+            ));
+        }
+        for task in tasks {
+            task.await.unwrap().expect("并发取连接应成功");
+        }
+        assert_eq!(*seen.lock(), vec!["agent.restart", "initialize"]);
+    }
+
+    /// 本地无活跃连接记录时必须先重启 agent 再 initialize（docs/DESIGN.md「Agent 生命周期」）：
+    /// agent 进程只接受一次 initialize，不换进程的重试永远失败。
+    #[tokio::test]
+    async fn missing_connection_restarts_agent_before_initialize() {
+        let (hub, machine, seen) = fake_daemon();
+        hub.acp("m", AGENT).await.expect("首次连接应成功");
+        machine.drop_agent(AGENT);
+        hub.acp("m", AGENT).await.expect("无记录时应重启并重建连接");
+        assert_eq!(
+            *seen.lock(),
+            vec![
+                "agent.restart",
+                "initialize",
+                "agent.restart",
+                "initialize"
+            ]
+        );
     }
 }
