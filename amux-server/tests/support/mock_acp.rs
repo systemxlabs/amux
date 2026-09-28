@@ -40,7 +40,7 @@ use agent_client_protocol::schema::v2::{
     SessionConfigOptionValue, SessionDeleteCapabilities, SessionId, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StateUpdate, StopReason,
     TextCommandInput, ToolCallStatus, ToolCallUpdate, ToolKind, UpdateSessionNotification,
-    UsageUpdate,
+    UsageUpdate, Meta,
 };
 use agent_client_protocol::{Agent, Client, Result, Stdio, V2ConnectionTo};
 use serde_json::Value;
@@ -301,10 +301,15 @@ async fn run(state_file: &str) -> Result<()> {
                         _ => None,
                     })
                     .unwrap_or_default();
-                // v2：立即受理，前台工作随后经 session/update 报告
-                responder.respond(PromptResponse::new(MessageId::new(
-                    uuid::Uuid::new_v4().to_string(),
-                )))?;
+                // v2：立即受理，前台工作随后经 session/update 报告。
+                // 响应形状对齐 codex-acp-v2 的转向响应：只带 `_meta`，不携带其它字段。
+                let meta: Meta = [(
+                    "codex".to_string(),
+                    serde_json::json!({ "steered": sid.clone() }),
+                )]
+                .into_iter()
+                .collect();
+                responder.respond(PromptResponse::new().meta(meta))?;
                 let state_file = state_prompt.clone();
                 let turn_cx = cx.clone();
                 cx.spawn(async move {

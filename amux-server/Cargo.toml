@@ -26,7 +26,7 @@ futures-util.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
-agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2"] }
+agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2", "unstable_tool_call_name"] }
 base64.workspace = true
 rig-core.workspace = true
 rig-agent.workspace = true
