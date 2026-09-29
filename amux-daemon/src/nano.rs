@@ -260,6 +260,8 @@ mod tests {
     #[tokio::test]
     async fn cancelling_inflight_model_request_returns_idle_and_allows_next_prompt() {
         use tokio::io::AsyncReadExt;
+        // 测试进程会继承开发机的 HTTP 代理；本地模型请求必须绕过代理。
+        std::env::set_var("NO_PROXY", "127.0.0.1");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (entered_tx, mut entered_rx) = mpsc::channel(2);
