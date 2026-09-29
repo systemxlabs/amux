@@ -268,14 +268,14 @@ Server 关闭时，关闭所有打开的 Agent 侧会话。
 
 当 Daemon 与 Server 建立好连接后
 1. 读取当前 Daemon 启动时间，与上次连接读取的 Daemon 启动时间比较，判断是否重建 ACP 连接
-  - 若上次 Daemon 启动时间为空，则为重建
-  - 若上次 Daemon 启动时间不为空且不等于当前 Daemon 启动时间，则为重建
-  - 若上次 Daemon 启动时间不为空且等于当前 Daemon 启动时间，则为不重建
+    - 若上次 Daemon 启动时间为空，则为重建
+    - 若上次 Daemon 启动时间不为空且不等于当前 Daemon 启动时间，则为重建
+    - 若上次 Daemon 启动时间不为空且等于当前 Daemon 启动时间，则为不重建
 2. 若为重建，则 Server 发送命令让 Daemon 发现机器上已安装的 agents 并逐个重启并执行 ACP 初始化
 3. 若为不重建
-  1. Server 发送命令让 Daemon 发现机器上已安装的 agents
-  2. 如果 agent 未启动，则启动 agent 并执行 ACP 初始化
-  3. 如果 agent 已启动，则直接复用 Server 侧持有的该 agent 的活跃 ACP 连接记录
+    1. Server 发送命令让 Daemon 发现机器上已安装的 agents
+    2. 如果 agent 未启动，则启动 agent 并执行 ACP 初始化
+    3. 如果 agent 已启动，则直接复用 Server 侧持有的该 agent 的活跃 ACP 连接记录
 
 Server 可中途重启某一 Agent（无论是否已启动）。
 
