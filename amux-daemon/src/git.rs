@@ -339,7 +339,16 @@ impl GitRunner {
             });
             if changes
                 .for_each_to_obtain_tree(&head_tree, |change| {
-                    paths.insert(change.location().into());
+                    // 目录内容变化时，gix 会同时报告目录级变更。目录没有 blob，
+                    // 若当作文件继续处理会生成 +0/-0 的伪文件项。
+                    if matches!(
+                        change.entry_mode().kind(),
+                        gix::object::tree::EntryKind::Blob
+                            | gix::object::tree::EntryKind::BlobExecutable
+                            | gix::object::tree::EntryKind::Link
+                    ) {
+                        paths.insert(change.location().into());
+                    }
                     Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(()))
                 })
                 .is_err()
@@ -856,6 +865,38 @@ mod tests {
         assert!(
             !diff.files.iter().any(|file| file.path == "a.txt"),
             "恢复到基准内容后不应显示空 diff: {diff:?}"
+        );
+    }
+
+    #[test]
+    fn diff_omits_directory_entries_for_directory_rename() {
+        let dir = init_repo();
+        std::fs::create_dir_all(dir.join("before/nested")).unwrap();
+        std::fs::write(dir.join("before/nested/file.txt"), "content\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-m", "add directory", "-q"]);
+        git(&dir, &["mv", "before", "after"]);
+        git(&dir, &["commit", "-m", "rename directory", "-q"]);
+
+        let diff = GitRunner::new().diff(dir.to_str().unwrap(), "HEAD~1");
+        assert!(
+            !diff
+                .files
+                .iter()
+                .any(|file| file.path == "before" || file.path == "after"),
+            "目录不是文件，不应出现在 diff.files 中: {diff:?}"
+        );
+        assert!(
+            diff.files
+                .iter()
+                .any(|file| file.path == "before/nested/file.txt"),
+            "旧目录下的文件删除应出现在 diff 中: {diff:?}"
+        );
+        assert!(
+            diff.files
+                .iter()
+                .any(|file| file.path == "after/nested/file.txt"),
+            "新目录下的文件新增应出现在 diff 中: {diff:?}"
         );
     }
 
