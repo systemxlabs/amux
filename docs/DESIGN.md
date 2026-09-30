@@ -81,7 +81,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/config_options` | 获取指定普通会话的会话选项 |
 | GET `/sessions/<session_id>/slash_commands` | 获取指定普通会话的斜杠命令 |
 | GET `/sessions/<session_id>/plan` | 获取指定普通会话的 agent 计划 |
-| GET `/sessions/<session_id>/context` | 获取指定普通会话的上下文信息 |
+| GET `/sessions/<session_id>/usage` | 获取指定普通会话的会话用量 |
 | GET `/sessions/<session_id>/history` | 分页查询指定普通会话的对话历史 |
 | GET `/sessions/<session_id>/activities` | 分页查询指定普通会话的活动历史 |
 | GET `/sessions/<session_id>/ongoing_activity` | 查询指定普通会话正在进行中的活动 |
@@ -104,6 +104,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | POST `/workflows/<workflow_id>` | 往指定工作流会话发送指令 |
 | DELETE `/workflows/<workflow_id>` | 删除指定工作流会话，级联删除关联普通会话 |
 | POST `/workflows/<workflow_id>/configure` | 配置指定工作流会话：会话标题、所属项目等 |
+| GET `/workflows/<workflow_id>/usage` | 查询指定工作流会话的会话用量 |
 | GET `/workflows/<workflow_id>/history` | 分页查询指定工作流会话的对话历史 |
 | GET `/workflows/<workflow_id>/activities` | 分页查询指定工作流会话的活动历史 |
 | GET `/workflows/<workflow_id>/ongoing_activity` | 查询指定工作流会话正在进行中的活动 |
@@ -199,7 +200,8 @@ Nano 智能体为 Daemon 内置智能体，运行在进程内，采用非流式�
          "amuxBaseUrl": "https://api.deepseek.com/v1",
          "amuxApiKey": "sk-xxx",
          "amuxModel": "deepseek-v4-flash",
-         "amuxEffort": "high"
+         "amuxEffort": "high",
+         "amuxContextWindow": 1000000
        }
      }
    ```
@@ -319,9 +321,9 @@ Server 作为 ACP client 与 Agents 通信
 
 普通会话计划存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `plan_update` 类型时，其通知中的计划全量覆盖内存存储。
 
-### 普通会话上下文信息
+### 普通会话用量
 
-普通会话上下文信息存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `usage_update` 类型时，其通知中的上下文窗口总大小和当前上下文大小全量覆盖内存存储。
+普通会话用量存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `usage_update` 类型时，其通知中的上下文窗口总大小和当前上下文大小全量覆盖内存存储。
 
 ### 普通会话删除
 
@@ -444,6 +446,10 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 - 当工作流智能体结束运行时，重新计算工作流会话状态
 - 当接收关联普通会话的 `session/update` ACP 通知的 `state_update` 类型时，重新计算工作流会话状态
 
+### 工作流会话用量
+
+工作流会话用量存储在内存中，每次请求模型供应商时，更新其当前上下文大小。
+
 ### 工作流会话存储
 
 工作流会话数据包含如下部分
@@ -474,6 +480,8 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "parameters": "..."}
   {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
   ```
+
+内存中保留活跃工作流会话的上下文对话，当工作流会话长时间不活跃（超过 1h）且其状态为空闲，清理内存中的数据，之后可从磁盘恢复上下文。
 
 ### 工作流计划存储
 
@@ -535,7 +543,8 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   "baseUrl": "https://api.deepseek.com/v1",
   "apiKey": "sk-xxx",
   "model": "deepseek-v4-flash",
-  "effort": "high"
+  "effort": "high",
+  "contextWindow": 1000000
 }
 ```
 读写为低频操作，无需考虑并发和原子写入问题。
@@ -587,7 +596,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 其他刷新机制
 - 实时活动在视图打开时获取一次，然后每隔 2s 刷新一次
-- 快捷指令、会话选项和斜杠命令在视图打开时获取一次，不定时刷新
+- 快捷指令、会话用量、会话选项和斜杠命令在视图打开时获取一次，不定时刷新
 
 对话滚动机制：按滚动位置计算应展示的页并拉取，预取上下相邻两页缓冲。页大小随面板可视高度自适应调整。
 
