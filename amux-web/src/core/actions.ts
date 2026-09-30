@@ -220,6 +220,34 @@ export async function renameEntry(core: Core, entry: ListEntry, title: string): 
   }
 }
 
+/** 以列表项的相同设置快速新建并打开一个普通会话或工作流会话。 */
+export async function createFromEntry(core: Core, entry: ListEntry): Promise<void> {
+  if (!core.client) return;
+  try {
+    if (entry.kind === "session") {
+      const session = await core.client.createSession({
+        machine: entry.session.machine,
+        agent: entry.session.agent,
+        workspace: entry.session.workspace,
+        useWorktree: entry.session.worktreeDir !== "",
+        project: entry.session.project,
+      });
+      await refreshList(core);
+      await openEntry(core, { kind: "session", session });
+    } else {
+      const workflow = await core.client.createWorkflow(
+        entry.workflow.plan,
+        null,
+        entry.workflow.project,
+      );
+      await refreshList(core);
+      await openEntry(core, { kind: "workflow", workflow });
+    }
+  } catch (error) {
+    core.failure(`新建会话失败：${messageOf(error)}`);
+  }
+}
+
 // ---------- 新建会话 ----------
 
 /** 删除最近工作目录项：从列表移除并全量保存（docs/PRD.md「新建会话视图」删除按钮「x」）。 */

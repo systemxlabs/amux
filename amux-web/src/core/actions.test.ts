@@ -16,6 +16,7 @@ import type {
 import {
   addFiles,
   cancelOpen,
+  createFromEntry,
   createWorkflow,
   deleteRecentWorkspace,
   deleteProject,
@@ -57,6 +58,57 @@ function workflow(): Workflow {
 
 const sessionEntry: ListEntry = { kind: "session", session: session() };
 const workflowEntry: ListEntry = { kind: "workflow", workflow: workflow() };
+
+it("从普通会话新建时保留机器、agent、工作目录、项目和 worktree 设置", async () => {
+  const core = new Core();
+  core.state.status = "online";
+  let request: unknown;
+  core.client = {
+    createSession: async (input: unknown) => {
+      request = input;
+      return { ...session(), id: "s2" };
+    },
+    sessions: async (): Promise<SessionList> => ({ sessions: [], hasMore: false }),
+    workflows: async (): Promise<WorkflowList> => ({ workflows: [], hasMore: false }),
+  } as unknown as ApiClient;
+
+  const source = session();
+  source.project = "project-a";
+  source.worktreeDir = "/tmp/worktree-s1";
+
+  await createFromEntry(core, { kind: "session", session: source });
+
+  expect(request).toEqual({
+    machine: "localpc",
+    agent: "codex",
+    workspace: "/w",
+    useWorktree: true,
+    project: "project-a",
+  });
+  expect(core.state.open).toEqual({ kind: "session", id: "s2" });
+});
+
+it("从工作流会话新建时保留计划与项目并切换", async () => {
+  const core = new Core();
+  core.state.status = "online";
+  let request: unknown[] = [];
+  core.client = {
+    createWorkflow: async (...args: unknown[]) => {
+      request = args;
+      return { ...workflow(), id: "w2" };
+    },
+    sessions: async (): Promise<SessionList> => ({ sessions: [], hasMore: false }),
+    workflows: async (): Promise<WorkflowList> => ({ workflows: [], hasMore: false }),
+  } as unknown as ApiClient;
+
+  const source = workflow();
+  source.project = "project-a";
+
+  await createFromEntry(core, { kind: "workflow", workflow: source });
+
+  expect(request).toEqual(["计划", null, "project-a"]);
+  expect(core.state.open).toEqual({ kind: "workflow", id: "w2" });
+});
 
 it("附件上传成功后以待发送 ResourceLink 保存，不再内联文件内容", async () => {
   const core = new Core();

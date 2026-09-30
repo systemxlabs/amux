@@ -27,6 +27,7 @@ import { ContextMenu, type MenuItem, type MenuState } from "../components/Contex
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import {
+  createFromEntry,
   deleteEntry,
   openEntry,
   renameEntry,
@@ -338,6 +339,13 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       onSelect: () => {
         handledRef.current = false;
         setRenaming({ kind: entry.kind, id, depth, value: title });
+      },
+    },
+    {
+      label: "新建会话",
+      onSelect: () => {
+        onNavigate();
+        void createFromEntry(core, entry);
       },
     },
     { label: "删除", danger: true, onSelect: () => setDeleting(entry) },

@@ -482,6 +482,8 @@ fn list_row(
             };
             let rename_id = entry.id().to_string();
             let rename_app = app.clone();
+            let create_entry = entry.clone();
+            let create_app = app.clone();
             let delete_entry = entry.clone();
             let delete_app = app.clone();
             let mut menu = menu
@@ -489,6 +491,12 @@ fn list_row(
                     let rename_id = rename_id.clone();
                     rename_app.update(cx, |this, cx| this.begin_rename(&rename_id, window, cx));
                 }))
+                .item(
+                    PopupMenuItem::new("新建会话").on_click(move |_, _window, cx| {
+                        let entry = create_entry.clone();
+                        create_app.update(cx, |this, cx| this.create_from_entry(entry, cx));
+                    }),
+                )
                 .item(
                     PopupMenuItem::new("删除会话").on_click(move |_, window, cx| {
                         delete_app.update(cx, |this, cx| {

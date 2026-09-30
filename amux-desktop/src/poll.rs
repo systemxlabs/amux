@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v2::TextContent;
+use amux_common::api::CreateSessionRequest;
 use amux_common::domain::{Activity, ContentBlock, HistoryItem};
 use futures_util::future::join_all;
 
@@ -705,5 +706,25 @@ pub async fn delete(client: &Client, entry: &ListEntry) -> Result<(), String> {
     match entry {
         ListEntry::Session(session) => client.delete_session(&session.id).await,
         ListEntry::Workflow(workflow) => client.delete_workflow(&workflow.id).await,
+    }
+}
+
+/// 以列表项的相同设置快速新建并打开一个普通会话或工作流会话。
+pub async fn create_from_entry(client: &Client, entry: &ListEntry) -> Result<OpenTarget, String> {
+    match entry {
+        ListEntry::Session(session) => client
+            .create_session(&CreateSessionRequest {
+                machine: session.machine.clone(),
+                agent: session.agent.clone(),
+                workspace: session.workspace.clone(),
+                use_worktree: !session.worktree_dir.is_empty(),
+                project: session.project.clone(),
+            })
+            .await
+            .map(|session| OpenTarget::Session(session.id)),
+        ListEntry::Workflow(workflow) => client
+            .create_workflow(&workflow.plan, None, workflow.project.clone())
+            .await
+            .map(|workflow| OpenTarget::Workflow(workflow.id)),
     }
 }

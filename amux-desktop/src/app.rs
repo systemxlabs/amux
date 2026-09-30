@@ -858,14 +858,25 @@ impl AmuxApp {
 
     /// 打开列表条目（普通会话或工作流会话）。
     pub fn open_entry(&mut self, id: &str, cx: &mut Context<Self>) {
-        let is_workflow =
-            self.with_core(|core| matches!(core.entry(id), Some(ListEntry::Workflow(_))));
+        let target = self.with_core(|core| {
+            core.entry(id).map(|entry| match entry {
+                ListEntry::Session(_) => OpenTarget::Session(id.to_string()),
+                ListEntry::Workflow(_) => OpenTarget::Workflow(id.to_string()),
+            })
+        });
+        if let Some(target) = target {
+            self.open_target(target, cx);
+        }
+    }
+
+    /// 按已知目标打开会话；快捷新建后列表尚未刷新时也要能正确切换。
+    fn open_target(&mut self, target: OpenTarget, cx: &mut Context<Self>) {
+        let is_workflow = matches!(&target, OpenTarget::Workflow(_));
         {
             let mut core = self.core.lock();
-            if is_workflow {
-                poll::open_workflow(&mut core, id);
-            } else {
-                poll::open_session(&mut core, id);
+            match &target {
+                OpenTarget::Session(id) => poll::open_session(&mut core, id),
+                OpenTarget::Workflow(id) => poll::open_workflow(&mut core, id),
             }
         }
         // 视图按会话隔离：切换会话时收起不适用或有残留内容的面板与状态
@@ -888,6 +899,30 @@ impl AmuxApp {
         self.dialog_scroll_on_entry = true;
         self.activities_scroll_on_entry = true;
         self.load_view_data();
+        cx.notify();
+    }
+
+    /// 以列表项的相同设置快速新建普通会话或工作流会话，并切换到新会话。
+    pub fn create_from_entry(&mut self, entry: ListEntry, cx: &mut Context<Self>) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let task = self
+            .runtime
+            .spawn(async move { poll::create_from_entry(&client, &entry).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else { return };
+            let _ = this.update_in(cx, |this, _window, cx| match result {
+                Ok(target) => {
+                    this.with_core(|core| core.last.list = None);
+                    this.open_target(target, cx);
+                }
+                Err(error) => {
+                    this.with_core(|core| core.error(format!("新建会话失败：{error}")));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 
