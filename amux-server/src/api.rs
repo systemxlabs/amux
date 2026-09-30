@@ -97,7 +97,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sessions/{id}/config_options", get(session_config_options))
         .route("/sessions/{id}/slash_commands", get(session_slash_commands))
         .route("/sessions/{id}/plan", get(session_plan))
-        .route("/sessions/{id}/context", get(session_context))
+        .route("/sessions/{id}/usage", get(session_usage))
         .route("/sessions/{id}/history", get(session_history))
         .route("/sessions/{id}/activities", get(session_activities))
         .route("/sessions/{id}/ongoing_activity", get(session_ongoing))
@@ -135,6 +135,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(delete_workflow),
         )
         .route("/workflows/{id}/configure", post(configure_workflow))
+        .route("/workflows/{id}/usage", get(workflow_usage))
         .route("/workflows/{id}/history", get(workflow_history))
         .route("/workflows/{id}/activities", get(workflow_activities))
         .route("/workflows/{id}/ongoing_activity", get(workflow_ongoing))
@@ -420,16 +421,12 @@ async fn session_plan(
     }))
 }
 
-async fn session_context(
+async fn session_usage(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> ApiResult<ContextInfo> {
+) -> ApiResult<Usage> {
     state.sessions.get(&id).map_err(not_found)?;
-    let (context_size, context_window_size) = state.sessions.context(&id);
-    Ok(Json(ContextInfo {
-        context_size,
-        context_window_size,
-    }))
+    Ok(Json(state.sessions.usage(&id)))
 }
 
 async fn session_history(
@@ -794,6 +791,14 @@ async fn configure_workflow(
         .configure(&id, request.title, request.project)
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
+}
+
+async fn workflow_usage(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Usage> {
+    state.workflows.get(&id).map_err(not_found)?;
+    Ok(Json(state.workflows.usage(&id)))
 }
 
 async fn workflow_history(

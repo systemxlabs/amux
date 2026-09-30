@@ -79,6 +79,7 @@ mod tests {
             api_key: String::new(),
             model: String::new(),
             effort: effort.into(),
+            context_window: 1,
         };
         assert_eq!(
             effort_params(&config(ApiFormat::ChatCompletions, "high")),

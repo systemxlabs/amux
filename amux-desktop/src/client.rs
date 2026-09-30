@@ -196,8 +196,8 @@ impl Client {
         Ok(response.entries)
     }
 
-    pub async fn context(&self, id: &str) -> Result<ContextInfo, String> {
-        self.get_json(&format!("/sessions/{id}/context")).await
+    pub async fn session_usage(&self, id: &str) -> Result<Usage, String> {
+        self.get_json(&format!("/sessions/{id}/usage")).await
     }
 
     pub async fn history(
@@ -430,6 +430,10 @@ impl Client {
             &ConfigureWorkflowRequest { title, project },
         )
         .await
+    }
+
+    pub async fn workflow_usage(&self, id: &str) -> Result<Usage, String> {
+        self.get_json(&format!("/workflows/{id}/usage")).await
     }
 
     pub async fn workflow_history(

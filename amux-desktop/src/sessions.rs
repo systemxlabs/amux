@@ -1,6 +1,6 @@
 //! 中间面板：新建会话视图与会话交互视图（对话、实时活动、输入区、会话选项）。
 
-use amux_common::api::RecentWorkspace;
+use amux_common::api::{RecentWorkspace, Usage};
 use amux_common::domain::{HistoryItem, SessionConfigKind, SessionConfigOptionValue, SessionState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -9,6 +9,7 @@ use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
+use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
@@ -968,6 +969,7 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let danger = theme.danger;
     let transparent = gpui::transparent_black();
     let pending_attachments = this.with_core(|core| core.composer_attachments.clone());
+    let usage = this.with_core(|core| core.view.detail.usage);
     let attachment_count = pending_attachments.len();
     let attachments_ready = pending_attachments
         .iter()
@@ -1109,6 +1111,7 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
                     h_flex()
                         .items_center()
                         .gap_2()
+                        .child(usage_indicator(usage, cx))
                         .child(
                             Button::new("cancel-work")
                                 .small()
@@ -1148,6 +1151,27 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
         }))
         .when(attachment_count > 0, |composer| composer.child(chips))
         .child(editor)
+        .into_any_element()
+}
+
+fn usage_indicator(usage: Usage, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let percent = if usage.size == 0 {
+        0.0
+    } else {
+        (usage.used as f64 / usage.size as f64) * 100.0
+    };
+    let label = format!("{:.0}%", percent.min(100.0));
+    let tooltip = ui::usage_text(usage.used, usage.size);
+    div()
+        .id("session-usage")
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .child(
+            ProgressCircle::new("session-usage-circle")
+                .large()
+                .value(percent as f32)
+                .color(cx.theme().primary)
+                .child(Label::new(label).text_xs()),
+        )
         .into_any_element()
 }
 

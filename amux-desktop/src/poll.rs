@@ -515,15 +515,33 @@ pub async fn refresh_workflow_setup(client: &Client, core: &SharedCore) {
 }
 
 /// 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置（工作流会话）、
-/// 快捷指令（输入区按钮）与普通会话的选项和斜杠命令。
+/// 快捷指令（输入区按钮）、会话用量，以及普通会话的选项和斜杠命令。
 pub async fn refresh_interaction(client: &Client, core: &SharedCore) {
     tokio::join!(
         refresh_machines(client, core),
         refresh_orchestrator(client, core),
         refresh_quick_commands(client, core),
+        refresh_usage(client, core),
         refresh_session_controls(client, core),
         refresh_terminal_list(client, core),
     );
+}
+
+/// 会话用量在视图打开时获取一次，不定时刷新（docs/DESIGN.md「会话交互视图」）。
+async fn refresh_usage(client: &Client, core: &SharedCore) {
+    let Some(target) = core.lock().open.clone() else {
+        return;
+    };
+    let usage = match &target {
+        OpenTarget::Session(id) => client.session_usage(id).await,
+        OpenTarget::Workflow(id) => client.workflow_usage(id).await,
+    };
+    if let Ok(usage) = usage {
+        let mut core = core.lock();
+        if core.open.as_ref() == Some(&target) {
+            core.view.detail.usage = usage;
+        }
+    }
 }
 
 /// 终端视图打开时从 Server 拉取一次终端列表，并移除服务端已消失的终端；

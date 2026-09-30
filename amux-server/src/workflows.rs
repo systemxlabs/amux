@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v2::TextContent;
-use amux_common::api::{Session, SessionConfigSetting, Workflow};
+use amux_common::api::{Session, SessionConfigSetting, Usage, Workflow};
 use amux_common::domain::{
     generate_title, Activity, ContentBlock, HistoryItem, SessionConfigOption, SessionState,
     StateChangeReason,
@@ -45,6 +45,8 @@ struct RunState {
     /// 待注入的 steer 用户消息（完整 ACP ContentBlock）
     steers: Vec<Vec<ContentBlock>>,
     running: bool,
+    /// 最近一次模型请求的上下文用量。
+    usage: Usage,
     /// 最近一次活动（进行中活动展示用）
     ongoing: Option<Activity>,
 }
@@ -229,6 +231,14 @@ impl WorkflowService {
         runs.get(id).and_then(|state| state.ongoing.clone())
     }
 
+    pub fn usage(&self, id: &str) -> Usage {
+        self.runs
+            .lock()
+            .get(id)
+            .map(|state| state.usage)
+            .unwrap_or_default()
+    }
+
     /// 关联普通会话状态落定：非取消地进入空闲时注入驱动消息。
     pub fn on_linked_idle(
         self: &Arc<Self>,
@@ -351,6 +361,7 @@ impl WorkflowService {
         let tools: Arc<dyn Tools> = Arc::new(WorkflowTools {
             service: Arc::clone(self),
             workflow_id: workflow_id.to_string(),
+            context_window: config.context_window,
         });
         let mut output = String::new();
         loop {
@@ -595,6 +606,7 @@ fn page<T>(items: Vec<T>, limit: usize, offset: usize) -> (Vec<T>, bool) {
 struct WorkflowTools {
     service: Arc<WorkflowService>,
     workflow_id: String,
+    context_window: u64,
 }
 
 impl Tools for WorkflowTools {
@@ -617,6 +629,16 @@ impl Tools for WorkflowTools {
         if let Some(state) = runs.get_mut(&self.workflow_id) {
             state.history.push(message);
             expire_old_tool_results(&mut state.history);
+        }
+    }
+
+    fn record_usage(&self, input_tokens: u64) {
+        let mut runs = self.service.runs.lock();
+        if let Some(state) = runs.get_mut(&self.workflow_id) {
+            state.usage = Usage {
+                used: input_tokens,
+                size: self.context_window,
+            };
         }
     }
 
@@ -1200,6 +1222,7 @@ mod tests {
         let tools = WorkflowTools {
             service,
             workflow_id: workflow.id,
+            context_window: 1_000_000,
         };
         let output = tools
             .call("list_sessions", serde_json::json!({}))
@@ -1216,6 +1239,28 @@ mod tests {
         ] {
             assert!(output.contains(expected), "缺少 {expected:?}: {output}");
         }
+    }
+
+    #[tokio::test]
+    async fn workflow_usage_tracks_latest_model_request_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let workflow = service.create("计划", None, None).await.unwrap();
+        service.runs.lock().entry(workflow.id.clone()).or_default();
+        let tools = WorkflowTools {
+            service: Arc::clone(&service),
+            workflow_id: workflow.id.clone(),
+            context_window: 128_000,
+        };
+
+        tools.record_usage(42_000);
+        assert_eq!(
+            service.usage(&workflow.id),
+            Usage {
+                used: 42_000,
+                size: 128_000
+            }
+        );
     }
 
     #[tokio::test]
@@ -1345,6 +1390,7 @@ mod tests {
         let tools = WorkflowTools {
             service: Arc::clone(&service),
             workflow_id: workflow.id.clone(),
+            context_window: 1_000_000,
         };
 
         service.append(

@@ -542,9 +542,9 @@ async fn server_daemon_agent_end_to_end() {
     assert_eq!(commands["commands"].as_array().unwrap().len(), 2);
     let plan = client.get(&format!("/sessions/{session_id}/plan")).await;
     assert_eq!(plan["entries"].as_array().unwrap().len(), 3);
-    let context = client.get(&format!("/sessions/{session_id}/context")).await;
-    assert_eq!(context["contextSize"], 53_000);
-    assert_eq!(context["contextWindowSize"], 200_000);
+    let usage = client.get(&format!("/sessions/{session_id}/usage")).await;
+    assert_eq!(usage["used"], 53_000);
+    assert_eq!(usage["size"], 200_000);
 
     // 会话选项：session/new 返回的 model 选项
     let options = client
@@ -678,6 +678,9 @@ async fn server_daemon_agent_end_to_end() {
     let fetched = client.get(&format!("/workflows/{workflow_id}")).await;
     assert_eq!(fetched["state"], "idle");
     assert!(fetched["linkedSessions"].as_array().unwrap().is_empty());
+    let usage = client.get(&format!("/workflows/{workflow_id}/usage")).await;
+    assert_eq!(usage["used"], 0);
+    assert_eq!(usage["size"], 0);
 
     // 删除会话：元数据立即消失
     assert_eq!(

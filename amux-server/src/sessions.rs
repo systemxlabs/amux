@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use amux_common::api::{Session, SessionConfigSetting, Terminal as ApiTerminal};
+use amux_common::api::{Session, SessionConfigSetting, Terminal as ApiTerminal, Usage};
 use amux_common::domain::{
     generate_title, Activity, ContentBlock, FsListParams, GitBranchListResult, HistoryItem,
     SessionConfigOption, SessionPlanEntry, SessionState, SlashCommand, StateChangeReason,
@@ -44,7 +44,7 @@ pub struct SessionCaches {
     options: Mutex<HashMap<String, Vec<SessionConfigOption>>>,
     commands: Mutex<HashMap<String, Vec<SlashCommand>>>,
     plans: Mutex<HashMap<String, Vec<SessionPlanEntry>>>,
-    contexts: Mutex<HashMap<String, (u64, u64)>>,
+    usages: Mutex<HashMap<String, Usage>>,
     /// 工具调用活动的当前字段（`tool_call_update` 未携带的字段保持不变）
     tool_calls: Mutex<HashMap<(String, String), Activity>>,
     /// agent 会话 id → amux 会话 id
@@ -63,7 +63,7 @@ impl SessionCaches {
         self.options.lock().remove(session_id);
         self.commands.lock().remove(session_id);
         self.plans.lock().remove(session_id);
-        self.contexts.lock().remove(session_id);
+        self.usages.lock().remove(session_id);
         self.tool_calls
             .lock()
             .retain(|(current_session, _), _| current_session != session_id);
@@ -301,13 +301,13 @@ impl SessionService {
             .unwrap_or_default()
     }
 
-    pub fn context(&self, id: &str) -> (u64, u64) {
+    pub fn usage(&self, id: &str) -> Usage {
         self.caches
-            .contexts
+            .usages
             .lock()
             .get(id)
             .copied()
-            .unwrap_or((0, 0))
+            .unwrap_or_default()
     }
 
     /// 进行中的活动：会话工作中时取最近一条活动。
@@ -654,13 +654,16 @@ impl SessionService {
                 }
                 None
             }
-            AcpEvent::Context {
+            AcpEvent::Usage {
                 agent_session_id,
                 used,
                 size,
             } => {
                 if let Some(session) = self.session_of_agent(&agent_session_id) {
-                    self.caches.contexts.lock().insert(session.id, (used, size));
+                    self.caches
+                        .usages
+                        .lock()
+                        .insert(session.id, Usage { used, size });
                 }
                 None
             }
@@ -872,7 +875,10 @@ mod tests {
         caches.options.lock().insert("s1".into(), Vec::new());
         caches.commands.lock().insert("s1".into(), Vec::new());
         caches.plans.lock().insert("s1".into(), Vec::new());
-        caches.contexts.lock().insert("s1".into(), (1, 2));
+        caches
+            .usages
+            .lock()
+            .insert("s1".into(), Usage { used: 1, size: 2 });
         caches.tool_calls.lock().insert(
             ("s1".into(), "call-1".into()),
             Activity::ToolCall {
@@ -892,7 +898,7 @@ mod tests {
         assert!(!caches.options.lock().contains_key("s1"));
         assert!(!caches.commands.lock().contains_key("s1"));
         assert!(!caches.plans.lock().contains_key("s1"));
-        assert!(!caches.contexts.lock().contains_key("s1"));
+        assert!(!caches.usages.lock().contains_key("s1"));
         assert!(!caches
             .tool_calls
             .lock()

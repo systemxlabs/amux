@@ -58,6 +58,7 @@ pub(super) async fn run(
     shell: Shell,
     text: String,
     history: Arc<Mutex<Vec<Message>>>,
+    context_window: u64,
     events: Events,
 ) -> Result<(), RunError> {
     let previous = history.lock().clone();
@@ -69,6 +70,7 @@ pub(super) async fn run(
         .add_hook(AcpHook {
             events,
             history: history.clone(),
+            context_window,
         })
         .build();
     // 显式串行，避免同一批 shell 命令在工作目录中相互竞争。
@@ -116,6 +118,7 @@ fn shell_command(args: &str) -> String {
 struct AcpHook {
     events: Events,
     history: Arc<Mutex<Vec<Message>>>,
+    context_window: u64,
 }
 
 impl AgentHook for AcpHook {
@@ -139,6 +142,11 @@ impl AgentHook for AcpHook {
         _ctx: &HookContext,
         event: hook::CompletionResponse<'_>,
     ) -> hook::ObservationAction {
+        self.events
+            .update(SessionUpdate::UsageUpdate(UsageUpdate::new(
+                event.usage.input_tokens,
+                self.context_window,
+            )));
         let mut text = String::new();
         for content in event.content {
             match content {
@@ -219,7 +227,7 @@ mod tests {
     use rig_core::{
         completion::{
             message::{Reasoning, ToolCall, ToolFunction, UserContent},
-            CompletionError,
+            CompletionError, Usage,
         },
         test_utils::{MockCompletionModel, MockTurn},
     };
@@ -286,8 +294,18 @@ mod tests {
         let shell = Shell::new(dir.path().to_path_buf());
         let model = MockCompletionModel::new([
             tool_turn("call-one", "printf hello > result; printf hello"),
-            MockTurn::text("完成"),
-            MockTurn::text("后续回答"),
+            MockTurn::text("完成").with_usage(Usage {
+                input_tokens: 12,
+                output_tokens: 2,
+                total_tokens: 14,
+                ..Usage::new()
+            }),
+            MockTurn::text("后续回答").with_usage(Usage {
+                input_tokens: 18,
+                output_tokens: 3,
+                total_tokens: 21,
+                ..Usage::new()
+            }),
         ]);
         let recorded = model.clone();
         let history = Arc::new(Mutex::new(vec![
@@ -318,6 +336,7 @@ mod tests {
                         shell.clone(),
                         "执行".into(),
                         history.clone(),
+                        200_000,
                         events.clone(),
                     )
                     .await
@@ -327,6 +346,7 @@ mod tests {
                         shell,
                         "继续".into(),
                         history,
+                        200_000,
                         events,
                     )
                     .await
@@ -355,14 +375,31 @@ mod tests {
                 .await?;
                 done_rx.await.unwrap();
                 let mut updates = Vec::new();
-                while updates.len() < 5 {
+                while updates.len() < 8 {
                     updates.push(updates_rx.recv().await.unwrap());
                 }
-                assert!(matches!(&updates[0], SessionUpdate::AgentThoughtChunk(_)));
-                let SessionUpdate::ToolCallUpdate(start) = &updates[1] else {
+                let usage_updates: Vec<_> = updates
+                    .iter()
+                    .filter_map(|update| match update {
+                        SessionUpdate::UsageUpdate(usage) => Some(usage),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(usage_updates.len(), 3);
+                assert_eq!(
+                    usage_updates
+                        .iter()
+                        .map(|usage| (usage.used, usage.size))
+                        .collect::<Vec<_>>(),
+                    [(0, 200_000), (12, 200_000), (18, 200_000)]
+                );
+                let SessionUpdate::AgentThoughtChunk(_) = &updates[1] else {
                     panic!("{updates:?}")
                 };
-                let SessionUpdate::ToolCallUpdate(end) = &updates[2] else {
+                let SessionUpdate::ToolCallUpdate(start) = &updates[2] else {
+                    panic!("{updates:?}")
+                };
+                let SessionUpdate::ToolCallUpdate(end) = &updates[3] else {
                     panic!("{updates:?}")
                 };
                 assert_eq!(start.tool_call_id, end.tool_call_id);
@@ -381,8 +418,8 @@ mod tests {
                     .to_string()
                     .contains("hello"));
                 assert_eq!(serde_json::to_value(end).unwrap()["status"], "completed");
-                assert!(matches!(updates[3], SessionUpdate::AgentMessage(_)));
-                assert!(matches!(updates[4], SessionUpdate::AgentMessage(_)));
+                assert!(matches!(updates[5], SessionUpdate::AgentMessage(_)));
+                assert!(matches!(updates[7], SessionUpdate::AgentMessage(_)));
                 Ok(())
             })
             .await

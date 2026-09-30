@@ -460,6 +460,8 @@ fn orchestrator_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement
                 .child(Input::new(&this.orch_model).w_full())
                 .child(Label::new("推理级别").text_sm().text_color(muted))
                 .child(Input::new(&this.orch_effort).w_full())
+                .child(Label::new("上下文窗口").text_sm().text_color(muted))
+                .child(Input::new(&this.orch_context_window).w_full())
                 .child(
                     h_flex().justify_end().child(
                         Button::new("orch-save")

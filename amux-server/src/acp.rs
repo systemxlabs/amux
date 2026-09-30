@@ -86,8 +86,8 @@ pub enum AcpEvent {
         agent_session_id: String,
         entries: Vec<SessionPlanEntry>,
     },
-    /// 上下文大小
-    Context {
+    /// 会话用量
+    Usage {
         agent_session_id: String,
         used: u64,
         size: u64,
@@ -616,7 +616,7 @@ fn translate(
                 out.push(event);
             }
         }
-        SessionUpdate::UsageUpdate(update) => out.push(AcpEvent::Context {
+        SessionUpdate::UsageUpdate(update) => out.push(AcpEvent::Usage {
             agent_session_id: session_id.clone(),
             used: update.used,
             size: update.size,

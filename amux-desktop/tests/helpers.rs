@@ -7,15 +7,12 @@ use amux_desktop::{diff, ui};
 use gpui::px;
 
 #[test]
-fn context_usage_text_hides_missing_and_formats_usage() {
-    assert_eq!(ui::context_usage_text(0, 0), None);
+fn usage_text_formats_available_context_window() {
+    assert_eq!(ui::usage_text(0, 0), "0 token");
+    assert_eq!(ui::usage_text(53000, 0), "53,000 token".to_string());
     assert_eq!(
-        ui::context_usage_text(53000, 0),
-        Some("53,000 token".into())
-    );
-    assert_eq!(
-        ui::context_usage_text(53000, 200000),
-        Some("53,000 / 200,000 token（26.5%）".into())
+        ui::usage_text(53000, 200000),
+        "53,000 / 200,000 token（26.5%）".to_string()
     );
 }
 

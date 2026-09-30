@@ -147,7 +147,14 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                     biased;
                     _ = cancel.changed() => (StopReason::Cancelled, None),
                     result = async {
-                        runtime::run(runtime::builder(&config)?, shell.clone(), text, history.clone(), tools.clone()).await
+                        runtime::run(
+                            runtime::builder(&config)?,
+                            shell.clone(),
+                            text,
+                            history.clone(),
+                            config.context_window,
+                            tools.clone(),
+                        ).await
                     } => {
                         match result {
                             Ok(()) => (StopReason::EndTurn, None),
@@ -196,7 +203,8 @@ mod tests {
             "amuxBaseUrl": "http://127.0.0.1:1",
             "amuxApiKey": "sk-test",
             "amuxModel": "test-model",
-            "amuxEffort": ""
+            "amuxEffort": "",
+            "amuxContextWindow": 200000
         })
     }
 

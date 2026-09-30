@@ -100,6 +100,7 @@ pub struct AmuxApp {
     pub orch_api_key: Entity<InputState>,
     pub orch_model: Entity<InputState>,
     pub orch_effort: Entity<InputState>,
+    pub orch_context_window: Entity<InputState>,
     pub quick_name: Entity<InputState>,
     pub quick_prompt: Entity<InputState>,
     /// 快捷指令表单当前选择的项目；None = 通用
@@ -310,6 +311,7 @@ impl AmuxApp {
         let orch_api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
         let orch_model = cx.new(|cx| InputState::new(window, cx));
         let orch_effort = cx.new(|cx| InputState::new(window, cx));
+        let orch_context_window = cx.new(|cx| InputState::new(window, cx).placeholder("1000000"));
         let quick_name = cx.new(|cx| InputState::new(window, cx));
         let quick_prompt = cx.new(|cx| {
             InputState::new(window, cx)
@@ -362,6 +364,7 @@ impl AmuxApp {
             orch_api_key,
             orch_model,
             orch_effort,
+            orch_context_window,
             quick_name,
             quick_prompt,
             quick_command_project: None,
@@ -2027,7 +2030,6 @@ impl AmuxApp {
             SidePanel::ExecDir => self.load_exec_dir(cx),
             SidePanel::Terminal => self.open_terminal(cx),
             SidePanel::Diff => self.refresh_diff(cx),
-            SidePanel::Detail => self.refresh_context(cx),
             SidePanel::Attachments => self.load_attachments(cx),
             _ => {}
         }
@@ -2234,24 +2236,6 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             if let Err(error) = client.terminal_input(&id, &terminal, data).await {
                 core.lock().error(format!("终端输入失败：{error}"));
-            }
-        });
-        cx.notify();
-    }
-
-    /// 刷新会话上下文用量；视图打开时刷新一次，不做定时刷新
-    /// （docs/DESIGN.md「会话详情视图」）。
-    pub fn refresh_context(&mut self, cx: &mut Context<Self>) {
-        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
-        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
-            return;
-        };
-        let core = Arc::clone(&self.core);
-        self.runtime.spawn(async move {
-            if let Ok(info) = client.context(&id).await {
-                let mut core = core.lock();
-                core.view.detail.context_size = info.context_size;
-                core.view.detail.context_window_size = info.context_window_size;
             }
         });
         cx.notify();
@@ -3275,15 +3259,27 @@ impl AmuxApp {
     pub fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
+        let Ok(context_window) = self
+            .orch_context_window
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u64>()
+        else {
+            self.with_core(|core| core.error("保存失败：上下文窗口必须是正整数。"));
+            cx.notify();
+            return;
+        };
         let config = OrchestratorConfig {
             api_format: self.current_orchestrator_format(),
             base_url: self.orch_base_url.read(cx).value().trim().to_string(),
             api_key: self.orch_api_key.read(cx).value().trim().to_string(),
             model: self.orch_model.read(cx).value().trim().to_string(),
             effort: self.orch_effort.read(cx).value().trim().to_string(),
+            context_window,
         };
-        if config.base_url.is_empty() || config.api_key.is_empty() || config.model.is_empty() {
-            self.with_core(|core| core.error("保存失败：请填写 Base URL、API Key 与模型名称。"));
+        if let Err(error) = config.validate() {
+            self.with_core(|core| core.error(format!("保存失败：{error}。")));
             cx.notify();
             return;
         }
@@ -3318,6 +3314,13 @@ impl AmuxApp {
             api_key: self.orch_api_key.read(cx).value().trim().to_string(),
             model: self.orch_model.read(cx).value().trim().to_string(),
             effort: self.orch_effort.read(cx).value().trim().to_string(),
+            context_window: self
+                .orch_context_window
+                .read(cx)
+                .value()
+                .trim()
+                .parse()
+                .unwrap_or(0),
         }
     }
 
@@ -3345,6 +3348,14 @@ impl AmuxApp {
             .update(cx, |state, cx| state.set_value(config.model, window, cx));
         self.orch_effort
             .update(cx, |state, cx| state.set_value(config.effort, window, cx));
+        self.orch_context_window.update(cx, |state, cx| {
+            let value = if config.context_window == 0 {
+                String::new()
+            } else {
+                config.context_window.to_string()
+            };
+            state.set_value(value, window, cx);
+        });
         cx.notify();
     }
 
@@ -3703,6 +3714,7 @@ fn empty_orchestrator_config() -> OrchestratorConfig {
         api_key: String::new(),
         model: String::new(),
         effort: String::new(),
+        context_window: 0,
     }
 }
 

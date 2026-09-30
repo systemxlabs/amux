@@ -1058,13 +1058,6 @@ fn detail_panel(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 },
                 &theme,
             ))
-            .children(
-                ui::context_usage_text(
-                    core.view.detail.context_size,
-                    core.view.detail.context_window_size,
-                )
-                .map(|text| ui::info_row("上下文", &text, &theme)),
-            )
             .child(ui::info_row(
                 "创建时间",
                 &ui::format_local_time(session.created_at, ui::TimePrecision::Seconds),

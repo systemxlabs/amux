@@ -189,12 +189,14 @@ pub struct Plan {
     pub entries: Vec<SessionPlanEntry>,
 }
 
-/// `GET /sessions/<id>/context` 响应。尚未收到 ACP `usage_update` 时两者为 0。
+/// 会话用量。尚未收到用量更新时两者为 0。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ContextInfo {
-    pub context_size: u64,
-    pub context_window_size: u64,
+pub struct Usage {
+    /// 当前上下文中已使用的 token 数。
+    pub used: u64,
+    /// 上下文窗口总 token 数。
+    pub size: u64,
 }
 
 /// `GET /sessions/<id>/diff` 响应。
@@ -412,6 +414,8 @@ pub struct OrchestratorConfig {
     pub model: String,
     /// 推理级别
     pub effort: String,
+    /// 模型上下文窗口 token 数
+    pub context_window: u64,
 }
 
 pub const AMUX_AUTH_METHOD: &str = "amux-config";
@@ -428,6 +432,9 @@ impl OrchestratorConfig {
         {
             return Err("请配置 Base URL、API Key 和模型".into());
         }
+        if self.context_window == 0 {
+            return Err("上下文窗口必须大于 0".into());
+        }
         Ok(())
     }
 
@@ -437,7 +444,8 @@ impl OrchestratorConfig {
             "amuxBaseUrl": self.base_url,
             "amuxApiKey": self.api_key,
             "amuxModel": self.model,
-            "amuxEffort": self.effort
+            "amuxEffort": self.effort,
+            "amuxContextWindow": self.context_window
         })
         .as_object()
         .unwrap()
@@ -452,7 +460,8 @@ impl OrchestratorConfig {
             "baseUrl": meta.get("amuxBaseUrl"),
             "apiKey": meta.get("amuxApiKey"),
             "model": meta.get("amuxModel"),
-            "effort": meta.get("amuxEffort")
+            "effort": meta.get("amuxEffort"),
+            "contextWindow": meta.get("amuxContextWindow")
         }))
         .map_err(|_| "模型配置格式不正确".to_string())?;
         config.validate()?;
@@ -540,10 +549,12 @@ mod tests {
             api_key: "sk-xxx".into(),
             model: "deepseek-v4-flash".into(),
             effort: "high".into(),
+            context_window: 1_000_000,
         };
         let meta = config.auth_meta();
         assert_eq!(meta["amuxApiFormat"], "responses");
         assert_eq!(meta["amuxModel"], "deepseek-v4-flash");
+        assert_eq!(meta["amuxContextWindow"], 1_000_000);
         assert_eq!(OrchestratorConfig::from_auth_meta(meta).unwrap(), config);
     }
 

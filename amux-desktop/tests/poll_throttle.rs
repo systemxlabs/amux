@@ -22,7 +22,7 @@ fn stub(path: &str) -> &'static str {
         }
         "/sessions/s1/history" => r#"{"items":[],"hasMore":false}"#,
         "/sessions/s1/plan" => r#"{"entries":[]}"#,
-        "/sessions/s1/context" => r#"{"contextSize":1,"contextWindowSize":2}"#,
+        "/sessions/s1/usage" => r#"{"used":1,"size":2}"#,
         "/sessions/s1/config_options" => {
             r#"{"options":[{"id":"model","name":"模型","type":"select","current_value":"a","options":[{"value":"a","name":"A"}]}]}"#
         }
@@ -38,7 +38,7 @@ fn stub(path: &str) -> &'static str {
             r#"[{"machine":"pc","workspace":"/tmp/proj","lastUsed":1}]"#
         }
         "/config/agent/" => {
-            r#"{"apiFormat":"chat_completions","baseUrl":"https://api.example.com/v1","apiKey":"sk","model":"m","effort":"high"}"#
+            r#"{"apiFormat":"chat_completions","baseUrl":"https://api.example.com/v1","apiKey":"sk","model":"m","effort":"high","contextWindow":1000000}"#
         }
         _ => "{}",
     }
@@ -117,6 +117,7 @@ async fn options_and_slash_commands_fetched_once_on_open() {
 
     assert_eq!(hit_count(&hits, "/sessions/s1/config_options"), 1);
     assert_eq!(hit_count(&hits, "/sessions/s1/slash_commands"), 1);
+    assert_eq!(hit_count(&hits, "/sessions/s1/usage"), 1);
     assert_eq!(hit_count(&hits, "/sessions/s1/plan"), 0, "计划面板未打开");
 
     let core = core.lock();
@@ -148,7 +149,7 @@ async fn tick_does_not_poll_settings_data() {
         "/config/quick_commands/",
         "/config/skills/",
         "/config/recent_workspaces/",
-        "/sessions/s1/context",
+        "/sessions/s1/usage",
     ] {
         assert_eq!(hit_count(&hits, path), 0, "{path} 不应定时拉取");
     }

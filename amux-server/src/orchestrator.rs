@@ -22,6 +22,8 @@ pub trait Tools: Send + Sync {
     fn dispatch<'a>(&'a self, name: &'a str, arguments: serde_json::Value) -> ToolFuture<'a>;
     fn record_thinking(&self, text: &str);
     fn record_tool_call(&self, call: &ToolCall);
+    /// 记录本次模型请求进入上下文窗口的 token 数。
+    fn record_usage(&self, input_tokens: u64);
     /// 把一个对话回合追加到内存中的模型上下文（工具结果不入盘）。
     fn record_context(&self, message: Message);
     fn take_steers(&self) -> Vec<Message>;
@@ -125,6 +127,7 @@ impl AgentHook for WorkflowHook {
         _ctx: &HookContext,
         event: hook::CompletionResponse<'_>,
     ) -> hook::ObservationAction {
+        self.tools.record_usage(event.usage.input_tokens);
         // 整个回合原样进内存上下文（含思考）：思考模型要求 assistant 回合回放推理内容
         if !event.content.is_empty() {
             self.tools.record_context(Message::Assistant {
@@ -205,7 +208,7 @@ pub fn preamble(plan: &str) -> String {
 mod tests {
     use super::*;
     use rig_core::{
-        completion::message::Reasoning,
+        completion::{message::Reasoning, Usage},
         test_utils::{MockCompletionModel, MockTurn},
     };
     use tokio::sync::{oneshot, Notify};
@@ -214,6 +217,7 @@ mod tests {
         entered: Mutex<Option<oneshot::Sender<()>>>,
         release: Notify,
         steers: Mutex<Vec<Message>>,
+        usages: Mutex<Vec<u64>>,
         events: Mutex<Vec<String>>,
     }
 
@@ -241,6 +245,10 @@ mod tests {
         fn record_tool_call(&self, call: &ToolCall) {
             self.events.lock().push(format!("call:{}", call.id));
         }
+        fn record_usage(&self, input_tokens: u64) {
+            self.usages.lock().push(input_tokens);
+            self.events.lock().push(format!("usage:{input_tokens}"));
+        }
         fn record_context(&self, message: Message) {
             self.events.lock().push(format!(
                 "context:{}",
@@ -254,6 +262,12 @@ mod tests {
 
     #[tokio::test]
     async fn steer_arriving_during_tool_execution_reaches_next_model_request() {
+        let usage = |input_tokens, output_tokens| Usage {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens + output_tokens,
+            ..Usage::new()
+        };
         let model = MockCompletionModel::new([
             MockTurn::from_contents([
                 AssistantContent::Reasoning(Reasoning::new("先检查")),
@@ -261,8 +275,9 @@ mod tests {
                     "call-1",
                     ToolFunction::new("list_sessions".into(), serde_json::json!({})),
                 )),
-            ]),
-            MockTurn::text("按新指令暂停"),
+            ])
+            .with_usage(usage(11, 2)),
+            MockTurn::text("按新指令暂停").with_usage(usage(17, 3)),
         ]);
         let recorded = model.clone();
         let (entered_tx, entered_rx) = oneshot::channel();
@@ -270,6 +285,7 @@ mod tests {
             entered: Mutex::new(Some(entered_tx)),
             release: Notify::new(),
             steers: Mutex::new(Vec::new()),
+            usages: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
         });
         let runner = tokio::spawn({
@@ -318,11 +334,12 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["context", "thinking", "call", "dispatch", "context", "context"]
+            ["usage", "context", "thinking", "call", "dispatch", "context", "usage", "context"]
         );
-        assert!(events[0].contains("call-1") && events[0].contains("先检查"));
-        assert!(events[1].contains("先检查"));
-        assert!(events[4].contains("session-result"));
-        assert!(events[5].contains("按新指令暂停"));
+        assert_eq!(*tools.usages.lock(), [11, 17]);
+        assert!(events[1].contains("call-1") && events[1].contains("先检查"));
+        assert!(events[2].contains("先检查"));
+        assert!(events[5].contains("session-result"));
+        assert!(events[7].contains("按新指令暂停"));
     }
 }

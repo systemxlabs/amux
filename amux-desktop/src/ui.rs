@@ -330,20 +330,17 @@ pub fn config_value_label(option: &SessionConfigOption) -> String {
     }
 }
 
-/// 会话上下文占用文案（token）；两者均为 0（尚未收到 usage 通知）时为 `None`。
-pub fn context_usage_text(used: u64, window: u64) -> Option<String> {
-    if used == 0 && window == 0 {
-        return None;
+/// 会话用量 tooltip 文案（token）。
+pub fn usage_text(used: u64, size: u64) -> String {
+    if size == 0 {
+        return format!("{} token", thousands(used));
     }
-    if window == 0 {
-        return Some(format!("{} token", thousands(used)));
-    }
-    let percent = (used as f64 / window as f64) * 100.0;
-    Some(format!(
+    let percent = (used as f64 / size as f64) * 100.0;
+    format!(
         "{} / {} token（{percent:.1}%）",
         thousands(used),
-        thousands(window)
-    ))
+        thousands(size)
+    )
 }
 
 fn thousands(value: u64) -> String {
