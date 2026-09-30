@@ -182,11 +182,11 @@ export class ApiClient {
     return response.entries;
   }
 
-  sessionUsage(id: string): Promise<Usage> {
+  sessionUsage(id: string): Promise<Usage | null> {
     return this.getJson(`/sessions/${encodeURIComponent(id)}/usage`);
   }
 
-  workflowUsage(id: string): Promise<Usage> {
+  workflowUsage(id: string): Promise<Usage | null> {
     return this.getJson(`/workflows/${encodeURIComponent(id)}/usage`);
   }
 

@@ -146,7 +146,7 @@ export type DetailState = {
   attachments: Attachment[];
   attachmentsHasMore: boolean;
   attachmentsLoading: boolean;
-  usage: Usage;
+  usage: Usage | null;
   terminals: Terminal[];
   activeTerminal: string | null;
   terminalChunks: TerminalChunk[];
@@ -191,7 +191,7 @@ export function initialDetail(): DetailState {
     attachments: [],
     attachmentsHasMore: false,
     attachmentsLoading: false,
-    usage: { used: 0, size: 0 },
+    usage: null,
     terminals: [],
     activeTerminal: null,
     terminalChunks: [],

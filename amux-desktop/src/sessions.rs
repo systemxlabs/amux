@@ -970,6 +970,7 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let transparent = gpui::transparent_black();
     let pending_attachments = this.with_core(|core| core.composer_attachments.clone());
     let usage = this.with_core(|core| core.view.detail.usage);
+    let usage_badge = usage.map(|usage| usage_indicator(usage, cx));
     let attachment_count = pending_attachments.len();
     let attachments_ready = pending_attachments
         .iter()
@@ -1111,7 +1112,7 @@ fn composer(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
                     h_flex()
                         .items_center()
                         .gap_2()
-                        .child(usage_indicator(usage, cx))
+                        .children(usage_badge)
                         .child(
                             Button::new("cancel-work")
                                 .small()

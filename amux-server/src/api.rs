@@ -424,7 +424,7 @@ async fn session_plan(
 async fn session_usage(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> ApiResult<Usage> {
+) -> ApiResult<Option<Usage>> {
     state.sessions.get(&id).map_err(not_found)?;
     Ok(Json(state.sessions.usage(&id)))
 }
@@ -796,7 +796,7 @@ async fn configure_workflow(
 async fn workflow_usage(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> ApiResult<Usage> {
+) -> ApiResult<Option<Usage>> {
     state.workflows.get(&id).map_err(not_found)?;
     Ok(Json(state.workflows.usage(&id)))
 }

@@ -201,14 +201,14 @@ describe("ApiClient", () => {
   it("普通会话与工作流会话用量使用各自 usage 端点", async () => {
     replies = [
       { status: 200, body: JSON.stringify({ used: 10, size: 100 }) },
-      { status: 200, body: JSON.stringify({ used: 20, size: 200 }) },
+      { status: 200, body: JSON.stringify(null) },
     ];
     const client = new ApiClient(base, "tk");
 
     await expect(client.sessionUsage("s1")).resolves.toEqual({ used: 10, size: 100 });
     expect(seen.at(-1)?.url).toBe("/sessions/s1/usage");
 
-    await expect(client.workflowUsage("w1")).resolves.toEqual({ used: 20, size: 200 });
+    await expect(client.workflowUsage("w1")).resolves.toBeNull();
     expect(seen.at(-1)?.url).toBe("/workflows/w1/usage");
   });
 

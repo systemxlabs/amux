@@ -348,6 +348,21 @@ describe("refreshInteraction", () => {
     expect(calls).not.toContain("sessionUsage");
     expect(core.state.detail.usage).toEqual({ used: 20, size: 200 });
   });
+
+  it("内存中无用量数据时保持为空", async () => {
+    const { client } = recordingClient({
+      machines: () => [],
+      orchestrator: () => null,
+      quickCommands: () => [],
+      workflowUsage: () => null,
+    });
+    const core = onlineCore(client);
+    core.state.open = { kind: "workflow", id: "w1" };
+
+    await refreshInteraction(core);
+
+    expect(core.state.detail.usage).toBeNull();
+  });
 });
 
 describe("refreshDetails", () => {

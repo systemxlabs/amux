@@ -49,7 +49,7 @@ struct RunState {
     steers: Vec<Vec<ContentBlock>>,
     running: bool,
     /// 最近一次模型请求的上下文用量。
-    usage: Usage,
+    usage: Option<Usage>,
     /// 最近一次活动（进行中活动展示用）
     ongoing: Option<Activity>,
 }
@@ -234,12 +234,8 @@ impl WorkflowService {
         runs.get(id).and_then(|state| state.ongoing.clone())
     }
 
-    pub fn usage(&self, id: &str) -> Usage {
-        self.runs
-            .lock()
-            .get(id)
-            .map(|state| state.usage)
-            .unwrap_or_default()
+    pub fn usage(&self, id: &str) -> Option<Usage> {
+        self.runs.lock().get(id).and_then(|state| state.usage)
     }
 
     /// 清理长时间空闲的工作流内存上下文；之后首次交互会从 transcript 恢复。
@@ -671,10 +667,10 @@ impl Tools for WorkflowTools {
     fn record_usage(&self, input_tokens: u64) {
         let mut runs = self.service.runs.lock();
         if let Some(state) = runs.get_mut(&self.workflow_id) {
-            state.usage = Usage {
+            state.usage = Some(Usage {
                 used: input_tokens,
                 size: self.context_window,
-            };
+            });
         }
     }
 
@@ -1292,10 +1288,10 @@ mod tests {
         tools.record_usage(42_000);
         assert_eq!(
             service.usage(&workflow.id),
-            Usage {
+            Some(Usage {
                 used: 42_000,
                 size: 128_000
-            }
+            })
         );
     }
 

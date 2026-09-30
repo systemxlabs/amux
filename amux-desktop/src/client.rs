@@ -196,7 +196,7 @@ impl Client {
         Ok(response.entries)
     }
 
-    pub async fn session_usage(&self, id: &str) -> Result<Usage, String> {
+    pub async fn session_usage(&self, id: &str) -> Result<Option<Usage>, String> {
         self.get_json(&format!("/sessions/{id}/usage")).await
     }
 
@@ -432,7 +432,7 @@ impl Client {
         .await
     }
 
-    pub async fn workflow_usage(&self, id: &str) -> Result<Usage, String> {
+    pub async fn workflow_usage(&self, id: &str) -> Result<Option<Usage>, String> {
         self.get_json(&format!("/workflows/{id}/usage")).await
     }
 

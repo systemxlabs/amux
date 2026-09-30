@@ -253,7 +253,7 @@ pub struct SessionView {
     pub config_options: Vec<SessionConfigOption>,
     pub slash_commands: Vec<SlashCommand>,
     pub ongoing: Option<Activity>,
-    pub usage: Usage,
+    pub usage: Option<Usage>,
     pub diff: Option<GitDiffResult>,
     pub diff_branches: Vec<GitBranch>,
     pub diff_base: String,

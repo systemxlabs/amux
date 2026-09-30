@@ -472,7 +472,9 @@ export function InteractionView() {
               附件
             </Button>
             <div className="flex items-center gap-2">
-              <UsageIndicator usage={detail.usage} />
+              {detail.usage !== null ? (
+                <UsageIndicator usage={detail.usage} />
+              ) : null}
               <Button
                 data-slot="cancel-button"
                 variant="outline"

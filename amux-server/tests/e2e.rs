@@ -679,8 +679,7 @@ async fn server_daemon_agent_end_to_end() {
     assert_eq!(fetched["state"], "idle");
     assert!(fetched["linkedSessions"].as_array().unwrap().is_empty());
     let usage = client.get(&format!("/workflows/{workflow_id}/usage")).await;
-    assert_eq!(usage["used"], 0);
-    assert_eq!(usage["size"], 0);
+    assert!(usage.is_null());
 
     // 删除会话：元数据立即消失
     assert_eq!(

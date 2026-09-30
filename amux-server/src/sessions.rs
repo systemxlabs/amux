@@ -301,13 +301,8 @@ impl SessionService {
             .unwrap_or_default()
     }
 
-    pub fn usage(&self, id: &str) -> Usage {
-        self.caches
-            .usages
-            .lock()
-            .get(id)
-            .copied()
-            .unwrap_or_default()
+    pub fn usage(&self, id: &str) -> Option<Usage> {
+        self.caches.usages.lock().get(id).copied()
     }
 
     /// 进行中的活动：会话工作中时取最近一条活动。
@@ -660,10 +655,13 @@ impl SessionService {
                 size,
             } => {
                 if let Some(session) = self.session_of_agent(&agent_session_id) {
-                    self.caches
-                        .usages
-                        .lock()
-                        .insert(session.id, Usage { used, size });
+                    let usage = Usage { used, size };
+                    let mut usages = self.caches.usages.lock();
+                    if usage.is_empty() {
+                        usages.remove(&session.id);
+                    } else {
+                        usages.insert(session.id, usage);
+                    }
                 }
                 None
             }

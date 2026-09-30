@@ -189,7 +189,7 @@ pub struct Plan {
     pub entries: Vec<SessionPlanEntry>,
 }
 
-/// 会话用量。尚未收到用量更新时两者为 0。
+/// 会话用量。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -197,6 +197,12 @@ pub struct Usage {
     pub used: u64,
     /// 上下文窗口总 token 数。
     pub size: u64,
+}
+
+impl Usage {
+    pub fn is_empty(&self) -> bool {
+        self.used == 0 && self.size == 0
+    }
 }
 
 /// `GET /sessions/<id>/diff` 响应。
