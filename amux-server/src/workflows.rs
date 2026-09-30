@@ -38,6 +38,9 @@ const EXPIRED_TOOL_RESULT: &str = "[工具结果已过期]";
 /// 内存上下文中保留真实工具结果的轮数（更早轮次替换为过期文本）。
 const KEPT_TOOL_RESULT_ROUNDS: usize = 5;
 
+/// 空闲工作流会话的内存上下文保留时长。
+const IDLE_CONTEXT_EXPIRE_MS: u64 = 60 * 60 * 1000;
+
 #[derive(Default)]
 struct RunState {
     /// 模型对话上下文：进程启动后首次交互从 transcript 恢复，之后在内存中维护
@@ -237,6 +240,39 @@ impl WorkflowService {
             .get(id)
             .map(|state| state.usage)
             .unwrap_or_default()
+    }
+
+    /// 清理长时间空闲的工作流内存上下文；之后首次交互会从 transcript 恢复。
+    pub fn maintain(&self) {
+        self.maintain_at(now_ms());
+    }
+
+    fn maintain_at(&self, now: u64) {
+        let mut runs = self.runs.lock();
+        runs.retain(|workflow_id, state| {
+            if state.running {
+                return true;
+            }
+            let Some(workflow) = self.store.workflow(workflow_id) else {
+                return false;
+            };
+            if workflow.state != SessionState::Idle
+                || now.saturating_sub(workflow.updated_at) <= IDLE_CONTEXT_EXPIRE_MS
+                || !self.all_linked_sessions_idle(workflow_id)
+            {
+                return true;
+            }
+            log::info!("清理空闲工作流内存上下文: {workflow_id}");
+            false
+        });
+    }
+
+    fn all_linked_sessions_idle(&self, workflow_id: &str) -> bool {
+        self.store
+            .linked_sessions(workflow_id)
+            .into_iter()
+            .filter_map(|session_id| self.store.session(&session_id))
+            .all(|session| session.state == SessionState::Idle)
     }
 
     /// 关联普通会话状态落定：非取消地进入空闲时注入驱动消息。
@@ -1261,6 +1297,60 @@ mod tests {
                 size: 128_000
             }
         );
+    }
+
+    #[test]
+    fn maintain_cleans_only_idle_expired_contexts() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let now = now_ms();
+        for (id, updated_at) in [
+            ("expired", 1),
+            ("recent", now),
+            ("busy", 1),
+            ("running", 1),
+            ("linked-idle", 1),
+            ("linked-busy", 1),
+        ] {
+            service
+                .store
+                .insert_workflow(id, "", SessionState::Idle, "计划", None, updated_at);
+            service.runs.lock().entry(id.to_string()).or_default();
+        }
+        service.store.set_workflow_state("busy", SessionState::Busy);
+        service.runs.lock().get_mut("running").unwrap().running = true;
+        for (session_id, state) in [
+            ("session-idle", SessionState::Idle),
+            ("session-busy", SessionState::Busy),
+        ] {
+            service
+                .store
+                .insert_session(&Session {
+                    id: session_id.into(),
+                    machine: "pc".into(),
+                    agent: "codex".into(),
+                    title: String::new(),
+                    state,
+                    project: None,
+                    workspace: "/repo".into(),
+                    worktree_dir: String::new(),
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .unwrap();
+        }
+        service.store.link_session("linked-idle", "session-idle");
+        service.store.link_session("linked-busy", "session-busy");
+
+        service.maintain_at(now + IDLE_CONTEXT_EXPIRE_MS);
+
+        let runs = service.runs.lock();
+        assert!(!runs.contains_key("expired"));
+        assert!(!runs.contains_key("linked-idle"));
+        assert!(runs.contains_key("recent"));
+        assert!(runs.contains_key("busy"));
+        assert!(runs.contains_key("running"));
+        assert!(runs.contains_key("linked-busy"));
     }
 
     #[tokio::test]

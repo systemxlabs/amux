@@ -107,10 +107,12 @@ async fn run(args: Args) -> Result<(), String> {
     ));
     tokio::spawn({
         let sessions = Arc::clone(&sessions);
+        let workflows = Arc::clone(&workflows);
         async move {
             loop {
                 tokio::time::sleep(MAINTENANCE_INTERVAL).await;
                 sessions.maintain().await;
+                workflows.maintain();
             }
         }
     });
