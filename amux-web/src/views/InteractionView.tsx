@@ -522,12 +522,12 @@ function UsageIndicator({ usage }: { usage: Usage }) {
       aria-valuemax={100}
       aria-valuenow={Math.round(percent)}
       title={label}
-      className="grid size-8 shrink-0 place-items-center rounded-full"
+      className="grid size-7 shrink-0 place-items-center rounded-full"
       style={{
         background: `conic-gradient(var(--color-primary) ${percent}%, var(--color-muted) 0)`,
       }}
     >
-      <span className="grid size-6 place-items-center rounded-full bg-background text-[10px] leading-none">
+      <span className="grid size-5 place-items-center rounded-full bg-background text-[9px] leading-none">
         {Math.round(percent)}%
       </span>
     </div>
