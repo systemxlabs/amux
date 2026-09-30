@@ -81,113 +81,228 @@ pub async fn run(incoming: mpsc::Receiver<String>, outbox: Arc<Outbox>) -> Resul
 }
 
 async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), Error> {
-    Agent.v2().name(NANO_AGENT)
-        .on_receive_request(async |request: InitializeRequest, responder, _cx| {
-            responder.respond(InitializeResponse::new(request.protocol_version, Implementation::new(NANO_AGENT, env!("CARGO_PKG_VERSION")))
-                .auth_methods(vec![AuthMethod::Other(OtherAuthMethod::new("_amux_config", AMUX_AUTH_METHOD, "Amux 模型配置", Default::default()))])
-                .capabilities(AgentCapabilities::new().session(SessionCapabilities::new()
-                    .prompt(PromptCapabilities::new()).delete(SessionDeleteCapabilities::new()))))
-        }, agent_client_protocol::on_receive_request!())
-        .on_receive_request({ let nano = nano.clone(); async move |request: LoginAuthRequest, responder, _cx| {
-            if request.method_id.to_string() != AMUX_AUTH_METHOD { return responder.respond_with_error(Error::invalid_params()); }
-            match OrchestratorConfig::from_auth_meta(request.meta.unwrap_or_default()) {
-                Ok(config) => { *nano.config.lock() = Some(config); responder.respond(LoginAuthResponse::new()) }
-                Err(error) => responder.respond_with_error(Error::invalid_params().data(error)),
-            }
-        }}, agent_client_protocol::on_receive_request!())
-        .on_receive_request({ let nano = nano.clone(); async move |_request: LogoutAuthRequest, responder, _cx| {
-            *nano.config.lock() = None;
-            nano.sessions.lock().clear();
-            responder.respond(LogoutAuthResponse::new())
-        }}, agent_client_protocol::on_receive_request!())
-        .on_receive_request({ let nano = nano.clone(); async move |request: NewSessionRequest, responder, _cx| {
-            if let Err(error) = nano.config() { return responder.respond_with_error(error); }
-            let id = SessionId::new(uuid::Uuid::new_v4().to_string());
-            nano.sessions.lock().insert(id.clone(), Session::new(request.cwd.0));
-            responder.respond(NewSessionResponse::new(id))
-        }}, agent_client_protocol::on_receive_request!())
-        .on_receive_request({ let nano = nano.clone(); async move |request: ResumeSessionRequest, responder, _cx| {
-            if let Err(error) = nano.config() { return responder.respond_with_error(error); }
-            nano.sessions.lock().entry(request.session_id).or_insert_with(|| Session::new(request.cwd.0));
-            responder.respond(ResumeSessionResponse::new())
-        }}, agent_client_protocol::on_receive_request!())
-        .on_receive_request({ let nano = nano.clone(); async move |request: CloseSessionRequest, responder, _cx| {
-            nano.sessions.lock().remove(&request.session_id);
-            responder.respond(CloseSessionResponse::new())
-        }}, agent_client_protocol::on_receive_request!())
-        .on_receive_request({ let nano = nano.clone(); async move |request: DeleteSessionRequest, responder, _cx| {
-            nano.sessions.lock().remove(&request.session_id);
-            responder.respond(DeleteSessionResponse::new())
-        }}, agent_client_protocol::on_receive_request!())
-        .on_receive_notification({ let nano = nano.clone(); async move |request: CancelSessionNotification, _cx| {
-            nano.cancel(&request.session_id); Ok(())
-        }}, agent_client_protocol::on_receive_notification!())
-        .on_receive_request({ let nano = nano.clone(); async move |request: PromptRequest, responder, cx: V2ConnectionTo<Client>| {
-            let config = match nano.config() { Ok(config) => config, Err(error) => return responder.respond_with_error(error) };
-            let text = request.prompt.iter().map(|block| match block {
-                ContentBlock::Text(text) => Ok(text.text.as_str()),
-                _ => Err(Error::invalid_params().data("Nano 仅支持文本输入")),
-            }).collect::<Result<Vec<_>, _>>();
-            let text = match text { Ok(text) => text.join("\n"), Err(error) => return responder.respond_with_error(error) };
-            let (shell, history, mut cancel) = {
-                let mut sessions = nano.sessions.lock();
-                let Some(session) = sessions.get_mut(&request.session_id) else { return responder.respond_with_error(Error::invalid_params()); };
-                if session.cancel.is_some() { return responder.respond_with_error(Error::invalid_request().data("会话正在工作中")); }
-                let (tx, rx) = watch::channel(false);
-                session.cancel = Some(tx);
-                (session.shell.clone(), std::mem::take(&mut session.history), rx)
-            };
-            let history = Arc::new(Mutex::new(history));
-            responder.respond(PromptResponse::new())?;
-            let tools = runtime::Events { cx: cx.clone(), id: request.session_id.clone() };
-            tools.update(SessionUpdate::StateUpdate(StateUpdate::Running(RunningStateUpdate::new())));
-            let nano = nano.clone();
-            cx.spawn(async move {
-                let (reason, error) = tokio::select! {
-                    biased;
-                    _ = cancel.changed() => (StopReason::Cancelled, None),
-                    result = async {
-                        runtime::run(
-                            runtime::builder(&config)?,
-                            shell.clone(),
-                            text,
-                            history.clone(),
-                            config.context_window,
-                            tools.clone(),
-                        ).await
-                    } => {
-                        match result {
-                            Ok(()) => (StopReason::EndTurn, None),
-                            Err(runtime::RunError::Stop(reason)) => (reason, None),
-                            Err(runtime::RunError::Failed(error)) => (
-                                StopReason::Other(NANO_ERROR_STOP_REASON.into()),
-                                Some(error),
-                            ),
-                        }
+    Agent
+        .v2()
+        .name(NANO_AGENT)
+        .on_receive_request(
+            async |request: InitializeRequest, responder, _cx| {
+                responder.respond(
+                    InitializeResponse::new(
+                        request.protocol_version,
+                        Implementation::new(NANO_AGENT, env!("CARGO_PKG_VERSION")),
+                    )
+                    .auth_methods(vec![AuthMethod::Other(OtherAuthMethod::new(
+                        "_amux_config",
+                        AMUX_AUTH_METHOD,
+                        "Amux 模型配置",
+                        Default::default(),
+                    ))])
+                    .capabilities(
+                        AgentCapabilities::new().session(
+                            SessionCapabilities::new()
+                                .prompt(PromptCapabilities::new())
+                                .delete(SessionDeleteCapabilities::new()),
+                        ),
+                    ),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let nano = nano.clone();
+                async move |request: LoginAuthRequest, responder, _cx| {
+                    if request.method_id.to_string() != AMUX_AUTH_METHOD {
+                        return responder.respond_with_error(Error::invalid_params());
                     }
-                };
-                let mut sessions = nano.sessions.lock();
-                if let Some(session) = sessions.get_mut(&request.session_id) {
-                    // 删除后恢复的同名会话不得被旧任务覆盖。
-                    if session.cancel.as_ref().is_some_and(|tx| tx.subscribe().same_channel(&cancel)) {
-                        session.history = std::mem::take(&mut *history.lock());
-                        session.cancel = None;
-                        let mut idle = IdleStateUpdate::new().stop_reason(reason);
-                        if let Some(error) = error {
-                            let mut meta = serde_json::Map::new();
-                            meta.insert(
-                                NANO_ERROR_META_KEY.to_string(),
-                                serde_json::json!({ "message": error }),
-                            );
-                            idle = idle.meta(meta);
+                    match OrchestratorConfig::from_auth_meta(request.meta.unwrap_or_default()) {
+                        Ok(config) => {
+                            *nano.config.lock() = Some(config);
+                            responder.respond(LoginAuthResponse::new())
                         }
-                        tools.update(SessionUpdate::StateUpdate(StateUpdate::Idle(idle)));
+                        Err(error) => {
+                            responder.respond_with_error(Error::invalid_params().data(error))
+                        }
                     }
                 }
-                Ok(())
-            })
-        }}, agent_client_protocol::on_receive_request!())
-        .connect_to(transport).await
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let nano = nano.clone();
+                async move |_request: LogoutAuthRequest, responder, _cx| {
+                    *nano.config.lock() = None;
+                    nano.sessions.lock().clear();
+                    responder.respond(LogoutAuthResponse::new())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let nano = nano.clone();
+                async move |request: NewSessionRequest, responder, _cx| {
+                    if let Err(error) = nano.config() {
+                        return responder.respond_with_error(error);
+                    }
+                    let id = SessionId::new(uuid::Uuid::new_v4().to_string());
+                    nano.sessions
+                        .lock()
+                        .insert(id.clone(), Session::new(request.cwd.0));
+                    responder.respond(NewSessionResponse::new(id))
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let nano = nano.clone();
+                async move |request: ResumeSessionRequest, responder, _cx| {
+                    if let Err(error) = nano.config() {
+                        return responder.respond_with_error(error);
+                    }
+                    nano.sessions
+                        .lock()
+                        .entry(request.session_id)
+                        .or_insert_with(|| Session::new(request.cwd.0));
+                    responder.respond(ResumeSessionResponse::new())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let nano = nano.clone();
+                async move |request: CloseSessionRequest, responder, _cx| {
+                    nano.sessions.lock().remove(&request.session_id);
+                    responder.respond(CloseSessionResponse::new())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let nano = nano.clone();
+                async move |request: DeleteSessionRequest, responder, _cx| {
+                    nano.sessions.lock().remove(&request.session_id);
+                    responder.respond(DeleteSessionResponse::new())
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            {
+                let nano = nano.clone();
+                async move |request: CancelSessionNotification, _cx| {
+                    nano.cancel(&request.session_id);
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_request(
+            {
+                let nano = nano.clone();
+                async move |request: PromptRequest, responder, cx: V2ConnectionTo<Client>| {
+                    let config = match nano.config() {
+                        Ok(config) => config,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    let text = request
+                        .prompt
+                        .iter()
+                        .map(|block| match block {
+                            ContentBlock::Text(text) => Ok(text.text.as_str()),
+                            _ => Err(Error::invalid_params().data("Nano 仅支持文本输入")),
+                        })
+                        .collect::<Result<Vec<_>, _>>();
+                    let text = match text {
+                        Ok(text) => text.join("\n"),
+                        Err(error) => return responder.respond_with_error(error),
+                    };
+                    let (shell, history, mut cancel) = {
+                        let mut sessions = nano.sessions.lock();
+                        let Some(session) = sessions.get_mut(&request.session_id) else {
+                            return responder.respond_with_error(Error::invalid_params());
+                        };
+                        if session.cancel.is_some() {
+                            return responder.respond_with_error(
+                                Error::invalid_request().data("会话正在工作中"),
+                            );
+                        }
+                        let (tx, rx) = watch::channel(false);
+                        session.cancel = Some(tx);
+                        (
+                            session.shell.clone(),
+                            std::mem::take(&mut session.history),
+                            rx,
+                        )
+                    };
+                    let history = Arc::new(Mutex::new(history));
+                    responder.respond(PromptResponse::new())?;
+                    let tools = runtime::Events {
+                        cx: cx.clone(),
+                        id: request.session_id.clone(),
+                    };
+                    tools.update(SessionUpdate::StateUpdate(StateUpdate::Running(
+                        RunningStateUpdate::new(),
+                    )));
+                    let nano = nano.clone();
+                    cx.spawn(async move {
+                        let (reason, error) = tokio::select! {
+                            biased;
+                            _ = cancel.changed() => (StopReason::Cancelled, None),
+                            result = async {
+                                runtime::run(
+                                    runtime::builder(&config)?,
+                                    shell.clone(),
+                                    text,
+                                    history.clone(),
+                                    config.context_window,
+                                    tools.clone(),
+                                ).await
+                            } => {
+                                match result {
+                                    Ok(()) => (StopReason::EndTurn, None),
+                                    Err(runtime::RunError::Stop(reason)) => (reason, None),
+                                    Err(runtime::RunError::Failed(error)) => (
+                                        StopReason::Other(NANO_ERROR_STOP_REASON.into()),
+                                        Some(error),
+                                    ),
+                                }
+                            }
+                        };
+                        let mut sessions = nano.sessions.lock();
+                        if let Some(session) = sessions.get_mut(&request.session_id) {
+                            // 删除后恢复的同名会话不得被旧任务覆盖。
+                            if session
+                                .cancel
+                                .as_ref()
+                                .is_some_and(|tx| tx.subscribe().same_channel(&cancel))
+                            {
+                                session.history = std::mem::take(&mut *history.lock());
+                                session.cancel = None;
+                                let mut idle = IdleStateUpdate::new().stop_reason(reason);
+                                if let Some(error) = error {
+                                    let mut meta = serde_json::Map::new();
+                                    meta.insert(
+                                        NANO_ERROR_META_KEY.to_string(),
+                                        serde_json::json!({ "message": error }),
+                                    );
+                                    idle = idle.meta(meta);
+                                }
+                                tools.update(SessionUpdate::StateUpdate(StateUpdate::Idle(idle)));
+                            }
+                        }
+                        Ok(())
+                    })
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_to(transport)
+        .await
 }
 
 #[cfg(test)]
