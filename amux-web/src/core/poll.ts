@@ -25,6 +25,7 @@ export const HISTORY_INTERVAL = 5_000;
 export const ONGOING_INTERVAL = 2_000;
 export const ACTIVITIES_INTERVAL = 10_000;
 export const PLAN_INTERVAL = 10_000;
+export const USAGE_INTERVAL = 60_000;
 export const RECONNECT_INTERVAL = 5_000;
 const TERMINAL_RETRY_DELAY = 500;
 
@@ -161,6 +162,11 @@ async function refreshOpen(core: Core): Promise<void> {
   if (!target) return;
   const activitiesOpen = core.state.sidePanel === "activities";
   const planOpen = core.state.sidePanel === "plan";
+
+  if (due(core.last.usage, USAGE_INTERVAL)) {
+    core.last.usage = Date.now();
+    await refreshUsage(core);
+  }
 
   // 会话详情只在详情视图打开时刷新一次（refreshDetails），不随节拍拉取
   if (due(core.last.history, HISTORY_INTERVAL)) {
@@ -578,6 +584,8 @@ export async function refreshWorkflowSetup(core: Core): Promise<void> {
 
 /** 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置、快捷指令、会话用量与普通会话控件。 */
 export async function refreshInteraction(core: Core): Promise<void> {
+  // 立即记为已拉取，避免打开时的首轮节拍与本次请求重复。
+  core.last.usage = Date.now();
   await Promise.all([
     refreshMachines(core),
     refreshOrchestrator(core),
@@ -588,7 +596,7 @@ export async function refreshInteraction(core: Core): Promise<void> {
   ]);
 }
 
-/** 会话用量在会话交互视图打开时获取一次，不定时刷新（docs/DESIGN.md「会话交互视图」）。 */
+/** 会话用量在会话交互视图打开时获取一次，之后每 60 秒刷新（docs/DESIGN.md「会话交互视图」）。 */
 async function refreshUsage(core: Core): Promise<void> {
   const client = core.client;
   const target = core.state.open;

@@ -20,6 +20,7 @@ pub const HISTORY_INTERVAL: Duration = Duration::from_secs(5);
 pub const ONGOING_INTERVAL: Duration = Duration::from_secs(2);
 pub const ACTIVITIES_INTERVAL: Duration = Duration::from_secs(10);
 pub const PLAN_INTERVAL: Duration = Duration::from_secs(10);
+pub const USAGE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// 连接状态（决定进入登录页面还是主页面）。
 #[derive(Debug, Clone, PartialEq)]
@@ -565,6 +566,7 @@ pub struct Ticks {
     pub ongoing: Option<Instant>,
     pub activities: Option<Instant>,
     pub plan: Option<Instant>,
+    pub usage: Option<Instant>,
 }
 
 impl Default for Core {

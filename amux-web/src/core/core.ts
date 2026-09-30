@@ -257,6 +257,7 @@ export type Ticks = {
   ongoing?: number;
   activities?: number;
   plan?: number;
+  usage?: number;
   reconnect?: number;
 };
 

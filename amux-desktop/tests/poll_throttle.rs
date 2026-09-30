@@ -6,6 +6,7 @@
 //! 放在 `tests/`：库内联测试会触发组件宏的深度展开，编译期爆栈。
 
 use std::sync::{Arc, Mutex, Once};
+use std::time::{Duration, Instant};
 
 use amux_desktop::client::Client;
 use amux_desktop::config::Connection;
@@ -125,6 +126,26 @@ async fn options_and_slash_commands_fetched_once_on_open() {
     assert_eq!(core.view.detail.slash_commands.len(), 1);
 }
 
+/// 会话用量在打开时拉取一次，之后每 60 秒刷新。
+#[tokio::test]
+async fn usage_refreshes_every_60_seconds() {
+    let (server, hits) = start_stub().await;
+    let core = opened_core(server);
+    {
+        let client = client_of(&core);
+        poll::refresh_interaction(&client, &core).await;
+    }
+    assert_eq!(hit_count(&hits, "/sessions/s1/usage"), 1);
+
+    core.lock().last.usage = Some(Instant::now() - Duration::from_secs(59));
+    poll::tick(Arc::clone(&core)).await;
+    assert_eq!(hit_count(&hits, "/sessions/s1/usage"), 1);
+
+    core.lock().last.usage = Some(Instant::now() - Duration::from_secs(60));
+    poll::tick(Arc::clone(&core)).await;
+    assert_eq!(hit_count(&hits, "/sessions/s1/usage"), 2);
+}
+
 /// 设置类数据（机器/agents、编排智能体、计划、快捷指令、技能）不参与定时刷新：
 /// 即使设置浮窗与会话打开，节拍也不得请求这些端点。
 #[tokio::test]
@@ -149,7 +170,6 @@ async fn tick_does_not_poll_settings_data() {
         "/config/quick_commands/",
         "/config/skills/",
         "/config/recent_workspaces/",
-        "/sessions/s1/usage",
     ] {
         assert_eq!(hit_count(&hits, path), 0, "{path} 不应定时拉取");
     }

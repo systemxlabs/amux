@@ -16,7 +16,7 @@ use crate::client::Client;
 use crate::state::{
     set_terminals, ConnectionStatus, Core, ListEntry, OpenTarget, Paging, SettingsTab, SharedCore,
     SidePanel, ACTIVITIES_INTERVAL, HISTORY_INTERVAL, ONGOING_INTERVAL, PLAN_INTERVAL,
-    SESSION_LIST_INTERVAL,
+    SESSION_LIST_INTERVAL, USAGE_INTERVAL,
 };
 
 /// 连接重试间隔。
@@ -254,15 +254,21 @@ async fn refresh_open(
     let activities_open = side_panel == Some(SidePanel::Activities);
     let plan_open = side_panel == Some(SidePanel::Plan);
 
-    let (due_history, due_ongoing, due_activities, due_plan) = {
+    let (due_history, due_ongoing, due_activities, due_plan, due_usage) = {
         let core = core.lock();
         (
             core.due(core.last.history, HISTORY_INTERVAL),
             core.due(core.last.ongoing, ONGOING_INTERVAL),
             core.due(core.last.activities, ACTIVITIES_INTERVAL),
             core.due(core.last.plan, PLAN_INTERVAL),
+            core.due(core.last.usage, USAGE_INTERVAL),
         )
     };
+
+    if due_usage {
+        core.lock().last.usage = Some(Instant::now());
+        refresh_usage(client, core).await;
+    }
 
     match target {
         OpenTarget::Session(id) => {
@@ -518,6 +524,8 @@ pub async fn refresh_workflow_setup(client: &Client, core: &SharedCore) {
 /// 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置（工作流会话）、
 /// 快捷指令（输入区按钮）、会话用量，以及普通会话的选项和斜杠命令。
 pub async fn refresh_interaction(client: &Client, core: &SharedCore) {
+    // 立即记为已拉取，避免打开时的首轮节拍与本次请求重复。
+    core.lock().last.usage = Some(Instant::now());
     tokio::join!(
         refresh_machines(client, core),
         refresh_orchestrator(client, core),
@@ -528,7 +536,7 @@ pub async fn refresh_interaction(client: &Client, core: &SharedCore) {
     );
 }
 
-/// 会话用量在视图打开时获取一次，不定时刷新（docs/DESIGN.md「会话交互视图」）。
+/// 会话用量在视图打开时获取一次，之后每 60 秒刷新（docs/DESIGN.md「会话交互视图」）。
 async fn refresh_usage(client: &Client, core: &SharedCore) {
     let Some(target) = core.lock().open.clone() else {
         return;

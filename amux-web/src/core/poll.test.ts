@@ -233,18 +233,46 @@ describe("tick", () => {
       expect(count("ongoingActivity")).toBe(2);
       vi.advanceTimersByTime(10_000);
       await tick(core);
-      for (const name of ["quickCommands", "configOptions", "slashCommands", "sessionUsage"]) {
+      for (const name of ["quickCommands", "configOptions", "slashCommands"]) {
         expect(count(name)).toBe(1);
       }
       await refreshInteraction(core);
-      for (const name of ["quickCommands", "configOptions", "slashCommands", "sessionUsage"]) {
+      for (const name of ["quickCommands", "configOptions", "slashCommands"]) {
         expect(count(name)).toBe(2);
       }
     } finally {
       vi.useRealTimers();
     }
   });
-  it("详情视图未打开时，只刷新会话列表与对话历史，不拉取会话详情与用量", async () => {
+
+  it("会话用量打开时读取一次，之后每 60 秒刷新", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, calls } = recordingClient({
+        machines: () => [], orchestrator: () => null, quickCommands: () => [],
+        configOptions: () => [], slashCommands: () => [], ongoingActivity: () => null,
+      });
+      const core = onlineCore(client);
+      core.state.middle = "interaction";
+      core.state.open = { kind: "session", id: "s1" };
+      const count = (name: string) => calls.filter((call) => call === name).length;
+
+      await refreshInteraction(core);
+      expect(count("sessionUsage")).toBe(1);
+
+      vi.advanceTimersByTime(59_999);
+      await tick(core);
+      expect(count("sessionUsage")).toBe(1);
+
+      vi.advanceTimersByTime(1);
+      await tick(core);
+      expect(count("sessionUsage")).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("详情视图未打开时，仍刷新会话列表、对话历史与用量，不拉取会话详情", async () => {
     const { client, calls } = recordingClient();
     const core = onlineCore(client);
     core.state.middle = "interaction";
@@ -254,8 +282,8 @@ describe("tick", () => {
     await tick(core);
 
     expect(calls).toContain("history");
+    expect(calls).toContain("sessionUsage");
     expect(calls).not.toContain("session");
-    expect(calls).not.toContain("sessionUsage");
     expect(calls).not.toContain("workflowUsage");
   });
 
@@ -269,7 +297,7 @@ describe("tick", () => {
     await tick(core);
 
     expect(calls).not.toContain("session");
-    expect(calls).not.toContain("sessionUsage");
+    expect(calls).toContain("sessionUsage");
   });
 });
 
