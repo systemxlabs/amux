@@ -2,6 +2,8 @@
 
 import type { Activity, ContentBlock } from "./types";
 
+const TOKEN_FORMAT = new Intl.NumberFormat("en-US");
+
 function pad(value: number, width = 2): string {
   return String(value).padStart(width, "0");
 }
@@ -109,8 +111,14 @@ export function truncate(text: string, max: number): string {
   return chars.length <= max ? text : `${chars.slice(0, max).join("")}…`;
 }
 
-/** 上下文用量展示。 */
-export function formatContext(contextSize: number, windowSize: number): string {
-  if (windowSize === 0) return "—";
-  return `${contextSize} / ${windowSize}`;
+/** 会话用量百分比；上下文窗口未知时为 0。 */
+export function usagePercent(used: number, size: number): number {
+  return size > 0 ? (used / size) * 100 : 0;
+}
+
+/** 会话用量 tooltip：展示精确 token 数与百分比。 */
+export function formatUsage(used: number, size: number): string {
+  if (size === 0) return `${TOKEN_FORMAT.format(used)} token`;
+  const percent = usagePercent(used, size);
+  return `${TOKEN_FORMAT.format(used)} / ${TOKEN_FORMAT.format(size)} token（${percent.toFixed(1)}%）`;
 }

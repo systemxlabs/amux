@@ -14,13 +14,27 @@ const FORMATS: ApiFormat[] = ["chat_completions", "responses", "messages"];
 
 /** 未配置时的初始表单值。 */
 function defaultConfig(): OrchestratorConfig {
-  return { apiFormat: "responses", baseUrl: "", apiKey: "", model: "", effort: "" };
+  return {
+    apiFormat: "responses",
+    baseUrl: "",
+    apiKey: "",
+    model: "",
+    effort: "",
+    contextWindow: 0,
+  };
 }
 
 /** 已加载配置的稳定渲染（对象的属性顺序不影响比较，字段值相同则视为未变化）。 */
 function configKey(config: OrchestratorConfig | null): string {
   if (config === null) return "";
-  return [config.apiFormat, config.baseUrl, config.apiKey, config.model, config.effort].join("\u0000");
+  return [
+    config.apiFormat,
+    config.baseUrl,
+    config.apiKey,
+    config.model,
+    config.effort,
+    config.contextWindow,
+  ].join("\u0000");
 }
 
 function sameConfig(left: OrchestratorConfig, right: OrchestratorConfig): boolean {
@@ -101,6 +115,21 @@ export function OrchestratorSection() {
           data-slot="orchestrator-effort"
           value={form.effort}
           onChange={(event) => setForm({ ...form, effort: event.target.value })}
+        />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="orchestrator-context-window">上下文窗口</Label>
+        <Input
+          id="orchestrator-context-window"
+          data-slot="orchestrator-context-window"
+          type="number"
+          min={1}
+          step={1}
+          value={form.contextWindow || ""}
+          onChange={(event) => {
+            const value = event.target.valueAsNumber;
+            setForm({ ...form, contextWindow: Number.isFinite(value) ? value : 0 });
+          }}
         />
       </div>
       <div>

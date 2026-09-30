@@ -24,6 +24,7 @@ import type {
   Skill,
   SlashCommand,
   Terminal,
+  Usage,
   Workflow,
   WorkflowPlanItem,
 } from "../lib/types";
@@ -145,8 +146,7 @@ export type DetailState = {
   attachments: Attachment[];
   attachmentsHasMore: boolean;
   attachmentsLoading: boolean;
-  contextSize: number;
-  contextWindowSize: number;
+  usage: Usage;
   terminals: Terminal[];
   activeTerminal: string | null;
   terminalChunks: TerminalChunk[];
@@ -191,8 +191,7 @@ export function initialDetail(): DetailState {
     attachments: [],
     attachmentsHasMore: false,
     attachmentsLoading: false,
-    contextSize: 0,
-    contextWindowSize: 0,
+    usage: { used: 0, size: 0 },
     terminals: [],
     activeTerminal: null,
     terminalChunks: [],

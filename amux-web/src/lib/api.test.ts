@@ -198,6 +198,20 @@ describe("ApiClient", () => {
     expect(page.hasMore).toBe(false);
   });
 
+  it("普通会话与工作流会话用量使用各自 usage 端点", async () => {
+    replies = [
+      { status: 200, body: JSON.stringify({ used: 10, size: 100 }) },
+      { status: 200, body: JSON.stringify({ used: 20, size: 200 }) },
+    ];
+    const client = new ApiClient(base, "tk");
+
+    await expect(client.sessionUsage("s1")).resolves.toEqual({ used: 10, size: 100 });
+    expect(seen.at(-1)?.url).toBe("/sessions/s1/usage");
+
+    await expect(client.workflowUsage("w1")).resolves.toEqual({ used: 20, size: 200 });
+    expect(seen.at(-1)?.url).toBe("/workflows/w1/usage");
+  });
+
   it("diff 编码基准分支，branches 解析分支标记", async () => {
     replies = [
       { status: 200, body: JSON.stringify({ files: [] }) },

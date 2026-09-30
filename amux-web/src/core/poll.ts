@@ -162,7 +162,7 @@ async function refreshOpen(core: Core): Promise<void> {
   const activitiesOpen = core.state.sidePanel === "activities";
   const planOpen = core.state.sidePanel === "plan";
 
-  // 会话详情与上下文用量只在详情视图打开时刷新一次（refreshDetails），不随节拍拉取
+  // 会话详情只在详情视图打开时刷新一次（refreshDetails），不随节拍拉取
   if (due(core.last.history, HISTORY_INTERVAL)) {
     core.last.history = Date.now();
     await refreshHistory(core);
@@ -576,15 +576,34 @@ export async function refreshWorkflowSetup(core: Core): Promise<void> {
   await refreshOrchestrator(core);
 }
 
-/** 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置与快捷指令。 */
+/** 会话交互视图常驻数据：机器/agents（可用性标记）、内置智能体配置、快捷指令、会话用量与普通会话控件。 */
 export async function refreshInteraction(core: Core): Promise<void> {
   await Promise.all([
     refreshMachines(core),
     refreshOrchestrator(core),
     refreshQuickCommands(core),
+    refreshUsage(core),
     refreshSessionControls(core),
     refreshTerminalList(core),
   ]);
+}
+
+/** 会话用量在会话交互视图打开时获取一次，不定时刷新（docs/DESIGN.md「会话交互视图」）。 */
+async function refreshUsage(core: Core): Promise<void> {
+  const client = core.client;
+  const target = core.state.open;
+  if (!client || !target) return;
+  try {
+    const usage =
+      target.kind === "session"
+        ? await client.sessionUsage(target.id)
+        : await client.workflowUsage(target.id);
+    core.update((state) => {
+      if (sameTarget(state.open, target)) state.detail.usage = usage;
+    });
+  } catch {
+    // 尚无模型用量时保持 0；重开视图时再获取。
+  }
 }
 
 async function refreshSessionControls(core: Core): Promise<void> {
@@ -748,16 +767,6 @@ export async function refreshDetails(core: Core): Promise<void> {
       });
     } catch (error) {
       core.failure(`读取会话详情失败：${messageOf(error)}`);
-    }
-    try {
-      const context = await client.context(target.id);
-      core.update((state) => {
-        if (!sameTarget(state.open, target)) return;
-        state.detail.contextSize = context.contextSize;
-        state.detail.contextWindowSize = context.contextWindowSize;
-      });
-    } catch {
-      // 上下文用量需 agent 侧就绪；失败时该行留空
     }
     return;
   }

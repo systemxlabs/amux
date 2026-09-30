@@ -904,6 +904,14 @@ export function selectSettingsTab(core: Core, tab: Core["state"]["settings"]["ta
 /** 保存内置智能体配置（PRD「内置智能体设置」）。 */
 export async function saveOrchestrator(core: Core, config: OrchestratorConfig): Promise<void> {
   if (!core.client) return;
+  if (config.baseUrl.trim() === "" || config.apiKey.trim() === "" || config.model.trim() === "") {
+    core.failure("保存失败：请填写 Base URL、API Key 与模型名称");
+    return;
+  }
+  if (!Number.isSafeInteger(config.contextWindow) || config.contextWindow <= 0) {
+    core.failure("保存失败：上下文窗口必须是正整数");
+    return;
+  }
   try {
     await core.client.setOrchestrator(config);
     core.update((state) => {

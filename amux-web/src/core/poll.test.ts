@@ -6,16 +6,26 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../lib/api";
 import { newPaging } from "../lib/paging";
 import type {
-  ContextInfo,
   HistoryPage,
   ListEntry,
   Session,
   SessionList,
+  Usage,
   Workflow,
   WorkflowList,
 } from "../lib/types";
 import { Core } from "./core";
-import { loadOlderList, refreshDetails, refreshList, refreshNewSession, refreshWorkflowSetup, refreshOrchestrator, refreshInteraction, stopTerminalStream, tick } from "./poll";
+import {
+  loadOlderList,
+  refreshDetails,
+  refreshInteraction,
+  refreshList,
+  refreshNewSession,
+  refreshOrchestrator,
+  refreshWorkflowSetup,
+  stopTerminalStream,
+  tick,
+} from "./poll";
 
 it("每次打开新建视图都读取最新计划，切换工作流模式不重复读取计划", async () => {
   const core = new Core();
@@ -177,7 +187,8 @@ function recordingClient(overrides: Record<string, unknown> = {}): {
     history: (): HistoryPage => ({ items: [], hasMore: false }),
     session: () => session("s1", 1),
     workflow: () => workflow("w1", 1),
-    context: (): ContextInfo => ({ contextSize: 10, contextWindowSize: 100 }),
+    sessionUsage: (): Usage => ({ used: 10, size: 100 }),
+    workflowUsage: (): Usage => ({ used: 20, size: 200 }),
     ...overrides,
   };
   const client: Record<string, unknown> = {};
@@ -222,18 +233,18 @@ describe("tick", () => {
       expect(count("ongoingActivity")).toBe(2);
       vi.advanceTimersByTime(10_000);
       await tick(core);
-      for (const name of ["quickCommands", "configOptions", "slashCommands"]) {
+      for (const name of ["quickCommands", "configOptions", "slashCommands", "sessionUsage"]) {
         expect(count(name)).toBe(1);
       }
       await refreshInteraction(core);
-      for (const name of ["quickCommands", "configOptions", "slashCommands"]) {
+      for (const name of ["quickCommands", "configOptions", "slashCommands", "sessionUsage"]) {
         expect(count(name)).toBe(2);
       }
     } finally {
       vi.useRealTimers();
     }
   });
-  it("详情视图未打开时，只刷新会话列表与对话历史，不拉取会话详情与上下文", async () => {
+  it("详情视图未打开时，只刷新会话列表与对话历史，不拉取会话详情与用量", async () => {
     const { client, calls } = recordingClient();
     const core = onlineCore(client);
     core.state.middle = "interaction";
@@ -244,7 +255,8 @@ describe("tick", () => {
 
     expect(calls).toContain("history");
     expect(calls).not.toContain("session");
-    expect(calls).not.toContain("context");
+    expect(calls).not.toContain("sessionUsage");
+    expect(calls).not.toContain("workflowUsage");
   });
 
   it("详情视图打开时也不定时刷新详情，由视图打开时自行拉取一次", async () => {
@@ -257,7 +269,7 @@ describe("tick", () => {
     await tick(core);
 
     expect(calls).not.toContain("session");
-    expect(calls).not.toContain("context");
+    expect(calls).not.toContain("sessionUsage");
   });
 });
 
@@ -302,21 +314,55 @@ describe("tick 终端流", () => {
   });
 });
 
+describe("refreshInteraction", () => {
+  it("普通会话打开时拉取一次普通会话用量", async () => {
+    const { client, calls } = recordingClient({
+      machines: () => [],
+      orchestrator: () => null,
+      quickCommands: () => [],
+      configOptions: () => [],
+      slashCommands: () => [],
+    });
+    const core = onlineCore(client);
+    core.state.open = { kind: "session", id: "s1" };
+
+    await refreshInteraction(core);
+
+    expect(calls).toContain("sessionUsage");
+    expect(calls).not.toContain("workflowUsage");
+    expect(core.state.detail.usage).toEqual({ used: 10, size: 100 });
+  });
+
+  it("工作流会话打开时拉取一次工作流用量", async () => {
+    const { client, calls } = recordingClient({
+      machines: () => [],
+      orchestrator: () => null,
+      quickCommands: () => [],
+    });
+    const core = onlineCore(client);
+    core.state.open = { kind: "workflow", id: "w1" };
+
+    await refreshInteraction(core);
+
+    expect(calls).toContain("workflowUsage");
+    expect(calls).not.toContain("sessionUsage");
+    expect(core.state.detail.usage).toEqual({ used: 20, size: 200 });
+  });
+});
+
 describe("refreshDetails", () => {
-  it("普通会话：拉取一次详情与上下文用量", async () => {
+  it("普通会话：只拉取详情，不重复拉取用量", async () => {
     const { client, calls } = recordingClient();
     const core = onlineCore(client);
     core.state.open = { kind: "session", id: "s1" };
 
     await refreshDetails(core);
 
-    expect(calls).toEqual(["session", "context"]);
+    expect(calls).toEqual(["session"]);
     expect(core.state.detail.session?.id).toBe("s1");
-    expect(core.state.detail.contextSize).toBe(10);
-    expect(core.state.detail.contextWindowSize).toBe(100);
   });
 
-  it("工作流会话：只拉取详情，不请求上下文", async () => {
+  it("工作流会话：只拉取详情", async () => {
     const { client, calls } = recordingClient();
     const core = onlineCore(client);
     core.state.open = { kind: "workflow", id: "w1" };

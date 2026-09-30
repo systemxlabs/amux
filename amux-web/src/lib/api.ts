@@ -9,7 +9,6 @@ import type {
   AttachmentList,
   ConfigOptions,
   ConfigureSessionRequest,
-  ContextInfo,
   CreateSessionRequest,
   CreateWorkflowRequest,
   ConfigureWorkflowRequest,
@@ -35,6 +34,7 @@ import type {
   Skill,
   Terminal,
   TerminalOutput,
+  Usage,
   Workflow,
   WorkflowList,
   WorkflowPlanItem,
@@ -182,8 +182,12 @@ export class ApiClient {
     return response.entries;
   }
 
-  context(id: string): Promise<ContextInfo> {
-    return this.getJson(`/sessions/${encodeURIComponent(id)}/context`);
+  sessionUsage(id: string): Promise<Usage> {
+    return this.getJson(`/sessions/${encodeURIComponent(id)}/usage`);
+  }
+
+  workflowUsage(id: string): Promise<Usage> {
+    return this.getJson(`/workflows/${encodeURIComponent(id)}/usage`);
   }
 
   history(id: string, limit: number, offset: number): Promise<HistoryPage> {

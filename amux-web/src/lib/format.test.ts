@@ -7,9 +7,11 @@ import {
   activityDetail,
   activitySummary,
   blocksText,
+  formatUsage,
   formatTime,
   oneLine,
   truncate,
+  usagePercent,
 } from "./format";
 
 describe("formatTime", () => {
@@ -159,5 +161,17 @@ describe("oneLine 与 truncate", () => {
   it("按字符截断（中文按字符计）", () => {
     expect(truncate("中文内容", 3)).toBe("中文内…");
     expect(truncate("短", 3)).toBe("短");
+  });
+});
+
+describe("会话用量", () => {
+  it("窗口大小未知时只展示已用 token", () => {
+    expect(formatUsage(53_000, 0)).toBe("53,000 token");
+    expect(usagePercent(53_000, 0)).toBe(0);
+  });
+
+  it("展示精确 token 与百分比", () => {
+    expect(formatUsage(53_000, 200_000)).toBe("53,000 / 200,000 token（26.5%）");
+    expect(usagePercent(53_000, 200_000)).toBe(26.5);
   });
 });

@@ -25,11 +25,11 @@ import {
 } from "../core/actions";
 import { loadNewerHistory, loadOlderHistory } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
-import { activityBarText, formatTime } from "../lib/format";
+import { activityBarText, formatTime, formatUsage, usagePercent } from "../lib/format";
 import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
 import { execDir } from "../lib/types";
-import type { ContentBlock, HistoryItem, SessionConfigOption } from "../lib/types";
+import type { ContentBlock, HistoryItem, SessionConfigOption, Usage } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useIsMobile } from "../lib/viewport";
 
@@ -472,6 +472,7 @@ export function InteractionView() {
               附件
             </Button>
             <div className="flex items-center gap-2">
+              <UsageIndicator usage={detail.usage} />
               <Button
                 data-slot="cancel-button"
                 variant="outline"
@@ -505,6 +506,30 @@ export function InteractionView() {
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function UsageIndicator({ usage }: { usage: Usage }) {
+  const percent = Math.min(100, Math.max(0, usagePercent(usage.used, usage.size)));
+  const label = formatUsage(usage.used, usage.size);
+  return (
+    <div
+      data-slot="session-usage"
+      role="progressbar"
+      aria-label={`会话用量：${label}`}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(percent)}
+      title={label}
+      className="grid size-8 shrink-0 place-items-center rounded-full"
+      style={{
+        background: `conic-gradient(var(--color-primary) ${percent}%, var(--color-muted) 0)`,
+      }}
+    >
+      <span className="grid size-6 place-items-center rounded-full bg-background text-[10px] leading-none">
+        {Math.round(percent)}%
+      </span>
     </div>
   );
 }

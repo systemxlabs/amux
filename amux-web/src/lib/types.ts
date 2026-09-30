@@ -147,7 +147,7 @@ export type OngoingActivity = { activity?: Activity };
 export type ConfigOptions = { options: SessionConfigOption[] };
 export type SlashCommands = { commands: SlashCommand[] };
 export type Plan = { entries: SessionPlanEntry[] };
-export type ContextInfo = { contextSize: number; contextWindowSize: number };
+export type Usage = { used: number; size: number };
 
 export type TerminalState = "running" | "exited";
 export type Terminal = {
@@ -204,6 +204,7 @@ export type OrchestratorConfig = {
   apiKey: string;
   model: string;
   effort: string;
+  contextWindow: number;
 };
 
 /** 会话目标：普通会话或工作流会话（对话/活动/取消等操作共用）。 */

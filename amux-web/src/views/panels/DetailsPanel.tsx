@@ -4,7 +4,7 @@ import { useEffect } from "react";
 
 import { refreshDetails } from "../../core/poll";
 import { useCore, useCoreState } from "../../core/store";
-import { formatContext, formatTime, stateLabel } from "../../lib/format";
+import { formatTime, stateLabel } from "../../lib/format";
 import { cn } from "../../lib/utils";
 
 type Row = { label: string; value: string; pre?: boolean };
@@ -45,10 +45,6 @@ export function DetailsPanel() {
     rows.push({ label: "标题", value: session.title });
     rows.push({ label: "创建时间", value: formatTime(session.createdAt) });
     rows.push({ label: "最近活跃", value: formatTime(session.updatedAt) });
-    rows.push({
-      label: "上下文用量",
-      value: formatContext(state.detail.contextSize, state.detail.contextWindowSize),
-    });
   } else if (workflow !== null) {
     rows.push({ label: "会话 ID", value: workflow.id });
     rows.push({ label: "agent", value: "工作流智能体" });
