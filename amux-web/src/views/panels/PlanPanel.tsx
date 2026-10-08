@@ -30,24 +30,28 @@ export function PlanPanel() {
   return (
     <div data-slot="plan-panel" className="flex h-full min-h-0 flex-col">
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
-        {entries.map((entry, index) => (
-          <div key={index} data-slot="plan-entry" className="flex items-start gap-2">
-            <span className={cn("shrink-0 text-xs", STATUS_CLASS[entry.status])}>
-              {STATUS_LABEL[entry.status]}
-            </span>
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {PRIORITY_LABEL[entry.priority]}
-            </span>
-            <span
-              className={cn(
-                "min-w-0 flex-1 text-sm",
-                entry.status === "completed" && "text-muted-foreground",
-              )}
-            >
-              {entry.content}
-            </span>
-          </div>
-        ))}
+        {entries.length === 0 ? (
+          <div className="text-xs text-muted-foreground">暂无会话计划</div>
+        ) : (
+          entries.map((entry, index) => (
+            <div key={index} data-slot="plan-entry" className="flex items-start gap-2">
+              <span className={cn("shrink-0 text-xs", STATUS_CLASS[entry.status])}>
+                {STATUS_LABEL[entry.status]}
+              </span>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {PRIORITY_LABEL[entry.priority]}
+              </span>
+              <span
+                className={cn(
+                  "min-w-0 flex-1 text-sm",
+                  entry.status === "completed" && "text-muted-foreground",
+                )}
+              >
+                {entry.content}
+              </span>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );

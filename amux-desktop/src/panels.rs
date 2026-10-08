@@ -1250,7 +1250,7 @@ fn activity_row(activity: &Activity, this: &mut AmuxApp, cx: &mut Context<AmuxAp
         .into_any_element()
 }
 
-/// 会话计划面板：`✓ / ● / ○` 标记 + 计划内容（无计划则空白）。
+/// 会话计划面板：`✓ / ● / ○` 标记 + 计划内容。
 fn plan_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let mut rows = v_flex().gap_1();
@@ -1274,6 +1274,9 @@ fn plan_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> Any
                         .flex_1(),
                 ),
         );
+    }
+    if core.view.detail.plan.is_empty() {
+        rows = rows.child(ui::empty_hint("暂无会话计划", &theme));
     }
     div()
         .id("plan-panel")
