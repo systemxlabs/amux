@@ -1276,6 +1276,7 @@ fn plan_panel(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> Any
         );
     }
     if core.view.detail.plan.is_empty() {
+        rows = rows.w_full().h_full().items_center().justify_center();
         rows = rows.child(ui::empty_hint("暂无会话计划", &theme));
     }
     div()

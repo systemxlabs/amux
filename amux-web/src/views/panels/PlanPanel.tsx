@@ -29,7 +29,12 @@ export function PlanPanel() {
 
   return (
     <div data-slot="plan-panel" className="flex h-full min-h-0 flex-col">
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
+      <div
+        className={cn(
+          "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3",
+          entries.length === 0 && "items-center justify-center",
+        )}
+      >
         {entries.length === 0 ? (
           <div className="text-xs text-muted-foreground">暂无会话计划</div>
         ) : (
