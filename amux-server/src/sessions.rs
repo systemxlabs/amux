@@ -493,20 +493,10 @@ impl SessionService {
         if session.worktree_dir.is_empty() {
             return;
         }
-        let accessible = self
-            .machines
-            .fs_list(
-                &session.machine,
-                FsListParams {
-                    path: Some(session.worktree_dir.clone()),
-                    limit: 1,
-                    offset: 0,
-                    dirs_only: false,
-                },
-            )
+        if self
+            .worktree_exists(&session.machine, &session.worktree_dir)
             .await
-            .is_ok();
-        if accessible {
+        {
             return;
         }
         log::info!("worktree 目录缺失，按原路径重建: {}", session.worktree_dir);
@@ -518,6 +508,21 @@ impl SessionService {
             log::warn!("worktree 重建失败: {error}");
             self.record_error(&session.id, &format!("worktree 重建失败: {error}"));
         }
+    }
+
+    async fn worktree_exists(&self, machine: &str, path: &str) -> bool {
+        self.machines
+            .fs_list(
+                machine,
+                FsListParams {
+                    path: Some(path.to_string()),
+                    limit: 1,
+                    offset: 0,
+                    dirs_only: false,
+                },
+            )
+            .await
+            .is_ok()
     }
 
     pub fn record_error(&self, session_id: &str, message: &str) {
@@ -710,6 +715,12 @@ impl SessionService {
             if !session.worktree_dir.is_empty()
                 && now.saturating_sub(session.updated_at) > WORKTREE_EXPIRE_AFTER_MS
             {
+                if !self
+                    .worktree_exists(&session.machine, &session.worktree_dir)
+                    .await
+                {
+                    continue;
+                }
                 self.machines
                     .worktree_remove(&session.machine, &session.workspace, &session.worktree_dir)
                     .await;
