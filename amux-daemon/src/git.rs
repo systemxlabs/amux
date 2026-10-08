@@ -616,8 +616,16 @@ impl GitRunner {
     /// 移除 worktree（强制），并 prune 主仓库的残留管理信息。
     /// repo 已不存在时退化为直接删目录。
     fn remove_worktree(&self, repo_cwd: &str, target: &Path) {
+        let repo_exists = gix::discover(repo_cwd).is_ok();
+        if !target.exists() {
+            if repo_exists {
+                let _ = run(repo_cwd, &["worktree", "prune"]);
+            }
+            return;
+        }
+
         let target_str = target.to_string_lossy().into_owned();
-        if gix::discover(repo_cwd).is_ok() {
+        if repo_exists {
             if let Err(e) = run(
                 repo_cwd,
                 &["worktree", "remove", "--force", target_str.as_str()],
@@ -628,10 +636,16 @@ impl GitRunner {
                 return;
             }
         }
-        if let Err(e) = std::fs::remove_dir_all(target) {
-            log::error!("删除 worktree 目录失败 {}: {e}", target.display());
+        if target.exists() {
+            if let Err(e) = std::fs::remove_dir_all(target) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::error!("删除 worktree 目录失败 {}: {e}", target.display());
+                }
+            }
         }
-        let _ = run(repo_cwd, &["worktree", "prune"]);
+        if repo_exists {
+            let _ = run(repo_cwd, &["worktree", "prune"]);
+        }
     }
 }
 
@@ -982,6 +996,30 @@ mod tests {
         assert!(
             !listed.iter().any(|path| path.ends_with(&target_name)),
             "移除后不应仍在列表中: {listed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktree_remove_prunes_missing_directory_and_is_idempotent() {
+        let repo = init_repo();
+        let repo_str = repo.to_str().unwrap();
+        let root = unique_dir("amux-worktree-idempotent");
+        let runner = GitRunner::new();
+        let target = worktree_dir_for(repo_str, &root).unwrap();
+        let target_name = target.file_name().unwrap().to_string_lossy().into_owned();
+
+        runner.add_worktree(repo_str, &target).unwrap();
+        std::fs::remove_dir_all(&target).unwrap();
+
+        runner.worktree_remove(repo_str, target.to_str().unwrap());
+        runner.worktree_remove(repo_str, target.to_str().unwrap());
+
+        let listed = runner.worktree_list(repo_str).unwrap();
+        assert!(
+            !listed.iter().any(|path| path.ends_with(&target_name)),
+            "清理缺失目录后不应残留 worktree 注册项: {listed:?}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
