@@ -50,13 +50,14 @@ it("每次打开新建视图都读取最新计划，切换工作流模式不重�
   expect(recentWorkspaces).toHaveBeenCalledTimes(2);
 });
 
-function session(id: string, updatedAt: number): Session {
+function session(id: string, updatedAt: number, pinned = false): Session {
   return {
     id,
     machine: "localpc",
     agent: "codex",
     title: id,
     state: "idle",
+    pinned,
     workspace: "/w",
     worktreeDir: "",
     createdAt: 1,
@@ -70,6 +71,7 @@ function workflow(id: string, updatedAt: number): Workflow {
     title: id,
     state: "idle",
     plan: "计划",
+    pinned: false,
     createdAt: 1,
     updatedAt,
     linkedSessions: [],
@@ -149,6 +151,7 @@ describe("loadOlderList", () => {
   it("普通会话与工作流会话按各自已加载条数作为偏移", async () => {
     const core = new Core();
     core.state.entries = [
+      { kind: "session", session: session("pinned", 400, true) },
       { kind: "session", session: session("s1", 300) },
       { kind: "session", session: session("s2", 290) },
       { kind: "workflow", workflow: workflow("w1", 200) },
@@ -168,7 +171,7 @@ describe("loadOlderList", () => {
       core.state.entries.map((entry) =>
         entry.kind === "session" ? entry.session.id : entry.workflow.id,
       ),
-    ).toEqual(["s1", "s2", "w1", "s3", "w2"]);
+    ).toEqual(["pinned", "s1", "s2", "s3", "w1", "w2"]);
     expect(core.state.listPaging.loadingOlder).toBe(false);
   });
 });

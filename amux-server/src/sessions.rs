@@ -135,11 +135,13 @@ impl SessionService {
         let now = now_ms();
         let session = Session {
             id: Uuid::new_v4().to_string(),
+            workflow_id: None,
             machine: machine.to_string(),
             agent: agent.to_string(),
             title: String::new(),
             state: SessionState::Idle,
             project: project.map(str::to_string),
+            pinned: false,
             workspace: workspace.to_string(),
             worktree_dir,
             created_at: now,
@@ -214,12 +216,16 @@ impl SessionService {
         title: Option<String>,
         config: Option<SessionConfigSetting>,
         project: Option<Option<String>>,
+        pinned: Option<bool>,
     ) -> Result<(), String> {
         if let Some(title) = title {
             self.store.set_title(id, &title);
         }
         if let Some(project) = project {
             self.store.set_session_project(id, project.as_deref());
+        }
+        if let Some(pinned) = pinned {
+            self.store.set_session_pinned(id, pinned);
         }
         if let Some(config) = config {
             let session = self.get(id)?;
@@ -839,11 +845,13 @@ mod tests {
     fn session(state: SessionState) -> Session {
         Session {
             id: "s1".into(),
+            workflow_id: None,
             machine: "pc".into(),
             agent: "codex".into(),
             title: String::new(),
             state,
             project: None,
+            pinned: false,
             workspace: "/tmp".into(),
             worktree_dir: String::new(),
             created_at: 1,

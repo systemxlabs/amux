@@ -61,10 +61,10 @@ impl ListEntry {
         }
     }
 
-    pub fn updated_at(&self) -> u64 {
+    pub fn is_pinned(&self) -> bool {
         match self {
-            ListEntry::Session(session) => session.updated_at,
-            ListEntry::Workflow(workflow) => workflow.updated_at,
+            ListEntry::Session(session) => session.pinned,
+            ListEntry::Workflow(workflow) => workflow.pinned,
         }
     }
 

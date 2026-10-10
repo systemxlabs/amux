@@ -17,7 +17,7 @@ import type {
   Skill,
   WorkflowPlanItem,
 } from "../lib/types";
-import { entryTitle, execDir } from "../lib/types";
+import { entryPinned, entryTitle, execDir } from "../lib/types";
 import { initialNewSession, panelAvailable } from "./core";
 import type { Core, PendingAttachment, SidePanel } from "./core";
 import {
@@ -307,6 +307,43 @@ export async function setEntryProject(
     await refreshList(core);
   } catch (error) {
     core.failure(`设置会话所属项目失败：${messageOf(error)}`);
+  }
+}
+
+/** 置顶或取消置顶会话（docs/PRD.md「会话列表视图」右键菜单）。 */
+export async function toggleEntryPinned(core: Core, entry: ListEntry): Promise<void> {
+  if (!core.client) return;
+  const pinned = !entryPinned(entry);
+  try {
+    if (entry.kind === "session") {
+      await core.client.configureSession(entry.session.id, null, null, undefined, pinned);
+      core.update((state) => {
+        const item = state.entries.find(
+          (candidate) =>
+            candidate.kind === "session" && candidate.session.id === entry.session.id,
+        );
+        if (item?.kind === "session") item.session.pinned = pinned;
+        if (state.detail.session?.id === entry.session.id) {
+          state.detail.session.pinned = pinned;
+        }
+      });
+    } else {
+      await core.client.configureWorkflow(entry.workflow.id, null, undefined, pinned);
+      core.update((state) => {
+        const item = state.entries.find(
+          (candidate) =>
+            candidate.kind === "workflow" &&
+            candidate.workflow.id === entry.workflow.id,
+        );
+        if (item?.kind === "workflow") item.workflow.pinned = pinned;
+        if (state.detail.workflow?.id === entry.workflow.id) {
+          state.detail.workflow.pinned = pinned;
+        }
+      });
+    }
+    await refreshList(core);
+  } catch (error) {
+    core.failure(`更新置顶状态失败：${messageOf(error)}`);
   }
 }
 

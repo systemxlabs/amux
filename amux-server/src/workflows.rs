@@ -102,6 +102,7 @@ impl WorkflowService {
             state: row.state,
             plan: row.plan,
             project: row.project,
+            pinned: row.pinned,
             created_at: row.created_at,
             updated_at: row.updated_at,
             linked_sessions: self.linked_sessions(id),
@@ -124,6 +125,7 @@ impl WorkflowService {
                     state: row.state,
                     plan: row.plan,
                     project: row.project,
+                    pinned: row.pinned,
                     created_at: row.created_at,
                     updated_at: row.updated_at,
                 })
@@ -167,12 +169,16 @@ impl WorkflowService {
         id: &str,
         title: Option<String>,
         project: Option<Option<String>>,
+        pinned: Option<bool>,
     ) -> Result<(), String> {
         if let Some(title) = title {
             self.store.set_workflow_title(id, &title);
         }
         if let Some(project) = project {
             self.store.set_workflow_project(id, project.as_deref());
+        }
+        if let Some(pinned) = pinned {
+            self.store.set_workflow_pinned(id, pinned);
         }
         Ok(())
     }
@@ -824,7 +830,7 @@ impl WorkflowTools {
                     .and_then(|value| serde_json::from_value::<SessionConfigSetting>(value).ok());
                 services
                     .sessions
-                    .configure(&session_id, title, config, None)
+                    .configure(&session_id, title, config, None, None)
                     .await?;
                 Ok(format!("已更新 {session_id} 配置"))
             }
@@ -1304,7 +1310,7 @@ mod tests {
         service.link_session(&workflow.id, &session.id);
         service
             .sessions
-            .configure(&session.id, Some("修复登录".into()), None, None)
+            .configure(&session.id, Some("修复登录".into()), None, None, None)
             .await
             .unwrap();
 
@@ -1380,11 +1386,13 @@ mod tests {
                 .store
                 .insert_session(&Session {
                     id: session_id.into(),
+                    workflow_id: None,
                     machine: "pc".into(),
                     agent: "codex".into(),
                     title: String::new(),
                     state,
                     project: None,
+                    pinned: false,
                     workspace: "/repo".into(),
                     worktree_dir: String::new(),
                     created_at: 1,

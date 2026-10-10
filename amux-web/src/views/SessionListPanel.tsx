@@ -1,7 +1,7 @@
 // 会话列表视图（docs/PRD.md「会话列表视图」、docs/DESIGN.md「会话列表视图」）。
 //
-// 顶部「+」进入新建会话视图；普通会话与工作流会话统一排序，工作流会话可展开关联普通会话。
-// 会话按创建时间倒序排列（最新在上）；未归属会话区域滚到最下方时加载更早一页。
+// 顶部「+」进入新建会话视图；置顶会话在前，其余普通会话与工作流会话按创建时间倒序，
+// 工作流会话可展开关联普通会话；未归属会话区域滚到最下方时加载更早一页。
 
 import {
   Fragment,
@@ -18,6 +18,7 @@ import {
   Loader2,
   MoreHorizontal,
   Network,
+  Pin,
   Plus,
   SquareTerminal,
 } from "lucide-react";
@@ -33,6 +34,7 @@ import {
   renameEntry,
   setEntryProject,
   showNewSession,
+  toggleEntryPinned,
   toggleExpand,
 } from "../core/actions";
 import { useCore, useCoreState } from "../core/store";
@@ -44,6 +46,7 @@ import {
 } from "../lib/list";
 import {
   entryId,
+  entryPinned,
   entryState,
   entryTitle,
   type ListEntry,
@@ -236,6 +239,15 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
         ) : (
           <SquareTerminal className="size-4 shrink-0 text-muted-foreground" />
         )}
+        <span className="flex size-3.5 shrink-0 items-center justify-center">
+          {entryPinned(entry) ? (
+            <Pin
+              data-slot="session-pinned"
+              aria-label="已置顶"
+              className="size-3.5 text-primary"
+            />
+          ) : null}
+        </span>
         <div className="min-w-0 flex-1">
           {editing ? (
             <Input
@@ -346,6 +358,12 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       onSelect: () => {
         onNavigate();
         void createFromEntry(core, entry);
+      },
+    },
+    {
+      label: entryPinned(entry) ? "取消置顶" : "置顶",
+      onSelect: () => {
+        void toggleEntryPinned(core, entry);
       },
     },
     { label: "删除", danger: true, onSelect: () => setDeleting(entry) },

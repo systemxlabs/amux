@@ -74,8 +74,11 @@ impl Store {
         std::fs::create_dir_all(&home).map_err(|e| format!("创建 {} 失败: {e}", home.display()))?;
         let sessions = open_db(&home.join("session.sqlite"), SESSION_SCHEMA)?;
         let workflows = open_db(&home.join("workflow.sqlite"), WORKFLOW_SCHEMA)?;
+        ensure_column(&sessions, "sessions", "workflow_id", "TEXT")?;
         ensure_column(&sessions, "sessions", "project", "TEXT")?;
+        ensure_column(&sessions, "sessions", "pinned", "BOOL NOT NULL DEFAULT 0")?;
         ensure_column(&workflows, "workflows", "project", "TEXT")?;
+        ensure_column(&workflows, "workflows", "pinned", "BOOL NOT NULL DEFAULT 0")?;
         // Server 重启后残留的「工作中」不再有 agent 侧 turn 支撑，统一回到空闲
         sessions
             .execute(
@@ -136,13 +139,15 @@ impl Store {
         self.sessions
             .lock()
             .execute(
-                "INSERT INTO sessions (id, state, title, project, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10)",
+                "INSERT INTO sessions (id, workflow_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12)",
                 params![
                     session.id,
+                    session.workflow_id,
                     session.state.as_str(),
                     session.title,
                     session.project.as_deref(),
+                    session.pinned,
                     session.workspace,
                     session.worktree_dir,
                     session.machine,
@@ -159,7 +164,7 @@ impl Store {
         self.sessions
             .lock()
             .query_row(
-                "SELECT id, state, title, project, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+                "SELECT id, workflow_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 row_to_session,
@@ -173,8 +178,8 @@ impl Store {
     pub fn sessions_all(&self) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, state, title, project, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
-             FROM sessions ORDER BY created_at DESC",
+            "SELECT id, workflow_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+             FROM sessions ORDER BY pinned DESC, created_at DESC, id DESC",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return Vec::new(),
@@ -183,47 +188,56 @@ impl Store {
         collect(rows)
     }
 
-    /// 会话列表：排除被工作流关联的会话（docs/DESIGN.md：`GET /sessions` 只出非关联会话）。
-    /// 会话量级小，关联标记在 Rust 侧过滤；`project` 指定时只返回该项目的会话。
+    /// 会话列表：分页返回非关联、非置顶普通会话，并始终附带该项目全部置顶会话。
+    ///
+    /// `has_more` 只表示非置顶分页是否还有更早一页；置顶会话不占用分页窗口。
     pub fn sessions_page(
         &self,
         limit: usize,
         offset: usize,
         project: Option<&str>,
     ) -> (Vec<Session>, bool) {
-        let linked: std::collections::HashSet<String> =
-            self.linked_session_ids().into_iter().collect();
-        let all: Vec<Session> = self
+        let sessions: Vec<Session> = self
             .sessions_all()
             .into_iter()
-            .filter(|session| !linked.contains(&session.id))
+            .filter(|session| session.workflow_id.is_none())
             .filter(|session| match project {
                 None => true,
                 Some("") => session.project.is_none(),
                 Some(project) => session.project.as_deref() == Some(project),
             })
             .collect();
-        let has_more = all.len() > offset + limit;
-        let page = all.into_iter().skip(offset).take(limit).collect();
+        let mut pinned: Vec<Session> = sessions
+            .iter()
+            .filter(|session| session.pinned)
+            .cloned()
+            .collect();
+        let mut unpinned: Vec<Session> = sessions
+            .into_iter()
+            .filter(|session| !session.pinned)
+            .collect();
+        pinned.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        unpinned.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        let has_more = unpinned.len() > offset + limit;
+        let mut page = pinned;
+        page.extend(unpinned.into_iter().skip(offset).take(limit));
         (page, has_more)
-    }
-
-    /// 所有被工作流关联的会话 id。
-    fn linked_session_ids(&self) -> Vec<String> {
-        let conn = self.workflows.lock();
-        let mut stmt =
-            match conn.prepare("SELECT DISTINCT session_id FROM workflow_linked_sessions") {
-                Ok(stmt) => stmt,
-                Err(_) => return Vec::new(),
-            };
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0));
-        collect(rows)
     }
 
     pub fn sessions_of_agent(&self, machine: &str, agent: &str) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, state, title, project, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+            "SELECT id, workflow_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions WHERE machine = ?1 AND agent = ?2",
         ) {
             Ok(stmt) => stmt,
@@ -235,16 +249,18 @@ impl Store {
 
     /// 关联会话的工作流会话 id。
     pub fn workflow_of_session(&self, session_id: &str) -> Option<String> {
-        self.workflows
+        let workflow_id = self
+            .sessions
             .lock()
             .query_row(
-                "SELECT workflow_id FROM workflow_linked_sessions WHERE session_id = ?1 LIMIT 1",
+                "SELECT workflow_id FROM sessions WHERE id = ?1",
                 params![session_id],
-                |row| row.get::<_, String>(0),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
             .ok()
-            .flatten()
+            .flatten()?;
+        workflow_id
     }
 
     pub fn set_state(&self, id: &str, state: SessionState) {
@@ -261,7 +277,7 @@ impl Store {
         );
     }
 
-    /// 会话活跃：更新最近活跃时间（会话列表按它排序）。
+    /// 会话活跃：更新最近活跃时间（会话详情展示用）。
     pub fn touch(&self, id: &str) {
         let _ = self.sessions.lock().execute(
             "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
@@ -294,10 +310,6 @@ impl Store {
         let conn = self.sessions.lock();
         let _ = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]);
         drop(conn);
-        let _ = self.workflows.lock().execute(
-            "DELETE FROM workflow_linked_sessions WHERE session_id = ?1",
-            params![id],
-        );
         self.transcripts.lock().remove(id);
         let dir = self.session_dir(id);
         if let Err(error) = std::fs::remove_dir_all(&dir) {
@@ -309,9 +321,9 @@ impl Store {
 
     /// 标记关联会话（供 `GET /sessions` 排除）。
     pub fn link_session(&self, workflow_id: &str, session_id: &str) {
-        let _ = self.workflows.lock().execute(
-            "INSERT OR REPLACE INTO workflow_linked_sessions (workflow_id, session_id) VALUES (?1, ?2)",
-            params![workflow_id, session_id],
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET workflow_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![session_id, workflow_id, now_ms() as i64],
         );
     }
 
@@ -526,8 +538,8 @@ impl Store {
         created_at: u64,
     ) {
         let _ = self.workflows.lock().execute(
-            "INSERT INTO workflows (id, title, state, plan, project, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            "INSERT INTO workflows (id, title, state, plan, project, pinned, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
             params![id, title, state.as_str(), plan, project, created_at as i64],
         );
     }
@@ -536,7 +548,7 @@ impl Store {
         self.workflows
             .lock()
             .query_row(
-                "SELECT id, title, state, plan, project, created_at, updated_at FROM workflows WHERE id = ?1",
+                "SELECT id, title, state, plan, project, pinned, created_at, updated_at FROM workflows WHERE id = ?1",
                 params![id],
                 row_to_workflow,
             )
@@ -553,21 +565,28 @@ impl Store {
     ) -> (Vec<WorkflowRow>, bool) {
         let conn = self.workflows.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, title, state, plan, project, created_at, updated_at FROM workflows
-             WHERE (?3 IS NULL OR (?3 = '' AND project IS NULL) OR project = ?3)
-             ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+            "SELECT id, title, state, plan, project, pinned, created_at, updated_at FROM workflows
+             WHERE (?1 IS NULL OR (?1 = '' AND project IS NULL) OR project = ?1)
+             ORDER BY pinned DESC, created_at DESC, id DESC",
         ) {
             Ok(stmt) => stmt,
             Err(_) => return (Vec::new(), false),
         };
-        let rows = stmt.query_map(
-            params![(limit + 1) as i64, offset as i64, project],
-            row_to_workflow,
-        );
-        let mut workflows = collect(rows);
-        let has_more = workflows.len() > limit;
-        workflows.truncate(limit);
-        (workflows, has_more)
+        let rows = stmt.query_map(params![project], row_to_workflow);
+        let workflows = collect(rows);
+        let mut pinned = Vec::new();
+        let mut unpinned = Vec::new();
+        for workflow in workflows {
+            if workflow.pinned {
+                pinned.push(workflow);
+            } else {
+                unpinned.push(workflow);
+            }
+        }
+        let has_more = unpinned.len() > offset + limit;
+        let mut page = pinned;
+        page.extend(unpinned.into_iter().skip(offset).take(limit));
+        (page, has_more)
     }
 
     pub fn set_workflow_state(&self, id: &str, state: SessionState) {
@@ -615,6 +634,20 @@ impl Store {
         );
     }
 
+    pub fn set_session_pinned(&self, id: &str, pinned: bool) {
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, pinned, now_ms() as i64],
+        );
+    }
+
+    pub fn set_workflow_pinned(&self, id: &str, pinned: bool) {
+        let _ = self.workflows.lock().execute(
+            "UPDATE workflows SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, pinned, now_ms() as i64],
+        );
+    }
+
     /// 项目删除后，其下所有会话回到未归属（docs/PRD.md「项目管理」）。
     pub fn unassign_project(&self, project: &str) {
         let _ = self.sessions.lock().execute(
@@ -628,50 +661,18 @@ impl Store {
     }
 
     pub fn delete_workflow(&self, id: &str) {
-        let conn = self.workflows.lock();
-        let _ = conn.execute("DELETE FROM workflows WHERE id = ?1", params![id]);
-        let _ = conn.execute(
-            "DELETE FROM workflow_linked_sessions WHERE workflow_id = ?1",
-            params![id],
-        );
+        let _ = self
+            .workflows
+            .lock()
+            .execute("DELETE FROM workflows WHERE id = ?1", params![id]);
     }
 
     pub fn linked_sessions(&self, workflow_id: &str) -> Vec<String> {
-        let ids: Vec<String> = {
-            let conn = self.workflows.lock();
-            let mut stmt = match conn
-                .prepare("SELECT session_id FROM workflow_linked_sessions WHERE workflow_id = ?1")
-            {
-                Ok(stmt) => stmt,
-                Err(_) => return Vec::new(),
-            };
-            let rows = stmt.query_map(params![workflow_id], |row| row.get::<_, String>(0));
-            match rows {
-                Ok(rows) => rows.flatten().collect(),
-                Err(_) => return Vec::new(),
-            }
-        };
-
-        // 关联普通会话按创建时间倒序排序（docs/PRD.md「会话列表视图」）。
-        let mut sessions: Vec<(String, u64)> = ids
+        self.sessions_all()
             .into_iter()
-            .filter_map(|session_id| {
-                let created_at = self
-                    .sessions
-                    .lock()
-                    .query_row(
-                        "SELECT created_at FROM sessions WHERE id = ?1",
-                        params![session_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten()?;
-                Some((session_id, created_at as u64))
-            })
-            .collect();
-        sessions.sort_by_key(|(_, created_at)| std::cmp::Reverse(*created_at));
-        sessions.into_iter().map(|(id, _)| id).collect()
+            .filter(|session| session.workflow_id.as_deref() == Some(workflow_id))
+            .map(|session| session.id)
+            .collect()
     }
 }
 
@@ -683,6 +684,7 @@ pub struct WorkflowRow {
     pub state: SessionState,
     pub plan: String,
     pub project: Option<String>,
+    pub pinned: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -691,9 +693,11 @@ pub struct WorkflowRow {
 const SESSION_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
+        workflow_id TEXT,
         state TEXT NOT NULL,
         title TEXT,
         project TEXT,
+        pinned BOOL NOT NULL,
         workspace TEXT NOT NULL,
         worktree_dir TEXT,
         machine TEXT NOT NULL,
@@ -728,13 +732,9 @@ const WORKFLOW_SCHEMA: &str = "
         state TEXT NOT NULL,
         plan TEXT NOT NULL,
         project TEXT,
+        pinned BOOL NOT NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS workflow_linked_sessions (
-        workflow_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        PRIMARY KEY (workflow_id, session_id)
     );";
 
 /// 为已有数据库补充新增列（老库无 project 列时）。
@@ -771,18 +771,20 @@ fn open_db(path: &Path, schema: &str) -> Result<Connection, String> {
 }
 
 fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
-    let state: String = row.get(1)?;
+    let state: String = row.get(2)?;
     Ok(Session {
         id: row.get(0)?,
+        workflow_id: row.get(1)?,
         state: amux_common::domain::parse_session_state(&state).unwrap_or(SessionState::Idle),
-        title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        project: row.get(3)?,
-        workspace: row.get(4)?,
-        worktree_dir: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-        machine: row.get(6)?,
-        agent: row.get(7)?,
-        created_at: row.get::<_, i64>(9)? as u64,
-        updated_at: row.get::<_, i64>(10)? as u64,
+        title: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        project: row.get(4)?,
+        pinned: row.get(5)?,
+        workspace: row.get(6)?,
+        worktree_dir: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        machine: row.get(8)?,
+        agent: row.get(9)?,
+        created_at: row.get::<_, i64>(11)? as u64,
+        updated_at: row.get::<_, i64>(12)? as u64,
     })
 }
 
@@ -794,8 +796,9 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRow> {
         state: amux_common::domain::parse_session_state(&state).unwrap_or(SessionState::Idle),
         plan: row.get(3)?,
         project: row.get(4)?,
-        created_at: row.get::<_, i64>(5)? as u64,
-        updated_at: row.get::<_, i64>(6)? as u64,
+        pinned: row.get(5)?,
+        created_at: row.get::<_, i64>(6)? as u64,
+        updated_at: row.get::<_, i64>(7)? as u64,
     })
 }
 
@@ -817,11 +820,13 @@ mod tests {
     fn session(id: &str, machine: &str, agent: &str) -> Session {
         Session {
             id: id.to_string(),
+            workflow_id: None,
             machine: machine.into(),
             agent: agent.into(),
             title: String::new(),
             state: SessionState::Idle,
             project: None,
+            pinned: false,
             workspace: "/tmp".into(),
             worktree_dir: String::new(),
             created_at: 1,
@@ -845,6 +850,40 @@ mod tests {
         );
         assert!(!has_more);
         assert_eq!(store.linked_sessions("w1"), ["s2"]);
+    }
+
+    #[test]
+    fn sessions_page_includes_all_pinned_and_paginates_unpinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        for (id, created_at, pinned) in [
+            ("s1", 70u64, false),
+            ("s2", 80, false),
+            ("p-old", 50, true),
+            ("p-new", 100, true),
+        ] {
+            let mut row = session(id, "pc", "codex");
+            row.created_at = created_at;
+            row.updated_at = created_at;
+            store.insert_session(&row).unwrap();
+            if pinned {
+                store.set_session_pinned(id, true);
+            }
+        }
+
+        let (first, has_more) = store.sessions_page(1, 0, None);
+        assert_eq!(
+            first.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["p-new", "p-old", "s2"]
+        );
+        assert!(has_more);
+
+        let (second, has_more) = store.sessions_page(1, 1, None);
+        assert_eq!(
+            second.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["p-new", "p-old", "s1"]
+        );
+        assert!(!has_more);
     }
 
     #[test]
@@ -876,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_sessions_sorted_by_session_created_at() {
+    fn linked_sessions_sort_pinned_before_session_created_at() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         for (id, created_at) in [("s1", 100u64), ("s2", 300), ("s3", 200)] {
@@ -885,10 +924,11 @@ mod tests {
             store.insert_session(&s).unwrap();
         }
         store.insert_workflow("w1", "wf", SessionState::Idle, "plan", None, 1);
-        // 按任意顺序关联，返回时应按创建时间倒序
+        // 按任意顺序关联，返回时置顶优先，其余按创建时间倒序
         store.link_session("w1", "s3");
         store.link_session("w1", "s1");
         store.link_session("w1", "s2");
+        store.set_session_pinned("s2", true);
 
         assert_eq!(store.linked_sessions("w1"), ["s2", "s3", "s1"]);
     }
@@ -935,6 +975,30 @@ mod tests {
         assert_eq!(
             second.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["a2"]
+        );
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn workflows_page_includes_all_pinned_and_paginates_unpinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_workflow("w1", "w1", SessionState::Idle, "p", None, 70);
+        store.insert_workflow("w2", "w2", SessionState::Idle, "p", None, 80);
+        store.insert_workflow("pinned", "pinned", SessionState::Idle, "p", None, 100);
+        store.set_workflow_pinned("pinned", true);
+
+        let (first, has_more) = store.workflows_page(1, 0, None);
+        assert_eq!(
+            first.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["pinned", "w2"]
+        );
+        assert!(has_more);
+
+        let (second, has_more) = store.workflows_page(1, 1, None);
+        assert_eq!(
+            second.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["pinned", "w1"]
         );
         assert!(!has_more);
     }

@@ -196,7 +196,7 @@ pub fn project_group_page_size(project: Option<&str>) -> usize {
     }
 }
 
-/// 两个来源各取首页，按创建时间合并后截断为一个项目的首页窗口。
+/// 两个来源各取首页：置顶项全部保留，非置顶项按创建时间合并后截断为一个项目的首页窗口。
 async fn fetch_project_group(
     client: &Client,
     project: Option<&str>,
@@ -210,19 +210,36 @@ async fn fetch_project_group(
     let sessions = sessions?;
     let workflows = workflows?;
     let has_more = sessions.has_more || workflows.has_more;
-    let mut entries: Vec<ListEntry> = sessions
+    let entries: Vec<ListEntry> = sessions
         .sessions
         .into_iter()
         .map(ListEntry::Session)
         .chain(workflows.workflows.into_iter().map(ListEntry::Workflow))
         .collect();
-    entries.sort_by(|left, right| {
+    let mut pinned: Vec<ListEntry> = entries
+        .iter()
+        .filter(|entry| entry.is_pinned())
+        .cloned()
+        .collect();
+    let mut unpinned: Vec<ListEntry> = entries
+        .into_iter()
+        .filter(|entry| !entry.is_pinned())
+        .collect();
+    pinned.sort_by(|left, right| {
         right
             .created_at()
             .cmp(&left.created_at())
             .then_with(|| left.id().cmp(right.id()))
     });
-    entries.truncate(limit);
+    unpinned.sort_by(|left, right| {
+        right
+            .created_at()
+            .cmp(&left.created_at())
+            .then_with(|| left.id().cmp(right.id()))
+    });
+    unpinned.truncate(limit);
+    pinned.extend(unpinned);
+    let entries = pinned;
     Ok((entries, has_more))
 }
 
@@ -236,8 +253,9 @@ fn sync_entries(core: &mut Core) {
         .collect();
     entries.sort_by(|left, right| {
         right
-            .created_at()
-            .cmp(&left.created_at())
+            .is_pinned()
+            .cmp(&left.is_pinned())
+            .then_with(|| right.created_at().cmp(&left.created_at()))
             .then_with(|| left.id().cmp(right.id()))
     });
     core.entries = entries;

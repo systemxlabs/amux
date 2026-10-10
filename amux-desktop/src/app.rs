@@ -1812,7 +1812,7 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             let setting = SessionConfigSetting { config_id, value };
             if let Err(error) = client
-                .configure_session(&id, None, Some(setting), None)
+                .configure_session(&id, None, Some(setting), None, None)
                 .await
             {
                 core.lock().error(format!("会话选项设置失败：{error}"));
@@ -1959,9 +1959,13 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             let result = match &target {
                 OpenTarget::Session(id) => {
-                    client.configure_session(id, Some(title), None, None).await
+                    client
+                        .configure_session(id, Some(title), None, None, None)
+                        .await
                 }
-                OpenTarget::Workflow(id) => client.configure_workflow(id, Some(title), None).await,
+                OpenTarget::Workflow(id) => {
+                    client.configure_workflow(id, Some(title), None, None).await
+                }
             };
             match result {
                 Ok(()) => core.lock().last.list = None,
@@ -1985,12 +1989,12 @@ impl AmuxApp {
             let result = match &entry {
                 ListEntry::Session(session) => {
                     client
-                        .configure_session(&session.id, None, None, Some(project.clone()))
+                        .configure_session(&session.id, None, None, Some(project.clone()), None)
                         .await
                 }
                 ListEntry::Workflow(workflow) => {
                     client
-                        .configure_workflow(&workflow.id, None, Some(project.clone()))
+                        .configure_workflow(&workflow.id, None, Some(project.clone()), None)
                         .await
                 }
             };
@@ -2026,6 +2030,61 @@ impl AmuxApp {
                     }
                 }
                 Err(error) => core.lock().error(format!("设置所属项目失败：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
+    /// 置顶或取消置顶会话（docs/PRD.md「会话列表视图」右键菜单）。
+    pub fn set_entry_pinned(&mut self, entry: ListEntry, pinned: bool, cx: &mut Context<Self>) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = match &entry {
+                ListEntry::Session(session) => {
+                    client
+                        .configure_session(&session.id, None, None, None, Some(pinned))
+                        .await
+                }
+                ListEntry::Workflow(workflow) => {
+                    client
+                        .configure_workflow(&workflow.id, None, None, Some(pinned))
+                        .await
+                }
+            };
+            match result {
+                Ok(()) => {
+                    let mut core = core.lock();
+                    core.last.list = None;
+                    match &entry {
+                        ListEntry::Session(session) => {
+                            if core
+                                .view
+                                .session
+                                .as_ref()
+                                .is_some_and(|open| open.id == session.id)
+                            {
+                                if let Some(open) = core.view.session.as_mut() {
+                                    open.pinned = pinned;
+                                }
+                            }
+                        }
+                        ListEntry::Workflow(workflow) => {
+                            if core
+                                .view
+                                .workflow
+                                .as_ref()
+                                .is_some_and(|open| open.id == workflow.id)
+                            {
+                                if let Some(open) = core.view.workflow.as_mut() {
+                                    open.pinned = pinned;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => core.lock().error(format!("更新置顶状态失败：{error}")),
             }
         });
         cx.notify();

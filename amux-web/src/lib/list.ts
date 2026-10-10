@@ -1,20 +1,22 @@
-// 会话列表：普通会话与工作流会话统一按最近活跃排序，工作流会话可展开其关联普通会话
+// 会话列表：置顶优先，其他普通会话与工作流会话按创建时间排序；工作流会话可展开其关联普通会话
 // （docs/PRD.md「会话列表视图」）。
 
 import {
   entryCreatedAt,
   entryId,
-  entryUpdatedAt,
+  entryPinned,
   type ListEntry,
   type Session,
   type Workflow,
 } from "./types";
 import type { Paging } from "./paging";
 
-/** 按最近活跃倒序排列（同刻按标识稳定排序，避免抖动）。 */
+/** 置顶条目在前；两端各自按创建时间倒序排列。 */
 export function sortEntries(entries: readonly ListEntry[]): ListEntry[] {
   return [...entries].sort((a, b) => {
-    const delta = entryUpdatedAt(b) - entryUpdatedAt(a);
+    const pinned = Number(entryPinned(b)) - Number(entryPinned(a));
+    if (pinned !== 0) return pinned;
+    const delta = entryCreatedAt(b) - entryCreatedAt(a);
     return delta !== 0 ? delta : entryId(a).localeCompare(entryId(b));
   });
 }
@@ -49,7 +51,7 @@ export function buildListWindow(
 }
 
 /**
- * 项目组窗口：两个来源各取首页，按创建时间合并后截断为项目组的可见条数。
+ * 项目组窗口：置顶项全部保留，非置顶项按创建时间合并后截断为项目组的可见条数。
  * 未归属组与普通项目组使用不同的 limit（docs/PRD.md「会话列表视图」）。
  */
 export function buildProjectGroupWindow(
@@ -62,13 +64,16 @@ export function buildProjectGroupWindow(
   const entries: ListEntry[] = [
     ...sessions.map((session): ListEntry => ({ kind: "session", session })),
     ...workflows.map((workflow): ListEntry => ({ kind: "workflow", workflow })),
-  ].sort(
-    (a, b) =>
-      entryCreatedAt(b) - entryCreatedAt(a) || entryId(a).localeCompare(entryId(b)),
-  );
+  ];
+  const pinned = entries
+    .filter(entryPinned)
+    .sort((a, b) => entryCreatedAt(b) - entryCreatedAt(a) || entryId(a).localeCompare(entryId(b)));
+  const unpinned = entries
+    .filter((entry) => !entryPinned(entry))
+    .sort((a, b) => entryCreatedAt(b) - entryCreatedAt(a) || entryId(a).localeCompare(entryId(b)));
   return {
-    entries: entries.slice(0, limit),
-    hasMore: entries.length > limit || sessionsHaveMore || workflowsHaveMore,
+    entries: [...pinned, ...unpinned.slice(0, limit)],
+    hasMore: unpinned.length > limit || sessionsHaveMore || workflowsHaveMore,
   };
 }
 
@@ -78,7 +83,7 @@ export type ListRow = { entry: ListEntry; depth: number };
 /**
  * 展开状态下的可见行序列。
  *
- * 关联普通会话按自身最近活跃倒序，且不参与顶层排序（工作流会话位置不变）。
+ * 关联普通会话置顶优先、其余按创建时间倒序，且不参与顶层排序（工作流会话位置不变）。
  */
 export function listRows(entries: readonly ListEntry[], expanded: ReadonlySet<string>): ListRow[] {
   const rows: ListRow[] = [];
@@ -86,7 +91,10 @@ export function listRows(entries: readonly ListEntry[], expanded: ReadonlySet<st
     rows.push({ entry, depth: 0 });
     if (entry.kind !== "workflow" || !expanded.has(entry.workflow.id)) continue;
     const linked = [...entry.workflow.linkedSessions].sort(
-      (a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id),
+      (a, b) =>
+        Number(b.pinned) - Number(a.pinned) ||
+        b.createdAt - a.createdAt ||
+        a.id.localeCompare(b.id),
     );
     for (const session of linked) {
       rows.push({ entry: { kind: "session", session }, depth: 1 });

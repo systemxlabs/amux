@@ -54,6 +54,9 @@ pub struct Agent {
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,
+    /// 所属工作流会话 ID；None = 非关联普通会话
+    #[serde(skip)]
+    pub workflow_id: Option<String>,
     /// 所属机器
     pub machine: String,
     /// 所属 agent
@@ -64,6 +67,8 @@ pub struct Session {
     /// 所属项目；None = 未归属项目
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// 是否置顶
+    pub pinned: bool,
     /// 用户指定的工作目录
     pub workspace: String,
     /// worktree 目录；空串 = 未启用 worktree
@@ -122,7 +127,7 @@ pub struct SessionConfigSetting {
     pub value: SessionConfigOptionValue,
 }
 
-/// `POST /sessions/<id>/configure` 请求：标题与选项均可选，至少设置一项。
+/// `POST /sessions/<id>/configure` 请求：标题、选项、项目和置顶状态均可选，至少设置一项。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigureSessionRequest {
@@ -137,6 +142,9 @@ pub struct ConfigureSessionRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub project: Option<Option<String>>,
+    /// 是否置顶；None 不修改
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 
 /// `GET /sessions/<id>/history` 响应。
@@ -295,6 +303,8 @@ pub struct Workflow {
     /// 所属项目；None = 未归属项目
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// 是否置顶
+    pub pinned: bool,
     pub created_at: u64,
     pub updated_at: u64,
     /// 关联普通会话
@@ -335,6 +345,9 @@ pub struct ConfigureWorkflowRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub project: Option<Option<String>>,
+    /// 是否置顶；None 不修改
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 
 /// 技能配置项。
@@ -495,11 +508,13 @@ mod tests {
     fn session_serializes_machine_and_worktree() {
         let session = Session {
             id: "s1".into(),
+            workflow_id: None,
             machine: "localpc".into(),
             agent: "codex".into(),
             title: "标题".into(),
             state: SessionState::Idle,
             project: None,
+            pinned: true,
             workspace: "/w".into(),
             worktree_dir: String::new(),
             created_at: 1,
@@ -508,6 +523,8 @@ mod tests {
         let json = serde_json::to_value(&session).unwrap();
         assert_eq!(json["machine"], "localpc");
         assert_eq!(json["state"], "idle");
+        assert!(json.get("workflowId").is_none());
+        assert_eq!(json["pinned"], true);
         assert_eq!(json["worktreeDir"], "");
     }
 
@@ -536,6 +553,7 @@ mod tests {
             title: None,
             config: None,
             project: Some(None),
+            pinned: None,
         })
         .unwrap();
         assert_eq!(unassigned_json["project"], serde_json::Value::Null);
@@ -544,6 +562,10 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "project": "项目 A" })).unwrap();
         assert_eq!(assigned.project, Some(Some("项目 A".to_string())));
         assert_eq!(serde_json::to_value(assigned).unwrap()["project"], "项目 A");
+
+        let pinned: ConfigureSessionRequest =
+            serde_json::from_value(serde_json::json!({ "pinned": true })).unwrap();
+        assert_eq!(pinned.pinned, Some(true));
     }
 
     /// Nano 认证的 _meta 载荷：编码后能无损还原，字段名按 docs/DESIGN.md「ACP 认证」。

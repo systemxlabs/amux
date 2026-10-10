@@ -165,6 +165,7 @@ impl Client {
         title: Option<String>,
         config: Option<SessionConfigSetting>,
         project: Option<Option<String>>,
+        pinned: Option<bool>,
     ) -> Result<(), String> {
         self.post_empty(
             &format!("/sessions/{id}/configure"),
@@ -172,6 +173,7 @@ impl Client {
                 title,
                 config,
                 project,
+                pinned,
             },
         )
         .await
@@ -424,10 +426,15 @@ impl Client {
         id: &str,
         title: Option<String>,
         project: Option<Option<String>>,
+        pinned: Option<bool>,
     ) -> Result<(), String> {
         self.post_empty(
             &format!("/workflows/{id}/configure"),
-            &ConfigureWorkflowRequest { title, project },
+            &ConfigureWorkflowRequest {
+                title,
+                project,
+                pinned,
+            },
         )
         .await
     }

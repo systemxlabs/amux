@@ -3,7 +3,7 @@
 // 单任务节拍内按到期时间触发各视图刷新；设置类数据不做定时刷新，由视图打开时实时拉取。
 
 import type { Activity, HistoryItem, ListEntry, OpenTarget } from "../lib/types";
-import { entryId } from "../lib/types";
+import { entryId, entryPinned } from "../lib/types";
 import {
   beginNewerPage,
   beginOlderPage,
@@ -126,8 +126,12 @@ export async function loadOlderList(core: Core): Promise<void> {
   });
   // 普通会话与工作流会话是独立分页的两个列表，偏移各自按已加载条数计算；
   // 用合并后总条数当 offset 会跳过两端的中间页（issue：普通会话和工作流混合翻页会跳数）。
-  const sessionsOffset = core.state.entries.filter((entry) => entry.kind === "session").length;
-  const workflowsOffset = core.state.entries.filter((entry) => entry.kind === "workflow").length;
+  const sessionsOffset = core.state.entries.filter(
+    (entry) => entry.kind === "session" && !entryPinned(entry),
+  ).length;
+  const workflowsOffset = core.state.entries.filter(
+    (entry) => entry.kind === "workflow" && !entryPinned(entry),
+  ).length;
   try {
     const [sessions, workflows] = await Promise.all([
       client.sessions(started.limit, sessionsOffset),

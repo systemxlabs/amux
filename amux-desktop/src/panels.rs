@@ -52,6 +52,15 @@ impl IconNamed for FileDiffIcon {
     }
 }
 
+/// 会话置顶状态图标；默认图标集没有「别针」，使用应用自有资产。
+struct PinIcon;
+
+impl IconNamed for PinIcon {
+    fn path(self) -> SharedString {
+        "icons/pin.svg".into()
+    }
+}
+
 // ---------- 左侧面板 ----------
 
 /// 左侧面板内容：标题与新建入口、会话列表、设置入口。
@@ -307,6 +316,11 @@ fn session_row(
         .gap_1p5()
         .items_center()
         .child(marker)
+        .child(if session.pinned {
+            pinned_indicator(theme.primary)
+        } else {
+            div().size_4().into_any_element()
+        })
         .child(
             h_flex().flex_1().min_w_0().gap_1().items_center().child(
                 Label::new(title)
@@ -358,6 +372,11 @@ fn workflow_row(
                     theme.muted_foreground
                 }),
         )
+        .child(if workflow.pinned {
+            pinned_indicator(theme.primary)
+        } else {
+            div().size_4().into_any_element()
+        })
         .child(
             Label::new(title)
                 .text_sm()
@@ -484,6 +503,9 @@ fn list_row(
             let rename_app = app.clone();
             let create_entry = entry.clone();
             let create_app = app.clone();
+            let pin_entry = entry.clone();
+            let pin_app = app.clone();
+            let pinned = entry.is_pinned();
             let delete_entry = entry.clone();
             let delete_app = app.clone();
             let mut menu = menu
@@ -496,6 +518,15 @@ fn list_row(
                         let entry = create_entry.clone();
                         create_app.update(cx, |this, cx| this.create_from_entry(entry, cx));
                     }),
+                )
+                .item(
+                    PopupMenuItem::new(if pinned { "取消置顶" } else { "置顶" }).on_click(
+                        move |_, _window, cx| {
+                            pin_app.update(cx, |this, cx| {
+                                this.set_entry_pinned(pin_entry.clone(), !pinned, cx)
+                            });
+                        },
+                    ),
                 )
                 .item(
                     PopupMenuItem::new("删除会话").on_click(move |_, window, cx| {
@@ -549,6 +580,13 @@ fn busy_indicator(state: SessionState, color: Hsla) -> AnyElement {
     } else {
         div().size_2().into_any_element()
     }
+}
+
+fn pinned_indicator(color: Hsla) -> AnyElement {
+    Icon::new(PinIcon)
+        .small()
+        .text_color(color)
+        .into_any_element()
 }
 
 // ---------- 悬浮按钮栏 ----------

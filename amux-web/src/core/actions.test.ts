@@ -25,6 +25,7 @@ import {
   retryAttachment,
   sendPrompt,
   showNewSession,
+  toggleEntryPinned,
   toggleSidePanel,
   updateWorkspaceInput,
 } from "./actions";
@@ -37,6 +38,7 @@ function session(): Session {
     agent: "codex",
     title: "会话",
     state: "idle",
+    pinned: false,
     workspace: "/w",
     worktreeDir: "",
     createdAt: 1,
@@ -50,6 +52,7 @@ function workflow(): Workflow {
     title: "工作流",
     state: "idle",
     plan: "计划",
+    pinned: false,
     createdAt: 1,
     updatedAt: 1,
     linkedSessions: [],
@@ -58,6 +61,30 @@ function workflow(): Workflow {
 
 const sessionEntry: ListEntry = { kind: "session", session: session() };
 const workflowEntry: ListEntry = { kind: "workflow", workflow: workflow() };
+
+it("置顶普通会话和工作流都通过 configure 更新并刷新列表", async () => {
+  const core = new Core();
+  core.state.status = "online";
+  const calls: unknown[][] = [];
+  core.client = {
+    configureSession: async (...args: unknown[]): Promise<void> => {
+      calls.push(args);
+    },
+    configureWorkflow: async (...args: unknown[]): Promise<void> => {
+      calls.push(args);
+    },
+    sessions: async (): Promise<SessionList> => ({ sessions: [], hasMore: false }),
+    workflows: async (): Promise<WorkflowList> => ({ workflows: [], hasMore: false }),
+  } as unknown as ApiClient;
+
+  await toggleEntryPinned(core, sessionEntry);
+  await toggleEntryPinned(core, workflowEntry);
+
+  expect(calls).toEqual([
+    ["s1", null, null, undefined, true],
+    ["w1", null, undefined, true],
+  ]);
+});
 
 it("从普通会话新建时保留机器、agent、工作目录、项目和 worktree 设置", async () => {
   const core = new Core();

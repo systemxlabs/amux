@@ -383,7 +383,13 @@ async fn configure_session(
 ) -> ApiResult<OpAck> {
     state
         .sessions
-        .configure(&id, request.title, request.config, request.project)
+        .configure(
+            &id,
+            request.title,
+            request.config,
+            request.project,
+            request.pinned,
+        )
         .await
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
@@ -788,7 +794,7 @@ async fn configure_workflow(
 ) -> ApiResult<OpAck> {
     state
         .workflows
-        .configure(&id, request.title, request.project)
+        .configure(&id, request.title, request.project, request.pinned)
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
 }

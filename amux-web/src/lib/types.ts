@@ -121,6 +121,7 @@ export type Session = {
   title: string;
   state: SessionState;
   project?: string;
+  pinned: boolean;
   workspace: string;
   worktreeDir: string;
   createdAt: number;
@@ -140,6 +141,7 @@ export type ConfigureSessionRequest = {
   title?: string;
   config?: SessionConfigSetting;
   project?: string | null;
+  pinned?: boolean;
 };
 
 export type HistoryPage = {
@@ -181,13 +183,18 @@ export type Workflow = {
   state: SessionState;
   plan: string;
   project?: string;
+  pinned: boolean;
   createdAt: number;
   updatedAt: number;
   linkedSessions: Session[];
 };
 export type WorkflowList = { workflows: Workflow[]; hasMore: boolean };
 export type CreateWorkflowRequest = { plan: string; title?: string; project?: string };
-export type ConfigureWorkflowRequest = { title?: string; project?: string | null };
+export type ConfigureWorkflowRequest = {
+  title?: string;
+  project?: string | null;
+  pinned?: boolean;
+};
 
 /** 管理类操作的通用应答。 */
 export type OpAck = { ok: boolean };
@@ -221,7 +228,7 @@ export type OpenTarget =
   | { kind: "session"; id: string }
   | { kind: "workflow"; id: string };
 
-/** 会话列表条目：普通会话或工作流会话（统一按最近活跃排序）。 */
+/** 会话列表条目：普通会话或工作流会话（置顶优先，其余按创建时间排序）。 */
 export type ListEntry =
   | { kind: "session"; session: Session }
   | { kind: "workflow"; workflow: Workflow };
@@ -235,16 +242,16 @@ export function entryId(entry: ListEntry): string {
   return entry.kind === "session" ? entry.session.id : entry.workflow.id;
 }
 
-export function entryUpdatedAt(entry: ListEntry): number {
-  return entry.kind === "session" ? entry.session.updatedAt : entry.workflow.updatedAt;
-}
-
 export function entryState(entry: ListEntry): SessionState {
   return entry.kind === "session" ? entry.session.state : entry.workflow.state;
 }
 
 export function entryTitle(entry: ListEntry): string {
   return entry.kind === "session" ? entry.session.title : entry.workflow.title;
+}
+
+export function entryPinned(entry: ListEntry): boolean {
+  return entry.kind === "session" ? entry.session.pinned : entry.workflow.pinned;
 }
 
 export function entryCreatedAt(entry: ListEntry): number {
