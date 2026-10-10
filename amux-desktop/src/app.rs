@@ -1788,8 +1788,7 @@ impl AmuxApp {
                 core.view.session.clone(),
             )
         });
-        let (Some(client), Some(OpenTarget::Session(id)), Some(session)) =
-            (client, open, session)
+        let (Some(client), Some(OpenTarget::Session(id)), Some(session)) = (client, open, session)
         else {
             return;
         };
