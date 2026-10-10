@@ -480,9 +480,15 @@ async fn server_daemon_agent_end_to_end() {
         "agent 回复落盘",
     )
     .await;
+    let user = history
+        .iter()
+        .find(|item| item["role"] == "user")
+        .expect("应有用户消息");
     assert!(
-        history.iter().any(|item| item["role"] == "user"),
-        "应有用户消息: {history:?}"
+        user["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("mock-")),
+        "用户消息 ID 应取自 session/prompt 响应: {user:?}"
     );
     let agent = history
         .iter()

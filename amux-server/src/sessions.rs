@@ -175,7 +175,7 @@ impl SessionService {
             .agent_session_id(id)
             .ok_or_else(|| "agent 会话未就绪".to_string())?;
         let conn = self.machines.acp(&session.machine, &session.agent).await?;
-        conn.prompt(&agent_session_id, input.clone()).await?;
+        let message_id = conn.prompt(&agent_session_id, input.clone()).await?;
 
         // prompt 已受理：用户消息立即落盘（忽略 Agent 回放的 user_message*）
         let text: String = input
@@ -187,7 +187,7 @@ impl SessionService {
             .collect();
         let content = serde_json::to_string(&input).unwrap_or_default();
         self.store
-            .upsert_message(id, &Uuid::new_v4().to_string(), "user", &content, now_ms());
+            .upsert_message(id, &message_id, "user", &content, now_ms());
         if session.title.is_empty() && !text.is_empty() {
             self.store.set_title(id, &generate_title(&text));
         }

@@ -134,7 +134,7 @@ enum Call {
     Prompt {
         agent_session_id: String,
         input: Vec<ContentBlock>,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<String, String>>,
     },
     Cancel {
         agent_session_id: String,
@@ -199,7 +199,7 @@ impl AgentConnection {
         &self,
         agent_session_id: &str,
         input: Vec<ContentBlock>,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let (tx, rx) = oneshot::channel();
         self.send(Call::Prompt {
             agent_session_id: agent_session_id.to_string(),
@@ -470,7 +470,7 @@ async fn handle_call(
         } => {
             let result = request(cx, PromptRequest::new(agent_session_id, input))
                 .await
-                .map(|_| ());
+                .map(|response| response.message_id.to_string());
             let _ = reply.send(result);
         }
         Call::Cancel { agent_session_id } => {
