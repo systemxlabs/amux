@@ -72,12 +72,12 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/machines/<machine_name>/list_dir` | 分页查看指定路径文件夹列表 |
 | GET `/machines/<machine_name>/read_file` | 分页查看指定路径文本文件内容 |
 | POST `/sessions` | 新建一个普通会话 |
-| GET `/sessions` | 分页查询非关联普通会话列表，可指定项目 |
+| GET `/sessions` | 分页查询非关联非置顶普通会话列表，可指定项目，响应包含该项目所有置顶非关联普通会话 |
 | GET `/sessions/<session_id>` | 查询指定普通会话 |
 | POST `/sessions/<session_id>` | 往指定普通会话发送指令 |
 | DELETE `/sessions/<session_id>` | 删除指定普通会话 |
 | POST `/sessions/<session_id>/cancel` | 取消指定普通会话 |
-| POST `/sessions/<session_id>/configure` | 配置指定普通会话：会话标题、会话选项、所属项目等 |
+| POST `/sessions/<session_id>/configure` | 配置指定普通会话：会话标题、会话选项、所属项目、（取消）置顶等 |
 | GET `/sessions/<session_id>/config_options` | 获取指定普通会话的会话选项 |
 | GET `/sessions/<session_id>/slash_commands` | 获取指定普通会话的斜杠命令 |
 | GET `/sessions/<session_id>/plan` | 获取指定普通会话的 agent 计划 |
@@ -99,11 +99,11 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/attachments/<attachment_name>` | 下载指定附件，无鉴权 |
 | DELETE `/sessions/<session_id>/attachments/<attachment_name>` | 删除指定附件 |
 | POST `/workflows` | 新建一个工作流会话 |
-| GET `/workflows` | 分页查询工作流会话列表，可指定项目，结果包含关联普通会话 |
+| GET `/workflows` | 分页查询非置顶工作流会话列表，可指定项目，响应应包含该项目所有置顶工作流会话，每个工作流会话应包含其所有关联普通会话 |
 | GET `/workflows/<workflow_id>` | 查询指定工作流会话 |
 | POST `/workflows/<workflow_id>` | 往指定工作流会话发送指令 |
 | DELETE `/workflows/<workflow_id>` | 删除指定工作流会话，级联删除关联普通会话 |
-| POST `/workflows/<workflow_id>/configure` | 配置指定工作流会话：会话标题、所属项目等 |
+| POST `/workflows/<workflow_id>/configure` | 配置指定工作流会话：会话标题、所属项目、（取消）置顶等 |
 | GET `/workflows/<workflow_id>/usage` | 查询指定工作流会话的会话用量 |
 | GET `/workflows/<workflow_id>/history` | 分页查询指定工作流会话的对话历史 |
 | GET `/workflows/<workflow_id>/activities` | 分页查询指定工作流会话的活动历史 |
@@ -338,9 +338,11 @@ Server 作为 ACP client 与 Agents 通信
   ```SQL
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,             -- 会话 ID
+    workflow_id TEXT,                -- 所属工作流会话 ID
     state TEXT NOT NULL,             -- 会话状态
     title TEXT,                      -- 会话标题
     project TEXT,                    -- 所属项目
+    pinned BOOL NOT NULL,            -- 是否置顶
     workspace TEXT NOT NULL,         -- 工作目录
     worktree_dir TEXT,               -- worktree 目录
     machine TEXT NOT NULL,           -- 所属机器
@@ -466,14 +468,9 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     state TEXT NOT NULL,              -- 会话状态
     plan TEXT NOT NULL,               -- 执行计划
     project TEXT,                     -- 所属项目
+    pinned BOOL NOT NULL,             -- 是否置顶
     created_at INTEGER NOT NULL,      -- 创建时间
     updated_at INTEGER NOT NULL       -- 更新时间
-  );
-
-  CREATE TABLE IF NOT EXISTS workflow_linked_sessions (
-    workflow_id TEXT NOT NULL,         -- 工作流会话 ID
-    session_id TEXT NOT NULL,          -- 关联普通会话 ID
-    PRIMARY KEY (workflow_id, session_id)
   );
   ```
 - 对话和活动历史：存储在 `~/.amux/workflows/<workflow_id>_transcript.jsonl` 文件中，包含用户输入、工作流智能体输出、工具调用、thinking、执行错误，不包含工具结果
@@ -584,7 +581,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 会话列表刷新机制
 - 定时刷新：每隔 10s 刷新一次会话列表
-- 主动刷新：当创建新会话、删除会话、重命名会话、用户或系统往会话发送用户消息时，主动触发会话列表刷新
+- 主动刷新：当创建新会话、删除会话、重命名会话、（取消）置顶会话、用户或系统往会话发送用户消息时，主动触发会话列表刷新
 
 会话列表滚动机制：按滚动位置计算应展示的页并拉取，预取上下相邻两页缓冲。页大小随面板可视高度自适应调整。
 
