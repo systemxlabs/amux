@@ -525,8 +525,10 @@ impl WorkflowService {
                         messages.push(Message::assistant(text));
                     }
                 }
-                // 执行错误只是本地记录，不构成回合边界，也不进模型上下文
-                TranscriptLine::Error { .. } => {}
+                // 执行错误、上下文压缩与通知只是展示活动，不构成回合边界
+                TranscriptLine::Compaction { .. }
+                | TranscriptLine::Notice { .. }
+                | TranscriptLine::Error { .. } => {}
             }
         }
         settle_turn(&mut messages, &mut thinking, &mut calls);
@@ -1042,6 +1044,17 @@ enum TranscriptLine {
         tool_name: String,
         parameters: String,
     },
+    Compaction {
+        timestamp: u64,
+        status: String,
+        summary: String,
+    },
+    Notice {
+        timestamp: u64,
+        severity: String,
+        title: String,
+        description: Option<String>,
+    },
     Error {
         timestamp: u64,
         error: String,
@@ -1070,6 +1083,28 @@ impl From<&Activity> for TranscriptLine {
                 tool_call_id: tool_call_id.clone(),
                 tool_name: tool_name.clone(),
                 parameters: parameters.clone().unwrap_or_default(),
+            },
+            Activity::Compaction {
+                timestamp,
+                status,
+                summary,
+                ..
+            } => TranscriptLine::Compaction {
+                timestamp: *timestamp,
+                status: status.clone(),
+                summary: summary.clone(),
+            },
+            Activity::Notice {
+                timestamp,
+                severity,
+                title,
+                description,
+                ..
+            } => TranscriptLine::Notice {
+                timestamp: *timestamp,
+                severity: severity.clone(),
+                title: title.clone(),
+                description: description.clone(),
             },
             Activity::Error {
                 timestamp, error, ..
@@ -1105,6 +1140,28 @@ impl TranscriptLine {
                 tool_name,
                 title: None,
                 parameters: Some(parameters),
+            }),
+            TranscriptLine::Compaction {
+                timestamp,
+                status,
+                summary,
+            } => Some(Activity::Compaction {
+                id,
+                timestamp,
+                status,
+                summary,
+            }),
+            TranscriptLine::Notice {
+                timestamp,
+                severity,
+                title,
+                description,
+            } => Some(Activity::Notice {
+                id,
+                timestamp,
+                severity,
+                title,
+                description,
             }),
             TranscriptLine::Error { timestamp, error } => Some(Activity::Error {
                 id,

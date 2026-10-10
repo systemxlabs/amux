@@ -88,7 +88,7 @@ impl HistoryItem {
     }
 }
 
-/// 会话活动：turn 过程中的详细活动（thinking / tool_call / error）。
+/// 会话活动：turn 过程中的详细活动（thinking / tool_call / compaction / notice / error）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
@@ -109,6 +109,22 @@ pub enum Activity {
         #[serde(skip_serializing_if = "Option::is_none")]
         parameters: Option<String>,
     },
+    Compaction {
+        #[serde(default)]
+        id: String,
+        timestamp: u64,
+        status: String,
+        summary: String,
+    },
+    Notice {
+        #[serde(default)]
+        id: String,
+        timestamp: u64,
+        severity: String,
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
     Error {
         #[serde(default)]
         id: String,
@@ -123,6 +139,8 @@ impl Activity {
         match self {
             Activity::Thinking { id, .. }
             | Activity::ToolCall { id, .. }
+            | Activity::Compaction { id, .. }
+            | Activity::Notice { id, .. }
             | Activity::Error { id, .. } => id,
         }
     }
@@ -132,6 +150,8 @@ impl Activity {
         match self {
             Activity::Thinking { id, .. }
             | Activity::ToolCall { id, .. }
+            | Activity::Compaction { id, .. }
+            | Activity::Notice { id, .. }
             | Activity::Error { id, .. } => *id = value,
         }
     }
@@ -141,6 +161,8 @@ impl Activity {
         match self {
             Activity::Thinking { timestamp, .. }
             | Activity::ToolCall { timestamp, .. }
+            | Activity::Compaction { timestamp, .. }
+            | Activity::Notice { timestamp, .. }
             | Activity::Error { timestamp, .. } => *timestamp,
         }
     }

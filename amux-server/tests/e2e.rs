@@ -553,6 +553,19 @@ async fn server_daemon_agent_end_to_end() {
         1,
         "同一 toolCallId 的多次 update 应合并为一条活动"
     );
+    let compaction = activities
+        .iter()
+        .find(|item| item["kind"] == "compaction")
+        .expect("应有上下文压缩活动");
+    assert_eq!(compaction["summary"], "压缩摘要");
+    assert_eq!(compaction["status"], "completed");
+    let notice = activities
+        .iter()
+        .find(|item| item["kind"] == "notice")
+        .expect("应有通知活动");
+    assert_eq!(notice["severity"], "warning");
+    assert_eq!(notice["title"], "连接不稳定");
+    assert_eq!(notice["description"], "请稍后重试");
 
     // 斜杠命令 / 计划 / 上下文：来自 ACP 通知的缓存
     let commands = client

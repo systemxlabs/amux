@@ -24,6 +24,15 @@ export type Activity =
       title?: string;
       parameters?: string;
     }
+  | { kind: "compaction"; id: string; timestamp: number; status: string; summary: string }
+  | {
+      kind: "notice";
+      id: string;
+      timestamp: number;
+      severity: string;
+      title: string;
+      description?: string;
+    }
   | { kind: "error"; id: string; timestamp: number; error: string };
 
 export type SessionConfigSelectEntry = { value: string; name: string };

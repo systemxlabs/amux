@@ -94,6 +94,24 @@ describe("activitySummary", () => {
     expect(activitySummary({ kind: "error", id: "a3", timestamp: 1, error: "调用失败" })).toBe(
       "调用失败",
     );
+    expect(
+      activitySummary({
+        kind: "compaction",
+        id: "a4",
+        timestamp: 1,
+        status: "completed",
+        summary: "压缩\n摘要",
+      }),
+    ).toBe("已完成 压缩 摘要");
+    expect(
+      activitySummary({
+        kind: "notice",
+        id: "a5",
+        timestamp: 1,
+        severity: "warning",
+        title: "连接不稳定",
+      }),
+    ).toBe("警告 连接不稳定");
   });
 });
 
@@ -115,6 +133,24 @@ describe("activityBarText", () => {
     expect(activityBarText({ kind: "error", id: "a3", timestamp: 1, error: "调用失败" })).toBe(
       "错误 调用失败",
     );
+    expect(
+      activityBarText({
+        kind: "compaction",
+        id: "a4",
+        timestamp: 1,
+        status: "completed",
+        summary: "压缩摘要",
+      }),
+    ).toBe("上下文压缩 已完成 压缩摘要");
+    expect(
+      activityBarText({
+        kind: "notice",
+        id: "a5",
+        timestamp: 1,
+        severity: "warning",
+        title: "连接不稳定",
+      }),
+    ).toBe("通知 警告 连接不稳定");
   });
 });
 
@@ -150,6 +186,25 @@ describe("activityDetail", () => {
         tool_name: "list_agents",
       }),
     ).toBe("list_agents");
+    expect(
+      activityDetail({
+        kind: "compaction",
+        id: "a4",
+        timestamp: 4,
+        status: "completed",
+        summary: "压缩摘要",
+      }),
+    ).toBe("已完成 压缩摘要");
+    expect(
+      activityDetail({
+        kind: "notice",
+        id: "a5",
+        timestamp: 5,
+        severity: "warning",
+        title: "连接不稳定",
+        description: "请稍后重试",
+      }),
+    ).toBe("连接不稳定\n请稍后重试");
   });
 });
 

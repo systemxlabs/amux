@@ -296,7 +296,50 @@ pub fn activity_kind_detail(activity: &Activity) -> (String, String) {
             }
             ("工具调用".to_string(), detail)
         }
+        Activity::Compaction {
+            status, summary, ..
+        } => (
+            "上下文压缩".to_string(),
+            [compaction_status_label(status), summary.as_str()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        Activity::Notice {
+            severity,
+            title,
+            description,
+            ..
+        } => {
+            let mut detail = format!("{}\n", notice_severity_label(severity));
+            detail.push_str(title);
+            if let Some(description) = description.as_ref().filter(|value| !value.is_empty()) {
+                detail.push('\n');
+                detail.push_str(description.as_str());
+            }
+            ("通知".to_string(), detail)
+        }
         Activity::Error { error, .. } => ("错误".to_string(), error.clone()),
+    }
+}
+
+fn compaction_status_label(status: &str) -> &str {
+    match status {
+        "in_progress" => "进行中",
+        "completed" => "已完成",
+        "failed" => "失败",
+        "cancelled" => "已取消",
+        _ => status,
+    }
+}
+
+fn notice_severity_label(severity: &str) -> &str {
+    match severity {
+        "info" => "信息",
+        "warning" => "警告",
+        "error" => "错误",
+        _ => severity,
     }
 }
 
@@ -311,6 +354,8 @@ pub fn activity_timestamp(activity: &Activity) -> u64 {
     match activity {
         Activity::Thinking { timestamp, .. } => *timestamp,
         Activity::ToolCall { timestamp, .. } => *timestamp,
+        Activity::Compaction { timestamp, .. } => *timestamp,
+        Activity::Notice { timestamp, .. } => *timestamp,
         Activity::Error { timestamp, .. } => *timestamp,
     }
 }

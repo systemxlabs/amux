@@ -31,9 +31,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_client_protocol::schema::v2::{
     AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
-    CancelSessionNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, DeleteSessionRequest, DeleteSessionResponse, IdleStateUpdate, InitializeRequest,
-    InitializeResponse, MessageId, Meta, NewSessionRequest, NewSessionResponse, PermissionOption,
+    CancelSessionNotification, CloseSessionRequest, CloseSessionResponse, CompactionStatus,
+    CompactionSummaryChunk, CompactionUpdate, ContentBlock, ContentChunk, DeleteSessionRequest,
+    DeleteSessionResponse, IdleStateUpdate, InitializeRequest, InitializeResponse, MessageId, Meta,
+    NewSessionRequest, NewSessionResponse, Notice, NoticeSeverity, PermissionOption,
     PermissionOptionKind, PlanEntry, PlanEntryPriority, PlanEntryStatus, PlanItems, PlanUpdate,
     PlanUpdateContent, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption,
@@ -302,14 +303,16 @@ async fn run(state_file: &str) -> Result<()> {
                     })
                     .unwrap_or_default();
                 // v2：立即受理，前台工作随后经 session/update 报告。
-                // 响应形状对齐 codex-acp-v2 的转向响应：只带 `_meta`，不携带其它字段。
                 let meta: Meta = [(
                     "codex".to_string(),
                     serde_json::json!({ "steered": sid.clone() }),
                 )]
                 .into_iter()
                 .collect();
-                responder.respond(PromptResponse::new().meta(meta))?;
+                responder.respond(
+                    PromptResponse::new(MessageId::new(format!("mock-{}", uuid::Uuid::new_v4())))
+                        .meta(meta),
+                )?;
                 let state_file = state_prompt.clone();
                 let turn_cx = cx.clone();
                 cx.spawn(async move {
@@ -497,6 +500,39 @@ async fn run_turn(
 
 /// 下发斜杠命令与计划（全量覆盖），供查询验证。
 fn send_profile_updates(cx: &V2ConnectionTo<Client>, sid: &SessionId) -> Result<()> {
+    send_update(
+        cx,
+        sid,
+        SessionUpdate::CompactionUpdate(CompactionUpdate::new(
+            "cmp_1",
+            CompactionStatus::InProgress,
+        )),
+    )?;
+    send_update(
+        cx,
+        sid,
+        SessionUpdate::CompactionSummaryChunk(CompactionSummaryChunk::new(
+            "cmp_1",
+            ContentBlock::Text(agent_client_protocol::schema::v2::TextContent::new(
+                "压缩摘要",
+            )),
+        )),
+    )?;
+    send_update(
+        cx,
+        sid,
+        SessionUpdate::CompactionUpdate(CompactionUpdate::new(
+            "cmp_1",
+            CompactionStatus::Completed,
+        )),
+    )?;
+    send_update(
+        cx,
+        sid,
+        SessionUpdate::Notice(
+            Notice::new(NoticeSeverity::Warning, "连接不稳定").description("请稍后重试"),
+        ),
+    )?;
     send_update(
         cx,
         sid,

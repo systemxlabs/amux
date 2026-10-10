@@ -14,11 +14,12 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::v2::{
     AvailableCommand, AvailableCommandInput, CancelSessionNotification, ClientCapabilities,
-    CloseSessionRequest, DeleteSessionRequest, IdleStateUpdate, Implementation, InitializeRequest,
-    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind,
-    PlanUpdateContent, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedPermissionOutcome,
-    SessionConfigKind as AcpSessionConfigKind, SessionConfigOption as AcpSessionConfigOption,
+    CloseSessionRequest, CompactionStatus, DeleteSessionRequest, IdleStateUpdate, Implementation,
+    InitializeRequest, NewSessionRequest, NoticeSeverity, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, PlanUpdateContent, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigKind as AcpSessionConfigKind,
+    SessionConfigOption as AcpSessionConfigOption,
     SessionConfigOptionValue as AcpSessionConfigOptionValue, SessionConfigSelectOptions,
     SessionUpdate, SetSessionConfigOptionRequest, StateUpdate, StopReason, TextContent,
     ToolCallUpdate, UpdateSessionNotification,
@@ -56,6 +57,20 @@ pub enum AcpEvent {
         agent_session_id: String,
         message_id: String,
         text: String,
+    },
+    /// 上下文压缩活动内容（按 compaction_id upsert）
+    Compaction {
+        agent_session_id: String,
+        compaction_id: String,
+        status: String,
+        summary: String,
+    },
+    /// 会话通知活动（每次通知本地生成唯一 ID）
+    Notice {
+        agent_session_id: String,
+        severity: String,
+        title: String,
+        description: Option<String>,
     },
     /// 工具调用（按 tool_call_id upsert）
     ToolCall {
@@ -100,6 +115,7 @@ pub enum AcpEvent {
 enum MessageBufferKind {
     AgentMessage,
     AgentThought,
+    CompactionSummary,
 }
 
 type MessageBuffers = Mutex<HashMap<(String, String, MessageBufferKind), Vec<ContentBlock>>>;
@@ -595,6 +611,62 @@ fn translate(
                 });
             }
         }
+        SessionUpdate::CompactionUpdate(update) => {
+            let summary = match snapshot_blocks(&update.summary) {
+                Some(Some(blocks)) => join_text(&replace_blocks(
+                    buffers,
+                    &session_id,
+                    &update.compaction_id.to_string(),
+                    MessageBufferKind::CompactionSummary,
+                    Some(blocks),
+                ))
+                .unwrap_or_default(),
+                Some(None) => {
+                    replace_blocks(
+                        buffers,
+                        &session_id,
+                        &update.compaction_id.to_string(),
+                        MessageBufferKind::CompactionSummary,
+                        None,
+                    );
+                    String::new()
+                }
+                None => join_text(&current_blocks(
+                    buffers,
+                    &session_id,
+                    &update.compaction_id.to_string(),
+                    MessageBufferKind::CompactionSummary,
+                ))
+                .unwrap_or_default(),
+            };
+            out.push(AcpEvent::Compaction {
+                agent_session_id: session_id.clone(),
+                compaction_id: update.compaction_id.to_string(),
+                status: compaction_status_str(&update.status).to_string(),
+                summary: compaction_summary_with_error(summary, &update.error),
+            });
+        }
+        SessionUpdate::CompactionSummaryChunk(chunk) => {
+            let merged = append_block(
+                buffers,
+                &session_id,
+                &chunk.compaction_id.to_string(),
+                MessageBufferKind::CompactionSummary,
+                &chunk.content,
+            );
+            out.push(AcpEvent::Compaction {
+                agent_session_id: session_id.clone(),
+                compaction_id: chunk.compaction_id.to_string(),
+                status: "in_progress".to_string(),
+                summary: join_text(&merged).unwrap_or_default(),
+            });
+        }
+        SessionUpdate::Notice(notice) => out.push(AcpEvent::Notice {
+            agent_session_id: session_id.clone(),
+            severity: notice_severity_str(&notice.severity).to_string(),
+            title: notice.title.clone(),
+            description: notice.description.clone(),
+        }),
         SessionUpdate::StateUpdate(state) => match state {
             StateUpdate::Running(_) | StateUpdate::RequiresAction(_) => out.push(AcpEvent::State {
                 agent_session_id: session_id.clone(),
@@ -685,6 +757,50 @@ fn replace_blocks(
         blocks.clone(),
     );
     blocks
+}
+
+fn current_blocks(
+    buffers: &MessageBuffers,
+    session_id: &str,
+    message_id: &str,
+    kind: MessageBufferKind,
+) -> Vec<ContentBlock> {
+    buffers
+        .lock()
+        .get(&(session_id.to_string(), message_id.to_string(), kind))
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn compaction_summary_with_error(summary: String, error: &MaybeUndefined<String>) -> String {
+    if !summary.is_empty() {
+        return summary;
+    }
+    match error {
+        MaybeUndefined::Value(error) => error.clone(),
+        MaybeUndefined::Null | MaybeUndefined::Undefined => String::new(),
+    }
+}
+
+fn compaction_status_str(status: &CompactionStatus) -> &str {
+    match status {
+        CompactionStatus::InProgress => "in_progress",
+        CompactionStatus::Completed => "completed",
+        CompactionStatus::Failed => "failed",
+        CompactionStatus::Cancelled => "cancelled",
+        CompactionStatus::Other(status) => status,
+        _ => "unknown",
+    }
+}
+
+fn notice_severity_str(severity: &NoticeSeverity) -> &str {
+    match severity {
+        NoticeSeverity::Info => "info",
+        NoticeSeverity::Warning => "warning",
+        NoticeSeverity::Error => "error",
+        NoticeSeverity::Other(severity) => severity,
+        _ => "unknown",
+    }
 }
 
 fn tool_call_event(session_id: &str, update: &ToolCallUpdate) -> Option<AcpEvent> {

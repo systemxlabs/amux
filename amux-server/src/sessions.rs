@@ -585,6 +585,49 @@ impl SessionService {
                     .upsert_activity(&session.id, &id, "thinking", &content, now_ms());
                 None
             }
+            AcpEvent::Compaction {
+                agent_session_id,
+                compaction_id,
+                status,
+                summary,
+            } => {
+                let session = self.session_of_agent(&agent_session_id)?;
+                let activity = Activity::Compaction {
+                    id: compaction_id.clone(),
+                    timestamp: now_ms(),
+                    status,
+                    summary,
+                };
+                let content = serde_json::to_string(&activity).unwrap_or_default();
+                self.store.upsert_activity(
+                    &session.id,
+                    &compaction_id,
+                    "compaction",
+                    &content,
+                    now_ms(),
+                );
+                None
+            }
+            AcpEvent::Notice {
+                agent_session_id,
+                severity,
+                title,
+                description,
+            } => {
+                let session = self.session_of_agent(&agent_session_id)?;
+                let id = format!("notice-{}", Uuid::new_v4());
+                let activity = Activity::Notice {
+                    id: id.clone(),
+                    timestamp: now_ms(),
+                    severity,
+                    title,
+                    description,
+                };
+                let content = serde_json::to_string(&activity).unwrap_or_default();
+                self.store
+                    .upsert_activity(&session.id, &id, "notice", &content, now_ms());
+                None
+            }
             AcpEvent::ToolCall {
                 agent_session_id,
                 tool_call_id,

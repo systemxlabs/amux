@@ -941,6 +941,8 @@ fn activity_bar(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
             core.view.detail.ongoing,
             Some(amux_common::domain::Activity::Thinking { .. })
                 | Some(amux_common::domain::Activity::ToolCall { .. })
+                | Some(amux_common::domain::Activity::Compaction { .. })
+                | Some(amux_common::domain::Activity::Notice { .. })
         );
     h_flex()
         .w_full()

@@ -58,6 +58,10 @@ export function activitySummary(activity: Activity): string {
       return oneLine(activity.thinking);
     case "tool_call":
       return oneLine(activityContent(activity));
+    case "compaction":
+      return oneLine([compactionStatusLabel(activity.status), activity.summary].filter(Boolean).join(" "));
+    case "notice":
+      return oneLine([noticeSeverityLabel(activity.severity), activity.title].filter(Boolean).join(" "));
     case "error":
       return oneLine(activity.error);
   }
@@ -75,6 +79,10 @@ export function activityDetail(activity: Activity): string {
       return activity.thinking;
     case "tool_call":
       return activityContent(activity);
+    case "compaction":
+      return [compactionStatusLabel(activity.status), activity.summary].filter(Boolean).join(" ");
+    case "notice":
+      return [activity.title, activity.description].filter(Boolean).join("\n");
     case "error":
       return activity.error;
   }
@@ -95,8 +103,40 @@ export function activityKindLabel(activity: Activity): string {
       return "思考";
     case "tool_call":
       return "工具调用";
+    case "compaction":
+      return "上下文压缩";
+    case "notice":
+      return "通知";
     case "error":
       return "错误";
+  }
+}
+
+function compactionStatusLabel(status: string): string {
+  switch (status) {
+    case "in_progress":
+      return "进行中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "cancelled":
+      return "已取消";
+    default:
+      return status;
+  }
+}
+
+function noticeSeverityLabel(severity: string): string {
+  switch (severity) {
+    case "info":
+      return "信息";
+    case "warning":
+      return "警告";
+    case "error":
+      return "错误";
+    default:
+      return severity;
   }
 }
 

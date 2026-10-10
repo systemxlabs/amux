@@ -240,7 +240,10 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                         )
                     };
                     let history = Arc::new(Mutex::new(history));
-                    responder.respond(PromptResponse::new())?;
+                    responder.respond(PromptResponse::new(MessageId::new(format!(
+                        "nano-{}",
+                        uuid::Uuid::new_v4()
+                    ))))?;
                     let tools = runtime::Events {
                         cx: cx.clone(),
                         id: request.session_id.clone(),
