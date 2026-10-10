@@ -160,6 +160,7 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 |---|---|
 | nano | 已内置 |
 | codex | 本机装有 `codex` CLI & bunx 可用 |
+| claude | 本机装有 `claude` CLI & npx 可用 |
 
 ### Agent 启动
 
@@ -167,6 +168,7 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 |---|---|
 | nano | 进程内启动 |
 | codex | `INITIAL_AGENT_MODE=agent-full-access bunx @nyssance/codex-acp-v2` |
+| claude | `CLAUDE_AGENT_ACP_EXPERIMENTAL_V2=1 npx -y @agentclientprotocol/claude-agent-acp` |
 
 ### Nano 智能体
 
