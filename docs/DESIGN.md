@@ -351,10 +351,10 @@ Server 作为 ACP client 与 Agents 通信
   );
   ```
 - 对话历史：存储在 `~/.amux/sessions/<session_id>/transcript.sqlite` 文件中
-  - Server 在往 Agent 发送 `session/prompt` 成功后，应立即给用户消息赋予消息 ID 并落盘，忽略 Agent 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
+  - Server 在往 Agent 发送 `session/prompt` 成功后，读取响应中的消息 ID 并立即将用户消息落盘，忽略 Agent 的 `session/update` 通知的 `user_message` 和 `user_message_chunk` 类别
   ```SQL
   CREATE TABLE IF NOT EXISTS messages (
-    message_id TEXT PRIMARY KEY,   -- 消息 ID：用户消息 ID 由 Amux 生成，Agent 消息 ID 由 Agent 提供
+    message_id TEXT PRIMARY KEY,   -- 消息 ID
     role TEXT NOT NULL,            -- user / agent
     content TEXT NOT NULL,         -- 消息内容，以 ACP ContentBlock 数组格式转 json 后存放
     created_at INTEGER NOT NULL,   -- 创建时间
