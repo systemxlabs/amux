@@ -96,6 +96,14 @@ pub enum AcpEvent {
     AgentRestarted { machine: String, agent: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MessageBufferKind {
+    AgentMessage,
+    AgentThought,
+}
+
+type MessageBuffers = Mutex<HashMap<(String, String, MessageBufferKind), Vec<ContentBlock>>>;
+
 /// 会话层发往 ACP 连接的调用。
 enum Call {
     NewSession {
@@ -278,9 +286,7 @@ pub async fn connect(
     let opened_sessions = Arc::new(Mutex::new(HashSet::new()));
     let machine_name = machine.to_string();
     let agent_name = agent.to_string();
-    let buffers = Arc::new(Mutex::new(
-        HashMap::<(String, String), Vec<ContentBlock>>::new(),
-    ));
+    let buffers = Arc::new(Mutex::new(HashMap::new()));
     let task_opened_sessions = Arc::clone(&opened_sessions);
 
     tokio::spawn(async move {
@@ -517,7 +523,7 @@ async fn request<R: JsonRpcRequest>(
 /// ACP 通知 → 事件（消息内容按 messageId 累积为 ACP ContentBlock 数组）。
 fn translate(
     notification: &UpdateSessionNotification,
-    buffers: &Mutex<HashMap<(String, String), Vec<ContentBlock>>>,
+    buffers: &MessageBuffers,
     events: &mpsc::Sender<AcpEvent>,
 ) {
     let session_id = notification.session_id.to_string();
@@ -531,6 +537,7 @@ fn translate(
                 buffers,
                 &session_id,
                 &chunk.message_id.to_string(),
+                MessageBufferKind::AgentMessage,
                 &chunk.content,
             );
             out.push(AcpEvent::Message {
@@ -545,6 +552,7 @@ fn translate(
                     buffers,
                     &session_id,
                     &message.message_id.to_string(),
+                    MessageBufferKind::AgentMessage,
                     blocks.clone(),
                 );
                 out.push(AcpEvent::Message {
@@ -560,6 +568,7 @@ fn translate(
                     buffers,
                     &session_id,
                     &chunk.message_id.to_string(),
+                    MessageBufferKind::AgentThought,
                     &ContentBlock::Text(TextContent::new(text)),
                 );
                 out.push(AcpEvent::Thinking {
@@ -576,6 +585,7 @@ fn translate(
                     buffers,
                     &session_id,
                     &thought.message_id.to_string(),
+                    MessageBufferKind::AgentThought,
                     blocks,
                 );
                 out.push(AcpEvent::Thinking {
@@ -648,28 +658,30 @@ fn translate(
 }
 
 fn append_block(
-    buffers: &Mutex<HashMap<(String, String), Vec<ContentBlock>>>,
+    buffers: &MessageBuffers,
     session_id: &str,
     message_id: &str,
+    kind: MessageBufferKind,
     block: &ContentBlock,
 ) -> Vec<ContentBlock> {
     let mut buffers = buffers.lock();
     let entry = buffers
-        .entry((session_id.to_string(), message_id.to_string()))
+        .entry((session_id.to_string(), message_id.to_string(), kind))
         .or_default();
     entry.push(block.clone());
     entry.clone()
 }
 
 fn replace_blocks(
-    buffers: &Mutex<HashMap<(String, String), Vec<ContentBlock>>>,
+    buffers: &MessageBuffers,
     session_id: &str,
     message_id: &str,
+    kind: MessageBufferKind,
     blocks: Option<Vec<ContentBlock>>,
 ) -> Vec<ContentBlock> {
     let blocks = blocks.unwrap_or_default();
     buffers.lock().insert(
-        (session_id.to_string(), message_id.to_string()),
+        (session_id.to_string(), message_id.to_string(), kind),
         blocks.clone(),
     );
     blocks
@@ -937,6 +949,7 @@ mod tests {
             &buffers,
             "s1",
             "m1",
+            MessageBufferKind::AgentMessage,
             &ContentBlock::Text(TextContent::new("he")),
         );
         assert_eq!(join_text(&blocks), Some("he".to_string()));
@@ -944,6 +957,7 @@ mod tests {
             &buffers,
             "s1",
             "m1",
+            MessageBufferKind::AgentMessage,
             &ContentBlock::Text(TextContent::new("llo")),
         );
         assert_eq!(join_text(&blocks), Some("hello".to_string()));
@@ -951,12 +965,34 @@ mod tests {
             &buffers,
             "s1",
             "m2",
+            MessageBufferKind::AgentMessage,
             &ContentBlock::Text(TextContent::new("x")),
         );
         assert_eq!(join_text(&blocks), Some("x".to_string()));
         // 整条快照替换累积内容；清空后为无文本
-        let blocks = replace_blocks(&buffers, "s1", "m1", None);
+        let blocks = replace_blocks(&buffers, "s1", "m1", MessageBufferKind::AgentMessage, None);
         assert_eq!(join_text(&blocks), None);
+    }
+
+    #[test]
+    fn thought_and_agent_message_buffers_are_isolated() {
+        let buffers = Mutex::new(HashMap::new());
+        let thought = append_block(
+            &buffers,
+            "s1",
+            "shared",
+            MessageBufferKind::AgentThought,
+            &ContentBlock::Text(TextContent::new("private reasoning")),
+        );
+        let message = append_block(
+            &buffers,
+            "s1",
+            "shared",
+            MessageBufferKind::AgentMessage,
+            &ContentBlock::Text(TextContent::new("answer")),
+        );
+        assert_eq!(join_text(&thought), Some("private reasoning".to_string()));
+        assert_eq!(join_text(&message), Some("answer".to_string()));
     }
 
     #[test]

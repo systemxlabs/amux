@@ -484,6 +484,14 @@ async fn server_daemon_agent_end_to_end() {
         history.iter().any(|item| item["role"] == "user"),
         "应有用户消息: {history:?}"
     );
+    let agent = history
+        .iter()
+        .find(|item| item["role"] == "agent")
+        .expect("应有 agent 回复");
+    assert_eq!(
+        agent["content"][0]["text"], "完成：你好",
+        "thinking 与 agent message 使用同一 messageId 时仍须隔离: {agent:?}"
+    );
 
     // 会话状态回到空闲、标题取首条提示词
     let session = poll(

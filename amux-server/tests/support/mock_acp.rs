@@ -463,7 +463,7 @@ async fn run_turn(
             ContentBlock::Text(agent_client_protocol::schema::v2::TextContent::new(
                 "让我想想…",
             )),
-            MessageId::new("t1"),
+            MessageId::new("a1"),
         )),
     )?;
     let tool = ToolCallUpdate::new("tc1")
