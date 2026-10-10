@@ -316,10 +316,8 @@ fn session_row(
         .gap_1p5()
         .items_center()
         .child(marker)
-        .child(if session.pinned {
-            pinned_indicator(theme.primary)
-        } else {
-            div().size_4().into_any_element()
+        .when(session.pinned, |row| {
+            row.child(pinned_indicator(theme.primary))
         })
         .child(
             h_flex().flex_1().min_w_0().gap_1().items_center().child(
@@ -372,10 +370,8 @@ fn workflow_row(
                     theme.muted_foreground
                 }),
         )
-        .child(if workflow.pinned {
-            pinned_indicator(theme.primary)
-        } else {
-            div().size_4().into_any_element()
+        .when(workflow.pinned, |header| {
+            header.child(pinned_indicator(theme.primary))
         })
         .child(
             Label::new(title)

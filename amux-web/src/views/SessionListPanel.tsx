@@ -239,15 +239,13 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
         ) : (
           <SquareTerminal className="size-4 shrink-0 text-muted-foreground" />
         )}
-        <span className="flex size-3.5 shrink-0 items-center justify-center">
-          {entryPinned(entry) ? (
-            <Pin
-              data-slot="session-pinned"
-              aria-label="已置顶"
-              className="size-3.5 text-primary"
-            />
-          ) : null}
-        </span>
+        {entryPinned(entry) ? (
+          <Pin
+            data-slot="session-pinned"
+            aria-label="已置顶"
+            className="size-3.5 shrink-0 text-primary"
+          />
+        ) : null}
         <div className="min-w-0 flex-1">
           {editing ? (
             <Input
