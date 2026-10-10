@@ -365,10 +365,11 @@ Server 作为 ACP client 与 Agents 通信
   - 工具调用：基于 `session/update` ACP 通知的 `tool_call_update` 类型消息，tool name 使用 ACP 工具调用事件的 `name` 字段，若为空则使用 `kind` 字段
   - 思考：基于 `session/update` ACP 通知的 `agent_thought` 和 `agent_thought_chunk` 类型消息
   - 上下文压缩：基于 `session/update` ACP 通知的 `compaction_update` 和 `compaction_summary_chunk` 类型消息
+  - 通知：基于 `session/update` ACP 通知的 `notice` 类型消息，自动生成一个唯一 ID
   ```
   CREATE TABLE IF NOT EXISTS activities (
     activity_id TEXT PRIMARY KEY,  -- toolCallId / thought message id / compaction id / 本地生成的唯一 ID
-    kind TEXT NOT NULL,            -- 类别：tool_call / thinking / compaction / error
+    kind TEXT NOT NULL,            -- 类别：tool_call / thinking / compaction / notice / error
     content TEXT,                  -- 活动内容，以 json 格式存放
     created_at INTEGER NOT NULL,   -- 创建时间
     updated_at INTEGER NOT NULL    -- 更新时间
@@ -422,7 +423,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 | `configure_session` | 配置指定关联普通会话的会话标题和会话选项 |
 | `get_session_config_options` | 获取指定关联普通会话中执行智能体支持的会话选项，例如模型、推理级别，不同执行智能体可能支持不同的选项 |
 | `read_session_history` | 分页读取关联普通会话对话内容，包含用户消息和执行智能体输出消息 |
-| `read_session_activities` | 分页读取关联普通会话活动内容，包含执行智能体的思考、工具调用、上下文压缩和错误 |
+| `read_session_activities` | 分页读取关联普通会话活动内容，包含执行智能体的思考、工具调用、上下文压缩、通知和错误 |
 
 工作流智能体实现应支持 steer，当工作流会话处于工作中时，接收的用户消息以 steer 方式注入。
 
