@@ -87,23 +87,30 @@ fn daemon_binary() -> PathBuf {
     path
 }
 
-/// 假 bin 目录：`codex`（发现用）与 `bunx`（启动 agent 时改为运行模拟 agent）。
+/// 假 bin 目录：`codex`/`claude`（发现用）与 `bunx`/`npx`（启动 agent 时改为运行模拟 agent）。
 fn fake_bin(mock_agent: &Path, state_file: &Path) -> PathBuf {
     let dir = state_file.parent().expect("状态文件目录").join("bin");
     std::fs::create_dir_all(&dir).unwrap();
-    let codex = dir.join("codex");
-    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
-    let bunx = dir.join("bunx");
-    std::fs::write(
-        &bunx,
-        format!(
-            "#!/bin/sh\nexec '{}' '{}'\n",
-            mock_agent.display(),
-            state_file.display()
-        ),
-    )
-    .unwrap();
-    for file in [codex, bunx] {
+    let mut files = Vec::new();
+    for cli in ["codex", "claude"] {
+        let file = dir.join(cli);
+        std::fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+        files.push(file);
+    }
+    for runner in ["bunx", "npx"] {
+        let file = dir.join(runner);
+        std::fs::write(
+            &file,
+            format!(
+                "#!/bin/sh\nexec '{}' '{}'\n",
+                mock_agent.display(),
+                state_file.display()
+            ),
+        )
+        .unwrap();
+        files.push(file);
+    }
+    for file in files {
         let mut permissions = std::fs::metadata(&file).unwrap().permissions();
         #[cfg(unix)]
         {
@@ -375,13 +382,17 @@ async fn server_daemon_agent_end_to_end() {
         "codex 可用",
     )
     .await;
-    // 仅 codex 可用：nano 已内置但未配置模型，连接未就绪
+    // codex 与 claude 可用：nano 已内置但未配置模型，连接未就绪
     let available: Vec<_> = agents
         .iter()
         .filter(|agent| agent["available"] == true)
         .map(|agent| agent["name"].clone())
         .collect();
-    assert_eq!(available, vec![json!("codex")], "{agents:?}");
+    assert_eq!(
+        available,
+        vec![json!("codex"), json!("claude")],
+        "{agents:?}"
+    );
 
     // 建会话（惰性创建 agent 侧会话）
     let session = client

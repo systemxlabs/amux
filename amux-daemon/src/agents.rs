@@ -20,7 +20,7 @@ struct LaunchSpec {
     env: &'static [(&'static str, &'static str)],
 }
 
-const KNOWN_AGENTS: &[&str] = &[amux_common::api::NANO_AGENT, "codex"];
+const KNOWN_AGENTS: &[&str] = &[amux_common::api::NANO_AGENT, "codex", "claude"];
 
 fn launch_spec(agent: &str) -> Option<LaunchSpec> {
     match agent {
@@ -28,6 +28,11 @@ fn launch_spec(agent: &str) -> Option<LaunchSpec> {
             program: "bunx",
             args: &["@nyssance/codex-acp-v2"],
             env: &[("INITIAL_AGENT_MODE", "agent-full-access")],
+        }),
+        "claude" => Some(LaunchSpec {
+            program: "npx",
+            args: &["-y", "@agentclientprotocol/claude-agent-acp"],
+            env: &[("CLAUDE_AGENT_ACP_EXPERIMENTAL_V2", "1")],
         }),
         _ => None,
     }
@@ -39,6 +44,8 @@ fn is_installed(agent: &str) -> bool {
         amux_common::api::NANO_AGENT => true,
         // codex 经 bunx 启动：需要 codex CLI 与 bunx 同时可用
         "codex" => in_path("codex") && in_path("bunx"),
+        // claude 经 npx 启动：需要 claude CLI 与 npx 同时可用
+        "claude" => in_path("claude") && in_path("npx"),
         _ => false,
     }
 }
@@ -287,6 +294,15 @@ mod tests {
     fn unknown_agent_has_no_launch_spec() {
         assert!(launch_spec("unknown").is_none());
         assert!(launch_spec("codex").is_some());
+        assert!(launch_spec("claude").is_some());
+    }
+
+    #[test]
+    fn claude_launch_spec_matches_design() {
+        let spec = launch_spec("claude").expect("claude 应有启动配置");
+        assert_eq!(spec.program, "npx");
+        assert_eq!(spec.args, &["-y", "@agentclientprotocol/claude-agent-acp"]);
+        assert_eq!(spec.env, &[("CLAUDE_AGENT_ACP_EXPERIMENTAL_V2", "1")]);
     }
 
     #[test]
