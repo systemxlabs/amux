@@ -162,10 +162,10 @@ impl Client {
     pub async fn configure_session(
         &self,
         id: &str,
-        title: Option<String>,
+        title: String,
         config: Option<SessionConfigSetting>,
-        project: Option<Option<String>>,
-        pinned: Option<bool>,
+        project: Option<String>,
+        pinned: bool,
     ) -> Result<(), String> {
         self.post_empty(
             &format!("/sessions/{id}/configure"),
@@ -424,9 +424,9 @@ impl Client {
     pub async fn configure_workflow(
         &self,
         id: &str,
-        title: Option<String>,
-        project: Option<Option<String>>,
-        pinned: Option<bool>,
+        title: String,
+        project: Option<String>,
+        pinned: bool,
     ) -> Result<(), String> {
         self.post_empty(
             &format!("/workflows/{id}/configure"),

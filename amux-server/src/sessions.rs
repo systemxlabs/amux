@@ -213,22 +213,16 @@ impl SessionService {
     pub async fn configure(
         &self,
         id: &str,
-        title: Option<String>,
+        title: String,
         config: Option<SessionConfigSetting>,
-        project: Option<Option<String>>,
-        pinned: Option<bool>,
+        project: Option<String>,
+        pinned: bool,
     ) -> Result<(), String> {
-        if let Some(title) = title {
-            self.store.set_title(id, &title);
-        }
-        if let Some(project) = project {
-            self.store.set_session_project(id, project.as_deref());
-        }
-        if let Some(pinned) = pinned {
-            self.store.set_session_pinned(id, pinned);
-        }
+        let session = self.get(id)?;
+        self.store.set_title(id, &title);
+        self.store.set_session_project(id, project.as_deref());
+        self.store.set_session_pinned(id, pinned);
         if let Some(config) = config {
-            let session = self.get(id)?;
             self.ensure_agent_session(&session).await?;
             let agent_session_id = self
                 .agent_session_id(id)

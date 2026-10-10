@@ -209,9 +209,20 @@ export async function renameEntry(core: Core, entry: ListEntry, title: string): 
   if (!core.client) return;
   try {
     if (entry.kind === "session") {
-      await core.client.configureSession(entry.session.id, title, null);
+      await core.client.configureSession(
+        entry.session.id,
+        title,
+        null,
+        entry.session.project ?? null,
+        entry.session.pinned,
+      );
     } else {
-      await core.client.configureWorkflow(entry.workflow.id, title, undefined);
+      await core.client.configureWorkflow(
+        entry.workflow.id,
+        title,
+        entry.workflow.project ?? null,
+        entry.workflow.pinned,
+      );
     }
     core.success("标题已更新");
     await refreshList(core);
@@ -280,7 +291,13 @@ export async function setEntryProject(
   if (!core.client) return;
   try {
     if (entry.kind === "session") {
-      await core.client.configureSession(entry.session.id, null, null, project ?? null);
+      await core.client.configureSession(
+        entry.session.id,
+        entry.session.title,
+        null,
+        project ?? null,
+        entry.session.pinned,
+      );
       core.update((state) => {
         const item = state.entries.find(
           (candidate) => candidate.kind === "session" && candidate.session.id === entry.session.id,
@@ -291,7 +308,12 @@ export async function setEntryProject(
         }
       });
     } else {
-      await core.client.configureWorkflow(entry.workflow.id, null, project ?? null);
+      await core.client.configureWorkflow(
+        entry.workflow.id,
+        entry.workflow.title,
+        project ?? null,
+        entry.workflow.pinned,
+      );
       core.update((state) => {
         const item = state.entries.find(
           (candidate) =>
@@ -316,7 +338,13 @@ export async function toggleEntryPinned(core: Core, entry: ListEntry): Promise<v
   const pinned = !entryPinned(entry);
   try {
     if (entry.kind === "session") {
-      await core.client.configureSession(entry.session.id, null, null, undefined, pinned);
+      await core.client.configureSession(
+        entry.session.id,
+        entry.session.title,
+        null,
+        entry.session.project ?? null,
+        pinned,
+      );
       core.update((state) => {
         const item = state.entries.find(
           (candidate) =>
@@ -328,7 +356,12 @@ export async function toggleEntryPinned(core: Core, entry: ListEntry): Promise<v
         }
       });
     } else {
-      await core.client.configureWorkflow(entry.workflow.id, null, undefined, pinned);
+      await core.client.configureWorkflow(
+        entry.workflow.id,
+        entry.workflow.title,
+        entry.workflow.project ?? null,
+        pinned,
+      );
       core.update((state) => {
         const item = state.entries.find(
           (candidate) =>
@@ -846,8 +879,16 @@ export async function setConfigOption(
 ): Promise<void> {
   const target = core.state.open;
   if (!core.client || !target || target.kind !== "session") return;
+  const session = core.state.detail.session;
+  if (session === null) return;
   try {
-    await core.client.configureSession(target.id, null, { configId, ...value });
+    await core.client.configureSession(
+      target.id,
+      session.title,
+      { configId, ...value },
+      session.project ?? null,
+      session.pinned,
+    );
     const options = await core.client.configOptions(target.id);
     core.update((state) => {
       state.detail.configOptions = options;

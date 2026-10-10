@@ -152,16 +152,12 @@ export class ApiClient {
 
   configureSession(
     id: string,
-    title: string | null,
+    title: string,
     config: SessionConfigSetting | null,
-    project?: string | null,
-    pinned?: boolean,
+    project: string | null,
+    pinned: boolean,
   ): Promise<void> {
-    const body: ConfigureSessionRequest = {};
-    if (title !== null) body.title = title;
-    if (config !== null) body.config = config;
-    if (project !== undefined) body.project = project;
-    if (pinned !== undefined) body.pinned = pinned;
+    const body: ConfigureSessionRequest = { title, config, project, pinned };
     return this.postEmpty(`/sessions/${encodeURIComponent(id)}/configure`, body);
   }
 
@@ -340,14 +336,11 @@ export class ApiClient {
 
   configureWorkflow(
     id: string,
-    title: string | null,
-    project?: string | null,
-    pinned?: boolean,
+    title: string,
+    project: string | null,
+    pinned: boolean,
   ): Promise<void> {
-    const body: ConfigureWorkflowRequest = {};
-    if (title !== null) body.title = title;
-    if (project !== undefined) body.project = project;
-    if (pinned !== undefined) body.pinned = pinned;
+    const body: ConfigureWorkflowRequest = { title, project, pinned };
     return this.postEmpty(`/workflows/${encodeURIComponent(id)}/configure`, body);
   }
 

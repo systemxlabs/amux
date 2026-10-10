@@ -1781,8 +1781,16 @@ impl AmuxApp {
         value: SessionConfigOptionValue,
         cx: &mut Context<Self>,
     ) {
-        let (client, open) = self.with_core(|core| (core.client.clone(), core.open.clone()));
-        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
+        let (client, open, session) = self.with_core(|core| {
+            (
+                core.client.clone(),
+                core.open.clone(),
+                core.view.session.clone(),
+            )
+        });
+        let (Some(client), Some(OpenTarget::Session(id)), Some(session)) =
+            (client, open, session)
+        else {
             return;
         };
         // 立即反映到本地选项（下一次轮询确认；失败时由轮询回滚）
@@ -1812,7 +1820,13 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             let setting = SessionConfigSetting { config_id, value };
             if let Err(error) = client
-                .configure_session(&id, None, Some(setting), None, None)
+                .configure_session(
+                    &id,
+                    session.title,
+                    Some(setting),
+                    session.project,
+                    session.pinned,
+                )
                 .await
             {
                 core.lock().error(format!("会话选项设置失败：{error}"));
@@ -1953,18 +1967,33 @@ impl AmuxApp {
 
     /// 重命名会话（经 configure 接口更新标题）。
     pub fn rename(&mut self, target: OpenTarget, title: String, cx: &mut Context<Self>) {
+        let id = match &target {
+            OpenTarget::Session(id) | OpenTarget::Workflow(id) => id.clone(),
+        };
+        let Some(entry) = self.with_core(|core| core.entry(&id)) else {
+            return;
+        };
+        let (project, pinned) = match (&target, entry) {
+            (OpenTarget::Session(_), ListEntry::Session(session)) => {
+                (session.project.clone(), session.pinned)
+            }
+            (OpenTarget::Workflow(_), ListEntry::Workflow(workflow)) => {
+                (workflow.project.clone(), workflow.pinned)
+            }
+            _ => return,
+        };
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
-            let result = match &target {
+            let result = match target {
                 OpenTarget::Session(id) => {
                     client
-                        .configure_session(id, Some(title), None, None, None)
+                        .configure_session(&id, title, None, project, pinned)
                         .await
                 }
                 OpenTarget::Workflow(id) => {
-                    client.configure_workflow(id, Some(title), None, None).await
+                    client.configure_workflow(&id, title, project, pinned).await
                 }
             };
             match result {
@@ -1989,12 +2018,23 @@ impl AmuxApp {
             let result = match &entry {
                 ListEntry::Session(session) => {
                     client
-                        .configure_session(&session.id, None, None, Some(project.clone()), None)
+                        .configure_session(
+                            &session.id,
+                            session.title.clone(),
+                            None,
+                            project.clone(),
+                            session.pinned,
+                        )
                         .await
                 }
                 ListEntry::Workflow(workflow) => {
                     client
-                        .configure_workflow(&workflow.id, None, Some(project.clone()), None)
+                        .configure_workflow(
+                            &workflow.id,
+                            workflow.title.clone(),
+                            project.clone(),
+                            workflow.pinned,
+                        )
                         .await
                 }
             };
@@ -2044,12 +2084,23 @@ impl AmuxApp {
             let result = match &entry {
                 ListEntry::Session(session) => {
                     client
-                        .configure_session(&session.id, None, None, None, Some(pinned))
+                        .configure_session(
+                            &session.id,
+                            session.title.clone(),
+                            None,
+                            session.project.clone(),
+                            pinned,
+                        )
                         .await
                 }
                 ListEntry::Workflow(workflow) => {
                     client
-                        .configure_workflow(&workflow.id, None, None, Some(pinned))
+                        .configure_workflow(
+                            &workflow.id,
+                            workflow.title.clone(),
+                            workflow.project.clone(),
+                            pinned,
+                        )
                         .await
                 }
             };

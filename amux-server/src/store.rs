@@ -74,11 +74,6 @@ impl Store {
         std::fs::create_dir_all(&home).map_err(|e| format!("创建 {} 失败: {e}", home.display()))?;
         let sessions = open_db(&home.join("session.sqlite"), SESSION_SCHEMA)?;
         let workflows = open_db(&home.join("workflow.sqlite"), WORKFLOW_SCHEMA)?;
-        ensure_column(&sessions, "sessions", "workflow_id", "TEXT")?;
-        ensure_column(&sessions, "sessions", "project", "TEXT")?;
-        ensure_column(&sessions, "sessions", "pinned", "BOOL NOT NULL DEFAULT 0")?;
-        ensure_column(&workflows, "workflows", "project", "TEXT")?;
-        ensure_column(&workflows, "workflows", "pinned", "BOOL NOT NULL DEFAULT 0")?;
         // Server 重启后残留的「工作中」不再有 agent 侧 turn 支撑，统一回到空闲
         sessions
             .execute(
@@ -736,32 +731,6 @@ const WORKFLOW_SCHEMA: &str = "
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );";
-
-/// 为已有数据库补充新增列（老库无 project 列时）。
-fn ensure_column(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> Result<(), String> {
-    let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(|e| format!("读取 {table} 表结构失败: {e}"))?;
-    let columns: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| format!("读取 {table} 表结构失败: {e}"))?
-        .flatten()
-        .collect();
-    if columns.iter().any(|name| name == column) {
-        return Ok(());
-    }
-    conn.execute(
-        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
-        [],
-    )
-    .map(|_| ())
-    .map_err(|e| format!("为 {table} 补充 {column} 列失败: {e}"))
-}
 
 fn open_db(path: &Path, schema: &str) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("打开 {} 失败: {e}", path.display()))?;

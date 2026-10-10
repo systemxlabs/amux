@@ -167,19 +167,14 @@ impl WorkflowService {
     pub fn configure(
         &self,
         id: &str,
-        title: Option<String>,
-        project: Option<Option<String>>,
-        pinned: Option<bool>,
+        title: String,
+        project: Option<String>,
+        pinned: bool,
     ) -> Result<(), String> {
-        if let Some(title) = title {
-            self.store.set_workflow_title(id, &title);
-        }
-        if let Some(project) = project {
-            self.store.set_workflow_project(id, project.as_deref());
-        }
-        if let Some(pinned) = pinned {
-            self.store.set_workflow_pinned(id, pinned);
-        }
+        self.store.workflow(id).ok_or("工作流不存在")?;
+        self.store.set_workflow_title(id, &title);
+        self.store.set_workflow_project(id, project.as_deref());
+        self.store.set_workflow_pinned(id, pinned);
         Ok(())
     }
 
@@ -820,17 +815,19 @@ impl WorkflowTools {
             "configure_session" => {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
+                let session = services.sessions.get(&session_id)?;
                 let title = arguments
                     .get("title")
                     .and_then(|value| value.as_str())
-                    .map(str::to_string);
+                    .map(str::to_string)
+                    .unwrap_or(session.title);
                 let config = arguments
                     .get("config")
                     .cloned()
                     .and_then(|value| serde_json::from_value::<SessionConfigSetting>(value).ok());
                 services
                     .sessions
-                    .configure(&session_id, title, config, None, None)
+                    .configure(&session_id, title, config, session.project, session.pinned)
                     .await?;
                 Ok(format!("已更新 {session_id} 配置"))
             }
@@ -1310,7 +1307,13 @@ mod tests {
         service.link_session(&workflow.id, &session.id);
         service
             .sessions
-            .configure(&session.id, Some("修复登录".into()), None, None, None)
+            .configure(
+                &session.id,
+                "修复登录".into(),
+                None,
+                session.project.clone(),
+                session.pinned,
+            )
             .await
             .unwrap();
 

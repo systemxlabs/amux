@@ -154,7 +154,7 @@ describe("ApiClient", () => {
     expect(url.searchParams.has("dirs_only")).toBe(false);
   });
 
-  it("发送指令把内容块作为请求体，配置会话按需带上标题与选项", async () => {
+  it("发送指令把内容块作为请求体，配置接口发送完整会话状态", async () => {
     replies = [
       { status: 200, body: JSON.stringify({ ok: true }) },
       { status: 200, body: JSON.stringify({ ok: true }) },
@@ -169,21 +169,39 @@ describe("ApiClient", () => {
       input: [{ type: "text", text: "你好" }],
     });
 
-    await client.configureSession("s1", null, {
-      configId: "model",
-      type: "value_id",
-      value: "gpt-5",
-    });
+    await client.configureSession(
+      "s1",
+      "新标题",
+      {
+        configId: "model",
+        type: "value_id",
+        value: "gpt-5",
+      },
+      null,
+      false,
+    );
     expect(seen.at(-1)?.url).toBe("/sessions/s1/configure");
     expect(JSON.parse(seen.at(-1)!.body)).toEqual({
+      title: "新标题",
       config: { configId: "model", type: "value_id", value: "gpt-5" },
+      project: null,
+      pinned: false,
     });
 
-    await client.configureSession("s1", null, null, null);
-    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ project: null });
+    await client.configureSession("s1", "项目会话", null, "project-a", true);
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({
+      title: "项目会话",
+      config: null,
+      project: "project-a",
+      pinned: true,
+    });
 
-    await client.configureWorkflow("w1", null, null);
-    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ project: null });
+    await client.configureWorkflow("w1", "工作流", null, false);
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({
+      title: "工作流",
+      project: null,
+      pinned: false,
+    });
   });
 
   it("对话历史保留服务端返回的条目与时序号", async () => {

@@ -81,8 +81,8 @@ it("置顶普通会话和工作流都通过 configure 更新并刷新列表", as
   await toggleEntryPinned(core, workflowEntry);
 
   expect(calls).toEqual([
-    ["s1", null, null, undefined, true],
-    ["w1", null, undefined, true],
+    ["s1", "会话", null, null, true],
+    ["w1", "工作流", null, true],
   ]);
 });
 

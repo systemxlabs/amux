@@ -138,10 +138,10 @@ export type CreateSessionRequest = {
 };
 export type PromptRequest = { input: ContentBlock[] };
 export type ConfigureSessionRequest = {
-  title?: string;
-  config?: SessionConfigSetting;
-  project?: string | null;
-  pinned?: boolean;
+  title: string;
+  config: SessionConfigSetting | null;
+  project: string | null;
+  pinned: boolean;
 };
 
 export type HistoryPage = {
@@ -191,9 +191,9 @@ export type Workflow = {
 export type WorkflowList = { workflows: Workflow[]; hasMore: boolean };
 export type CreateWorkflowRequest = { plan: string; title?: string; project?: string };
 export type ConfigureWorkflowRequest = {
-  title?: string;
-  project?: string | null;
-  pinned?: boolean;
+  title: string;
+  project: string | null;
+  pinned: boolean;
 };
 
 /** 管理类操作的通用应答。 */
