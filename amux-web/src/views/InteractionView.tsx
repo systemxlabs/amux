@@ -562,13 +562,28 @@ function MessageBubble({ item }: { item: HistoryItem }) {
 
 /** 消息气泡内容：文本块直接展示，资源块展示文本内容与图片，URI 资源提供打开入口。 */
 function MessageContent({ content }: { content: readonly ContentBlock[] }) {
+  const blocks = mergeAdjacentTextBlocks(content);
   return (
     <>
-      {content.map((block, index) => (
+      {blocks.map((block, index) => (
         <BlockContent key={index} block={block} />
       ))}
     </>
   );
+}
+
+/** ACP v2 将流式文本按 chunk 保存为多个相邻 text block；展示时还原为连续文本。 */
+function mergeAdjacentTextBlocks(content: readonly ContentBlock[]): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+  for (const block of content) {
+    const previous = blocks.at(-1);
+    if (block.type === "text" && previous?.type === "text") {
+      blocks[blocks.length - 1] = { ...previous, text: previous.text + block.text };
+      continue;
+    }
+    blocks.push(block);
+  }
+  return blocks;
 }
 
 function BlockContent({ block }: { block: ContentBlock }) {
