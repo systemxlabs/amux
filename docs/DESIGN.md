@@ -29,11 +29,10 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 | `agent.list` | 发现当前机器已安装的 agents，以及 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
 | `git.diff` | 查询指定仓库改动 diff，对基准分支与 HEAD 的 merge-base 后的工作区做三点对比，覆盖已提交与未提交改动及未跟踪文件 |
-| `git.branches` | 查询指定仓库本地分支，并标记 worktree 源分支、仓库默认分支 |
-| `git.worktree.new` | 从指定仓库创建一个 worktree |
-| `git.worktree.resume` | 从指定仓库指定路径恢复 worktree |
-| `git.worktree.list` | 查询指定仓库所有 worktrees |
-| `git.worktree.remove` | 删除指定 worktree |
+| `git.branches` | 查询指定仓库本地分支和远端跟踪分支，并标记 worktree 基分支、仓库默认分支 |
+| `git.create_worktree` | 从指定仓库指定分支创建一个 worktree |
+| `git.worktrees` | 查询指定仓库所有 worktrees |
+| `git.remove_worktree` | 删除指定 worktree |
 | `fs.list` | 分页查看指定路径文件夹列表 |
 | `fs.read` | 分页查看指定路径文本文件内容 |
 | `terminal.open` | 打开一个终端，指定 cwd 和 size 等，返回终端 ID |
@@ -390,8 +389,6 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 普通会话创建时若指定了 worktree 方式，则创建 worktree。普通会话被删除时，删除其关联的 worktree，但保留 worktree 检出的分支。
 
-当普通会话超过 7 天不活跃时，自动清理其关联的 worktree，但不要清理其会话的 worktree 相关元数据，后续可按需（如用户向该会话输入新指令、查看会话执行目录）在同一目录重建 worktree。
-
 ### 工作流智能体
 
 系统提示词
@@ -419,7 +416,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 |---|---|
 | `list_agents` | 查询各机器的执行智能体列表，包括执行智能体状态（可用或不可用） |
 | `list_sessions` | 查询关联普通会话列表，包含会话 ID、状态、标题、工作目录、worktree 目录、机器、执行智能体等信息 |
-| `create_session` | 创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作 |
+| `create_session` | 创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作，若未指定 worktree 基分支，则默认从当前仓库的 HEAD 切出 |
 | `prompt_session` | 向指定关联普通会话以用户角色发送消息，驱动执行智能体工作 |
 | `cancel_session` | 取消指定关联普通会话中执行智能体正在进行中的工作，若无进行中的工作则立即返回成功 |
 | `configure_session` | 配置指定关联普通会话的会话标题和会话选项 |
@@ -627,7 +624,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 改动审查视图未打开时，不主动拉取改动内容。视图打开时，刷新一次，不定时刷新。
 
 改动审查视图基准分支优先顺序
-- 开启 worktree 会话：worktree 源分支 > 仓库默认分支 > HEAD
+- 开启 worktree 会话：worktree 基分支 > 仓库默认分支 > HEAD
 - 未开启 worktree 会话：仓库默认分支 > HEAD
 
 ### 会话详情视图
