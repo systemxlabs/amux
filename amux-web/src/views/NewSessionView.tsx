@@ -9,6 +9,13 @@ import { Folder } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Textarea } from "../components/ui/textarea";
@@ -22,6 +29,7 @@ import {
 import { refreshWorkflowSetup } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
 import { truncate } from "../lib/format";
+import type { GitBranch } from "../lib/types";
 import { cn } from "../lib/utils";
 
 /** 已保存计划上拉框：向上弹出，上方空间不足时向下弹，高度按剩余空间收敛。 */
@@ -36,6 +44,14 @@ const PLAN_POPUP_HEIGHT = 224;
 const POPUP_GAP = 8;
 /** 浮层最小高度：空间实在不够时允许略超出视口，也不至于只露一条缝。 */
 const POPUP_MIN_HEIGHT = 80;
+
+function worktreeBranchLabel(branch: GitBranch): string {
+  const marks = [
+    branch.isWorktreeBase ? "worktree 基分支" : "",
+    branch.isDefault ? "默认分支" : "",
+  ].filter(Boolean);
+  return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
+}
 
 /** 锚点某一侧可用于浮层的高度：收敛到该方向剩余空间。 */
 function popupMaxHeight(anchor: DOMRect, below: boolean): number {
@@ -88,8 +104,19 @@ export function NewSessionView() {
   const planField = useRef<HTMLDivElement | null>(null);
   const [planPopup, setPlanPopup] = useState<PlanPopupPlacement | null>(null);
   const [workspacePopup, setWorkspacePopup] = useState<WorkspacePopup | null>(null);
-  const { mode, machine, agent, workspace, useWorktree, plan, selectedPlan, suggestions } =
-    state.newSession;
+  const [worktreeBranches, setWorktreeBranches] = useState<GitBranch[]>([]);
+  const worktreeBranchRequest = useRef(0);
+  const {
+    mode,
+    machine,
+    agent,
+    workspace,
+    useWorktree,
+    worktreeBaseBranch,
+    plan,
+    selectedPlan,
+    suggestions,
+  } = state.newSession;
   const agents = state.settings.agents.find((item) => item.machine === machine)?.agents ?? [];
   const selectedAgent = agents.find((item) => item.name === agent);
   // PRD「新建会话视图」：已选择机器、已选择可用 agent、工作目录非空才可创建
@@ -108,6 +135,33 @@ export function NewSessionView() {
     setPlanPopup(null);
     setWorkspacePopup(null);
   }, [mode]);
+
+  useEffect(() => {
+    const repo = workspace.trim();
+    if (!useWorktree || machine === "" || repo === "" || core.client === null) {
+      worktreeBranchRequest.current += 1;
+      setWorktreeBranches([]);
+      return;
+    }
+    const request = ++worktreeBranchRequest.current;
+    void core.client.listBranches(machine, repo).then(
+      (result) => {
+        if (request !== worktreeBranchRequest.current) return;
+        setWorktreeBranches(result.branches);
+        core.update((draft) => {
+          if (
+            draft.newSession.worktreeBaseBranch !== "HEAD" &&
+            !result.branches.some((branch) => branch.name === draft.newSession.worktreeBaseBranch)
+          ) {
+            draft.newSession.worktreeBaseBranch = "HEAD";
+          }
+        });
+      },
+      () => {
+        if (request === worktreeBranchRequest.current) setWorktreeBranches([]);
+      },
+    );
+  }, [core, machine, useWorktree, workspace]);
 
   // 已保存计划的上拉框按点击外部收起（工作目录的两个浮层由输入框失焦收起）
   useEffect(() => {
@@ -339,18 +393,49 @@ export function NewSessionView() {
         </div>
       </div>
 
-      <div className="flex items-center justify-between">
-        <Label>使用 worktree</Label>
-        <Switch
-          data-slot="worktree-switch"
-          aria-label="使用 worktree"
-          checked={useWorktree}
-          onCheckedChange={(checked) =>
-            core.update((draft) => {
-              draft.newSession.useWorktree = checked;
-            })
-          }
-        />
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <Label>使用 worktree</Label>
+          <Switch
+            data-slot="worktree-switch"
+            aria-label="使用 worktree"
+            checked={useWorktree}
+            onCheckedChange={(checked) =>
+              core.update((draft) => {
+                draft.newSession.useWorktree = checked;
+              })
+            }
+          />
+        </div>
+        {useWorktree ? (
+          <div className="flex items-center justify-between gap-3">
+            <Label>基分支</Label>
+            <Select
+              value={worktreeBaseBranch}
+              onValueChange={(value) =>
+                core.update((draft) => {
+                  draft.newSession.worktreeBaseBranch = value;
+                })
+              }
+            >
+              <SelectTrigger
+                data-slot="worktree-base-select"
+                aria-label="选择 worktree 基分支"
+                className="h-8 w-64 max-w-[55%]"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="HEAD">HEAD（当前提交）</SelectItem>
+                {worktreeBranches.map((branch) => (
+                  <SelectItem key={branch.name} value={branch.name}>
+                    {worktreeBranchLabel(branch)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        ) : null}
       </div>
 
       <Button data-slot="create-session" disabled={!canCreate} onClick={() => void createSession(core)}>

@@ -321,18 +321,18 @@ pub struct GitDiffResult {
     pub not_repo: bool,
 }
 
-/// 本地分支及改动审查使用的标记。
+/// 本地与远端跟踪分支及改动审查使用的标记。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranch {
     pub name: String,
-    /// worktree 会话的源分支
-    pub is_worktree_source: bool,
+    /// worktree 会话的基分支
+    pub is_worktree_base: bool,
     /// 仓库默认分支
     pub is_default: bool,
 }
 
-/// 本地分支列表。
+/// 分支列表。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranchListResult {
@@ -547,5 +547,14 @@ mod tests {
     fn git_branch_flags_are_required() {
         let missing_flag = serde_json::json!({ "name": "main" });
         assert!(serde_json::from_value::<GitBranch>(missing_flag).is_err());
+
+        let branch = GitBranch {
+            name: "main".into(),
+            is_worktree_base: true,
+            is_default: true,
+        };
+        let json = serde_json::to_value(branch).unwrap();
+        assert_eq!(json["isWorktreeBase"], true);
+        assert_eq!(json["isDefault"], true);
     }
 }

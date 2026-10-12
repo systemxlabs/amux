@@ -236,11 +236,20 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
   if (!core.client) return;
   try {
     if (entry.kind === "session") {
+      const useWorktree = entry.session.worktreeDir !== "";
+      const worktreeBaseBranch = useWorktree
+        ? (
+            await core.client
+              .listBranches(entry.session.machine, execDir(entry.session))
+              .catch(() => ({ branches: [] }))
+          ).branches.find((branch) => branch.isWorktreeBase)?.name
+        : undefined;
       const session = await core.client.createSession({
         machine: entry.session.machine,
         agent: entry.session.agent,
         workspace: entry.session.workspace,
-        useWorktree: entry.session.worktreeDir !== "",
+        useWorktree,
+        worktreeBaseBranch,
         project: entry.session.project,
       });
       await refreshList(core);
@@ -452,13 +461,16 @@ export async function setProjectOrder(core: Core, names: string[]): Promise<void
 /** 普通模式创建会话。 */
 export async function createSession(core: Core): Promise<void> {
   if (!core.client) return;
-  const { machine, agent, workspace, useWorktree, project } = core.state.newSession;
+  const { machine, agent, workspace, useWorktree, worktreeBaseBranch, project } =
+    core.state.newSession;
   try {
     const session = await core.client.createSession({
       machine,
       agent,
       workspace,
       useWorktree,
+      worktreeBaseBranch:
+        useWorktree && worktreeBaseBranch !== "HEAD" ? worktreeBaseBranch : undefined,
       project,
     });
     core.update((state) => {

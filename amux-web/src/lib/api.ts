@@ -211,8 +211,10 @@ export class ApiClient {
     return this.getJson(`/sessions/${encodeURIComponent(id)}/diff?${query({ base })}`);
   }
 
-  branches(id: string): Promise<GitBranchListResult> {
-    return this.getJson(`/sessions/${encodeURIComponent(id)}/branches`);
+  listBranches(machine: string, repo: string): Promise<GitBranchListResult> {
+    return this.getJson(
+      `/machines/${encodeURIComponent(machine)}/list_branches?${query({ repo })}`,
+    );
   }
 
   sessionAttachments(id: string, limit: number, offset: number): Promise<AttachmentList> {

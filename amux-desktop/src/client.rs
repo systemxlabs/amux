@@ -108,6 +108,18 @@ impl Client {
         }
     }
 
+    pub async fn list_branches(
+        &self,
+        machine: &str,
+        repo: &str,
+    ) -> Result<GitBranchListResult, String> {
+        self.get_json(&format!(
+            "/machines/{machine}/list_branches?repo={}",
+            urlencode(repo)
+        ))
+        .await
+    }
+
     pub async fn read_file(
         &self,
         machine: &str,
@@ -236,10 +248,6 @@ impl Client {
     pub async fn diff(&self, id: &str, base: &str) -> Result<GitDiffResult, String> {
         self.get_json(&format!("/sessions/{id}/diff?base={}", urlencode(base)))
             .await
-    }
-
-    pub async fn branches(&self, id: &str) -> Result<GitBranchListResult, String> {
-        self.get_json(&format!("/sessions/{id}/branches")).await
     }
 
     pub async fn session_attachments(

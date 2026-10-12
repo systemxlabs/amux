@@ -738,16 +738,35 @@ pub async fn delete(client: &Client, entry: &ListEntry) -> Result<(), String> {
 /// 以列表项的相同设置快速新建并打开一个普通会话或工作流会话。
 pub async fn create_from_entry(client: &Client, entry: &ListEntry) -> Result<OpenTarget, String> {
     match entry {
-        ListEntry::Session(session) => client
-            .create_session(&CreateSessionRequest {
-                machine: session.machine.clone(),
-                agent: session.agent.clone(),
-                workspace: session.workspace.clone(),
-                use_worktree: !session.worktree_dir.is_empty(),
-                project: session.project.clone(),
-            })
-            .await
-            .map(|session| OpenTarget::Session(session.id)),
+        ListEntry::Session(session) => {
+            let use_worktree = !session.worktree_dir.is_empty();
+            let worktree_base_branch = if use_worktree {
+                client
+                    .list_branches(&session.machine, session.exec_dir())
+                    .await
+                    .ok()
+                    .and_then(|result| {
+                        result
+                            .branches
+                            .into_iter()
+                            .find(|branch| branch.is_worktree_base)
+                            .map(|branch| branch.name)
+                    })
+            } else {
+                None
+            };
+            client
+                .create_session(&CreateSessionRequest {
+                    machine: session.machine.clone(),
+                    agent: session.agent.clone(),
+                    workspace: session.workspace.clone(),
+                    use_worktree,
+                    worktree_base_branch,
+                    project: session.project.clone(),
+                })
+                .await
+                .map(|session| OpenTarget::Session(session.id))
+        }
         ListEntry::Workflow(workflow) => client
             .create_workflow(&workflow.plan, None, workflow.project.clone())
             .await

@@ -410,7 +410,10 @@ async fn server_daemon_agent_end_to_end() {
 
     // 分支列表与指定基准分支的 diff 经 Server、Daemon 到 Git 的完整链路。
     let branches = client
-        .get(&format!("/sessions/{session_id}/branches"))
+        .get(&format!(
+            "/machines/{MACHINE}/list_branches?repo={}",
+            workspace.path().to_string_lossy()
+        ))
         .await;
     assert!(
         branches["branches"]
@@ -420,7 +423,7 @@ async fn server_daemon_agent_end_to_end() {
             .any(|branch| {
                 branch["name"] == "main"
                     && branch["isDefault"] == true
-                    && branch["isWorktreeSource"] == false
+                    && branch["isWorktreeBase"] == false
             }),
         "{branches}"
     );

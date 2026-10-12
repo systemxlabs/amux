@@ -17,11 +17,12 @@ import {
 import { sendPrompt } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 import { buildDiffTree, type DiffNode } from "../../lib/difftree";
-import type {
-  GitBranch,
-  GitDiffHunk,
-  GitDiffLine,
-  GitDiffResult,
+import {
+  execDir,
+  type GitBranch,
+  type GitDiffHunk,
+  type GitDiffLine,
+  type GitDiffResult,
 } from "../../lib/types";
 import { cn } from "../../lib/utils";
 
@@ -37,7 +38,7 @@ function linePrefix(kind: GitDiffLine["kind"]): string {
 
 function preferredDiffBase(branches: readonly GitBranch[], useWorktree: boolean): string {
   if (useWorktree) {
-    const source = branches.find((branch) => branch.isWorktreeSource);
+    const source = branches.find((branch) => branch.isWorktreeBase);
     if (source !== undefined) return source.name;
   }
   return branches.find((branch) => branch.isDefault)?.name ?? "HEAD";
@@ -45,7 +46,7 @@ function preferredDiffBase(branches: readonly GitBranch[], useWorktree: boolean)
 
 function branchLabel(branch: GitBranch): string {
   const marks = [
-    branch.isWorktreeSource ? "worktree 源分支" : "",
+    branch.isWorktreeBase ? "worktree 基分支" : "",
     branch.isDefault ? "默认分支" : "",
   ].filter(Boolean);
   return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
@@ -253,6 +254,8 @@ export function DiffPanel() {
   const dragPointerRef = useRef<number | null>(null);
   const diffRequestRef = useRef(0);
   const useWorktree = (state.detail.session?.worktreeDir ?? "") !== "";
+  const branchMachine = state.detail.session?.machine ?? null;
+  const branchRepo = state.detail.session ? execDir(state.detail.session) : null;
 
   // 打开时刷新一次（docs/DESIGN.md「改动审查视图」）：会话切换时重新拉取
   useEffect(() => {
@@ -272,10 +275,12 @@ export function DiffPanel() {
     dragPointerRef.current = null;
     const request = ++diffRequestRef.current;
     const client = core.client;
-    if (client === null || sessionId === null) return;
+    if (client === null || sessionId === null || branchMachine === null || branchRepo === null) return;
     let cancelled = false;
     void (async () => {
-      const branchResult = await client.branches(sessionId).catch(() => ({ branches: [] }));
+      const branchResult = await client
+        .listBranches(branchMachine, branchRepo)
+        .catch(() => ({ branches: [] }));
       if (cancelled || request !== diffRequestRef.current) return;
       const selected = preferredDiffBase(branchResult.branches, useWorktree);
       setBranches(branchResult.branches);
@@ -290,7 +295,7 @@ export function DiffPanel() {
     return () => {
       cancelled = true;
     };
-  }, [core, sessionId, useWorktree]);
+  }, [branchMachine, branchRepo, core, sessionId, useWorktree]);
 
   const files = diff?.files ?? [];
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);

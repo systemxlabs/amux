@@ -1,7 +1,7 @@
 //! git 能力：
 //! - diff 查询、untracked 判定：gitoxide（gix）结构化实现，不依赖 git 二进制、
 //!   无本地化输出解析
-//! - gitoxide 无等价能力处保留 git CLI：worktree 新增/删除/重建（gix-worktree
+//! - gitoxide 无等价能力处保留 git CLI：worktree 新增/删除（gix-worktree
 //!   仅有列出能力，无增删管理）
 //!
 //! 依赖上用 `gix` 伞 crate（DESIGN「Daemon 技术栈 - Git：gix」，只开 status / sha1 两个
@@ -490,7 +490,7 @@ impl GitRunner {
         }
     }
 
-    /// 查询本地分支，并标记 worktree 源分支与仓库默认分支。
+    /// 查询本地与远端跟踪分支，并标记 worktree 基分支与仓库默认分支。
     pub fn branches(&self, cwd: &str) -> Result<GitBranchListResult, String> {
         let repo = gix::discover(cwd).map_err(|error| format!("不是 git 仓库: {cwd}: {error}"))?;
         let current = repo
@@ -498,15 +498,8 @@ impl GitRunner {
             .ok()
             .flatten()
             .map(|name| name.shorten().to_str_lossy().into_owned());
-        let worktree_source = if repo.kind() == gix::repository::Kind::LinkedWorkTree {
-            repo.main_repo()
-                .ok()
-                .and_then(|main| main.head_name().ok().flatten())
-                .map(|name| name.shorten().to_str_lossy().into_owned())
-        } else {
-            None
-        };
-        let mut names = Vec::new();
+        let worktree_base = worktree_base_branch(&repo);
+        let mut local_names = Vec::new();
         for reference in repo
             .references()
             .map_err(|error| format!("读取分支失败: {error}"))?
@@ -514,15 +507,30 @@ impl GitRunner {
             .map_err(|error| format!("读取本地分支失败: {error}"))?
         {
             let reference = reference.map_err(|error| format!("读取本地分支失败: {error}"))?;
-            names.push(reference.name().shorten().to_str_lossy().into_owned());
+            local_names.push(reference.name().shorten().to_str_lossy().into_owned());
         }
-        names.sort();
-        let default = default_branch(cwd, &names, current.as_deref());
+        local_names.sort();
+        let default = default_branch(cwd, &local_names, current.as_deref());
+
+        let mut names = BTreeSet::new();
+        names.extend(local_names);
+        for reference in repo
+            .references()
+            .map_err(|error| format!("读取分支失败: {error}"))?
+            .remote_branches()
+            .map_err(|error| format!("读取远端跟踪分支失败: {error}"))?
+        {
+            let reference = reference.map_err(|error| format!("读取远端跟踪分支失败: {error}"))?;
+            let name = reference.name().shorten().to_str_lossy().into_owned();
+            if !name.ends_with("/HEAD") {
+                names.insert(name);
+            }
+        }
         Ok(GitBranchListResult {
             branches: names
                 .into_iter()
                 .map(|name| GitBranch {
-                    is_worktree_source: worktree_source.as_deref() == Some(name.as_str()),
+                    is_worktree_base: worktree_base.as_deref() == Some(name.as_str()),
                     is_default: default.as_deref() == Some(name.as_str()),
                     name,
                 })
@@ -531,22 +539,18 @@ impl GitRunner {
     }
 
     /// 新建 worktree：目录约定 `<amux_home>/worktrees/<仓库目录名>-<随机串>/`。
-    pub fn worktree_new(&self, repo: &str) -> Result<String, String> {
+    pub fn create_worktree(&self, repo: &str, base_branch: Option<&str>) -> Result<String, String> {
         let target = worktree_dir_for(repo, &amux_common::paths::worktrees_dir())?;
-        self.add_worktree(repo, &target)?;
-        Ok(target.to_string_lossy().replace('\\', "/"))
-    }
-
-    /// 按原路径重建 worktree（过期清理后按需重建；目录元数据仍保留在会话中）。
-    pub fn worktree_resume(&self, repo: &str, path: &str) -> Result<String, String> {
-        let target = PathBuf::from(path);
-        self.rebuild_worktree(repo, &target)?;
+        let base = normalize_base_branch(base_branch);
+        self.add_worktree(repo, &target, base)?;
+        let marker = resolve_base_branch_marker(repo, base)?;
+        write_worktree_base_branch(&target, &marker)?;
         Ok(target.to_string_lossy().replace('\\', "/"))
     }
 
     /// 查询仓库的所有 worktree 路径（主工作树 + linked worktrees）。
     /// gix-worktree 可枚举工作树；若枚举失败则回退到 `git worktree list`。
-    pub fn worktree_list(&self, repo: &str) -> Result<Vec<String>, String> {
+    pub fn worktrees(&self, repo: &str) -> Result<Vec<String>, String> {
         match self.worktree_list_gix(repo) {
             Ok(paths) => Ok(paths),
             Err(gix_err) => {
@@ -594,23 +598,27 @@ impl GitRunner {
         self.remove_worktree(repo, Path::new(path));
     }
 
-    /// 在 `repo_cwd` 仓库内创建指向 `target` 路径的 git worktree。分支名由 git
-    /// 取目标目录 basename 自动生成。要求仓库已有提交（unborn HEAD 无法建 worktree）。
-    fn add_worktree(&self, repo_cwd: &str, target: &Path) -> Result<(), String> {
-        run(
-            repo_cwd,
-            &["worktree", "add", target.to_string_lossy().as_ref()],
-        )
-        .map(|_| ())
-        .map_err(|e| format!("{}: {}", e.message, e.stderr.trim()))
-    }
-
-    /// 过期清理后按原路径重建 worktree。目录已删但主仓库残留的 worktree 管理
-    /// 条目会令同路径 add 被拒（"丢失但已注册"），先 prune 再 add；分支名仍取
-    /// 目录 basename，若该分支已存在则检出现有分支，延续会话原工作分支。
-    fn rebuild_worktree(&self, repo_cwd: &str, target: &Path) -> Result<(), String> {
-        let _ = run(repo_cwd, &["worktree", "prune"]);
-        self.add_worktree(repo_cwd, target)
+    /// 在 `repo_cwd` 仓库内创建指向 `target` 路径的 git worktree。分支名由目标目录
+    /// basename 生成，基点缺省为 HEAD。要求仓库已有提交（unborn HEAD 无法建 worktree）。
+    fn add_worktree(
+        &self,
+        repo_cwd: &str,
+        target: &Path,
+        base: Option<&str>,
+    ) -> Result<(), String> {
+        let target = target.to_string_lossy();
+        let branch = Path::new(target.as_ref())
+            .file_name()
+            .ok_or_else(|| format!("无效 worktree 路径: {target}"))?
+            .to_string_lossy()
+            .into_owned();
+        let mut args = vec!["worktree", "add", "-b", branch.as_str(), target.as_ref()];
+        if let Some(base) = base {
+            args.push(base);
+        }
+        run(repo_cwd, &args)
+            .map(|_| ())
+            .map_err(|e| format!("{}: {}", e.message, e.stderr.trim()))
     }
 
     /// 移除 worktree（强制），并 prune 主仓库的残留管理信息。
@@ -661,6 +669,51 @@ fn worktree_dir_for(repo: &str, root: &Path) -> Result<PathBuf, String> {
         .unwrap_or_else(|| "repo".to_string());
     std::fs::create_dir_all(root).map_err(|e| format!("创建 worktree 根目录失败: {e}"))?;
     Ok(root.join(format!("{name}-{}", worktree_suffix())))
+}
+
+const WORKTREE_BASE_BRANCH_FILE: &str = "amux-base-branch";
+
+fn normalize_base_branch(base_branch: Option<&str>) -> Option<&str> {
+    base_branch
+        .map(str::trim)
+        .filter(|base| !base.is_empty() && *base != "HEAD")
+}
+
+/// 读取 linked worktree 的基分支；旧 worktree 无标记时退回主工作树当前分支。
+fn worktree_base_branch(repo: &gix::Repository) -> Option<String> {
+    if repo.kind() != gix::repository::Kind::LinkedWorkTree {
+        return None;
+    }
+    if let Ok(marker) = std::fs::read_to_string(repo.git_dir().join(WORKTREE_BASE_BRANCH_FILE)) {
+        let marker = marker.trim();
+        if !marker.is_empty() && marker != "HEAD" {
+            return Some(marker.to_string());
+        }
+    }
+    repo.main_repo()
+        .ok()
+        .and_then(|main| main.head_name().ok().flatten())
+        .map(|name| name.shorten().to_str_lossy().into_owned())
+}
+
+fn resolve_base_branch_marker(repo: &str, base_branch: Option<&str>) -> Result<String, String> {
+    if let Some(base_branch) = base_branch {
+        return Ok(base_branch.to_string());
+    }
+    let repo = gix::discover(repo).map_err(|error| format!("不是 git 仓库: {repo}: {error}"))?;
+    Ok(repo
+        .head_name()
+        .ok()
+        .flatten()
+        .map(|name| name.shorten().to_str_lossy().into_owned())
+        .unwrap_or_else(|| "HEAD".to_string()))
+}
+
+fn write_worktree_base_branch(worktree: &Path, base_branch: &str) -> Result<(), String> {
+    let repo = gix::discover(worktree)
+        .map_err(|error| format!("不是 git 仓库: {}: {error}", worktree.display()))?;
+    std::fs::write(repo.git_dir().join(WORKTREE_BASE_BRANCH_FILE), base_branch)
+        .map_err(|error| format!("写入 worktree 基分支失败: {error}"))
 }
 
 /// 5 字符随机后缀；UUID v4 的前 5 个十六进制字符满足目录名简洁性与随机性要求。
@@ -915,9 +968,10 @@ mod tests {
     }
 
     #[test]
-    fn branches_mark_default_and_worktree_source() {
+    fn branches_mark_default_and_worktree_base() {
         let repo = init_repo();
         git(&repo, &["branch", "feature"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         let runner = GitRunner::new();
         let branches = runner.branches(repo.to_str().unwrap()).unwrap();
         let main = branches
@@ -926,20 +980,27 @@ mod tests {
             .find(|branch| branch.name == "main")
             .unwrap();
         assert!(main.is_default);
+        assert!(
+            branches
+                .branches
+                .iter()
+                .any(|branch| branch.name == "origin/main" && !branch.is_default),
+            "{branches:?}"
+        );
 
         let root = unique_dir("amux-branches-worktree");
         let target = worktree_dir_for(repo.to_str().unwrap(), &root).unwrap();
         runner
-            .add_worktree(repo.to_str().unwrap(), &target)
+            .add_worktree(repo.to_str().unwrap(), &target, Some("feature"))
             .unwrap();
+        write_worktree_base_branch(&target, "feature").unwrap();
         let branches = runner.branches(target.to_str().unwrap()).unwrap();
-        let main = branches
+        let feature = branches
             .branches
             .iter()
-            .find(|branch| branch.name == "main")
+            .find(|branch| branch.name == "feature")
             .unwrap();
-        assert!(main.is_default);
-        assert!(main.is_worktree_source);
+        assert!(feature.is_worktree_base);
 
         runner.worktree_remove(repo.to_str().unwrap(), target.to_str().unwrap());
         let _ = std::fs::remove_dir_all(&root);
@@ -981,18 +1042,18 @@ mod tests {
         let target = worktree_dir_for(repo_str, &root).unwrap();
         let target_name = target.file_name().unwrap().to_string_lossy().into_owned();
 
-        git.add_worktree(repo_str, &target).unwrap();
+        git.add_worktree(repo_str, &target, None).unwrap();
         assert!(target.join(".git").exists(), "worktree 应为有效检出");
 
-        let listed = git.worktree_list(repo_str).unwrap();
+        let listed = git.worktrees(repo_str).unwrap();
         assert!(
             listed.iter().any(|path| path.ends_with(&target_name)),
-            "worktree.list 应包含新建目录: {listed:?}"
+            "worktrees 应包含新建目录: {listed:?}"
         );
 
         git.worktree_remove(repo_str, target.to_str().unwrap());
         assert!(!target.exists(), "remove 后目录应消失");
-        let listed = git.worktree_list(repo_str).unwrap();
+        let listed = git.worktrees(repo_str).unwrap();
         assert!(
             !listed.iter().any(|path| path.ends_with(&target_name)),
             "移除后不应仍在列表中: {listed:?}"
@@ -1010,13 +1071,13 @@ mod tests {
         let target = worktree_dir_for(repo_str, &root).unwrap();
         let target_name = target.file_name().unwrap().to_string_lossy().into_owned();
 
-        runner.add_worktree(repo_str, &target).unwrap();
+        runner.add_worktree(repo_str, &target, None).unwrap();
         std::fs::remove_dir_all(&target).unwrap();
 
         runner.worktree_remove(repo_str, target.to_str().unwrap());
         runner.worktree_remove(repo_str, target.to_str().unwrap());
 
-        let listed = runner.worktree_list(repo_str).unwrap();
+        let listed = runner.worktrees(repo_str).unwrap();
         assert!(
             !listed.iter().any(|path| path.ends_with(&target_name)),
             "清理缺失目录后不应残留 worktree 注册项: {listed:?}"

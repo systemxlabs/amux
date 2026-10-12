@@ -80,7 +80,7 @@ export type GitDiffFile = {
 export type GitDiffResult = { files: GitDiffFile[]; notRepo?: boolean };
 export type GitBranch = {
   name: string;
-  isWorktreeSource: boolean;
+  isWorktreeBase: boolean;
   isDefault: boolean;
 };
 export type GitBranchListResult = { branches: GitBranch[] };
@@ -134,6 +134,7 @@ export type CreateSessionRequest = {
   agent: string;
   workspace: string;
   useWorktree: boolean;
+  worktreeBaseBranch?: string;
   project?: string;
 };
 export type PromptRequest = { input: ContentBlock[] };

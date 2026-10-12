@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use amux_common::api::Agent;
 use amux_common::daemon::{
-    header, method, notify, AcpForward, AgentListResult, AgentParams, GitDiffParams, GitRepoParams,
-    MachineInfo, WorktreePathParams, WorktreeResult,
+    header, method, notify, AcpForward, AgentListResult, AgentParams, CreateWorktreeParams,
+    GitDiffParams, GitRepoParams, MachineInfo, WorktreeListResult, WorktreePathParams,
+    WorktreeResult,
 };
 use amux_common::domain::{
     FsListParams, FsListResult, FsReadParams, FsReadResult, GitBranchListResult, GitDiffResult,
@@ -188,36 +189,37 @@ impl MachineHub {
             .await
     }
 
-    pub async fn worktree_new(&self, machine: &str, repo: &str) -> Result<String, String> {
+    pub async fn create_worktree(
+        &self,
+        machine: &str,
+        repo: &str,
+        base_branch: Option<&str>,
+    ) -> Result<String, String> {
         let result: WorktreeResult = self
             .machine(machine)?
             .request(
-                method::GIT_WORKTREE_NEW,
-                GitRepoParams {
+                method::GIT_CREATE_WORKTREE,
+                CreateWorktreeParams {
                     repo: repo.to_string(),
+                    base_branch: base_branch.map(str::to_string),
                 },
             )
             .await?;
         Ok(result.worktree_dir)
     }
 
-    pub async fn worktree_resume(
-        &self,
-        machine: &str,
-        repo: &str,
-        path: &str,
-    ) -> Result<String, String> {
-        let result: WorktreeResult = self
+    #[allow(dead_code)]
+    pub async fn worktrees(&self, machine: &str, repo: &str) -> Result<Vec<String>, String> {
+        let result: WorktreeListResult = self
             .machine(machine)?
             .request(
-                method::GIT_WORKTREE_RESUME,
-                WorktreePathParams {
+                method::GIT_WORKTREES,
+                GitRepoParams {
                     repo: repo.to_string(),
-                    path: path.to_string(),
                 },
             )
             .await?;
-        Ok(result.worktree_dir)
+        Ok(result.worktrees)
     }
 
     pub async fn worktree_remove(&self, machine: &str, repo: &str, path: &str) {
@@ -226,7 +228,7 @@ impl MachineHub {
         };
         let _ = machine
             .request::<_, OpResult>(
-                method::GIT_WORKTREE_REMOVE,
+                method::GIT_REMOVE_WORKTREE,
                 WorktreePathParams {
                     repo: repo.to_string(),
                     path: path.to_string(),

@@ -106,6 +106,9 @@ pub struct CreateSessionRequest {
     pub workspace: String,
     #[serde(default)]
     pub use_worktree: bool,
+    /// worktree 基分支；None 或 "HEAD" = 当前仓库 HEAD
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_base_branch: Option<String>,
     /// 所属项目；None = 未归属项目
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -501,6 +504,21 @@ mod tests {
         assert!(json.get("workflowId").is_none());
         assert_eq!(json["pinned"], true);
         assert_eq!(json["worktreeDir"], "");
+    }
+
+    #[test]
+    fn create_session_request_serializes_worktree_base_branch() {
+        let request = CreateSessionRequest {
+            machine: "pc".into(),
+            agent: "codex".into(),
+            workspace: "/repo".into(),
+            use_worktree: true,
+            worktree_base_branch: Some("origin/main".into()),
+            project: None,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["useWorktree"], true);
+        assert_eq!(json["worktreeBaseBranch"], "origin/main");
     }
 
     #[test]

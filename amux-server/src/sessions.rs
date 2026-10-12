@@ -11,9 +11,8 @@ use std::sync::Arc;
 
 use amux_common::api::{Session, SessionConfigSetting, Terminal as ApiTerminal, Usage};
 use amux_common::domain::{
-    generate_title, Activity, ContentBlock, FsListParams, GitBranchListResult, HistoryItem,
-    SessionConfigOption, SessionPlanEntry, SessionState, SlashCommand, StateChangeReason,
-    TerminalOpenParams, TerminalResizeParams,
+    generate_title, Activity, ContentBlock, HistoryItem, SessionConfigOption, SessionPlanEntry,
+    SessionState, SlashCommand, StateChangeReason, TerminalOpenParams, TerminalResizeParams,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -27,8 +26,6 @@ use crate::timestamps::now_ms;
 
 /// 会话长时间无活动后关闭 agent 侧会话的阈值。
 const IDLE_CLOSE_AFTER_MS: u64 = 60 * 60 * 1000;
-/// worktree 过期清理阈值。
-const WORKTREE_EXPIRE_AFTER_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// 一次状态落定的结果（工作流驱动据此注入提示词）。
 #[derive(Debug, Clone)]
@@ -125,10 +122,13 @@ impl SessionService {
         agent: &str,
         workspace: &str,
         use_worktree: bool,
+        worktree_base_branch: Option<&str>,
         project: Option<&str>,
     ) -> Result<Session, String> {
         let worktree_dir = if use_worktree {
-            self.machines.worktree_new(machine, workspace).await?
+            self.machines
+                .create_worktree(machine, workspace, worktree_base_branch)
+                .await?
         } else {
             String::new()
         };
@@ -328,17 +328,8 @@ impl SessionService {
         base: &str,
     ) -> Result<amux_common::domain::GitDiffResult, String> {
         let session = self.get(id)?;
-        self.ensure_worktree(&session).await;
         self.machines
             .git_diff(&session.machine, &self.exec_dir(&session), base)
-            .await
-    }
-
-    pub async fn branches(&self, id: &str) -> Result<GitBranchListResult, String> {
-        let session = self.get(id)?;
-        self.ensure_worktree(&session).await;
-        self.machines
-            .git_branches(&session.machine, &self.exec_dir(&session))
             .await
     }
 
@@ -443,7 +434,6 @@ impl SessionService {
 
     /// 惰性创建/恢复 agent 侧会话；resume 失败只记错误活动，不改元数据。
     pub async fn ensure_agent_session(&self, session: &Session) -> Result<(), String> {
-        self.ensure_worktree(session).await;
         let cwd = self.exec_dir(session);
         let conn = self.machines.acp(&session.machine, &session.agent).await?;
         let resumed = self.caches.resumed.lock().contains(&session.id);
@@ -486,43 +476,6 @@ impl SessionService {
             }
         }
         Ok(())
-    }
-
-    /// worktree 按需重建：目录不可访问时在同一路径重建。
-    async fn ensure_worktree(&self, session: &Session) {
-        if session.worktree_dir.is_empty() {
-            return;
-        }
-        if self
-            .worktree_exists(&session.machine, &session.worktree_dir)
-            .await
-        {
-            return;
-        }
-        log::info!("worktree 目录缺失，按原路径重建: {}", session.worktree_dir);
-        if let Err(error) = self
-            .machines
-            .worktree_resume(&session.machine, &session.workspace, &session.worktree_dir)
-            .await
-        {
-            log::warn!("worktree 重建失败: {error}");
-            self.record_error(&session.id, &format!("worktree 重建失败: {error}"));
-        }
-    }
-
-    async fn worktree_exists(&self, machine: &str, path: &str) -> bool {
-        self.machines
-            .fs_list(
-                machine,
-                FsListParams {
-                    path: Some(path.to_string()),
-                    limit: 1,
-                    offset: 0,
-                    dirs_only: false,
-                },
-            )
-            .await
-            .is_ok()
     }
 
     pub fn record_error(&self, session_id: &str, message: &str) {
@@ -733,7 +686,7 @@ impl SessionService {
         self.store.session(&session_id)
     }
 
-    /// 后台维护：关闭长时间无活动的 agent 会话、清理过期 worktree、删除长期无输入输出的终端。
+    /// 后台维护：关闭长时间无活动的 agent 会话、删除长期无输入输出的终端。
     pub async fn maintain(&self) {
         let now = now_ms();
         for session in self.store.sessions_all() {
@@ -754,20 +707,6 @@ impl SessionService {
                         log::info!("会话长时间无活动，已关闭 agent 侧会话: {}", session.id);
                     }
                 }
-            }
-            if !session.worktree_dir.is_empty()
-                && now.saturating_sub(session.updated_at) > WORKTREE_EXPIRE_AFTER_MS
-            {
-                if !self
-                    .worktree_exists(&session.machine, &session.worktree_dir)
-                    .await
-                {
-                    continue;
-                }
-                self.machines
-                    .worktree_remove(&session.machine, &session.workspace, &session.worktree_dir)
-                    .await;
-                log::info!("会话 worktree 过期清理: {}", session.id);
             }
         }
         // 终端超过 1 天没有输入输出即删除，并通知机器关闭对应 PTY（docs/DESIGN.md「终端存储」）

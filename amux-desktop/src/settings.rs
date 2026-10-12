@@ -874,6 +874,7 @@ pub fn manage_skill(
                 agent,
                 workspace,
                 use_worktree: false,
+                worktree_base_branch: None,
                 project: None,
             })
             .await

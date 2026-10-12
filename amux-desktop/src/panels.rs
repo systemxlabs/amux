@@ -1634,9 +1634,9 @@ fn diff_base_menu(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
 }
 
 fn diff_branch_label(branch: &GitBranch) -> String {
-    match (branch.is_worktree_source, branch.is_default) {
-        (true, true) => format!("{}（worktree 源分支、默认分支）", branch.name),
-        (true, false) => format!("{}（worktree 源分支）", branch.name),
+    match (branch.is_worktree_base, branch.is_default) {
+        (true, true) => format!("{}（worktree 基分支、默认分支）", branch.name),
+        (true, false) => format!("{}（worktree 基分支）", branch.name),
         (false, true) => format!("{}（默认分支）", branch.name),
         (false, false) => branch.name.clone(),
     }

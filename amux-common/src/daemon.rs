@@ -14,10 +14,9 @@ pub mod method {
     pub const AGENT_RESTART: &str = "agent.restart";
     pub const GIT_DIFF: &str = "git.diff";
     pub const GIT_BRANCHES: &str = "git.branches";
-    pub const GIT_WORKTREE_NEW: &str = "git.worktree.new";
-    pub const GIT_WORKTREE_RESUME: &str = "git.worktree.resume";
-    pub const GIT_WORKTREE_LIST: &str = "git.worktree.list";
-    pub const GIT_WORKTREE_REMOVE: &str = "git.worktree.remove";
+    pub const GIT_CREATE_WORKTREE: &str = "git.create_worktree";
+    pub const GIT_WORKTREES: &str = "git.worktrees";
+    pub const GIT_REMOVE_WORKTREE: &str = "git.remove_worktree";
     pub const FS_LIST: &str = "fs.list";
     pub const FS_READ: &str = "fs.read";
     pub const TERMINAL_OPEN: &str = "terminal.open";
@@ -112,11 +111,20 @@ pub struct AcpForward {
     pub raw: String,
 }
 
-/// 以仓库根目录为目标的 git 参数（`git.branches` / `git.worktree.new` / `git.worktree.list`）。
+/// 以仓库根目录为目标的 git 参数（`git.branches` / `git.worktrees`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitRepoParams {
     pub repo: String,
+}
+
+/// `git.create_worktree` 参数；`base_branch` 缺省或 `HEAD` 时以当前 HEAD 为基点。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorktreeParams {
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
 }
 
 /// `git.diff` 参数。
@@ -127,14 +135,14 @@ pub struct GitDiffParams {
     pub base: String,
 }
 
-/// `git.worktree.new` / `git.worktree.resume` 结果。
+/// `git.create_worktree` 结果。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeResult {
     pub worktree_dir: String,
 }
 
-/// `git.worktree.resume` / `git.worktree.remove` 参数。
+/// `git.remove_worktree` 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreePathParams {
@@ -142,7 +150,7 @@ pub struct WorktreePathParams {
     pub path: String,
 }
 
-/// `git.worktree.list` 结果。
+/// `git.worktrees` 结果。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeListResult {
@@ -175,6 +183,13 @@ mod tests {
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["agents"][0]["name"], "codex");
         assert_eq!(json["agents"][0]["running"], true);
+    }
+
+    #[test]
+    fn worktree_method_names_match_design() {
+        assert_eq!(method::GIT_CREATE_WORKTREE, "git.create_worktree");
+        assert_eq!(method::GIT_WORKTREES, "git.worktrees");
+        assert_eq!(method::GIT_REMOVE_WORKTREE, "git.remove_worktree");
     }
 
     #[test]

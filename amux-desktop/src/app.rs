@@ -249,6 +249,7 @@ impl AmuxApp {
                 InputEvent::Change => {
                     this.workspace_recent_open = false;
                     this.refresh_workspace_suggestions(cx);
+                    this.refresh_worktree_branches(cx);
                 }
                 InputEvent::Blur => this.dismiss_workspace_popups(cx),
                 _ => {}
@@ -1154,6 +1155,7 @@ impl AmuxApp {
             });
         });
         self.dismiss_workspace_popups(cx);
+        self.refresh_worktree_branches(cx);
     }
 
     /// 点选前缀联想项：填入该目录并继续列出其下的条目，用户可一路点选下钻
@@ -1162,6 +1164,7 @@ impl AmuxApp {
         self.workspace_input
             .update(cx, |state, cx| state.set_value(path, window, cx));
         self.refresh_workspace_suggestions(cx);
+        self.refresh_worktree_branches(cx);
         cx.notify();
     }
 
@@ -1312,6 +1315,77 @@ impl AmuxApp {
                 Err(_) => {
                     core.new_session.suggestion = None;
                     core.new_session.suggestions.clear();
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    /// 拉取当前工作目录的可选 worktree 基分支；`HEAD` 始终由前端固定提供。
+    pub fn refresh_worktree_branches(&mut self, cx: &mut Context<Self>) {
+        let (use_worktree, machine, workspace) = self.with_core(|core| {
+            (
+                core.new_session.use_worktree,
+                core.new_session.machine.clone(),
+                self.workspace_input.read(cx).value().trim().to_string(),
+            )
+        });
+        if !use_worktree {
+            self.with_core(|core| {
+                core.new_session.worktree_branch_seq =
+                    core.new_session.worktree_branch_seq.saturating_add(1);
+                core.new_session.worktree_branches.clear();
+                core.new_session.worktree_branch_source = None;
+            });
+            return;
+        }
+        let (Some(machine), false) = (machine, workspace.is_empty()) else {
+            self.with_core(|core| {
+                core.new_session.worktree_branches.clear();
+                core.new_session.worktree_branch_source = None;
+            });
+            cx.notify();
+            return;
+        };
+        let seq = self.with_core(|core| {
+            let seq = core.new_session.worktree_branch_seq.saturating_add(1);
+            core.new_session.worktree_branch_seq = seq;
+            core.new_session.worktree_branch_source = Some((machine.clone(), workspace.clone()));
+            core.new_session.worktree_branches.clear();
+            seq
+        });
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            let result = client.list_branches(&machine, &workspace).await;
+            let mut core = core.lock();
+            if core.new_session.worktree_branch_seq != seq {
+                return;
+            }
+            let source_matches = core
+                .new_session
+                .worktree_branch_source
+                .as_ref()
+                .is_some_and(|source| source == &(machine, workspace));
+            if !source_matches {
+                return;
+            }
+            match result {
+                Ok(result) => {
+                    core.new_session.worktree_branches = result.branches;
+                    if core.new_session.worktree_base_branch != "HEAD"
+                        && !core
+                            .new_session
+                            .worktree_branches
+                            .iter()
+                            .any(|branch| branch.name == core.new_session.worktree_base_branch)
+                    {
+                        core.new_session.worktree_base_branch = "HEAD".to_string();
+                    }
+                }
+                Err(_) => {
+                    core.new_session.worktree_branches.clear();
                 }
             }
         });
@@ -1890,6 +1964,10 @@ impl AmuxApp {
                 agent,
                 workspace,
                 use_worktree: form.use_worktree,
+                worktree_base_branch: form
+                    .use_worktree
+                    .then(|| form.worktree_base_branch.clone())
+                    .filter(|branch| branch != "HEAD"),
                 project: form.project.clone(),
             };
             self.runtime.spawn(async move {
@@ -2387,7 +2465,7 @@ impl AmuxApp {
 
     /// 刷新改动 diff。
     pub fn refresh_diff(&mut self, cx: &mut Context<Self>) {
-        let (client, open, use_worktree, request) = self.with_core(|core| {
+        let (client, open, branch_target, use_worktree, request) = self.with_core(|core| {
             core.view.detail.diff_request_seq = core.view.detail.diff_request_seq.wrapping_add(1);
             (
                 core.client.clone(),
@@ -2395,17 +2473,23 @@ impl AmuxApp {
                 core.view
                     .session
                     .as_ref()
+                    .map(|session| (session.machine.clone(), session.exec_dir().to_string())),
+                core.view
+                    .session
+                    .as_ref()
                     .is_some_and(|session| !session.worktree_dir.is_empty()),
                 core.view.detail.diff_request_seq,
             )
         });
-        let (Some(client), Some(OpenTarget::Session(id))) = (client, open) else {
+        let (Some(client), Some(OpenTarget::Session(id)), Some((machine, repo))) =
+            (client, open, branch_target)
+        else {
             return;
         };
         let core = Arc::clone(&self.core);
         self.runtime.spawn(async move {
             let branches = client
-                .branches(&id)
+                .list_branches(&machine, &repo)
                 .await
                 .map(|result| result.branches)
                 .unwrap_or_default();
@@ -3581,7 +3665,7 @@ impl AmuxApp {
 
 fn preferred_diff_base(branches: &[GitBranch], use_worktree: bool) -> String {
     if use_worktree {
-        if let Some(branch) = branches.iter().find(|branch| branch.is_worktree_source) {
+        if let Some(branch) = branches.iter().find(|branch| branch.is_worktree_base) {
             return branch.name.clone();
         }
     }

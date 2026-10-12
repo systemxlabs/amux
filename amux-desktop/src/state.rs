@@ -293,19 +293,44 @@ impl OpenView {
 }
 
 /// 新建会话视图状态。
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct NewSessionForm {
     pub workflow_mode: bool,
     pub machine: Option<String>,
     pub agent: Option<String>,
     pub project: Option<String>,
     pub use_worktree: bool,
+    /// worktree 基分支；`HEAD` = 当前仓库 HEAD
+    pub worktree_base_branch: String,
+    pub worktree_branches: Vec<GitBranch>,
+    /// 已拉取分支对应的 (machine, workspace)；用于丢弃过期应答
+    pub worktree_branch_source: Option<(String, String)>,
+    pub worktree_branch_seq: u64,
     /// 工作目录输入框的前缀匹配目录项
     pub suggestions: Vec<FsEntry>,
     /// 已拉取条目的目录（前缀匹配的数据源；应答回来时目录或机器已变则丢弃）
     pub suggestion: Option<DirectoryListing>,
     /// 当前输入的名字前缀（应答回来时按最新前缀过滤）
     pub suggestion_prefix: String,
+}
+
+impl Default for NewSessionForm {
+    fn default() -> Self {
+        Self {
+            workflow_mode: false,
+            machine: None,
+            agent: None,
+            project: None,
+            use_worktree: false,
+            worktree_base_branch: "HEAD".to_string(),
+            worktree_branches: Vec::new(),
+            worktree_branch_source: None,
+            worktree_branch_seq: 0,
+            suggestions: Vec::new(),
+            suggestion: None,
+            suggestion_prefix: String::new(),
+        }
+    }
 }
 
 /// 某机器某目录下的全部目录项：输入停在同一个目录内时直接用它做前缀匹配，不再重复拉取。

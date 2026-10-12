@@ -71,6 +71,11 @@ pub struct DiffQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RepoQuery {
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UploadAttachment {
     pub filename: String,
 }
@@ -87,6 +92,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/machines/{machine}/list_dir", get(list_dir))
         .route("/machines/{machine}/read_file", get(read_file))
+        .route(
+            "/machines/{machine}/list_branches",
+            get(machine_list_branches),
+        )
         .route("/sessions", post(create_session).get(list_sessions))
         .route(
             "/sessions/{id}",
@@ -102,7 +111,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sessions/{id}/activities", get(session_activities))
         .route("/sessions/{id}/ongoing_activity", get(session_ongoing))
         .route("/sessions/{id}/diff", get(session_diff))
-        .route("/sessions/{id}/branches", get(session_branches))
         .route(
             "/sessions/{id}/terminals",
             post(open_terminal).get(list_terminals),
@@ -301,6 +309,19 @@ async fn read_file(
         .map_err(bad_request)
 }
 
+async fn machine_list_branches(
+    State(state): State<Arc<AppState>>,
+    Path(machine): Path<String>,
+    Query(query): Query<RepoQuery>,
+) -> ApiResult<amux_common::domain::GitBranchListResult> {
+    state
+        .machines
+        .git_branches(&machine, &query.repo)
+        .await
+        .map(Json)
+        .map_err(bad_request)
+}
+
 // ---------- 普通会话 ----------
 
 async fn create_session(
@@ -314,6 +335,7 @@ async fn create_session(
             &request.agent,
             &request.workspace,
             request.use_worktree,
+            request.worktree_base_branch.as_deref(),
             request.project.as_deref(),
         )
         .await
@@ -488,18 +510,6 @@ async fn session_diff(
     state
         .sessions
         .diff(&id, &query.base)
-        .await
-        .map(Json)
-        .map_err(bad_request)
-}
-
-async fn session_branches(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> ApiResult<BranchesResponse> {
-    state
-        .sessions
-        .branches(&id)
         .await
         .map(Json)
         .map_err(bad_request)

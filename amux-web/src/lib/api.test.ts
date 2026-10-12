@@ -237,8 +237,8 @@ describe("ApiClient", () => {
         status: 200,
         body: JSON.stringify({
           branches: [
-            { name: "main", isWorktreeSource: true, isDefault: true },
-            { name: "feature/login", isWorktreeSource: false, isDefault: false },
+            { name: "main", isWorktreeBase: true, isDefault: true },
+            { name: "feature/login", isWorktreeBase: false, isDefault: false },
           ],
         }),
       },
@@ -249,11 +249,11 @@ describe("ApiClient", () => {
     expect(diffUrl.pathname).toBe("/sessions/s1/diff");
     expect(diffUrl.searchParams.get("base")).toBe("feature/login");
 
-    const result = await client.branches("s1");
-    expect(seen.at(-1)?.url).toBe("/sessions/s1/branches");
+    const result = await client.listBranches("pc", "/repo/work tree");
+    expect(seen.at(-1)?.url).toBe("/machines/pc/list_branches?repo=%2Frepo%2Fwork+tree");
     expect(result.branches[0]).toEqual({
       name: "main",
-      isWorktreeSource: true,
+      isWorktreeBase: true,
       isDefault: true,
     });
   });

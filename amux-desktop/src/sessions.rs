@@ -9,6 +9,7 @@ use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::label::Label;
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_component::spinner::Spinner;
@@ -164,13 +165,30 @@ fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
         .child(workspace_picker(core, this, cx))
         .child(field("项目", project_selector(core, cx), cx))
         .child(
-            Checkbox::new("ns-worktree-toggle")
-                .label("使用 worktree")
-                .checked(core.new_session.use_worktree)
-                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                    this.with_core(|core| core.new_session.use_worktree = *checked);
-                    cx.notify();
-                })),
+            h_flex()
+                .gap_3()
+                .items_end()
+                .child(
+                    Checkbox::new("ns-worktree-toggle")
+                        .label("使用 worktree")
+                        .checked(core.new_session.use_worktree)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.with_core(|core| {
+                                core.new_session.use_worktree = *checked;
+                                if !*checked {
+                                    core.new_session.worktree_branches.clear();
+                                    core.new_session.worktree_branch_source = None;
+                                }
+                            });
+                            if *checked {
+                                this.refresh_worktree_branches(cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .when(core.new_session.use_worktree, |row| {
+                    row.child(field("基分支", worktree_base_menu(core, cx), cx))
+                }),
         )
         .child(
             div().id("ns-create-wrap").child(
@@ -183,6 +201,71 @@ fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
             ),
         )
         .into_any_element()
+}
+
+fn worktree_base_menu(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let current = core.new_session.worktree_base_branch.clone();
+    let branches = core.new_session.worktree_branches.clone();
+    let app = cx.entity();
+    Button::new("ns-worktree-base-select")
+        .small()
+        .outline()
+        .child(
+            div()
+                .max_w(rems(14.))
+                .line_height(relative(1.))
+                .truncate()
+                .child(if current == "HEAD" {
+                    "HEAD（当前提交）".to_string()
+                } else {
+                    current.clone()
+                }),
+        )
+        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+            let mut menu = menu;
+            let head_selected = current == "HEAD";
+            let head_app = app.clone();
+            menu = menu.item(
+                PopupMenuItem::new("HEAD（当前提交）")
+                    .checked(head_selected)
+                    .on_click(move |_, _, cx| {
+                        head_app.update(cx, |this, cx| {
+                            this.with_core(|core| {
+                                core.new_session.worktree_base_branch = "HEAD".to_string()
+                            });
+                            cx.notify();
+                        })
+                    }),
+            );
+            for branch in &branches {
+                let value = branch.name.clone();
+                let checked = current == value;
+                let branch_app = app.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(worktree_base_branch_label(branch))
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            branch_app.update(cx, |this, cx| {
+                                this.with_core(|core| {
+                                    core.new_session.worktree_base_branch = value.clone()
+                                });
+                                cx.notify();
+                            })
+                        }),
+                );
+            }
+            menu
+        })
+        .into_any_element()
+}
+
+fn worktree_base_branch_label(branch: &amux_common::domain::GitBranch) -> String {
+    match (branch.is_worktree_base, branch.is_default) {
+        (true, true) => format!("{}（worktree 基分支、默认分支）", branch.name),
+        (true, false) => format!("{}（worktree 基分支）", branch.name),
+        (false, true) => format!("{}（默认分支）", branch.name),
+        (false, false) => branch.name.clone(),
+    }
 }
 
 /// 工作流模式：工作计划 / 创建（未配置内置智能体时引导去设置）。
@@ -314,7 +397,10 @@ fn machine_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                         core.new_session.agent = None;
                         core.new_session.suggestions.clear();
                         core.new_session.suggestion = None;
+                        core.new_session.worktree_branches.clear();
+                        core.new_session.worktree_branch_source = None;
                     });
+                    this.refresh_worktree_branches(cx);
                     cx.notify();
                 })),
         );

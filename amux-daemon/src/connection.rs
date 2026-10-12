@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use amux_common::daemon::{
-    header, method, notify, AcpForward, AgentParams, GitDiffParams, GitRepoParams,
-    WorktreeListResult, WorktreePathParams, WorktreeResult,
+    header, method, notify, AcpForward, AgentParams, CreateWorktreeParams, GitDiffParams,
+    GitRepoParams, WorktreeListResult, WorktreePathParams, WorktreeResult,
 };
 use amux_common::domain::{
     FsListParams, FsReadParams, OpResult, TerminalIdParams, TerminalInputParams,
@@ -272,31 +272,20 @@ async fn execute(
             let params: GitRepoParams = decode(params)?;
             to_value(daemon.git.branches(&params.repo).map_err(RpcError::git)?)
         }
-        method::GIT_WORKTREE_NEW => {
-            let params: GitRepoParams = decode(params)?;
+        method::GIT_CREATE_WORKTREE => {
+            let params: CreateWorktreeParams = decode(params)?;
             let dir = daemon
                 .git
-                .worktree_new(&params.repo)
+                .create_worktree(&params.repo, params.base_branch.as_deref())
                 .map_err(RpcError::git)?;
             to_value(WorktreeResult { worktree_dir: dir })
         }
-        method::GIT_WORKTREE_RESUME => {
-            let params: WorktreePathParams = decode(params)?;
-            let dir = daemon
-                .git
-                .worktree_resume(&params.repo, &params.path)
-                .map_err(RpcError::git)?;
-            to_value(WorktreeResult { worktree_dir: dir })
-        }
-        method::GIT_WORKTREE_LIST => {
+        method::GIT_WORKTREES => {
             let params: GitRepoParams = decode(params)?;
-            let worktrees = daemon
-                .git
-                .worktree_list(&params.repo)
-                .map_err(RpcError::git)?;
+            let worktrees = daemon.git.worktrees(&params.repo).map_err(RpcError::git)?;
             to_value(WorktreeListResult { worktrees })
         }
-        method::GIT_WORKTREE_REMOVE => {
+        method::GIT_REMOVE_WORKTREE => {
             let params: WorktreePathParams = decode(params)?;
             daemon.git.worktree_remove(&params.repo, &params.path);
             to_value(OpResult::ok())

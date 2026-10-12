@@ -780,9 +780,20 @@ impl WorkflowTools {
                     .get("worktree")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false);
+                let worktree_base_branch = arguments
+                    .get("base_branch")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
                 let session = services
                     .sessions
-                    .create(&machine, &agent, &cwd, worktree, None)
+                    .create(
+                        &machine,
+                        &agent,
+                        &cwd,
+                        worktree,
+                        worktree_base_branch.as_deref(),
+                        None,
+                    )
                     .await?;
                 services.link_session(&self.workflow_id, &session.id);
                 Ok(format!(
@@ -913,14 +924,15 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "create_session".into(),
-            description: "创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
+            description: "创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作，若未指定 worktree 基分支，则默认从当前仓库的 HEAD 切出".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "machine": string("机器名"),
                     "agent": string("agent 名"),
                     "cwd": string("工作目录"),
-                    "worktree": { "type": "boolean", "description": "是否以 git worktree 方式工作；缺省 false" }
+                    "worktree": { "type": "boolean", "description": "是否以 git worktree 方式工作；缺省 false" },
+                    "base_branch": string("worktree 基分支；缺省或 HEAD 表示当前仓库 HEAD")
                 },
                 "required": ["machine", "agent", "cwd"]
             }),
@@ -1301,7 +1313,7 @@ mod tests {
         let workflow = service.create("计划", None, None).await.unwrap();
         let session = service
             .sessions
-            .create("pc", "codex", "/repo", false, None)
+            .create("pc", "codex", "/repo", false, None, None)
             .await
             .unwrap();
         service.link_session(&workflow.id, &session.id);

@@ -38,7 +38,7 @@ use crate::store::Store;
 use crate::terminals::TerminalCache;
 use crate::workflows::WorkflowService;
 
-/// 后台维护周期（关闭长时间无活动会话、清理过期 worktree）。
+/// 后台维护周期（关闭长时间无活动会话、清理过期终端）。
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(600);
 
 /// ACP 事件队列容量。
