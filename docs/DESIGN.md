@@ -70,6 +70,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | POST `/machines/<machine_name>/agents/<agent_name>/restart` | 重启指定 agent |
 | GET `/machines/<machine_name>/list_dir` | 分页查看指定路径文件夹列表 |
 | GET `/machines/<machine_name>/read_file` | 分页查看指定路径文本文件内容 |
+| GET `/machines/<machine_name>/list_branches` | 查看指定路径仓库的本地分支和远程跟踪分支列表 |
 | POST `/sessions` | 新建一个普通会话 |
 | GET `/sessions` | 分页查询非关联非置顶普通会话列表，可指定项目，响应包含该项目所有置顶非关联普通会话 |
 | GET `/sessions/<session_id>` | 查询指定普通会话 |
@@ -85,7 +86,6 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/sessions/<session_id>/activities` | 分页查询指定普通会话的活动历史 |
 | GET `/sessions/<session_id>/ongoing_activity` | 查询指定普通会话正在进行中的活动 |
 | GET `/sessions/<session_id>/diff` | 查询普通会话执行目录改动 diff |
-| GET `/sessions/<session_id>/branches` | 查询普通会话执行目录本地分支列表 |
 | POST `/sessions/<session_id>/terminals` | 打开指定普通会话一个终端 |
 | GET `/sessions/<session_id>/terminals` | 查询指定普通会话所有打开的终端 |
 | POST `/sessions/<session_id>/terminals/<terminal_id>` | 向指定终端输入内容 |
