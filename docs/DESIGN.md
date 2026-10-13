@@ -580,7 +580,7 @@ Github Webhook 触发
 - 自动化配置：存储在 `~/.amux/config/automation.json`
   ```json
   {
-    "apiFormat": "jev",
+    "apiFormat": "system_one",
     "endpoint": "https://api.typesafe.ai/v1/systemone",
     "apiKey": "sk-xxx",
     "model": "jev-latest"
