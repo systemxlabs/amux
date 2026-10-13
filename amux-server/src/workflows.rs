@@ -91,6 +91,7 @@ impl WorkflowService {
         let title = title.unwrap_or_default();
         self.store
             .insert_workflow(&id, &title, SessionState::Idle, plan, project, now_ms());
+        log::info!("工作流会话已创建: workflow={id}");
         self.get(&id)
     }
 
@@ -156,6 +157,7 @@ impl WorkflowService {
             }
         }
         self.push_user(id, input);
+        log::info!("工作流指令已发送: workflow={id}");
         Ok(())
     }
 
@@ -175,6 +177,7 @@ impl WorkflowService {
         self.store.set_workflow_title(id, &title);
         self.store.set_workflow_project(id, project.as_deref());
         self.store.set_workflow_pinned(id, pinned);
+        log::info!("工作流配置已更新: workflow={id}");
         Ok(())
     }
 
@@ -188,7 +191,7 @@ impl WorkflowService {
             let _ = self.sessions.delete(&session_id).await;
         }
         let _ = std::fs::remove_file(self.transcript_path(id));
-        log::info!("工作流会话已删除: {id}");
+        log::info!("工作流会话已删除: workflow={id}");
         Ok(())
     }
 
@@ -259,7 +262,7 @@ impl WorkflowService {
             {
                 return true;
             }
-            log::info!("清理空闲工作流内存上下文: {workflow_id}");
+            log::info!("清理空闲工作流内存上下文: workflow={workflow_id}");
             false
         });
     }
@@ -358,7 +361,7 @@ impl WorkflowService {
                 }
             }
             Err(error) => {
-                log::warn!("工作流智能体运行失败（{workflow_id}）: {error}");
+                log::warn!("工作流智能体运行失败: workflow={workflow_id}: {error}");
                 self.record_activity(
                     workflow_id,
                     &Activity::Error {
@@ -796,6 +799,13 @@ impl WorkflowTools {
                     )
                     .await?;
                 services.link_session(&self.workflow_id, &session.id);
+                log::info!(
+                    "工作流已创建关联会话: workflow={} session={} machine={} agent={}",
+                    self.workflow_id,
+                    session.id,
+                    session.machine,
+                    session.agent
+                );
                 Ok(format!(
                     "已创建关联普通会话 {} （{}@{}, 执行目录 {}）",
                     session.id,
@@ -815,12 +825,20 @@ impl WorkflowTools {
                         vec![ContentBlock::Text(TextContent::new(prompt))],
                     )
                     .await?;
+                log::info!(
+                    "工作流已发送关联会话指令: workflow={} session={session_id}",
+                    self.workflow_id
+                );
                 Ok(format!("已向 {session_id} 下发指令"))
             }
             "cancel_session" => {
                 let session_id = string_arg(&arguments, "session")?;
                 self.require_linked(&session_id)?;
                 services.sessions.cancel(&session_id).await?;
+                log::info!(
+                    "工作流已取消关联会话: workflow={} session={session_id}",
+                    self.workflow_id
+                );
                 Ok(format!("已取消 {session_id} 进行中的工作"))
             }
             "configure_session" => {

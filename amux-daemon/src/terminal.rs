@@ -191,7 +191,7 @@ impl TerminalRegistry {
                 wait_thread,
             },
         );
-        log::info!("终端 {terminal_id} 已打开（{cols}x{rows}，cwd {cwd}）");
+        log::info!("终端已打开: terminal={terminal_id} cwd={cwd} cols={cols} rows={rows}");
 
         // 输出泵：PTY 字节 → base64 → 出站缓存。进程退出后发 exit 通知并回收条目。
         let this = Arc::clone(self);
@@ -218,7 +218,7 @@ impl TerminalRegistry {
                         terminal_id: pump_id.clone(),
                     },
                 ));
-                log::info!("终端 {pump_id} 进程已退出");
+                log::info!("终端进程已退出: terminal={pump_id}");
             }
         });
 
@@ -264,7 +264,7 @@ impl TerminalRegistry {
             .remove(&params.terminal_id)
             .ok_or_else(not_found)?;
         stop_terminal(&handle.killer, &handle.wait_thread);
-        log::info!("终端 {} 已关闭", params.terminal_id);
+        log::info!("终端已关闭: terminal={}", params.terminal_id);
         Ok(())
     }
 

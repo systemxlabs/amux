@@ -123,7 +123,7 @@ impl AgentRegistry {
             let spec = launch_spec(agent).ok_or_else(|| format!("未知 agent: {agent}"))?;
             self.spawn(agent, spec, outbox).await?
         };
-        log::info!("agent 已启动: {agent}");
+        log::info!("agent 已启动: agent={agent}");
         self.agents.lock().insert(agent.to_string(), running);
         Ok(())
     }
@@ -159,7 +159,7 @@ impl AgentRegistry {
                     let _ = task.await;
                 }
             }
-            log::info!("agent 已停止: {agent}");
+            log::info!("agent 已停止: agent={agent}");
         }
     }
 
@@ -224,7 +224,7 @@ impl AgentRegistry {
                 };
                 outbox.push(frames::notification(notify::ACP, &forward));
             }
-            log::info!("agent stdout 结束: {agent_name}");
+            log::info!("agent stdout 结束: agent={agent_name}");
         });
 
         let agent_name = agent.to_string();
@@ -262,7 +262,7 @@ impl AgentRegistry {
         let mut agents = self.agents.lock();
         if agents.get(agent).map(|running| running.instance) == Some(instance) {
             agents.remove(agent);
-            log::warn!("agent 进程退出: {agent} ({status:?})");
+            log::warn!("agent 进程退出: agent={agent} status={status:?}");
         }
     }
 }

@@ -176,6 +176,8 @@ async fn shutdown_signal() {
 
 /// 认证：所有请求（含 Daemon 握手）都必须携带 `Authorization: Bearer <token>`。
 async fn authorize(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
     let authorized = request
         .headers()
         .get("authorization")
@@ -183,6 +185,7 @@ async fn authorize(State(state): State<Arc<AppState>>, request: Request, next: N
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|token| token == state.token);
     if !authorized {
+        log::warn!("未认证请求被拒绝: {method} {path}");
         return StatusCode::UNAUTHORIZED.into_response();
     }
     next.run(request).await

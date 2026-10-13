@@ -393,7 +393,7 @@ async fn delete_session(
 ) -> ApiResult<OpAck> {
     state.sessions.delete(&id).await.map_err(bad_request)?;
     if let Err(error) = state.attachments.delete_all(AttachmentOwner::Session(&id)) {
-        log::warn!("删除会话附件失败（{id}）: {error}");
+        log::warn!("删除会话附件失败: session={id}: {error}");
     }
     Ok(Json(OpAck { ok: true }))
 }
@@ -720,14 +720,14 @@ async fn delete_workflow(
     let workflow = state.workflows.get(&id).map_err(not_found)?;
     state.workflows.delete(&id).await.map_err(bad_request)?;
     if let Err(error) = state.attachments.delete_all(AttachmentOwner::Workflow(&id)) {
-        log::warn!("删除工作流附件失败（{id}）: {error}");
+        log::warn!("删除工作流附件失败: workflow={id}: {error}");
     }
     for session in workflow.linked_sessions {
         if let Err(error) = state
             .attachments
             .delete_all(AttachmentOwner::Session(&session.id))
         {
-            log::warn!("删除关联会话附件失败（{}）: {error}", session.id);
+            log::warn!("删除关联会话附件失败: session={}: {error}", session.id);
         }
     }
     Ok(Json(OpAck { ok: true }))
@@ -869,11 +869,9 @@ async fn put_skills(
     State(state): State<Arc<AppState>>,
     Json(skills): Json<Vec<Skill>>,
 ) -> ApiResult<OpAck> {
-    state
-        .config
-        .set_skills(&skills)
-        .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+    state.config.set_skills(&skills).map_err(bad_request)?;
+    log::info!("技能配置已更新: {} 项", skills.len());
+    Ok(Json(OpAck { ok: true }))
 }
 
 async fn get_plans(State(state): State<Arc<AppState>>) -> Json<Vec<WorkflowPlanItem>> {
@@ -887,8 +885,9 @@ async fn put_plans(
     state
         .config
         .set_workflow_plans(&plans)
-        .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+        .map_err(bad_request)?;
+    log::info!("工作流计划配置已更新: {} 项", plans.len());
+    Ok(Json(OpAck { ok: true }))
 }
 
 async fn get_recent_workspaces(State(state): State<Arc<AppState>>) -> Json<Vec<RecentWorkspace>> {
@@ -916,11 +915,9 @@ async fn create_project(
     State(state): State<Arc<AppState>>,
     Json(project): Json<Project>,
 ) -> ApiResult<OpAck> {
-    state
-        .config
-        .add_project(&project)
-        .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+    state.config.add_project(&project).map_err(bad_request)?;
+    log::info!("项目已创建: {}", project.name);
+    Ok(Json(OpAck { ok: true }))
 }
 
 async fn set_project_order(
@@ -930,8 +927,9 @@ async fn set_project_order(
     state
         .config
         .set_project_order(&request.names)
-        .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+        .map_err(bad_request)?;
+    log::info!("项目顺序已更新: {} 项", request.names.len());
+    Ok(Json(OpAck { ok: true }))
 }
 
 async fn update_project(
@@ -942,8 +940,9 @@ async fn update_project(
     state
         .config
         .update_project(&name, &request.description)
-        .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+        .map_err(bad_request)?;
+    log::info!("项目已更新: {name}");
+    Ok(Json(OpAck { ok: true }))
 }
 
 async fn delete_project(
@@ -951,6 +950,7 @@ async fn delete_project(
     Path(name): Path<String>,
 ) -> ApiResult<OpAck> {
     state.config.delete_project(&name).map_err(bad_request)?;
+    log::info!("项目已删除: {name}");
     // 项目删除后，其下会话回到未归属（docs/PRD.md「项目管理」）
     state.sessions.unassign_project(&name);
     state.workflows.unassign_project(&name);
@@ -968,8 +968,9 @@ async fn put_quick_commands(
     state
         .config
         .set_quick_commands(&commands)
-        .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+        .map_err(bad_request)?;
+    log::info!("快捷指令配置已更新: {} 项", commands.len());
+    Ok(Json(OpAck { ok: true }))
 }
 
 async fn get_orchestrator(State(state): State<Arc<AppState>>) -> Json<Option<OrchestratorConfig>> {
@@ -983,8 +984,9 @@ async fn put_orchestrator(
     state
         .config
         .set_orchestrator(&config)
-        .map(|_| Json(OpAck { ok: true }))
-        .map_err(bad_request)
+        .map_err(bad_request)?;
+    log::info!("内置智能体配置已更新: {}", config.model);
+    Ok(Json(OpAck { ok: true }))
 }
 
 /// 通用操作应答。

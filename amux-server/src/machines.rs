@@ -122,9 +122,18 @@ impl MachineHub {
     /// 重新发现 agents：发现、启动未运行者、建立 ACP 连接，再回报最新状态。
     /// 已启动且有活跃 ACP 连接记录的 agent 不重启。
     pub async fn rediscover(&self, machine_name: &str) -> Result<Vec<Agent>, String> {
+        log::info!("收到重新发现 agents 请求: machine={machine_name}");
         let machine = self.machine(machine_name)?;
-        self.start_agents(&machine, false).await?;
-        self.agents(machine_name).await
+        match self.start_agents(&machine, false).await {
+            Ok(()) => {
+                log::info!("重新发现 agents 完成: machine={machine_name}");
+                self.agents(machine_name).await
+            }
+            Err(error) => {
+                log::warn!("重新发现 agents 失败: machine={machine_name}: {error}");
+                Err(error)
+            }
+        }
     }
 
     /// 重启（或启动）指定 agent，并重建 ACP 连接。
@@ -132,15 +141,15 @@ impl MachineHub {
         let machine = self.machine(machine_name)?;
         let lock = machine.connect_lock(agent);
         let _guard = lock.lock().await;
-        log::info!("收到重启 agent 请求: {agent}@{machine_name}");
+        log::info!("收到重启 agent 请求: machine={machine_name} agent={agent}");
         match self.restart_and_connect(&machine, agent).await {
             Ok(_) => {
                 self.notify_agent_restarted(&machine, agent);
-                log::info!("agent 重启完成: {agent}@{machine_name}");
+                log::info!("agent 重启完成: machine={machine_name} agent={agent}");
                 Ok(())
             }
             Err(error) => {
-                log::warn!("agent 重启失败: {agent}@{machine_name}: {error}");
+                log::warn!("agent 重启失败: machine={machine_name} agent={agent}: {error}");
                 Err(error)
             }
         }
@@ -203,7 +212,12 @@ impl MachineHub {
         machine: &str,
         repo: &str,
         base_branch: Option<&str>,
+        session_id: &str,
     ) -> Result<String, String> {
+        log::info!(
+            "请求创建 worktree: session={session_id} machine={machine} repo={repo} base={}",
+            base_branch.unwrap_or("HEAD")
+        );
         let result: WorktreeResult = self
             .machine(machine)?
             .request(
@@ -214,6 +228,10 @@ impl MachineHub {
                 },
             )
             .await?;
+        log::info!(
+            "worktree 已创建: session={session_id} machine={machine} path={}",
+            result.worktree_dir
+        );
         Ok(result.worktree_dir)
     }
 
@@ -231,11 +249,14 @@ impl MachineHub {
         Ok(result.worktrees)
     }
 
-    pub async fn worktree_remove(&self, machine: &str, repo: &str, path: &str) {
-        let Ok(machine) = self.machine(machine) else {
+    pub async fn worktree_remove(&self, machine: &str, repo: &str, path: &str, session_id: &str) {
+        log::info!(
+            "请求删除 worktree: session={session_id} machine={machine} repo={repo} path={path}"
+        );
+        let Ok(machine_handle) = self.machine(machine) else {
             return;
         };
-        let _ = machine
+        let result = machine_handle
             .request::<_, OpResult>(
                 method::GIT_REMOVE_WORKTREE,
                 WorktreePathParams {
@@ -244,6 +265,14 @@ impl MachineHub {
                 },
             )
             .await;
+        match result {
+            Ok(_) => {
+                log::info!("worktree 已删除: session={session_id} machine={machine} path={path}")
+            }
+            Err(error) => log::warn!(
+                "删除 worktree 失败: session={session_id} machine={machine} path={path}: {error}"
+            ),
+        }
     }
 
     pub async fn terminal_open(
@@ -571,7 +600,10 @@ impl MachineHub {
         machine: &Arc<Machine>,
         agent: &str,
     ) -> Result<Arc<AgentConnection>, String> {
-        log::info!("重启 agent 并重建 ACP 连接: {agent}@{}", machine.name);
+        log::info!(
+            "重启 agent 并重建 ACP 连接: machine={} agent={agent}",
+            machine.name
+        );
         machine
             .request::<_, OpResult>(
                 method::AGENT_RESTART,

@@ -125,16 +125,24 @@ impl SessionService {
         worktree_base_branch: Option<&str>,
         project: Option<&str>,
     ) -> Result<Session, String> {
+        let id = Uuid::new_v4().to_string();
         let worktree_dir = if use_worktree {
-            self.machines
-                .create_worktree(machine, workspace, worktree_base_branch)
-                .await?
+            log::info!(
+                "会话 worktree 创建请求: session={id} machine={machine} repo={workspace} base={}",
+                worktree_base_branch.unwrap_or("HEAD")
+            );
+            let dir = self
+                .machines
+                .create_worktree(machine, workspace, worktree_base_branch, &id)
+                .await?;
+            log::info!("会话 worktree 已创建: session={id} machine={machine} path={dir}");
+            dir
         } else {
             String::new()
         };
         let now = now_ms();
         let session = Session {
-            id: Uuid::new_v4().to_string(),
+            id,
             workflow_id: None,
             machine: machine.to_string(),
             agent: agent.to_string(),
@@ -161,10 +169,10 @@ impl SessionService {
         .await
         .map_err(|error| format!("写入会话任务失败: {error}"))??;
         log::info!(
-            "会话已创建: {} ({}@{})",
+            "会话已创建: session={} machine={} agent={}",
             session.id,
-            session.agent,
-            session.machine
+            session.machine,
+            session.agent
         );
         Ok(session)
     }
@@ -194,6 +202,11 @@ impl SessionService {
             self.store.set_title(id, &generate_title(&text));
         }
         self.store.touch(id);
+        log::info!(
+            "会话指令已发送: session={id} machine={} agent={} agent_session={agent_session_id}",
+            session.machine,
+            session.agent
+        );
         Ok(())
     }
 
@@ -201,13 +214,21 @@ impl SessionService {
     pub async fn cancel(&self, id: &str) -> Result<(), String> {
         let session = self.get(id)?;
         if session.state == SessionState::Idle {
+            log::info!("忽略取消请求，会话已空闲: session={id}");
             return Ok(());
         }
         let Some(agent_session_id) = self.agent_session_id(id) else {
+            log::info!("忽略取消请求，agent 会话未就绪: session={id}");
             return Ok(());
         };
         let conn = self.machines.acp(&session.machine, &session.agent).await?;
-        conn.cancel(&agent_session_id)
+        conn.cancel(&agent_session_id)?;
+        log::info!(
+            "会话取消请求已发送: session={id} machine={} agent={} agent_session={agent_session_id}",
+            session.machine,
+            session.agent
+        );
+        Ok(())
     }
 
     pub async fn configure(
@@ -222,6 +243,7 @@ impl SessionService {
         self.store.set_title(id, &title);
         self.store.set_session_project(id, project.as_deref());
         self.store.set_session_pinned(id, pinned);
+        let has_config = config.is_some();
         if let Some(config) = config {
             self.ensure_agent_session(&session).await?;
             let agent_session_id = self
@@ -233,6 +255,12 @@ impl SessionService {
                 .await?;
             self.caches.options.lock().insert(id.to_string(), options);
         }
+        log::info!(
+            "会话配置已更新: session={id} machine={} agent={} config={}",
+            session.machine,
+            session.agent,
+            has_config
+        );
         Ok(())
     }
 
@@ -249,25 +277,34 @@ impl SessionService {
         let workspace = session.workspace.clone();
         let machine = session.machine.clone();
         let agent = session.agent.clone();
+        let session_id = id.to_string();
         tokio::spawn(async move {
             for terminal_id in terminals {
+                log::info!(
+                    "会话删除清理终端: session={session_id} terminal={terminal_id} machine={machine}"
+                );
                 machines.terminal_close(&machine, &terminal_id).await;
             }
             if let Some(agent_session_id) = agent_session_id {
                 if let Ok(conn) = machines.acp(&machine, &agent).await {
                     if let Err(error) = conn.close(&agent_session_id).await {
-                        log::warn!("session/close 失败（{agent_session_id}）: {error}");
+                        log::warn!(
+                            "session/close 失败: session={session_id} agent_session={agent_session_id}: {error}"
+                        );
                     }
                     let _ = conn.delete(&agent_session_id).await;
                 }
             }
             if !worktree_dir.is_empty() {
+                log::info!(
+                    "会话删除清理 worktree: session={session_id} machine={machine} path={worktree_dir}"
+                );
                 machines
-                    .worktree_remove(&machine, &workspace, &worktree_dir)
+                    .worktree_remove(&machine, &workspace, &worktree_dir, &session_id)
                     .await;
             }
         });
-        log::info!("会话已删除: {id}");
+        log::info!("会话已删除: session={id}");
         Ok(())
     }
 
@@ -356,6 +393,9 @@ impl SessionService {
             )
             .await?;
         self.terminals.open(id, &terminal_id, &cwd, cols, rows);
+        log::info!(
+            "终端已打开: session={id} terminal={terminal_id} cwd={cwd} cols={cols} rows={rows}"
+        );
         Ok(terminal_id)
     }
 
@@ -411,6 +451,7 @@ impl SessionService {
         let machine = self.terminal_machine(id, terminal_id)?;
         self.terminals.remove(terminal_id);
         self.machines.terminal_close(&machine, terminal_id).await;
+        log::info!("终端已关闭: session={id} terminal={terminal_id}");
         Ok(())
     }
 
@@ -440,6 +481,12 @@ impl SessionService {
         match self.store.agent_session_id(&session.id) {
             None => {
                 let (agent_session_id, options) = conn.new_session(&cwd).await?;
+                log::info!(
+                    "agent 会话已创建: session={} machine={} agent={} agent_session={agent_session_id} cwd={cwd}",
+                    session.id,
+                    session.machine,
+                    session.agent
+                );
                 self.store
                     .set_agent_session_id(&session.id, &agent_session_id);
                 self.caches
@@ -458,6 +505,12 @@ impl SessionService {
                 }
                 match conn.resume_session(&agent_session_id, &cwd).await {
                     Ok(options) => {
+                        log::info!(
+                            "agent 会话已恢复: session={} machine={} agent={} agent_session={agent_session_id} cwd={cwd}",
+                            session.id,
+                            session.machine,
+                            session.agent
+                        );
                         self.caches
                             .agent_sessions
                             .lock()
@@ -469,7 +522,10 @@ impl SessionService {
                         self.caches.resumed.lock().insert(session.id.clone());
                     }
                     Err(error) => {
-                        log::warn!("session/resume 失败（{}）: {error}", session.id);
+                        log::warn!(
+                            "session/resume 失败: session={} agent_session={agent_session_id}: {error}",
+                            session.id
+                        );
                         self.record_error(&session.id, &format!("会话恢复失败: {error}"));
                     }
                 }
@@ -701,10 +757,16 @@ impl SessionService {
                 if let Some(agent_session_id) = self.store.agent_session_id(&session.id) {
                     if let Ok(conn) = self.machines.acp(&session.machine, &session.agent).await {
                         if let Err(error) = conn.close(&agent_session_id).await {
-                            log::warn!("session/close 失败（{agent_session_id}）: {error}");
+                            log::warn!(
+                                "session/close 失败: session={} agent_session={agent_session_id}: {error}",
+                                session.id
+                            );
                         }
                         self.caches.forget(&session.id);
-                        log::info!("会话长时间无活动，已关闭 agent 侧会话: {}", session.id);
+                        log::info!(
+                            "会话长时间无活动，已关闭 agent 侧会话: session={} agent_session={agent_session_id}",
+                            session.id
+                        );
                     }
                 }
             }
@@ -716,7 +778,7 @@ impl SessionService {
                     .terminal_close(&session.machine, &terminal_id)
                     .await;
             }
-            log::info!("终端长时间无输入输出，已删除: {terminal_id}");
+            log::info!("终端长时间无输入输出，已删除: session={session_id} terminal={terminal_id}");
         }
     }
 }

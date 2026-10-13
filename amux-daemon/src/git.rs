@@ -542,9 +542,15 @@ impl GitRunner {
     pub fn create_worktree(&self, repo: &str, base_branch: Option<&str>) -> Result<String, String> {
         let target = worktree_dir_for(repo, &amux_common::paths::worktrees_dir())?;
         let base = normalize_base_branch(base_branch);
+        log::info!(
+            "创建 worktree: repo={repo} target={} base={}",
+            target.display(),
+            base.unwrap_or("HEAD")
+        );
         self.add_worktree(repo, &target, base)?;
         let marker = resolve_base_branch_marker(repo, base)?;
         write_worktree_base_branch(&target, &marker)?;
+        log::info!("worktree 创建完成: repo={repo} path={}", target.display());
         Ok(target.to_string_lossy().replace('\\', "/"))
     }
 
@@ -595,7 +601,9 @@ impl GitRunner {
 
     /// 删除 worktree（强制：会话删除级联清理不因未提交改动而失败）。
     pub fn worktree_remove(&self, repo: &str, path: &str) {
+        log::info!("删除 worktree: repo={repo} path={path}");
         self.remove_worktree(repo, Path::new(path));
+        log::info!("worktree 删除完成: repo={repo} path={path}");
     }
 
     /// 在 `repo_cwd` 仓库内创建指向 `target` 路径的 git worktree。分支名由目标目录
