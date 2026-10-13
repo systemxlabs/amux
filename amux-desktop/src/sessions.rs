@@ -22,7 +22,7 @@ use gpui_component::{
 };
 
 use crate::app::{AmuxApp, InputResizeDrag, INPUT_RESIZE_HANDLE_HEIGHT};
-use crate::state::{Core, PendingAttachmentStatus, SettingsTab};
+use crate::state::{Core, PendingAttachmentStatus, SettingsTab, WorkspacePickerTarget};
 use crate::ui;
 
 /// 消息气泡宽度上下限（下限需容纳时间戳行）。
@@ -162,7 +162,12 @@ fn direct_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> An
     v_flex()
         .gap_3()
         .child(row)
-        .child(workspace_picker(core, this, cx))
+        .child(workspace_picker(
+            core,
+            this,
+            WorkspacePickerTarget::NewSession,
+            cx,
+        ))
         .child(field("项目", project_selector(core, cx), cx))
         .child(
             h_flex()
@@ -458,11 +463,32 @@ fn hint_text(text: &str, cx: &Context<AmuxApp>) -> AnyElement {
 /// （行内展示完整路径、溢出从头部截断）；手动输入时上拉框换成输入框下方的前缀匹配下拉框，
 /// 输入框失焦或点击浮层之外则上下拉框都收起；没有最近目录时就是普通输入框
 /// （docs/PRD.md「新建会话视图」）。
-fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+pub(crate) fn workspace_picker(
+    core: &Core,
+    this: &mut AmuxApp,
+    picker: WorkspacePickerTarget,
+    cx: &mut Context<AmuxApp>,
+) -> AnyElement {
+    let (machine, suggestions, recent_open, input_bounds, input) = match picker {
+        WorkspacePickerTarget::NewSession => (
+            core.new_session.machine.clone(),
+            core.new_session.suggestions.clone(),
+            this.workspace_recent_open,
+            this.workspace_input_bounds,
+            this.workspace_input.clone(),
+        ),
+        WorkspacePickerTarget::Automation => (
+            core.automation_form.machine.clone(),
+            core.automation_form.workspace_suggestions.clone(),
+            this.automation_workspace_recent_open,
+            this.automation_workspace_input_bounds,
+            this.automation_workspace.clone(),
+        ),
+    };
     let recent: Vec<RecentWorkspace> = core
         .recent_workspaces
         .iter()
-        .filter(|workspace| core.new_session.machine.as_deref() == Some(workspace.machine.as_str()))
+        .filter(|workspace| machine.as_deref() == Some(workspace.machine.as_str()))
         .take(RECENT_WORKSPACE_LIMIT)
         .cloned()
         .collect();
@@ -470,27 +496,30 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
     let theme = ui::Colors::of(cx.theme());
     let app = cx.entity();
     let has_recent = !recent.is_empty();
-    let open = has_recent && this.workspace_recent_open;
-    let input_bounds = this.workspace_input_bounds;
+    let open = has_recent && recent_open;
+    let id_prefix = match picker {
+        WorkspacePickerTarget::NewSession => "ns",
+        WorkspacePickerTarget::Automation => "automation",
+    };
 
-    let mut input_row =
-        h_flex()
-            .w_full()
-            .min_w_0()
-            .child(
-                Input::new(&this.workspace_input)
-                    .w_full()
-                    .when(has_recent, |input| {
-                        input.suffix(
-                            Icon::new(IconName::ChevronUp)
-                                .small()
-                                .text_color(theme.muted_foreground),
-                        )
-                    }),
-            );
+    let mut input_row = h_flex()
+        .w_full()
+        .min_w_0()
+        .child(Input::new(&input).w_full().when(has_recent, |input| {
+            input.suffix(
+                Icon::new(IconName::ChevronUp)
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+        }));
     let bounds_app = app.clone();
     input_row = input_row.on_prepaint(move |bounds, _, cx| {
-        bounds_app.update(cx, |this, _| this.workspace_input_bounds = Some(bounds));
+        bounds_app.update(cx, |this, _| match picker {
+            WorkspacePickerTarget::NewSession => this.workspace_input_bounds = Some(bounds),
+            WorkspacePickerTarget::Automation => {
+                this.automation_workspace_input_bounds = Some(bounds)
+            }
+        });
     });
     if has_recent {
         // 点击输入框弹出最近目录上拉框（鼠标事件先到输入框自身，再冒泡到这里，不影响编辑；
@@ -498,11 +527,11 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         // （docs/PRD.md「新建会话视图」）
         let app = app.clone();
         input_row = input_row.on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            app.update(cx, |this, cx| this.show_recent_workspaces(cx));
+            app.update(cx, |this, cx| this.show_recent_workspaces_for(picker, cx));
         });
     }
     let mut wrap = h_flex()
-        .id("ns-workspace-wrap")
+        .id(SharedString::from(format!("{id_prefix}-workspace-wrap")))
         .relative()
         .w_full()
         .min_w_0()
@@ -515,7 +544,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
         let visible = recent.len().min(SUGGEST_MAX_ROWS);
         let height = px(SUGGEST_PADDING * 2.0 + SUGGEST_ROW_HEIGHT * visible as f32);
         let mut rows = v_flex()
-            .id("ns-workspace-recent")
+            .id(SharedString::from(format!("{id_prefix}-workspace-recent")))
             .w_full()
             .flex_1()
             .min_h_0()
@@ -529,7 +558,9 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
             let delete_target = workspace.clone();
             rows = rows.child(
                 div()
-                    .id(SharedString::from(format!("ns-workspace-recent-{path}")))
+                    .id(SharedString::from(format!(
+                        "{id_prefix}-workspace-recent-{path}"
+                    )))
                     .w_full()
                     .h(px(SUGGEST_ROW_HEIGHT))
                     .flex_shrink_0()
@@ -544,7 +575,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     .on_click(move |_, window, cx| {
                         let value = value.clone();
                         app.update(cx, |this, cx| {
-                            this.select_recent_workspace(value.clone(), window, cx)
+                            this.select_recent_workspace_for(picker, value.clone(), window, cx)
                         });
                     })
                     .child(
@@ -556,7 +587,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                             .text_ellipsis_start(),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("ns-recent-del-{path}")))
+                        Button::new(SharedString::from(format!("{id_prefix}-recent-del-{path}")))
                             .xsmall()
                             .ghost()
                             .icon(IconName::Close)
@@ -576,7 +607,9 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                 .position(point(bounds.left(), bounds.top() - px(SUGGEST_PADDING)))
                 .child(
                     v_flex()
-                        .id("ns-workspace-recent-panel")
+                        .id(SharedString::from(format!(
+                            "{id_prefix}-workspace-recent-panel"
+                        )))
                         .w(bounds.size.width)
                         .h(height)
                         .overflow_hidden()
@@ -586,9 +619,9 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                         .border_color(theme.border)
                         .rounded_lg()
                         .shadow_lg()
-                        .on_mouse_down_out(
-                            cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
-                        )
+                        .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                            this.dismiss_workspace_popups_for(picker, cx)
+                        }))
                         .child(rows),
                 ),
         ));
@@ -596,22 +629,22 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
 
     // 前缀联想：以输入行左缘为锚向下展开（deferred 保持浮层置顶）；高度按条目数
     // 自适应，超过上限时列表内滚动查看（带滚动条）
-    if let Some(bounds) = input_bounds.filter(|_| !core.new_session.suggestions.is_empty()) {
-        let visible = core.new_session.suggestions.len().min(SUGGEST_MAX_ROWS);
+    if let Some(bounds) = input_bounds.filter(|_| !suggestions.is_empty()) {
+        let visible = suggestions.len().min(SUGGEST_MAX_ROWS);
         let height = px(SUGGEST_PADDING * 2.0 + SUGGEST_ROW_HEIGHT * visible as f32);
         let mut rows = v_flex()
-            .id("ns-workspace-suggest")
+            .id(SharedString::from(format!("{id_prefix}-workspace-suggest")))
             .w_full()
             .flex_1()
             .min_h_0()
             .p(px(SUGGEST_PADDING))
             .overflow_y_scrollbar();
-        for entry in core.new_session.suggestions.clone() {
+        for entry in suggestions {
             let path = entry.path.clone();
             let value = format!("{}/", path.trim_end_matches('/'));
             rows = rows.child(
                 div()
-                    .id(SharedString::from(format!("ns-suggest-{path}")))
+                    .id(SharedString::from(format!("{id_prefix}-suggest-{path}")))
                     .w_full()
                     .h(px(SUGGEST_ROW_HEIGHT))
                     .flex_shrink_0()
@@ -623,7 +656,7 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                     .overflow_hidden()
                     .hover(|row| row.bg(theme.accent))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_workspace(value.clone(), window, cx)
+                        this.set_workspace_for(picker, value.clone(), window, cx)
                     }))
                     .child(
                         Label::new(path.clone())
@@ -639,7 +672,9 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                 .position(point(bounds.left(), bounds.bottom() + px(SUGGEST_PADDING)))
                 .child(
                     v_flex()
-                        .id("ns-workspace-suggest-panel")
+                        .id(SharedString::from(format!(
+                            "{id_prefix}-workspace-suggest-panel"
+                        )))
                         .w(bounds.size.width)
                         .h(height)
                         .overflow_hidden()
@@ -649,9 +684,9 @@ fn workspace_picker(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) 
                         .border_color(theme.border)
                         .rounded_lg()
                         .shadow_lg()
-                        .on_mouse_down_out(
-                            cx.listener(|this, _, _, cx| this.dismiss_workspace_popups(cx)),
-                        )
+                        .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                            this.dismiss_workspace_popups_for(picker, cx)
+                        }))
                         .child(rows),
                 ),
         ));

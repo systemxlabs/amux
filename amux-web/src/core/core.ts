@@ -11,7 +11,6 @@ import type {
   Automation,
   AutomationConfig,
   ContentBlock,
-  FsEntry,
   HistoryItem,
   ListEntry,
   Machine,
@@ -91,19 +90,7 @@ export type NewSessionState = {
   plan: string;
   /** 工作流模式：选中的已保存计划名 */
   selectedPlan: string | null;
-  /** 工作目录前缀匹配候选 */
-  suggestions: FsEntry[];
-  /**
-   * 已拉取条目的目录（前缀匹配的数据源）：输入停在同一个目录内时直接用它过滤，
-   * 不为同一个目录重复拉取；应答回来时目录或机器已变则丢弃。
-   */
-  suggestion: DirectoryListing | null;
-  /** 当前输入的名字前缀 */
-  suggestionPrefix: string;
 };
-
-/** 某机器某目录下的全部目录项（docs/DESIGN.md「新建会话视图」）。 */
-export type DirectoryListing = { machine: string; dir: string; entries: FsEntry[] };
 
 /** 设置浮窗分类。 */
 export type SettingsTab =
@@ -234,9 +221,6 @@ export function initialNewSession(): NewSessionState {
     worktreeBaseBranch: "HEAD",
     plan: "",
     selectedPlan: null,
-    suggestions: [],
-    suggestion: null,
-    suggestionPrefix: "",
   };
 }
 

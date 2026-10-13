@@ -3,61 +3,21 @@
 // 顶部为模式切换（普通/工作流）：普通模式选择机器与可用 agent、输入工作目录（前缀匹配联想与最近目录）、
 // worktree 开关；工作流模式选择或输入工作计划（内置智能体未配置时引导去设置）。
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Folder } from "lucide-react";
+import type { ReactNode } from "react";
 
-import { Button } from "../components/ui/button";
-import { Input } from "../components/ui/input";
-import { Label } from "../components/ui/label";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../components/ui/select";
+  WorkflowPlanField,
+  WorkspaceField,
+  WorktreeBranchField,
+} from "../components/SessionCreationFields";
+import { Button } from "../components/ui/button";
+import { Label } from "../components/ui/label";
 import { Switch } from "../components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { Textarea } from "../components/ui/textarea";
-import {
-  createSession,
-  createWorkflow,
-  deleteRecentWorkspace,
-  openSettings,
-  updateWorkspaceInput,
-} from "../core/actions";
+import { createSession, createWorkflow, openSettings } from "../core/actions";
 import { refreshWorkflowSetup } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
-import { truncate } from "../lib/format";
-import type { GitBranch } from "../lib/types";
 import { cn } from "../lib/utils";
-
-/** 已保存计划上拉框：向上弹出，上方空间不足时向下弹，高度按剩余空间收敛。 */
-type PlanPopupPlacement = { below: boolean; maxHeight: number };
-
-/** 工作目录字段的浮层：点击输入框展示最近目录（上拉），手动输入改为前缀匹配（下拉）。 */
-type WorkspacePopup = { kind: "recent" | "suggest"; maxHeight: number };
-
-/** 浮层最大高度（对应 max-h-56）。 */
-const PLAN_POPUP_HEIGHT = 224;
-/** 浮层与锚点的间距。 */
-const POPUP_GAP = 8;
-/** 浮层最小高度：空间实在不够时允许略超出视口，也不至于只露一条缝。 */
-const POPUP_MIN_HEIGHT = 80;
-
-function worktreeBranchLabel(branch: GitBranch): string {
-  const marks = [
-    branch.isWorktreeBase ? "worktree 基分支" : "",
-    branch.isDefault ? "默认分支" : "",
-  ].filter(Boolean);
-  return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
-}
-
-/** 锚点某一侧可用于浮层的高度：收敛到该方向剩余空间。 */
-function popupMaxHeight(anchor: DOMRect, below: boolean): number {
-  const available = below ? window.innerHeight - anchor.bottom - POPUP_GAP : anchor.top - POPUP_GAP;
-  return Math.max(Math.min(PLAN_POPUP_HEIGHT, available), POPUP_MIN_HEIGHT);
-}
 
 /**
  * 选项按钮组中的一个按钮（docs/PRD.md「新建会话视图」：机器与 agent 均采用选项按钮组，
@@ -101,11 +61,6 @@ function OptionButton({
 export function NewSessionView() {
   const core = useCore();
   const state = useCoreState();
-  const planField = useRef<HTMLDivElement | null>(null);
-  const [planPopup, setPlanPopup] = useState<PlanPopupPlacement | null>(null);
-  const [workspacePopup, setWorkspacePopup] = useState<WorkspacePopup | null>(null);
-  const [worktreeBranches, setWorktreeBranches] = useState<GitBranch[]>([]);
-  const worktreeBranchRequest = useRef(0);
   const {
     mode,
     machine,
@@ -115,7 +70,6 @@ export function NewSessionView() {
     worktreeBaseBranch,
     plan,
     selectedPlan,
-    suggestions,
   } = state.newSession;
   const agents = state.settings.agents.find((item) => item.machine === machine)?.agents ?? [];
   const selectedAgent = agents.find((item) => item.name === agent);
@@ -125,75 +79,7 @@ export function NewSessionView() {
     selectedAgent !== undefined &&
     selectedAgent.available &&
     workspace.trim() !== "";
-  const recent = state.recentWorkspaces
-    .filter((item) => item.machine === machine)
-    .sort((a, b) => b.lastUsed - a.lastUsed)
-    .slice(0, 8);
-
-  // 切换模式后不保留浮层：回到工作流/普通模式时由聚焦输入框重新触发
-  useEffect(() => {
-    setPlanPopup(null);
-    setWorkspacePopup(null);
-  }, [mode]);
-
-  useEffect(() => {
-    const repo = workspace.trim();
-    if (!useWorktree || machine === "" || repo === "" || core.client === null) {
-      worktreeBranchRequest.current += 1;
-      setWorktreeBranches([]);
-      return;
-    }
-    const request = ++worktreeBranchRequest.current;
-    void core.client.listBranches(machine, repo).then(
-      (result) => {
-        if (request !== worktreeBranchRequest.current) return;
-        setWorktreeBranches(result.branches);
-        core.update((draft) => {
-          if (
-            draft.newSession.worktreeBaseBranch !== "HEAD" &&
-            !result.branches.some((branch) => branch.name === draft.newSession.worktreeBaseBranch)
-          ) {
-            draft.newSession.worktreeBaseBranch = "HEAD";
-          }
-        });
-      },
-      () => {
-        if (request === worktreeBranchRequest.current) setWorktreeBranches([]);
-      },
-    );
-  }, [core, machine, useWorktree, workspace]);
-
-  // 已保存计划的上拉框按点击外部收起（工作目录的两个浮层由输入框失焦收起）
-  useEffect(() => {
-    const onMouseDown = (event: MouseEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      const plans = planField.current;
-      if (plans !== null && !plans.contains(target)) setPlanPopup(null);
-    };
-    document.addEventListener("mousedown", onMouseDown);
-    return () => document.removeEventListener("mousedown", onMouseDown);
-  }, []);
-
-  /** 点击/聚焦工作目录输入框：上拉展示最近使用的工作目录。 */
-  const showRecentWorkspaces = (input: HTMLInputElement): void => {
-    setWorkspacePopup(
-      recent.length === 0
-        ? null
-        : { kind: "recent", maxHeight: popupMaxHeight(input.getBoundingClientRect(), false) },
-    );
-  };
-
-  /** 展开已保存计划上拉框：按输入框上下的可用空间决定方向与高度。 */
-  const openPlanPopup = (input: HTMLElement): void => {
-    const rect = input.getBoundingClientRect();
-    const above = rect.top - POPUP_GAP;
-    const below = window.innerHeight - rect.bottom - POPUP_GAP;
-    const useBelow = above < PLAN_POPUP_HEIGHT && below > above;
-    setPlanPopup({ below: useBelow, maxHeight: popupMaxHeight(rect, useBelow) });
-  };
-
-  /** 选中已保存计划：填入输入框并收起上拉框。 */
+  /** 选中已保存计划：沿用新建会话行为，同时恢复该计划最近使用的项目。 */
   const pickPlan = (item: (typeof state.settings.plans)[number]): void => {
     core.update((draft) => {
       draft.newSession.plan = item.plan;
@@ -204,10 +90,9 @@ export function NewSessionView() {
           ? item.lastUsedProject
           : undefined;
     });
-    setPlanPopup(null);
   };
 
-  /** 选中最近使用的工作目录：填入并收起浮层（选定项，不再联想）。 */
+  /** 选中最近使用的工作目录：沿用新建会话行为，同时恢复该项目。 */
   const pickRecentWorkspace = (item: (typeof state.recentWorkspaces)[number]): void => {
     core.update((draft) => {
       draft.newSession.workspace = item.workspace;
@@ -216,22 +101,7 @@ export function NewSessionView() {
         state.settings.projects.some((project) => project.name === item.lastUsedProject)
           ? item.lastUsedProject
           : undefined;
-      draft.newSession.suggestions = [];
     });
-    setWorkspacePopup(null);
-  };
-
-  /**
-   * 选中前缀匹配的目录项：填入该目录并保持下拉框，由联想结果继续展示这一级目录项，
-   * 用户可一路点选下钻（docs/DESIGN.md「新建会话视图」：目录边界处拉取该目录的全部目录项）。
-   */
-  const pickSuggestion = (value: string): void => {
-    const path = value.endsWith("/") ? value : `${value}/`;
-    core.update((draft) => {
-      draft.newSession.workspace = path;
-      draft.newSession.suggestions = [];
-    });
-    void updateWorkspaceInput(core, path);
   };
 
   // PRD「新建会话视图」：无连接机器时整个视图展示提示，与普通/工作流模式无关
@@ -251,7 +121,6 @@ export function NewSessionView() {
                   draft.newSession.machine = item.name;
                   draft.newSession.agent = "";
                 });
-                void updateWorkspaceInput(core, workspace);
               }}
             >
               {item.name}
@@ -290,86 +159,17 @@ export function NewSessionView() {
 
       <div className="flex flex-col gap-2">
         <Label>工作目录</Label>
-        <div className="relative">
-          <Input
-            data-slot="workspace-input"
-            aria-label="工作目录"
-            value={workspace}
-            onFocus={(event) => showRecentWorkspaces(event.currentTarget)}
-            onClick={(event) => showRecentWorkspaces(event.currentTarget)}
-            onBlur={() => setWorkspacePopup(null)}
-            onChange={(event) => {
-              const value = event.target.value;
-              core.update((draft) => {
-                draft.newSession.workspace = value;
-                // 输入变化先清掉旧候选：新前缀的应答到达前不展示与当前输入不符的目录项
-                draft.newSession.suggestions = [];
-              });
-              void updateWorkspaceInput(core, value);
-              // 手动输入：上拉框（最近目录）换成下拉框（前缀匹配）
-              setWorkspacePopup({
-                kind: "suggest",
-                maxHeight: popupMaxHeight(event.currentTarget.getBoundingClientRect(), true),
-              });
-            }}
-          />
-          {workspacePopup?.kind === "recent" && recent.length > 0 ? (
-            <div
-              data-slot="recent-workspaces"
-              style={{ maxHeight: workspacePopup.maxHeight }}
-              className="absolute bottom-full left-0 z-10 mb-1 flex w-full flex-col overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg"
-            >
-              {recent.map((item) => (
-                <div
-                  key={`${item.machine}:${item.workspace}`}
-                  data-slot="recent-workspace"
-                  // 阻止默认行为以免输入框失焦（失焦会收起浮层，点击就落不到这一项上）
-                  onMouseDown={(event) => event.preventDefault()}
-                  className="flex cursor-pointer items-center hover:bg-accent"
-                >
-                  <button
-                    type="button"
-                    onClick={() => pickRecentWorkspace(item)}
-                    className="min-w-0 flex-1 truncate px-2 py-2 text-left text-sm lg:py-1"
-                  >
-                    {item.workspace}
-                  </button>
-                  <button
-                    type="button"
-                    data-slot="recent-workspace-delete"
-                    aria-label={`删除 ${item.workspace}`}
-                    onClick={() => void deleteRecentWorkspace(core, item.machine, item.workspace)}
-                    className="shrink-0 px-2 py-2 text-muted-foreground hover:text-foreground lg:py-1"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          {workspacePopup?.kind === "suggest" && suggestions.length > 0 ? (
-            <div
-              data-slot="workspace-suggestions"
-              style={{ maxHeight: workspacePopup.maxHeight }}
-              className="absolute top-full left-0 z-10 mt-1 flex w-full flex-col overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg"
-            >
-              {suggestions.map((item) => (
-                <button
-                  key={item.path}
-                  type="button"
-                  data-slot="workspace-suggestion"
-                  data-path={item.path}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => pickSuggestion(item.path)}
-                  className="flex cursor-pointer items-center gap-1.5 rounded-sm px-2 py-2 text-left text-sm hover:bg-accent lg:py-1"
-                >
-                  <Folder className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="truncate">{item.name}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
+        <WorkspaceField
+          core={core}
+          machine={machine}
+          value={workspace}
+          onPickRecent={pickRecentWorkspace}
+          onChange={(value) => {
+            core.update((draft) => {
+              draft.newSession.workspace = value;
+            });
+          }}
+        />
       </div>
 
       <div className="flex flex-col gap-2">
@@ -408,33 +208,17 @@ export function NewSessionView() {
           />
         </div>
         {useWorktree ? (
-          <div className="flex items-center justify-between gap-3">
-            <Label>基分支</Label>
-            <Select
-              value={worktreeBaseBranch}
-              onValueChange={(value) =>
-                core.update((draft) => {
-                  draft.newSession.worktreeBaseBranch = value;
-                })
-              }
-            >
-              <SelectTrigger
-                data-slot="worktree-base-select"
-                aria-label="选择 worktree 基分支"
-                className="h-8 w-64 max-w-[55%]"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="HEAD">HEAD（当前提交）</SelectItem>
-                {worktreeBranches.map((branch) => (
-                  <SelectItem key={branch.name} value={branch.name}>
-                    {worktreeBranchLabel(branch)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          <WorktreeBranchField
+            core={core}
+            machine={machine}
+            workspace={workspace}
+            value={worktreeBaseBranch}
+            onChange={(value) => {
+              core.update((draft) => {
+                draft.newSession.worktreeBaseBranch = value;
+              });
+            }}
+          />
         ) : null}
       </div>
 
@@ -451,55 +235,18 @@ export function NewSessionView() {
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-2">
           <Label>工作计划</Label>
-          <div ref={planField} className="relative">
-            {/* 已保存计划的上拉框：聚焦输入框时弹出，覆盖在上方不挤占表单版面 */}
-            {planPopup !== null && state.settings.plans.length > 0 ? (
-              <div
-                data-slot="plan-popup"
-                data-direction={planPopup.below ? "below" : "above"}
-                style={{ maxHeight: planPopup.maxHeight }}
-                className={cn(
-                  "absolute left-0 z-10 flex w-full flex-col overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg",
-                  planPopup.below ? "top-full mt-1" : "bottom-full mb-1",
-                )}
-              >
-                {state.settings.plans.map((item) => (
-                  <button
-                    key={item.name}
-                    type="button"
-                    data-slot="plan-choice"
-                    data-selected={selectedPlan === item.name ? "true" : "false"}
-                    onClick={() => pickPlan(item)}
-                    className={cn(
-                      "flex cursor-pointer flex-col items-start gap-1 px-2 py-2 text-left hover:bg-accent lg:py-1",
-                      selectedPlan === item.name && "bg-accent",
-                    )}
-                  >
-                    <span className="text-sm">{item.name}</span>
-                    <span className="text-xs text-muted-foreground">{truncate(item.plan, 80)}</span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            <Textarea
-              data-slot="workflow-plan-input"
-              aria-label="工作计划"
-              className="min-h-32"
-              placeholder="输入工作计划"
-              value={plan}
-              onFocus={(event) => openPlanPopup(event.currentTarget)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") setPlanPopup(null);
-              }}
-              onChange={(event) => {
-                const value = event.target.value;
-                core.update((draft) => {
-                  draft.newSession.plan = value;
-                  draft.newSession.selectedPlan = null;
-                });
-              }}
-            />
-          </div>
+          <WorkflowPlanField
+            plans={state.settings.plans}
+            value={plan}
+            selectedPlan={selectedPlan}
+            onChange={(value) => {
+              core.update((draft) => {
+                draft.newSession.plan = value;
+                draft.newSession.selectedPlan = null;
+              });
+            }}
+            onSelectPlan={pickPlan}
+          />
         </div>
         <div className="flex flex-col gap-2">
           <Label>项目</Label>

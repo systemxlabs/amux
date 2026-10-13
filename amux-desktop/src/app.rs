@@ -89,7 +89,6 @@ pub struct AmuxApp {
     pub automation_repository: Entity<InputState>,
     pub automation_events: Entity<InputState>,
     pub automation_workspace: Entity<InputState>,
-    pub automation_worktree_branch: Entity<InputState>,
     pub automation_plan: Entity<InputState>,
     pub automation_label1_name: Entity<InputState>,
     pub automation_label1_description: Entity<InputState>,
@@ -180,6 +179,10 @@ pub struct AmuxApp {
     pub workspace_recent_open: bool,
     /// 新建会话工作目录输入框的窗口坐标（浮层按输入框边缘锚定）
     pub workspace_input_bounds: Option<Bounds<Pixels>>,
+    /// 自动化工作目录最近目录下拉是否展开
+    pub automation_workspace_recent_open: bool,
+    /// 自动化工作目录输入框的窗口坐标（浮层按输入框边缘锚定）
+    pub automation_workspace_input_bounds: Option<Bounds<Pixels>>,
     /// 执行目录面板当前查看的文件路径
     pub exec_file: Option<String>,
     /// 执行目录面板中文件树区域是否展开
@@ -252,8 +255,6 @@ impl AmuxApp {
         let automation_events =
             cx.new(|cx| InputState::new(window, cx).placeholder("push, pull_request"));
         let automation_workspace = cx.new(|cx| InputState::new(window, cx));
-        let automation_worktree_branch =
-            cx.new(|cx| InputState::new(window, cx).placeholder("HEAD"));
         let automation_plan = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -300,6 +301,34 @@ impl AmuxApp {
                     this.refresh_worktree_branches(cx);
                 }
                 InputEvent::Blur => this.dismiss_workspace_popups(cx),
+                _ => {}
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &automation_workspace,
+            |this: &mut Self, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.automation_workspace_recent_open = false;
+                    this.refresh_automation_workspace_suggestions(cx);
+                    this.refresh_automation_worktree_branches(cx);
+                }
+                InputEvent::Blur => this.dismiss_automation_workspace_popups(cx),
+                _ => {}
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &automation_cron,
+            |this: &mut Self, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.with_core(|core| {
+                        core.automation_form.cron_error = None;
+                        core.automation_form.cron_next_runs.clear();
+                    });
+                    cx.notify();
+                }
+                InputEvent::Blur => this.validate_automation_cron(cx),
                 _ => {}
             },
         )
@@ -414,7 +443,6 @@ impl AmuxApp {
             automation_repository,
             automation_events,
             automation_workspace,
-            automation_worktree_branch,
             automation_plan,
             automation_label1_name,
             automation_label1_description,
@@ -473,6 +501,8 @@ impl AmuxApp {
             expanded_activities: HashSet::new(),
             workspace_recent_open: false,
             workspace_input_bounds: None,
+            automation_workspace_recent_open: false,
+            automation_workspace_input_bounds: None,
             exec_file: None,
             exec_tree_visible: true,
             exec_content_visible: true,
@@ -1228,28 +1258,66 @@ impl AmuxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspace_input.update(cx, |state, cx| {
+        self.select_recent_workspace_for(
+            crate::state::WorkspacePickerTarget::NewSession,
+            target,
+            window,
+            cx,
+        );
+    }
+
+    pub fn select_recent_workspace_for(
+        &mut self,
+        picker: crate::state::WorkspacePickerTarget,
+        target: RecentWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_input_for(picker).update(cx, |state, cx| {
             state.set_value(target.workspace.clone(), window, cx)
         });
         self.with_core(|core| {
-            core.new_session.project = target.last_used_project.filter(|project| {
+            let project = target.last_used_project.filter(|project| {
                 core.settings
                     .projects
                     .iter()
                     .any(|candidate| &candidate.name == project)
             });
+            match picker {
+                crate::state::WorkspacePickerTarget::NewSession => {
+                    core.new_session.project = project;
+                }
+                crate::state::WorkspacePickerTarget::Automation => {
+                    core.automation_form.project = project;
+                }
+            }
         });
-        self.dismiss_workspace_popups(cx);
-        self.refresh_worktree_branches(cx);
+        self.dismiss_workspace_popups_for(picker, cx);
+        self.refresh_worktree_branches_for(picker, cx);
     }
 
     /// 点选前缀联想项：填入该目录并继续列出其下的条目，用户可一路点选下钻
     /// （docs/DESIGN.md「新建会话视图」：输入以 `/` 结尾时列出该目录全部条目）。
     pub fn set_workspace(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.workspace_input
+        self.set_workspace_for(
+            crate::state::WorkspacePickerTarget::NewSession,
+            path,
+            window,
+            cx,
+        );
+    }
+
+    pub fn set_workspace_for(
+        &mut self,
+        picker: crate::state::WorkspacePickerTarget,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_input_for(picker)
             .update(cx, |state, cx| state.set_value(path, window, cx));
-        self.refresh_workspace_suggestions(cx);
-        self.refresh_worktree_branches(cx);
+        self.refresh_workspace_suggestions_for(picker, cx);
+        self.refresh_worktree_branches_for(picker, cx);
         cx.notify();
     }
 
@@ -1296,25 +1364,83 @@ impl AmuxApp {
     /// 展开工作目录最近目录上拉框：收起前缀匹配项，两者不叠加（进行中的联想应答也会因
     /// 已拉取目录被清空而丢弃）。已有输入时保持手动输入流程，不重新展示最近目录。
     pub fn show_recent_workspaces(&mut self, cx: &mut Context<Self>) {
-        if !self.workspace_input.read(cx).value().trim().is_empty() {
+        self.show_recent_workspaces_for(crate::state::WorkspacePickerTarget::NewSession, cx);
+    }
+
+    pub fn show_recent_workspaces_for(
+        &mut self,
+        picker: crate::state::WorkspacePickerTarget,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .workspace_input_for(picker)
+            .read(cx)
+            .value()
+            .trim()
+            .is_empty()
+        {
             return;
         }
-        self.workspace_recent_open = true;
-        self.with_core(|core| {
-            core.new_session.suggestions.clear();
-            core.new_session.suggestion = None;
+        match picker {
+            crate::state::WorkspacePickerTarget::NewSession => {
+                self.workspace_recent_open = true;
+            }
+            crate::state::WorkspacePickerTarget::Automation => {
+                self.automation_workspace_recent_open = true;
+            }
+        }
+        self.with_core(|core| match picker {
+            crate::state::WorkspacePickerTarget::NewSession => {
+                core.new_session.suggestions.clear();
+                core.new_session.suggestion = None;
+            }
+            crate::state::WorkspacePickerTarget::Automation => {
+                core.automation_form.workspace_suggestions.clear();
+                core.automation_form.workspace_suggestion = None;
+            }
         });
         cx.notify();
     }
 
     /// 收起工作目录的上下拉框（输入框失焦、点击浮层之外）。
     pub fn dismiss_workspace_popups(&mut self, cx: &mut Context<Self>) {
-        self.workspace_recent_open = false;
-        self.with_core(|core| {
-            core.new_session.suggestions.clear();
-            core.new_session.suggestion = None;
+        self.dismiss_workspace_popups_for(crate::state::WorkspacePickerTarget::NewSession, cx);
+    }
+
+    pub fn dismiss_workspace_popups_for(
+        &mut self,
+        picker: crate::state::WorkspacePickerTarget,
+        cx: &mut Context<Self>,
+    ) {
+        match picker {
+            crate::state::WorkspacePickerTarget::NewSession => {
+                self.workspace_recent_open = false;
+            }
+            crate::state::WorkspacePickerTarget::Automation => {
+                self.automation_workspace_recent_open = false;
+            }
+        }
+        self.with_core(|core| match picker {
+            crate::state::WorkspacePickerTarget::NewSession => {
+                core.new_session.suggestions.clear();
+                core.new_session.suggestion = None;
+            }
+            crate::state::WorkspacePickerTarget::Automation => {
+                core.automation_form.workspace_suggestions.clear();
+                core.automation_form.workspace_suggestion = None;
+            }
         });
         cx.notify();
+    }
+
+    fn workspace_input_for(
+        &self,
+        picker: crate::state::WorkspacePickerTarget,
+    ) -> &Entity<InputState> {
+        match picker {
+            crate::state::WorkspacePickerTarget::NewSession => &self.workspace_input,
+            crate::state::WorkspacePickerTarget::Automation => &self.automation_workspace,
+        }
     }
 
     /// 刷新前缀匹配的目录项（docs/DESIGN.md「新建会话视图」）：输入 `…/tom/` 列出该目录下
@@ -1324,50 +1450,108 @@ impl AmuxApp {
     /// 条目按最新前缀过滤，避免同一个目录在输入过程中被反复拉取。应答回来时若目录或机器已变
     /// 则丢弃。联想优先于最近目录下拉，避免两层浮层叠加。
     fn refresh_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
-        let text = self.workspace_input.read(cx).value().to_string();
-        let machine = self.with_core(|core| core.new_session.machine.clone());
+        self.refresh_workspace_suggestions_for(crate::state::WorkspacePickerTarget::NewSession, cx);
+    }
+
+    pub(crate) fn refresh_workspace_suggestions_for(
+        &mut self,
+        picker: crate::state::WorkspacePickerTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self
+            .workspace_input_for(picker)
+            .read(cx)
+            .value()
+            .to_string();
+        let machine = self.with_core(|core| match picker {
+            crate::state::WorkspacePickerTarget::NewSession => core.new_session.machine.clone(),
+            crate::state::WorkspacePickerTarget::Automation => core.automation_form.machine.clone(),
+        });
         let parsed = ui::split_dir_query(&text);
         let (Some((dir, prefix)), Some(machine)) = (parsed, machine) else {
-            self.with_core(|core| {
-                core.new_session.suggestions.clear();
-                core.new_session.suggestion = None;
+            self.with_core(|core| match picker {
+                crate::state::WorkspacePickerTarget::NewSession => {
+                    core.new_session.suggestions.clear();
+                    core.new_session.suggestion = None;
+                }
+                crate::state::WorkspacePickerTarget::Automation => {
+                    core.automation_form.workspace_suggestions.clear();
+                    core.automation_form.workspace_suggestion = None;
+                }
             });
             cx.notify();
             return;
         };
         // 还在同一个目录里输入：用已拉取的条目做前缀匹配，不再拉取
         let listed = self.with_core(|core| {
-            core.new_session
-                .suggestion
-                .as_ref()
-                .is_some_and(|listing| listing.machine == machine && listing.dir == dir)
+            let listing = match picker {
+                crate::state::WorkspacePickerTarget::NewSession => {
+                    core.new_session.suggestion.as_ref()
+                }
+                crate::state::WorkspacePickerTarget::Automation => {
+                    core.automation_form.workspace_suggestion.as_ref()
+                }
+            };
+            listing.is_some_and(|listing| listing.machine == machine && listing.dir == dir)
         });
         if listed {
-            self.with_core(|core| {
-                core.new_session.suggestion_prefix = prefix.to_string();
-                let entries = core
-                    .new_session
-                    .suggestion
-                    .as_ref()
-                    .map(|listing| listing.entries.clone())
-                    .unwrap_or_default();
-                core.new_session.suggestions = matching_prefix(entries, prefix);
+            self.with_core(|core| match picker {
+                crate::state::WorkspacePickerTarget::NewSession => {
+                    core.new_session.suggestion_prefix = prefix.to_string();
+                    let entries = core
+                        .new_session
+                        .suggestion
+                        .as_ref()
+                        .map(|listing| listing.entries.clone())
+                        .unwrap_or_default();
+                    core.new_session.suggestions = matching_prefix(entries, prefix);
+                }
+                crate::state::WorkspacePickerTarget::Automation => {
+                    core.automation_form.workspace_suggestion_prefix = prefix.to_string();
+                    let entries = core
+                        .automation_form
+                        .workspace_suggestion
+                        .as_ref()
+                        .map(|listing| listing.entries.clone())
+                        .unwrap_or_default();
+                    core.automation_form.workspace_suggestions = matching_prefix(entries, prefix);
+                }
             });
             cx.notify();
             return;
         }
-        self.workspace_recent_open = false;
+        match picker {
+            crate::state::WorkspacePickerTarget::NewSession => {
+                self.workspace_recent_open = false;
+            }
+            crate::state::WorkspacePickerTarget::Automation => {
+                self.automation_workspace_recent_open = false;
+            }
+        }
         let dir = dir.to_string();
         let prefix = prefix.to_string();
         self.with_core(|core| {
             // 先占位：新目录的条目到达前不展示上一个目录的项，也不为它重复拉取
-            core.new_session.suggestion = Some(DirectoryListing {
-                machine: machine.clone(),
-                dir: dir.clone(),
-                entries: Vec::new(),
-            });
-            core.new_session.suggestion_prefix = prefix;
-            core.new_session.suggestions.clear();
+            match picker {
+                crate::state::WorkspacePickerTarget::NewSession => {
+                    core.new_session.suggestion = Some(DirectoryListing {
+                        machine: machine.clone(),
+                        dir: dir.clone(),
+                        entries: Vec::new(),
+                    });
+                    core.new_session.suggestion_prefix = prefix;
+                    core.new_session.suggestions.clear();
+                }
+                crate::state::WorkspacePickerTarget::Automation => {
+                    core.automation_form.workspace_suggestion = Some(DirectoryListing {
+                        machine: machine.clone(),
+                        dir: dir.clone(),
+                        entries: Vec::new(),
+                    });
+                    core.automation_form.workspace_suggestion_prefix = prefix;
+                    core.automation_form.workspace_suggestions.clear();
+                }
+            }
         });
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
@@ -1376,29 +1560,54 @@ impl AmuxApp {
             let result = client.list_all_dirs(&machine, &dir).await;
             let mut core = core.lock();
             // 用户可能已经继续输入、换了目录或换了机器：过期应答不落地
-            let stale = core
-                .new_session
-                .suggestion
-                .as_ref()
-                .is_none_or(|listing| listing.machine != machine || listing.dir != dir);
+            let stale = match picker {
+                crate::state::WorkspacePickerTarget::NewSession => core
+                    .new_session
+                    .suggestion
+                    .as_ref()
+                    .is_none_or(|listing| listing.machine != machine || listing.dir != dir),
+                crate::state::WorkspacePickerTarget::Automation => core
+                    .automation_form
+                    .workspace_suggestion
+                    .as_ref()
+                    .is_none_or(|listing| listing.machine != machine || listing.dir != dir),
+            };
             if stale {
                 return;
             }
             match result {
-                Ok(entries) => {
-                    let prefix = core.new_session.suggestion_prefix.clone();
-                    core.new_session.suggestions = matching_prefix(entries.clone(), &prefix);
-                    core.new_session.suggestion = Some(DirectoryListing {
-                        machine,
-                        dir,
-                        entries,
-                    });
-                }
+                Ok(entries) => match picker {
+                    crate::state::WorkspacePickerTarget::NewSession => {
+                        let prefix = core.new_session.suggestion_prefix.clone();
+                        core.new_session.suggestions = matching_prefix(entries.clone(), &prefix);
+                        core.new_session.suggestion = Some(DirectoryListing {
+                            machine,
+                            dir,
+                            entries,
+                        });
+                    }
+                    crate::state::WorkspacePickerTarget::Automation => {
+                        let prefix = core.automation_form.workspace_suggestion_prefix.clone();
+                        core.automation_form.workspace_suggestions =
+                            matching_prefix(entries.clone(), &prefix);
+                        core.automation_form.workspace_suggestion = Some(DirectoryListing {
+                            machine,
+                            dir,
+                            entries,
+                        });
+                    }
+                },
                 // 拉取失败：撤掉占位，下次输入时重试
-                Err(_) => {
-                    core.new_session.suggestion = None;
-                    core.new_session.suggestions.clear();
-                }
+                Err(_) => match picker {
+                    crate::state::WorkspacePickerTarget::NewSession => {
+                        core.new_session.suggestion = None;
+                        core.new_session.suggestions.clear();
+                    }
+                    crate::state::WorkspacePickerTarget::Automation => {
+                        core.automation_form.workspace_suggestion = None;
+                        core.automation_form.workspace_suggestions.clear();
+                    }
+                },
             }
         });
         cx.notify();
@@ -1406,36 +1615,78 @@ impl AmuxApp {
 
     /// 拉取当前工作目录的可选 worktree 基分支；`HEAD` 始终由前端固定提供。
     pub fn refresh_worktree_branches(&mut self, cx: &mut Context<Self>) {
-        let (use_worktree, machine, workspace) = self.with_core(|core| {
-            (
+        self.refresh_worktree_branches_for(crate::state::WorkspacePickerTarget::NewSession, cx);
+    }
+
+    pub fn refresh_worktree_branches_for(
+        &mut self,
+        picker: crate::state::WorkspacePickerTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let (use_worktree, machine) = self.with_core(|core| match picker {
+            crate::state::WorkspacePickerTarget::NewSession => (
                 core.new_session.use_worktree,
                 core.new_session.machine.clone(),
-                self.workspace_input.read(cx).value().trim().to_string(),
-            )
+            ),
+            crate::state::WorkspacePickerTarget::Automation => (
+                core.automation_form.use_worktree,
+                core.automation_form.machine.clone(),
+            ),
         });
+        let workspace = self
+            .workspace_input_for(picker)
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
         if !use_worktree {
-            self.with_core(|core| {
-                core.new_session.worktree_branch_seq =
-                    core.new_session.worktree_branch_seq.saturating_add(1);
-                core.new_session.worktree_branches.clear();
-                core.new_session.worktree_branch_source = None;
+            self.with_core(|core| match picker {
+                crate::state::WorkspacePickerTarget::NewSession => {
+                    core.new_session.worktree_branch_seq =
+                        core.new_session.worktree_branch_seq.saturating_add(1);
+                    core.new_session.worktree_branches.clear();
+                    core.new_session.worktree_branch_source = None;
+                }
+                crate::state::WorkspacePickerTarget::Automation => {
+                    core.automation_form.worktree_branch_seq =
+                        core.automation_form.worktree_branch_seq.saturating_add(1);
+                    core.automation_form.worktree_branches.clear();
+                    core.automation_form.worktree_branch_source = None;
+                }
             });
             return;
         }
         let (Some(machine), false) = (machine, workspace.is_empty()) else {
-            self.with_core(|core| {
-                core.new_session.worktree_branches.clear();
-                core.new_session.worktree_branch_source = None;
+            self.with_core(|core| match picker {
+                crate::state::WorkspacePickerTarget::NewSession => {
+                    core.new_session.worktree_branches.clear();
+                    core.new_session.worktree_branch_source = None;
+                }
+                crate::state::WorkspacePickerTarget::Automation => {
+                    core.automation_form.worktree_branches.clear();
+                    core.automation_form.worktree_branch_source = None;
+                }
             });
             cx.notify();
             return;
         };
-        let seq = self.with_core(|core| {
-            let seq = core.new_session.worktree_branch_seq.saturating_add(1);
-            core.new_session.worktree_branch_seq = seq;
-            core.new_session.worktree_branch_source = Some((machine.clone(), workspace.clone()));
-            core.new_session.worktree_branches.clear();
-            seq
+        let seq = self.with_core(|core| match picker {
+            crate::state::WorkspacePickerTarget::NewSession => {
+                let seq = core.new_session.worktree_branch_seq.saturating_add(1);
+                core.new_session.worktree_branch_seq = seq;
+                core.new_session.worktree_branch_source =
+                    Some((machine.clone(), workspace.clone()));
+                core.new_session.worktree_branches.clear();
+                seq
+            }
+            crate::state::WorkspacePickerTarget::Automation => {
+                let seq = core.automation_form.worktree_branch_seq.saturating_add(1);
+                core.automation_form.worktree_branch_seq = seq;
+                core.automation_form.worktree_branch_source =
+                    Some((machine.clone(), workspace.clone()));
+                core.automation_form.worktree_branches.clear();
+                seq
+            }
         });
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
@@ -1443,32 +1694,62 @@ impl AmuxApp {
         self.runtime.spawn(async move {
             let result = client.list_branches(&machine, &workspace).await;
             let mut core = core.lock();
-            if core.new_session.worktree_branch_seq != seq {
-                return;
-            }
-            let source_matches = core
-                .new_session
-                .worktree_branch_source
-                .as_ref()
-                .is_some_and(|source| source == &(machine, workspace));
-            if !source_matches {
-                return;
-            }
-            match result {
-                Ok(result) => {
-                    core.new_session.worktree_branches = result.branches;
-                    if core.new_session.worktree_base_branch != "HEAD"
-                        && !core
-                            .new_session
-                            .worktree_branches
-                            .iter()
-                            .any(|branch| branch.name == core.new_session.worktree_base_branch)
-                    {
-                        core.new_session.worktree_base_branch = "HEAD".to_string();
+            match picker {
+                crate::state::WorkspacePickerTarget::NewSession => {
+                    if core.new_session.worktree_branch_seq != seq {
+                        return;
+                    }
+                    let source_matches = core
+                        .new_session
+                        .worktree_branch_source
+                        .as_ref()
+                        .is_some_and(|source| source == &(machine, workspace));
+                    if !source_matches {
+                        return;
+                    }
+                    match result {
+                        Ok(result) => {
+                            core.new_session.worktree_branches = result.branches;
+                            if core.new_session.worktree_base_branch != "HEAD"
+                                && !core.new_session.worktree_branches.iter().any(|branch| {
+                                    branch.name == core.new_session.worktree_base_branch
+                                })
+                            {
+                                core.new_session.worktree_base_branch = "HEAD".to_string();
+                            }
+                        }
+                        Err(_) => {
+                            core.new_session.worktree_branches.clear();
+                        }
                     }
                 }
-                Err(_) => {
-                    core.new_session.worktree_branches.clear();
+                crate::state::WorkspacePickerTarget::Automation => {
+                    if core.automation_form.worktree_branch_seq != seq {
+                        return;
+                    }
+                    let source_matches = core
+                        .automation_form
+                        .worktree_branch_source
+                        .as_ref()
+                        .is_some_and(|source| source == &(machine, workspace));
+                    if !source_matches {
+                        return;
+                    }
+                    match result {
+                        Ok(result) => {
+                            core.automation_form.worktree_branches = result.branches;
+                            if core.automation_form.worktree_base_branch != "HEAD"
+                                && !core.automation_form.worktree_branches.iter().any(|branch| {
+                                    branch.name == core.automation_form.worktree_base_branch
+                                })
+                            {
+                                core.automation_form.worktree_base_branch = "HEAD".to_string();
+                            }
+                        }
+                        Err(_) => {
+                            core.automation_form.worktree_branches.clear();
+                        }
+                    }
                 }
             }
         });

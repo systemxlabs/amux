@@ -1,6 +1,16 @@
 // 路径与工作目录联想（docs/DESIGN.md「新建会话视图」、docs/PRD.md「执行目录视图」）。
 
-import type { FsEntry } from "./types";
+import type { FsEntry, FsListResult } from "./types";
+
+type DirectoryLister = {
+  listDir(
+    machine: string,
+    path: string,
+    limit?: number,
+    offset?: number,
+    dirsOnly?: boolean,
+  ): Promise<FsListResult>;
+};
 
 /**
  * 工作目录输入拆分为（要列的目录, 名前缀）：
@@ -17,6 +27,23 @@ export function splitDirQuery(text: string): { dir: string; prefix: string } | n
 /** 目录联想候选：名称以输入前缀开头（前缀为空时全部）。 */
 export function matchingPrefix(entries: readonly FsEntry[], prefix: string): FsEntry[] {
   return prefix === "" ? [...entries] : entries.filter((entry) => entry.name.startsWith(prefix));
+}
+
+/** 拉取某目录的全部目录项；前缀匹配在完整列表上执行，避免分页导致候选缺失。 */
+export async function listAllDirs(
+  client: DirectoryLister,
+  machine: string,
+  dir: string,
+): Promise<FsEntry[]> {
+  const entries: FsEntry[] = [];
+  let offset = 0;
+  while (true) {
+    const page = await client.listDir(machine, dir, undefined, offset, true);
+    entries.push(...page.entries);
+    if (!page.hasMore) return entries;
+    if (page.nextOffset <= offset) return entries;
+    offset = page.nextOffset;
+  }
 }
 
 /** 仅目录项（联想列表只列目录）。 */

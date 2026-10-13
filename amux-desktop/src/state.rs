@@ -134,6 +134,13 @@ pub enum AutomationSessionMode {
     NewWorkflow,
 }
 
+/// 工作目录选择器的使用位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspacePickerTarget {
+    NewSession,
+    Automation,
+}
+
 /// 自动化编辑表单中的非文本状态。
 #[derive(Debug, Clone)]
 pub struct AutomationForm {
@@ -141,11 +148,26 @@ pub struct AutomationForm {
     pub project: Option<String>,
     pub trigger_mode: AutomationTriggerMode,
     pub session_mode: AutomationSessionMode,
-    /// 选择已有会话时对应的普通会话/工作流会话 ID。
-    pub existing_target: Option<String>,
+    /// 已有普通会话模式选中的会话 ID。
+    pub existing_session_target: Option<String>,
+    /// 已有工作流会话模式选中的工作流 ID。
+    pub existing_workflow_target: Option<String>,
     pub machine: Option<String>,
     pub agent: Option<String>,
     pub use_worktree: bool,
+    /// worktree 基分支；`HEAD` = 当前仓库 HEAD
+    pub worktree_base_branch: String,
+    pub worktree_branches: Vec<GitBranch>,
+    pub worktree_branch_source: Option<(String, String)>,
+    pub worktree_branch_seq: u64,
+    /// 工作目录输入框的前缀匹配目录项
+    pub workspace_suggestions: Vec<FsEntry>,
+    pub workspace_suggestion: Option<DirectoryListing>,
+    pub workspace_suggestion_prefix: String,
+    /// cron 失焦校验错误。
+    pub cron_error: Option<String>,
+    /// cron 表达式最近 5 次触发时间（毫秒时间戳）。
+    pub cron_next_runs: Vec<u64>,
 }
 
 impl Default for AutomationForm {
@@ -155,10 +177,20 @@ impl Default for AutomationForm {
             project: None,
             trigger_mode: AutomationTriggerMode::Schedule,
             session_mode: AutomationSessionMode::NewSession,
-            existing_target: None,
+            existing_session_target: None,
+            existing_workflow_target: None,
             machine: None,
             agent: None,
             use_worktree: false,
+            worktree_base_branch: "HEAD".to_string(),
+            worktree_branches: Vec::new(),
+            worktree_branch_source: None,
+            worktree_branch_seq: 0,
+            workspace_suggestions: Vec::new(),
+            workspace_suggestion: None,
+            workspace_suggestion_prefix: String::new(),
+            cron_error: None,
+            cron_next_runs: Vec::new(),
         }
     }
 }
@@ -388,7 +420,7 @@ impl Default for NewSessionForm {
 }
 
 /// 某机器某目录下的全部目录项：输入停在同一个目录内时直接用它做前缀匹配，不再重复拉取。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DirectoryListing {
     pub machine: String,
     pub dir: String,

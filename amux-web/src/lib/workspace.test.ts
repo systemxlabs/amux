@@ -2,12 +2,13 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { FsEntry } from "./types";
+import type { FsEntry, FsListResult } from "./types";
 import {
   baseName,
   dirsOnly,
   isInSubtree,
   joinPath,
+  listAllDirs,
   matchingPrefix,
   parentDir,
   pathSegments,
@@ -47,6 +48,57 @@ describe("matchingPrefix", () => {
       dir("jerry", "/home/jerry"),
     ];
     expect(matchingPrefix(entries, "tom").map((entry) => entry.name)).toEqual(["tom", "tomcat"]);
+  });
+});
+
+describe("listAllDirs", () => {
+  it("分页续拉到没有更多为止", async () => {
+    const calls: number[] = [];
+    const pages: Record<number, FsListResult> = {
+      0: {
+        path: "/home/",
+        entries: [dir("tom", "/home/tom"), dir("tmp", "/home/tmp")],
+        hasMore: true,
+        nextOffset: 2,
+      },
+      2: {
+        path: "/home/",
+        entries: [dir("usr", "/home/usr")],
+        hasMore: false,
+        nextOffset: 3,
+      },
+    };
+    const client = {
+      listDir: async (
+        _machine: string,
+        _path: string,
+        _limit?: number,
+        offset = 0,
+      ): Promise<FsListResult> => {
+        calls.push(offset);
+        return pages[offset];
+      },
+    };
+
+    const entries = await listAllDirs(client, "localpc", "/home/");
+
+    expect(calls).toEqual([0, 2]);
+    expect(entries.map((entry) => entry.name)).toEqual(["tom", "tmp", "usr"]);
+  });
+
+  it("分页游标不前进时停止，避免死循环", async () => {
+    const client = {
+      listDir: async (): Promise<FsListResult> => ({
+        path: "/home/",
+        entries: [dir("tom", "/home/tom")],
+        hasMore: true,
+        nextOffset: 0,
+      }),
+    };
+
+    const entries = await listAllDirs(client, "localpc", "/home/");
+
+    expect(entries.map((entry) => entry.name)).toEqual(["tom"]);
   });
 });
 

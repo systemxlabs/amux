@@ -12,6 +12,11 @@ import {
 
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ContextMenu, type MenuItem, type MenuState } from "../components/ContextMenu";
+import {
+  WorkflowPlanField,
+  WorkspaceField,
+  WorktreeBranchField,
+} from "../components/SessionCreationFields";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -43,6 +48,7 @@ import {
   refreshNewSession,
 } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
+import { previewCron } from "../lib/cron";
 import { formatTime } from "../lib/format";
 import type {
   Automation,
@@ -437,8 +443,14 @@ function AutomationEditor({
   const [triggerMode, setTriggerMode] = useState<"schedule" | "webhook">(
     initial?.trigger.type === "github_webhook" ? "webhook" : "schedule",
   );
-  const [cron, setCron] = useState(
-    initial?.trigger.type === "schedule" ? initial.trigger.cron : "0 9 * * *",
+  const initialCron =
+    initial?.trigger.type === "schedule" ? initial.trigger.cron : "0 9 * * *";
+  const [cron, setCron] = useState(initialCron);
+  const [cronError, setCronError] = useState<string | null>(
+    () => previewCron(initialCron).error,
+  );
+  const [cronNextRuns, setCronNextRuns] = useState<Date[]>(
+    () => previewCron(initialCron).nextRuns,
   );
   const [repository, setRepository] = useState(
     initial?.trigger.type === "github_webhook" ? initial.trigger.repository : "",
@@ -487,6 +499,7 @@ function AutomationEditor({
       ? initial.sessionOptions.plan
       : "",
   );
+  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [resultLabels, setResultLabels] = useState<AutomationResultLabel[]>(
     initial?.resultLabels.map((label) => ({ ...label })) ?? [
       { name: "通过", description: "任务成功完成" },
@@ -519,10 +532,18 @@ function AutomationEditor({
     task.trim() !== "" &&
     sessionValid &&
     labelsValid &&
-    (triggerMode === "schedule" ? cron.trim() !== "" : repository.trim() !== "");
+    (triggerMode === "schedule"
+      ? cron.trim() !== "" && cronError === null
+      : repository.trim() !== "");
 
   const save = async (): Promise<void> => {
     if (!canSave || saving) return;
+    if (triggerMode === "schedule") {
+      const preview = previewCron(cron);
+      setCronError(preview.error);
+      setCronNextRuns(preview.nextRuns);
+      if (preview.error !== null) return;
+    }
     const trigger: AutomationTrigger =
       triggerMode === "schedule"
         ? { type: "schedule", cron: cron.trim() }
@@ -605,9 +626,6 @@ function AutomationEditor({
                 {item.name}
               </OptionButton>
             ))}
-            <OptionButton selected={project === ""} onClick={() => setProject("")}>
-              未归属
-            </OptionButton>
           </OptionGroup>
         </Field>
 
@@ -628,11 +646,34 @@ function AutomationEditor({
         </Field>
         {triggerMode === "schedule" ? (
           <Field label="cron 表达式">
-            <Input
-              value={cron}
-              onChange={(event) => setCron(event.target.value)}
-              placeholder="0 9 * * *"
-            />
+            <div className="space-y-2">
+              <Input
+                value={cron}
+                onChange={(event) => {
+                  setCron(event.target.value);
+                  setCronError(null);
+                  setCronNextRuns([]);
+                }}
+                onBlur={() => {
+                  const preview = previewCron(cron);
+                  setCronError(preview.error);
+                  setCronNextRuns(preview.nextRuns);
+                }}
+                placeholder="0 9 * * *"
+              />
+              {cronError !== null ? (
+                <p className="text-xs text-destructive">{cronError}</p>
+              ) : cronNextRuns.length > 0 ? (
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">最近 5 次触发时间</p>
+                  {cronNextRuns.map((time) => (
+                    <p key={time.getTime()} className="text-xs text-muted-foreground">
+                      {formatTime(time.getTime())}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </Field>
         ) : (
           <div className="grid gap-4">
@@ -656,95 +697,77 @@ function AutomationEditor({
         <Field label="会话选项">
           <Tabs
             value={sessionMode}
-            onValueChange={(value) => {
-              setSessionMode(value as EditorSessionMode);
-              setExistingSessionId("");
-              setExistingWorkflowId("");
-            }}
+            onValueChange={(value) => setSessionMode(value as EditorSessionMode)}
           >
             <TabsList className="w-full flex-wrap">
               <TabsTrigger className="flex-1" value="existing_session">
-                已有普通
+                已有普通会话
               </TabsTrigger>
               <TabsTrigger className="flex-1" value="existing_workflow">
-                已有工作流
+                已有工作流会话
               </TabsTrigger>
               <TabsTrigger className="flex-1" value="new_session">
-                新建普通
+                新建普通会话
               </TabsTrigger>
               <TabsTrigger className="flex-1" value="new_workflow">
-                新建工作流
+                新建工作流会话
               </TabsTrigger>
             </TabsList>
           </Tabs>
         </Field>
-        {sessionMode === "existing_session" || sessionMode === "existing_workflow" ? (
-          <div className="grid gap-4">
-            <Field label="普通会话">
-              <Select
-                value={existingSessionId || "none"}
-                onValueChange={(value) => {
-                  const id = value === "none" ? "" : value;
-                  setExistingSessionId(id);
-                  if (id !== "") {
-                    setExistingWorkflowId("");
-                    setSessionMode("existing_session");
+        {sessionMode === "existing_session" ? (
+          <Field label="普通会话">
+            <Select
+              value={existingSessionId || "none"}
+              onValueChange={(value) => setExistingSessionId(value === "none" ? "" : value)}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="选择普通会话" />
+              </SelectTrigger>
+              <SelectContent
+                onViewportScroll={(event) => {
+                  const node = event.currentTarget;
+                  if (node.scrollTop + node.clientHeight >= node.scrollHeight - 24) {
+                    void loadMoreAutomationSessions(core);
                   }
                 }}
               >
-                <SelectTrigger>
-                  <SelectValue placeholder="选择普通会话" />
-                </SelectTrigger>
-                <SelectContent
-                  onViewportScroll={(event) => {
-                    const node = event.currentTarget;
-                    if (node.scrollTop + node.clientHeight >= node.scrollHeight - 24) {
-                      void loadMoreAutomationSessions(core);
-                    }
-                  }}
-                >
-                  <SelectItem value="none">未选择</SelectItem>
-                  {state.automationSessions.map((session) => (
-                    <SelectItem key={session.id} value={session.id}>
-                      {(session.pinned ? "置顶 · " : "") + (session.title || session.id)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field label="工作流会话">
-              <Select
-                value={existingWorkflowId || "none"}
-                onValueChange={(value) => {
-                  const id = value === "none" ? "" : value;
-                  setExistingWorkflowId(id);
-                  if (id !== "") {
-                    setExistingSessionId("");
-                    setSessionMode("existing_workflow");
+                <SelectItem value="none">未选择</SelectItem>
+                {state.automationSessions.map((session) => (
+                  <SelectItem key={session.id} value={session.id}>
+                    {(session.pinned ? "置顶 · " : "") + (session.title || session.id)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        ) : null}
+        {sessionMode === "existing_workflow" ? (
+          <Field label="工作流会话">
+            <Select
+              value={existingWorkflowId || "none"}
+              onValueChange={(value) => setExistingWorkflowId(value === "none" ? "" : value)}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="选择工作流会话" />
+              </SelectTrigger>
+              <SelectContent
+                onViewportScroll={(event) => {
+                  const node = event.currentTarget;
+                  if (node.scrollTop + node.clientHeight >= node.scrollHeight - 24) {
+                    void loadMoreAutomationWorkflows(core);
                   }
                 }}
               >
-                <SelectTrigger>
-                  <SelectValue placeholder="选择工作流会话" />
-                </SelectTrigger>
-                <SelectContent
-                  onViewportScroll={(event) => {
-                    const node = event.currentTarget;
-                    if (node.scrollTop + node.clientHeight >= node.scrollHeight - 24) {
-                      void loadMoreAutomationWorkflows(core);
-                    }
-                  }}
-                >
-                  <SelectItem value="none">未选择</SelectItem>
-                  {state.automationWorkflows.map((workflow) => (
-                    <SelectItem key={workflow.id} value={workflow.id}>
-                      {(workflow.pinned ? "置顶 · " : "") + (workflow.title || workflow.id)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-          </div>
+                <SelectItem value="none">未选择</SelectItem>
+                {state.automationWorkflows.map((workflow) => (
+                  <SelectItem key={workflow.id} value={workflow.id}>
+                    {(workflow.pinned ? "置顶 · " : "") + (workflow.title || workflow.id)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
         ) : null}
         {sessionMode === "new_session" ? (
           <div className="space-y-4">
@@ -779,9 +802,22 @@ function AutomationEditor({
               </OptionGroup>
             </Field>
             <Field label="工作目录">
-              <Input
+              <WorkspaceField
+                core={core}
+                machine={machine}
                 value={workspace}
-                onChange={(event) => setWorkspace(event.target.value)}
+                onChange={setWorkspace}
+                onPickRecent={(item) => {
+                  if (
+                    item.lastUsedProject !== undefined &&
+                    state.settings.projects.some(
+                      (project) => project.name === item.lastUsedProject,
+                    )
+                  ) {
+                    setProject(item.lastUsedProject);
+                  }
+                }}
+                slotPrefix="automation-workspace"
               />
             </Field>
             <div className="flex items-center justify-between gap-3">
@@ -789,22 +825,39 @@ function AutomationEditor({
               <Switch checked={useWorktree} onCheckedChange={setUseWorktree} />
             </div>
             {useWorktree ? (
-              <Field label="worktree 基分支">
-                <Input
-                  value={worktreeBaseBranch}
-                  onChange={(event) => setWorktreeBaseBranch(event.target.value)}
-                  placeholder="HEAD"
-                />
-              </Field>
+              <WorktreeBranchField
+                core={core}
+                machine={machine}
+                workspace={workspace}
+                value={worktreeBaseBranch}
+                onChange={setWorktreeBaseBranch}
+              />
             ) : null}
           </div>
         ) : null}
         {sessionMode === "new_workflow" ? (
           <Field label="工作流计划">
-            <Textarea
+            <WorkflowPlanField
+              plans={state.settings.plans}
               value={plan}
-              onChange={(event) => setPlan(event.target.value)}
-              className="min-h-28"
+              selectedPlan={selectedPlan}
+              onChange={(value) => {
+                setPlan(value);
+                setSelectedPlan(null);
+              }}
+              onSelectPlan={(item) => {
+                setPlan(item.plan);
+                setSelectedPlan(item.name);
+                if (
+                  item.lastUsedProject !== undefined &&
+                  state.settings.projects.some(
+                    (project) => project.name === item.lastUsedProject,
+                  )
+                ) {
+                  setProject(item.lastUsedProject);
+                }
+              }}
+              slotPrefix="automation-workflow-plan"
             />
           </Field>
         ) : null}

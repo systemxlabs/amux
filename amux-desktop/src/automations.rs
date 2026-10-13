@@ -1,21 +1,24 @@
 //! 自动化列表、编辑与运行详情（docs/PRD.md「自动化列表视图」等）。
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use amux_common::api::{
     Automation, AutomationInput, AutomationResultLabel, AutomationRun, AutomationRunState,
     AutomationSessionOptions, AutomationTrigger,
 };
+use croner::Cron;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputState};
 use gpui_component::label::Label;
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{
     h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Selectable, Sizable,
 };
@@ -24,6 +27,7 @@ use crate::app::{AmuxApp, PanelResizeDrag, PANEL_RESIZE_HANDLE_WIDTH};
 use crate::dialog;
 use crate::state::{
     AutomationPanel, AutomationSessionMode, AutomationTriggerMode, Core, OpenTarget,
+    WorkspacePickerTarget,
 };
 use crate::ui;
 
@@ -590,13 +594,12 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
     let can_save = !title.is_empty()
         && !task.is_empty()
         && match form.trigger_mode {
-            AutomationTriggerMode::Schedule => !cron.is_empty(),
+            AutomationTriggerMode::Schedule => cron_next_runs(&cron).is_ok(),
             AutomationTriggerMode::Webhook => !repository.is_empty(),
         }
         && match form.session_mode {
-            AutomationSessionMode::ExistingSession | AutomationSessionMode::ExistingWorkflow => {
-                form.existing_target.is_some()
-            }
+            AutomationSessionMode::ExistingSession => form.existing_session_target.is_some(),
+            AutomationSessionMode::ExistingWorkflow => form.existing_workflow_target.is_some(),
             AutomationSessionMode::NewSession => {
                 form.machine.is_some() && form.agent.is_some() && !workspace.is_empty()
             }
@@ -631,13 +634,33 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
         .child(project_selector(core, cx))
         .child(trigger_mode_selector(core, cx))
         .child(match form.trigger_mode {
-            AutomationTriggerMode::Schedule => field(
-                "cron 表达式",
-                Input::new(&this.automation_cron)
+            AutomationTriggerMode::Schedule => {
+                let mut control = v_flex()
                     .w_full()
-                    .into_any_element(),
-                cx,
-            ),
+                    .gap_2()
+                    .child(Input::new(&this.automation_cron).w_full());
+                if let Some(error) = form.cron_error.clone() {
+                    control =
+                        control.child(Label::new(error).text_xs().text_color(cx.theme().danger));
+                } else if !form.cron_next_runs.is_empty() {
+                    control = control.child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                Label::new("最近 5 次触发时间")
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .children(form.cron_next_runs.iter().map(|time| {
+                                Label::new(ui::format_local_time(*time, ui::TimePrecision::Seconds))
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .into_any_element()
+                            })),
+                    );
+                }
+                field("cron 表达式", control.into_any_element(), cx)
+            }
             AutomationTriggerMode::Webhook => v_flex()
                 .gap_3()
                 .child(field(
@@ -665,11 +688,10 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
         AutomationSessionMode::NewSession => content
             .child(machine_selector(core, cx))
             .child(agent_selector(core, cx))
-            .child(field(
-                "工作目录",
-                Input::new(&this.automation_workspace)
-                    .w_full()
-                    .into_any_element(),
+            .child(crate::sessions::workspace_picker(
+                core,
+                this,
+                WorkspacePickerTarget::Automation,
                 cx,
             ))
             .child(
@@ -685,6 +707,7 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
                             .checked(form.use_worktree)
                             .on_click(cx.listener(|this, checked, _, cx| {
                                 this.with_core(|core| core.automation_form.use_worktree = *checked);
+                                this.refresh_automation_worktree_branches(cx);
                                 cx.notify();
                             })),
                     ),
@@ -692,16 +715,19 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
             .when(form.use_worktree, |content| {
                 content.child(field(
                     "worktree 基分支",
-                    Input::new(&this.automation_worktree_branch)
-                        .w_full()
-                        .into_any_element(),
+                    automation_worktree_base_menu(core, cx),
                     cx,
                 ))
             }),
         AutomationSessionMode::NewWorkflow => content.child(field(
             "工作流计划",
-            Input::new(&this.automation_plan)
+            v_flex()
                 .w_full()
+                .gap_2()
+                .when_some(automation_plan_selector(core, cx), |form, plans| {
+                    form.child(plans)
+                })
+                .child(Input::new(&this.automation_plan).w_full())
                 .into_any_element(),
             cx,
         )),
@@ -756,24 +782,19 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
 fn trigger_mode_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     field(
         "触发方式",
-        ButtonGroup::new("automation-trigger-mode")
+        TabBar::new("automation-trigger-mode")
             .small()
+            .segmented()
             .w_full()
-            .child(
-                Button::new("automation-trigger-schedule")
-                    .flex_1()
-                    .label("定时")
-                    .selected(core.automation_form.trigger_mode == AutomationTriggerMode::Schedule),
-            )
-            .child(
-                Button::new("automation-trigger-webhook")
-                    .flex_1()
-                    .label("Github Webhook")
-                    .selected(core.automation_form.trigger_mode == AutomationTriggerMode::Webhook),
-            )
-            .on_click(cx.listener(|this, clicks: &Vec<usize>, _, cx| {
+            .selected_index(match core.automation_form.trigger_mode {
+                AutomationTriggerMode::Schedule => 0,
+                AutomationTriggerMode::Webhook => 1,
+            })
+            .child(Tab::new().label("定时"))
+            .child(Tab::new().label("Github Webhook"))
+            .on_click(cx.listener(|this, index: &usize, _, cx| {
                 this.with_core(|core| {
-                    core.automation_form.trigger_mode = if clicks.contains(&1) {
+                    core.automation_form.trigger_mode = if *index == 1 {
                         AutomationTriggerMode::Webhook
                     } else {
                         AutomationTriggerMode::Schedule
@@ -789,54 +810,29 @@ fn trigger_mode_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
 fn session_mode_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     field(
         "会话选项",
-        ButtonGroup::new("automation-session-mode")
+        TabBar::new("automation-session-mode")
             .small()
+            .segmented()
             .w_full()
-            .child(
-                Button::new("automation-session-existing-normal")
-                    .flex_1()
-                    .label("已有普通")
-                    .selected(
-                        core.automation_form.session_mode == AutomationSessionMode::ExistingSession,
-                    ),
-            )
-            .child(
-                Button::new("automation-session-existing-workflow")
-                    .flex_1()
-                    .label("已有工作流")
-                    .selected(
-                        core.automation_form.session_mode
-                            == AutomationSessionMode::ExistingWorkflow,
-                    ),
-            )
-            .child(
-                Button::new("automation-session-new-normal")
-                    .flex_1()
-                    .label("新建普通")
-                    .selected(
-                        core.automation_form.session_mode == AutomationSessionMode::NewSession,
-                    ),
-            )
-            .child(
-                Button::new("automation-session-new-workflow")
-                    .flex_1()
-                    .label("新建工作流")
-                    .selected(
-                        core.automation_form.session_mode == AutomationSessionMode::NewWorkflow,
-                    ),
-            )
-            .on_click(cx.listener(|this, clicks: &Vec<usize>, _, cx| {
+            .selected_index(match core.automation_form.session_mode {
+                AutomationSessionMode::ExistingSession => 0,
+                AutomationSessionMode::ExistingWorkflow => 1,
+                AutomationSessionMode::NewSession => 2,
+                AutomationSessionMode::NewWorkflow => 3,
+            })
+            .child(Tab::new().label("已有普通会话"))
+            .child(Tab::new().label("已有工作流会话"))
+            .child(Tab::new().label("新建普通会话"))
+            .child(Tab::new().label("新建工作流会话"))
+            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                this.dismiss_automation_workspace_popups(cx);
                 this.with_core(|core| {
-                    core.automation_form.session_mode = if clicks.contains(&3) {
-                        AutomationSessionMode::NewWorkflow
-                    } else if clicks.contains(&2) {
-                        AutomationSessionMode::NewSession
-                    } else if clicks.contains(&1) {
-                        AutomationSessionMode::ExistingWorkflow
-                    } else {
-                        AutomationSessionMode::ExistingSession
+                    core.automation_form.session_mode = match *index {
+                        0 => AutomationSessionMode::ExistingSession,
+                        1 => AutomationSessionMode::ExistingWorkflow,
+                        2 => AutomationSessionMode::NewSession,
+                        _ => AutomationSessionMode::NewWorkflow,
                     };
-                    core.automation_form.existing_target = None;
                 });
                 cx.notify();
             }))
@@ -846,20 +842,21 @@ fn session_mode_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
 }
 
 fn existing_session_selector(core: &Core, this: &AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
-    v_flex()
-        .w_full()
-        .gap_3()
-        .child(field(
+    match core.automation_form.session_mode {
+        AutomationSessionMode::ExistingSession => field(
             "普通会话",
             automation_target_popover(core, this, AutomationTargetKind::Session, cx),
             cx,
-        ))
-        .child(field(
+        ),
+        AutomationSessionMode::ExistingWorkflow => field(
             "工作流会话",
             automation_target_popover(core, this, AutomationTargetKind::Workflow, cx),
             cx,
-        ))
-        .into_any_element()
+        ),
+        AutomationSessionMode::NewSession | AutomationSessionMode::NewWorkflow => {
+            div().into_any_element()
+        }
+    }
 }
 
 fn automation_target_popover(
@@ -868,7 +865,10 @@ fn automation_target_popover(
     kind: AutomationTargetKind,
     cx: &mut Context<AmuxApp>,
 ) -> AnyElement {
-    let selected = core.automation_form.existing_target.clone();
+    let selected = match kind {
+        AutomationTargetKind::Session => core.automation_form.existing_session_target.clone(),
+        AutomationTargetKind::Workflow => core.automation_form.existing_workflow_target.clone(),
+    };
     let app = cx.entity();
     let sessions = core.automation_sessions.clone();
     let workflows = core.automation_workflows.clone();
@@ -907,7 +907,15 @@ fn automation_target_popover(
                 .small()
                 .outline()
                 .w_full()
-                .child(ui::truncate(&label, 36)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(label),
+                ),
         )
         .content(move |_, _, cx| {
             let load_app = app.clone();
@@ -947,7 +955,7 @@ fn automation_target_popover(
                                 let id = id.clone();
                                 app.update(cx, |this, cx| {
                                     this.with_core(|core| {
-                                        core.automation_form.existing_target = Some(id);
+                                        core.automation_form.existing_session_target = Some(id);
                                         core.automation_form.session_mode =
                                             AutomationSessionMode::ExistingSession;
                                     });
@@ -985,7 +993,7 @@ fn automation_target_popover(
                                 let id = id.clone();
                                 app.update(cx, |this, cx| {
                                     this.with_core(|core| {
-                                        core.automation_form.existing_target = Some(id);
+                                        core.automation_form.existing_workflow_target = Some(id);
                                         core.automation_form.session_mode =
                                             AutomationSessionMode::ExistingWorkflow;
                                     });
@@ -1047,17 +1055,6 @@ fn project_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                         }))
                         .into_any_element()
                 })
-                .chain(std::iter::once(
-                    Button::new("automation-project-unassigned")
-                        .small()
-                        .label("未归属")
-                        .selected(core.automation_form.project.is_none())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.with_core(|core| core.automation_form.project = None);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                ))
                 .collect(),
         ),
         cx,
@@ -1084,6 +1081,8 @@ fn machine_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                                 core.automation_form.machine = Some(name.clone());
                                 core.automation_form.agent = None;
                             });
+                            this.refresh_automation_workspace_suggestions(cx);
+                            this.refresh_automation_worktree_branches(cx);
                             cx.notify();
                         }))
                         .into_any_element()
@@ -1131,6 +1130,99 @@ fn agent_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
         ),
         cx,
     )
+}
+
+fn automation_worktree_base_menu(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let current = core.automation_form.worktree_base_branch.clone();
+    let branches = core.automation_form.worktree_branches.clone();
+    let app = cx.entity();
+    Button::new("automation-worktree-base-select")
+        .small()
+        .outline()
+        .child(
+            div()
+                .max_w(rems(14.))
+                .line_height(relative(1.))
+                .truncate()
+                .child(if current == "HEAD" {
+                    "HEAD（当前提交）".to_string()
+                } else {
+                    current.clone()
+                }),
+        )
+        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+            let mut menu = menu;
+            let head_selected = current == "HEAD";
+            let head_app = app.clone();
+            menu = menu.item(
+                PopupMenuItem::new("HEAD（当前提交）")
+                    .checked(head_selected)
+                    .on_click(move |_, _, cx| {
+                        head_app.update(cx, |this, cx| {
+                            this.with_core(|core| {
+                                core.automation_form.worktree_base_branch = "HEAD".to_string()
+                            });
+                            cx.notify();
+                        })
+                    }),
+            );
+            for branch in &branches {
+                let value = branch.name.clone();
+                let checked = current == value;
+                let branch_app = app.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(worktree_base_branch_label(branch))
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            branch_app.update(cx, |this, cx| {
+                                this.with_core(|core| {
+                                    core.automation_form.worktree_base_branch = value.clone()
+                                });
+                                cx.notify();
+                            })
+                        }),
+                );
+            }
+            menu
+        })
+        .into_any_element()
+}
+
+fn worktree_base_branch_label(branch: &amux_common::domain::GitBranch) -> String {
+    match (branch.is_worktree_base, branch.is_default) {
+        (true, true) => format!("{}（worktree 基分支、默认分支）", branch.name),
+        (true, false) => format!("{}（worktree 基分支）", branch.name),
+        (false, true) => format!("{}（默认分支）", branch.name),
+        (false, false) => branch.name.clone(),
+    }
+}
+
+fn automation_plan_selector(core: &Core, cx: &mut Context<AmuxApp>) -> Option<AnyElement> {
+    if core.settings.plans.is_empty() {
+        return None;
+    }
+    let mut row = h_flex().flex_wrap().gap_1();
+    for plan in core.settings.plans.clone() {
+        let project = plan.last_used_project.clone().filter(|project| {
+            core.settings
+                .projects
+                .iter()
+                .any(|candidate| &candidate.name == project)
+        });
+        row = row.child(
+            Button::new(SharedString::from(format!("automation-plan-{}", plan.name)))
+                .small()
+                .label(ui::truncate(&plan.name, 18))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.automation_plan.update(cx, |state, cx| {
+                        state.set_value(plan.plan.clone(), window, cx)
+                    });
+                    this.with_core(|core| core.automation_form.project = project.clone());
+                    cx.notify();
+                })),
+        );
+    }
+    Some(row.into_any_element())
 }
 
 fn option_group(items: Vec<AnyElement>) -> AnyElement {
@@ -1323,10 +1415,10 @@ impl AmuxApp {
         };
         let session_options = match form.session_mode {
             AutomationSessionMode::ExistingSession => AutomationSessionOptions::ExistingSession {
-                session_id: form.existing_target.clone().unwrap_or_default(),
+                session_id: form.existing_session_target.clone().unwrap_or_default(),
             },
             AutomationSessionMode::ExistingWorkflow => AutomationSessionOptions::ExistingWorkflow {
-                workflow_id: form.existing_target.clone().unwrap_or_default(),
+                workflow_id: form.existing_workflow_target.clone().unwrap_or_default(),
             },
             AutomationSessionMode::NewSession => AutomationSessionOptions::NewSession {
                 machine: form.machine.clone().unwrap_or_default(),
@@ -1338,13 +1430,10 @@ impl AmuxApp {
                     .trim()
                     .to_string(),
                 use_worktree: form.use_worktree,
-                worktree_base_branch: form.use_worktree.then(|| {
-                    self.automation_worktree_branch
-                        .read(cx)
-                        .value()
-                        .trim()
-                        .to_string()
-                }),
+                worktree_base_branch: form
+                    .use_worktree
+                    .then(|| form.worktree_base_branch.clone())
+                    .filter(|branch| branch != "HEAD"),
             },
             AutomationSessionMode::NewWorkflow => AutomationSessionOptions::NewWorkflow {
                 plan: self.automation_plan.read(cx).value().trim().to_string(),
@@ -1507,6 +1596,34 @@ impl AmuxApp {
         });
     }
 
+    pub fn refresh_automation_workspace_suggestions(&mut self, cx: &mut Context<Self>) {
+        self.refresh_workspace_suggestions_for(WorkspacePickerTarget::Automation, cx);
+    }
+
+    pub fn refresh_automation_worktree_branches(&mut self, cx: &mut Context<Self>) {
+        self.refresh_worktree_branches_for(WorkspacePickerTarget::Automation, cx);
+    }
+
+    pub fn validate_automation_cron(&mut self, cx: &mut Context<Self>) {
+        let value = self.automation_cron.read(cx).value().trim().to_string();
+        let preview = cron_next_runs(&value);
+        self.with_core(|core| match preview {
+            Ok(runs) => {
+                core.automation_form.cron_error = None;
+                core.automation_form.cron_next_runs = runs;
+            }
+            Err(error) => {
+                core.automation_form.cron_error = Some(error);
+                core.automation_form.cron_next_runs.clear();
+            }
+        });
+        cx.notify();
+    }
+
+    pub fn dismiss_automation_workspace_popups(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_workspace_popups_for(WorkspacePickerTarget::Automation, cx);
+    }
+
     pub fn load_more_automation_sessions(&mut self, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
@@ -1573,20 +1690,24 @@ impl AmuxApp {
             };
             match &automation.session_options {
                 AutomationSessionOptions::ExistingSession { session_id } => {
-                    form.existing_target = Some(session_id.clone());
+                    form.existing_session_target = Some(session_id.clone());
                 }
                 AutomationSessionOptions::ExistingWorkflow { workflow_id } => {
-                    form.existing_target = Some(workflow_id.clone());
+                    form.existing_workflow_target = Some(workflow_id.clone());
                 }
                 AutomationSessionOptions::NewSession {
                     machine,
                     agent,
                     use_worktree,
+                    worktree_base_branch,
                     ..
                 } => {
                     form.machine = Some(machine.clone());
                     form.agent = Some(agent.clone());
                     form.use_worktree = *use_worktree;
+                    form.worktree_base_branch = worktree_base_branch
+                        .clone()
+                        .unwrap_or_else(|| "HEAD".to_string());
                 }
                 AutomationSessionOptions::NewWorkflow { .. } => {}
             }
@@ -1627,28 +1748,19 @@ impl AmuxApp {
             .unwrap_or_else(|| (String::new(), "push".to_string()));
         set(&self.automation_repository, repository, window, cx);
         set(&self.automation_events, events, window, cx);
-        let (workspace, branch, plan) = automation
+        let (workspace, plan) = automation
             .map(|automation| match &automation.session_options {
-                AutomationSessionOptions::NewSession {
-                    workspace,
-                    worktree_base_branch,
-                    ..
-                } => (
-                    workspace.clone(),
-                    worktree_base_branch.clone().unwrap_or_default(),
-                    String::new(),
-                ),
-                AutomationSessionOptions::NewWorkflow { plan } => {
-                    (String::new(), String::new(), plan.clone())
+                AutomationSessionOptions::NewSession { workspace, .. } => {
+                    (workspace.clone(), String::new())
                 }
+                AutomationSessionOptions::NewWorkflow { plan } => (String::new(), plan.clone()),
                 AutomationSessionOptions::ExistingSession { .. }
                 | AutomationSessionOptions::ExistingWorkflow { .. } => {
-                    (String::new(), String::new(), String::new())
+                    (String::new(), String::new())
                 }
             })
             .unwrap_or_default();
         set(&self.automation_workspace, workspace, window, cx);
-        set(&self.automation_worktree_branch, branch, window, cx);
         set(&self.automation_plan, plan, window, cx);
         let labels = automation
             .map(|automation| automation.result_labels.clone())
@@ -1700,7 +1812,26 @@ impl AmuxApp {
             window,
             cx,
         );
+        self.refresh_automation_worktree_branches(cx);
+        self.validate_automation_cron(cx);
     }
+}
+
+fn cron_next_runs(expression: &str) -> Result<Vec<u64>, String> {
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return Err("请输入 cron 表达式".to_string());
+    }
+    let cron = Cron::from_str(expression).map_err(|error| format!("cron 表达式无效: {error}"))?;
+    let mut current = jiff::Zoned::now();
+    let mut runs = Vec::with_capacity(5);
+    for _ in 0..5 {
+        current = cron
+            .find_next_occurrence(&current, false)
+            .map_err(|error| format!("计算触发时间失败: {error}"))?;
+        runs.push(current.timestamp().as_millisecond().max(0) as u64);
+    }
+    Ok(runs)
 }
 
 fn automation_input(automation: &Automation, enabled: bool) -> AutomationInput {
@@ -1712,5 +1843,22 @@ fn automation_input(automation: &Automation, enabled: bool) -> AutomationInput {
         trigger: automation.trigger.clone(),
         session_options: automation.session_options.clone(),
         result_labels: automation.result_labels.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cron_next_runs;
+
+    #[test]
+    fn cron_preview_returns_five_increasing_runs() {
+        let runs = cron_next_runs("0 9 * * *").unwrap();
+        assert_eq!(runs.len(), 5);
+        assert!(runs.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn cron_preview_rejects_invalid_expression() {
+        assert!(cron_next_runs("not a cron").is_err());
     }
 }
