@@ -72,7 +72,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/machines/<machine_name>/read_file` | 分页查看指定路径文本文件内容 |
 | GET `/machines/<machine_name>/list_branches` | 查看指定路径仓库的本地分支和远程跟踪分支列表 |
 | POST `/sessions` | 新建一个普通会话 |
-| GET `/sessions` | 分页查询非关联非置顶普通会话列表，可指定项目，响应包含该项目所有置顶非关联普通会话 |
+| GET `/sessions` | 分页查询非置顶普通会话列表，可指定项目，响应包含该项目所有置顶普通会话 |
 | GET `/sessions/<session_id>` | 查询指定普通会话 |
 | POST `/sessions/<session_id>` | 往指定普通会话发送指令 |
 | DELETE `/sessions/<session_id>` | 删除指定普通会话 |
