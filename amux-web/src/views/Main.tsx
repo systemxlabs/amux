@@ -16,13 +16,19 @@ import {
   ListTodo,
   Menu,
   Paperclip,
+  Plus,
   Settings as SettingsIcon,
   SquareTerminal,
   Zap,
   X,
 } from "lucide-react";
 
-import { openSettings, showAutomations, toggleSidePanel } from "../core/actions";
+import {
+  openSettings,
+  showAutomations,
+  showNewSession,
+  toggleSidePanel,
+} from "../core/actions";
 import { panelAvailable } from "../core/core";
 import { useCore, useCoreState } from "../core/store";
 import type { SidePanel } from "../core/core";
@@ -127,21 +133,38 @@ export function Main() {
         )}
         style={{ width: leftWidth }}
       >
-        <button
-          data-slot="automation-entry"
-          type="button"
-          className={cn(
-            "flex shrink-0 items-center gap-2 border-b border-border px-3 py-3 text-left hover:bg-accent lg:py-2",
-            state.middle === "automation" && "bg-accent",
-          )}
-          onClick={() => {
-            closeDrawer();
-            void showAutomations(core);
-          }}
-        >
-          <Zap className="size-4" />
-          自动化
-        </button>
+        <div data-slot="function-list" className="flex shrink-0 flex-col">
+          <button
+            data-slot="new-session-entry"
+            type="button"
+            className={cn(
+              "flex items-center gap-2 border-b border-border px-3 py-3 text-left hover:bg-accent lg:py-2",
+              state.middle === "new" && "bg-accent",
+            )}
+            onClick={() => {
+              closeDrawer();
+              showNewSession(core);
+            }}
+          >
+            <Plus className="size-4" />
+            新建会话
+          </button>
+          <button
+            data-slot="automation-entry"
+            type="button"
+            className={cn(
+              "flex items-center gap-2 border-b border-border px-3 py-3 text-left hover:bg-accent lg:py-2",
+              state.middle === "automation" && "bg-accent",
+            )}
+            onClick={() => {
+              closeDrawer();
+              void showAutomations(core);
+            }}
+          >
+            <Zap className="size-4" />
+            自动化
+          </button>
+        </div>
         <div className="h-2 shrink-0" />
         <SessionListPanel onNavigate={closeDrawer} />
         <button

@@ -266,6 +266,17 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                 ),
         )
         .child(
+            Button::new("function-new-session")
+                .small()
+                .ghost()
+                .w_full()
+                .justify_start()
+                .icon(IconName::Plus)
+                .label("新建会话")
+                .selected(core.open.is_none() && !core.automation_open)
+                .on_click(cx.listener(|this, _, _, cx| this.open_new_session(cx))),
+        )
+        .child(
             Button::new("open-automations")
                 .small()
                 .ghost()
