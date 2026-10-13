@@ -127,6 +127,8 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | POST `/config/projects/order` | 更新项目顺序 |
 | PUT `/config/projects/<project_name>` | 更新指定项目 |
 | DELETE `/config/projects/<project_name>` | 删除指定项目 |
+| GET `/config/automation` | 查询自动化配置 |
+| PUT `/config/automation` | 更新自动化配置 |
 | GET `/automations` | 查询所有自动化列表 |
 | POST `/automations` | 创建自动化 |
 | PUT `/automations/<automation_id>` | 全量更新自动化 |
@@ -564,7 +566,7 @@ Github Webhook 触发
     error TEXT,                             -- 错误信息
     result_label TEXT,                      -- 结果标签
     started_at INTEGER NOT NULL,            -- 开始时间
-    finished_at INTEGER NOT NULL            -- 完成时间
+    finished_at INTEGER                     -- 完成时间
   );
   ```
 - 自动化配置：存储在 `~/.amux/config/automation.json`
