@@ -702,24 +702,6 @@ Github Webhook 触发
 
 主题存放在项目内 `theme.json` 文件中，只有一套主题，用于在不同应用间共享颜色/间距/圆角/字号等信息。
 
-### 桌面应用
-
-#### 技术栈
-
-- GUI：`gpui` + `gpui-component`
-- HTTP: `reqwest`
-- 终端：`alacritty_terminal`
-
-#### 连接存储
-
-Server 连接信息存储在 `~/.amux/app/server.json` 中，格式为
-```json
-{
-  "server": "https://amux.example.com:34567",
-  "token": "xxx"
-}
-```
-
 ### Web 应用
 
 Web 应用需适配桌面和手机浏览器。
@@ -745,5 +727,4 @@ Daemon、Server 和应用在实现时，均需埋点丰富的日志。日志按�
 日志存储
 - Daemon：存放在 `~/.amux/logs/daemon.log`
 - Server：存放在 `~/.amux/logs/server.log`
-- 桌面应用：存放在 `~/.amux/logs/desktop.log`
 - Web 应用：无需日志
