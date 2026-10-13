@@ -988,8 +988,28 @@ function AutomationEditor({
         </div>
 
         <div className="space-y-4 border-t border-border pt-4">
-          <Field label="运行结果分类">
+          <Field
+            label="运行结果分类"
+            action={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="新增分类"
+                title="新增分类"
+                onClick={() =>
+                  setResultLabels((current) => [
+                    ...current,
+                    { name: "", description: "" },
+                  ])
+                }
+              >
+                <Plus />
+              </Button>
+            }
+          >
             <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">最少输入两个分类</p>
               {resultLabels.map((label, index) => (
                 <div key={index} className="grid gap-2 rounded-md border border-border p-2">
                   <Input
@@ -1016,33 +1036,25 @@ function AutomationEditor({
                       )
                     }
                   />
-                  {resultLabels.length > 2 ? (
+                  <div className="flex justify-end">
                     <Button
+                      type="button"
                       variant="ghost"
-                      size="sm"
+                      size="icon"
+                      aria-label="删除分类"
+                      title={resultLabels.length <= 2 ? "至少保留两个分类" : "删除分类"}
+                      disabled={resultLabels.length <= 2}
                       onClick={() =>
                         setResultLabels((current) =>
                           current.filter((_, itemIndex) => itemIndex !== index),
                         )
                       }
                     >
-                      删除分类
+                      <Trash2 />
                     </Button>
-                  ) : null}
+                  </div>
                 </div>
               ))}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  setResultLabels((current) => [
-                    ...current,
-                    { name: "", description: "" },
-                  ])
-                }
-              >
-                添加分类
-              </Button>
             </div>
           </Field>
 
@@ -1066,10 +1078,21 @@ function PanelHeader({ title, onClose }: { title: string; onClose: () => void })
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({
+  label,
+  action,
+  children,
+}: {
+  label: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <div className="space-y-1.5">
-      <Label className="text-muted-foreground">{label}</Label>
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-muted-foreground">{label}</Label>
+        {action}
+      </div>
       {children}
     </div>
   );
