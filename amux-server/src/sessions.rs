@@ -832,7 +832,11 @@ fn should_close_idle_agent_session(idle_expired: bool, resumed: bool) -> bool {
 }
 
 fn is_missing_agent_session(error: &str) -> bool {
-    error.contains("Unknown session") && error.contains("missing or closed")
+    if error.contains("Unknown session") && error.contains("missing or closed") {
+        return true;
+    }
+    let lower = error.to_ascii_lowercase();
+    lower.contains("no rollout found for thread id") || lower.contains("session not found")
 }
 
 fn apply_tool_call_patch(
@@ -924,6 +928,10 @@ mod tests {
         assert!(is_missing_agent_session(
             "Invalid params: Unknown session \"agent-s1\" (missing or closed); create or resume it first"
         ));
+        assert!(is_missing_agent_session(
+            "Internal error: no rollout found for thread id 01a13503-ba89-7dd1-89b0-b43fb9dc060a"
+        ));
+        assert!(is_missing_agent_session("Session not found"));
         assert!(!is_missing_agent_session("ACP 连接已关闭"));
     }
 
