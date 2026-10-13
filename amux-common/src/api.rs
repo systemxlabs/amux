@@ -357,7 +357,11 @@ pub enum AutomationTrigger {
 
 /// 自动化运行任务时用于创建普通会话的选项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+#[serde(
+    tag = "mode",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum AutomationSessionOptions {
     /// 使用已有普通会话。
     ExistingSession { session_id: String },
@@ -772,6 +776,37 @@ mod tests {
         assert_eq!(json["mode"], "new_workflow");
         assert_eq!(json["plan"], "先实现再审查");
         assert_eq!(json["project"], "p");
+    }
+
+    #[test]
+    fn automation_session_options_use_camel_case_fields() {
+        let existing = serde_json::to_value(AutomationSessionOptions::ExistingSession {
+            session_id: "s1".into(),
+        })
+        .unwrap();
+        assert_eq!(existing["mode"], "existing_session");
+        assert_eq!(existing["sessionId"], "s1");
+        assert!(existing.get("session_id").is_none());
+        assert_eq!(
+            serde_json::from_value::<AutomationSessionOptions>(existing).unwrap(),
+            AutomationSessionOptions::ExistingSession {
+                session_id: "s1".into(),
+            }
+        );
+
+        let new_session = serde_json::to_value(AutomationSessionOptions::NewSession {
+            machine: "pc".into(),
+            agent: "codex".into(),
+            workspace: "/repo".into(),
+            use_worktree: true,
+            worktree_base_branch: Some("main".into()),
+            project: Some("p".into()),
+        })
+        .unwrap();
+        assert_eq!(new_session["mode"], "new_session");
+        assert_eq!(new_session["useWorktree"], true);
+        assert_eq!(new_session["worktreeBaseBranch"], "main");
+        assert!(new_session.get("worktree_base_branch").is_none());
     }
 
     #[test]
