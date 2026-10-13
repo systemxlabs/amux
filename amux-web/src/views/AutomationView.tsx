@@ -500,8 +500,8 @@ function AutomationEditor({
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [resultLabels, setResultLabels] = useState<AutomationResultLabel[]>(
     initial?.resultLabels.map((label) => ({ ...label })) ?? [
-      { name: "通过", description: "任务成功完成" },
-      { name: "失败", description: "任务未成功完成" },
+      { name: "", description: "" },
+      { name: "", description: "" },
     ],
   );
   const [saving, setSaving] = useState(false);
