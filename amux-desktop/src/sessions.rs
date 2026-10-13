@@ -1006,7 +1006,7 @@ fn quick_buttons(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
         );
     }
     if !project_commands.is_empty() && !general_commands.is_empty() {
-        row = row.child(div().w(px(1.)).h_4().bg(theme.border));
+        row = row.child(div().w(px(2.)).h_4().bg(theme.border));
     }
     for command in &general_commands {
         row = row.child(

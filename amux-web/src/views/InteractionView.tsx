@@ -323,7 +323,7 @@ export function InteractionView() {
             <Separator
               orientation="vertical"
               data-slot="quick-command-separator"
-              className="mx-1 h-6 self-center"
+              className="mx-1 h-6 self-center border-l-2"
             />
           ) : null}
           {generalQuickCommands.map((command) => (
