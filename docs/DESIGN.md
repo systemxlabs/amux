@@ -555,7 +555,6 @@ Github Webhook 触发
     title TEXT NOT NULL,                    -- 自动化标题
     enabled BOOL NOT NULL,                  -- 是否开启
     task TEXT NOT NULL,                     -- 自动化任务
-    project TEXT,                           -- 所属项目
     trigger TEXT NOT NULL,                  -- 触发方式
     session_options TEXT NOT NULL,          -- 会话选项
     result_labels TEXT NOT NULL,            -- 结果分类
