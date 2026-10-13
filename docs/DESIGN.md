@@ -129,7 +129,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | DELETE `/config/projects/<project_name>` | 删除指定项目 |
 | GET `/config/automation` | 查询自动化配置 |
 | PUT `/config/automation` | 更新自动化配置 |
-| GET `/automations` | 查询所有自动化列表 |
+| GET `/automations` | 查询所有自动化列表，包含最近一次运行记录 |
 | POST `/automations` | 创建自动化 |
 | PUT `/automations/<automation_id>` | 全量更新自动化 |
 | DELETE `/automations/<automation_id>` | 删除指定自动化 |
