@@ -39,6 +39,7 @@ import {
   openEntry,
   saveAutomation,
   showAutomationDetail,
+  showEditAutomation,
   showNewAutomation,
   toggleAutomation,
   triggerAutomation,
@@ -157,6 +158,7 @@ export function AutomationListView() {
       label: automation.enabled ? "暂停" : "恢复",
       onSelect: () => void toggleAutomation(core, automation),
     },
+    { label: "编辑", onSelect: () => showEditAutomation(core, automation.id) },
     { label: "删除", danger: true, onSelect: () => setDeleting(automation) },
   ];
 
@@ -185,7 +187,8 @@ export function AutomationListView() {
         <div className="flex flex-col gap-1">
           {state.automations.map((automation) => {
             const active =
-              state.automationPanel?.kind === "detail" &&
+              state.automationPanel !== null &&
+              state.automationPanel.kind !== "new" &&
               state.automationPanel.id === automation.id;
             return (
               <button
@@ -234,9 +237,11 @@ export function AutomationListView() {
                   <span className="mt-0.5 block truncate text-xs text-muted-foreground">
                     {triggerSummary(automation)}
                   </span>
-                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                    最近运行：{runSummary(automation.lastRun)}
-                  </span>
+                  {automation.lastRun ? (
+                    <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                      最近运行：{runSummary(automation.lastRun)}
+                    </span>
+                  ) : null}
                 </span>
                 {automation.trigger.type === "schedule" ? (
                   <Clock3 className="size-4 shrink-0 text-muted-foreground" />
@@ -280,6 +285,15 @@ export function AutomationPanelView() {
       <div className="flex h-full items-center justify-center p-4 text-sm text-muted-foreground">
         自动化不存在
       </div>
+    );
+  }
+  if (panel.kind === "edit") {
+    return (
+      <AutomationEditor
+        core={core}
+        automation={automation}
+        onCancel={() => showAutomationDetail(core, automation.id)}
+      />
     );
   }
   return <AutomationDetail automation={automation} />;

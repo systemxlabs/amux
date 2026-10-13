@@ -36,9 +36,10 @@ export type ConnectionStatus = "connecting" | "offline" | "failed" | "online";
 /** 中间面板：新建会话视图或会话交互视图。 */
 export type MiddleView = "new" | "interaction" | "automation";
 
-/** 自动化右侧面板：新建或详情。 */
+/** 自动化右侧面板：新建、编辑或详情。 */
 export type AutomationPanel =
   | { kind: "new" }
+  | { kind: "edit"; id: string }
   | { kind: "detail"; id: string };
 
 /** 右侧面板。 */

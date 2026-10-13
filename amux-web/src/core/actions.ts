@@ -208,6 +208,15 @@ export function showAutomationDetail(core: Core, id: string): void {
   });
 }
 
+export function showEditAutomation(core: Core, id: string): void {
+  core.update((state) => {
+    state.middle = "automation";
+    state.open = null;
+    state.sidePanel = null;
+    state.automationPanel = { kind: "edit", id };
+  });
+}
+
 export function closeAutomationPanel(core: Core): void {
   core.update((state) => {
     state.automationPanel = null;
@@ -246,7 +255,11 @@ export async function deleteAutomation(core: Core, automation: Automation): Prom
     await core.client.deleteAutomation(automation.id);
     core.update((state) => {
       state.automations = state.automations.filter((item) => item.id !== automation.id);
-      if (state.automationPanel?.kind === "detail" && state.automationPanel.id === automation.id) {
+      if (
+        state.automationPanel !== null &&
+        state.automationPanel.kind !== "new" &&
+        state.automationPanel.id === automation.id
+      ) {
         state.automationPanel = null;
       }
     });
