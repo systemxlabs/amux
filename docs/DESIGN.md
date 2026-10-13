@@ -505,7 +505,8 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 ### 自动化存储
 
-自动化数据存储在 `~/.amux/automation.sqlite` 文件中
+自动化数据包含两部分
+- 元数据：存储在 `~/.amux/automation.sqlite` 文件中
   ```SQL
   CREATE TABLE IF NOT EXISTS automations (
     id TEXT PRIMARY KEY,                    -- 自动化 ID
@@ -514,10 +515,23 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     task TEXT NOT NULL,                     -- 自动化任务
     project TEXT,                           -- 所属项目
     trigger TEXT NOT NULL,                  -- 触发方式
-    create_session_options TEXT NOT NULL,   -- 新建会话选项
+    session_options TEXT NOT NULL,          -- 会话选项
     result_labels TEXT NOT NULL,            -- 结果分类
     created_at INTEGER NOT NULL,            -- 创建时间
     updated_at INTEGER NOT NULL             -- 更新时间
+  );
+  ```
+- 运行记录数据：存储在 `~/.amux/automation.sqlite` 文件中
+  ```SQL
+  CREATE TABLE IF NOT EXISTS runs (
+    id TEXT PRIMARY KEY,                    -- 运行记录 ID
+    automation_id TEXT NOT NULL,            -- 自动化 ID
+    session_id TEXT,                        -- 普通会话 ID
+    workflow_id TEXT,                       -- 工作流会话 ID
+    state TEXT NOT NULL,                    -- 运行状态 running/finished/failed
+    result_label TEXT,                      -- 结果标签
+    started_at INTEGER NOT NULL,            -- 开始时间
+    finished_at INTEGER NOT NULL            -- 完成时间
   );
   ```
   
