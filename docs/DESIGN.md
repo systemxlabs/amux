@@ -582,7 +582,7 @@ Github Webhook 触发
   ```json
   {
     "apiFormat": "jev",
-    "baseUrl": "https://api.typesafe.ai/v1/systemone",
+    "endpoint": "https://api.typesafe.ai/v1/systemone",
     "apiKey": "sk-xxx",
     "model": "jev-latest"
   }
