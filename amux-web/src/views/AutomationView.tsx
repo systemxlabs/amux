@@ -637,89 +637,92 @@ function AutomationEditor({
           </OptionGroup>
         </Field>
 
-        <Field label="触发方式">
-          <Tabs
-            value={triggerMode}
-            onValueChange={(value) => setTriggerMode(value as "schedule" | "webhook")}
-          >
-            <TabsList className="w-full">
-              <TabsTrigger className="flex-1" value="schedule">
-                定时
-              </TabsTrigger>
-              <TabsTrigger className="flex-1" value="webhook">
-                Github Webhook
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        </Field>
-        {triggerMode === "schedule" ? (
-          <Field label="cron 表达式">
-            <div className="space-y-2">
-              <Input
-                value={cron}
-                onChange={(event) => {
-                  setCron(event.target.value);
-                  setCronError(null);
-                  setCronNextRuns([]);
-                }}
-                onBlur={() => {
-                  const preview = previewCron(cron);
-                  setCronError(preview.error);
-                  setCronNextRuns(preview.nextRuns);
-                }}
-                placeholder="0 9 * * *"
-              />
-              {cronError !== null ? (
-                <p className="text-xs text-destructive">{cronError}</p>
-              ) : cronNextRuns.length > 0 ? (
-                <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground">最近 5 次触发时间</p>
-                  {cronNextRuns.map((time) => (
-                    <p key={time.getTime()} className="text-xs text-muted-foreground">
-                      {formatTime(time.getTime())}
-                    </p>
-                  ))}
-                </div>
-              ) : null}
-            </div>
+        <div className="space-y-4 border-t border-border pt-4">
+          <Field label="触发方式">
+            <Tabs
+              value={triggerMode}
+              onValueChange={(value) => setTriggerMode(value as "schedule" | "webhook")}
+            >
+              <TabsList className="w-full">
+                <TabsTrigger className="flex-1" value="schedule">
+                  定时
+                </TabsTrigger>
+                <TabsTrigger className="flex-1" value="webhook">
+                  Github Webhook
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
           </Field>
-        ) : (
-          <div className="grid gap-4">
-            <Field label="仓库">
-              <Input
-                value={repository}
-                onChange={(event) => setRepository(event.target.value)}
-                placeholder="owner/repository"
-              />
-            </Field>
-            <Field label="推送事件">
-              <div className="grid gap-2">
-                {GITHUB_WEBHOOK_EVENTS.map((event) => (
-                  <label
-                    key={event}
-                    className="flex cursor-pointer items-center gap-2 text-sm text-foreground"
-                  >
-                    <input
-                      type="checkbox"
-                      className="size-4 accent-primary"
-                      checked={events.includes(event)}
-                      onChange={(input) =>
-                        setEvents((current) =>
-                          input.target.checked
-                            ? [...current, event]
-                            : current.filter((item) => item !== event),
-                        )
-                      }
-                    />
-                    <span>{event}</span>
-                  </label>
-                ))}
+          {triggerMode === "schedule" ? (
+            <Field label="cron 表达式">
+              <div className="space-y-2">
+                <Input
+                  value={cron}
+                  onChange={(event) => {
+                    setCron(event.target.value);
+                    setCronError(null);
+                    setCronNextRuns([]);
+                  }}
+                  onBlur={() => {
+                    const preview = previewCron(cron);
+                    setCronError(preview.error);
+                    setCronNextRuns(preview.nextRuns);
+                  }}
+                  placeholder="0 9 * * *"
+                />
+                {cronError !== null ? (
+                  <p className="text-xs text-destructive">{cronError}</p>
+                ) : cronNextRuns.length > 0 ? (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">最近 5 次触发时间</p>
+                    {cronNextRuns.map((time) => (
+                      <p key={time.getTime()} className="text-xs text-muted-foreground">
+                        {formatTime(time.getTime())}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </Field>
-          </div>
-        )}
+          ) : (
+            <div className="grid gap-4">
+              <Field label="仓库">
+                <Input
+                  value={repository}
+                  onChange={(event) => setRepository(event.target.value)}
+                  placeholder="owner/repository"
+                />
+              </Field>
+              <Field label="推送事件">
+                <div className="grid gap-2">
+                  {GITHUB_WEBHOOK_EVENTS.map((event) => (
+                    <label
+                      key={event}
+                      className="flex cursor-pointer items-center gap-2 text-sm text-foreground"
+                    >
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-primary"
+                        checked={events.includes(event)}
+                        onChange={(input) =>
+                          setEvents((current) =>
+                            input.target.checked
+                              ? [...current, event]
+                              : current.filter((item) => item !== event),
+                          )
+                        }
+                      />
+                      <span>{event}</span>
+                    </label>
+                  ))}
+                </div>
+              </Field>
+            </div>
+          )}
+        </div>
 
-        <Field label="会话选项">
+        <div className="space-y-4 border-t border-border pt-4">
+          <Field label="会话选项">
           <Tabs
             value={sessionMode}
             onValueChange={(value) => setSessionMode(value as EditorSessionMode)}
@@ -860,9 +863,9 @@ function AutomationEditor({
             ) : null}
           </div>
         ) : null}
-        {sessionMode === "new_workflow" ? (
-          <Field label="工作流计划">
-            <WorkflowPlanField
+          {sessionMode === "new_workflow" ? (
+            <Field label="工作流计划">
+              <WorkflowPlanField
               plans={state.settings.plans}
               value={plan}
               selectedPlan={selectedPlan}
@@ -883,71 +886,74 @@ function AutomationEditor({
                 }
               }}
               slotPrefix="automation-workflow-plan"
-            />
-          </Field>
-        ) : null}
+              />
+            </Field>
+          ) : null}
+        </div>
 
-        <Field label="运行结果分类">
-          <div className="space-y-2">
-            {resultLabels.map((label, index) => (
-              <div key={index} className="grid gap-2 rounded-md border border-border p-2">
-                <Input
-                  value={label.name}
-                  placeholder="标签名"
-                  onChange={(event) =>
-                    setResultLabels((current) =>
-                      current.map((item, itemIndex) =>
-                        itemIndex === index ? { ...item, name: event.target.value } : item,
-                      ),
-                    )
-                  }
-                />
-                <Input
-                  value={label.description}
-                  placeholder="标签描述"
-                  onChange={(event) =>
-                    setResultLabels((current) =>
-                      current.map((item, itemIndex) =>
-                        itemIndex === index
-                          ? { ...item, description: event.target.value }
-                          : item,
-                      ),
-                    )
-                  }
-                />
-                {resultLabels.length > 2 ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() =>
+        <div className="space-y-4 border-t border-border pt-4">
+          <Field label="运行结果分类">
+            <div className="space-y-2">
+              {resultLabels.map((label, index) => (
+                <div key={index} className="grid gap-2 rounded-md border border-border p-2">
+                  <Input
+                    value={label.name}
+                    placeholder="标签名"
+                    onChange={(event) =>
                       setResultLabels((current) =>
-                        current.filter((_, itemIndex) => itemIndex !== index),
+                        current.map((item, itemIndex) =>
+                          itemIndex === index ? { ...item, name: event.target.value } : item,
+                        ),
                       )
                     }
-                  >
-                    删除分类
-                  </Button>
-                ) : null}
-              </div>
-            ))}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                setResultLabels((current) => [
-                  ...current,
-                  { name: "", description: "" },
-                ])
-              }
-            >
-              添加分类
-            </Button>
-          </div>
-        </Field>
+                  />
+                  <Input
+                    value={label.description}
+                    placeholder="标签描述"
+                    onChange={(event) =>
+                      setResultLabels((current) =>
+                        current.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? { ...item, description: event.target.value }
+                            : item,
+                        ),
+                      )
+                    }
+                  />
+                  {resultLabels.length > 2 ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        setResultLabels((current) =>
+                          current.filter((_, itemIndex) => itemIndex !== index),
+                        )
+                      }
+                    >
+                      删除分类
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setResultLabels((current) => [
+                    ...current,
+                    { name: "", description: "" },
+                  ])
+                }
+              >
+                添加分类
+              </Button>
+            </div>
+          </Field>
 
-        <Button className="w-full" disabled={!canSave || saving} onClick={() => void save()}>
-          {saving ? "保存中…" : "保存"}
-        </Button>
+          <Button className="w-full" disabled={!canSave || saving} onClick={() => void save()}>
+            {saving ? "保存中…" : "保存"}
+          </Button>
+        </div>
       </div>
     </div>
   );

@@ -642,6 +642,7 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
             cx,
         ))
         .child(project_selector(core, cx))
+        .child(section_separator(cx))
         .child(trigger_mode_selector(core, cx))
         .child(match form.trigger_mode {
             AutomationTriggerMode::Schedule => {
@@ -683,6 +684,7 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
                 .child(field("推送事件", webhook_events_selector(core, cx), cx))
                 .into_any_element(),
         })
+        .child(section_separator(cx))
         .child(session_mode_selector(core, cx));
 
     content = match form.session_mode {
@@ -738,6 +740,7 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
     };
 
     content = content
+        .child(section_separator(cx))
         .child(field(
             "运行结果分类",
             v_flex()
@@ -1317,6 +1320,14 @@ fn field(label: &str, control: AnyElement, cx: &Context<AmuxApp>) -> AnyElement 
                 .text_color(cx.theme().muted_foreground),
         )
         .child(control)
+        .into_any_element()
+}
+
+fn section_separator(cx: &Context<AmuxApp>) -> AnyElement {
+    div()
+        .w_full()
+        .border_t_1()
+        .border_color(cx.theme().border)
         .into_any_element()
 }
 
