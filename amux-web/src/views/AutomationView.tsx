@@ -59,6 +59,7 @@ import type {
   AutomationInput,
   AutomationResultLabel,
   AutomationRun,
+  AutomationRunState,
   AutomationSessionOptions,
   AutomationTrigger,
 } from "../lib/types";
@@ -83,6 +84,13 @@ const GITHUB_WEBHOOK_EVENTS = [
 
 const AUTOMATION_RUNS_PAGE_SIZE = 20;
 const RUNS_SCROLL_THRESHOLD = 32;
+
+const RUN_STATE_META: Record<AutomationRunState, { label: string; dotClass: string }> = {
+  queued: { label: "排队中", dotClass: "bg-warning" },
+  running: { label: "运行中", dotClass: "bg-primary animate-pulse" },
+  finished: { label: "已完成", dotClass: "bg-success" },
+  failed: { label: "失败", dotClass: "bg-destructive" },
+};
 
 function triggerSummary(automation: Automation): string {
   if (automation.trigger.type === "schedule") {
@@ -110,17 +118,14 @@ function sessionOptionsSummary(options: AutomationSessionOptions): string {
   }
 }
 
-function runSummary(run: AutomationRun | undefined, includeError = true): string {
-  if (run === undefined) return "尚未运行";
-  const state = {
-    queued: "排队中",
-    running: "运行中",
-    finished: "已完成",
-    failed: "失败",
-  }[run.state];
-  const parts = [formatTime(run.createdAt), state, run.resultLabel];
-  if (includeError && run.error) parts.push(run.error);
-  return parts.filter(Boolean).join(" · ");
+function RunState({ state }: { state: AutomationRunState }) {
+  const meta = RUN_STATE_META[state];
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1">
+      <span className={cn("size-1.5 rounded-full", meta.dotClass)} />
+      <span>{meta.label}</span>
+    </span>
+  );
 }
 
 function runTimingSummary(run: AutomationRun): string | null {
@@ -239,7 +244,12 @@ export function AutomationListView() {
                   </span>
                   {automation.lastRun ? (
                     <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                      最近运行：{runSummary(automation.lastRun)}
+                      最近运行：{formatTime(automation.lastRun.createdAt)} ·{" "}
+                      <RunState state={automation.lastRun.state} />
+                      {automation.lastRun.resultLabel
+                        ? ` · ${automation.lastRun.resultLabel}`
+                        : ""}
+                      {automation.lastRun.error ? ` · ${automation.lastRun.error}` : ""}
                     </span>
                   ) : null}
                 </span>
@@ -456,7 +466,17 @@ function AutomationDetail({ automation }: { automation: Automation }) {
                 if (entry !== undefined) void openEntry(core, entry);
               }}
             >
-              <div className="truncate">{runSummary(run, false)}</div>
+              <div className="flex min-w-0 items-center gap-1 truncate">
+                <span className="shrink-0">{formatTime(run.createdAt)}</span>
+                <span className="shrink-0">·</span>
+                <RunState state={run.state} />
+                {run.resultLabel ? (
+                  <>
+                    <span className="shrink-0">·</span>
+                    <span className="truncate">{run.resultLabel}</span>
+                  </>
+                ) : null}
+              </div>
               {run.error ? (
                 <p className="mt-1 truncate text-xs text-destructive" title={run.error}>
                   {run.error}
