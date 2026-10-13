@@ -45,6 +45,8 @@ import { SettingsOverlay } from "./settings/SettingsOverlay";
 const PANEL_MIN_WIDTH = 0;
 /** 分隔条宽度，与分隔条的 `w-1` 保持一致。 */
 const PANEL_DIVIDER_WIDTH = 4;
+/** 新建自动化表单字段较多，右侧面板使用更宽的最小宽度。 */
+const AUTOMATION_EDITOR_WIDTH = 520;
 const panelMaxWidth = (): number => window.innerWidth - PANEL_DIVIDER_WIDTH;
 
 export function Main() {
@@ -93,6 +95,10 @@ export function Main() {
 
   const openPanel = state.sidePanel;
   const automationPanelOpen = state.middle === "automation" && state.automationPanel !== null;
+  const rightPanelWidth =
+    state.automationPanel?.kind === "new"
+      ? Math.max(rightWidth, AUTOMATION_EDITOR_WIDTH)
+      : rightWidth;
   const openPanelLabel = panels.find((entry) => entry.panel === openPanel)?.label ?? "";
 
   return (
@@ -227,7 +233,7 @@ export function Main() {
           <aside
             data-slot="right-panel"
             className="fixed inset-0 z-30 flex min-h-0 flex-col overflow-hidden bg-card lg:static lg:z-auto lg:shrink-0 lg:border-l lg:border-border"
-            style={isMobile ? undefined : { width: rightWidth }}
+            style={isMobile ? undefined : { width: rightPanelWidth }}
           >
             {!automationPanelOpen ? (
               <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1 lg:hidden">

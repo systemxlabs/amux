@@ -31,7 +31,8 @@ use crate::state::{
 };
 use crate::ui;
 
-const AUTOMATION_PANEL_WIDTH: f32 = 460.0;
+const AUTOMATION_PANEL_MIN_WIDTH: f32 = 460.0;
+const AUTOMATION_EDITOR_WIDTH: f32 = 520.0;
 const GITHUB_WEBHOOK_EVENTS: &[&str] = &[
     "push",
     "pull_request",
@@ -216,7 +217,7 @@ pub fn render_panel(
             .child(handle)
             .child(
                 v_flex()
-                    .w(px(this.panel_width.max(AUTOMATION_PANEL_WIDTH)))
+                    .w(px(this.panel_width.max(AUTOMATION_PANEL_MIN_WIDTH)))
                     .h_full()
                     .min_w_0()
                     .bg(cx.theme().background)
@@ -1389,7 +1390,7 @@ impl AmuxApp {
             core.open = None;
             core.side_panel = None;
         });
-        self.panel_width = AUTOMATION_PANEL_WIDTH;
+        self.panel_width = AUTOMATION_EDITOR_WIDTH;
         self.load_automations();
         cx.notify();
     }
@@ -1402,7 +1403,7 @@ impl AmuxApp {
             core.open = None;
             core.side_panel = None;
         });
-        self.panel_width = AUTOMATION_PANEL_WIDTH;
+        self.panel_width = AUTOMATION_PANEL_MIN_WIDTH;
         self.load_automation_runs(id);
         cx.notify();
     }
