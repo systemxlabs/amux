@@ -112,7 +112,14 @@ function runSummary(run: AutomationRun | undefined): string {
     finished: "已完成",
     failed: "失败",
   }[run.state];
-  return [state, run.resultLabel ?? run.error].filter(Boolean).join(" · ");
+  return [
+    formatTime(run.startedAt ?? run.createdAt),
+    state,
+    run.resultLabel,
+    run.error,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 export function AutomationListView() {
@@ -205,6 +212,9 @@ export function AutomationListView() {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium">
                     {automation.title}
+                  </span>
+                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                    {automation.task}
                   </span>
                   <span className="mt-0.5 block truncate text-xs text-muted-foreground">
                     {triggerSummary(automation)}

@@ -192,6 +192,7 @@ pub fn render_panel(
 fn automation_row(automation: Automation, core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
     let id = automation.id.clone();
     let title = automation.title.clone();
+    let task = automation.task.clone();
     let selected = core.automation_panel == Some(AutomationPanel::Detail(id.clone()));
     let enabled = automation.enabled;
     let trigger = trigger_summary(&automation);
@@ -273,6 +274,12 @@ fn automation_row(automation: Automation, core: &Core, cx: &mut Context<AmuxApp>
                     Label::new(title)
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
+                        .truncate(),
+                )
+                .child(
+                    Label::new(task)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
                         .truncate(),
                 )
                 .child(
@@ -1397,10 +1404,19 @@ fn run_summary(run: Option<&AutomationRun>) -> String {
         AutomationRunState::Finished => "已完成",
         AutomationRunState::Failed => "失败",
     };
-    match run.result_label.as_deref().or(run.error.as_deref()) {
-        Some(detail) => format!("{state} · {detail}"),
-        None => state.to_string(),
-    }
+    [
+        ui::format_local_time(
+            run.started_at.unwrap_or(run.created_at),
+            ui::TimePrecision::Seconds,
+        ),
+        state.to_string(),
+        run.result_label.clone().unwrap_or_default(),
+        run.error.clone().unwrap_or_default(),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 impl AmuxApp {
