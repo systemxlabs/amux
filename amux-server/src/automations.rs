@@ -111,10 +111,6 @@ impl AutomationService {
         Ok(())
     }
 
-    pub fn unassign_project(&self, project: &str) {
-        self.store.unassign_automation_project(project);
-    }
-
     pub fn runs_page(
         &self,
         id: &str,
@@ -166,6 +162,7 @@ impl AutomationService {
                     workspace,
                     use_worktree,
                     worktree_base_branch,
+                    project,
                 } => {
                     let session = self
                         .sessions
@@ -175,7 +172,7 @@ impl AutomationService {
                             workspace,
                             use_worktree: *use_worktree,
                             worktree_base_branch: worktree_base_branch.as_deref(),
-                            project: automation.project.as_deref(),
+                            project: project.as_deref(),
                         })
                         .await?;
                     if !automation.title.trim().is_empty() {
@@ -184,14 +181,10 @@ impl AutomationService {
                     self.sessions.prompt(&session.id, prompt()).await?;
                     Ok(RunTarget::Session(session.id))
                 }
-                AutomationSessionOptions::NewWorkflow { plan } => {
+                AutomationSessionOptions::NewWorkflow { plan, project } => {
                     let workflow = self
                         .workflows
-                        .create(
-                            plan,
-                            Some(automation.title.clone()),
-                            automation.project.as_deref(),
-                        )
+                        .create(plan, Some(automation.title.clone()), project.as_deref())
                         .await?;
                     self.workflows.prompt(&workflow.id, prompt()).await?;
                     Ok(RunTarget::Workflow(workflow.id))
@@ -337,7 +330,6 @@ impl AutomationService {
             title: row.title,
             enabled: row.enabled,
             task: row.task,
-            project: row.project,
             trigger: row.trigger,
             session_options: row.session_options,
             result_labels: row.result_labels,
@@ -448,7 +440,7 @@ fn normalize_input(mut input: AutomationInput) -> Result<AutomationInput, String
         } if machine.is_empty() || agent.is_empty() || workspace.is_empty() => {
             return Err("机器、智能体和工作目录不能为空".into());
         }
-        AutomationSessionOptions::NewWorkflow { plan } if plan.is_empty() => {
+        AutomationSessionOptions::NewWorkflow { plan, .. } if plan.is_empty() => {
             return Err("工作流计划不能为空".into());
         }
         _ => {}
@@ -497,6 +489,7 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
             agent,
             workspace,
             worktree_base_branch,
+            project,
             ..
         } => {
             *machine = machine.trim().to_string();
@@ -506,9 +499,17 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
                 .take()
                 .map(|branch| branch.trim().to_string())
                 .filter(|branch| !branch.is_empty());
+            *project = project
+                .take()
+                .map(|project| project.trim().to_string())
+                .filter(|project| !project.is_empty());
         }
-        AutomationSessionOptions::NewWorkflow { plan } => {
+        AutomationSessionOptions::NewWorkflow { plan, project } => {
             *plan = plan.trim().to_string();
+            *project = project
+                .take()
+                .map(|project| project.trim().to_string())
+                .filter(|project| !project.is_empty());
         }
     }
 }
@@ -729,7 +730,6 @@ mod tests {
             title: " 每日任务 ".into(),
             enabled: true,
             task: " 执行任务 ".into(),
-            project: None,
             trigger: AutomationTrigger::Schedule {
                 cron: "0 9 * * *".into(),
             },
@@ -739,6 +739,7 @@ mod tests {
                 workspace: " /repo ".into(),
                 use_worktree: false,
                 worktree_base_branch: Some(" ".into()),
+                project: Some(" p ".into()),
             },
             result_labels: labels(),
         }
@@ -751,6 +752,7 @@ mod tests {
         let AutomationSessionOptions::NewSession {
             machine,
             worktree_base_branch,
+            project,
             ..
         } = input.session_options
         else {
@@ -758,6 +760,7 @@ mod tests {
         };
         assert_eq!(machine, "pc");
         assert_eq!(worktree_base_branch, None);
+        assert_eq!(project.as_deref(), Some("p"));
     }
 
     #[test]

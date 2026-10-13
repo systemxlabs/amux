@@ -691,7 +691,7 @@ impl Store {
     pub fn automations(&self) -> Vec<AutomationRow> {
         let conn = self.automations.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, title, enabled, task, project, trigger, session_options,
+            "SELECT id, title, enabled, task, trigger, session_options,
                     result_labels, created_at, updated_at
              FROM automations ORDER BY created_at DESC, id DESC",
         ) {
@@ -709,7 +709,7 @@ impl Store {
             .automations
             .lock()
             .query_row(
-                "SELECT id, title, enabled, task, project, trigger, session_options,
+                "SELECT id, title, enabled, task, trigger, session_options,
                         result_labels, created_at, updated_at
                  FROM automations WHERE id = ?1",
                 params![id],
@@ -733,15 +733,14 @@ impl Store {
         let labels = serde_json::to_string(&input.result_labels).unwrap_or_default();
         let _ = self.automations.lock().execute(
             "INSERT INTO automations (
-                id, title, enabled, task, project, trigger, session_options,
+                id, title, enabled, task, trigger, session_options,
                 result_labels, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 input.title,
                 input.enabled,
                 input.task,
-                input.project,
                 trigger,
                 options,
                 labels,
@@ -759,15 +758,14 @@ impl Store {
             .lock()
             .execute(
                 "UPDATE automations
-                 SET title = ?2, enabled = ?3, task = ?4, project = ?5, trigger = ?6,
-                     session_options = ?7, result_labels = ?8, updated_at = ?9
+                 SET title = ?2, enabled = ?3, task = ?4, trigger = ?5,
+                     session_options = ?6, result_labels = ?7, updated_at = ?8
                  WHERE id = ?1",
                 params![
                     id,
                     input.title,
                     input.enabled,
                     input.task,
-                    input.project,
                     trigger,
                     options,
                     labels,
@@ -786,13 +784,6 @@ impl Store {
             let _ = conn.execute("DELETE FROM runs WHERE automation_id = ?1", params![id]);
         }
         deleted
-    }
-
-    pub fn unassign_automation_project(&self, project: &str) {
-        let _ = self.automations.lock().execute(
-            "UPDATE automations SET project = NULL WHERE project = ?1",
-            params![project],
-        );
     }
 
     pub fn insert_automation_run(&self, run: &AutomationRun) {
@@ -1001,7 +992,6 @@ pub struct AutomationRow {
     pub title: String,
     pub enabled: bool,
     pub task: String,
-    pub project: Option<String>,
     pub trigger: AutomationTrigger,
     pub session_options: AutomationSessionOptions,
     pub result_labels: Vec<AutomationResultLabel>,
@@ -1015,7 +1005,6 @@ struct AutomationRecord {
     title: String,
     enabled: bool,
     task: String,
-    project: Option<String>,
     trigger: String,
     session_options: String,
     result_labels: String,
@@ -1030,7 +1019,6 @@ impl AutomationRecord {
             title: self.title,
             enabled: self.enabled,
             task: self.task,
-            project: self.project,
             trigger: serde_json::from_str(&self.trigger).ok()?,
             session_options: serde_json::from_str(&self.session_options).ok()?,
             result_labels: serde_json::from_str(&self.result_labels).ok()?,
@@ -1126,7 +1114,6 @@ const AUTOMATION_SCHEMA: &str = "
         title TEXT NOT NULL,
         enabled BOOL NOT NULL,
         task TEXT NOT NULL,
-        project TEXT,
         trigger TEXT NOT NULL,
         session_options TEXT NOT NULL,
         result_labels TEXT NOT NULL,
@@ -1193,12 +1180,11 @@ fn row_to_automation_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Automat
         title: row.get(1)?,
         enabled: row.get(2)?,
         task: row.get(3)?,
-        project: row.get(4)?,
-        trigger: row.get(5)?,
-        session_options: row.get(6)?,
-        result_labels: row.get(7)?,
-        created_at: row.get::<_, i64>(8)? as u64,
-        updated_at: row.get::<_, i64>(9)? as u64,
+        trigger: row.get(4)?,
+        session_options: row.get(5)?,
+        result_labels: row.get(6)?,
+        created_at: row.get::<_, i64>(7)? as u64,
+        updated_at: row.get::<_, i64>(8)? as u64,
     })
 }
 
@@ -1496,7 +1482,6 @@ mod tests {
             title: "每日任务".into(),
             enabled: true,
             task: "执行检查".into(),
-            project: Some("p".into()),
             trigger: AutomationTrigger::Schedule {
                 cron: "0 9 * * *".into(),
             },
@@ -1506,6 +1491,7 @@ mod tests {
                 workspace: "/repo".into(),
                 use_worktree: false,
                 worktree_base_branch: None,
+                project: Some("p".into()),
             },
             result_labels: vec![
                 AutomationResultLabel {

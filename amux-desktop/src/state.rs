@@ -145,7 +145,6 @@ pub enum WorkspacePickerTarget {
 #[derive(Debug, Clone)]
 pub struct AutomationForm {
     pub editing_id: Option<String>,
-    pub project: Option<String>,
     pub trigger_mode: AutomationTriggerMode,
     /// GitHub Webhook 订阅的事件；空数组表示全部事件。
     pub webhook_events: Vec<String>,
@@ -156,6 +155,10 @@ pub struct AutomationForm {
     pub existing_workflow_target: Option<String>,
     pub machine: Option<String>,
     pub agent: Option<String>,
+    /// 新建普通会话的所属项目。
+    pub session_project: Option<String>,
+    /// 新建工作流会话的所属项目。
+    pub workflow_project: Option<String>,
     pub use_worktree: bool,
     /// worktree 基分支；`HEAD` = 当前仓库 HEAD
     pub worktree_base_branch: String,
@@ -176,7 +179,6 @@ impl Default for AutomationForm {
     fn default() -> Self {
         Self {
             editing_id: None,
-            project: None,
             trigger_mode: AutomationTriggerMode::Schedule,
             webhook_events: vec!["push".to_string()],
             session_mode: AutomationSessionMode::NewSession,
@@ -184,6 +186,8 @@ impl Default for AutomationForm {
             existing_workflow_target: None,
             machine: None,
             agent: None,
+            session_project: None,
+            workflow_project: None,
             use_worktree: false,
             worktree_base_branch: "HEAD".to_string(),
             worktree_branches: Vec::new(),

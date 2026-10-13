@@ -372,9 +372,15 @@ pub enum AutomationSessionOptions {
         use_worktree: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree_base_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
     },
     /// 新建工作流会话并执行任务。
-    NewWorkflow { plan: String },
+    NewWorkflow {
+        plan: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
 }
 
 /// 自动化运行状态。
@@ -446,8 +452,6 @@ pub struct Automation {
     pub title: String,
     pub enabled: bool,
     pub task: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<String>,
     pub trigger: AutomationTrigger,
     pub session_options: AutomationSessionOptions,
     #[serde(default)]
@@ -469,8 +473,6 @@ pub struct AutomationInput {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub task: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<String>,
     pub trigger: AutomationTrigger,
     pub session_options: AutomationSessionOptions,
     #[serde(default)]
@@ -764,10 +766,12 @@ mod tests {
     fn automation_session_options_use_mode_tag() {
         let options = AutomationSessionOptions::NewWorkflow {
             plan: "先实现再审查".into(),
+            project: Some("p".into()),
         };
         let json = serde_json::to_value(options).unwrap();
         assert_eq!(json["mode"], "new_workflow");
         assert_eq!(json["plan"], "先实现再审查");
+        assert_eq!(json["project"], "p");
     }
 
     #[test]

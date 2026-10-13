@@ -263,7 +263,6 @@ export async function toggleAutomation(core: Core, automation: Automation): Prom
       title: automation.title,
       enabled: !automation.enabled,
       task: automation.task,
-      project: automation.project,
       trigger: automation.trigger,
       sessionOptions: automation.sessionOptions,
       resultLabels: automation.resultLabels,

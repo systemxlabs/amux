@@ -50,55 +50,17 @@ enum AutomationTargetKind {
     Workflow,
 }
 
+#[derive(Clone, Copy)]
+enum ProjectTarget {
+    Session,
+    Workflow,
+}
+
 /// 自动化列表位于中间面板。
 pub fn render_main(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
-    let mut groups = Vec::new();
-    for project in &core.settings.projects {
-        groups.push((
-            project.name.clone(),
-            if project.description.trim().is_empty() {
-                project.name.clone()
-            } else {
-                format!("{} · {}", project.name, project.description)
-            },
-            core.automations
-                .iter()
-                .filter(|automation| automation.project.as_deref() == Some(project.name.as_str()))
-                .cloned()
-                .collect::<Vec<_>>(),
-        ));
-    }
-    groups.push((
-        String::new(),
-        String::new(),
-        core.automations
-            .iter()
-            .filter(|automation| automation.project.is_none())
-            .cloned()
-            .collect(),
-    ));
-
-    let mut body = v_flex().gap_3();
-    for (key, label, automations) in groups {
-        if automations.is_empty() {
-            continue;
-        }
-        let mut group = v_flex().gap_1();
-        if key.is_empty() && !core.settings.projects.is_empty() {
-            group = group.child(div().my_1().border_t_1().border_color(cx.theme().border));
-        } else if !label.is_empty() {
-            group = group.child(
-                Label::new(label)
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .truncate(),
-            );
-        }
-        for automation in automations {
-            group = group.child(automation_row(automation, core, cx));
-        }
-        body = body.child(group);
+    let mut body = v_flex().gap_1();
+    for automation in core.automations.clone() {
+        body = body.child(automation_row(automation, core, cx));
     }
     if core.automations.is_empty() {
         body = body.child(
@@ -505,7 +467,7 @@ fn detail_fields(automation: &Automation, cx: &Context<AmuxApp>) -> AnyElement {
             workspace,
             ..
         } => format!("新建普通会话 · {agent}@{machine} · {workspace}"),
-        AutomationSessionOptions::NewWorkflow { plan } => {
+        AutomationSessionOptions::NewWorkflow { plan, .. } => {
             format!("新建工作流会话 · {plan}")
         }
     };
@@ -513,14 +475,6 @@ fn detail_fields(automation: &Automation, cx: &Context<AmuxApp>) -> AnyElement {
         .gap_2()
         .child(detail_line("触发方式", trigger_summary(automation), cx))
         .child(detail_line("任务", automation.task.clone(), cx))
-        .child(detail_line(
-            "项目",
-            automation
-                .project
-                .clone()
-                .unwrap_or_else(|| "未归属".into()),
-            cx,
-        ))
         .child(detail_line("新建会话选项", session, cx))
         .child(detail_line(
             "结果分类",
@@ -642,7 +596,6 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
                 .into_any_element(),
             cx,
         ))
-        .child(project_selector(core, cx))
         .child(section_separator(cx))
         .child(trigger_mode_selector(core, cx))
         .child(match form.trigger_mode {
@@ -701,6 +654,7 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
                 WorkspacePickerTarget::Automation,
                 cx,
             ))
+            .child(project_selector(core, ProjectTarget::Session, cx))
             .child(
                 h_flex()
                     .justify_between()
@@ -726,18 +680,25 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
                     cx,
                 ))
             }),
-        AutomationSessionMode::NewWorkflow => content.child(field(
-            "工作流计划",
+        AutomationSessionMode::NewWorkflow => content.child(
             v_flex()
                 .w_full()
-                .gap_2()
-                .when_some(automation_plan_selector(core, cx), |form, plans| {
-                    form.child(plans)
-                })
-                .child(Input::new(&this.automation_plan).w_full())
+                .gap_4()
+                .child(field(
+                    "工作流计划",
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .when_some(automation_plan_selector(core, cx), |form, plans| {
+                            form.child(plans)
+                        })
+                        .child(Input::new(&this.automation_plan).w_full())
+                        .into_any_element(),
+                    cx,
+                ))
+                .child(project_selector(core, ProjectTarget::Workflow, cx))
                 .into_any_element(),
-            cx,
-        )),
+        ),
     };
 
     content = content
@@ -1143,7 +1104,7 @@ fn automation_target_popover(
         .into_any_element()
 }
 
-fn project_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+fn project_selector(core: &Core, target: ProjectTarget, cx: &mut Context<AmuxApp>) -> AnyElement {
     field(
         "项目",
         option_group(
@@ -1152,15 +1113,31 @@ fn project_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .iter()
                 .map(|project| {
                     let name = project.name.clone();
-                    let selected =
-                        core.automation_form.project.as_deref() == Some(project.name.as_str());
+                    let selected = match target {
+                        ProjectTarget::Session => {
+                            core.automation_form.session_project.as_deref()
+                                == Some(project.name.as_str())
+                        }
+                        ProjectTarget::Workflow => {
+                            core.automation_form.workflow_project.as_deref()
+                                == Some(project.name.as_str())
+                        }
+                    };
                     Button::new(SharedString::from(format!("automation-project-{name}")))
                         .small()
                         .label(ui::truncate(&project.name, 24))
                         .selected(selected)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.with_core(|core| {
-                                core.automation_form.project = (!selected).then(|| name.clone());
+                                let value = (!selected).then(|| name.clone());
+                                match target {
+                                    ProjectTarget::Session => {
+                                        core.automation_form.session_project = value;
+                                    }
+                                    ProjectTarget::Workflow => {
+                                        core.automation_form.workflow_project = value;
+                                    }
+                                }
                             });
                             cx.notify();
                         }))
@@ -1328,7 +1305,7 @@ fn automation_plan_selector(core: &Core, cx: &mut Context<AmuxApp>) -> Option<An
                     this.automation_plan.update(cx, |state, cx| {
                         state.set_value(plan.plan.clone(), window, cx)
                     });
-                    this.with_core(|core| core.automation_form.project = project.clone());
+                    this.with_core(|core| core.automation_form.workflow_project = project.clone());
                     cx.notify();
                 })),
         );
@@ -1546,9 +1523,11 @@ impl AmuxApp {
                     .use_worktree
                     .then(|| form.worktree_base_branch.clone())
                     .filter(|branch| branch != "HEAD"),
+                project: form.session_project.clone(),
             },
             AutomationSessionMode::NewWorkflow => AutomationSessionOptions::NewWorkflow {
                 plan: self.automation_plan.read(cx).value().trim().to_string(),
+                project: form.workflow_project.clone(),
             },
         };
         let label =
@@ -1560,7 +1539,6 @@ impl AmuxApp {
             title,
             enabled: automation_enabled,
             task,
-            project: form.project,
             trigger,
             session_options,
             result_labels: vec![
@@ -1785,7 +1763,6 @@ impl AmuxApp {
             ..Default::default()
         };
         if let Some(automation) = automation {
-            form.project = automation.project.clone();
             form.trigger_mode = match &automation.trigger {
                 AutomationTrigger::Schedule { .. } => AutomationTriggerMode::Schedule,
                 AutomationTrigger::GithubWebhook { events, .. } => {
@@ -1813,18 +1790,22 @@ impl AmuxApp {
                 AutomationSessionOptions::NewSession {
                     machine,
                     agent,
+                    project,
                     use_worktree,
                     worktree_base_branch,
                     ..
                 } => {
                     form.machine = Some(machine.clone());
                     form.agent = Some(agent.clone());
+                    form.session_project = project.clone();
                     form.use_worktree = *use_worktree;
                     form.worktree_base_branch = worktree_base_branch
                         .clone()
                         .unwrap_or_else(|| "HEAD".to_string());
                 }
-                AutomationSessionOptions::NewWorkflow { .. } => {}
+                AutomationSessionOptions::NewWorkflow { project, .. } => {
+                    form.workflow_project = project.clone();
+                }
             }
         }
         self.with_core(|core| core.automation_form = form);
@@ -1866,7 +1847,7 @@ impl AmuxApp {
                 AutomationSessionOptions::NewSession { workspace, .. } => {
                     (workspace.clone(), String::new())
                 }
-                AutomationSessionOptions::NewWorkflow { plan } => (String::new(), plan.clone()),
+                AutomationSessionOptions::NewWorkflow { plan, .. } => (String::new(), plan.clone()),
                 AutomationSessionOptions::ExistingSession { .. }
                 | AutomationSessionOptions::ExistingWorkflow { .. } => {
                     (String::new(), String::new())
@@ -1954,7 +1935,6 @@ fn automation_input(automation: &Automation, enabled: bool) -> AutomationInput {
         title: automation.title.clone(),
         enabled,
         task: automation.task.clone(),
-        project: automation.project.clone(),
         trigger: automation.trigger.clone(),
         session_options: automation.session_options.clone(),
         result_labels: automation.result_labels.clone(),

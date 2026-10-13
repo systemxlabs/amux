@@ -238,8 +238,9 @@ export type AutomationSessionOptions =
       workspace: string;
       useWorktree: boolean;
       worktreeBaseBranch?: string;
+      project?: string;
     }
-  | { mode: "new_workflow"; plan: string };
+  | { mode: "new_workflow"; plan: string; project?: string };
 
 export type AutomationRunState = "queued" | "running" | "finished" | "failed";
 
@@ -263,7 +264,6 @@ export type Automation = {
   title: string;
   enabled: boolean;
   task: string;
-  project?: string;
   trigger: AutomationTrigger;
   sessionOptions: AutomationSessionOptions;
   resultLabels: AutomationResultLabel[];
@@ -277,7 +277,6 @@ export type AutomationInput = {
   title: string;
   enabled: boolean;
   task: string;
-  project?: string;
   trigger: AutomationTrigger;
   sessionOptions: AutomationSessionOptions;
   resultLabels: AutomationResultLabel[];

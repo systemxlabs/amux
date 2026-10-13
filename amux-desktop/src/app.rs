@@ -1284,7 +1284,7 @@ impl AmuxApp {
                     core.new_session.project = project;
                 }
                 crate::state::WorkspacePickerTarget::Automation => {
-                    core.automation_form.project = project;
+                    core.automation_form.session_project = project;
                 }
             }
         });

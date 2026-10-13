@@ -1,6 +1,6 @@
 // 自动化列表、编辑与详情视图（docs/PRD.md「自动化」、docs/DESIGN.md「Client-Server 通信」）。
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Clock3,
   Github,
@@ -129,24 +129,6 @@ export function AutomationListView() {
     ]);
   }, [core]);
 
-  const groups = useMemo(() => {
-    const byProject = new Map<string, Automation[]>();
-    for (const automation of state.automations) {
-      const key = automation.project ?? "";
-      const group = byProject.get(key) ?? [];
-      group.push(automation);
-      byProject.set(key, group);
-    }
-    return [
-      ...state.settings.projects.map((project) => ({
-        key: project.name,
-        label: project.description ? `${project.name} · ${project.description}` : project.name,
-        automations: byProject.get(project.name) ?? [],
-      })),
-      { key: "", label: "", automations: byProject.get("") ?? [] },
-    ];
-  }, [state.automations, state.settings.projects]);
-
   const menuItems = (automation: Automation): MenuItem[] => [
     { label: "立即运行", onSelect: () => void triggerAutomation(core, automation) },
     {
@@ -173,87 +155,73 @@ export function AutomationListView() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        {groups.every((group) => group.automations.length === 0) ? (
+        {state.automations.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             暂无自动化
           </div>
         ) : null}
-        {groups.map((group) => {
-          if (group.automations.length === 0) return null;
-          return (
-            <section key={group.key || "unassigned"} className="mb-4">
-              {group.key !== "" ? (
-                <h3 className="mb-1 truncate px-1 text-sm font-semibold text-muted-foreground">
-                  {group.label}
-                </h3>
-              ) : (
-                <div className="my-3 border-t border-border" />
-              )}
-              <div className="flex flex-col gap-1">
-                {group.automations.map((automation) => {
-                  const active =
-                    state.automationPanel?.kind === "detail" &&
-                    state.automationPanel.id === automation.id;
-                  return (
-                    <button
-                      key={automation.id}
-                      type="button"
-                      data-slot="automation-item"
-                      data-enabled={automation.enabled ? "true" : "false"}
-                      onClick={() => showAutomationDetail(core, automation.id)}
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        setMenu({
-                          x: event.clientX,
-                          y: event.clientY,
-                          items: menuItems(automation),
-                        });
-                      }}
-                      className={cn(
-                        "flex w-full items-center gap-3 rounded-md border border-transparent px-3 py-2 text-left",
-                        active ? "border-border bg-accent" : "hover:bg-accent",
-                      )}
-                    >
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="size-8 shrink-0"
-                        aria-label={automation.enabled ? "暂停自动化" : "恢复自动化"}
-                        title={automation.enabled ? "暂停" : "恢复"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void toggleAutomation(core, automation);
-                        }}
-                      >
-                        {automation.enabled ? (
-                          <Pause className="size-4" />
-                        ) : (
-                          <Play className="size-4" />
-                        )}
-                      </Button>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-medium">
-                          {automation.title}
-                        </span>
-                        <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                          {triggerSummary(automation)}
-                        </span>
-                        <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                          最近运行：{runSummary(automation.lastRun)}
-                        </span>
-                      </span>
-                      {automation.trigger.type === "schedule" ? (
-                        <Clock3 className="size-4 shrink-0 text-muted-foreground" />
-                      ) : (
-                        <Github className="size-4 shrink-0 text-muted-foreground" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-          );
-        })}
+        <div className="flex flex-col gap-1">
+          {state.automations.map((automation) => {
+            const active =
+              state.automationPanel?.kind === "detail" &&
+              state.automationPanel.id === automation.id;
+            return (
+              <button
+                key={automation.id}
+                type="button"
+                data-slot="automation-item"
+                data-enabled={automation.enabled ? "true" : "false"}
+                onClick={() => showAutomationDetail(core, automation.id)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    items: menuItems(automation),
+                  });
+                }}
+                className={cn(
+                  "flex w-full items-center gap-3 rounded-md border border-transparent px-3 py-2 text-left",
+                  active ? "border-border bg-accent" : "hover:bg-accent",
+                )}
+              >
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 shrink-0"
+                  aria-label={automation.enabled ? "暂停自动化" : "恢复自动化"}
+                  title={automation.enabled ? "暂停" : "恢复"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void toggleAutomation(core, automation);
+                  }}
+                >
+                  {automation.enabled ? (
+                    <Pause className="size-4" />
+                  ) : (
+                    <Play className="size-4" />
+                  )}
+                </Button>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">
+                    {automation.title}
+                  </span>
+                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                    {triggerSummary(automation)}
+                  </span>
+                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                    最近运行：{runSummary(automation.lastRun)}
+                  </span>
+                </span>
+                {automation.trigger.type === "schedule" ? (
+                  <Clock3 className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <Github className="size-4 shrink-0 text-muted-foreground" />
+                )}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <ContextMenu state={menu} onClose={() => setMenu(null)} />
@@ -368,7 +336,6 @@ function AutomationDetail({ automation }: { automation: Automation }) {
         <dl className="mt-5 grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm">
           <Detail label="触发方式" value={triggerSummary(automation)} />
           <Detail label="任务" value={automation.task} />
-          <Detail label="项目" value={automation.project ?? "未归属"} />
           <Detail
             label="会话选项"
             value={sessionOptionsSummary(automation.sessionOptions)}
@@ -451,7 +418,6 @@ function AutomationEditor({
   const initial = automation;
   const [title, setTitle] = useState(initial?.title ?? "");
   const [task, setTask] = useState(initial?.task ?? "");
-  const [project, setProject] = useState(initial?.project ?? "");
   const [triggerMode, setTriggerMode] = useState<"schedule" | "webhook">(
     initial?.trigger.type === "github_webhook" ? "webhook" : "schedule",
   );
@@ -506,9 +472,19 @@ function AutomationEditor({
       ? (initial.sessionOptions.worktreeBaseBranch ?? "")
       : "",
   );
+  const [sessionProject, setSessionProject] = useState(
+    initial?.sessionOptions.mode === "new_session"
+      ? (initial.sessionOptions.project ?? "")
+      : "",
+  );
   const [plan, setPlan] = useState(
     initial?.sessionOptions.mode === "new_workflow"
       ? initial.sessionOptions.plan
+      : "",
+  );
+  const [workflowProject, setWorkflowProject] = useState(
+    initial?.sessionOptions.mode === "new_workflow"
+      ? (initial.sessionOptions.project ?? "")
       : "",
   );
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
@@ -581,16 +557,20 @@ function AutomationEditor({
               useWorktree && worktreeBaseBranch.trim() !== ""
                 ? worktreeBaseBranch.trim()
                 : undefined,
+            project: sessionProject === "" ? undefined : sessionProject,
           };
         case "new_workflow":
-          return { mode: "new_workflow", plan: plan.trim() };
+          return {
+            mode: "new_workflow",
+            plan: plan.trim(),
+            project: workflowProject === "" ? undefined : workflowProject,
+          };
       }
     })();
     const input: AutomationInput = {
       title: title.trim(),
       enabled: initial?.enabled ?? true,
       task: task.trim(),
-      project: project === "" ? undefined : project,
       trigger,
       sessionOptions,
       resultLabels: resultLabels.map((label) => ({
@@ -624,20 +604,6 @@ function AutomationEditor({
             className="min-h-24"
           />
         </Field>
-        <Field label="项目">
-          <OptionGroup>
-            {state.settings.projects.map((item) => (
-              <OptionButton
-                key={item.name}
-                selected={project === item.name}
-                onClick={() => setProject(project === item.name ? "" : item.name)}
-              >
-                {item.name}
-              </OptionButton>
-            ))}
-          </OptionGroup>
-        </Field>
-
         <div className="space-y-4 border-t border-border pt-4">
           <Field label="触发方式">
             <Tabs
@@ -828,11 +794,26 @@ function AutomationEditor({
                       (project) => project.name === item.lastUsedProject,
                     )
                   ) {
-                    setProject(item.lastUsedProject);
+                    setSessionProject(item.lastUsedProject);
                   }
                 }}
                 slotPrefix="automation-workspace"
               />
+            </Field>
+            <Field label="项目">
+              <OptionGroup>
+                {state.settings.projects.map((item) => (
+                  <OptionButton
+                    key={item.name}
+                    selected={sessionProject === item.name}
+                    onClick={() =>
+                      setSessionProject(sessionProject === item.name ? "" : item.name)
+                    }
+                  >
+                    {item.name}
+                  </OptionButton>
+                ))}
+              </OptionGroup>
             </Field>
             <div className="flex items-center justify-between gap-3">
               <Label>使用 worktree</Label>
@@ -849,32 +830,49 @@ function AutomationEditor({
             ) : null}
           </div>
         ) : null}
-          {sessionMode === "new_workflow" ? (
+        {sessionMode === "new_workflow" ? (
+          <div className="space-y-4">
             <Field label="工作流计划">
               <WorkflowPlanField
-              plans={state.settings.plans}
-              value={plan}
-              selectedPlan={selectedPlan}
-              onChange={(value) => {
-                setPlan(value);
-                setSelectedPlan(null);
-              }}
-              onSelectPlan={(item) => {
-                setPlan(item.plan);
-                setSelectedPlan(item.name);
-                if (
-                  item.lastUsedProject !== undefined &&
-                  state.settings.projects.some(
-                    (project) => project.name === item.lastUsedProject,
-                  )
-                ) {
-                  setProject(item.lastUsedProject);
-                }
-              }}
-              slotPrefix="automation-workflow-plan"
+                plans={state.settings.plans}
+                value={plan}
+                selectedPlan={selectedPlan}
+                onChange={(value) => {
+                  setPlan(value);
+                  setSelectedPlan(null);
+                }}
+                onSelectPlan={(item) => {
+                  setPlan(item.plan);
+                  setSelectedPlan(item.name);
+                  if (
+                    item.lastUsedProject !== undefined &&
+                    state.settings.projects.some(
+                      (project) => project.name === item.lastUsedProject,
+                    )
+                  ) {
+                    setWorkflowProject(item.lastUsedProject);
+                  }
+                }}
+                slotPrefix="automation-workflow-plan"
               />
             </Field>
-          ) : null}
+            <Field label="项目">
+              <OptionGroup>
+                {state.settings.projects.map((item) => (
+                  <OptionButton
+                    key={item.name}
+                    selected={workflowProject === item.name}
+                    onClick={() =>
+                      setWorkflowProject(workflowProject === item.name ? "" : item.name)
+                    }
+                  >
+                    {item.name}
+                  </OptionButton>
+                ))}
+              </OptionGroup>
+            </Field>
+          </div>
+        ) : null}
         </div>
 
         <div className="space-y-4 border-t border-border pt-4">

@@ -1059,7 +1059,6 @@ async fn delete_project(
     // 项目删除后，其下会话回到未归属（docs/PRD.md「项目管理」）
     state.sessions.unassign_project(&name);
     state.workflows.unassign_project(&name);
-    state.automations.unassign_project(&name);
     Ok(Json(OpAck { ok: true }))
 }
 
