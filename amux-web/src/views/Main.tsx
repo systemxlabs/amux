@@ -133,7 +133,7 @@ export function Main() {
         )}
         style={{ width: leftWidth }}
       >
-        <div data-slot="function-list" className="flex shrink-0 flex-col">
+        <div data-slot="function-list" className="flex shrink-0 flex-col pt-2">
           <button
             data-slot="new-session-entry"
             type="button"
