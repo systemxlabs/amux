@@ -254,11 +254,13 @@ async fn execute(
         method::AGENT_LIST => to_value(daemon.agents.list()),
         method::AGENT_RESTART => {
             let params: AgentParams = decode(params)?;
+            log::info!("收到 agent 重启请求: {}", params.agent);
             daemon
                 .agents
                 .restart(&params.agent, Arc::clone(outbox))
                 .await
                 .map_err(RpcError::agent_unavailable)?;
+            log::info!("agent 重启请求完成: {}", params.agent);
             to_value(OpResult::ok())
         }
         method::GIT_DIFF => {

@@ -132,9 +132,18 @@ impl MachineHub {
         let machine = self.machine(machine_name)?;
         let lock = machine.connect_lock(agent);
         let _guard = lock.lock().await;
-        self.restart_and_connect(&machine, agent).await?;
-        self.notify_agent_restarted(&machine, agent);
-        Ok(())
+        log::info!("收到重启 agent 请求: {agent}@{machine_name}");
+        match self.restart_and_connect(&machine, agent).await {
+            Ok(_) => {
+                self.notify_agent_restarted(&machine, agent);
+                log::info!("agent 重启完成: {agent}@{machine_name}");
+                Ok(())
+            }
+            Err(error) => {
+                log::warn!("agent 重启失败: {agent}@{machine_name}: {error}");
+                Err(error)
+            }
+        }
     }
 
     pub async fn fs_list(
@@ -562,6 +571,7 @@ impl MachineHub {
         machine: &Arc<Machine>,
         agent: &str,
     ) -> Result<Arc<AgentConnection>, String> {
+        log::info!("重启 agent 并重建 ACP 连接: {agent}@{}", machine.name);
         machine
             .request::<_, OpResult>(
                 method::AGENT_RESTART,
