@@ -276,13 +276,6 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                 .selected(core.automation_open)
                 .on_click(cx.listener(|this, _, _, cx| this.open_automation_list(cx))),
         )
-        .child(
-            div()
-                .my_1()
-                .w_full()
-                .border_t_1()
-                .border_color(sidebar_border),
-        )
         .child(list)
         .child(
             h_flex().child(
