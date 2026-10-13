@@ -949,7 +949,15 @@ fn automation_target_popover(
                             .ghost()
                             .w_full()
                             .justify_start()
-                            .label(label)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(label),
+                            )
                             .selected(selected)
                             .on_click(move |_, _, cx| {
                                 let id = id.clone();
@@ -987,7 +995,15 @@ fn automation_target_popover(
                             .ghost()
                             .w_full()
                             .justify_start()
-                            .label(label)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(label),
+                            )
                             .selected(selected)
                             .on_click(move |_, _, cx| {
                                 let id = id.clone();
