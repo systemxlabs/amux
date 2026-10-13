@@ -138,7 +138,7 @@ export function Main() {
             data-slot="new-session-entry"
             type="button"
             className={cn(
-              "flex items-center gap-2 border-b border-border px-3 py-3 text-left hover:bg-accent lg:py-2",
+              "flex items-center gap-2 px-3 py-3 text-left hover:bg-accent lg:py-2",
               state.middle === "new" && "bg-accent",
             )}
             onClick={() => {
