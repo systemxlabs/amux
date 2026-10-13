@@ -102,7 +102,7 @@ export function Main() {
   const openPanel = state.sidePanel;
   const automationPanelOpen = state.middle === "automation" && state.automationPanel !== null;
   const rightPanelWidth =
-    state.automationPanel?.kind === "new"
+    automationPanelOpen
       ? Math.max(rightWidth, AUTOMATION_EDITOR_WIDTH)
       : rightWidth;
   const openPanelLabel = panels.find((entry) => entry.panel === openPanel)?.label ?? "";

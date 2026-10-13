@@ -1454,7 +1454,7 @@ impl AmuxApp {
             core.open = None;
             core.side_panel = None;
         });
-        self.panel_width = AUTOMATION_PANEL_MIN_WIDTH;
+        self.panel_width = AUTOMATION_EDITOR_WIDTH;
         self.load_automation_runs(id);
         cx.notify();
     }
