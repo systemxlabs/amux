@@ -497,18 +497,18 @@ pub enum AutomationApiFormat {
 #[serde(rename_all = "camelCase")]
 pub struct AutomationConfig {
     pub api_format: AutomationApiFormat,
-    pub base_url: String,
+    pub endpoint: String,
     pub api_key: String,
     pub model: String,
 }
 
 impl AutomationConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if self.base_url.trim().is_empty()
+        if self.endpoint.trim().is_empty()
             || self.api_key.trim().is_empty()
             || self.model.trim().is_empty()
         {
-            return Err("请配置 Base URL、API Key 和模型".into());
+            return Err("请配置 Endpoint、API Key 和模型".into());
         }
         Ok(())
     }
@@ -768,5 +768,19 @@ mod tests {
         let json = serde_json::to_value(options).unwrap();
         assert_eq!(json["mode"], "new_workflow");
         assert_eq!(json["plan"], "先实现再审查");
+    }
+
+    #[test]
+    fn automation_config_uses_endpoint_field() {
+        let config = AutomationConfig {
+            api_format: AutomationApiFormat::Jev,
+            endpoint: "https://api.typesafe.ai/v1/systemone".into(),
+            api_key: "token".into(),
+            model: "jev-latest".into(),
+        };
+        let json = serde_json::to_value(config).unwrap();
+        assert_eq!(json["endpoint"], "https://api.typesafe.ai/v1/systemone");
+        assert!(json.get("baseUrl").is_none());
+        assert!(json.get("base_url").is_none());
     }
 }

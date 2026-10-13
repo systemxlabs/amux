@@ -114,7 +114,7 @@ pub struct AmuxApp {
     pub orch_model: Entity<InputState>,
     pub orch_effort: Entity<InputState>,
     pub orch_context_window: Entity<InputState>,
-    pub automation_config_base_url: Entity<InputState>,
+    pub automation_config_endpoint: Entity<InputState>,
     pub automation_config_api_key: Entity<InputState>,
     pub automation_config_model: Entity<InputState>,
     pub automation_session_scroll: ScrollHandle,
@@ -388,7 +388,7 @@ impl AmuxApp {
         let orch_model = cx.new(|cx| InputState::new(window, cx));
         let orch_effort = cx.new(|cx| InputState::new(window, cx));
         let orch_context_window = cx.new(|cx| InputState::new(window, cx).placeholder("1000000"));
-        let automation_config_base_url = cx.new(|cx| {
+        let automation_config_endpoint = cx.new(|cx| {
             InputState::new(window, cx).placeholder("https://api.typesafe.ai/v1/systemone")
         });
         let automation_config_api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
@@ -458,7 +458,7 @@ impl AmuxApp {
             orch_model,
             orch_effort,
             orch_context_window,
-            automation_config_base_url,
+            automation_config_endpoint,
             automation_config_api_key,
             automation_config_model,
             automation_session_scroll: ScrollHandle::new(),
@@ -4015,15 +4015,15 @@ impl AmuxApp {
         }
         let saved = saved.unwrap_or(AutomationConfig {
             api_format: amux_common::api::AutomationApiFormat::Jev,
-            base_url: "https://api.typesafe.ai/v1/systemone".into(),
+            endpoint: String::new(),
             api_key: String::new(),
             model: "jev-latest".into(),
         });
         if self.automation_config_prefilled.as_ref() == Some(&saved) {
             return;
         }
-        self.automation_config_base_url.update(cx, |state, cx| {
-            state.set_value(saved.base_url.clone(), window, cx)
+        self.automation_config_endpoint.update(cx, |state, cx| {
+            state.set_value(saved.endpoint.clone(), window, cx)
         });
         self.automation_config_api_key.update(cx, |state, cx| {
             state.set_value(saved.api_key.clone(), window, cx)
@@ -4039,8 +4039,8 @@ impl AmuxApp {
         let Some(client) = client else { return };
         let config = AutomationConfig {
             api_format: amux_common::api::AutomationApiFormat::Jev,
-            base_url: self
-                .automation_config_base_url
+            endpoint: self
+                .automation_config_endpoint
                 .read(cx)
                 .value()
                 .trim()
@@ -4082,8 +4082,8 @@ impl AmuxApp {
         let saved = self.with_core(|core| core.settings.automation.clone());
         let current = AutomationConfig {
             api_format: amux_common::api::AutomationApiFormat::Jev,
-            base_url: self
-                .automation_config_base_url
+            endpoint: self
+                .automation_config_endpoint
                 .read(cx)
                 .value()
                 .trim()

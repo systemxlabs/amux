@@ -12,7 +12,7 @@ import type { AutomationConfig } from "../../lib/types";
 function defaultConfig(): AutomationConfig {
   return {
     apiFormat: "jev",
-    baseUrl: "https://api.typesafe.ai/v1/systemone",
+    endpoint: "",
     apiKey: "",
     model: "jev-latest",
   };
@@ -20,7 +20,7 @@ function defaultConfig(): AutomationConfig {
 
 function configKey(config: AutomationConfig | null): string {
   if (config === null) return "";
-  return [config.apiFormat, config.baseUrl, config.apiKey, config.model].join("\u0000");
+  return [config.apiFormat, config.endpoint, config.apiKey, config.model].join("\u0000");
 }
 
 function sameConfig(left: AutomationConfig, right: AutomationConfig): boolean {
@@ -40,7 +40,7 @@ export function AutomationSection() {
 
   const changed = !sameConfig(form, loaded ?? defaultConfig());
   const canSave =
-    form.baseUrl.trim() !== "" && form.apiKey.trim() !== "" && form.model.trim() !== "";
+    form.endpoint.trim() !== "" && form.apiKey.trim() !== "" && form.model.trim() !== "";
 
   return (
     <section className="flex flex-col gap-4">
@@ -50,11 +50,12 @@ export function AutomationSection() {
         <div className="text-sm text-muted-foreground">jev</div>
       </div>
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor="automation-base-url">Base URL</Label>
+        <Label htmlFor="automation-endpoint">Endpoint</Label>
         <Input
-          id="automation-base-url"
-          value={form.baseUrl}
-          onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
+          id="automation-endpoint"
+          value={form.endpoint}
+          onChange={(event) => setForm({ ...form, endpoint: event.target.value })}
+          placeholder="https://api.typesafe.ai/v1/systemone"
         />
       </div>
       <div className="flex flex-col gap-1.5">

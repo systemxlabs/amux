@@ -434,7 +434,7 @@ mod tests {
         let store = ConfigStore::new(dir.path().to_path_buf());
         let config = AutomationConfig {
             api_format: amux_common::api::AutomationApiFormat::Jev,
-            base_url: "https://api.typesafe.ai/v1/systemone".into(),
+            endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             api_key: "token".into(),
             model: "jev-latest".into(),
         };

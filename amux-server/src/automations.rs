@@ -679,7 +679,7 @@ async fn call_decision_model(
         DynamicQuery::new(definitions).map_err(|error| format!("构造结果分类问题失败: {error}"))?;
     let model = JevConfig::new(config.api_key.clone())
         .model(config.model.clone())
-        .with_endpoint(config.base_url.clone())
+        .with_endpoint(config.endpoint.clone())
         .client()
         .evaluation();
     let state = serde_json::json!({ "context": context });

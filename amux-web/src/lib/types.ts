@@ -288,7 +288,7 @@ export type AutomationRunList = { runs: AutomationRun[]; hasMore: boolean };
 export type AutomationApiFormat = "jev";
 export type AutomationConfig = {
   apiFormat: AutomationApiFormat;
-  baseUrl: string;
+  endpoint: string;
   apiKey: string;
   model: string;
 };
