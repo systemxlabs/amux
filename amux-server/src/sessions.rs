@@ -3,7 +3,7 @@
 //! 语义要点（docs/DESIGN.md「Server」各节）：
 //! - 会话状态以 Server 元数据为权威，变更来自 Agent 的 `state_update` 通知
 //! - 惰性创建：发指令或查询会话选项时才向 Agent 发 `session/new`
-//! - 惰性恢复：已有 agent 会话在首次交互时 `session/resume`；会话缺失时新建 agent 会话
+//! - 惰性恢复：已有 agent 会话在首次交互时 `session/resume`
 //! - 删除立即生效，资源清理（agent 会话、worktree、终端）异步尽力而为
 
 use std::collections::{HashMap, HashSet};
@@ -483,7 +483,7 @@ impl SessionService {
         }
     }
 
-    /// 惰性创建/恢复 agent 侧会话；resume 发现会话缺失时新建，其他错误直接返回。
+    /// 惰性创建/恢复 agent 侧会话；resume 失败时记录错误并返回。
     pub async fn ensure_agent_session(&self, session: &Session) -> Result<(), String> {
         let cwd = self.exec_dir(session);
         let conn = self.machines.acp(&session.machine, &session.agent).await?;
@@ -536,31 +536,8 @@ impl SessionService {
                             "session/resume 失败: session={} agent_session={agent_session_id}: {error}",
                             session.id
                         );
-                        if is_missing_agent_session(&error) {
-                            let (new_id, options) =
-                                conn.new_session(&cwd).await.map_err(|error| {
-                                    format!("旧会话不存在，新建 agent 会话失败: {error}")
-                                })?;
-                            log::info!(
-                                "agent 会话缺失，已新建: session={} machine={} agent={} old_agent_session={agent_session_id} new_agent_session={new_id} cwd={cwd}",
-                                session.id,
-                                session.machine,
-                                session.agent
-                            );
-                            self.store.set_agent_session_id(&session.id, &new_id);
-                            self.caches
-                                .agent_sessions
-                                .lock()
-                                .insert(new_id, session.id.clone());
-                            self.caches
-                                .options
-                                .lock()
-                                .insert(session.id.clone(), options);
-                            self.caches.resumed.lock().insert(session.id.clone());
-                        } else {
-                            self.record_error(&session.id, &format!("会话恢复失败: {error}"));
-                            return Err(format!("会话恢复失败: {error}"));
-                        }
+                        self.record_error(&session.id, &format!("会话恢复失败: {error}"));
+                        return Err(format!("会话恢复失败: {error}"));
                     }
                 }
             }
@@ -831,14 +808,6 @@ fn should_close_idle_agent_session(idle_expired: bool, resumed: bool) -> bool {
     idle_expired && resumed
 }
 
-fn is_missing_agent_session(error: &str) -> bool {
-    if error.contains("Unknown session") && error.contains("missing or closed") {
-        return true;
-    }
-    let lower = error.to_ascii_lowercase();
-    lower.contains("no rollout found for thread id") || lower.contains("session not found")
-}
-
 fn apply_tool_call_patch(
     activity: &mut Activity,
     name: Option<String>,
@@ -921,18 +890,6 @@ mod tests {
     fn idle_agent_session_closes_only_while_resumed() {
         assert!(!should_close_idle_agent_session(true, false));
         assert!(should_close_idle_agent_session(true, true));
-    }
-
-    #[test]
-    fn detects_deleted_agent_session() {
-        assert!(is_missing_agent_session(
-            "Invalid params: Unknown session \"agent-s1\" (missing or closed); create or resume it first"
-        ));
-        assert!(is_missing_agent_session(
-            "Internal error: no rollout found for thread id 01a13503-ba89-7dd1-89b0-b43fb9dc060a"
-        ));
-        assert!(is_missing_agent_session("Session not found"));
-        assert!(!is_missing_agent_session("ACP 连接已关闭"));
     }
 
     #[test]
