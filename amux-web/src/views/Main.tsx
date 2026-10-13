@@ -136,6 +136,7 @@ export function Main() {
           <Zap className="size-4" />
           自动化
         </button>
+        <div className="h-2 shrink-0" />
         <SessionListPanel onNavigate={closeDrawer} />
         <button
           data-slot="settings-entry"
