@@ -18,6 +18,23 @@ export function formatTime(ms: number): string {
   );
 }
 
+/** 任务耗时：按秒、分钟或小时展示，整小时不附加分钟。 */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) {
+    return remainingMinutes === 0 ? `${hours}h` : `${hours}h${remainingMinutes}m`;
+  }
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours === 0 ? `${days}d` : `${days}d${remainingHours}h`;
+}
+
 /** 消息内容块的纯文本（气泡展示；非文本块退化为类型标签）。 */
 export function blocksText(blocks: readonly ContentBlock[]): string {
   return blocks

@@ -7,6 +7,7 @@ import {
   activityDetail,
   activitySummary,
   blocksText,
+  formatDuration,
   formatUsage,
   formatTime,
   oneLine,
@@ -22,6 +23,23 @@ describe("formatTime", () => {
 
   it("非法时间戳返回空串", () => {
     expect(formatTime(Number.NaN)).toBe("");
+  });
+});
+
+describe("formatDuration", () => {
+  it("按耗时长度选择秒、分钟和小时", () => {
+    expect(formatDuration(59_999)).toBe("59s");
+    expect(formatDuration(60_000)).toBe("1m");
+    expect(formatDuration(3_599_000)).toBe("59m");
+    expect(formatDuration(3_600_000)).toBe("1h");
+    expect(formatDuration(3_660_000)).toBe("1h1m");
+  });
+
+  it("跨天展示为天和小时，非法耗时返回空串", () => {
+    expect(formatDuration(90_000_000)).toBe("1d1h");
+    expect(formatDuration(172_800_000)).toBe("2d");
+    expect(formatDuration(-1)).toBe("");
+    expect(formatDuration(Number.NaN)).toBe("");
   });
 });
 

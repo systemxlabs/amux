@@ -254,7 +254,7 @@ export type AutomationRun = {
   error?: string;
   createdAt: number;
   startedAt?: number;
-  finishedAt: number;
+  finishedAt?: number;
 };
 
 export type AutomationResultLabel = { name: string; description: string };

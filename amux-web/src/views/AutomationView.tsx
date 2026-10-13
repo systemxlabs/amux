@@ -1,13 +1,15 @@
 // 自动化列表、编辑与详情视图（docs/PRD.md「自动化」、docs/DESIGN.md「Client-Server 通信」）。
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Clock3,
   Github,
   Pause,
+  Pencil,
   Play,
   Plus,
-  RefreshCw,
+  Trash2,
+  X,
 } from "lucide-react";
 
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -50,7 +52,7 @@ import {
 } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
 import { previewCron } from "../lib/cron";
-import { formatTime } from "../lib/format";
+import { formatDuration, formatTime } from "../lib/format";
 import type {
   Automation,
   AutomationInput,
@@ -78,6 +80,9 @@ const GITHUB_WEBHOOK_EVENTS = [
   "workflow_run",
 ] as const;
 
+const AUTOMATION_RUNS_PAGE_SIZE = 20;
+const RUNS_SCROLL_THRESHOLD = 32;
+
 function triggerSummary(automation: Automation): string {
   if (automation.trigger.type === "schedule") {
     return automation.nextRunAt === undefined
@@ -104,7 +109,7 @@ function sessionOptionsSummary(options: AutomationSessionOptions): string {
   }
 }
 
-function runSummary(run: AutomationRun | undefined): string {
+function runSummary(run: AutomationRun | undefined, includeError = true): string {
   if (run === undefined) return "尚未运行";
   const state = {
     queued: "排队中",
@@ -112,14 +117,24 @@ function runSummary(run: AutomationRun | undefined): string {
     finished: "已完成",
     failed: "失败",
   }[run.state];
-  return [
-    formatTime(run.startedAt ?? run.createdAt),
-    state,
-    run.resultLabel,
-    run.error,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const parts = [formatTime(run.createdAt), state, run.resultLabel];
+  if (includeError && run.error) parts.push(run.error);
+  return parts.filter(Boolean).join(" · ");
+}
+
+function runTimingSummary(run: AutomationRun): string | null {
+  if (run.startedAt !== undefined && run.finishedAt !== undefined) {
+    const duration = formatDuration(run.finishedAt - run.startedAt);
+    return [
+      `${formatTime(run.startedAt)} - ${formatTime(run.finishedAt)}`,
+      duration === "" ? "" : `耗时 ${duration}`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (run.startedAt !== undefined) return `开始 ${formatTime(run.startedAt)}`;
+  if (run.finishedAt !== undefined) return `完成 ${formatTime(run.finishedAt)}`;
+  return null;
 }
 
 export function AutomationListView() {
@@ -273,26 +288,58 @@ export function AutomationPanelView() {
 function AutomationDetail({ automation }: { automation: Automation }) {
   const core = useCore();
   const state = useCoreState();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const runsLoadingRef = useRef(false);
   const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
+  const [runsHasMore, setRunsHasMore] = useState(false);
 
-  const loadRuns = async (): Promise<void> => {
-    if (core.client === null) return;
+  const loadRuns = async (offset: number, append: boolean): Promise<void> => {
+    if (core.client === null || runsLoadingRef.current) return;
+    runsLoadingRef.current = true;
     setRunsLoading(true);
     try {
-      const page = await core.client.automationRuns(automation.id, 100, 0);
-      setRuns(page.runs);
+      const page = await core.client.automationRuns(
+        automation.id,
+        AUTOMATION_RUNS_PAGE_SIZE,
+        offset,
+      );
+      setRuns((current) => (append ? [...current, ...page.runs] : page.runs));
+      setRunsHasMore(page.hasMore);
     } catch (error) {
       core.failure(`读取运行记录失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      runsLoadingRef.current = false;
       setRunsLoading(false);
     }
   };
 
   useEffect(() => {
-    void loadRuns();
+    setRuns([]);
+    setRunsHasMore(false);
+    void loadRuns(0, false);
   }, [automation.id, automation.updatedAt]);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (element === null || !runsHasMore || runsLoadingRef.current) return;
+    if (element.scrollHeight <= element.clientHeight) {
+      void loadRuns(runs.length, true);
+    }
+  }, [runs, runsHasMore]);
+
+  const loadMoreRuns = (element: HTMLDivElement): void => {
+    if (
+      element.scrollHeight - element.scrollTop - element.clientHeight <=
+        RUNS_SCROLL_THRESHOLD &&
+      runsHasMore &&
+      !runsLoadingRef.current
+    ) {
+      void loadRuns(runs.length, true);
+    }
+  };
 
   if (editing) {
     return (
@@ -308,17 +355,16 @@ function AutomationDetail({ automation }: { automation: Automation }) {
   return (
     <div data-slot="automation-detail" className="flex h-full min-h-0 flex-col">
       <PanelHeader title="自动化详情" onClose={() => closeAutomationPanel(core)} />
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="truncate text-base font-semibold">{automation.title}</h3>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {automation.enabled ? "已开启" : "已暂停"}
-            </p>
-          </div>
-          <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
-            编辑
-          </Button>
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-y-auto p-4"
+        onScroll={(event) => loadMoreRuns(event.currentTarget)}
+      >
+        <div className="min-w-0">
+          <h3 className="truncate text-base font-semibold">{automation.title}</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {automation.enabled ? "已开启" : "已暂停"}
+          </p>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
           <Button
@@ -337,9 +383,18 @@ function AutomationDetail({ automation }: { automation: Automation }) {
             {automation.enabled ? <Pause className="size-4" /> : <Play className="size-4" />}
             {automation.enabled ? "暂停" : "恢复"}
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => void loadRuns()}>
-            <RefreshCw className="size-4" />
-            刷新记录
+          <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+            <Pencil className="size-4" />
+            编辑
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-destructive hover:text-destructive"
+            onClick={() => setDeleting(true)}
+          >
+            <Trash2 className="size-4" />
+            删除
           </Button>
         </div>
 
@@ -387,19 +442,30 @@ function AutomationDetail({ automation }: { automation: Automation }) {
                 if (entry !== undefined) void openEntry(core, entry);
               }}
             >
-              <div className="flex items-center justify-between gap-2">
-                <span>{runSummary(run)}</span>
-                <span className="text-xs text-muted-foreground">
-                  {formatTime(run.startedAt ?? run.createdAt)}
-                </span>
-              </div>
+              <div className="truncate">{runSummary(run, false)}</div>
               {run.error ? (
-                <p className="mt-1 text-xs text-destructive">{run.error}</p>
+                <p className="mt-1 truncate text-xs text-destructive" title={run.error}>
+                  {run.error}
+                </p>
+              ) : null}
+              {runTimingSummary(run) ? (
+                <p className="mt-1 text-xs text-muted-foreground">{runTimingSummary(run)}</p>
               ) : null}
             </button>
           ))}
         </div>
       </div>
+      <ConfirmDialog
+        open={deleting}
+        title={`删除“${automation.title}”？`}
+        description="自动化定义和全部运行记录都会被删除。"
+        confirmLabel="删除"
+        onCancel={() => setDeleting(false)}
+        onConfirm={() => {
+          setDeleting(false);
+          void deleteAutomation(core, automation);
+        }}
+      />
     </div>
   );
 }
@@ -959,8 +1025,8 @@ function PanelHeader({ title, onClose }: { title: string; onClose: () => void })
   return (
     <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2">
       <h2 className="text-sm font-semibold">{title}</h2>
-      <Button variant="ghost" size="sm" onClick={onClose}>
-        关闭
+      <Button variant="ghost" size="icon" aria-label="关闭" title="关闭" onClick={onClose}>
+        <X />
       </Button>
     </div>
   );
