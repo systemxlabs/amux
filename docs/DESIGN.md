@@ -120,8 +120,8 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | PUT `/config/recent_workspaces/` | 全量更新所有最近工作目录 |
 | GET `/config/quick_commands/` | 查询所有配置的快捷指令 |
 | PUT `/config/quick_commands/` | 全量更新所有快捷指令 |
-| GET `/config/agent/` | 查询内置智能体配置 |
-| PUT `/config/agent/` | 更新内置智能体配置 |
+| GET `/config/workflow_agent/` | 查询工作流智能体配置 |
+| PUT `/config/workflow_agent/` | 更新工作流智能体配置 |
 | GET `/config/projects/` | 查询所有配置的项目 |
 | POST `/config/projects/` | 新建项目 |
 | POST `/config/projects/order` | 更新项目顺序 |
@@ -383,8 +383,23 @@ Server 作为 ACP client 与 Agents 通信
     updated_at INTEGER NOT NULL    -- 更新时间
   );
   ```
+- 附件：存储在 `~/.amux/sessions/<session_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
+- 最近工作目录：存储在 `~/.amux/config/recent_workspaces.json` 路径，格式为
+  ```json
+  [
+    {
+      "machine": "localpc",
+      "workspace": "/home/linwei/workspace/amux",
+      "lastUsedProject": "project1",
+      "lastUsed": 1729000000000
+    }
+  ]
+  ```
+  注意 (machine, workspace) 组合必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 Server 在接收到流式内容后，应按 ACP V2 流式传输的 upsert 语义立即落盘。
+
+会话删除时，删除其对应的所有附件。
 
 ### 终端存储
 
@@ -461,7 +476,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 工作流会话用量存储在内存中，每次请求模型供应商时，更新其当前上下文大小。
 
-### 工作流存储
+### 工作流会话存储
 
 工作流数据包含如下部分
 - 元数据：存储在 `~/.amux/workflow.sqlite` 文件中
@@ -486,13 +501,27 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "parameters": "..."}
   {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
   ```
+- 附件存储：存储在 `~/.amux/workflows/<workflow_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
 - 工作流计划：存储在 `~/.amux/config/workflows.json` 路径
   ```json
   [ { "name": "amux开发工作流", "plan": "xxx", "lastUsedProject": "project1" } ]
   ```
   注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
+- 工作流智能体：存储在 `~/.amux/config/workflow_agent.json` 路径
+  ```json
+  {
+    "apiFormat": "responses",
+    "baseUrl": "https://api.deepseek.com/v1",
+    "apiKey": "sk-xxx",
+    "model": "deepseek-v4-flash",
+    "effort": "high",
+    "contextWindow": 1000000
+  }
+  ```
 
 内存中保留活跃工作流会话的上下文对话，当工作流会话长时间不活跃（超过 1h）且工作流会话和其所有关联普通会话状态均为空闲时，清理内存中的工作流会话数据。
+
+会话删除时，删除其对应的所有附件。
 
 ### 自动化触发
 
@@ -531,7 +560,8 @@ Github Webhook 触发
     automation_id TEXT NOT NULL,            -- 自动化 ID
     session_id TEXT,                        -- 普通会话 ID
     workflow_id TEXT,                       -- 工作流会话 ID
-    state TEXT NOT NULL,                    -- 运行状态 running/finished/failed
+    state TEXT NOT NULL,                    -- 运行状态 running / finished / failed
+    error TEXT,                             -- 错误信息
     result_label TEXT,                      -- 结果标签
     started_at INTEGER NOT NULL,            -- 开始时间
     finished_at INTEGER NOT NULL            -- 完成时间
@@ -555,21 +585,6 @@ Github Webhook 触发
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
-### 最近工作目录存储
-
-存储在 `~/.amux/config/recent_workspaces.json` 路径，格式为
-```json
-[
-  {
-    "machine": "localpc",
-    "workspace": "/home/linwei/workspace/amux",
-    "lastUsedProject": "project1",
-    "lastUsed": 1729000000000
-  }
-]
-```
-注意 (machine, workspace) 组合必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
-
 ### 快捷指令存储
 
 存储在 `~/.amux/config/quick_commands.json` 路径，格式为
@@ -584,21 +599,6 @@ Github Webhook 触发
 ```
 注意 (project, name) 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
-### 内置智能体配置存储
-
-存储在 `~/.amux/config/agent.json` 路径，格式为
-```json
-{
-  "apiFormat": "responses",
-  "baseUrl": "https://api.deepseek.com/v1",
-  "apiKey": "sk-xxx",
-  "model": "deepseek-v4-flash",
-  "effort": "high",
-  "contextWindow": 1000000
-}
-```
-读写为低频操作，无需考虑并发和原子写入问题。
-
 ### 项目存储
 
 存储在 `~/.amux/config/projects.json` 路径，格式为
@@ -608,12 +608,6 @@ Github Webhook 触发
 ]
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
-
-### 附件存储
-
-普通会话附件存储在 `~/.amux/sessions/<session_id>/attachments/` 目录下，工作流会话附件存储在 `~/.amux/workflows/<workflow_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`。
-
-会话删除时，删除其对应的所有附件。
 
 ## 应用
 
