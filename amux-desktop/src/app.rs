@@ -87,7 +87,6 @@ pub struct AmuxApp {
     pub automation_task: Entity<InputState>,
     pub automation_cron: Entity<InputState>,
     pub automation_repository: Entity<InputState>,
-    pub automation_events: Entity<InputState>,
     pub automation_workspace: Entity<InputState>,
     pub automation_plan: Entity<InputState>,
     pub automation_label1_name: Entity<InputState>,
@@ -252,8 +251,6 @@ impl AmuxApp {
         let automation_cron = cx.new(|cx| InputState::new(window, cx).placeholder("0 9 * * *"));
         let automation_repository =
             cx.new(|cx| InputState::new(window, cx).placeholder("owner/repository"));
-        let automation_events =
-            cx.new(|cx| InputState::new(window, cx).placeholder("push, pull_request"));
         let automation_workspace = cx.new(|cx| InputState::new(window, cx));
         let automation_plan = cx.new(|cx| {
             InputState::new(window, cx)
@@ -441,7 +438,6 @@ impl AmuxApp {
             automation_task,
             automation_cron,
             automation_repository,
-            automation_events,
             automation_workspace,
             automation_plan,
             automation_label1_name,

@@ -66,6 +66,17 @@ type EditorSessionMode =
   | "new_session"
   | "new_workflow";
 
+const GITHUB_WEBHOOK_EVENTS = [
+  "push",
+  "pull_request",
+  "issues",
+  "issue_comment",
+  "pull_request_review",
+  "pull_request_review_comment",
+  "release",
+  "workflow_run",
+] as const;
+
 function triggerSummary(automation: Automation): string {
   if (automation.trigger.type === "schedule") {
     return automation.nextRunAt === undefined
@@ -455,8 +466,8 @@ function AutomationEditor({
   const [repository, setRepository] = useState(
     initial?.trigger.type === "github_webhook" ? initial.trigger.repository : "",
   );
-  const [events, setEvents] = useState(
-    initial?.trigger.type === "github_webhook" ? (initial.trigger.events ?? []).join(", ") : "push",
+  const [events, setEvents] = useState<string[]>(
+    initial?.trigger.type === "github_webhook" ? (initial.trigger.events ?? []) : ["push"],
   );
   const [sessionMode, setSessionMode] = useState<EditorSessionMode>(
     initial?.sessionOptions.mode ?? "new_session",
@@ -550,10 +561,7 @@ function AutomationEditor({
         : {
             type: "github_webhook",
             repository: repository.trim(),
-            events: events
-              .split(",")
-              .map((item) => item.trim())
-              .filter(Boolean),
+            events,
           };
     const sessionOptions: AutomationSessionOptions = (() => {
       switch (sessionMode) {
@@ -684,12 +692,29 @@ function AutomationEditor({
                 placeholder="owner/repository"
               />
             </Field>
-            <Field label="事件类型">
-              <Input
-                value={events}
-                onChange={(event) => setEvents(event.target.value)}
-                placeholder="push, pull_request"
-              />
+            <Field label="推送事件">
+              <div className="grid gap-2">
+                {GITHUB_WEBHOOK_EVENTS.map((event) => (
+                  <label
+                    key={event}
+                    className="flex cursor-pointer items-center gap-2 text-sm text-foreground"
+                  >
+                    <input
+                      type="checkbox"
+                      className="size-4 accent-primary"
+                      checked={events.includes(event)}
+                      onChange={(input) =>
+                        setEvents((current) =>
+                          input.target.checked
+                            ? [...current, event]
+                            : current.filter((item) => item !== event),
+                        )
+                      }
+                    />
+                    <span>{event}</span>
+                  </label>
+                ))}
+              </div>
             </Field>
           </div>
         )}

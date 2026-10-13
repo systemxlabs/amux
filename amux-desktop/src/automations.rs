@@ -32,6 +32,16 @@ use crate::state::{
 use crate::ui;
 
 const AUTOMATION_PANEL_WIDTH: f32 = 460.0;
+const GITHUB_WEBHOOK_EVENTS: &[&str] = &[
+    "push",
+    "pull_request",
+    "issues",
+    "issue_comment",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "release",
+    "workflow_run",
+];
 
 #[derive(Clone, Copy)]
 enum AutomationTargetKind {
@@ -670,13 +680,7 @@ fn editor(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElem
                         .into_any_element(),
                     cx,
                 ))
-                .child(field(
-                    "事件类型",
-                    Input::new(&this.automation_events)
-                        .w_full()
-                        .into_any_element(),
-                    cx,
-                ))
+                .child(field("推送事件", webhook_events_selector(core, cx), cx))
                 .into_any_element(),
         })
         .child(session_mode_selector(core, cx));
@@ -805,6 +809,35 @@ fn trigger_mode_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
             .into_any_element(),
         cx,
     )
+}
+
+fn webhook_events_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    v_flex()
+        .w_full()
+        .gap_1()
+        .children(GITHUB_WEBHOOK_EVENTS.iter().map(|event| {
+            let event = event.to_string();
+            let selected = core.automation_form.webhook_events.contains(&event);
+            Checkbox::new(SharedString::from(format!("automation-event-{event}")))
+                .label(event.clone())
+                .checked(selected)
+                .on_click(cx.listener(move |this, checked, _, cx| {
+                    this.with_core(|core| {
+                        if *checked {
+                            if !core.automation_form.webhook_events.contains(&event) {
+                                core.automation_form.webhook_events.push(event.clone());
+                            }
+                        } else {
+                            core.automation_form
+                                .webhook_events
+                                .retain(|item| item != &event);
+                        }
+                    });
+                    cx.notify();
+                }))
+                .into_any_element()
+        }))
+        .into_any_element()
 }
 
 fn session_mode_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
@@ -1419,14 +1452,7 @@ impl AmuxApp {
                     .value()
                     .trim()
                     .to_string(),
-                events: self
-                    .automation_events
-                    .read(cx)
-                    .value()
-                    .split(',')
-                    .map(|event| event.trim().to_string())
-                    .filter(|event| !event.is_empty())
-                    .collect(),
+                events: form.webhook_events.clone(),
             },
         };
         let session_options = match form.session_mode {
@@ -1692,7 +1718,10 @@ impl AmuxApp {
             form.project = automation.project.clone();
             form.trigger_mode = match &automation.trigger {
                 AutomationTrigger::Schedule { .. } => AutomationTriggerMode::Schedule,
-                AutomationTrigger::GithubWebhook { .. } => AutomationTriggerMode::Webhook,
+                AutomationTrigger::GithubWebhook { events, .. } => {
+                    form.webhook_events = events.clone();
+                    AutomationTriggerMode::Webhook
+                }
             };
             form.session_mode = match &automation.session_options {
                 AutomationSessionOptions::ExistingSession { .. } => {
@@ -1755,16 +1784,13 @@ impl AmuxApp {
             .unwrap_or_default();
         let validate_cron = !cron.trim().is_empty();
         set(&self.automation_cron, cron, window, cx);
-        let (repository, events) = automation
+        let repository = automation
             .and_then(|automation| match &automation.trigger {
-                AutomationTrigger::GithubWebhook { repository, events } => {
-                    Some((repository.clone(), events.join(", ")))
-                }
+                AutomationTrigger::GithubWebhook { repository, .. } => Some(repository.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| (String::new(), "push".to_string()));
+            .unwrap_or_default();
         set(&self.automation_repository, repository, window, cx);
-        set(&self.automation_events, events, window, cx);
         let (workspace, plan) = automation
             .map(|automation| match &automation.session_options {
                 AutomationSessionOptions::NewSession { workspace, .. } => {

@@ -147,6 +147,8 @@ pub struct AutomationForm {
     pub editing_id: Option<String>,
     pub project: Option<String>,
     pub trigger_mode: AutomationTriggerMode,
+    /// GitHub Webhook 订阅的事件；空数组表示全部事件。
+    pub webhook_events: Vec<String>,
     pub session_mode: AutomationSessionMode,
     /// 已有普通会话模式选中的会话 ID。
     pub existing_session_target: Option<String>,
@@ -176,6 +178,7 @@ impl Default for AutomationForm {
             editing_id: None,
             project: None,
             trigger_mode: AutomationTriggerMode::Schedule,
+            webhook_events: vec!["push".to_string()],
             session_mode: AutomationSessionMode::NewSession,
             existing_session_target: None,
             existing_workflow_target: None,
