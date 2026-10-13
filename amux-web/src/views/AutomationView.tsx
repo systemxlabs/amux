@@ -715,6 +715,7 @@ function AutomationEditor({
                 <SelectValue placeholder="选择普通会话" />
               </SelectTrigger>
               <SelectContent
+                className="w-[var(--radix-select-trigger-width)]"
                 onViewportScroll={(event) => {
                   const node = event.currentTarget;
                   if (node.scrollTop + node.clientHeight >= node.scrollHeight - 24) {
@@ -742,6 +743,7 @@ function AutomationEditor({
                 <SelectValue placeholder="选择工作流会话" />
               </SelectTrigger>
               <SelectContent
+                className="w-[var(--radix-select-trigger-width)]"
                 onViewportScroll={(event) => {
                   const node = event.currentTarget;
                   if (node.scrollTop + node.clientHeight >= node.scrollHeight - 24) {

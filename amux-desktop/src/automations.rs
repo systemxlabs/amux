@@ -20,7 +20,8 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme, Disableable as _, Icon, IconName, Selectable, Sizable,
+    h_flex, v_flex, ActiveTheme, Disableable as _, ElementExt as _, Icon, IconName, Selectable,
+    Sizable,
 };
 
 use crate::app::{AmuxApp, PanelResizeDrag, PANEL_RESIZE_HANDLE_WIDTH};
@@ -962,14 +963,25 @@ fn automation_target_popover(
         ),
     };
     let selected_for_menu = selected.clone();
+    let trigger_app = app.clone();
+    let popover_width = this.automation_target_width.max(320.0);
     Popover::new(id)
-        .w(px(320.))
+        .w(px(popover_width))
         .max_h(px(280.))
         .trigger(
             Button::new(format!("{id}-trigger"))
                 .small()
                 .outline()
                 .w_full()
+                .on_prepaint(move |bounds, _, cx| {
+                    let width = bounds.size.width.as_f32();
+                    trigger_app.update(cx, |this, cx| {
+                        if (this.automation_target_width - width).abs() > 0.5 {
+                            this.automation_target_width = width;
+                            cx.notify();
+                        }
+                    });
+                })
                 .child(
                     div()
                         .flex_1()

@@ -119,6 +119,8 @@ pub struct AmuxApp {
     pub automation_config_model: Entity<InputState>,
     pub automation_session_scroll: ScrollHandle,
     pub automation_workflow_scroll: ScrollHandle,
+    /// 自动化“已有会话”下拉内容宽度；跟随触发按钮解析后的宽度。
+    pub automation_target_width: f32,
     pub quick_name: Entity<InputState>,
     pub quick_prompt: Entity<InputState>,
     /// 快捷指令表单当前选择的项目；None = 通用
@@ -463,6 +465,7 @@ impl AmuxApp {
             automation_config_model,
             automation_session_scroll: ScrollHandle::new(),
             automation_workflow_scroll: ScrollHandle::new(),
+            automation_target_width: 320.0,
             quick_name,
             quick_prompt,
             quick_command_project: None,
