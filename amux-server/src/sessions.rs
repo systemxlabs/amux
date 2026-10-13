@@ -75,6 +75,16 @@ pub struct SessionService {
     pub caches: Arc<SessionCaches>,
 }
 
+/// 新建普通会话所需的输入。
+pub struct CreateSessionParams<'a> {
+    pub machine: &'a str,
+    pub agent: &'a str,
+    pub workspace: &'a str,
+    pub use_worktree: bool,
+    pub worktree_base_branch: Option<&'a str>,
+    pub project: Option<&'a str>,
+}
+
 impl SessionService {
     pub fn new(
         store: Arc<Store>,
@@ -116,15 +126,15 @@ impl SessionService {
     /// 不再校验 agent 是否可用：新建会话视图只允许选择已发现的可用 agent，真正不可用
     /// 时会在发送指令时暴露。落库与最近工作目录记录都是阻塞 I/O，放到阻塞线程池执行，
     /// 不占用 async 执行器；仍在响应前完成，保证返回的会话立即可读。
-    pub async fn create(
-        &self,
-        machine: &str,
-        agent: &str,
-        workspace: &str,
-        use_worktree: bool,
-        worktree_base_branch: Option<&str>,
-        project: Option<&str>,
-    ) -> Result<Session, String> {
+    pub async fn create(&self, request: CreateSessionParams<'_>) -> Result<Session, String> {
+        let CreateSessionParams {
+            machine,
+            agent,
+            workspace,
+            use_worktree,
+            worktree_base_branch,
+            project,
+        } = request;
         let id = Uuid::new_v4().to_string();
         let worktree_dir = if use_worktree {
             log::info!(

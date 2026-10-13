@@ -21,8 +21,11 @@ pub mod path {
     pub const CONFIG_WORKFLOWS: &str = "/config/workflows/";
     pub const CONFIG_RECENT_WORKSPACES: &str = "/config/recent_workspaces/";
     pub const CONFIG_QUICK_COMMANDS: &str = "/config/quick_commands/";
-    pub const CONFIG_AGENT: &str = "/config/agent/";
+    pub const CONFIG_WORKFLOW_AGENT: &str = "/config/workflow_agent/";
+    pub const CONFIG_AUTOMATION: &str = "/config/automation";
     pub const CONFIG_PROJECTS: &str = "/config/projects/";
+    pub const AUTOMATIONS: &str = "/automations";
+    pub const GITHUB_WEBHOOK: &str = "/webhooks/github";
 }
 
 /// 一台已连接的机器（`machine.info` 透传）。
@@ -336,6 +339,181 @@ pub struct ConfigureWorkflowRequest {
     pub pinned: bool,
 }
 
+/// 自动化触发方式。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AutomationTrigger {
+    /// 按 cron 表达式定时触发。
+    Schedule { cron: String },
+    /// 按 GitHub Webhook 触发。
+    GithubWebhook {
+        /// `owner/repository`
+        repository: String,
+        /// 订阅的 GitHub 事件类型；空数组表示全部事件
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<String>,
+    },
+}
+
+/// 自动化运行任务时用于创建普通会话的选项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AutomationSessionOptions {
+    /// 使用已有普通会话。
+    ExistingSession { session_id: String },
+    /// 使用已有工作流会话。
+    ExistingWorkflow { workflow_id: String },
+    /// 新建普通会话并执行任务。
+    NewSession {
+        machine: String,
+        agent: String,
+        workspace: String,
+        #[serde(default)]
+        use_worktree: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_base_branch: Option<String>,
+    },
+    /// 新建工作流会话并执行任务。
+    NewWorkflow { plan: String },
+}
+
+/// 自动化运行状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationRunState {
+    Queued,
+    Running,
+    Finished,
+    Failed,
+}
+
+impl AutomationRunState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Finished => "finished",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+pub fn parse_automation_run_state(value: &str) -> Option<AutomationRunState> {
+    match value {
+        "queued" => Some(AutomationRunState::Queued),
+        "running" => Some(AutomationRunState::Running),
+        "finished" => Some(AutomationRunState::Finished),
+        "failed" => Some(AutomationRunState::Failed),
+        _ => None,
+    }
+}
+
+/// 自动化的一次运行记录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRun {
+    pub id: String,
+    pub automation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    pub state: AutomationRunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+}
+
+/// 自动化结果分类项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationResultLabel {
+    pub name: String,
+    pub description: String,
+}
+
+/// 自动化定义与最近运行状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Automation {
+    pub id: String,
+    pub title: String,
+    pub enabled: bool,
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub trigger: AutomationTrigger,
+    pub session_options: AutomationSessionOptions,
+    #[serde(default)]
+    pub result_labels: Vec<AutomationResultLabel>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    /// 下一次定时运行时间；Webhook 触发时为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<AutomationRun>,
+}
+
+/// 新建或全量更新自动化的请求。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationInput {
+    pub title: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub trigger: AutomationTrigger,
+    pub session_options: AutomationSessionOptions,
+    #[serde(default)]
+    pub result_labels: Vec<AutomationResultLabel>,
+}
+
+/// `GET /automations/<id>/runs` 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRunList {
+    pub runs: Vec<AutomationRun>,
+    pub has_more: bool,
+}
+
+/// 自动化决策模型 API 格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationApiFormat {
+    Jev,
+}
+
+/// 自动化决策模型配置。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationConfig {
+    pub api_format: AutomationApiFormat,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl AutomationConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.base_url.trim().is_empty()
+            || self.api_key.trim().is_empty()
+            || self.model.trim().is_empty()
+        {
+            return Err("请配置 Base URL、API Key 和模型".into());
+        }
+        Ok(())
+    }
+}
+
 /// 技能配置项。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -478,6 +656,10 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,5 +758,15 @@ mod tests {
         let mut meta = serde_json::Map::new();
         meta.insert("amuxModel".into(), "m".into());
         assert!(OrchestratorConfig::from_auth_meta(meta).is_err());
+    }
+
+    #[test]
+    fn automation_session_options_use_mode_tag() {
+        let options = AutomationSessionOptions::NewWorkflow {
+            plan: "先实现再审查".into(),
+        };
+        let json = serde_json::to_value(options).unwrap();
+        assert_eq!(json["mode"], "new_workflow");
+        assert_eq!(json["plan"], "先实现再审查");
     }
 }

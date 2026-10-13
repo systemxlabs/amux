@@ -265,6 +265,17 @@ pub fn render_sidebar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
                         .on_click(cx.listener(|this, _, _, cx| this.open_new_session(cx))),
                 ),
         )
+        .child(
+            Button::new("open-automations")
+                .small()
+                .ghost()
+                .w_full()
+                .justify_start()
+                .icon(IconName::Bot)
+                .label("自动化")
+                .selected(core.automation_open)
+                .on_click(cx.listener(|this, _, _, cx| this.open_automation_list(cx))),
+        )
         .child(list)
         .child(
             h_flex().child(

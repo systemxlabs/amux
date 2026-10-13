@@ -38,7 +38,7 @@ fn stub(path: &str) -> &'static str {
         "/config/recent_workspaces/" => {
             r#"[{"machine":"pc","workspace":"/tmp/proj","lastUsed":1}]"#
         }
-        "/config/agent/" => {
+        "/config/workflow_agent/" => {
             r#"{"apiFormat":"chat_completions","baseUrl":"https://api.example.com/v1","apiKey":"sk","model":"m","effort":"high","contextWindow":1000000}"#
         }
         _ => "{}",
@@ -165,7 +165,7 @@ async fn tick_does_not_poll_settings_data() {
     for path in [
         "/machines",
         "/machines/pc/agents",
-        "/config/agent/",
+        "/config/workflow_agent/",
         "/config/workflows/",
         "/config/quick_commands/",
         "/config/skills/",
@@ -206,7 +206,7 @@ async fn new_session_load_fetches_machines_agents_recent_workspaces_and_plans() 
     assert_eq!(hit_count(&hits, "/machines"), 1);
     assert_eq!(hit_count(&hits, "/machines/pc/agents"), 1);
     assert_eq!(hit_count(&hits, "/config/recent_workspaces/"), 1);
-    assert_eq!(hit_count(&hits, "/config/agent/"), 0);
+    assert_eq!(hit_count(&hits, "/config/workflow_agent/"), 0);
     assert_eq!(hit_count(&hits, "/config/workflows/"), 1);
     let core = core.lock();
     assert_eq!(core.settings.machines.len(), 1);
@@ -222,7 +222,7 @@ async fn workflow_setup_load_fetches_orchestrator_without_refetching_plans() {
 
     poll::refresh_workflow_setup(&client, &core).await;
 
-    assert_eq!(hit_count(&hits, "/config/agent/"), 1);
+    assert_eq!(hit_count(&hits, "/config/workflow_agent/"), 1);
     assert_eq!(hit_count(&hits, "/config/workflows/"), 0);
     assert!(core.lock().settings.orchestrator_loaded);
 }
@@ -238,7 +238,7 @@ async fn interaction_load_fetches_agents_and_quick_commands() {
 
     assert_eq!(hit_count(&hits, "/machines/pc/agents"), 1);
     assert_eq!(hit_count(&hits, "/config/quick_commands/"), 1);
-    assert_eq!(hit_count(&hits, "/config/agent/"), 1);
+    assert_eq!(hit_count(&hits, "/config/workflow_agent/"), 1);
     let core = core.lock();
     assert_eq!(core.settings.quick_commands.len(), 1);
     assert_eq!(

@@ -11,8 +11,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-# agent-client-protocol（ACP 官方 SDK）要求 rustc ≥ 1.88
-rust-version = "1.89"
+# agent-client-protocol（ACP 官方 SDK）要求 rustc ≥ 1.88；rig-typesafeai 要求 ≥ 1.95
+rust-version = "1.95"
 
 [workspace.dependencies]
 amux-common = { path = "amux-common" }
@@ -43,10 +43,14 @@ jiff = "0.2.35"
 percent-encoding = "2.3.2"
 rig-core = { version = "0.42.0", default-features = false, features = ["reqwest", "rustls"] }
 rig-agent = { version = "0.42.0", default-features = false }
+rig-typesafeai = { version = "0.44.0", features = ["reqwest"] }
 process-wrap = { version = "10.0.0", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 alacritty_terminal = "0.26.0"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+croner = { version = "4.0.1", default-features = false, features = ["jiff"] }
+hmac = "0.12"
+sha2 = "0.10"
 
 [profile.release]
 lto = "thin"

@@ -7,6 +7,11 @@ import type {
   Agent,
   Attachment,
   AttachmentList,
+  Automation,
+  AutomationConfig,
+  AutomationInput,
+  AutomationRun,
+  AutomationRunList,
   ConfigOptions,
   ConfigureSessionRequest,
   CreateSessionRequest,
@@ -399,6 +404,42 @@ export class ApiClient {
     return this.delete(`/workflows/${encodeURIComponent(id)}/attachments`);
   }
 
+  // ---------- 自动化 ----------
+
+  automations(): Promise<Automation[]> {
+    return this.getJson("/automations");
+  }
+
+  createAutomation(input: AutomationInput): Promise<Automation> {
+    return this.postJson("/automations", input);
+  }
+
+  updateAutomation(id: string, input: AutomationInput): Promise<Automation> {
+    return this.putJson(`/automations/${encodeURIComponent(id)}`, input);
+  }
+
+  deleteAutomation(id: string): Promise<void> {
+    return this.delete(`/automations/${encodeURIComponent(id)}`);
+  }
+
+  automationRuns(id: string, limit: number, offset: number): Promise<AutomationRunList> {
+    return this.getJson(
+      `/automations/${encodeURIComponent(id)}/runs?${query({ limit: clamp(limit), offset })}`,
+    );
+  }
+
+  triggerAutomation(id: string): Promise<AutomationRun> {
+    return this.postJson(`/automations/${encodeURIComponent(id)}/trigger`, {});
+  }
+
+  automationConfig(): Promise<AutomationConfig | null> {
+    return this.getJson("/config/automation");
+  }
+
+  setAutomationConfig(config: AutomationConfig): Promise<void> {
+    return this.putEmpty("/config/automation", config);
+  }
+
   // ---------- 配置 ----------
 
   projects(): Promise<Project[]> {
@@ -454,11 +495,11 @@ export class ApiClient {
   }
 
   orchestrator(): Promise<OrchestratorConfig | null> {
-    return this.getJson("/config/agent/");
+    return this.getJson("/config/workflow_agent/");
   }
 
   setOrchestrator(config: OrchestratorConfig): Promise<void> {
-    return this.putEmpty("/config/agent/", config);
+    return this.putEmpty("/config/workflow_agent/", config);
   }
 
   // ---------- 内部 ----------
@@ -502,6 +543,10 @@ export class ApiClient {
 
   private async putEmpty(path: string, body: unknown): Promise<void> {
     await decode<OpAck>(await this.sendJson(path, "PUT", body));
+  }
+
+  private async putJson<T>(path: string, body: unknown): Promise<T> {
+    return decode<T>(await this.sendJson(path, "PUT", body));
   }
 
   private sendJson(path: string, method: string, body: unknown): Promise<Response> {

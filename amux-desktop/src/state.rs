@@ -105,8 +105,62 @@ pub enum ViewKey {
     NewSession,
     /// 会话交互视图
     Interaction(OpenTarget),
+    /// 自动化列表与右侧编辑/详情视图
+    Automations,
     /// 设置浮窗的某个分类
     Settings(SettingsTab),
+}
+
+/// 自动化右侧面板。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationPanel {
+    New,
+    Detail(String),
+}
+
+/// 自动化触发方式表单模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomationTriggerMode {
+    Schedule,
+    Webhook,
+}
+
+/// 自动化创建的会话模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomationSessionMode {
+    ExistingSession,
+    ExistingWorkflow,
+    NewSession,
+    NewWorkflow,
+}
+
+/// 自动化编辑表单中的非文本状态。
+#[derive(Debug, Clone)]
+pub struct AutomationForm {
+    pub editing_id: Option<String>,
+    pub project: Option<String>,
+    pub trigger_mode: AutomationTriggerMode,
+    pub session_mode: AutomationSessionMode,
+    /// 选择已有会话时对应的普通会话/工作流会话 ID。
+    pub existing_target: Option<String>,
+    pub machine: Option<String>,
+    pub agent: Option<String>,
+    pub use_worktree: bool,
+}
+
+impl Default for AutomationForm {
+    fn default() -> Self {
+        Self {
+            editing_id: None,
+            project: None,
+            trigger_mode: AutomationTriggerMode::Schedule,
+            session_mode: AutomationSessionMode::NewSession,
+            existing_target: None,
+            machine: None,
+            agent: None,
+            use_worktree: false,
+        }
+    }
 }
 
 /// 执行目录树节点：目录项不缓存，展开时才拉取子节点
@@ -493,10 +547,10 @@ pub struct Note {
 pub enum SettingsTab {
     Connection,
     Machines,
-    Orchestrator,
+    Workflow,
+    Automation,
     QuickCommands,
     Skills,
-    WorkflowPlans,
     Projects,
 }
 
@@ -504,10 +558,10 @@ impl SettingsTab {
     pub const ALL: [SettingsTab; 7] = [
         SettingsTab::Connection,
         SettingsTab::Machines,
-        SettingsTab::Orchestrator,
+        SettingsTab::Workflow,
+        SettingsTab::Automation,
         SettingsTab::QuickCommands,
         SettingsTab::Skills,
-        SettingsTab::WorkflowPlans,
         SettingsTab::Projects,
     ];
 
@@ -515,10 +569,10 @@ impl SettingsTab {
         match self {
             SettingsTab::Connection => "连接设置",
             SettingsTab::Machines => "机器管理",
-            SettingsTab::Orchestrator => "内置智能体",
+            SettingsTab::Workflow => "工作流",
+            SettingsTab::Automation => "自动化",
             SettingsTab::QuickCommands => "快捷指令",
             SettingsTab::Skills => "技能管理",
-            SettingsTab::WorkflowPlans => "工作流计划",
             SettingsTab::Projects => "项目管理",
         }
     }
@@ -529,10 +583,10 @@ impl SettingsTab {
         match self {
             SettingsTab::Connection => IconName::Globe,
             SettingsTab::Machines => IconName::HardDrive,
-            SettingsTab::Orchestrator => IconName::Bot,
+            SettingsTab::Workflow => IconName::Bot,
+            SettingsTab::Automation => IconName::Play,
             SettingsTab::QuickCommands => IconName::Play,
             SettingsTab::Skills => IconName::BookOpen,
-            SettingsTab::WorkflowPlans => IconName::File,
             SettingsTab::Projects => IconName::Folder,
         }
     }
@@ -548,6 +602,8 @@ pub struct SettingsData {
     pub quick_commands: Vec<QuickCommand>,
     pub projects: Vec<Project>,
     pub orchestrator: Option<OrchestratorConfig>,
+    pub automation: Option<AutomationConfig>,
+    pub automation_loaded: bool,
     /// 内置智能体配置是否已拉取过：区分「未配置」与「尚未拉取」
     pub orchestrator_loaded: bool,
 }
@@ -564,6 +620,26 @@ pub struct Core {
     /// 已折叠的项目组；折叠组不加载会话。
     pub collapsed_project_groups: HashSet<String>,
     pub new_session: NewSessionForm,
+    /// 自动化列表。
+    pub automations: Vec<Automation>,
+    /// 自动化“已有会话”下拉框的全量候选项。
+    pub automation_sessions: Vec<Session>,
+    pub automation_workflows: Vec<Workflow>,
+    pub automation_sessions_has_more: bool,
+    pub automation_workflows_has_more: bool,
+    pub automation_sessions_loading: bool,
+    pub automation_workflows_loading: bool,
+    pub automation_session_offset: usize,
+    pub automation_workflow_offset: usize,
+    /// 是否停留在自动化功能视图。
+    pub automation_open: bool,
+    /// 自动化右侧面板。
+    pub automation_panel: Option<AutomationPanel>,
+    /// 自动化编辑表单的非文本状态。
+    pub automation_form: AutomationForm,
+    /// 自动化运行记录（按自动化 id 缓存）。
+    pub automation_runs: HashMap<String, Vec<AutomationRun>>,
+    pub automation_runs_loading: bool,
     pub recent_workspaces: Vec<RecentWorkspace>,
     /// 输入区待发送附件
     pub composer_attachments: Vec<PendingAttachment>,
@@ -587,6 +663,7 @@ pub struct Core {
 #[derive(Default, Clone, Copy)]
 pub struct Ticks {
     pub list: Option<Instant>,
+    pub automations: Option<Instant>,
     pub history: Option<Instant>,
     pub ongoing: Option<Instant>,
     pub activities: Option<Instant>,
@@ -604,6 +681,20 @@ impl Default for Core {
             project_groups: HashMap::new(),
             collapsed_project_groups: HashSet::new(),
             new_session: NewSessionForm::default(),
+            automations: Vec::new(),
+            automation_sessions: Vec::new(),
+            automation_workflows: Vec::new(),
+            automation_sessions_has_more: false,
+            automation_workflows_has_more: false,
+            automation_sessions_loading: false,
+            automation_workflows_loading: false,
+            automation_session_offset: 0,
+            automation_workflow_offset: 0,
+            automation_open: false,
+            automation_panel: None,
+            automation_form: AutomationForm::default(),
+            automation_runs: HashMap::new(),
+            automation_runs_loading: false,
             recent_workspaces: Vec::new(),
             composer_attachments: Vec::new(),
             open: None,
@@ -646,6 +737,9 @@ impl Core {
     pub fn view_key(&self) -> ViewKey {
         if self.settings_open {
             return ViewKey::Settings(self.settings_tab);
+        }
+        if self.automation_open {
+            return ViewKey::Automations;
         }
         match &self.open {
             Some(target) => ViewKey::Interaction(target.clone()),

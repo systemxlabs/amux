@@ -89,8 +89,14 @@ impl WorkflowService {
     ) -> Result<Workflow, String> {
         let id = Uuid::new_v4().to_string();
         let title = title.unwrap_or_default();
-        self.store
-            .insert_workflow(&id, &title, SessionState::Idle, plan, project, now_ms());
+        self.store.insert_workflow(crate::store::WorkflowInsert {
+            id: &id,
+            title: &title,
+            state: SessionState::Idle,
+            plan,
+            project,
+            created_at: now_ms(),
+        });
         log::info!("工作流会话已创建: workflow={id}");
         self.get(&id)
     }
@@ -789,14 +795,14 @@ impl WorkflowTools {
                     .map(str::to_string);
                 let session = services
                     .sessions
-                    .create(
-                        &machine,
-                        &agent,
-                        &cwd,
-                        worktree,
-                        worktree_base_branch.as_deref(),
-                        None,
-                    )
+                    .create(crate::sessions::CreateSessionParams {
+                        machine: &machine,
+                        agent: &agent,
+                        workspace: &cwd,
+                        use_worktree: worktree,
+                        worktree_base_branch: worktree_base_branch.as_deref(),
+                        project: None,
+                    })
                     .await?;
                 services.link_session(&self.workflow_id, &session.id);
                 log::info!(
@@ -1331,7 +1337,14 @@ mod tests {
         let workflow = service.create("计划", None, None).await.unwrap();
         let session = service
             .sessions
-            .create("pc", "codex", "/repo", false, None, None)
+            .create(crate::sessions::CreateSessionParams {
+                machine: "pc",
+                agent: "codex",
+                workspace: "/repo",
+                use_worktree: false,
+                worktree_base_branch: None,
+                project: None,
+            })
             .await
             .unwrap();
         service.link_session(&workflow.id, &session.id);
@@ -1404,9 +1417,14 @@ mod tests {
             ("linked-idle", 1),
             ("linked-busy", 1),
         ] {
-            service
-                .store
-                .insert_workflow(id, "", SessionState::Idle, "计划", None, updated_at);
+            service.store.insert_workflow(crate::store::WorkflowInsert {
+                id,
+                title: "",
+                state: SessionState::Idle,
+                plan: "计划",
+                project: None,
+                created_at: updated_at,
+            });
             service.runs.lock().entry(id.to_string()).or_default();
         }
         service.store.set_workflow_state("busy", SessionState::Busy);

@@ -536,12 +536,12 @@ export function NewSessionView() {
       >
         {orchestrator.status === "loading" ? (
           <p data-slot="orchestrator-loading" className="text-muted-foreground">
-            正在确认内置智能体配置…
+            正在确认工作流智能体配置…
           </p>
         ) : orchestrator.status === "failed" ? (
           <>
             <p data-slot="orchestrator-error" className="text-destructive">
-              读取内置智能体配置失败：{orchestrator.error}
+              读取工作流智能体配置失败：{orchestrator.error}
             </p>
             <div className="flex gap-2">
               <Button
@@ -551,18 +551,18 @@ export function NewSessionView() {
               >
                 重试
               </Button>
-              <Button variant="outline" onClick={() => openSettings(core, "orchestrator")}>
+              <Button variant="outline" onClick={() => openSettings(core, "workflow")}>
                 前往设置
               </Button>
             </div>
           </>
         ) : (
           <>
-            <p className="text-destructive">内置智能体未配置，无法创建工作流会话。</p>
+            <p className="text-destructive">工作流智能体未配置，无法创建工作流会话。</p>
             <Button
               data-slot="open-orchestrator-settings"
               variant="outline"
-              onClick={() => openSettings(core, "orchestrator")}
+              onClick={() => openSettings(core, "workflow")}
             >
               前往设置
             </Button>

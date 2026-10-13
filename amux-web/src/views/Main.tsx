@@ -18,10 +18,11 @@ import {
   Paperclip,
   Settings as SettingsIcon,
   SquareTerminal,
+  Zap,
   X,
 } from "lucide-react";
 
-import { openSettings, toggleSidePanel } from "../core/actions";
+import { openSettings, showAutomations, toggleSidePanel } from "../core/actions";
 import { panelAvailable } from "../core/core";
 import { useCore, useCoreState } from "../core/store";
 import type { SidePanel } from "../core/core";
@@ -30,6 +31,7 @@ import { useIsMobile } from "../lib/viewport";
 import { InteractionView } from "./InteractionView";
 import { NewSessionView } from "./NewSessionView";
 import { SessionListPanel } from "./SessionListPanel";
+import { AutomationListView, AutomationPanelView } from "./AutomationView";
 import { SidePanelView } from "./panels";
 import { SettingsOverlay } from "./settings/SettingsOverlay";
 
@@ -90,6 +92,7 @@ export function Main() {
   ];
 
   const openPanel = state.sidePanel;
+  const automationPanelOpen = state.middle === "automation" && state.automationPanel !== null;
   const openPanelLabel = panels.find((entry) => entry.panel === openPanel)?.label ?? "";
 
   return (
@@ -118,6 +121,21 @@ export function Main() {
         )}
         style={{ width: leftWidth }}
       >
+        <button
+          data-slot="automation-entry"
+          type="button"
+          className={cn(
+            "flex shrink-0 items-center gap-2 border-b border-border px-3 py-3 text-left hover:bg-accent lg:py-2",
+            state.middle === "automation" && "bg-accent",
+          )}
+          onClick={() => {
+            closeDrawer();
+            void showAutomations(core);
+          }}
+        >
+          <Zap className="size-4" />
+          自动化
+        </button>
         <SessionListPanel onNavigate={closeDrawer} />
         <button
           data-slot="settings-entry"
@@ -148,7 +166,13 @@ export function Main() {
         // overflow-hidden：面板可以被拖到接近 0 宽，内容溢出会盖住相邻的分隔条，分隔条就点不到了
         className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
-        {state.middle === "interaction" ? <InteractionView /> : <NewSessionView />}
+        {state.middle === "automation" ? (
+          <AutomationListView />
+        ) : state.middle === "interaction" ? (
+          <InteractionView />
+        ) : (
+          <NewSessionView />
+        )}
 
         {/* 窄视口下左栏收在抽屉里，需要一个入口把它拉出来；宽视口下左栏常驻，不渲染 */}
         <button
@@ -189,7 +213,7 @@ export function Main() {
         ) : null}
       </main>
 
-      {openPanel !== null ? (
+      {openPanel !== null || automationPanelOpen ? (
         <>
           <div
             data-slot="panel-divider-right"
@@ -204,20 +228,24 @@ export function Main() {
             className="fixed inset-0 z-30 flex min-h-0 flex-col overflow-hidden bg-card lg:static lg:z-auto lg:shrink-0 lg:border-l lg:border-border"
             style={isMobile ? undefined : { width: rightWidth }}
           >
-            <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1 lg:hidden">
-              <span className="text-sm font-medium">{openPanelLabel}</span>
-              <button
-                data-slot="side-panel-close"
-                type="button"
-                aria-label="关闭面板"
-                className="rounded-md p-2.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                onClick={() => toggleSidePanel(core, openPanel)}
-              >
-                <X className="size-4" />
-              </button>
-            </div>
+            {!automationPanelOpen ? (
+              <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1 lg:hidden">
+                <span className="text-sm font-medium">{openPanelLabel}</span>
+                <button
+                  data-slot="side-panel-close"
+                  type="button"
+                  aria-label="关闭面板"
+                  className="rounded-md p-2.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={() => {
+                    if (openPanel !== null) toggleSidePanel(core, openPanel);
+                  }}
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+            ) : null}
             <div className="min-h-0 flex-1">
-              <SidePanelView />
+              {automationPanelOpen ? <AutomationPanelView /> : <SidePanelView />}
             </div>
           </aside>
         </>

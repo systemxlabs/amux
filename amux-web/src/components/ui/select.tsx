@@ -45,8 +45,11 @@ function SelectContent({
   className,
   children,
   position = "popper",
+  onViewportScroll,
   ...props
-}: React.ComponentProps<typeof SelectPrimitive.Content>) {
+}: React.ComponentProps<typeof SelectPrimitive.Content> & {
+  onViewportScroll?: React.UIEventHandler<HTMLDivElement>;
+}) {
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
@@ -64,6 +67,7 @@ function SelectContent({
         <SelectScrollUpButton />
         <SelectPrimitive.Viewport
           data-slot="select-viewport"
+          onScroll={onViewportScroll}
           className={cn(
             "p-1",
             position === "popper" &&

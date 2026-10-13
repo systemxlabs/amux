@@ -1,4 +1,4 @@
-//! 设置浮窗：分类导航 + 连接设置 / 机器管理 / 内置智能体 / 快捷指令 / 技能管理 / 工作流计划。
+//! 设置浮窗：分类导航 + 连接 / 机器 / 内置智能体 / 自动化 / 快捷指令 / 技能 / 工作流计划。
 
 use agent_client_protocol::schema::v2::TextContent;
 use amux_common::api::{ApiFormat, Machine, Skill};
@@ -169,10 +169,10 @@ fn render_content(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) ->
     let page = match core.settings_tab {
         SettingsTab::Connection => connection_tab(this, cx),
         SettingsTab::Machines => machines_tab(this, cx),
-        SettingsTab::Orchestrator => orchestrator_tab(this, cx),
+        SettingsTab::Workflow => workflow_tab(core, this, cx),
+        SettingsTab::Automation => automation_tab(this, cx),
         SettingsTab::QuickCommands => quick_commands_tab(core, this, cx),
         SettingsTab::Skills => skills_tab(core, cx),
-        SettingsTab::WorkflowPlans => plans_tab(core, cx),
         SettingsTab::Projects => projects_tab(core, cx),
     };
     v_flex()
@@ -217,7 +217,7 @@ fn tab_action(core: &Core, cx: &mut Context<AmuxApp>) -> Option<AnyElement> {
     let (id, tooltip) = match tab {
         SettingsTab::QuickCommands => ("qc-add", "添加快捷指令"),
         SettingsTab::Skills => ("skill-add", "添加技能"),
-        SettingsTab::WorkflowPlans => ("plan-add", "添加计划"),
+        SettingsTab::Workflow => ("plan-add", "添加计划"),
         SettingsTab::Projects => ("project-add", "添加项目"),
         _ => return None,
     };
@@ -237,10 +237,10 @@ fn tab_heading(tab: SettingsTab) -> (&'static str, &'static str) {
     match tab {
         SettingsTab::Connection => ("连接设置", "配置 Server 地址与认证 token"),
         SettingsTab::Machines => ("机器管理", "查看已接入机器与其 agent，可重启 / 重新发现"),
-        SettingsTab::Orchestrator => ("内置智能体", "配置内置智能体使用的大模型供应商连接信息"),
+        SettingsTab::Workflow => ("工作流", "配置工作流智能体与可复用的工作流计划"),
+        SettingsTab::Automation => ("自动化", "配置自动化结果分类使用的决策模型"),
         SettingsTab::QuickCommands => ("快捷指令", "自定义快捷指令，在会话输入区上方一键发送"),
         SettingsTab::Skills => ("技能管理", "集中管理各机器各 agent 上的技能"),
-        SettingsTab::WorkflowPlans => ("工作流计划", "可复用的工作流计划，发起工作流会话时选用"),
         SettingsTab::Projects => ("项目管理", "项目用于将普通会话与工作流会话分组聚合展示"),
     }
 }
@@ -476,6 +476,51 @@ fn orchestrator_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement
                             .label("保存")
                             .disabled(!this.orchestrator_dirty(cx))
                             .on_click(cx.listener(|this, _, _, cx| this.save_orchestrator(cx))),
+                    ),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 工作流设置：工作流智能体连接信息 + 可复用计划。
+fn workflow_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    v_flex()
+        .gap_4()
+        .child(orchestrator_tab(this, cx))
+        .child(plans_tab(core, cx))
+        .into_any_element()
+}
+
+/// 自动化：Jev 决策模型连接信息，改动后才可保存。
+fn automation_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
+    let muted = theme.muted_foreground;
+    v_flex()
+        .gap_2()
+        .child(
+            v_flex()
+                .gap_1()
+                .p_3()
+                .bg(theme.muted)
+                .rounded_md()
+                .child(Label::new("API 格式").text_sm().text_color(muted))
+                .child(Label::new("jev").text_sm())
+                .child(Label::new("Base URL").text_sm().text_color(muted))
+                .child(Input::new(&this.automation_config_base_url).w_full())
+                .child(Label::new("API Key").text_sm().text_color(muted))
+                .child(Input::new(&this.automation_config_api_key).w_full())
+                .child(Label::new("模型名称").text_sm().text_color(muted))
+                .child(Input::new(&this.automation_config_model).w_full())
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("automation-settings-save")
+                            .small()
+                            .primary()
+                            .label("保存")
+                            .disabled(!this.automation_config_dirty(cx))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.save_automation_config(cx)),
+                            ),
                     ),
                 ),
         )

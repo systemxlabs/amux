@@ -34,6 +34,11 @@ agent-client-protocol = { workspace = true, features = [
 base64.workspace = true
 rig-core.workspace = true
 rig-agent.workspace = true
+rig-typesafeai.workspace = true
+croner.workspace = true
+jiff.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 libc.workspace = true

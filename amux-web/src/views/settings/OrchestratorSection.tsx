@@ -59,7 +59,7 @@ export function OrchestratorSection() {
 
   return (
     <section className="flex flex-col gap-4">
-      <h2 className="text-sm font-medium">内置智能体</h2>
+      <h2 className="text-sm font-medium">工作流智能体</h2>
       {orchestrator.status === "failed" ? (
         <p data-slot="orchestrator-error" className="text-xs text-destructive">
           读取配置失败：{orchestrator.error}

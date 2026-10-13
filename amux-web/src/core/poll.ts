@@ -2,7 +2,12 @@
 //
 // 单任务节拍内按到期时间触发各视图刷新；设置类数据不做定时刷新，由视图打开时实时拉取。
 
-import type { Activity, HistoryItem, ListEntry, OpenTarget } from "../lib/types";
+import type {
+  Activity,
+  HistoryItem,
+  ListEntry,
+  OpenTarget,
+} from "../lib/types";
 import { entryId, entryPinned } from "../lib/types";
 import {
   beginNewerPage,
@@ -21,6 +26,7 @@ import { ApiError } from "../lib/api";
 import type { Core, SettingsTab } from "./core";
 
 export const SESSION_LIST_INTERVAL = 10_000;
+export const AUTOMATION_LIST_INTERVAL = 10_000;
 export const HISTORY_INTERVAL = 5_000;
 export const ONGOING_INTERVAL = 2_000;
 export const ACTIVITIES_INTERVAL = 10_000;
@@ -70,6 +76,10 @@ export async function tick(core: Core): Promise<void> {
     core.last.list = Date.now();
     await refreshList(core);
   }
+  if (core.state.middle === "automation" && due(core.last.automations, AUTOMATION_LIST_INTERVAL)) {
+    core.last.automations = Date.now();
+    await refreshAutomations(core);
+  }
 
   syncTerminalStream(core);
   if (core.state.open && core.state.middle === "interaction") {
@@ -82,6 +92,110 @@ function messageOf(error: unknown): string {
 }
 
 // ---------- 会话列表 ----------
+
+export async function refreshAutomations(core: Core): Promise<void> {
+  const client = core.client;
+  if (!client) return;
+  try {
+    const automations = await client.automations();
+    core.update((state) => {
+      state.automations = automations;
+    });
+  } catch (error) {
+    core.failure(`刷新自动化失败：${messageOf(error)}`);
+  }
+}
+
+const AUTOMATION_TARGET_PAGE = 20;
+
+/** 打开自动化表单时重置“已有会话”下拉候选为第一页。 */
+export async function resetAutomationTargets(core: Core): Promise<void> {
+  core.update((state) => {
+    state.automationSessions = [];
+    state.automationWorkflows = [];
+    state.automationSessionsHasMore = false;
+    state.automationWorkflowsHasMore = false;
+    state.automationSessionOffset = 0;
+    state.automationWorkflowOffset = 0;
+  });
+  await Promise.all([
+    loadMoreAutomationSessions(core),
+    loadMoreAutomationWorkflows(core),
+  ]);
+}
+
+export async function loadMoreAutomationSessions(core: Core): Promise<void> {
+  const client = core.client;
+  if (
+    !client ||
+    core.state.automationSessionsLoading ||
+    (core.state.automationSessions.length > 0 && !core.state.automationSessionsHasMore)
+  ) {
+    return;
+  }
+  const offset = core.state.automationSessionOffset;
+  core.update((state) => {
+    state.automationSessionsLoading = true;
+  });
+  try {
+    const page = await client.sessions(AUTOMATION_TARGET_PAGE, offset);
+    const merged = new Map(core.state.automationSessions.map((session) => [session.id, session]));
+    for (const session of page.sessions) merged.set(session.id, session);
+    core.update((state) => {
+      state.automationSessions = sortAutomationTargets([...merged.values()]);
+      state.automationSessionOffset += page.sessions.filter((session) => !session.pinned).length;
+      state.automationSessionsHasMore = page.hasMore;
+    });
+  } catch (error) {
+    core.failure(`读取可选普通会话失败：${messageOf(error)}`);
+  } finally {
+    core.update((state) => {
+      state.automationSessionsLoading = false;
+    });
+  }
+}
+
+export async function loadMoreAutomationWorkflows(core: Core): Promise<void> {
+  const client = core.client;
+  if (
+    !client ||
+    core.state.automationWorkflowsLoading ||
+    (core.state.automationWorkflows.length > 0 && !core.state.automationWorkflowsHasMore)
+  ) {
+    return;
+  }
+  const offset = core.state.automationWorkflowOffset;
+  core.update((state) => {
+    state.automationWorkflowsLoading = true;
+  });
+  try {
+    const page = await client.workflows(AUTOMATION_TARGET_PAGE, offset);
+    const merged = new Map(
+      core.state.automationWorkflows.map((workflow) => [workflow.id, workflow]),
+    );
+    for (const workflow of page.workflows) merged.set(workflow.id, workflow);
+    core.update((state) => {
+      state.automationWorkflows = sortAutomationTargets([...merged.values()]);
+      state.automationWorkflowOffset += page.workflows.filter((workflow) => !workflow.pinned).length;
+      state.automationWorkflowsHasMore = page.hasMore;
+    });
+  } catch (error) {
+    core.failure(`读取可选工作流失败：${messageOf(error)}`);
+  } finally {
+    core.update((state) => {
+      state.automationWorkflowsLoading = false;
+    });
+  }
+}
+
+function sortAutomationTargets<T extends { pinned: boolean; createdAt: number }>(
+  items: T[],
+): T[] {
+  return [...items].sort(
+    (left, right) =>
+      Number(right.pinned) - Number(left.pinned) || right.createdAt - left.createdAt,
+  );
+}
 
 /**
  * 会话列表刷新：重取已加载窗口（普通会话与工作流会话各取一窗）。
@@ -649,17 +763,32 @@ export async function refreshSettings(core: Core, tab: SettingsTab): Promise<voi
       return;
     case "machines":
       return refreshMachines(core);
-    case "orchestrator":
-      return refreshOrchestrator(core);
+    case "workflow":
+      await Promise.all([refreshOrchestrator(core), refreshPlans(core)]);
+      return;
+    case "automation":
+      return refreshAutomationConfig(core);
     case "quickCommands":
       await Promise.all([refreshQuickCommands(core), refreshProjects(core)]);
       return;
     case "skills":
       return refreshSkills(core);
-    case "plans":
-      return refreshPlans(core);
     case "projects":
       return refreshProjects(core);
+  }
+}
+
+export async function refreshAutomationConfig(core: Core): Promise<void> {
+  const client = core.client;
+  if (!client) return;
+  try {
+    const config = await client.automationConfig();
+    core.update((state) => {
+      state.settings.automation = config;
+      state.settings.automationLoaded = true;
+    });
+  } catch (error) {
+    core.failure(`读取自动化配置失败：${messageOf(error)}`);
   }
 }
 

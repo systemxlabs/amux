@@ -224,6 +224,75 @@ export type OrchestratorConfig = {
   contextWindow: number;
 };
 
+export type AutomationTrigger =
+  | { type: "schedule"; cron: string }
+  | { type: "github_webhook"; repository: string; events?: string[] };
+
+export type AutomationSessionOptions =
+  | { mode: "existing_session"; sessionId: string }
+  | { mode: "existing_workflow"; workflowId: string }
+  | {
+      mode: "new_session";
+      machine: string;
+      agent: string;
+      workspace: string;
+      useWorktree: boolean;
+      worktreeBaseBranch?: string;
+    }
+  | { mode: "new_workflow"; plan: string };
+
+export type AutomationRunState = "queued" | "running" | "finished" | "failed";
+
+export type AutomationRun = {
+  id: string;
+  automationId: string;
+  sessionId?: string;
+  workflowId?: string;
+  state: AutomationRunState;
+  resultLabel?: string;
+  error?: string;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt: number;
+};
+
+export type AutomationResultLabel = { name: string; description: string };
+
+export type Automation = {
+  id: string;
+  title: string;
+  enabled: boolean;
+  task: string;
+  project?: string;
+  trigger: AutomationTrigger;
+  sessionOptions: AutomationSessionOptions;
+  resultLabels: AutomationResultLabel[];
+  createdAt: number;
+  updatedAt: number;
+  nextRunAt?: number;
+  lastRun?: AutomationRun;
+};
+
+export type AutomationInput = {
+  title: string;
+  enabled: boolean;
+  task: string;
+  project?: string;
+  trigger: AutomationTrigger;
+  sessionOptions: AutomationSessionOptions;
+  resultLabels: AutomationResultLabel[];
+};
+
+export type AutomationRunList = { runs: AutomationRun[]; hasMore: boolean };
+
+export type AutomationApiFormat = "jev";
+export type AutomationConfig = {
+  apiFormat: AutomationApiFormat;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+};
+
 /** 会话目标：普通会话或工作流会话（对话/活动/取消等操作共用）。 */
 export type OpenTarget =
   | { kind: "session"; id: string }

@@ -19,18 +19,22 @@ use crate::state::{
     SESSION_LIST_INTERVAL, USAGE_INTERVAL,
 };
 
+/// 自动化列表刷新周期。
+pub const AUTOMATION_LIST_INTERVAL: Duration = Duration::from_secs(10);
+
 /// 连接重试间隔。
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 单次节拍：按需刷新各视图。
 pub async fn tick(core: SharedCore) {
-    let (client, status, open, side_panel) = {
+    let (client, status, open, side_panel, automation_open) = {
         let core = core.lock();
         (
             core.client.clone(),
             core.status.clone(),
             core.open.clone(),
             core.side_panel,
+            core.automation_open,
         )
     };
     let Some(client) = client else {
@@ -61,8 +65,146 @@ pub async fn tick(core: SharedCore) {
     if core_due(&core, |last| last.list, SESSION_LIST_INTERVAL) {
         refresh_list(&client, &core).await;
     }
+    if automation_open && core_due(&core, |last| last.automations, AUTOMATION_LIST_INTERVAL) {
+        refresh_automations(&client, &core).await;
+    }
     if let Some(target) = open {
         refresh_open(&client, &core, &target, side_panel).await;
+    }
+}
+
+pub async fn refresh_automations(client: &Client, core: &SharedCore) {
+    match client.automations().await {
+        Ok(automations) => {
+            let mut core = core.lock();
+            core.automations = automations;
+            core.last.automations = Some(Instant::now());
+        }
+        Err(error) => {
+            let mut core = core.lock();
+            core.error(format!("刷新自动化失败：{error}"));
+            core.last.automations = Some(Instant::now());
+        }
+    }
+}
+
+const AUTOMATION_TARGET_PAGE: usize = 20;
+
+/// 打开自动化表单时重置“已有会话”下拉候选为第一页。
+pub async fn reset_automation_targets(client: &Client, core: &SharedCore) {
+    {
+        let mut core = core.lock();
+        core.automation_sessions.clear();
+        core.automation_workflows.clear();
+        core.automation_session_offset = 0;
+        core.automation_workflow_offset = 0;
+        core.automation_sessions_has_more = false;
+        core.automation_workflows_has_more = false;
+    }
+    load_more_automation_sessions(client, core).await;
+    load_more_automation_workflows(client, core).await;
+}
+
+pub async fn load_more_automation_sessions(client: &Client, core: &SharedCore) {
+    let offset = {
+        let mut core = core.lock();
+        if core.automation_sessions_loading
+            || (!core.automation_sessions.is_empty() && !core.automation_sessions_has_more)
+        {
+            return;
+        }
+        core.automation_sessions_loading = true;
+        core.automation_session_offset
+    };
+    let result = client.sessions(AUTOMATION_TARGET_PAGE, offset, None).await;
+    let mut core = core.lock();
+    core.automation_sessions_loading = false;
+    let Ok(page) = result else { return };
+    let mut sessions: std::collections::HashMap<_, _> = core
+        .automation_sessions
+        .iter()
+        .cloned()
+        .map(|session| (session.id.clone(), session))
+        .collect();
+    let unpinned = page
+        .sessions
+        .iter()
+        .filter(|session| !session.pinned)
+        .count();
+    for session in page.sessions {
+        sessions.insert(session.id.clone(), session);
+    }
+    core.automation_sessions = sort_automation_targets(sessions.into_values().collect());
+    core.automation_session_offset += unpinned;
+    core.automation_sessions_has_more = page.has_more;
+}
+
+pub async fn load_more_automation_workflows(client: &Client, core: &SharedCore) {
+    let offset = {
+        let mut core = core.lock();
+        if core.automation_workflows_loading
+            || (!core.automation_workflows.is_empty() && !core.automation_workflows_has_more)
+        {
+            return;
+        }
+        core.automation_workflows_loading = true;
+        core.automation_workflow_offset
+    };
+    let result = client.workflows(AUTOMATION_TARGET_PAGE, offset, None).await;
+    let mut core = core.lock();
+    core.automation_workflows_loading = false;
+    let Ok(page) = result else { return };
+    let mut workflows: std::collections::HashMap<_, _> = core
+        .automation_workflows
+        .iter()
+        .cloned()
+        .map(|workflow| (workflow.id.clone(), workflow))
+        .collect();
+    let unpinned = page
+        .workflows
+        .iter()
+        .filter(|workflow| !workflow.pinned)
+        .count();
+    for workflow in page.workflows {
+        workflows.insert(workflow.id.clone(), workflow);
+    }
+    core.automation_workflows = sort_automation_targets(workflows.into_values().collect());
+    core.automation_workflow_offset += unpinned;
+    core.automation_workflows_has_more = page.has_more;
+}
+
+fn sort_automation_targets<T: HasAutomationTargetOrder>(mut items: Vec<T>) -> Vec<T> {
+    items.sort_by(|left, right| {
+        right
+            .is_pinned()
+            .cmp(&left.is_pinned())
+            .then_with(|| right.created_at().cmp(&left.created_at()))
+    });
+    items
+}
+
+trait HasAutomationTargetOrder {
+    fn is_pinned(&self) -> bool;
+    fn created_at(&self) -> u64;
+}
+
+impl HasAutomationTargetOrder for amux_common::api::Session {
+    fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    fn created_at(&self) -> u64 {
+        self.created_at
+    }
+}
+
+impl HasAutomationTargetOrder for amux_common::api::Workflow {
+    fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    fn created_at(&self) -> u64 {
+        self.created_at
     }
 }
 
@@ -84,7 +226,7 @@ const UNASSIGNED_GROUP_PAGE: usize = 20;
 ///
 /// 折叠组不加载；窗口贴着最新一端，删改与排序变化都在整窗重取后自然生效
 /// （docs/PRD.md「会话列表视图」、docs/DESIGN.md「会话列表刷新机制」）。
-async fn refresh_list(client: &Client, core: &SharedCore) {
+pub async fn refresh_list(client: &Client, core: &SharedCore) {
     let groups: Vec<(String, Option<String>)> = {
         let core = core.lock();
         let mut groups: Vec<(String, Option<String>)> = core
@@ -621,13 +763,16 @@ pub async fn refresh_settings(client: &Client, core: &SharedCore, tab: SettingsT
     match tab {
         SettingsTab::Connection => {}
         SettingsTab::Machines => refresh_machines(client, core).await,
-        SettingsTab::Orchestrator => refresh_orchestrator(client, core).await,
+        SettingsTab::Workflow => {
+            refresh_orchestrator(client, core).await;
+            refresh_plans(client, core).await;
+        }
+        SettingsTab::Automation => refresh_automation_config(client, core).await,
         SettingsTab::QuickCommands => {
             refresh_quick_commands(client, core).await;
             refresh_projects(client, core).await;
         }
         SettingsTab::Skills => refresh_skills(client, core).await,
-        SettingsTab::WorkflowPlans => refresh_plans(client, core).await,
         SettingsTab::Projects => refresh_projects(client, core).await,
     }
 }
@@ -652,6 +797,14 @@ async fn refresh_orchestrator(client: &Client, core: &SharedCore) {
         let mut core = core.lock();
         core.settings.orchestrator = orchestrator;
         core.settings.orchestrator_loaded = true;
+    }
+}
+
+async fn refresh_automation_config(client: &Client, core: &SharedCore) {
+    if let Ok(config) = client.automation_config().await {
+        let mut core = core.lock();
+        core.settings.automation = config;
+        core.settings.automation_loaded = true;
     }
 }
 

@@ -6,6 +6,7 @@ use amux_common::domain::SessionState;
 use tokio::sync::mpsc;
 
 use crate::acp::AcpEvent;
+use crate::automations::AutomationService;
 use crate::sessions::SessionService;
 use crate::store::Store;
 use crate::workflows::WorkflowService;
@@ -14,6 +15,7 @@ pub async fn run(
     mut events: mpsc::Receiver<AcpEvent>,
     sessions: Arc<SessionService>,
     workflows: Arc<WorkflowService>,
+    automations: Arc<AutomationService>,
     store: Arc<Store>,
 ) {
     while let Some(event) = events.recv().await {
@@ -31,9 +33,16 @@ pub async fn run(
                 applied.new_state,
                 applied.reason,
             );
+            automations.on_session_idle(&applied.session_id, applied.reason);
         }
         if let Some(workflow_id) = store.workflow_of_session(&applied.session_id) {
             workflows.recompute_state(&workflow_id);
+            if store
+                .workflow(&workflow_id)
+                .is_some_and(|workflow| workflow.state == SessionState::Idle)
+            {
+                automations.on_workflow_idle(&workflow_id);
+            }
         }
     }
 }

@@ -6,6 +6,7 @@
 mod acp;
 mod api;
 mod attachments;
+mod automations;
 mod config_store;
 mod events;
 mod frames;
@@ -30,6 +31,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use crate::attachments::AttachmentStore;
+use crate::automations::AutomationService;
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
 use crate::sessions::SessionService;
@@ -98,11 +100,19 @@ async fn run(args: Args) -> Result<(), String> {
         Arc::clone(&config),
         home.clone(),
     ));
+    let automations = AutomationService::new(
+        Arc::clone(&store),
+        Arc::clone(&sessions),
+        Arc::clone(&workflows),
+        Arc::clone(&config),
+    );
+    automations.start();
 
     tokio::spawn(events::run(
         events_rx,
         Arc::clone(&sessions),
         Arc::clone(&workflows),
+        Arc::clone(&automations),
         Arc::clone(&store),
     ));
     tokio::spawn({
@@ -123,6 +133,7 @@ async fn run(args: Args) -> Result<(), String> {
         machines,
         sessions,
         workflows,
+        automations,
         attachments,
     });
     // 鉴权只对命中 API 路由的请求生效：浏览器加载页面时无法携带 Authorization 头，

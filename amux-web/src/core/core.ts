@@ -8,6 +8,8 @@ import type {
   Activity,
   Agent,
   Attachment,
+  Automation,
+  AutomationConfig,
   ContentBlock,
   FsEntry,
   HistoryItem,
@@ -33,7 +35,12 @@ import type {
 export type ConnectionStatus = "connecting" | "offline" | "failed" | "online";
 
 /** 中间面板：新建会话视图或会话交互视图。 */
-export type MiddleView = "new" | "interaction";
+export type MiddleView = "new" | "interaction" | "automation";
+
+/** 自动化右侧面板：新建或详情。 */
+export type AutomationPanel =
+  | { kind: "new" }
+  | { kind: "detail"; id: string };
 
 /** 右侧面板。 */
 export type SidePanel =
@@ -102,10 +109,10 @@ export type DirectoryListing = { machine: string; dir: string; entries: FsEntry[
 export type SettingsTab =
   | "connection"
   | "machines"
-  | "orchestrator"
+  | "workflow"
+  | "automation"
   | "quickCommands"
   | "skills"
-  | "plans"
   | "projects";
 
 /**
@@ -124,6 +131,8 @@ export type SettingsState = {
   /** 每台机器的 agent 列表（与 machines 同序） */
   agents: { machine: string; agents: Agent[] }[];
   orchestrator: OrchestratorState;
+  automation: AutomationConfig | null;
+  automationLoaded: boolean;
   quickCommands: QuickCommand[];
   skills: Skill[];
   plans: WorkflowPlanItem[];
@@ -170,6 +179,19 @@ export type CoreState = {
   open: OpenTarget | null;
   sidePanel: SidePanel | null;
   detail: DetailState;
+  /** 自动化列表 */
+  automations: Automation[];
+  /** 自动化“已有会话”下拉框的全量候选项。 */
+  automationSessions: Session[];
+  automationWorkflows: Workflow[];
+  automationSessionsHasMore: boolean;
+  automationWorkflowsHasMore: boolean;
+  automationSessionsLoading: boolean;
+  automationWorkflowsLoading: boolean;
+  automationSessionOffset: number;
+  automationWorkflowOffset: number;
+  /** 自动化右侧面板；null = 收起 */
+  automationPanel: AutomationPanel | null;
   /** 会话交互视图输入框草稿（改动审查引用会往这里追加） */
   inputDraft: string;
   newSession: NewSessionState;
@@ -225,6 +247,8 @@ export function initialSettings(): SettingsState {
     machines: [],
     agents: [],
     orchestrator: { status: "loading" },
+    automation: null,
+    automationLoaded: false,
     quickCommands: [],
     skills: [],
     plans: [],
@@ -245,6 +269,16 @@ export function initialState(): CoreState {
     open: null,
     sidePanel: null,
     detail: initialDetail(),
+    automations: [],
+    automationSessions: [],
+    automationWorkflows: [],
+    automationSessionsHasMore: false,
+    automationWorkflowsHasMore: false,
+    automationSessionsLoading: false,
+    automationWorkflowsLoading: false,
+    automationSessionOffset: 0,
+    automationWorkflowOffset: 0,
+    automationPanel: null,
     inputDraft: "",
     newSession: initialNewSession(),
     settings: initialSettings(),
@@ -256,6 +290,7 @@ export function initialState(): CoreState {
 /** 各视图的上次刷新时刻（毫秒时间戳；不参与渲染）。 */
 export type Ticks = {
   list?: number;
+  automations?: number;
   history?: number;
   ongoing?: number;
   activities?: number;

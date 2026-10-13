@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::v2::{MediaType, ResourceLink, TextContent};
 use amux_common::api::{
-    Agent, ApiFormat, CreateSessionRequest, OrchestratorConfig, Project, QuickCommand,
-    RecentWorkspace, SessionConfigSetting, Skill, WorkflowPlanItem,
+    Agent, ApiFormat, AutomationConfig, CreateSessionRequest, OrchestratorConfig, Project,
+    QuickCommand, RecentWorkspace, SessionConfigSetting, Skill, WorkflowPlanItem,
 };
 use amux_common::domain::{
     ContentBlock, GitBranch, GitDiffHunk, SessionConfigKind, SessionConfigOption,
@@ -26,6 +26,7 @@ use gpui_component::{
 };
 use parking_lot::Mutex;
 
+use crate::automations;
 use crate::config::{self, Connection};
 use crate::dialog::{self, FormTarget};
 use crate::diff;
@@ -63,7 +64,7 @@ actions!(amux, [CloseSettingsOverlay, TerminalTab, TerminalBackTab]);
 /// 侧栏调宽拖拽载荷（与面板载荷分开，避免全局拖拽事件互相触发）。
 struct SidebarResizeDrag;
 /// 右侧面板调宽拖拽载荷。
-struct PanelResizeDrag;
+pub(crate) struct PanelResizeDrag;
 /// 输入框高度拖拽载荷。
 pub(crate) struct InputResizeDrag;
 /// 当前终端 SSE 的身份；会话、终端或面板变化时重建连接。
@@ -81,6 +82,19 @@ pub struct AmuxApp {
     pub input: Entity<InputState>,
     /// 工作流计划输入框（新建工作流会话）
     pub plan_input: Entity<InputState>,
+    /// 自动化表单输入框
+    pub automation_title: Entity<InputState>,
+    pub automation_task: Entity<InputState>,
+    pub automation_cron: Entity<InputState>,
+    pub automation_repository: Entity<InputState>,
+    pub automation_events: Entity<InputState>,
+    pub automation_workspace: Entity<InputState>,
+    pub automation_worktree_branch: Entity<InputState>,
+    pub automation_plan: Entity<InputState>,
+    pub automation_label1_name: Entity<InputState>,
+    pub automation_label1_description: Entity<InputState>,
+    pub automation_label2_name: Entity<InputState>,
+    pub automation_label2_description: Entity<InputState>,
     /// 工作目录输入框（新建普通会话）
     pub workspace_input: Entity<InputState>,
     /// 连接设置输入框
@@ -92,6 +106,7 @@ pub struct AmuxApp {
     pub orchestrator_format: Option<ApiFormat>,
     /// 内置智能体表单已预填的配置（分类打开时的拉取是异步的，落地后据此重填一次）
     pub orchestrator_prefilled: Option<OrchestratorConfig>,
+    pub automation_config_prefilled: Option<AutomationConfig>,
     /// 行内重命名的会话 id 与输入框
     pub renaming_id: Option<String>,
     pub rename_input: Entity<InputState>,
@@ -101,6 +116,11 @@ pub struct AmuxApp {
     pub orch_model: Entity<InputState>,
     pub orch_effort: Entity<InputState>,
     pub orch_context_window: Entity<InputState>,
+    pub automation_config_base_url: Entity<InputState>,
+    pub automation_config_api_key: Entity<InputState>,
+    pub automation_config_model: Entity<InputState>,
+    pub automation_session_scroll: ScrollHandle,
+    pub automation_workflow_scroll: ScrollHandle,
     pub quick_name: Entity<InputState>,
     pub quick_prompt: Entity<InputState>,
     /// 快捷指令表单当前选择的项目；None = 通用
@@ -179,9 +199,9 @@ pub struct AmuxApp {
     /// 侧栏拖拽起点（指针 x, 起始宽度）
     sidebar_drag: Option<(f32, f32)>,
     /// 右侧面板宽度（逻辑像素，不含手柄）
-    panel_width: f32,
+    pub panel_width: f32,
     /// 面板拖拽起点（指针 x, 起始宽度）
-    panel_drag: Option<(f32, f32)>,
+    pub(crate) panel_drag: Option<(f32, f32)>,
     /// 设置浮窗的焦点锚点（Esc 关闭依赖焦点在浮窗内）
     pub settings_focus: FocusHandle,
 }
@@ -219,6 +239,34 @@ impl AmuxApp {
                 .multi_line(true)
                 .auto_grow(3, 10)
         });
+        let automation_title = cx.new(|cx| InputState::new(window, cx).placeholder("自动化标题"));
+        let automation_task = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(3, 12)
+                .placeholder("到达触发时间后发送给智能体的任务")
+        });
+        let automation_cron = cx.new(|cx| InputState::new(window, cx).placeholder("0 9 * * *"));
+        let automation_repository =
+            cx.new(|cx| InputState::new(window, cx).placeholder("owner/repository"));
+        let automation_events =
+            cx.new(|cx| InputState::new(window, cx).placeholder("push, pull_request"));
+        let automation_workspace = cx.new(|cx| InputState::new(window, cx));
+        let automation_worktree_branch =
+            cx.new(|cx| InputState::new(window, cx).placeholder("HEAD"));
+        let automation_plan = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(3, 12)
+        });
+        let automation_label1_name =
+            cx.new(|cx| InputState::new(window, cx).placeholder("标签名，如：通过"));
+        let automation_label1_description =
+            cx.new(|cx| InputState::new(window, cx).placeholder("标签描述"));
+        let automation_label2_name =
+            cx.new(|cx| InputState::new(window, cx).placeholder("标签名，如：失败"));
+        let automation_label2_description =
+            cx.new(|cx| InputState::new(window, cx).placeholder("标签描述"));
         let workspace_input = cx.new(|cx| InputState::new(window, cx));
         let server_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://amux.example.com:34567"));
@@ -269,6 +317,7 @@ impl AmuxApp {
                     this.sync_terminal_stream();
                     this.sync_paging(cx);
                     this.sync_orchestrator_form(window, cx);
+                    this.sync_automation_config_form(window, cx);
                     this.flush_notes(window, cx);
                     cx.notify();
                 })
@@ -313,6 +362,12 @@ impl AmuxApp {
         let orch_model = cx.new(|cx| InputState::new(window, cx));
         let orch_effort = cx.new(|cx| InputState::new(window, cx));
         let orch_context_window = cx.new(|cx| InputState::new(window, cx).placeholder("1000000"));
+        let automation_config_base_url = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("https://api.typesafe.ai/v1/systemone")
+        });
+        let automation_config_api_key = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let automation_config_model =
+            cx.new(|cx| InputState::new(window, cx).placeholder("jev-latest"));
         let quick_name = cx.new(|cx| InputState::new(window, cx));
         let quick_prompt = cx.new(|cx| {
             InputState::new(window, cx)
@@ -353,12 +408,25 @@ impl AmuxApp {
             runtime,
             input,
             plan_input,
+            automation_title,
+            automation_task,
+            automation_cron,
+            automation_repository,
+            automation_events,
+            automation_workspace,
+            automation_worktree_branch,
+            automation_plan,
+            automation_label1_name,
+            automation_label1_description,
+            automation_label2_name,
+            automation_label2_description,
             workspace_input,
             server_input,
             token_input,
             settings_dirty: false,
             orchestrator_format: None,
             orchestrator_prefilled: None,
+            automation_config_prefilled: None,
             renaming_id: None,
             rename_input,
             orch_base_url,
@@ -366,6 +434,11 @@ impl AmuxApp {
             orch_model,
             orch_effort,
             orch_context_window,
+            automation_config_base_url,
+            automation_config_api_key,
+            automation_config_model,
+            automation_session_scroll: ScrollHandle::new(),
+            automation_workflow_scroll: ScrollHandle::new(),
             quick_name,
             quick_prompt,
             quick_command_project: None,
@@ -458,7 +531,7 @@ impl AmuxApp {
             switched
         });
         if switched
-            && self.with_core(|core| core.settings_tab) == crate::state::SettingsTab::Orchestrator
+            && self.with_core(|core| core.settings_tab) == crate::state::SettingsTab::Workflow
         {
             self.load_orchestrator_form(window, cx);
         }
@@ -488,7 +561,7 @@ impl AmuxApp {
             switched
         });
         if switched {
-            if tab == crate::state::SettingsTab::Orchestrator {
+            if tab == crate::state::SettingsTab::Workflow {
                 self.load_orchestrator_form(window, cx);
             }
             self.load_view_data();
@@ -501,11 +574,19 @@ impl AmuxApp {
     /// 设置类数据不做定时刷新（docs/DESIGN.md「设置页面」），只在视图打开时拉取一次；
     /// 视图切换与连接建立后重取由 [`Self::sync_view_data`] 补上。
     fn load_view_data(&mut self) {
-        let (settings_open, tab, open) =
-            self.with_core(|core| (core.settings_open, core.settings_tab, core.open.clone()));
+        let (settings_open, tab, open, automation_open) = self.with_core(|core| {
+            (
+                core.settings_open,
+                core.settings_tab,
+                core.open.clone(),
+                core.automation_open,
+            )
+        });
         self.with_core(|core| core.loaded_view = Some(core.view_key()));
         if settings_open {
             self.load_settings(tab);
+        } else if automation_open {
+            self.load_automations();
         } else if open.is_some() {
             self.load_interaction();
         } else {
@@ -850,6 +931,8 @@ impl AmuxApp {
         self.dialog_scroll_on_entry = true;
         self.with_core(|core| {
             core.open = None;
+            core.automation_open = false;
+            core.automation_panel = None;
             core.side_panel = None;
             core.view = Default::default();
         });
@@ -871,7 +954,7 @@ impl AmuxApp {
     }
 
     /// 按已知目标打开会话；快捷新建后列表尚未刷新时也要能正确切换。
-    fn open_target(&mut self, target: OpenTarget, cx: &mut Context<Self>) {
+    pub(crate) fn open_target(&mut self, target: OpenTarget, cx: &mut Context<Self>) {
         let is_workflow = matches!(&target, OpenTarget::Workflow(_));
         {
             let mut core = self.core.lock();
@@ -882,6 +965,8 @@ impl AmuxApp {
         }
         // 视图按会话隔离：切换会话时收起不适用或有残留内容的面板与状态
         self.with_core(|core| {
+            core.automation_open = false;
+            core.automation_panel = None;
             if core
                 .side_panel
                 .is_some_and(|panel| !panel.is_available(is_workflow))
@@ -1180,9 +1265,7 @@ impl AmuxApp {
                 self.open_quick_command_form(QuickCommandFormTarget::New, window, cx)
             }
             crate::state::SettingsTab::Skills => self.open_skill_form(FormTarget::New, window, cx),
-            crate::state::SettingsTab::WorkflowPlans => {
-                self.open_plan_form(FormTarget::New, window, cx)
-            }
+            crate::state::SettingsTab::Workflow => self.open_plan_form(FormTarget::New, window, cx),
             crate::state::SettingsTab::Projects => {
                 self.open_project_form(FormTarget::New, window, cx)
             }
@@ -3550,7 +3633,7 @@ impl AmuxApp {
                 Ok(()) => {
                     let mut core = core.lock();
                     core.settings.orchestrator = Some(config);
-                    core.success("内置智能体设置已保存");
+                    core.success("工作流智能体设置已保存");
                 }
                 Err(error) => core.lock().error(format!("保存失败：{error}")),
             }
@@ -3623,7 +3706,7 @@ impl AmuxApp {
     /// 内置智能体分类打开时拉取的配置落地后重填一次表单（打开瞬间可能还是缓存或空）。
     fn sync_orchestrator_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.with_core(|core| {
-            core.settings_open && core.settings_tab == crate::state::SettingsTab::Orchestrator
+            core.settings_open && core.settings_tab == crate::state::SettingsTab::Workflow
         });
         if !open {
             return;
@@ -3635,6 +3718,113 @@ impl AmuxApp {
             return;
         }
         self.load_orchestrator_form(window, cx);
+    }
+
+    fn sync_automation_config_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.with_core(|core| {
+            core.settings_open && core.settings_tab == crate::state::SettingsTab::Automation
+        });
+        if !open {
+            return;
+        }
+        let (loaded, saved) = self.with_core(|core| {
+            (
+                core.settings.automation_loaded,
+                core.settings.automation.clone(),
+            )
+        });
+        if !loaded {
+            return;
+        }
+        let saved = saved.unwrap_or(AutomationConfig {
+            api_format: amux_common::api::AutomationApiFormat::Jev,
+            base_url: "https://api.typesafe.ai/v1/systemone".into(),
+            api_key: String::new(),
+            model: "jev-latest".into(),
+        });
+        if self.automation_config_prefilled.as_ref() == Some(&saved) {
+            return;
+        }
+        self.automation_config_base_url.update(cx, |state, cx| {
+            state.set_value(saved.base_url.clone(), window, cx)
+        });
+        self.automation_config_api_key.update(cx, |state, cx| {
+            state.set_value(saved.api_key.clone(), window, cx)
+        });
+        self.automation_config_model.update(cx, |state, cx| {
+            state.set_value(saved.model.clone(), window, cx)
+        });
+        self.automation_config_prefilled = Some(saved);
+    }
+
+    pub fn save_automation_config(&mut self, cx: &mut Context<Self>) {
+        let client = self.with_core(|core| core.client.clone());
+        let Some(client) = client else { return };
+        let config = AutomationConfig {
+            api_format: amux_common::api::AutomationApiFormat::Jev,
+            base_url: self
+                .automation_config_base_url
+                .read(cx)
+                .value()
+                .trim()
+                .to_string(),
+            api_key: self
+                .automation_config_api_key
+                .read(cx)
+                .value()
+                .trim()
+                .to_string(),
+            model: self
+                .automation_config_model
+                .read(cx)
+                .value()
+                .trim()
+                .to_string(),
+        };
+        if let Err(error) = config.validate() {
+            self.with_core(|core| core.error(format!("保存失败：{error}")));
+            cx.notify();
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        self.runtime.spawn(async move {
+            match client.set_automation_config(&config).await {
+                Ok(()) => {
+                    let mut core = core.lock();
+                    core.settings.automation = Some(config);
+                    core.settings.automation_loaded = true;
+                    core.success("自动化设置已保存");
+                }
+                Err(error) => core.lock().error(format!("保存失败：{error}")),
+            }
+        });
+        cx.notify();
+    }
+
+    pub fn automation_config_dirty(&self, cx: &App) -> bool {
+        let saved = self.with_core(|core| core.settings.automation.clone());
+        let current = AutomationConfig {
+            api_format: amux_common::api::AutomationApiFormat::Jev,
+            base_url: self
+                .automation_config_base_url
+                .read(cx)
+                .value()
+                .trim()
+                .to_string(),
+            api_key: self
+                .automation_config_api_key
+                .read(cx)
+                .value()
+                .trim()
+                .to_string(),
+            model: self
+                .automation_config_model
+                .read(cx)
+                .value()
+                .trim()
+                .to_string(),
+        };
+        saved.as_ref() != Some(&current)
     }
 
     /// 会话选项下拉框：单个 select 选项。
@@ -3736,9 +3926,17 @@ impl AmuxApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let has_open = core.open.is_some();
-        let panel = self.render_panel(window, cx);
+        let panel = if core.automation_open {
+            automations::render_panel(core, self, cx)
+        } else {
+            self.render_panel(window, cx)
+        };
         let sidebar = self.render_sidebar(cx);
-        let main = sessions::render_main(core, self, cx);
+        let main = if core.automation_open {
+            automations::render_main(core, cx)
+        } else {
+            sessions::render_main(core, self, cx)
+        };
         let rail = self.render_rail(cx);
 
         let mut main_row = h_flex()

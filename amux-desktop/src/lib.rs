@@ -1,6 +1,7 @@
 //! amux 桌面应用 crate（模块导出供测试复用；二进制入口在 `main.rs`）。
 
 pub mod app;
+pub mod automations;
 pub mod client;
 pub mod config;
 pub mod dialog;

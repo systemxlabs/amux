@@ -277,17 +277,17 @@ fn workflow_form(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> 
             .child(
                 Alert::warning(
                     "ns-no-orchestrator-alert",
-                    "请先在设置 → 内置智能体中配置大模型供应商连接。",
+                    "请先在设置 → 工作流中配置工作流智能体的大模型供应商连接。",
                 )
-                .title("内置智能体尚未配置"),
+                .title("工作流智能体尚未配置"),
             )
             .child(
                 Button::new("ns-goto-orchestrator-settings")
                     .small()
                     .primary()
-                    .label("去配置内置智能体")
+                    .label("去配置工作流智能体")
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_settings(Some(SettingsTab::Orchestrator), window, cx)
+                        this.open_settings(Some(SettingsTab::Workflow), window, cx)
                     })),
             )
             .into_any_element();
@@ -1006,7 +1006,7 @@ fn quick_buttons(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
         );
     }
     if !project_commands.is_empty() && !general_commands.is_empty() {
-        row = row.child(div().w(px(2.)).h_4().bg(theme.border));
+        row = row.child(div().w(px(2.)).h_4().bg(theme.foreground.opacity(0.4)));
     }
     for command in &general_commands {
         row = row.child(

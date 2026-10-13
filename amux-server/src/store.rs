@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use amux_common::api::Session;
+use amux_common::api::{
+    parse_automation_run_state, AutomationInput, AutomationResultLabel, AutomationRun,
+    AutomationSessionOptions, AutomationTrigger, Session,
+};
 use amux_common::domain::{Activity, HistoryItem, SessionState};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -65,7 +68,18 @@ pub struct Store {
     home: PathBuf,
     sessions: Mutex<Connection>,
     workflows: Mutex<Connection>,
+    automations: Mutex<Connection>,
     transcripts: Mutex<TranscriptCache>,
+}
+
+/// 新建工作流元数据所需的输入。
+pub struct WorkflowInsert<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub state: SessionState,
+    pub plan: &'a str,
+    pub project: Option<&'a str>,
+    pub created_at: u64,
 }
 
 impl Store {
@@ -74,6 +88,7 @@ impl Store {
         std::fs::create_dir_all(&home).map_err(|e| format!("创建 {} 失败: {e}", home.display()))?;
         let sessions = open_db(&home.join("session.sqlite"), SESSION_SCHEMA)?;
         let workflows = open_db(&home.join("workflow.sqlite"), WORKFLOW_SCHEMA)?;
+        let automations = open_db(&home.join("automation.sqlite"), AUTOMATION_SCHEMA)?;
         // Server 重启后残留的「工作中」不再有 agent 侧 turn 支撑，统一回到空闲
         sessions
             .execute(
@@ -91,6 +106,7 @@ impl Store {
             home,
             sessions: Mutex::new(sessions),
             workflows: Mutex::new(workflows),
+            automations: Mutex::new(automations),
             transcripts: Mutex::new(TranscriptCache::default()),
         })
     }
@@ -523,15 +539,15 @@ impl Store {
 
     // ---------- 工作流会话 ----------
 
-    pub fn insert_workflow(
-        &self,
-        id: &str,
-        title: &str,
-        state: SessionState,
-        plan: &str,
-        project: Option<&str>,
-        created_at: u64,
-    ) {
+    pub fn insert_workflow(&self, workflow: WorkflowInsert<'_>) {
+        let WorkflowInsert {
+            id,
+            title,
+            state,
+            plan,
+            project,
+            created_at,
+        } = workflow;
         let _ = self.workflows.lock().execute(
             "INSERT INTO workflows (id, title, state, plan, project, pinned, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
@@ -669,6 +685,300 @@ impl Store {
             .map(|session| session.id)
             .collect()
     }
+
+    // ---------- 自动化 ----------
+
+    pub fn automations(&self) -> Vec<AutomationRow> {
+        let conn = self.automations.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, title, enabled, task, project, trigger, session_options,
+                    result_labels, created_at, updated_at
+             FROM automations ORDER BY created_at DESC, id DESC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        collect(stmt.query_map([], row_to_automation_record))
+            .into_iter()
+            .filter_map(AutomationRecord::decode)
+            .collect()
+    }
+
+    pub fn automation(&self, id: &str) -> Option<AutomationRow> {
+        let record = self
+            .automations
+            .lock()
+            .query_row(
+                "SELECT id, title, enabled, task, project, trigger, session_options,
+                        result_labels, created_at, updated_at
+                 FROM automations WHERE id = ?1",
+                params![id],
+                row_to_automation_record,
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        record.decode()
+    }
+
+    pub fn insert_automation(
+        &self,
+        id: &str,
+        input: &AutomationInput,
+        created_at: u64,
+        updated_at: u64,
+    ) {
+        let trigger = serde_json::to_string(&input.trigger).unwrap_or_default();
+        let options = serde_json::to_string(&input.session_options).unwrap_or_default();
+        let labels = serde_json::to_string(&input.result_labels).unwrap_or_default();
+        let _ = self.automations.lock().execute(
+            "INSERT INTO automations (
+                id, title, enabled, task, project, trigger, session_options,
+                result_labels, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                id,
+                input.title,
+                input.enabled,
+                input.task,
+                input.project,
+                trigger,
+                options,
+                labels,
+                created_at as i64,
+                updated_at as i64,
+            ],
+        );
+    }
+
+    pub fn update_automation(&self, id: &str, input: &AutomationInput, updated_at: u64) -> bool {
+        let trigger = serde_json::to_string(&input.trigger).unwrap_or_default();
+        let options = serde_json::to_string(&input.session_options).unwrap_or_default();
+        let labels = serde_json::to_string(&input.result_labels).unwrap_or_default();
+        self.automations
+            .lock()
+            .execute(
+                "UPDATE automations
+                 SET title = ?2, enabled = ?3, task = ?4, project = ?5, trigger = ?6,
+                     session_options = ?7, result_labels = ?8, updated_at = ?9
+                 WHERE id = ?1",
+                params![
+                    id,
+                    input.title,
+                    input.enabled,
+                    input.task,
+                    input.project,
+                    trigger,
+                    options,
+                    labels,
+                    updated_at as i64,
+                ],
+            )
+            .is_ok_and(|changed| changed > 0)
+    }
+
+    pub fn delete_automation(&self, id: &str) -> bool {
+        let conn = self.automations.lock();
+        let deleted = conn
+            .execute("DELETE FROM automations WHERE id = ?1", params![id])
+            .is_ok_and(|changed| changed > 0);
+        if deleted {
+            let _ = conn.execute("DELETE FROM runs WHERE automation_id = ?1", params![id]);
+        }
+        deleted
+    }
+
+    pub fn unassign_automation_project(&self, project: &str) {
+        let _ = self.automations.lock().execute(
+            "UPDATE automations SET project = NULL WHERE project = ?1",
+            params![project],
+        );
+    }
+
+    pub fn insert_automation_run(&self, run: &AutomationRun) {
+        let _ = self.automations.lock().execute(
+            "INSERT INTO runs (
+                id, automation_id, session_id, workflow_id, state, error, result_label,
+                created_at, started_at, finished_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                run.id,
+                run.automation_id,
+                run.session_id,
+                run.workflow_id,
+                run.state.as_str(),
+                run.error,
+                run.result_label,
+                run.created_at as i64,
+                run.started_at.map(|value| value as i64),
+                run.finished_at.map(|value| value as i64),
+            ],
+        );
+    }
+
+    pub fn start_automation_run(
+        &self,
+        run_id: &str,
+        session_id: Option<&str>,
+        workflow_id: Option<&str>,
+        started_at: u64,
+    ) {
+        let _ = self.automations.lock().execute(
+            "UPDATE runs
+             SET state = 'running', session_id = ?2, workflow_id = ?3, started_at = ?4
+             WHERE id = ?1 AND state = 'queued'",
+            params![run_id, session_id, workflow_id, started_at as i64],
+        );
+    }
+
+    pub fn finish_automation_run(&self, run_id: &str, finished_at: u64) {
+        let _ = self.automations.lock().execute(
+            "UPDATE runs
+             SET state = 'finished', error = NULL, finished_at = ?2
+             WHERE id = ?1 AND state = 'running'",
+            params![run_id, finished_at as i64],
+        );
+    }
+
+    pub fn fail_automation_run(&self, run_id: &str, error: &str, finished_at: u64) {
+        let _ = self.automations.lock().execute(
+            "UPDATE runs
+             SET state = 'failed', error = ?2, finished_at = ?3
+             WHERE id = ?1 AND state IN ('queued', 'running')",
+            params![run_id, error, finished_at as i64],
+        );
+    }
+
+    pub fn set_automation_run_label(
+        &self,
+        run_id: &str,
+        result_label: Option<&str>,
+        error: Option<&str>,
+    ) {
+        let _ = self.automations.lock().execute(
+            "UPDATE runs SET result_label = ?2, error = ?3 WHERE id = ?1 AND state = 'finished'",
+            params![run_id, result_label, error],
+        );
+    }
+
+    pub fn automation_run(&self, id: &str) -> Option<AutomationRun> {
+        let record = self
+            .automations
+            .lock()
+            .query_row(
+                "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                        created_at, started_at, finished_at
+                 FROM runs WHERE id = ?1",
+                params![id],
+                row_to_automation_run,
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        record.decode()
+    }
+
+    pub fn latest_automation_run(&self, automation_id: &str) -> Option<AutomationRun> {
+        let record = self
+            .automations
+            .lock()
+            .query_row(
+                "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                        created_at, started_at, finished_at
+                 FROM runs WHERE automation_id = ?1
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![automation_id],
+                row_to_automation_run,
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        record.decode()
+    }
+
+    pub fn running_automation_run_for_session(&self, session_id: &str) -> Option<AutomationRun> {
+        let record = self
+            .automations
+            .lock()
+            .query_row(
+                "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                        created_at, started_at, finished_at
+                 FROM runs
+                 WHERE session_id = ?1 AND state = 'running'
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![session_id],
+                row_to_automation_run,
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        record.decode()
+    }
+
+    pub fn running_automation_run_for_workflow(&self, workflow_id: &str) -> Option<AutomationRun> {
+        let record = self
+            .automations
+            .lock()
+            .query_row(
+                "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                        created_at, started_at, finished_at
+                 FROM runs
+                 WHERE workflow_id = ?1 AND state = 'running'
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![workflow_id],
+                row_to_automation_run,
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        record.decode()
+    }
+
+    pub fn running_automation_runs(&self) -> Vec<AutomationRun> {
+        let conn = self.automations.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                    created_at, started_at, finished_at
+             FROM runs WHERE state = 'running'
+             ORDER BY created_at ASC, id ASC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        collect(stmt.query_map([], row_to_automation_run))
+            .into_iter()
+            .filter_map(AutomationRunRecord::decode)
+            .collect()
+    }
+
+    pub fn automation_runs_page(
+        &self,
+        automation_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> (Vec<AutomationRun>, bool) {
+        let conn = self.automations.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                    created_at, started_at, finished_at
+             FROM runs WHERE automation_id = ?1
+             ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return (Vec::new(), false),
+        };
+        let rows = stmt.query_map(
+            params![automation_id, (limit + 1) as i64, offset as i64],
+            row_to_automation_run,
+        );
+        let mut runs: Vec<AutomationRun> = collect(rows)
+            .into_iter()
+            .filter_map(AutomationRunRecord::decode)
+            .collect();
+        let has_more = runs.len() > limit;
+        runs.truncate(limit);
+        (runs, has_more)
+    }
 }
 
 /// 工作流会话元数据行。
@@ -682,6 +992,83 @@ pub struct WorkflowRow {
     pub pinned: bool,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// 自动化元数据行；JSON 列在读取时解码成强类型字段。
+#[derive(Debug, Clone)]
+pub struct AutomationRow {
+    pub id: String,
+    pub title: String,
+    pub enabled: bool,
+    pub task: String,
+    pub project: Option<String>,
+    pub trigger: AutomationTrigger,
+    pub session_options: AutomationSessionOptions,
+    pub result_labels: Vec<AutomationResultLabel>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug)]
+struct AutomationRecord {
+    id: String,
+    title: String,
+    enabled: bool,
+    task: String,
+    project: Option<String>,
+    trigger: String,
+    session_options: String,
+    result_labels: String,
+    created_at: u64,
+    updated_at: u64,
+}
+
+impl AutomationRecord {
+    fn decode(self) -> Option<AutomationRow> {
+        Some(AutomationRow {
+            id: self.id,
+            title: self.title,
+            enabled: self.enabled,
+            task: self.task,
+            project: self.project,
+            trigger: serde_json::from_str(&self.trigger).ok()?,
+            session_options: serde_json::from_str(&self.session_options).ok()?,
+            result_labels: serde_json::from_str(&self.result_labels).ok()?,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct AutomationRunRecord {
+    id: String,
+    automation_id: String,
+    session_id: Option<String>,
+    workflow_id: Option<String>,
+    state: String,
+    error: Option<String>,
+    result_label: Option<String>,
+    created_at: u64,
+    started_at: Option<u64>,
+    finished_at: Option<u64>,
+}
+
+impl AutomationRunRecord {
+    fn decode(self) -> Option<AutomationRun> {
+        Some(AutomationRun {
+            id: self.id,
+            automation_id: self.automation_id,
+            session_id: self.session_id,
+            workflow_id: self.workflow_id,
+            state: parse_automation_run_state(&self.state)?,
+            error: self.error,
+            result_label: self.result_label,
+            created_at: self.created_at,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+        })
+    }
 }
 
 /// 中心 `session.sqlite` 表结构。
@@ -732,6 +1119,35 @@ const WORKFLOW_SCHEMA: &str = "
         updated_at INTEGER NOT NULL
     );";
 
+/// `automation.sqlite` 表结构（独立数据库按 docs/DESIGN.md「自动化存储」）。
+const AUTOMATION_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS automations (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        enabled BOOL NOT NULL,
+        task TEXT NOT NULL,
+        project TEXT,
+        trigger TEXT NOT NULL,
+        session_options TEXT NOT NULL,
+        result_labels TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS runs (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT NOT NULL,
+        session_id TEXT,
+        workflow_id TEXT,
+        state TEXT NOT NULL,
+        error TEXT,
+        result_label TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS runs_by_automation
+        ON runs(automation_id, created_at DESC);";
+
 fn open_db(path: &Path, schema: &str) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("打开 {} 失败: {e}", path.display()))?;
     conn.execute_batch(&format!("PRAGMA journal_mode = WAL;\n{schema}"))
@@ -768,6 +1184,36 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRow> {
         pinned: row.get(5)?,
         created_at: row.get::<_, i64>(6)? as u64,
         updated_at: row.get::<_, i64>(7)? as u64,
+    })
+}
+
+fn row_to_automation_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationRecord> {
+    Ok(AutomationRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        enabled: row.get(2)?,
+        task: row.get(3)?,
+        project: row.get(4)?,
+        trigger: row.get(5)?,
+        session_options: row.get(6)?,
+        result_labels: row.get(7)?,
+        created_at: row.get::<_, i64>(8)? as u64,
+        updated_at: row.get::<_, i64>(9)? as u64,
+    })
+}
+
+fn row_to_automation_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationRunRecord> {
+    Ok(AutomationRunRecord {
+        id: row.get(0)?,
+        automation_id: row.get(1)?,
+        session_id: row.get(2)?,
+        workflow_id: row.get(3)?,
+        state: row.get(4)?,
+        error: row.get(5)?,
+        result_label: row.get(6)?,
+        created_at: row.get::<_, i64>(7)? as u64,
+        started_at: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
+        finished_at: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
     })
 }
 
@@ -809,7 +1255,14 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         store.insert_session(&session("s1", "pc", "codex")).unwrap();
         store.insert_session(&session("s2", "pc", "codex")).unwrap();
-        store.insert_workflow("w1", "wf", SessionState::Idle, "plan", None, 1);
+        store.insert_workflow(WorkflowInsert {
+            id: "w1",
+            title: "wf",
+            state: SessionState::Idle,
+            plan: "plan",
+            project: None,
+            created_at: 1,
+        });
         store.link_session("w1", "s2");
 
         let (page, has_more) = store.sessions_page(10, 0, None);
@@ -892,7 +1345,14 @@ mod tests {
             s.created_at = created_at;
             store.insert_session(&s).unwrap();
         }
-        store.insert_workflow("w1", "wf", SessionState::Idle, "plan", None, 1);
+        store.insert_workflow(WorkflowInsert {
+            id: "w1",
+            title: "wf",
+            state: SessionState::Idle,
+            plan: "plan",
+            project: None,
+            created_at: 1,
+        });
         // 按任意顺序关联，返回时置顶优先，其余按创建时间倒序
         store.link_session("w1", "s3");
         store.link_session("w1", "s1");
@@ -906,9 +1366,20 @@ mod tests {
     fn workflows_page_filters_project_before_pagination() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        store.insert_workflow("a1", "a1", SessionState::Idle, "p", Some("p"), 10);
-        store.insert_workflow("b1", "b1", SessionState::Idle, "q", Some("q"), 9);
-        store.insert_workflow("a2", "a2", SessionState::Idle, "p", Some("p"), 8);
+        for (id, plan, project, created_at) in [
+            ("a1", "p", "p", 10),
+            ("b1", "q", "q", 9),
+            ("a2", "p", "p", 8),
+        ] {
+            store.insert_workflow(WorkflowInsert {
+                id,
+                title: id,
+                state: SessionState::Idle,
+                plan,
+                project: Some(project),
+                created_at,
+            });
+        }
 
         let (first, has_more) = store.workflows_page(1, 0, Some("p"));
         assert_eq!(
@@ -929,9 +1400,30 @@ mod tests {
     fn workflows_page_filters_unassigned_before_pagination() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        store.insert_workflow("a1", "a1", SessionState::Idle, "p", None, 10);
-        store.insert_workflow("b1", "b1", SessionState::Idle, "q", Some("q"), 9);
-        store.insert_workflow("a2", "a2", SessionState::Idle, "p", None, 8);
+        store.insert_workflow(WorkflowInsert {
+            id: "a1",
+            title: "a1",
+            state: SessionState::Idle,
+            plan: "p",
+            project: None,
+            created_at: 10,
+        });
+        store.insert_workflow(WorkflowInsert {
+            id: "b1",
+            title: "b1",
+            state: SessionState::Idle,
+            plan: "q",
+            project: Some("q"),
+            created_at: 9,
+        });
+        store.insert_workflow(WorkflowInsert {
+            id: "a2",
+            title: "a2",
+            state: SessionState::Idle,
+            plan: "p",
+            project: None,
+            created_at: 8,
+        });
 
         let (first, has_more) = store.workflows_page(1, 0, Some(""));
         assert_eq!(
@@ -952,9 +1444,16 @@ mod tests {
     fn workflows_page_includes_all_pinned_and_paginates_unpinned() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        store.insert_workflow("w1", "w1", SessionState::Idle, "p", None, 70);
-        store.insert_workflow("w2", "w2", SessionState::Idle, "p", None, 80);
-        store.insert_workflow("pinned", "pinned", SessionState::Idle, "p", None, 100);
+        for (id, created_at) in [("w1", 70), ("w2", 80), ("pinned", 100)] {
+            store.insert_workflow(WorkflowInsert {
+                id,
+                title: id,
+                state: SessionState::Idle,
+                plan: "p",
+                project: None,
+                created_at,
+            });
+        }
         store.set_workflow_pinned("pinned", true);
 
         let (first, has_more) = store.workflows_page(1, 0, None);
@@ -987,6 +1486,64 @@ mod tests {
             SessionState::Idle,
             "Server 重启后不应残留工作中状态"
         );
+    }
+
+    #[test]
+    fn automation_and_runs_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let input = AutomationInput {
+            title: "每日任务".into(),
+            enabled: true,
+            task: "执行检查".into(),
+            project: Some("p".into()),
+            trigger: AutomationTrigger::Schedule {
+                cron: "0 9 * * *".into(),
+            },
+            session_options: AutomationSessionOptions::NewSession {
+                machine: "pc".into(),
+                agent: "codex".into(),
+                workspace: "/repo".into(),
+                use_worktree: false,
+                worktree_base_branch: None,
+            },
+            result_labels: vec![
+                AutomationResultLabel {
+                    name: "通过".into(),
+                    description: "已完成".into(),
+                },
+                AutomationResultLabel {
+                    name: "失败".into(),
+                    description: "未完成".into(),
+                },
+            ],
+        };
+        store.insert_automation("a1", &input, 10, 10);
+        store.insert_automation_run(&AutomationRun {
+            id: "r1".into(),
+            automation_id: "a1".into(),
+            session_id: None,
+            workflow_id: None,
+            state: amux_common::api::AutomationRunState::Queued,
+            result_label: None,
+            error: None,
+            created_at: 11,
+            started_at: None,
+            finished_at: None,
+        });
+        store.start_automation_run("r1", None, Some("w1"), 11);
+        store.finish_automation_run("r1", 12);
+        store.set_automation_run_label("r1", Some("通过"), None);
+
+        let automation = store.automation("a1").unwrap();
+        assert_eq!(automation.title, "每日任务");
+        assert_eq!(automation.result_labels.len(), 2);
+        let run = store.latest_automation_run("a1").unwrap();
+        assert_eq!(run.state, amux_common::api::AutomationRunState::Finished);
+        assert_eq!(run.workflow_id.as_deref(), Some("w1"));
+        assert_eq!(run.started_at, Some(11));
+        assert_eq!(run.result_label.as_deref(), Some("通过"));
+        assert_eq!(run.finished_at, Some(12));
     }
 
     #[test]

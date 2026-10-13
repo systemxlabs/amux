@@ -1,11 +1,12 @@
-//! 配置存储：`<amux_home>/config/*.json`（技能、工作流计划、最近工作目录、项目、快捷指令、内置智能体）。
+//! 配置存储：`<amux_home>/config/*.json`（技能、工作流计划、最近工作目录、项目、快捷指令、内置智能体、自动化）。
 //!
 //! 读写为低频操作，不做并发与原子写入处理（docs/DESIGN.md 各「存储」一节）。
 
 use std::path::PathBuf;
 
 use amux_common::api::{
-    OrchestratorConfig, Project, QuickCommand, RecentWorkspace, Skill, WorkflowPlanItem,
+    AutomationConfig, OrchestratorConfig, Project, QuickCommand, RecentWorkspace, Skill,
+    WorkflowPlanItem,
 };
 use parking_lot::Mutex;
 
@@ -67,11 +68,20 @@ impl ConfigStore {
     }
 
     pub fn orchestrator(&self) -> Option<OrchestratorConfig> {
-        read_json::<OrchestratorConfig>(&self.path("agent"))
+        read_json::<OrchestratorConfig>(&self.path("workflow_agent"))
     }
 
     pub fn set_orchestrator(&self, config: &OrchestratorConfig) -> Result<(), String> {
-        write_json(&self.path("agent"), config)
+        write_json(&self.path("workflow_agent"), config)
+    }
+
+    pub fn automation(&self) -> Option<AutomationConfig> {
+        read_json::<AutomationConfig>(&self.path("automation"))
+    }
+
+    pub fn set_automation(&self, config: &AutomationConfig) -> Result<(), String> {
+        config.validate()?;
+        write_json(&self.path("automation"), config)
     }
     pub fn projects(&self) -> Vec<Project> {
         read_json::<Vec<Project>>(&self.path("projects")).unwrap_or_default()
@@ -416,5 +426,21 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].project, None);
         assert_eq!(commands[0].name, "通用指令");
+    }
+
+    #[test]
+    fn automation_config_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+        let config = AutomationConfig {
+            api_format: amux_common::api::AutomationApiFormat::Jev,
+            base_url: "https://api.typesafe.ai/v1/systemone".into(),
+            api_key: "token".into(),
+            model: "jev-latest".into(),
+        };
+        store.set_automation(&config).unwrap();
+
+        let reopened = ConfigStore::new(dir.path().to_path_buf());
+        assert_eq!(reopened.automation().unwrap(), config);
     }
 }

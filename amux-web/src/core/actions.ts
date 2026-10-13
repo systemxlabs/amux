@@ -6,6 +6,9 @@ import { encodeBase64 } from "../lib/terminal";
 import { clearToken, loadToken, saveToken } from "../lib/token";
 import type {
   Agent,
+  Automation,
+  AutomationConfig,
+  AutomationInput,
   ContentBlock,
   FsEntry,
   ListEntry,
@@ -22,6 +25,7 @@ import { initialNewSession, panelAvailable } from "./core";
 import type { Core, PendingAttachment, SidePanel } from "./core";
 import {
   refreshHistory,
+  refreshAutomations,
   refreshInteraction,
   refreshList,
   refreshNewSession,
@@ -110,12 +114,30 @@ export async function saveConnection(core: Core, token: string): Promise<void> {
   await refreshList(core);
 }
 
+export async function saveAutomationConfig(
+  core: Core,
+  config: AutomationConfig,
+): Promise<void> {
+  if (!core.client) return;
+  try {
+    await core.client.setAutomationConfig(config);
+    core.update((state) => {
+      state.settings.automation = config;
+      state.settings.automationLoaded = true;
+    });
+    core.success("自动化配置已保存");
+  } catch (error) {
+    core.failure(`保存自动化配置失败：${messageOf(error)}`);
+  }
+}
+
 // ---------- 会话列表与打开 ----------
 
 export function showNewSession(core: Core): void {
   core.update((state) => {
     state.middle = "new";
     state.sidePanel = null;
+    state.automationPanel = null;
     for (const attachment of state.attachments) attachment.controller?.abort();
     state.attachments = [];
   });
@@ -140,6 +162,7 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
   core.update((state) => {
     state.open = target;
     state.middle = "interaction";
+    state.automationPanel = null;
     for (const attachment of state.attachments) attachment.controller?.abort();
     state.attachments = [];
     // 执行目录/改动审查/计划/终端仅普通会话有：切到不适用的会话时关闭面板
@@ -155,6 +178,111 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
   });
   core.resetTicks();
   await Promise.all([refreshInteraction(core), tick(core)]);
+}
+
+/** 打开自动化列表，并清空当前会话视图状态。 */
+export async function showAutomations(core: Core): Promise<void> {
+  core.update((state) => {
+    state.middle = "automation";
+    state.open = null;
+    state.sidePanel = null;
+    state.automationPanel = null;
+  });
+  core.resetTicks();
+  await Promise.all([refreshAutomations(core), refreshList(core)]);
+}
+
+export function showNewAutomation(core: Core): void {
+  core.update((state) => {
+    state.middle = "automation";
+    state.open = null;
+    state.sidePanel = null;
+    state.automationPanel = { kind: "new" };
+  });
+}
+
+export function showAutomationDetail(core: Core, id: string): void {
+  core.update((state) => {
+    state.middle = "automation";
+    state.open = null;
+    state.sidePanel = null;
+    state.automationPanel = { kind: "detail", id };
+  });
+}
+
+export function closeAutomationPanel(core: Core): void {
+  core.update((state) => {
+    state.automationPanel = null;
+  });
+}
+
+export async function saveAutomation(
+  core: Core,
+  input: AutomationInput,
+  id?: string,
+): Promise<boolean> {
+  if (!core.client) return false;
+  try {
+    const automation =
+      id === undefined
+        ? await core.client.createAutomation(input)
+        : await core.client.updateAutomation(id, input);
+    core.update((state) => {
+      const index = state.automations.findIndex((item) => item.id === automation.id);
+      if (index === -1) state.automations = [automation, ...state.automations];
+      else state.automations[index] = automation;
+      state.automationPanel = { kind: "detail", id: automation.id };
+    });
+    core.success(id === undefined ? "自动化已创建" : "自动化已保存");
+    await refreshAutomations(core);
+    return true;
+  } catch (error) {
+    core.failure(`保存自动化失败：${messageOf(error)}`);
+    return false;
+  }
+}
+
+export async function deleteAutomation(core: Core, automation: Automation): Promise<void> {
+  if (!core.client) return;
+  try {
+    await core.client.deleteAutomation(automation.id);
+    core.update((state) => {
+      state.automations = state.automations.filter((item) => item.id !== automation.id);
+      if (state.automationPanel?.kind === "detail" && state.automationPanel.id === automation.id) {
+        state.automationPanel = null;
+      }
+    });
+    core.success(`已删除「${automation.title}」`);
+  } catch (error) {
+    core.failure(`删除自动化失败：${messageOf(error)}`);
+  }
+}
+
+export async function toggleAutomation(core: Core, automation: Automation): Promise<void> {
+  await saveAutomation(
+    core,
+    {
+      title: automation.title,
+      enabled: !automation.enabled,
+      task: automation.task,
+      project: automation.project,
+      trigger: automation.trigger,
+      sessionOptions: automation.sessionOptions,
+      resultLabels: automation.resultLabels,
+    },
+    automation.id,
+  );
+}
+
+export async function triggerAutomation(core: Core, automation: Automation): Promise<void> {
+  if (!core.client) return;
+  try {
+    await core.client.triggerAutomation(automation.id);
+    core.success(`已触发「${automation.title}」`);
+    await refreshAutomations(core);
+  } catch (error) {
+    core.failure(`触发自动化失败：${messageOf(error)}`);
+  }
 }
 
 /** 切换右侧面板（再次点击收起）。 */
@@ -1035,7 +1163,7 @@ export async function saveOrchestrator(core: Core, config: OrchestratorConfig): 
     core.update((state) => {
       state.settings.orchestrator = { status: "ready", config };
     });
-    core.success("内置智能体配置已保存");
+    core.success("工作流智能体配置已保存");
   } catch (error) {
     core.failure(`保存失败：${messageOf(error)}`);
   }

@@ -8,6 +8,7 @@ import type { SettingsTab } from "../../core/core";
 import { useCore, useCoreState } from "../../core/store";
 import { cn } from "../../lib/utils";
 import { ConnectionSection } from "./ConnectionSection";
+import { AutomationSection } from "./AutomationSection";
 import { MachinesSection } from "./MachinesSection";
 import { OrchestratorSection } from "./OrchestratorSection";
 import { QuickCommandsSection } from "./QuickCommandsSection";
@@ -19,10 +20,10 @@ import { ProjectsSection } from "./ProjectsSection";
 const TABS: { tab: SettingsTab; label: string }[] = [
   { tab: "connection", label: "连接" },
   { tab: "machines", label: "机器管理" },
-  { tab: "orchestrator", label: "内置智能体" },
+  { tab: "workflow", label: "工作流" },
+  { tab: "automation", label: "自动化" },
   { tab: "quickCommands", label: "快捷指令" },
   { tab: "skills", label: "技能管理" },
-  { tab: "plans", label: "工作流计划" },
   { tab: "projects", label: "项目管理" },
 ];
 
@@ -32,14 +33,19 @@ function section(tab: SettingsTab) {
       return <ConnectionSection />;
     case "machines":
       return <MachinesSection />;
-    case "orchestrator":
-      return <OrchestratorSection />;
+    case "workflow":
+      return (
+        <div className="flex flex-col gap-6">
+          <OrchestratorSection />
+          <WorkflowPlansSection />
+        </div>
+      );
+    case "automation":
+      return <AutomationSection />;
     case "quickCommands":
       return <QuickCommandsSection />;
     case "skills":
       return <SkillsSection />;
-    case "plans":
-      return <WorkflowPlansSection />;
     case "projects":
       return <ProjectsSection />;
   }

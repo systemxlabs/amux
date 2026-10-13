@@ -581,11 +581,63 @@ impl Client {
     }
 
     pub async fn orchestrator(&self) -> Result<Option<OrchestratorConfig>, String> {
-        self.get_json(path::CONFIG_AGENT).await
+        self.get_json(path::CONFIG_WORKFLOW_AGENT).await
     }
 
     pub async fn set_orchestrator(&self, config: &OrchestratorConfig) -> Result<(), String> {
-        self.put_empty(path::CONFIG_AGENT, config).await
+        self.put_empty(path::CONFIG_WORKFLOW_AGENT, config).await
+    }
+
+    pub async fn automation_config(&self) -> Result<Option<AutomationConfig>, String> {
+        self.get_json(path::CONFIG_AUTOMATION).await
+    }
+
+    pub async fn set_automation_config(&self, config: &AutomationConfig) -> Result<(), String> {
+        self.put_empty(path::CONFIG_AUTOMATION, config).await
+    }
+
+    // ---------- 自动化 ----------
+
+    pub async fn automations(&self) -> Result<Vec<Automation>, String> {
+        self.get_json(path::AUTOMATIONS).await
+    }
+
+    pub async fn create_automation(&self, input: &AutomationInput) -> Result<Automation, String> {
+        self.post_json(path::AUTOMATIONS, input).await
+    }
+
+    pub async fn update_automation(
+        &self,
+        id: &str,
+        input: &AutomationInput,
+    ) -> Result<Automation, String> {
+        self.put_json(&format!("{}/{id}", path::AUTOMATIONS), input)
+            .await
+    }
+
+    pub async fn delete_automation(&self, id: &str) -> Result<(), String> {
+        self.delete(&format!("{}/{id}", path::AUTOMATIONS)).await
+    }
+
+    pub async fn automation_runs(
+        &self,
+        id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<AutomationRunList, String> {
+        self.get_json(&format!(
+            "{}/{id}/runs?limit={limit}&offset={offset}",
+            path::AUTOMATIONS
+        ))
+        .await
+    }
+
+    pub async fn trigger_automation(&self, id: &str) -> Result<AutomationRun, String> {
+        self.post_json(
+            &format!("{}/{id}/trigger", path::AUTOMATIONS),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     // ---------- 内部 ----------
@@ -639,6 +691,22 @@ impl Client {
             .await
             .map_err(|error| format!("请求失败: {error}"))?;
         ensure_success(response).await
+    }
+
+    async fn put_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, String> {
+        let response = self
+            .http
+            .put(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| format!("请求失败: {error}"))?;
+        decode(response).await
     }
 
     async fn delete(&self, path: &str) -> Result<(), String> {

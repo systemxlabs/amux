@@ -15,7 +15,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use hmac::{Hmac, Mac};
 use serde::Deserialize;
+use sha2::Sha256;
 
 use crate::attachments::{AttachmentOwner, MAX_ATTACHMENT_BYTES};
 use crate::state::AppState;
@@ -174,9 +176,23 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_quick_commands).put(put_quick_commands),
         )
         .route(
-            "/config/agent/",
+            "/config/workflow_agent/",
             get(get_orchestrator).put(put_orchestrator),
         )
+        .route(
+            "/config/automation",
+            get(get_automation_config).put(put_automation_config),
+        )
+        .route(
+            "/automations",
+            get(list_automations).post(create_automation),
+        )
+        .route(
+            "/automations/{id}",
+            put(update_automation).delete(delete_automation),
+        )
+        .route("/automations/{id}/runs", get(automation_runs))
+        .route("/automations/{id}/trigger", post(trigger_automation))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -191,6 +207,7 @@ pub fn public_router(state: Arc<AppState>) -> Router {
             "/workflows/{id}/attachments/{name}",
             get(download_workflow_attachment),
         )
+        .route("/webhooks/github", post(github_webhook))
         .with_state(state)
 }
 
@@ -330,14 +347,14 @@ async fn create_session(
 ) -> ApiResult<Session> {
     state
         .sessions
-        .create(
-            &request.machine,
-            &request.agent,
-            &request.workspace,
-            request.use_worktree,
-            request.worktree_base_branch.as_deref(),
-            request.project.as_deref(),
-        )
+        .create(crate::sessions::CreateSessionParams {
+            machine: &request.machine,
+            agent: &request.agent,
+            workspace: &request.workspace,
+            use_worktree: request.use_worktree,
+            worktree_base_branch: request.worktree_base_branch.as_deref(),
+            project: request.project.as_deref(),
+        })
         .await
         .map(Json)
         .map_err(bad_request)
@@ -859,6 +876,94 @@ async fn workflow_ongoing(
     }))
 }
 
+// ---------- 自动化 ----------
+
+async fn list_automations(State(state): State<Arc<AppState>>) -> Json<Vec<Automation>> {
+    Json(state.automations.list())
+}
+
+async fn create_automation(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<AutomationInput>,
+) -> ApiResult<Automation> {
+    state
+        .automations
+        .create(input)
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn update_automation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<AutomationInput>,
+) -> ApiResult<Automation> {
+    state
+        .automations
+        .update(&id, input)
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn delete_automation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    state.automations.delete(&id).map_err(bad_request)?;
+    Ok(Json(OpAck { ok: true }))
+}
+
+async fn automation_runs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(page): Query<Page>,
+) -> ApiResult<AutomationRunList> {
+    let limit = page.limit(SESSION_PAGE_DEFAULT_LIMIT);
+    let offset = page.offset();
+    let (runs, has_more) = state
+        .automations
+        .runs_page(&id, limit, offset)
+        .map_err(bad_request)?;
+    Ok(Json(AutomationRunList { runs, has_more }))
+}
+
+async fn trigger_automation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<AutomationRun> {
+    state
+        .automations
+        .trigger(&id)
+        .await
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn github_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<OpAck> {
+    let event = headers
+        .get("x-github-event")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let signature = headers
+        .get("x-hub-signature-256")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| bad_request("缺少 X-Hub-Signature-256 请求头".into()))?;
+    verify_github_signature(&state.token, signature, &body)?;
+    let body: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| bad_request(format!("Webhook JSON 无效: {error}")))?;
+    let matched = state
+        .automations
+        .github_webhook(event, &body)
+        .await
+        .map_err(bad_request)?;
+    log::info!("GitHub Webhook 已处理: event={event} matched={matched}");
+    Ok(Json(OpAck { ok: true }))
+}
+
 // ---------- 配置 ----------
 
 async fn get_skills(State(state): State<Arc<AppState>>) -> Json<Vec<Skill>> {
@@ -954,6 +1059,7 @@ async fn delete_project(
     // 项目删除后，其下会话回到未归属（docs/PRD.md「项目管理」）
     state.sessions.unassign_project(&name);
     state.workflows.unassign_project(&name);
+    state.automations.unassign_project(&name);
     Ok(Json(OpAck { ok: true }))
 }
 
@@ -989,10 +1095,57 @@ async fn put_orchestrator(
     Ok(Json(OpAck { ok: true }))
 }
 
+async fn get_automation_config(
+    State(state): State<Arc<AppState>>,
+) -> Json<Option<AutomationConfig>> {
+    Json(state.config.automation())
+}
+
+async fn put_automation_config(
+    State(state): State<Arc<AppState>>,
+    Json(config): Json<AutomationConfig>,
+) -> ApiResult<OpAck> {
+    state.config.set_automation(&config).map_err(bad_request)?;
+    log::info!("自动化决策模型配置已更新: {}", config.model);
+    Ok(Json(OpAck { ok: true }))
+}
+
 /// 通用操作应答。
 #[derive(Debug, serde::Serialize)]
 pub struct OpAck {
     pub ok: bool,
+}
+
+fn verify_github_signature(
+    secret: &str,
+    signature: &str,
+    body: &[u8],
+) -> Result<(), (StatusCode, String)> {
+    let signature = signature
+        .strip_prefix("sha256=")
+        .ok_or_else(|| bad_request("X-Hub-Signature-256 格式无效".into()))?;
+    let signature =
+        decode_hex(signature).ok_or_else(|| bad_request("X-Hub-Signature-256 格式无效".into()))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|error| bad_request(format!("校验 Webhook 签名失败: {error}")))?;
+    mac.update(body);
+    mac.verify_slice(&signature)
+        .map_err(|_| bad_request("Webhook 签名校验失败".into()))
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 fn bad_request(message: String) -> (StatusCode, String) {
@@ -1039,4 +1192,34 @@ fn download_attachment(
         )
         .body(Body::from(bytes))
         .map_err(|error| bad_request(format!("构造下载响应失败: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use hmac::Mac as _;
+
+    use super::*;
+
+    #[test]
+    fn github_signature_is_verified_with_server_token() {
+        const TOKEN: &str = "secret-token";
+        let body = br#"{"repository":{"full_name":"owner/repo"}}"#;
+        let mut mac = Hmac::<Sha256>::new_from_slice(TOKEN.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = format!("sha256={}", encode_hex(&mac.finalize().into_bytes()));
+
+        assert!(verify_github_signature(TOKEN, &signature, body).is_ok());
+        assert!(verify_github_signature(TOKEN, &signature, br#"{"repository":{}}"#).is_err());
+        assert!(verify_github_signature(TOKEN, "sha256=00", body).is_err());
+    }
+
+    fn encode_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut output = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            output.push(HEX[(byte >> 4) as usize] as char);
+            output.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        output
+    }
 }
