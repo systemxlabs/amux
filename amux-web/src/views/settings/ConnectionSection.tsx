@@ -1,7 +1,7 @@
 // 连接设置（docs/PRD.md「连接设置」）。
 //
-// 没有 Server 地址输入框：Web 应用与 Server 同源（PRD「登录页面」：该框桌面应用有而 Web 应用无），
-// 地址固定为当前站点，用户只能配置认证 token。
+// Web 应用由 Server 托管并与 Server 同源，因此没有 Server 地址输入框，
+// 用户只能配置认证 token。
 
 import { useState } from "react";
 

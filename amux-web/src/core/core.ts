@@ -1,4 +1,4 @@
-// 应用状态：与桌面应用同构的单一状态树，React 组件只读取与派发动作。
+// 应用状态：单一状态树，React 组件只读取与派发动作。
 
 import type { ApiClient } from "../lib/api";
 import type { Paging } from "../lib/paging";

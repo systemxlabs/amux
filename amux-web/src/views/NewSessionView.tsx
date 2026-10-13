@@ -21,7 +21,7 @@ import { cn } from "../lib/utils";
 
 /**
  * 选项按钮组中的一个按钮（docs/PRD.md「新建会话视图」：机器与 agent 均采用选项按钮组，
- * 不可用的 agent 置灰不可点击）。与桌面应用 `Button::small().selected()` 的外观一致。
+ * 不可用的 agent 置灰不可点击）。
  */
 function OptionButton({
   slot,

@@ -3,7 +3,7 @@
 
 /*
  * shadcn/ui 令牌（Tailwind v4 CSS-first 配置）：应用为单一浅色主题，颜色/圆角/字号
- * 由项目根 theme.json 生成（docs/DESIGN.md「共享主题」，与桌面端共用一套取值，
+ * 由项目根 theme.json 生成（docs/DESIGN.md「共享主题」，
  * 对齐官方 New York 样式 + Zinc 基础色 + 中性色强调）；
  * diff 色与等宽字体栈为应用自有扩展。
  */

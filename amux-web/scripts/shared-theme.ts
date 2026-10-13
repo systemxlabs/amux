@@ -1,8 +1,7 @@
 // 共享主题读取（docs/DESIGN.md「共享主题」）。
 //
 // 项目根 theme.json 是唯一主题来源：Web 端由 Vite 插件在启动/构建时把它转成
-// `src/theme.generated.css`（index.css @import 引用）；桌面端经 include_str!
-// 在编译期内嵌同一文件解析，两端不会漂移。
+// `src/theme.generated.css`（index.css @import 引用）。
 
 import fs from "node:fs";
 import { fileURLToPath, URL } from "node:url";

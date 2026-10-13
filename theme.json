@@ -1,5 +1,5 @@
 {
-  "$comment": "共享主题（docs/DESIGN.md「共享主题」）：颜色与圆角供桌面端与 Web 端共用；色值与 shadcn/ui Zinc 浅色主题对齐",
+  "$comment": "Web 应用主题（docs/DESIGN.md「共享主题」）：色值与 shadcn/ui Zinc 浅色主题对齐",
   "color": {
     "background": "#ffffff",
     "foreground": "#09090b",

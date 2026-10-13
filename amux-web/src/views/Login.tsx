@@ -1,7 +1,7 @@
 // 登录页面（docs/PRD.md「登录页面」）。
 //
 // 建立连接过程中整页转圈；连接失败时内容居中展示错误提示、认证 token 输入框与进入按钮。
-// Web 应用固定同源访问 Server，因此没有桌面应用的「Server 地址输入框」。
+// Web 应用由 Server 托管并固定同源访问，因此没有「Server 地址输入框」。
 
 import { useState } from "react";
 

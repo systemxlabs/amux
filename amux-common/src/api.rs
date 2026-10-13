@@ -1,6 +1,6 @@
 //! Client API（HTTPS）的请求与响应类型。
 //!
-//! 端点路径与 DESIGN「Client-Server 通信」一节一一对应；Server 与桌面应用共用这些类型。
+//! 端点路径与 DESIGN「Client-Server 通信」一节一一对应；Server 实现、Web 应用消费这些类型。
 
 use serde::{Deserialize, Serialize};
 

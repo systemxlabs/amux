@@ -4,7 +4,6 @@ members = [
     "amux-common",
     "amux-daemon",
     "amux-server",
-    "amux-desktop",
 ]
 
 [workspace.package]
@@ -44,7 +43,6 @@ percent-encoding = "2.3.2"
 rig-core = { version = "0.42.0", default-features = false, features = ["reqwest", "rustls"] }
 rig-agent = { version = "0.42.0", default-features = false }
 process-wrap = { version = "10.0.0", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
-alacritty_terminal = "0.26.0"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 croner = { version = "4.0.1", default-features = false, features = ["jiff"] }
@@ -53,12 +51,3 @@ sha2 = "0.10"
 
 [profile.release]
 lto = "thin"
-
-# dev 构建只保留行号表：gpui 级别的依赖全量 debuginfo 会让二进制膨胀到数百 MB，
-# 在内存紧张的机器上链接抖动近停滞；行号表足以支撑 panic 回溯定位。
-[profile.dev]
-debug = "line-tables-only"
-
-# zed 的 git 依赖在 gpui-component 中未固定 rev，与本项目的 gpui/gpui_platform
-# 同源同分支，cargo 会统一解析到同一提交；若未来依赖图里出现两份 gpui
-#（类型不互通），需显式 [patch] 钉到相同提交。

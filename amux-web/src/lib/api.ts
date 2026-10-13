@@ -51,7 +51,7 @@ const FS_PAGE_LIMIT = 500;
 /** 服务端分页上限（`Page::limit` 夹取到 500）。 */
 const PAGE_LIMIT_MAX = 500;
 
-/** 非 2xx 的错误消息：与桌面应用的 `Client` 保持一致（`HTTP <status>: <body>`）。 */
+/** 非 2xx 的错误消息统一为 `HTTP <status>: <body>`。 */
 export function errorMessage(status: number, body: string): string {
   const trimmed = body.trim();
   return trimmed === "" ? `HTTP ${status}` : `HTTP ${status}: ${trimmed}`;
