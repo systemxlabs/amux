@@ -127,6 +127,13 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | POST `/config/projects/order` | 更新项目顺序 |
 | PUT `/config/projects/<project_name>` | 更新指定项目 |
 | DELETE `/config/projects/<project_name>` | 删除指定项目 |
+| GET `/automations` | 查询所有自动化列表 |
+| POST `/automations` | 创建自动化 |
+| PUT `/automations/<automation_id>` | 全量更新自动化 |
+| DELETE `/automations/<automation_id>` | 删除指定自动化 |
+| GET `/automations/<automation_id>/runs` | 分页查询指定自动化运行记录 |
+| POST `/automations/<automation_id>/trigger` | 手动触发指定自动化 |
+| POST `/webhooks/github` | Github Webhook 统一入口 |
 
 ## Daemon
 
@@ -496,6 +503,24 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 ```
 注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
+### 自动化存储
+
+自动化数据存储在 `~/.amux/automation.sqlite` 文件中
+  ```SQL
+  CREATE TABLE IF NOT EXISTS automations (
+    id TEXT PRIMARY KEY,                    -- 自动化 ID
+    title TEXT NOT NULL,                    -- 自动化标题
+    enabled BOOL NOT NULL,                  -- 是否开启
+    task TEXT NOT NULL,                     -- 自动化任务
+    project TEXT,                           -- 所属项目
+    trigger TEXT NOT NULL,                  -- 触发方式
+    create_session_options TEXT NOT NULL,   -- 新建会话选项
+    result_labels TEXT NOT NULL,            -- 结果分类
+    created_at INTEGER NOT NULL,            -- 创建时间
+    updated_at INTEGER NOT NULL             -- 更新时间
+  );
+  ```
+  
 ### 技能存储
 
 存储在 `~/.amux/config/skills.json` 路径，格式为
