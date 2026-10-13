@@ -444,13 +444,13 @@ function AutomationEditor({
     initial?.trigger.type === "github_webhook" ? "webhook" : "schedule",
   );
   const initialCron =
-    initial?.trigger.type === "schedule" ? initial.trigger.cron : "0 9 * * *";
+    initial?.trigger.type === "schedule" ? initial.trigger.cron : "";
   const [cron, setCron] = useState(initialCron);
   const [cronError, setCronError] = useState<string | null>(
-    () => previewCron(initialCron).error,
+    () => (initialCron.trim() === "" ? null : previewCron(initialCron).error),
   );
   const [cronNextRuns, setCronNextRuns] = useState<Date[]>(
-    () => previewCron(initialCron).nextRuns,
+    () => (initialCron.trim() === "" ? [] : previewCron(initialCron).nextRuns),
   );
   const [repository, setRepository] = useState(
     initial?.trigger.type === "github_webhook" ? initial.trigger.repository : "",

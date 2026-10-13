@@ -1752,7 +1752,8 @@ impl AmuxApp {
                 AutomationTrigger::Schedule { cron } => Some(cron.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| "0 9 * * *".to_string());
+            .unwrap_or_default();
+        let validate_cron = !cron.trim().is_empty();
         set(&self.automation_cron, cron, window, cx);
         let (repository, events) = automation
             .and_then(|automation| match &automation.trigger {
@@ -1829,7 +1830,9 @@ impl AmuxApp {
             cx,
         );
         self.refresh_automation_worktree_branches(cx);
-        self.validate_automation_cron(cx);
+        if validate_cron {
+            self.validate_automation_cron(cx);
+        }
     }
 }
 
