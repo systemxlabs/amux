@@ -461,9 +461,9 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 工作流会话用量存储在内存中，每次请求模型供应商时，更新其当前上下文大小。
 
-### 工作流会话存储
+### 工作流存储
 
-工作流会话数据包含如下部分
+工作流数据包含如下部分
 - 元数据：存储在 `~/.amux/workflow.sqlite` 文件中
   ```SQL
   CREATE TABLE IF NOT EXISTS workflows (
@@ -486,22 +486,25 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   {"kind": "tool_call", "timestamp": 1694230805000, "tool_call_id": "call_001", "tool_name": "read_file", "parameters": "..."}
   {"kind": "error", "timestamp": 1694230810000, "error": "模型 API 调用失败：xxx"}
   ```
+- 工作流计划：存储在 `~/.amux/config/workflows.json` 路径
+  ```json
+  [ { "name": "amux开发工作流", "plan": "xxx", "lastUsedProject": "project1" } ]
+  ```
+  注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
 内存中保留活跃工作流会话的上下文对话，当工作流会话长时间不活跃（超过 1h）且工作流会话和其所有关联普通会话状态均为空闲时，清理内存中的工作流会话数据。
 
-### 工作流计划存储
+### 自动化触发
 
-存储在 `~/.amux/config/workflows.json` 路径，格式为
-```json
-[
-  {
-    "name": "amux开发工作流",
-    "plan": "xxx",
-    "lastUsedProject": "project1"
-  }
-]
-```
-注意 name 必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
+定时触发：系统根据 cron 表达式计算触发时刻。
+
+Github Webhook 触发
+- Github Webhook 配置的 Secret 必须使用 Server token
+- Server 对每个 webhook 推送请求必须验证签名
+
+### 自动化结果分类
+
+当自动化运行记录所属会话进入空闲状态时，收集会话历史和会话活动信息，调用决策模型分类，并写入数据库。
 
 ### 自动化存储
 
@@ -533,6 +536,15 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     started_at INTEGER NOT NULL,            -- 开始时间
     finished_at INTEGER NOT NULL            -- 完成时间
   );
+  ```
+- 自动化配置：存储在 `~/.amux/config/automation.json`
+  ```json
+  {
+    "apiFormat": "jev",
+    "baseUrl": "https://api.typesafe.ai/v1/systemone",
+    "apiKey": "sk-xxx",
+    "model": "jev-latest"
+  }
   ```
   
 ### 技能存储
