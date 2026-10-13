@@ -533,9 +533,17 @@ Github Webhook 触发
 - Github Webhook 配置的 Secret 必须使用 Server token
 - Server 对每个 webhook 推送请求必须验证签名
 
-### 自动化结果分类
+### 自动化运行
 
-当自动化运行记录所属会话进入空闲状态时，收集会话历史和会话活动信息，调用决策模型分类，并写入数据库。
+自动化运行生命周期
+- 触发后创建运行记录，初始状态为 queued
+- 使用已有会话或创建新会话，向会话发送任务内容
+  - 若成功，状态更新为 running，并记录会话 ID 和开始时间
+  - 若失败，状态更新为 failed，并记录错误信息
+- 当会话状态进入空闲时，状态更新为 finished，并记录完成时间
+- 最后进行结果打标，记录结果标签
+
+结果打标：收集会话从自动化运行开始时间到完成时间的对话和活动信息，调用决策模型分类。
 
 ### 自动化存储
 
@@ -562,10 +570,11 @@ Github Webhook 触发
     automation_id TEXT NOT NULL,            -- 自动化 ID
     session_id TEXT,                        -- 普通会话 ID
     workflow_id TEXT,                       -- 工作流会话 ID
-    state TEXT NOT NULL,                    -- 运行状态 running / finished / failed
+    state TEXT NOT NULL,                    -- 运行状态 queued / running / finished / failed
     error TEXT,                             -- 错误信息
     result_label TEXT,                      -- 结果标签
-    started_at INTEGER NOT NULL,            -- 开始时间
+    created_at INTEGER NOT NULL,            -- 创建时间
+    started_at INTEGER,                     -- 开始时间
     finished_at INTEGER                     -- 完成时间
   );
   ```
