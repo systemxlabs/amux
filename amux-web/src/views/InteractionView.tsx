@@ -13,6 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
+import { Separator } from "../components/ui/separator";
 import { Switch } from "../components/ui/switch";
 import { Textarea } from "../components/ui/textarea";
 import {
@@ -153,6 +154,13 @@ export function InteractionView() {
   const project = detail.session?.project ?? detail.workflow?.project;
   const quickCommands = state.settings.quickCommands.filter(
     (command) => command.project === undefined || command.project === project,
+  );
+  const projectQuickCommands =
+    project === undefined
+      ? []
+      : quickCommands.filter((command) => command.project === project);
+  const generalQuickCommands = quickCommands.filter(
+    (command) => command.project === undefined,
   );
   const attachmentsReady = state.attachments.every(
     (attachment) => attachment.status === "uploaded",
@@ -299,7 +307,26 @@ export function InteractionView() {
           data-slot="quick-command-bar"
           className="flex flex-wrap gap-1 border-t border-border px-3 py-2"
         >
-          {quickCommands.map((command) => (
+          {projectQuickCommands.map((command) => (
+            <Button
+              key={JSON.stringify([command.project ?? null, command.name])}
+              data-slot="quick-command-button"
+              variant="secondary"
+              size="sm"
+              title={command.prompt}
+              onClick={() => void quickSend(command.prompt)}
+            >
+              {command.name}
+            </Button>
+          ))}
+          {projectQuickCommands.length > 0 && generalQuickCommands.length > 0 ? (
+            <Separator
+              orientation="vertical"
+              data-slot="quick-command-separator"
+              className="mx-1 h-6 self-center"
+            />
+          ) : null}
+          {generalQuickCommands.map((command) => (
             <Button
               key={JSON.stringify([command.project ?? null, command.name])}
               data-slot="quick-command-button"

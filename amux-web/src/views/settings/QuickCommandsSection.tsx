@@ -42,6 +42,7 @@ export function QuickCommandsSection() {
   const [activeProject, setActiveProject] = useState<string | undefined>(undefined);
   const [form, setForm] = useState<FormState | null>(null);
   const [removing, setRemoving] = useState<number | null>(null);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
   const selectedProject =
     activeProject !== undefined &&
     projects.some((project) => project.name === activeProject)
@@ -92,6 +93,15 @@ export function QuickCommandsSection() {
     );
   }
 
+  function reorder(from: number, to: number): void {
+    if (from === to) return;
+    const nextVisible = [...visibleCommands];
+    const [item] = nextVisible.splice(from, 1);
+    nextVisible.splice(to, 0, item);
+    const others = commands.filter((command) => command.project !== selectedProject);
+    void saveQuickCommands(core, [...others, ...nextVisible]);
+  }
+
   return (
     <section className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
@@ -134,13 +144,22 @@ export function QuickCommandsSection() {
         <div className="text-xs text-muted-foreground">暂无快捷指令</div>
       ) : (
         <div className="flex flex-col gap-3">
-          {visibleCommands.map((command) => {
+          {visibleCommands.map((command, visibleIndex) => {
             const index = commands.indexOf(command);
             return (
               <Card
                 key={JSON.stringify([command.project ?? null, command.name])}
                 data-slot="quick-command-card"
-                className="gap-2"
+                draggable
+                onDragStart={() => setDragIndex(visibleIndex)}
+                onDragOver={(event) => event.preventDefault()}
+                onDragEnd={() => setDragIndex(null)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (dragIndex !== null) reorder(dragIndex, visibleIndex);
+                  setDragIndex(null);
+                }}
+                className="cursor-grab gap-2 active:cursor-grabbing"
               >
                 <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
                   <CardTitle>{command.name}</CardTitle>

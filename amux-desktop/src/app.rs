@@ -3483,6 +3483,39 @@ impl AmuxApp {
         }
     }
 
+    /// 快捷指令卡片拖拽排序：仅在同一项目 tab 内调整顺序。
+    pub fn reorder_quick_command(
+        &mut self,
+        from_project: Option<String>,
+        from_name: String,
+        target_project: Option<String>,
+        target_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        if from_project != target_project {
+            return;
+        }
+        let mut list = self.with_core(|core| core.settings.quick_commands.clone());
+        let Some(from_ix) = list
+            .iter()
+            .position(|item| item.project == from_project && item.name == from_name)
+        else {
+            return;
+        };
+        let Some(target_ix) = list
+            .iter()
+            .position(|item| item.project == target_project && item.name == target_name)
+        else {
+            return;
+        };
+        if from_ix == target_ix {
+            return;
+        }
+        let item = list.remove(from_ix);
+        list.insert(target_ix, item);
+        self.save_list(SettingsList::QuickCommands(list), cx);
+    }
+
     /// 保存内置智能体配置；保存结果以弹窗反馈（docs/DESIGN.md 连接/内置智能体设置）。
     pub fn save_orchestrator(&mut self, cx: &mut Context<Self>) {
         let client = self.with_core(|core| core.client.clone());

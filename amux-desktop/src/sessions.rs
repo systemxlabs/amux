@@ -965,6 +965,7 @@ fn input_bar(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyE
 
 /// 快捷指令：点击即作为用户输入发送（docs/PRD.md「快捷指令」）。
 fn quick_buttons(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
+    let theme = ui::Colors::of(cx.theme());
     let mut row = h_flex().flex_wrap().gap_1();
     let project = core
         .view
@@ -977,13 +978,37 @@ fn quick_buttons(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .as_ref()
                 .and_then(|workflow| workflow.project.as_deref())
         });
-    for command in core
+    let project_commands: Vec<_> = core
         .settings
         .quick_commands
         .iter()
-        .filter(|command| command.project.is_none() || command.project.as_deref() == project)
+        .filter(|command| project.is_some() && command.project.as_deref() == project)
         .cloned()
-    {
+        .collect();
+    let general_commands: Vec<_> = core
+        .settings
+        .quick_commands
+        .iter()
+        .filter(|command| command.project.is_none())
+        .cloned()
+        .collect();
+    for command in &project_commands {
+        row = row.child(
+            Button::new(format!("qc-{:?}-{}", command.project, command.name))
+                .small()
+                .ghost()
+                .label(ui::truncate(&command.name, 16))
+                .tooltip(command.prompt.clone())
+                .on_click(cx.listener({
+                    let prompt = command.prompt.clone();
+                    move |this, _, _, cx| this.send_quick_command(prompt.clone(), cx)
+                })),
+        );
+    }
+    if !project_commands.is_empty() && !general_commands.is_empty() {
+        row = row.child(div().w(px(1.)).h_4().bg(theme.border));
+    }
+    for command in &general_commands {
         row = row.child(
             Button::new(format!("qc-{:?}-{}", command.project, command.name))
                 .small()

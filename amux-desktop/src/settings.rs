@@ -23,6 +23,12 @@ use crate::ui;
 #[derive(Clone)]
 struct ProjectOrderDrag(String);
 
+#[derive(Debug, Clone)]
+struct QuickCommandOrderDrag {
+    project: Option<String>,
+    name: String,
+}
+
 /// 内置智能体 API 格式的顺序（索引与单选组一一对应）。
 const API_FORMATS: [ApiFormat; 3] = [
     ApiFormat::ChatCompletions,
@@ -476,7 +482,7 @@ fn orchestrator_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement
         .into_any_element()
 }
 
-/// 快捷指令：卡片列表（名称 + 内容 + 编辑/删除），右上角「+」新增。
+/// 快捷指令：卡片列表（名称 + 内容 + 编辑/删除），支持拖拽排序，右上角「+」新增。
 fn quick_commands_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let projects: Vec<String> = core
@@ -529,11 +535,32 @@ fn quick_commands_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>
         let key = format!("{project:?}-{name}");
         list = list.child(
             h_flex()
+                .id(SharedString::from(format!("qc-card-{key}")))
                 .gap_2()
                 .items_center()
                 .p_2()
                 .bg(theme.muted)
                 .rounded_md()
+                .on_drag(
+                    QuickCommandOrderDrag {
+                        project: project.clone(),
+                        name: name.clone(),
+                    },
+                    |_, _, _, cx| cx.new(|_| Empty),
+                )
+                .on_drop(cx.listener({
+                    let target_project = project.clone();
+                    let target_name = name.clone();
+                    move |this, drag: &QuickCommandOrderDrag, _, cx| {
+                        this.reorder_quick_command(
+                            drag.project.clone(),
+                            drag.name.clone(),
+                            target_project.clone(),
+                            target_name.clone(),
+                            cx,
+                        )
+                    }
+                }))
                 .child(
                     v_flex()
                         .flex_1()
