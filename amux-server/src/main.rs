@@ -15,6 +15,7 @@ mod orchestrator;
 mod sessions;
 mod state;
 mod store;
+mod system_one;
 mod terminals;
 mod timestamps;
 mod web;

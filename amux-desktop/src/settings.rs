@@ -491,7 +491,7 @@ fn workflow_tab(core: &Core, this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> A
         .into_any_element()
 }
 
-/// 自动化：Jev 决策模型连接信息，改动后才可保存。
+/// 自动化：System One 决策模型连接信息，改动后才可保存。
 fn automation_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
     let theme = ui::Colors::of(cx.theme());
     let muted = theme.muted_foreground;
@@ -504,7 +504,7 @@ fn automation_tab(this: &mut AmuxApp, cx: &mut Context<AmuxApp>) -> AnyElement {
                 .bg(theme.muted)
                 .rounded_md()
                 .child(Label::new("API 格式").text_sm().text_color(muted))
-                .child(Label::new("jev").text_sm())
+                .child(Label::new("system_one").text_sm())
                 .child(Label::new("Endpoint").text_sm().text_color(muted))
                 .child(Input::new(&this.automation_config_endpoint).w_full())
                 .child(Label::new("API Key").text_sm().text_color(muted))

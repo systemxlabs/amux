@@ -2,20 +2,17 @@
 //!
 //! 持久化布局见 docs/DESIGN.md「自动化存储」。
 
-use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v2::TextContent;
 use amux_common::api::{
-    Automation, AutomationApiFormat, AutomationConfig, AutomationInput, AutomationResultLabel,
-    AutomationRun, AutomationRunState, AutomationSessionOptions, AutomationTrigger,
+    Automation, AutomationInput, AutomationResultLabel, AutomationRun, AutomationRunState,
+    AutomationSessionOptions, AutomationTrigger,
 };
 use amux_common::domain::{Activity, ContentBlock, HistoryItem, StateChangeReason};
 use croner::Cron;
 use parking_lot::Mutex;
-use rig_typesafeai::types::{Answer, Question};
-use rig_typesafeai::{DynamicQuery, Evaluate, JevConfig};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -316,7 +313,8 @@ impl AutomationService {
             .config
             .automation()
             .ok_or("自动化决策模型未配置，无法进行结果分类")?;
-        let label = call_decision_model(&config, labels, truncate(context, 16_000)).await?;
+        let label =
+            crate::system_one::evaluate_choice(&config, labels, truncate(context, 16_000)).await?;
         Ok(Some(label))
     }
 
@@ -651,50 +649,6 @@ fn activity_text(activity: &Activity) -> String {
         ),
         Activity::Error { error, .. } => format!("错误 {error}"),
     }
-}
-
-async fn call_decision_model(
-    config: &AutomationConfig,
-    labels: &[AutomationResultLabel],
-    context: &str,
-) -> Result<String, String> {
-    match config.api_format {
-        AutomationApiFormat::Jev => {}
-    }
-    let criteria = labels
-        .iter()
-        .map(|label| {
-            (
-                label.name.clone(),
-                Some(Value::String(label.description.clone())),
-            )
-        })
-        .collect();
-    let question = Question::Choice {
-        instructions: Value::String("选择最符合任务运行结果的分类".into()),
-        criteria,
-    };
-    let mut definitions = BTreeMap::new();
-    definitions.insert("result".to_string(), question);
-    let query =
-        DynamicQuery::new(definitions).map_err(|error| format!("构造结果分类问题失败: {error}"))?;
-    let model = JevConfig::new(config.api_key.clone())
-        .model(config.model.clone())
-        .with_endpoint(config.endpoint.clone())
-        .client()
-        .evaluation();
-    let state = serde_json::json!({ "context": context });
-    let result = model
-        .evaluate(&state, query)
-        .await
-        .map_err(|error| format!("决策模型请求失败: {error}"))?;
-    let Some(Answer::Choice { choice, .. }) = result.answers.get("result") else {
-        return Err("决策模型没有返回选择结果".into());
-    };
-    if !labels.iter().any(|label| &label.name == choice) {
-        return Err(format!("决策模型返回未知分类: {choice}"));
-    }
-    Ok(choice.clone())
 }
 
 fn truncate(text: &str, limit: usize) -> &str {

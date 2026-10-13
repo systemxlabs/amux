@@ -4014,7 +4014,7 @@ impl AmuxApp {
             return;
         }
         let saved = saved.unwrap_or(AutomationConfig {
-            api_format: amux_common::api::AutomationApiFormat::Jev,
+            api_format: amux_common::api::AutomationApiFormat::SystemOne,
             endpoint: String::new(),
             api_key: String::new(),
             model: "jev-latest".into(),
@@ -4038,7 +4038,7 @@ impl AmuxApp {
         let client = self.with_core(|core| core.client.clone());
         let Some(client) = client else { return };
         let config = AutomationConfig {
-            api_format: amux_common::api::AutomationApiFormat::Jev,
+            api_format: amux_common::api::AutomationApiFormat::SystemOne,
             endpoint: self
                 .automation_config_endpoint
                 .read(cx)
@@ -4081,7 +4081,7 @@ impl AmuxApp {
     pub fn automation_config_dirty(&self, cx: &App) -> bool {
         let saved = self.with_core(|core| core.settings.automation.clone());
         let current = AutomationConfig {
-            api_format: amux_common::api::AutomationApiFormat::Jev,
+            api_format: amux_common::api::AutomationApiFormat::SystemOne,
             endpoint: self
                 .automation_config_endpoint
                 .read(cx)

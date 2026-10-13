@@ -433,7 +433,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(dir.path().to_path_buf());
         let config = AutomationConfig {
-            api_format: amux_common::api::AutomationApiFormat::Jev,
+            api_format: amux_common::api::AutomationApiFormat::SystemOne,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             api_key: "token".into(),
             model: "jev-latest".into(),

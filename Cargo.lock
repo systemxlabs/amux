@@ -239,7 +239,7 @@ dependencies = [
  "logforth",
  "percent-encoding",
  "rig-agent",
- "rig-core 0.42.0",
+ "rig-core",
  "serde",
  "serde_json",
 ]
@@ -261,7 +261,7 @@ dependencies = [
  "portable-pty",
  "process-wrap",
  "rig-agent",
- "rig-core 0.42.0",
+ "rig-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -313,8 +313,7 @@ dependencies = [
  "parking_lot",
  "reqwest 0.12.28",
  "rig-agent",
- "rig-core 0.42.0",
- "rig-typesafeai",
+ "rig-core",
  "rusqlite",
  "serde",
  "serde_json",
@@ -7239,7 +7238,7 @@ dependencies = [
  "futures",
  "http",
  "indexmap 2.14.0",
- "rig-core 0.42.0",
+ "rig-core",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -7281,77 +7280,6 @@ dependencies = [
  "tracing",
  "tracing-futures",
  "url",
-]
-
-[[package]]
-name = "rig-core"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c60db6e3da7681abbdfa9637c1a76dbd5a713f935f0a6753d72c5d2770ed4c6"
-dependencies = [
- "async-stream",
- "base64 0.22.1",
- "bytes",
- "fastrand",
- "futures",
- "glob",
- "http",
- "mime",
- "mime_guess",
- "ordered-float",
- "rig-http",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "rig-http"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9b68e5fe7258d64aeffb0a976ad0665ad2f94104d41eb4cdf463065ba57ec0b"
-dependencies = [
- "bytes",
- "futures",
- "futures-timer",
- "http",
- "mime",
- "thiserror 2.0.20",
- "url",
-]
-
-[[package]]
-name = "rig-reqwest"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d478ca821bdf7030b4cabfdc7acc07ab5f0449886f9a7e472de205a6ec4b2b1d"
-dependencies = [
- "bytes",
- "futures",
- "http",
- "reqwest 0.13.4",
- "rig-http",
- "thiserror 2.0.20",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "rig-typesafeai"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4b100f45342e825569960d672a8ee919c1432fff56934b229f27afac7eb8a59"
-dependencies = [
- "http",
- "rig-core 0.44.0",
- "rig-reqwest",
- "serde",
- "serde_json",
 ]
 
 [[package]]

@@ -11,7 +11,7 @@ import type { AutomationConfig } from "../../lib/types";
 
 function defaultConfig(): AutomationConfig {
   return {
-    apiFormat: "jev",
+    apiFormat: "system_one",
     endpoint: "",
     apiKey: "",
     model: "jev-latest",
@@ -47,7 +47,7 @@ export function AutomationSection() {
       <h2 className="text-sm font-medium">自动化</h2>
       <div className="flex flex-col gap-1.5">
         <Label>API 格式</Label>
-        <div className="text-sm text-muted-foreground">jev</div>
+        <div className="text-sm text-muted-foreground">system_one</div>
       </div>
       <div className="flex flex-col gap-1.5">
         <Label htmlFor="automation-endpoint">Endpoint</Label>

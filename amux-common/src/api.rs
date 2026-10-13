@@ -491,7 +491,7 @@ pub struct AutomationRunList {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationApiFormat {
-    Jev,
+    SystemOne,
 }
 
 /// 自动化决策模型配置。
@@ -777,12 +777,13 @@ mod tests {
     #[test]
     fn automation_config_uses_endpoint_field() {
         let config = AutomationConfig {
-            api_format: AutomationApiFormat::Jev,
+            api_format: AutomationApiFormat::SystemOne,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             api_key: "token".into(),
             model: "jev-latest".into(),
         };
         let json = serde_json::to_value(config).unwrap();
+        assert_eq!(json["apiFormat"], "system_one");
         assert_eq!(json["endpoint"], "https://api.typesafe.ai/v1/systemone");
         assert!(json.get("baseUrl").is_none());
         assert!(json.get("base_url").is_none());
