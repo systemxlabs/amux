@@ -12,6 +12,7 @@ import {
 
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ContextMenu, type MenuItem, type MenuState } from "../components/ContextMenu";
+import { MultiSelectCombobox } from "../components/MultiSelectCombobox";
 import {
   WorkflowPlanField,
   WorkspaceField,
@@ -694,28 +695,13 @@ function AutomationEditor({
                 />
               </Field>
               <Field label="推送事件">
-                <div className="grid gap-2">
-                  {GITHUB_WEBHOOK_EVENTS.map((event) => (
-                    <label
-                      key={event}
-                      className="flex cursor-pointer items-center gap-2 text-sm text-foreground"
-                    >
-                      <input
-                        type="checkbox"
-                        className="size-4 accent-primary"
-                        checked={events.includes(event)}
-                        onChange={(input) =>
-                          setEvents((current) =>
-                            input.target.checked
-                              ? [...current, event]
-                              : current.filter((item) => item !== event),
-                          )
-                        }
-                      />
-                      <span>{event}</span>
-                    </label>
-                  ))}
-                </div>
+                <MultiSelectCombobox
+                  options={GITHUB_WEBHOOK_EVENTS}
+                  value={events}
+                  onChange={setEvents}
+                  placeholder="全部事件"
+                  ariaLabel="选择推送事件"
+                />
               </Field>
             </div>
           )}

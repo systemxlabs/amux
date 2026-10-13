@@ -816,31 +816,89 @@ fn trigger_mode_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
 }
 
 fn webhook_events_selector(core: &Core, cx: &mut Context<AmuxApp>) -> AnyElement {
-    v_flex()
+    let selected = core.automation_form.webhook_events.clone();
+    let selected_for_trigger = selected.clone();
+    let selected_for_content = selected;
+    let app = cx.entity();
+    let theme = ui::Colors::of(cx.theme());
+
+    Popover::new("automation-webhook-events")
         .w_full()
-        .gap_1()
-        .children(GITHUB_WEBHOOK_EVENTS.iter().map(|event| {
-            let event = event.to_string();
-            let selected = core.automation_form.webhook_events.contains(&event);
-            Checkbox::new(SharedString::from(format!("automation-event-{event}")))
-                .label(event.clone())
-                .checked(selected)
-                .on_click(cx.listener(move |this, checked, _, cx| {
-                    this.with_core(|core| {
-                        if *checked {
-                            if !core.automation_form.webhook_events.contains(&event) {
-                                core.automation_form.webhook_events.push(event.clone());
-                            }
-                        } else {
-                            core.automation_form
-                                .webhook_events
-                                .retain(|item| item != &event);
-                        }
-                    });
-                    cx.notify();
-                }))
-                .into_any_element()
-        }))
+        .trigger(
+            Button::new("automation-webhook-events-trigger")
+                .small()
+                .outline()
+                .w_full()
+                .h_auto()
+                .min_h_8()
+                .py_1()
+                .justify_start()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .when(selected_for_trigger.is_empty(), |row| {
+                            row.child(
+                                Label::new("全部事件")
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground),
+                            )
+                        })
+                        .children(selected_for_trigger.into_iter().map(|event| {
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme.accent)
+                                .child(Label::new(event).text_xs())
+                                .into_any_element()
+                        }))
+                        .child(div().flex_1())
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .small()
+                                .text_color(theme.muted_foreground),
+                        ),
+                ),
+        )
+        .content(move |_, _, _cx| {
+            let mut body = v_flex().w_full().gap_1();
+            for event in GITHUB_WEBHOOK_EVENTS {
+                let event = event.to_string();
+                let checked = selected_for_content.contains(&event);
+                let app = app.clone();
+                body = body.child(
+                    Checkbox::new(SharedString::from(format!("automation-event-{event}")))
+                        .label(event.clone())
+                        .checked(checked)
+                        .on_click(move |checked, _, cx| {
+                            let event = event.clone();
+                            app.update(cx, |this, cx| {
+                                this.with_core(|core| {
+                                    if *checked {
+                                        if !core.automation_form.webhook_events.contains(&event) {
+                                            core.automation_form.webhook_events.push(event.clone());
+                                        }
+                                    } else {
+                                        core.automation_form
+                                            .webhook_events
+                                            .retain(|item| item != &event);
+                                    }
+                                });
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            body.child(
+                Label::new("未选择时接收全部事件")
+                    .text_xs()
+                    .text_color(theme.muted_foreground),
+            )
+        })
         .into_any_element()
 }
 
