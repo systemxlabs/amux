@@ -18,7 +18,7 @@ use amux_common::daemon::{
 use amux_common::domain::{
     FsListParams, FsListResult, FsReadParams, FsReadResult, GitBranchListResult, GitDiffResult,
     OpResult, TerminalExitNotification, TerminalIdParams, TerminalInputParams, TerminalOpenParams,
-    TerminalOpenResult, TerminalOutputNotification, TerminalResizeParams,
+    TerminalOpenResult, TerminalOutputNotification, TerminalResizeParams, WorktreeBase,
 };
 use amux_common::jsonrpc::{JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -211,12 +211,13 @@ impl MachineHub {
         &self,
         machine: &str,
         repo: &str,
-        base_branch: Option<&str>,
+        base: Option<&WorktreeBase>,
         session_id: &str,
     ) -> Result<String, String> {
         log::info!(
             "请求创建 worktree: session={session_id} machine={machine} repo={repo} base={}",
-            base_branch.unwrap_or("HEAD")
+            base.map(WorktreeBase::display_name)
+                .unwrap_or_else(|| "HEAD".to_string())
         );
         let result: WorktreeResult = self
             .machine(machine)?
@@ -224,7 +225,7 @@ impl MachineHub {
                 method::GIT_CREATE_WORKTREE,
                 CreateWorktreeParams {
                     repo: repo.to_string(),
-                    base_branch: base_branch.map(str::to_string),
+                    base: base.cloned(),
                 },
             )
             .await?;

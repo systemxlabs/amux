@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     Activity, ContentBlock, GitBranchListResult, GitDiffResult, HistoryItem, SessionConfigOption,
-    SessionConfigOptionValue, SessionPlanEntry, SessionState, SlashCommand,
+    SessionConfigOptionValue, SessionPlanEntry, SessionState, SlashCommand, WorktreeBase,
 };
 
 /// Daemon 内置智能体的发现名称。
@@ -109,9 +109,9 @@ pub struct CreateSessionRequest {
     pub workspace: String,
     #[serde(default)]
     pub use_worktree: bool,
-    /// worktree 基分支；None 或 "HEAD" = 当前仓库 HEAD
+    /// worktree 基点；None 或 Head = 当前仓库 HEAD
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_base_branch: Option<String>,
+    pub worktree_base: Option<WorktreeBase>,
     /// 所属项目；None = 未归属项目
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -375,7 +375,7 @@ pub enum AutomationSessionOptions {
         #[serde(default)]
         use_worktree: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        worktree_base_branch: Option<String>,
+        worktree_base: Option<WorktreeBase>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
     },
@@ -695,18 +695,23 @@ mod tests {
     }
 
     #[test]
-    fn create_session_request_serializes_worktree_base_branch() {
+    fn create_session_request_serializes_worktree_base() {
         let request = CreateSessionRequest {
             machine: "pc".into(),
             agent: "codex".into(),
             workspace: "/repo".into(),
             use_worktree: true,
-            worktree_base_branch: Some("origin/main".into()),
+            worktree_base: Some(WorktreeBase::Remote {
+                remote: "origin".into(),
+                branch: "main".into(),
+            }),
             project: None,
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["useWorktree"], true);
-        assert_eq!(json["worktreeBaseBranch"], "origin/main");
+        assert_eq!(json["worktreeBase"]["kind"], "remote");
+        assert_eq!(json["worktreeBase"]["remote"], "origin");
+        assert_eq!(json["worktreeBase"]["branch"], "main");
     }
 
     #[test]
@@ -799,14 +804,16 @@ mod tests {
             agent: "codex".into(),
             workspace: "/repo".into(),
             use_worktree: true,
-            worktree_base_branch: Some("main".into()),
+            worktree_base: Some(WorktreeBase::Local {
+                name: "main".into(),
+            }),
             project: Some("p".into()),
         })
         .unwrap();
         assert_eq!(new_session["mode"], "new_session");
         assert_eq!(new_session["useWorktree"], true);
-        assert_eq!(new_session["worktreeBaseBranch"], "main");
-        assert!(new_session.get("worktree_base_branch").is_none());
+        assert_eq!(new_session["worktreeBase"]["kind"], "local");
+        assert_eq!(new_session["worktreeBase"]["name"], "main");
     }
 
     #[test]

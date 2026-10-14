@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::WorktreeBase;
+
 /// Server → Daemon 的请求方法名。
 pub mod method {
     /// 获取当前机器信息（操作系统等）
@@ -118,13 +120,13 @@ pub struct GitRepoParams {
     pub repo: String,
 }
 
-/// `git.create_worktree` 参数；`base_branch` 缺省或 `HEAD` 时以当前 HEAD 为基点。
+/// `git.create_worktree` 参数；`base` 缺省或 `Head` 时以当前 HEAD 为基点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateWorktreeParams {
     pub repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_branch: Option<String>,
+    pub base: Option<WorktreeBase>,
 }
 
 /// `git.diff` 参数。

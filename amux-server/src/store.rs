@@ -1490,7 +1490,7 @@ mod tests {
                 agent: "codex".into(),
                 workspace: "/repo".into(),
                 use_worktree: false,
-                worktree_base_branch: None,
+                worktree_base: None,
                 project: Some("p".into()),
             },
             result_labels: vec![

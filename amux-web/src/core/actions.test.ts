@@ -94,7 +94,15 @@ it("从普通会话新建时保留机器、agent、工作目录、项目和 work
       return { ...session(), id: "s2" };
     },
     listBranches: async () => ({
-      branches: [{ name: "main", isWorktreeBase: true, isDefault: true }],
+      branches: [
+        {
+          name: "main",
+          fullName: "refs/heads/main",
+          kind: "local",
+          isWorktreeBase: true,
+          isDefault: true,
+        },
+      ],
     }),
     sessions: async (): Promise<SessionList> => ({ sessions: [], hasMore: false }),
     workflows: async (): Promise<WorkflowList> => ({ workflows: [], hasMore: false }),
@@ -111,7 +119,7 @@ it("从普通会话新建时保留机器、agent、工作目录、项目和 work
     agent: "codex",
     workspace: "/w",
     useWorktree: true,
-    worktreeBaseBranch: "main",
+    worktreeBase: { kind: "local", name: "main" },
     project: "project-a",
   });
   expect(core.state.open).toEqual({ kind: "session", id: "s2" });

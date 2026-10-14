@@ -10,7 +10,7 @@ use amux_common::api::{
     Automation, AutomationInput, AutomationResultLabel, AutomationRun, AutomationRunState,
     AutomationSessionOptions, AutomationTrigger,
 };
-use amux_common::domain::{Activity, ContentBlock, HistoryItem, StateChangeReason};
+use amux_common::domain::{Activity, ContentBlock, HistoryItem, StateChangeReason, WorktreeBase};
 use croner::Cron;
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -158,7 +158,7 @@ impl AutomationService {
                     agent,
                     workspace,
                     use_worktree,
-                    worktree_base_branch,
+                    worktree_base,
                     project,
                 } => {
                     let session = self
@@ -168,7 +168,7 @@ impl AutomationService {
                             agent,
                             workspace,
                             use_worktree: *use_worktree,
-                            worktree_base_branch: worktree_base_branch.as_deref(),
+                            worktree_base: worktree_base.as_ref(),
                             project: project.as_deref(),
                         })
                         .await?;
@@ -486,17 +486,31 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
             machine,
             agent,
             workspace,
-            worktree_base_branch,
+            worktree_base,
             project,
             ..
         } => {
             *machine = machine.trim().to_string();
             *agent = agent.trim().to_string();
             *workspace = workspace.trim().to_string();
-            *worktree_base_branch = worktree_base_branch
-                .take()
-                .map(|branch| branch.trim().to_string())
-                .filter(|branch| !branch.is_empty());
+            if let Some(base) = worktree_base {
+                match base {
+                    WorktreeBase::Head => {}
+                    WorktreeBase::Local { name } => {
+                        *name = name.trim().to_string();
+                        if name.is_empty() {
+                            *worktree_base = None;
+                        }
+                    }
+                    WorktreeBase::Remote { remote, branch } => {
+                        *remote = remote.trim().to_string();
+                        *branch = branch.trim().to_string();
+                        if remote.is_empty() || branch.is_empty() {
+                            *worktree_base = None;
+                        }
+                    }
+                }
+            }
             *project = project
                 .take()
                 .map(|project| project.trim().to_string())
@@ -692,7 +706,7 @@ mod tests {
                 agent: " codex ".into(),
                 workspace: " /repo ".into(),
                 use_worktree: false,
-                worktree_base_branch: Some(" ".into()),
+                worktree_base: Some(WorktreeBase::Local { name: " ".into() }),
                 project: Some(" p ".into()),
             },
             result_labels: labels(),
@@ -705,7 +719,7 @@ mod tests {
         assert_eq!(input.title, "每日任务");
         let AutomationSessionOptions::NewSession {
             machine,
-            worktree_base_branch,
+            worktree_base,
             project,
             ..
         } = input.session_options
@@ -713,7 +727,7 @@ mod tests {
             panic!("应为新建普通会话");
         };
         assert_eq!(machine, "pc");
-        assert_eq!(worktree_base_branch, None);
+        assert_eq!(worktree_base, None);
         assert_eq!(project.as_deref(), Some("p"));
     }
 

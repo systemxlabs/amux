@@ -11,8 +11,8 @@ use std::sync::Arc;
 use agent_client_protocol::schema::v2::TextContent;
 use amux_common::api::{Session, SessionConfigSetting, Usage, Workflow};
 use amux_common::domain::{
-    generate_title, Activity, ContentBlock, HistoryItem, SessionConfigOption, SessionState,
-    StateChangeReason,
+    generate_title, Activity, ContentBlock, GitBranchKind, HistoryItem, SessionConfigOption,
+    SessionState, StateChangeReason, WorktreeBase,
 };
 use parking_lot::Mutex;
 use rig_core::completion::message::{
@@ -789,10 +789,13 @@ impl WorkflowTools {
                     .get("worktree")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false);
-                let worktree_base_branch = arguments
+                let requested_base = arguments
                     .get("base_branch")
                     .and_then(|value| value.as_str())
                     .map(str::to_string);
+                let worktree_base =
+                    resolve_worktree_base(&services.machines, &machine, &cwd, requested_base)
+                        .await?;
                 let session = services
                     .sessions
                     .create(crate::sessions::CreateSessionParams {
@@ -800,7 +803,7 @@ impl WorkflowTools {
                         agent: &agent,
                         workspace: &cwd,
                         use_worktree: worktree,
-                        worktree_base_branch: worktree_base_branch.as_deref(),
+                        worktree_base: worktree_base.as_ref(),
                         project: None,
                     })
                     .await?;
@@ -897,6 +900,40 @@ impl WorkflowTools {
         } else {
             Err(format!("{session_id} 不是本工作流的关联普通会话"))
         }
+    }
+}
+
+async fn resolve_worktree_base(
+    machines: &MachineHub,
+    machine: &str,
+    cwd: &str,
+    requested: Option<String>,
+) -> Result<Option<WorktreeBase>, String> {
+    let Some(requested) = requested
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(None);
+    };
+    if requested.eq_ignore_ascii_case("HEAD") {
+        return Ok(Some(WorktreeBase::Head));
+    }
+    let branches = machines.git_branches(machine, cwd).await?;
+    let branch = branches
+        .branches
+        .into_iter()
+        .find(|branch| branch.name == requested || branch.full_name == requested)
+        .ok_or_else(|| format!("worktree 基分支不存在: {requested}"))?;
+    match branch.kind {
+        GitBranchKind::Local => Ok(Some(WorktreeBase::Local { name: branch.name })),
+        GitBranchKind::Remote => Ok(Some(WorktreeBase::Remote {
+            remote: branch
+                .remote
+                .ok_or_else(|| format!("远端分支缺少 remote: {}", branch.name))?,
+            branch: branch
+                .remote_branch
+                .ok_or_else(|| format!("远端分支缺少分支名: {}", branch.name))?,
+        })),
     }
 }
 
@@ -1342,7 +1379,7 @@ mod tests {
                 agent: "codex",
                 workspace: "/repo",
                 use_worktree: false,
-                worktree_base_branch: None,
+                worktree_base: None,
                 project: None,
             })
             .await

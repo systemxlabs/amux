@@ -78,12 +78,49 @@ export type GitDiffFile = {
   hunks: GitDiffHunk[];
 };
 export type GitDiffResult = { files: GitDiffFile[]; notRepo?: boolean };
-export type GitBranch = {
+export type GitBranchKind = "local" | "remote";
+type GitBranchBase = {
   name: string;
+  fullName: string;
   isWorktreeBase: boolean;
   isDefault: boolean;
 };
+export type GitBranch =
+  | (GitBranchBase & { kind: "local" })
+  | (GitBranchBase & {
+      kind: "remote";
+      remote: string;
+      remoteBranch: string;
+    });
 export type GitBranchListResult = { branches: GitBranch[] };
+
+export type WorktreeBase =
+  | { kind: "head" }
+  | { kind: "local"; name: string }
+  | { kind: "remote"; remote: string; branch: string };
+
+/** 分支引用转换为创建请求使用的 worktree 基点。 */
+export function worktreeBaseFromBranch(branch: GitBranch): WorktreeBase {
+  if (branch.kind === "local") {
+    return { kind: "local", name: branch.name };
+  }
+  return {
+    kind: "remote",
+    remote: branch.remote,
+    branch: branch.remoteBranch,
+  };
+}
+
+export function worktreeBaseKey(base: WorktreeBase): string {
+  switch (base.kind) {
+    case "head":
+      return "HEAD";
+    case "local":
+      return `refs/heads/${base.name}`;
+    case "remote":
+      return `refs/remotes/${base.remote}/${base.branch}`;
+  }
+}
 
 export type FsEntry = { name: string; path: string; isDir: boolean; size: number };
 export type FsListResult = {
@@ -134,7 +171,7 @@ export type CreateSessionRequest = {
   agent: string;
   workspace: string;
   useWorktree: boolean;
-  worktreeBaseBranch?: string;
+  worktreeBase?: WorktreeBase;
   project?: string;
 };
 export type PromptRequest = { input: ContentBlock[] };
@@ -237,7 +274,7 @@ export type AutomationSessionOptions =
       agent: string;
       workspace: string;
       useWorktree: boolean;
-      worktreeBaseBranch?: string;
+      worktreeBase?: WorktreeBase;
       project?: string;
     }
   | { mode: "new_workflow"; plan: string; project?: string };

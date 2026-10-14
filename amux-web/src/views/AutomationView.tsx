@@ -62,6 +62,7 @@ import type {
   AutomationRunState,
   AutomationSessionOptions,
   AutomationTrigger,
+  WorktreeBase,
 } from "../lib/types";
 import { cn } from "../lib/utils";
 
@@ -577,10 +578,10 @@ function AutomationEditor({
       ? initial.sessionOptions.useWorktree
       : false,
   );
-  const [worktreeBaseBranch, setWorktreeBaseBranch] = useState(
+  const [worktreeBase, setWorktreeBase] = useState<WorktreeBase>(
     initial?.sessionOptions.mode === "new_session"
-      ? (initial.sessionOptions.worktreeBaseBranch ?? "")
-      : "",
+      ? (initial.sessionOptions.worktreeBase ?? { kind: "head" })
+      : { kind: "head" },
   );
   const [sessionProject, setSessionProject] = useState(
     initial?.sessionOptions.mode === "new_session"
@@ -663,10 +664,8 @@ function AutomationEditor({
             agent,
             workspace: workspace.trim(),
             useWorktree,
-            worktreeBaseBranch:
-              useWorktree && worktreeBaseBranch.trim() !== ""
-                ? worktreeBaseBranch.trim()
-                : undefined,
+            worktreeBase:
+              useWorktree && worktreeBase.kind !== "head" ? worktreeBase : undefined,
             project: sessionProject === "" ? undefined : sessionProject,
           };
         case "new_workflow":
@@ -936,8 +935,8 @@ function AutomationEditor({
                 core={core}
                 machine={machine}
                 workspace={workspace}
-                value={worktreeBaseBranch}
-                onChange={setWorktreeBaseBranch}
+                value={worktreeBase}
+                onChange={setWorktreeBase}
               />
             ) : null}
           </div>

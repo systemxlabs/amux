@@ -237,8 +237,22 @@ describe("ApiClient", () => {
         status: 200,
         body: JSON.stringify({
           branches: [
-            { name: "main", isWorktreeBase: true, isDefault: true },
-            { name: "feature/login", isWorktreeBase: false, isDefault: false },
+            {
+              name: "main",
+              fullName: "refs/heads/main",
+              kind: "local",
+              isWorktreeBase: true,
+              isDefault: true,
+            },
+            {
+              name: "origin/main",
+              fullName: "refs/remotes/origin/main",
+              kind: "remote",
+              remote: "origin",
+              remoteBranch: "main",
+              isWorktreeBase: false,
+              isDefault: false,
+            },
           ],
         }),
       },
@@ -253,6 +267,8 @@ describe("ApiClient", () => {
     expect(seen.at(-1)?.url).toBe("/machines/pc/list_branches?repo=%2Frepo%2Fwork+tree");
     expect(result.branches[0]).toEqual({
       name: "main",
+      fullName: "refs/heads/main",
+      kind: "local",
       isWorktreeBase: true,
       isDefault: true,
     });

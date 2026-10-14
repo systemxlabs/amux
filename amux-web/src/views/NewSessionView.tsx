@@ -67,7 +67,7 @@ export function NewSessionView() {
     agent,
     workspace,
     useWorktree,
-    worktreeBaseBranch,
+    worktreeBase,
     plan,
     selectedPlan,
   } = state.newSession;
@@ -212,10 +212,10 @@ export function NewSessionView() {
             core={core}
             machine={machine}
             workspace={workspace}
-            value={worktreeBaseBranch}
+            value={worktreeBase}
             onChange={(value) => {
               core.update((draft) => {
-                draft.newSession.worktreeBaseBranch = value;
+                draft.newSession.worktreeBase = value;
               });
             }}
           />

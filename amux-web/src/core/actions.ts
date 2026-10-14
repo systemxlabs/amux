@@ -18,7 +18,7 @@ import type {
   Skill,
   WorkflowPlanItem,
 } from "../lib/types";
-import { entryPinned, entryTitle, execDir } from "../lib/types";
+import { entryPinned, entryTitle, execDir, worktreeBaseFromBranch } from "../lib/types";
 import { initialNewSession, panelAvailable } from "./core";
 import type { Core, PendingAttachment, SidePanel } from "./core";
 import {
@@ -375,19 +375,21 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
   try {
     if (entry.kind === "session") {
       const useWorktree = entry.session.worktreeDir !== "";
-      const worktreeBaseBranch = useWorktree
-        ? (
-            await core.client
-              .listBranches(entry.session.machine, execDir(entry.session))
-              .catch(() => ({ branches: [] }))
-          ).branches.find((branch) => branch.isWorktreeBase)?.name
-        : undefined;
+      let worktreeBase;
+      if (useWorktree) {
+        const branch = (
+          await core.client
+            .listBranches(entry.session.machine, execDir(entry.session))
+            .catch(() => ({ branches: [] }))
+        ).branches.find((item) => item.isWorktreeBase);
+        worktreeBase = branch === undefined ? undefined : worktreeBaseFromBranch(branch);
+      }
       const session = await core.client.createSession({
         machine: entry.session.machine,
         agent: entry.session.agent,
         workspace: entry.session.workspace,
         useWorktree,
-        worktreeBaseBranch,
+        worktreeBase,
         project: entry.session.project,
       });
       await refreshList(core);
@@ -599,7 +601,7 @@ export async function setProjectOrder(core: Core, names: string[]): Promise<void
 /** 普通模式创建会话。 */
 export async function createSession(core: Core): Promise<void> {
   if (!core.client) return;
-  const { machine, agent, workspace, useWorktree, worktreeBaseBranch, project } =
+  const { machine, agent, workspace, useWorktree, worktreeBase, project } =
     core.state.newSession;
   try {
     const session = await core.client.createSession({
@@ -607,8 +609,7 @@ export async function createSession(core: Core): Promise<void> {
       agent,
       workspace,
       useWorktree,
-      worktreeBaseBranch:
-        useWorktree && worktreeBaseBranch !== "HEAD" ? worktreeBaseBranch : undefined,
+      worktreeBase: useWorktree && worktreeBase.kind !== "head" ? worktreeBase : undefined,
       project,
     });
     core.update((state) => {

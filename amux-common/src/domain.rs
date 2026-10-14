@@ -321,11 +321,49 @@ pub struct GitDiffResult {
     pub not_repo: bool,
 }
 
+/// 分支引用来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitBranchKind {
+    Local,
+    Remote,
+}
+
+/// worktree 创建基点。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorktreeBase {
+    Head,
+    Local { name: String },
+    Remote { remote: String, branch: String },
+}
+
+impl WorktreeBase {
+    /// 日志与 worktree 标记使用的稳定名称。
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Head => "HEAD".to_string(),
+            Self::Local { name } => name.clone(),
+            Self::Remote { remote, branch } => format!("{remote}/{branch}"),
+        }
+    }
+}
+
 /// 本地与远端跟踪分支及改动审查使用的标记。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranch {
+    /// 展示名：本地分支名或 `origin/main`。
     pub name: String,
+    /// 完整引用名：`refs/heads/main` 或 `refs/remotes/origin/main`。
+    pub full_name: String,
+    pub kind: GitBranchKind,
+    /// 远端跟踪分支所属远端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// 远端侧分支名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_branch: Option<String>,
     /// worktree 会话的基分支
     pub is_worktree_base: bool,
     /// 仓库默认分支
@@ -550,6 +588,10 @@ mod tests {
 
         let branch = GitBranch {
             name: "main".into(),
+            full_name: "refs/heads/main".into(),
+            kind: GitBranchKind::Local,
+            remote: None,
+            remote_branch: None,
             is_worktree_base: true,
             is_default: true,
         };

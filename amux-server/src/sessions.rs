@@ -13,6 +13,7 @@ use amux_common::api::{Session, SessionConfigSetting, Terminal as ApiTerminal, U
 use amux_common::domain::{
     generate_title, Activity, ContentBlock, HistoryItem, SessionConfigOption, SessionPlanEntry,
     SessionState, SlashCommand, StateChangeReason, TerminalOpenParams, TerminalResizeParams,
+    WorktreeBase,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -81,7 +82,7 @@ pub struct CreateSessionParams<'a> {
     pub agent: &'a str,
     pub workspace: &'a str,
     pub use_worktree: bool,
-    pub worktree_base_branch: Option<&'a str>,
+    pub worktree_base: Option<&'a WorktreeBase>,
     pub project: Option<&'a str>,
 }
 
@@ -132,18 +133,20 @@ impl SessionService {
             agent,
             workspace,
             use_worktree,
-            worktree_base_branch,
+            worktree_base,
             project,
         } = request;
         let id = Uuid::new_v4().to_string();
         let worktree_dir = if use_worktree {
             log::info!(
                 "会话 worktree 创建请求: session={id} machine={machine} repo={workspace} base={}",
-                worktree_base_branch.unwrap_or("HEAD")
+                worktree_base
+                    .map(WorktreeBase::display_name)
+                    .unwrap_or_else(|| "HEAD".to_string())
             );
             let dir = self
                 .machines
-                .create_worktree(machine, workspace, worktree_base_branch, &id)
+                .create_worktree(machine, workspace, worktree_base, &id)
                 .await?;
             log::info!("会话 worktree 已创建: session={id} machine={machine} path={dir}");
             dir

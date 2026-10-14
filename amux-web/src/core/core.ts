@@ -28,6 +28,7 @@ import type {
   Usage,
   Workflow,
   WorkflowPlanItem,
+  WorktreeBase,
 } from "../lib/types";
 
 /** 连接状态（决定进入登录页面还是主页面）。 */
@@ -85,8 +86,8 @@ export type NewSessionState = {
   project?: string;
   workspace: string;
   useWorktree: boolean;
-  /** worktree 基分支；HEAD = 当前仓库 HEAD */
-  worktreeBaseBranch: string;
+  /** worktree 基点。 */
+  worktreeBase: WorktreeBase;
   /** 工作流模式：计划内容（手输或选择已保存计划） */
   plan: string;
   /** 工作流模式：选中的已保存计划名 */
@@ -219,7 +220,7 @@ export function initialNewSession(): NewSessionState {
     project: undefined,
     workspace: "",
     useWorktree: false,
-    worktreeBaseBranch: "HEAD",
+    worktreeBase: { kind: "head" },
     plan: "",
     selectedPlan: null,
   };

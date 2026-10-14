@@ -7,7 +7,15 @@ import { deleteRecentWorkspace } from "../core/actions";
 import type { Core } from "../core/core";
 import { useCoreState } from "../core/store";
 import { truncate } from "../lib/format";
-import type { FsEntry, GitBranch, RecentWorkspace, WorkflowPlanItem } from "../lib/types";
+import {
+  worktreeBaseFromBranch,
+  worktreeBaseKey,
+  type FsEntry,
+  type GitBranch,
+  type RecentWorkspace,
+  type WorkflowPlanItem,
+  type WorktreeBase,
+} from "../lib/types";
 import { listAllDirs, matchingPrefix, splitDirQuery } from "../lib/workspace";
 import { cn } from "../lib/utils";
 import { Input } from "./ui/input";
@@ -31,6 +39,7 @@ const POPUP_MIN_HEIGHT = 80;
 
 function worktreeBranchLabel(branch: GitBranch): string {
   const marks = [
+    branch.kind === "remote" ? "创建时获取最新" : "",
     branch.isWorktreeBase ? "worktree 基分支" : "",
     branch.isDefault ? "默认分支" : "",
   ].filter(Boolean);
@@ -228,8 +237,8 @@ export function WorktreeBranchField({
   core: Core;
   machine: string;
   workspace: string;
-  value: string;
-  onChange: (value: string) => void;
+  value: WorktreeBase;
+  onChange: (value: WorktreeBase) => void;
 }) {
   const request = useRef(0);
   const onChangeRef = useRef(onChange);
@@ -252,10 +261,14 @@ export function WorktreeBranchField({
         if (request.current !== seq) return;
         setBranches(result.branches);
         if (
-          valueRef.current !== "HEAD" &&
-          !result.branches.some((branch) => branch.name === valueRef.current)
+          worktreeBaseKey(valueRef.current) !== "HEAD" &&
+          !result.branches.some(
+            (branch) =>
+              worktreeBaseKey(worktreeBaseFromBranch(branch)) ===
+              worktreeBaseKey(valueRef.current),
+          )
         ) {
-          onChangeRef.current("HEAD");
+          onChangeRef.current({ kind: "head" });
         }
       },
       () => {
@@ -267,7 +280,17 @@ export function WorktreeBranchField({
   return (
     <div className="flex items-center justify-between gap-3">
       <Label>基分支</Label>
-      <Select value={value} onValueChange={onChange}>
+      <Select
+        value={worktreeBaseKey(value)}
+        onValueChange={(next) => {
+          if (next === "HEAD") {
+            onChange({ kind: "head" });
+            return;
+          }
+          const branch = branches.find((item) => item.fullName === next);
+          if (branch !== undefined) onChange(worktreeBaseFromBranch(branch));
+        }}
+      >
         <SelectTrigger
           data-slot="worktree-base-select"
           aria-label="选择 worktree 基分支"
@@ -276,9 +299,9 @@ export function WorktreeBranchField({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="HEAD">HEAD（当前提交）</SelectItem>
+          <SelectItem value="HEAD">HEAD（本地当前提交）</SelectItem>
           {branches.map((branch) => (
-            <SelectItem key={branch.name} value={branch.name}>
+            <SelectItem key={branch.fullName} value={branch.fullName}>
               {worktreeBranchLabel(branch)}
             </SelectItem>
           ))}
