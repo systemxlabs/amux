@@ -77,8 +77,15 @@ export function buildProjectGroupWindow(
   };
 }
 
+/** 关联会话之间的树形连接位置。 */
+export type ListTreeConnector = "first" | "middle" | "last";
+
 /** 列表行：工作流会话展开后其关联普通会话紧随其后（深度 1），不影响其他条目的位置。 */
-export type ListRow = { entry: ListEntry; depth: number };
+export type ListRow = {
+  entry: ListEntry;
+  depth: number;
+  connector?: ListTreeConnector;
+};
 
 /**
  * 展开状态下的可见行序列。
@@ -96,8 +103,16 @@ export function listRows(entries: readonly ListEntry[], expanded: ReadonlySet<st
         b.createdAt - a.createdAt ||
         a.id.localeCompare(b.id),
     );
-    for (const session of linked) {
-      rows.push({ entry: { kind: "session", session }, depth: 1 });
+    for (const [index, session] of linked.entries()) {
+      const connector: ListTreeConnector =
+        linked.length === 1
+          ? "last"
+          : index === 0
+            ? "first"
+            : index === linked.length - 1
+              ? "last"
+              : "middle";
+      rows.push({ entry: { kind: "session", session }, depth: 1, connector });
     }
   }
   return rows;

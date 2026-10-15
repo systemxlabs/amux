@@ -43,6 +43,7 @@ import {
   canExpand,
   listRows,
   sameListEntries,
+  type ListRow,
 } from "../lib/list";
 import {
   entryId,
@@ -190,7 +191,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     void loadGroup("project:", undefined, current.loaded + 20);
   };
 
-  const renderRow = (row: { entry: ListEntry; depth: number }): ReactElement => {
+  const renderRow = (row: ListRow): ReactElement => {
     const entry = row.entry;
     const id = entryId(entry);
     const title = entryTitle(entry) || "未命名会话";
@@ -229,11 +230,26 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
           });
         }}
         className={cn(
-          "flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 lg:py-1.5",
-          row.depth === 1 && "pl-6",
+          "relative flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 lg:py-1.5",
+          row.depth === 1 && "pl-8",
           active ? "bg-accent" : "hover:bg-accent",
         )}
       >
+        {row.depth === 1 ? (
+          <span aria-hidden className="pointer-events-none absolute inset-y-0 left-4 w-4">
+            <span
+              className={cn(
+                "absolute left-0 w-px bg-border",
+                row.connector === "last"
+                  ? "top-0 bottom-1/2"
+                  : row.connector === "first"
+                    ? "-top-1 bottom-0"
+                    : "inset-y-0",
+              )}
+            />
+            <span className="absolute top-1/2 left-0 h-px w-4 bg-border" />
+          </span>
+        ) : null}
         {entry.kind === "workflow" ? (
           <Network className="size-4 shrink-0 text-muted-foreground" />
         ) : (

@@ -184,12 +184,13 @@ describe("listRows", () => {
       rows.map((row) => ({
         id: row.entry.kind === "session" ? row.entry.session.id : row.entry.workflow.id,
         depth: row.depth,
+        connector: row.connector,
       })),
     ).toEqual([
-      { id: "w", depth: 0 },
-      { id: "l-high", depth: 1 },
-      { id: "l-low", depth: 1 },
-      { id: "s", depth: 0 },
+      { id: "w", depth: 0, connector: undefined },
+      { id: "l-high", depth: 1, connector: "first" },
+      { id: "l-low", depth: 1, connector: "last" },
+      { id: "s", depth: 0, connector: undefined },
     ]);
   });
 
