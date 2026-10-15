@@ -415,6 +415,7 @@ async fn server_daemon_agent_end_to_end() {
             workspace.path().to_string_lossy()
         ))
         .await;
+    assert_eq!(branches["currentBranch"], "main");
     assert!(
         branches["branches"]
             .as_array()

@@ -560,7 +560,10 @@ impl GitRunner {
                 .cmp(&branch_kind_rank(right.kind))
                 .then_with(|| left.name.cmp(&right.name))
         });
-        Ok(GitBranchListResult { branches })
+        Ok(GitBranchListResult {
+            current_branch: current.unwrap_or_else(|| "HEAD".to_string()),
+            branches,
+        })
     }
 
     /// 新建 worktree：目录约定 `<amux_home>/worktrees/<仓库目录名>-<随机串>/`。
@@ -1033,6 +1036,7 @@ mod tests {
         git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         let runner = GitRunner::new();
         let branches = runner.branches(repo.to_str().unwrap()).unwrap();
+        assert_eq!(branches.current_branch, "main");
         let main = branches
             .branches
             .iter()
@@ -1063,6 +1067,11 @@ mod tests {
             .unwrap();
         write_worktree_base(&target, &feature_base).unwrap();
         let branches = runner.branches(target.to_str().unwrap()).unwrap();
+        assert_eq!(
+            branches.current_branch,
+            target.file_name().unwrap().to_string_lossy(),
+            "worktree 应报告自身检出的分支，而不是创建基分支"
+        );
         let feature = branches
             .branches
             .iter()

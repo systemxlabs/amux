@@ -55,6 +55,7 @@ export function InteractionView() {
   // 输入框高度（拖拽调整；null 表示用 rows 的默认高度）
   const [inputHeight, setInputHeight] = useState<number | null>(null);
   const [inputResizing, setInputResizing] = useState(false);
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
   const inputDrag = useRef<{ startY: number; startHeight: number } | null>(null);
   const targetKey = target === null ? null : `${target.kind}:${target.id}`;
 
@@ -166,6 +167,26 @@ export function InteractionView() {
     (attachment) => attachment.status === "uploaded",
   );
 
+  useEffect(() => {
+    const session = isSession ? detail.session : null;
+    const client = core.client;
+    setGitBranch(null);
+    if (session === null || client === null) return;
+
+    let cancelled = false;
+    void client.listBranches(session.machine, execDir(session)).then(
+      (result) => {
+        if (!cancelled) setGitBranch(result.currentBranch);
+      },
+      () => {
+        // 非 Git 目录没有分支可展示。
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [core, detail.session, isSession]);
+
   // 页大小随可视高度自适应：首次渲染与窗口/容器尺寸变化时也重新计算（不只是滚动事件）
   useEffect(() => {
     const element = listRef.current;
@@ -260,13 +281,16 @@ export function InteractionView() {
           {available ? "可用" : "不可用"}
         </span>
         {isSession && execDirPath !== "" ? (
-          <span
-            data-slot="interaction-exec-dir"
-            title={execDirPath}
-            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
-          >
-            {execDirPath}
-          </span>
+          <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground">
+            <span data-slot="interaction-exec-dir" title={execDirPath} className="min-w-0 truncate">
+              {execDirPath}
+            </span>
+            {gitBranch !== null ? (
+              <span data-slot="interaction-git-branch" title={gitBranch} className="shrink-0 truncate">
+                {gitBranch}
+              </span>
+            ) : null}
+          </div>
         ) : null}
         {!isSession && workflowPlan !== "" ? (
           <span

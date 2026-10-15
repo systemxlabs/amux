@@ -92,7 +92,7 @@ export type GitBranch =
       remote: string;
       remoteBranch: string;
     });
-export type GitBranchListResult = { branches: GitBranch[] };
+export type GitBranchListResult = { currentBranch: string; branches: GitBranch[] };
 
 export type WorktreeBase =
   | { kind: "head" }

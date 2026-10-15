@@ -374,6 +374,8 @@ pub struct GitBranch {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranchListResult {
+    /// 当前工作目录检出的分支；分离 HEAD 时为 `HEAD`。
+    pub current_branch: String,
     pub branches: Vec<GitBranch>,
 }
 
