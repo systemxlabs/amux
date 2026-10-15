@@ -1,82 +1,40 @@
-//! 工作流智能体：rig-agent 非流式运行、工具注册和活动 hooks。
+//! 工作流智能体：rig-agent 非流式运行。
 
 use amux_common::{api::OrchestratorConfig, model};
-use parking_lot::Mutex;
-use rig_agent::{
-    agent::hook::{self, AgentHook, HookContext},
-    completion::PromptError,
-    tool::{DynamicTool, ToolOutput},
-    AgentBuilder,
-};
-use rig_core::completion::{
-    message::{ToolCall, ToolFunction, UserContent},
-    AssistantContent, Message, ToolDefinition,
-};
-use std::{future::Future, pin::Pin, sync::Arc};
+use rig_agent::{agent::hook::AgentHook, completion::PromptError, tool::DynamicTool, AgentBuilder};
+use rig_core::completion::Message;
 
 const MAX_MODEL_CALLS: usize = 32;
-pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 
-pub trait Tools: Send + Sync {
-    fn definitions(&self) -> Vec<ToolDefinition>;
-    fn dispatch<'a>(&'a self, name: &'a str, arguments: serde_json::Value) -> ToolFuture<'a>;
-    fn record_thinking(&self, text: &str);
-    fn record_tool_call(&self, call: &ToolCall);
-    /// 记录本次模型请求进入上下文窗口的 token 数。
-    fn record_usage(&self, input_tokens: u64);
-    /// 把一个对话回合追加到内存中的模型上下文（工具结果不入盘）。
-    fn record_context(&self, message: Message);
-    fn take_steers(&self) -> Vec<Message>;
-}
-
-pub async fn run(
+pub async fn run<H>(
     config: &OrchestratorConfig,
     preamble: &str,
     history: Vec<Message>,
-    tools: Arc<dyn Tools>,
-) -> Result<String, String> {
-    run_agent(model::builder(config)?, preamble, history, tools).await
+    tools: Vec<DynamicTool>,
+    hook: H,
+) -> Result<String, String>
+where
+    H: AgentHook + Send + Sync + 'static,
+{
+    run_agent(model::builder(config)?, preamble, history, tools, hook).await
 }
 
-async fn run_agent(
+async fn run_agent<H>(
     builder: AgentBuilder,
     preamble: &str,
     mut history: Vec<Message>,
-    tools: Arc<dyn Tools>,
-) -> Result<String, String> {
+    tools: Vec<DynamicTool>,
+    hook: H,
+) -> Result<String, String>
+where
+    H: AgentHook + Send + Sync + 'static,
+{
     let prompt = history.pop().ok_or("对话历史为空")?;
-    let registered = tools
-        .definitions()
-        .into_iter()
-        .map(|definition| {
-            let tools = tools.clone();
-            let name = definition.name.clone();
-            DynamicTool::new(
-                definition.name,
-                definition.description,
-                definition.parameters,
-                move |_context, arguments| {
-                    let tools = tools.clone();
-                    let name = name.clone();
-                    Box::pin(async move {
-                        let result = tools
-                            .dispatch(&name, arguments)
-                            .await
-                            .unwrap_or_else(|error| format!("工具执行失败：{error}"));
-                        Ok(ToolOutput::text(result))
-                    })
-                },
-            )
-        })
-        .collect();
     let agent = builder
         .preamble(preamble)
         .default_max_turns(MAX_MODEL_CALLS)
-        .dynamic_tools(registered)
-        .add_hook(WorkflowHook {
-            tools,
-            injected: Mutex::new(Vec::new()),
-        })
+        .dynamic_tools(tools)
+        .add_hook(hook)
         .build();
     match agent
         .runner(prompt)
@@ -90,100 +48,6 @@ async fn run_agent(
             "（本轮工具调度已达 {MAX_MODEL_CALLS} 次上限，已暂停；可继续输入消息推进）"
         )),
         Err(error) => Err(format!("模型调用失败: {error}")),
-    }
-}
-
-struct WorkflowHook {
-    tools: Arc<dyn Tools>,
-    injected: Mutex<Vec<Message>>,
-}
-
-impl AgentHook for WorkflowHook {
-    async fn on_completion_call(
-        &self,
-        _ctx: &HookContext,
-        event: hook::CompletionCall<'_>,
-    ) -> hook::CompletionCallAction {
-        let mut injected = self.injected.lock();
-        injected.extend(self.tools.take_steers());
-        if injected.is_empty() {
-            return hook::CompletionCallAction::Continue;
-        }
-        // RequestPatch 只改变本次请求，不写入 rig transcript，后续请求需再次携带已注入消息。
-        let mut history = event.history.to_vec();
-        // 不把用户指令插在 assistant tool call 与当前 tool result 之间。
-        let position = if matches!(history.last(), Some(Message::Assistant { content, .. }) if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_))))
-        {
-            history.len() - 1
-        } else {
-            history.len()
-        };
-        history.splice(position..position, injected.iter().cloned());
-        hook::CompletionCallAction::patch(hook::RequestPatch::default().history(history))
-    }
-
-    async fn on_completion_response(
-        &self,
-        _ctx: &HookContext,
-        event: hook::CompletionResponse<'_>,
-    ) -> hook::ObservationAction {
-        self.tools.record_usage(event.usage.input_tokens);
-        // 整个回合原样进内存上下文（含思考）：思考模型要求 assistant 回合回放推理内容
-        if !event.content.is_empty() {
-            self.tools.record_context(Message::Assistant {
-                id: event.message_id.map(str::to_string),
-                content: event.content.clone(),
-            });
-        }
-        for content in event.content {
-            if let AssistantContent::Reasoning(reasoning) = content {
-                let text = model::reasoning_text(reasoning);
-                if !text.trim().is_empty() {
-                    self.tools.record_thinking(&text);
-                }
-            }
-        }
-        hook::ObservationAction::Continue
-    }
-
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: hook::ToolResultEvent<'_>,
-    ) -> hook::ToolResultAction {
-        self.tools.record_context(Message::User {
-            content: vec![UserContent::tool_result(
-                event.tool_call_id.unwrap_or(event.internal_call_id),
-                event.tool_name,
-                event.presentation.as_content().to_vec(),
-            )],
-        });
-        hook::ToolResultAction::Keep
-    }
-
-    async fn on_tool_call(
-        &self,
-        _ctx: &HookContext,
-        event: hook::ToolCall<'_>,
-    ) -> hook::ToolCallAction {
-        self.tools.record_tool_call(&ToolCall::from_wire(
-            event.tool_call_id.unwrap_or(event.internal_call_id),
-            ToolFunction::new(
-                event.tool_name.into(),
-                serde_json::from_str(event.args).unwrap_or_default(),
-            ),
-        ));
-        hook::ToolCallAction::Run
-    }
-
-    async fn on_invalid_tool_call(
-        &self,
-        _ctx: &HookContext,
-        event: &hook::InvalidToolCallContext,
-    ) -> Option<hook::InvalidToolCallAction> {
-        Some(hook::InvalidToolCallAction::Skip {
-            reason: format!("工具执行失败：未知工具: {}", event.tool_name),
-        })
     }
 }
 
@@ -207,13 +71,23 @@ pub fn preamble(plan: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use rig_agent::{
+        agent::hook::{self, HookContext},
+        tool::ToolOutput,
+    };
+    use rig_core::completion::{
+        message::{AssistantContent, ToolCall, ToolFunction, UserContent},
+        Usage,
+    };
     use rig_core::{
-        completion::{message::Reasoning, Usage},
+        completion::message::Reasoning,
         test_utils::{MockCompletionModel, MockTurn},
     };
+    use std::sync::Arc;
     use tokio::sync::{oneshot, Notify};
 
-    struct ControlledTools {
+    struct ControlledState {
         entered: Mutex<Option<oneshot::Sender<()>>>,
         release: Notify,
         steers: Mutex<Vec<Message>>,
@@ -221,43 +95,116 @@ mod tests {
         events: Mutex<Vec<String>>,
     }
 
-    impl Tools for ControlledTools {
-        fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: "list_sessions".into(),
-                description: "读取关联会话".into(),
-                parameters: serde_json::json!({"type":"object","properties":{}}),
-            }]
-        }
-        fn dispatch<'a>(&'a self, name: &'a str, _arguments: serde_json::Value) -> ToolFuture<'a> {
-            Box::pin(async move {
-                self.events.lock().push(format!("dispatch:{name}"));
-                if let Some(tx) = self.entered.lock().take() {
-                    tx.send(()).unwrap();
-                }
-                self.release.notified().await;
-                Ok("session-result".into())
-            })
-        }
-        fn record_thinking(&self, text: &str) {
-            self.events.lock().push(format!("thinking:{text}"));
-        }
-        fn record_tool_call(&self, call: &ToolCall) {
-            self.events.lock().push(format!("call:{}", call.id));
-        }
-        fn record_usage(&self, input_tokens: u64) {
-            self.usages.lock().push(input_tokens);
-            self.events.lock().push(format!("usage:{input_tokens}"));
-        }
+    struct ControlledHook {
+        state: Arc<ControlledState>,
+    }
+
+    impl ControlledHook {
         fn record_context(&self, message: Message) {
-            self.events.lock().push(format!(
+            self.state.events.lock().push(format!(
                 "context:{}",
                 serde_json::to_string(&message).unwrap()
             ));
         }
+
         fn take_steers(&self) -> Vec<Message> {
-            std::mem::take(&mut *self.steers.lock())
+            std::mem::take(&mut *self.state.steers.lock())
         }
+    }
+
+    impl AgentHook for ControlledHook {
+        async fn on_completion_call(
+            &self,
+            _ctx: &HookContext,
+            event: hook::CompletionCall<'_>,
+        ) -> hook::CompletionCallAction {
+            let injected = self.take_steers();
+            if injected.is_empty() {
+                return hook::CompletionCallAction::Continue;
+            }
+            let mut history = event.history.to_vec();
+            let position = if matches!(history.last(), Some(Message::Assistant { content, .. }) if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_))))
+            {
+                history.len() - 1
+            } else {
+                history.len()
+            };
+            history.splice(position..position, injected);
+            hook::CompletionCallAction::patch(hook::RequestPatch::default().history(history))
+        }
+
+        async fn on_completion_response(
+            &self,
+            _ctx: &HookContext,
+            event: hook::CompletionResponse<'_>,
+        ) -> hook::ObservationAction {
+            self.state.usages.lock().push(event.usage.input_tokens);
+            self.state
+                .events
+                .lock()
+                .push(format!("usage:{}", event.usage.input_tokens));
+            if !event.content.is_empty() {
+                self.record_context(Message::Assistant {
+                    id: event.message_id.map(str::to_string),
+                    content: event.content.clone(),
+                });
+            }
+            for content in event.content {
+                if let AssistantContent::Reasoning(reasoning) = content {
+                    let text = model::reasoning_text(reasoning);
+                    if !text.trim().is_empty() {
+                        self.state.events.lock().push(format!("thinking:{text}"));
+                    }
+                }
+            }
+            hook::ObservationAction::Continue
+        }
+
+        async fn on_tool_result(
+            &self,
+            _ctx: &HookContext,
+            event: hook::ToolResultEvent<'_>,
+        ) -> hook::ToolResultAction {
+            self.record_context(Message::User {
+                content: vec![UserContent::tool_result(
+                    event.tool_call_id.unwrap_or(event.internal_call_id),
+                    event.tool_name,
+                    event.presentation.as_content().to_vec(),
+                )],
+            });
+            hook::ToolResultAction::Keep
+        }
+
+        async fn on_tool_call(
+            &self,
+            _ctx: &HookContext,
+            event: hook::ToolCall<'_>,
+        ) -> hook::ToolCallAction {
+            self.state.events.lock().push(format!(
+                "call:{}",
+                event.tool_call_id.unwrap_or(event.internal_call_id)
+            ));
+            hook::ToolCallAction::Run
+        }
+    }
+
+    fn controlled_tool(state: Arc<ControlledState>) -> DynamicTool {
+        DynamicTool::new(
+            "list_sessions",
+            "读取关联会话",
+            serde_json::json!({"type":"object","properties":{}}),
+            move |_context, _arguments| {
+                let state = Arc::clone(&state);
+                Box::pin(async move {
+                    state.events.lock().push("dispatch:list_sessions".into());
+                    if let Some(tx) = state.entered.lock().take() {
+                        tx.send(()).unwrap();
+                    }
+                    state.release.notified().await;
+                    Ok(ToolOutput::text("session-result"))
+                })
+            },
+        )
     }
 
     #[tokio::test]
@@ -281,7 +228,7 @@ mod tests {
         ]);
         let recorded = model.clone();
         let (entered_tx, entered_rx) = oneshot::channel();
-        let tools = Arc::new(ControlledTools {
+        let state = Arc::new(ControlledState {
             entered: Mutex::new(Some(entered_tx)),
             release: Notify::new(),
             steers: Mutex::new(Vec::new()),
@@ -289,13 +236,16 @@ mod tests {
             events: Mutex::new(Vec::new()),
         });
         let runner = tokio::spawn({
-            let tools = tools.clone();
+            let state = Arc::clone(&state);
             async move {
                 run_agent(
                     AgentBuilder::new(model),
                     &preamble("按计划运行"),
                     vec![Message::user("开始")],
-                    tools,
+                    vec![controlled_tool(Arc::clone(&state))],
+                    ControlledHook {
+                        state: Arc::clone(&state),
+                    },
                 )
                 .await
             }
@@ -304,11 +254,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        tools
+        state
             .steers
             .lock()
             .push(Message::user("现在暂停，不再启动新会话"));
-        tools.release.notify_one();
+        state.release.notify_one();
         let output = tokio::time::timeout(std::time::Duration::from_secs(5), runner)
             .await
             .unwrap()
@@ -325,9 +275,9 @@ mod tests {
             second.contains("session-result"),
             "工具结果未回填: {second}"
         );
-        assert!(tools.steers.lock().is_empty());
+        assert!(state.steers.lock().is_empty());
         // 内存上下文按回合累积：assistant 回合（含思考）、工具结果、最终输出
-        let events = tools.events.lock().clone();
+        let events = state.events.lock().clone();
         let kinds: Vec<&str> = events
             .iter()
             .map(|event| event.split(':').next().unwrap())
@@ -336,7 +286,7 @@ mod tests {
             kinds,
             ["usage", "context", "thinking", "call", "dispatch", "context", "usage", "context"]
         );
-        assert_eq!(*tools.usages.lock(), [11, 17]);
+        assert_eq!(*state.usages.lock(), [11, 17]);
         assert!(events[1].contains("call-1") && events[1].contains("先检查"));
         assert!(events[2].contains("先检查"));
         assert!(events[5].contains("session-result"));

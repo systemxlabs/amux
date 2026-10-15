@@ -9,12 +9,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v2::TextContent;
-use amux_common::api::{Session, SessionConfigSetting, Usage, Workflow};
 use amux_common::domain::{
     generate_title, Activity, ContentBlock, GitBranchKind, HistoryItem, SessionConfigOption,
     SessionState, StateChangeReason, WorktreeBase,
 };
+use amux_common::{
+    api::{Session, SessionConfigSetting, Usage, Workflow},
+    model,
+};
 use parking_lot::Mutex;
+use rig_agent::{
+    agent::hook::{self, AgentHook, HookContext},
+    tool::{DynamicTool, ToolOutput},
+};
 use rig_core::completion::message::{
     AssistantContent, Audio, AudioMediaType, DocumentSourceKind, Image, ImageMediaType, MimeType,
     Reasoning, Text as RigText, ToolCall, ToolFunction, ToolResultContent, UserContent,
@@ -24,7 +31,7 @@ use uuid::Uuid;
 
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
-use crate::orchestrator::{self, ToolFuture, Tools};
+use crate::orchestrator;
 use crate::sessions::SessionService;
 use crate::store::Store;
 use crate::timestamps::now_ms;
@@ -400,11 +407,11 @@ impl WorkflowService {
             .workflow(workflow_id)
             .map(|row| row.plan)
             .unwrap_or_default();
-        let tools: Arc<dyn Tools> = Arc::new(WorkflowTools {
+        let tools = Arc::new(WorkflowTools {
             service: Arc::clone(self),
             workflow_id: workflow_id.to_string(),
-            context_window: config.context_window,
         });
+        let dynamic_tools = tools.dynamic_tools();
         let mut output = String::new();
         loop {
             let history = {
@@ -417,7 +424,13 @@ impl WorkflowService {
                 &config,
                 &orchestrator::preamble(&plan),
                 history,
-                tools.clone(),
+                dynamic_tools.clone(),
+                WorkflowHook {
+                    service: Arc::clone(self),
+                    workflow_id: workflow_id.to_string(),
+                    context_window: config.context_window,
+                    injected: Mutex::new(Vec::new()),
+                },
             )
             .await?;
             output.push_str(&text);
@@ -646,14 +659,21 @@ fn page<T>(items: Vec<T>, limit: usize, offset: usize) -> (Vec<T>, bool) {
     (window, has_more)
 }
 
-/// 工作流智能体的工具执行面与活动记录面：全部动作限定在本工作流的关联普通会话上。
+/// 工作流智能体的工具执行面：全部动作限定在本工作流的关联普通会话上。
 struct WorkflowTools {
     service: Arc<WorkflowService>,
     workflow_id: String,
-    context_window: u64,
 }
 
-impl Tools for WorkflowTools {
+/// 工作流智能体的运行观测面。
+struct WorkflowHook {
+    service: Arc<WorkflowService>,
+    workflow_id: String,
+    context_window: u64,
+    injected: Mutex<Vec<Message>>,
+}
+
+impl WorkflowHook {
     fn take_steers(&self) -> Vec<Message> {
         let mut runs = self.service.runs.lock();
         let Some(state) = runs.get_mut(&self.workflow_id) else {
@@ -686,14 +706,6 @@ impl Tools for WorkflowTools {
         }
     }
 
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        tool_definitions()
-    }
-
-    fn dispatch<'a>(&'a self, name: &'a str, arguments: serde_json::Value) -> ToolFuture<'a> {
-        Box::pin(async move { self.call(name, arguments).await })
-    }
-
     fn record_thinking(&self, text: &str) {
         self.service.record_activity(
             &self.workflow_id,
@@ -720,7 +732,122 @@ impl Tools for WorkflowTools {
     }
 }
 
+impl AgentHook for WorkflowHook {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        event: hook::CompletionCall<'_>,
+    ) -> hook::CompletionCallAction {
+        let mut injected = self.injected.lock();
+        injected.extend(self.take_steers());
+        if injected.is_empty() {
+            return hook::CompletionCallAction::Continue;
+        }
+        // RequestPatch 只改变本次请求，不写入 rig transcript，后续请求需再次携带已注入消息。
+        let mut history = event.history.to_vec();
+        // 不把用户指令插在 assistant tool call 与当前 tool result 之间。
+        let position = if matches!(history.last(), Some(Message::Assistant { content, .. }) if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_))))
+        {
+            history.len() - 1
+        } else {
+            history.len()
+        };
+        history.splice(position..position, injected.iter().cloned());
+        hook::CompletionCallAction::patch(hook::RequestPatch::default().history(history))
+    }
+
+    async fn on_completion_response(
+        &self,
+        _ctx: &HookContext,
+        event: hook::CompletionResponse<'_>,
+    ) -> hook::ObservationAction {
+        self.record_usage(event.usage.input_tokens);
+        // 整个回合原样进内存上下文（含思考）：思考模型要求 assistant 回合回放推理内容
+        if !event.content.is_empty() {
+            self.record_context(Message::Assistant {
+                id: event.message_id.map(str::to_string),
+                content: event.content.clone(),
+            });
+        }
+        for content in event.content {
+            if let AssistantContent::Reasoning(reasoning) = content {
+                let text = model::reasoning_text(reasoning);
+                if !text.trim().is_empty() {
+                    self.record_thinking(&text);
+                }
+            }
+        }
+        hook::ObservationAction::Continue
+    }
+
+    async fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: hook::ToolResultEvent<'_>,
+    ) -> hook::ToolResultAction {
+        self.record_context(Message::User {
+            content: vec![UserContent::tool_result(
+                event.tool_call_id.unwrap_or(event.internal_call_id),
+                event.tool_name,
+                event.presentation.as_content().to_vec(),
+            )],
+        });
+        hook::ToolResultAction::Keep
+    }
+
+    async fn on_tool_call(
+        &self,
+        _ctx: &HookContext,
+        event: hook::ToolCall<'_>,
+    ) -> hook::ToolCallAction {
+        self.record_tool_call(&ToolCall::from_wire(
+            event.tool_call_id.unwrap_or(event.internal_call_id),
+            ToolFunction::new(
+                event.tool_name.into(),
+                serde_json::from_str(event.args).unwrap_or_default(),
+            ),
+        ));
+        hook::ToolCallAction::Run
+    }
+
+    async fn on_invalid_tool_call(
+        &self,
+        _ctx: &HookContext,
+        event: &hook::InvalidToolCallContext,
+    ) -> Option<hook::InvalidToolCallAction> {
+        Some(hook::InvalidToolCallAction::Skip {
+            reason: format!("工具执行失败：未知工具: {}", event.tool_name),
+        })
+    }
+}
+
 impl WorkflowTools {
+    fn dynamic_tools(self: &Arc<Self>) -> Vec<DynamicTool> {
+        tool_definitions()
+            .into_iter()
+            .map(|definition| {
+                let tools = Arc::clone(self);
+                let name = definition.name.clone();
+                DynamicTool::new(
+                    definition.name,
+                    definition.description,
+                    definition.parameters,
+                    move |_context, arguments| {
+                        let tools = Arc::clone(&tools);
+                        let name = name.clone();
+                        Box::pin(async move {
+                            let result = tools
+                                .call(&name, arguments)
+                                .await
+                                .unwrap_or_else(|error| format!("工具执行失败：{error}"));
+                            Ok(ToolOutput::text(result))
+                        })
+                    },
+                )
+            })
+            .collect()
+    }
+
     async fn call(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
         let services = &self.service;
         match name {
@@ -1400,7 +1527,6 @@ mod tests {
         let tools = WorkflowTools {
             service,
             workflow_id: workflow.id,
-            context_window: 1_000_000,
         };
         let output = tools
             .call("list_sessions", serde_json::json!({}))
@@ -1425,13 +1551,14 @@ mod tests {
         let service = test_service(dir.path());
         let workflow = service.create("计划", None, None).await.unwrap();
         service.runs.lock().entry(workflow.id.clone()).or_default();
-        let tools = WorkflowTools {
+        let hook = WorkflowHook {
             service: Arc::clone(&service),
             workflow_id: workflow.id.clone(),
             context_window: 128_000,
+            injected: Mutex::new(Vec::new()),
         };
 
-        tools.record_usage(42_000);
+        hook.record_usage(42_000);
         assert_eq!(
             service.usage(&workflow.id),
             Some(Usage {
@@ -1626,10 +1753,11 @@ mod tests {
         let service = test_service(dir.path());
         let workflow = service.create("计划", None, None).await.unwrap();
         service.runs.lock().entry(workflow.id.clone()).or_default();
-        let tools = WorkflowTools {
+        let hook = WorkflowHook {
             service: Arc::clone(&service),
             workflow_id: workflow.id.clone(),
             context_window: 1_000_000,
+            injected: Mutex::new(Vec::new()),
         };
 
         service.append(
@@ -1639,14 +1767,14 @@ mod tests {
                 timestamp: 1,
             },
         );
-        tools.record_tool_call(&ToolCall::from_wire(
+        hook.record_tool_call(&ToolCall::from_wire(
             "call_001",
             ToolFunction::new(
                 "prompt_session".into(),
                 serde_json::json!({ "session": "s1", "prompt": "跑测试" }),
             ),
         ));
-        tools.record_thinking("先下发指令");
+        hook.record_thinking("先下发指令");
 
         let (activities, more) = service.activities(&workflow.id, PAGE_LIMIT, 0);
         assert!(!more);
