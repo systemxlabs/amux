@@ -2,7 +2,7 @@
 // 快捷指令栏、输入区（Enter 发送 / Shift+Enter 换行、斜杠命令上拉框、附件）、会话选项。
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { AlertCircle, LoaderCircle, Paperclip, RotateCw, SendHorizontal, Square } from "lucide-react";
+import { AlertCircle, GitBranch, LoaderCircle, Paperclip, RotateCw, SendHorizontal, Square } from "lucide-react";
 
 import { Markdown } from "../components/Markdown";
 import { Button } from "../components/ui/button";
@@ -286,8 +286,9 @@ export function InteractionView() {
               {execDirPath}
             </span>
             {gitBranch !== null ? (
-              <span data-slot="interaction-git-branch" title={gitBranch} className="shrink-0 truncate">
-                {gitBranch}
+              <span data-slot="interaction-git-branch" title={gitBranch} className="flex shrink-0 items-center gap-1 truncate">
+                <GitBranch aria-hidden="true" className="size-3 shrink-0" />
+                <span className="truncate">{gitBranch}</span>
               </span>
             ) : null}
           </div>
