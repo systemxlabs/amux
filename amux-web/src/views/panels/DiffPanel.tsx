@@ -3,17 +3,18 @@
 // 面板打开时拉取一次改动，不定时刷新；折叠状态只存在于本地。
 
 import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
+import {
+  ChevronDown,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  Plus,
+} from "lucide-react";
 
 import { ResizableTreePane } from "../../components/ResizableTreePane";
 import { Button } from "../../components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../../components/ui/select";
+import { Input } from "../../components/ui/input";
 import { sendPrompt } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
 import { buildDiffTree, type DiffNode } from "../../lib/difftree";
@@ -41,13 +42,20 @@ function preferredDiffBase(branches: readonly GitBranch[], useWorktree: boolean)
     const source = branches.find((branch) => branch.isWorktreeBase);
     if (source !== undefined) return source.name;
   }
-  return branches.find((branch) => branch.isDefault)?.name ?? "HEAD";
+  const remoteDefaults = branches.filter((branch) => branch.isRemoteDefault);
+  return (
+    remoteDefaults.find((branch) => branch.kind === "remote" && branch.remote === "origin")
+      ?.name ??
+    remoteDefaults[0]?.name ??
+    "HEAD"
+  );
 }
 
 function branchLabel(branch: GitBranch): string {
   const marks = [
     branch.isWorktreeBase ? "worktree 基分支" : "",
-    branch.isDefault ? "默认分支" : "",
+    branch.isLocalDefault ? "本地默认分支" : "",
+    branch.isRemoteDefault ? "远端默认分支" : "",
   ].filter(Boolean);
   return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
 }
@@ -239,6 +247,8 @@ export function DiffPanel() {
   const [diff, setDiff] = useState<GitDiffResult | null>(null);
   const [branches, setBranches] = useState<GitBranch[]>([]);
   const [base, setBase] = useState("HEAD");
+  const [basePickerOpen, setBasePickerOpen] = useState(false);
+  const [baseQuery, setBaseQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [treeVisible, setTreeVisible] = useState(true);
   /** 折叠全部文件改动：折叠后仅显示文件名（docs/PRD.md「改动审查视图」） */
@@ -253,6 +263,7 @@ export function DiffPanel() {
   const dragRef = useRef<DiffDrag | null>(null);
   const dragPointerRef = useRef<number | null>(null);
   const diffRequestRef = useRef(0);
+  const basePickerRef = useRef<HTMLDivElement | null>(null);
   const useWorktree = (state.detail.session?.worktreeDir ?? "") !== "";
   const branchMachine = state.detail.session?.machine ?? null;
   const branchRepo = state.detail.session ? execDir(state.detail.session) : null;
@@ -262,6 +273,8 @@ export function DiffPanel() {
     setDiff(null);
     setBranches([]);
     setBase("HEAD");
+    setBasePickerOpen(false);
+    setBaseQuery("");
     setError(null);
     setDiffsCollapsed(false);
     setCollapsedDirs([]);
@@ -297,12 +310,28 @@ export function DiffPanel() {
     };
   }, [branchMachine, branchRepo, core, sessionId, useWorktree]);
 
+  useEffect(() => {
+    if (!basePickerOpen) return;
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (basePickerRef.current !== null && !basePickerRef.current.contains(target)) {
+        setBasePickerOpen(false);
+        setBaseQuery("");
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [basePickerOpen]);
+
   const files = diff?.files ?? [];
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
   const additions = files.reduce((total, file) => total + file.additions, 0);
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
 
   const selectBase = (value: string) => {
+    setBasePickerOpen(false);
+    setBaseQuery("");
     if (sessionId === null || value === base) return;
     setBase(value);
     const request = ++diffRequestRef.current;
@@ -317,6 +346,19 @@ export function DiffPanel() {
       },
     );
   };
+
+  const baseKeyword = baseQuery.trim().toLowerCase();
+  const matchedBranches =
+    baseKeyword === ""
+      ? branches
+      : branches.filter(
+          (branch) =>
+            branch.name.toLowerCase().includes(baseKeyword) ||
+            branch.fullName.toLowerCase().includes(baseKeyword),
+        );
+  const selectedBranch = branches.find((branch) => branch.name === base);
+  const baseLabel =
+    base === "HEAD" ? "HEAD（当前提交）" : selectedBranch === undefined ? base : branchLabel(selectedBranch);
 
   const toggleDir = (key: string) => {
     setCollapsedDirs((prev) =>
@@ -633,23 +675,76 @@ export function DiffPanel() {
             {files.length} 个文件
           </span>
         </div>
-        <Select value={base} onValueChange={selectBase}>
-          <SelectTrigger
-            data-slot="diff-base-select"
+        <div ref={basePickerRef} className="relative w-40 lg:w-56">
+          <button
+            type="button"
+            role="combobox"
             aria-label="选择基准分支"
-            className="h-8 max-w-40 lg:max-w-56"
+            aria-expanded={basePickerOpen}
+            data-slot="diff-base-select"
+            onClick={() => {
+              setBasePickerOpen((open) => !open);
+              setBaseQuery("");
+            }}
+            className={cn(
+              "flex h-8 w-full items-center gap-2 rounded-md border border-input bg-background px-2 text-sm outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40",
+              basePickerOpen && "border-ring ring-2 ring-ring/40",
+            )}
           >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="HEAD">HEAD（当前提交）</SelectItem>
-            {branches.map((branch) => (
-              <SelectItem key={branch.name} value={branch.name}>
-                {branchLabel(branch)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <span className="min-w-0 flex-1 truncate text-left">{baseLabel}</span>
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+          </button>
+          {basePickerOpen ? (
+            <div
+              role="listbox"
+              data-slot="diff-base-list"
+              className="absolute top-full left-1/2 z-20 mt-1 flex max-h-64 w-64 -translate-x-1/2 flex-col overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg"
+            >
+              <Input
+                autoFocus
+                data-slot="diff-base-search"
+                aria-label="搜索基准分支"
+                placeholder="搜索分支"
+                className="mb-1 h-8"
+                value={baseQuery}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setBasePickerOpen(false);
+                    setBaseQuery("");
+                  }
+                }}
+                onChange={(event) => setBaseQuery(event.target.value)}
+              />
+              {(baseKeyword === "" || "head".includes(baseKeyword)) && (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={base === "HEAD"}
+                  className="flex cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                  onClick={() => selectBase("HEAD")}
+                >
+                  HEAD（当前提交）
+                </button>
+              )}
+              {matchedBranches.length === 0 ? (
+                <span className="px-2 py-1.5 text-xs text-muted-foreground">无匹配分支</span>
+              ) : (
+                matchedBranches.map((branch) => (
+                  <button
+                    key={branch.fullName}
+                    type="button"
+                    role="option"
+                    aria-selected={base === branch.name}
+                    className="flex cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    onClick={() => selectBase(branch.name)}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{branchLabel(branch)}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          ) : null}
+        </div>
         <div className="flex min-w-0 items-center justify-end gap-2">
           <span data-slot="diff-line-count" className="text-xs">
             <span className="text-success">+{additions}</span>

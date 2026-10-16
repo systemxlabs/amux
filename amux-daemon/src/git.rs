@@ -490,7 +490,7 @@ impl GitRunner {
         }
     }
 
-    /// 查询本地与远端跟踪分支，并标记 worktree 基分支与仓库默认分支。
+    /// 查询本地与远端跟踪分支，并标记 worktree 基分支及本地、远端默认分支。
     pub fn branches(&self, cwd: &str) -> Result<GitBranchListResult, String> {
         let repo = gix::discover(cwd).map_err(|error| format!("不是 git 仓库: {cwd}: {error}"))?;
         let current = repo
@@ -517,11 +517,13 @@ impl GitRunner {
                 remote: None,
                 remote_branch: None,
                 is_worktree_base: false,
-                is_default: false,
+                is_local_default: false,
+                is_remote_default: false,
             });
         }
         local_names.sort();
-        let default = default_branch(cwd, &local_names, current.as_deref());
+        let local_default = default_branch(cwd, &local_names, current.as_deref());
+        let remote_defaults = remote_default_branches(cwd);
 
         for reference in repo
             .references()
@@ -545,7 +547,8 @@ impl GitRunner {
                     remote,
                     remote_branch,
                     is_worktree_base: false,
-                    is_default: false,
+                    is_local_default: false,
+                    is_remote_default: false,
                 });
             }
         }
@@ -553,7 +556,10 @@ impl GitRunner {
             branch.is_worktree_base = worktree_base
                 .as_ref()
                 .is_some_and(|base| branch_matches_worktree_base(base, branch));
-            branch.is_default = default.as_deref() == Some(branch.name.as_str());
+            branch.is_local_default = branch.kind == GitBranchKind::Local
+                && local_default.as_deref() == Some(branch.name.as_str());
+            branch.is_remote_default =
+                branch.kind == GitBranchKind::Remote && remote_defaults.contains(&branch.name);
         }
         branches.sort_by(|left, right| {
             branch_kind_rank(left.kind)
@@ -789,6 +795,29 @@ fn default_branch(cwd: &str, branches: &[String], current: Option<&str>) -> Opti
         .map(str::to_string)
 }
 
+/// 每个远端的 HEAD 引用指向各自的默认分支；无法读取的远端不标记默认分支。
+fn remote_default_branches(cwd: &str) -> BTreeSet<String> {
+    let Ok(references) = run(
+        cwd,
+        &["for-each-ref", "--format=%(refname)", "refs/remotes"],
+    ) else {
+        return BTreeSet::new();
+    };
+    references
+        .lines()
+        .filter_map(|reference| {
+            let remote = reference
+                .strip_prefix("refs/remotes/")?
+                .strip_suffix("/HEAD")?;
+            let output = run(cwd, &["symbolic-ref", "--quiet", "--short", reference]).ok()?;
+            output
+                .trim()
+                .strip_prefix(&format!("{remote}/"))
+                .map(|branch| format!("{remote}/{branch}"))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1013,6 +1042,14 @@ mod tests {
         let repo = init_repo();
         git(&repo, &["branch", "feature"]);
         git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
         let runner = GitRunner::new();
         let branches = runner.branches(repo.to_str().unwrap()).unwrap();
         assert_eq!(branches.current_branch, "main");
@@ -1021,7 +1058,7 @@ mod tests {
             .iter()
             .find(|branch| branch.name == "main")
             .unwrap();
-        assert!(main.is_default);
+        assert!(main.is_local_default);
         assert_eq!(main.kind, GitBranchKind::Local);
         assert_eq!(main.full_name, "refs/heads/main");
         assert!(
@@ -1031,7 +1068,7 @@ mod tests {
                     && branch.kind == GitBranchKind::Remote
                     && branch.remote.as_deref() == Some("origin")
                     && branch.remote_branch.as_deref() == Some("main")
-                    && !branch.is_default
+                    && branch.is_remote_default
             }),
             "{branches:?}"
         );

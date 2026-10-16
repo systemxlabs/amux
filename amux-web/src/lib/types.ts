@@ -83,7 +83,8 @@ type GitBranchBase = {
   name: string;
   fullName: string;
   isWorktreeBase: boolean;
-  isDefault: boolean;
+  isLocalDefault: boolean;
+  isRemoteDefault: boolean;
 };
 export type GitBranch =
   | (GitBranchBase & { kind: "local" })

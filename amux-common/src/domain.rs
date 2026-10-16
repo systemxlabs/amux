@@ -366,8 +366,10 @@ pub struct GitBranch {
     pub remote_branch: Option<String>,
     /// worktree 会话的基分支
     pub is_worktree_base: bool,
-    /// 仓库默认分支
-    pub is_default: bool,
+    /// 本地仓库默认分支。
+    pub is_local_default: bool,
+    /// 远端仓库默认分支。
+    pub is_remote_default: bool,
 }
 
 /// 分支列表。
@@ -595,10 +597,12 @@ mod tests {
             remote: None,
             remote_branch: None,
             is_worktree_base: true,
-            is_default: true,
+            is_local_default: true,
+            is_remote_default: false,
         };
         let json = serde_json::to_value(branch).unwrap();
         assert_eq!(json["isWorktreeBase"], true);
-        assert_eq!(json["isDefault"], true);
+        assert_eq!(json["isLocalDefault"], true);
+        assert_eq!(json["isRemoteDefault"], false);
     }
 }

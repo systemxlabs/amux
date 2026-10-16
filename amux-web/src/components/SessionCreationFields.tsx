@@ -34,7 +34,8 @@ function worktreeBranchLabel(branch: GitBranch): string {
   const marks = [
     branch.kind === "remote" ? "创建时获取最新" : "",
     branch.isWorktreeBase ? "worktree 基分支" : "",
-    branch.isDefault ? "默认分支" : "",
+    branch.isLocalDefault ? "本地默认分支" : "",
+    branch.isRemoteDefault ? "远端默认分支" : "",
   ].filter(Boolean);
   return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
 }
@@ -277,7 +278,9 @@ export function WorktreeBranchField({
               worktreeBaseKey(worktreeBaseFromBranch(branch)) === worktreeBaseKey(current),
           );
         if (selected) return;
-        const fallback = result.branches.find((branch) => branch.isDefault);
+        const fallback = result.branches.find(
+          (branch) => branch.kind === "local" && branch.isLocalDefault,
+        );
         onChangeRef.current(fallback === undefined ? null : worktreeBaseFromBranch(fallback));
       },
       () => {

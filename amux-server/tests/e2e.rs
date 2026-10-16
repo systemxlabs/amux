@@ -440,7 +440,7 @@ async fn server_daemon_agent_end_to_end() {
             .iter()
             .any(|branch| {
                 branch["name"] == "main"
-                    && branch["isDefault"] == true
+                    && branch["isLocalDefault"] == true
                     && branch["isWorktreeBase"] == false
             }),
         "{branches}"
