@@ -10,7 +10,7 @@ use amux_common::api::{
     Automation, AutomationInput, AutomationResultLabel, AutomationRun, AutomationRunState,
     AutomationSessionOptions, AutomationTrigger,
 };
-use amux_common::domain::{Activity, ContentBlock, HistoryItem, StateChangeReason, WorktreeBase};
+use amux_common::domain::{ContentBlock, HistoryItem, StateChangeReason, WorktreeBase};
 use croner::Cron;
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -274,19 +274,27 @@ impl AutomationService {
         self.store.finish_automation_run(&run.id, finished_at);
         let started_at = run.started_at.unwrap_or(run.created_at);
         let context = match (&run.session_id, &run.workflow_id) {
-            (Some(session_id), _) => {
-                session_context(&self.sessions, session_id, started_at, finished_at)
-            }
-            (_, Some(workflow_id)) => {
-                workflow_context(&self.workflows, workflow_id, started_at, finished_at)
-            }
-            _ => None,
+            (Some(session_id), _) => session_context(
+                &self.sessions,
+                session_id,
+                &automation.task,
+                started_at,
+                finished_at,
+            ),
+            (_, Some(workflow_id)) => workflow_context(
+                &self.workflows,
+                workflow_id,
+                &automation.task,
+                started_at,
+                finished_at,
+            ),
+            _ => Err("自动化运行缺少会话".into()),
         };
         match context {
-            Some(context) => match self.classify(&automation.result_labels, &context).await {
+            Ok(context) => match self.classify(&automation.result_labels, &context).await {
                 Ok(label) => {
                     self.store
-                        .set_automation_run_label(&run.id, label.as_deref(), None);
+                        .set_automation_run_label(&run.id, Some(&label), None);
                 }
                 Err(error) => {
                     log::warn!("自动化结果分类失败: run={}: {error}", run.id);
@@ -294,12 +302,9 @@ impl AutomationService {
                         .set_automation_run_label(&run.id, None, Some(&error));
                 }
             },
-            None => {
-                self.store.set_automation_run_label(
-                    &run.id,
-                    None,
-                    Some("会话没有可分类的历史或活动"),
-                );
+            Err(error) => {
+                self.store
+                    .set_automation_run_label(&run.id, None, Some(&error));
             }
         }
     }
@@ -308,14 +313,12 @@ impl AutomationService {
         &self,
         labels: &[AutomationResultLabel],
         context: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<String, String> {
         let config = self
             .config
             .automation()
             .ok_or("自动化决策模型未配置，无法进行结果分类")?;
-        let label =
-            crate::system_one::evaluate_choice(&config, labels, truncate(context, 16_000)).await?;
-        Ok(Some(label))
+        crate::system_one::evaluate_choice(&config, labels, context).await
     }
 
     fn view(&self, row: AutomationRow) -> Automation {
@@ -567,56 +570,84 @@ fn zoned(timestamp_ms: u64) -> jiff::Zoned {
 fn session_context(
     sessions: &SessionService,
     session_id: &str,
+    task: &str,
     started_at: u64,
     finished_at: u64,
-) -> Option<String> {
-    let (history, _) = sessions.history(session_id, 50, 0);
-    let (activities, _) = sessions.activities(session_id, 50, 0);
-    format_context(history, activities, started_at, finished_at)
+) -> Result<String, String> {
+    format_context(
+        task,
+        collect_history(|limit, offset| sessions.history(session_id, limit, offset)),
+        started_at,
+        finished_at,
+    )
 }
 
 fn workflow_context(
     workflows: &WorkflowService,
     workflow_id: &str,
+    task: &str,
     started_at: u64,
     finished_at: u64,
-) -> Option<String> {
-    let (history, _) = workflows.history(workflow_id, 50, 0);
-    let (activities, _) = workflows.activities(workflow_id, 50, 0);
-    format_context(history, activities, started_at, finished_at)
+) -> Result<String, String> {
+    format_context(
+        task,
+        collect_history(|limit, offset| workflows.history(workflow_id, limit, offset)),
+        started_at,
+        finished_at,
+    )
+}
+
+/// 历史接口按最新优先分页，每页内部再按时间正序返回；按页前插可还原完整时序。
+fn collect_history(
+    mut page: impl FnMut(usize, usize) -> (Vec<HistoryItem>, bool),
+) -> Vec<HistoryItem> {
+    const PAGE_SIZE: usize = 100;
+    let mut offset = 0;
+    let mut history = Vec::new();
+    loop {
+        let (mut items, has_more) = page(PAGE_SIZE, offset);
+        offset += items.len();
+        if items.is_empty() {
+            break;
+        }
+        items.append(&mut history);
+        history = items;
+        if !has_more {
+            break;
+        }
+    }
+    history
 }
 
 fn format_context(
+    task: &str,
     history: Vec<HistoryItem>,
-    activities: Vec<Activity>,
     started_at: u64,
     finished_at: u64,
-) -> Option<String> {
+) -> Result<String, String> {
     let mut lines = Vec::new();
+    let mut has_agent_message = false;
     for item in history
         .into_iter()
         .filter(|item| (started_at..=finished_at).contains(&item.timestamp()))
     {
         match item {
-            HistoryItem::UserMessage {
-                content, timestamp, ..
-            } => lines.push(format!("[{timestamp}] 用户：{}", blocks_text(&content))),
-            HistoryItem::AgentMessage {
-                content, timestamp, ..
-            } => lines.push(format!("[{timestamp}] 智能体：{}", blocks_text(&content))),
+            HistoryItem::UserMessage { content, .. } => {
+                lines.push(format!("user: {}", blocks_text(&content)));
+            }
+            HistoryItem::AgentMessage { content, .. } => {
+                has_agent_message = true;
+                lines.push(format!("agent: {}", blocks_text(&content)));
+            }
         }
     }
-    for activity in activities
-        .into_iter()
-        .filter(|activity| (started_at..=finished_at).contains(&activity.timestamp()))
-    {
-        lines.push(format!(
-            "[{}] {}",
-            activity.timestamp(),
-            activity_text(&activity)
-        ));
+    if !has_agent_message {
+        return Err("Agent 无任何输出".into());
     }
-    (!lines.is_empty()).then(|| lines.join("\n"))
+    Ok(format!(
+        "智能体正在执行一个自动化任务，任务内容是：{task}。\n\n以下是智能体会话消息：\n{}",
+        lines.join("\n")
+    ))
 }
 
 fn blocks_text(blocks: &[ContentBlock]) -> String {
@@ -630,55 +661,26 @@ fn blocks_text(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-fn activity_text(activity: &Activity) -> String {
-    match activity {
-        Activity::Thinking { thinking, .. } => format!("思考 {thinking}"),
-        Activity::ToolCall {
-            tool_name,
-            title,
-            parameters,
-            ..
-        } => format!(
-            "工具调用 {tool_name} {}{}",
-            title.as_deref().unwrap_or_default(),
-            parameters
-                .as_deref()
-                .map(|parameters| format!("\n{parameters}"))
-                .unwrap_or_default()
-        ),
-        Activity::Compaction {
-            status, summary, ..
-        } => format!("上下文压缩 {status} {summary}"),
-        Activity::Notice {
-            severity,
-            title,
-            description,
-            ..
-        } => format!(
-            "通知 {severity} {title}{}",
-            description
-                .as_deref()
-                .map(|description| format!("\n{description}"))
-                .unwrap_or_default()
-        ),
-        Activity::Error { error, .. } => format!("错误 {error}"),
-    }
-}
-
-fn truncate(text: &str, limit: usize) -> &str {
-    if text.len() <= limit {
-        return text;
-    }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message(role: &str, text: &str, timestamp: u64) -> HistoryItem {
+        let content = vec![ContentBlock::Text(TextContent::new(text))];
+        match role {
+            "user" => HistoryItem::UserMessage {
+                id: format!("user-{timestamp}"),
+                content,
+                timestamp,
+            },
+            "agent" => HistoryItem::AgentMessage {
+                id: format!("agent-{timestamp}"),
+                content,
+                timestamp,
+            },
+            _ => panic!("未知角色"),
+        }
+    }
 
     fn labels() -> Vec<AutomationResultLabel> {
         vec![
@@ -757,5 +759,61 @@ mod tests {
         let next = next_occurrence_ms("0 0 * * *", from).unwrap();
         assert!(next > from);
         assert!(next - from <= 24 * 60 * 60 * 1000);
+    }
+
+    #[test]
+    fn classification_context_uses_only_run_conversation() {
+        let context = format_context(
+            "检查构建",
+            vec![
+                message("user", "旧任务", 1),
+                message("user", "开始构建", 10),
+                message("agent", "构建通过", 11),
+                message("agent", "下一次任务", 20),
+            ],
+            10,
+            11,
+        )
+        .unwrap();
+
+        assert_eq!(
+            context,
+            "智能体正在执行一个自动化任务，任务内容是：检查构建。\n\n以下是智能体会话消息：\nuser: 开始构建\nagent: 构建通过"
+        );
+    }
+
+    #[test]
+    fn classification_context_rejects_run_without_agent_output() {
+        let error =
+            format_context("检查构建", vec![message("user", "开始构建", 10)], 10, 10).unwrap_err();
+        assert_eq!(error, "Agent 无任何输出");
+    }
+
+    #[test]
+    fn collection_reassembles_latest_first_pages_in_time_order() {
+        let pages = [
+            (
+                vec![message("agent", "第三条", 3), message("agent", "第四条", 4)],
+                true,
+            ),
+            (
+                vec![message("user", "第一条", 1), message("agent", "第二条", 2)],
+                false,
+            ),
+        ];
+        let mut index = 0;
+        let history = collect_history(|_, _| {
+            let page = pages[index].clone();
+            index += 1;
+            page
+        });
+
+        assert_eq!(
+            history
+                .iter()
+                .map(HistoryItem::timestamp)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
     }
 }

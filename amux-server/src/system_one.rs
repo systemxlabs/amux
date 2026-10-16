@@ -41,22 +41,7 @@ pub async fn evaluate_choice(
     labels: &[AutomationResultLabel],
     context: &str,
 ) -> Result<String, String> {
-    let criteria = labels
-        .iter()
-        .map(|label| (label.name.clone(), Some(label.description.clone())))
-        .collect();
-    let questions = BTreeMap::from([(
-        "result",
-        Question::Choice {
-            instructions: "选择最符合任务运行结果的分类".into(),
-            criteria,
-        },
-    )]);
-    let request = EvaluationRequest {
-        model: &config.model,
-        state: serde_json::json!({ "context": context }),
-        questions,
-    };
+    let request = evaluation_request(config, labels, context);
 
     let response = CLIENT
         .get_or_init(reqwest::Client::new)
@@ -89,9 +74,34 @@ pub async fn evaluate_choice(
     Ok(choice.clone())
 }
 
+fn evaluation_request<'a>(
+    config: &'a AutomationConfig,
+    labels: &[AutomationResultLabel],
+    context: &str,
+) -> EvaluationRequest<'a> {
+    let criteria = labels
+        .iter()
+        .map(|label| (label.name.clone(), Some(label.description.clone())))
+        .collect();
+    let questions = BTreeMap::from([(
+        "result",
+        Question::Choice {
+            instructions: "请告诉我这个任务的结果是什么？".into(),
+            criteria,
+        },
+    )]);
+    EvaluationRequest {
+        model: &config.model,
+        state: serde_json::json!({ "context": context }),
+        questions,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::EvaluationResponse;
+    use amux_common::api::{AutomationApiFormat, AutomationConfig, AutomationResultLabel};
+
+    use super::{evaluation_request, EvaluationResponse};
 
     #[test]
     fn response_ignores_numeric_usage_cost() {
@@ -114,5 +124,31 @@ mod tests {
         let response: EvaluationResponse = serde_json::from_str(body).unwrap();
         let super::Answer::Choice { choice } = response.answers.get("result").unwrap();
         assert_eq!(choice, "通过");
+    }
+
+    #[test]
+    fn request_uses_documented_question_and_label_descriptions() {
+        let config = AutomationConfig {
+            api_format: AutomationApiFormat::SystemOne,
+            endpoint: "https://example.test".into(),
+            api_key: "token".into(),
+            model: "model".into(),
+        };
+        let request = evaluation_request(
+            &config,
+            &[AutomationResultLabel {
+                name: "通过".into(),
+                description: "任务完成".into(),
+            }],
+            "上下文",
+        );
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["state"]["context"], "上下文");
+        assert_eq!(
+            json["questions"]["result"]["instructions"],
+            "请告诉我这个任务的结果是什么？"
+        );
+        assert_eq!(json["questions"]["result"]["criteria"]["通过"], "任务完成");
     }
 }
