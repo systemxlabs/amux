@@ -619,7 +619,8 @@ function AutomationEditor({
     (sessionMode === "new_session" &&
       machine !== "" &&
       agent !== "" &&
-      workspace.trim() !== "") ||
+      workspace.trim() !== "" &&
+      (!useWorktree || worktreeBase !== null)) ||
     (sessionMode === "new_workflow" && plan.trim() !== "");
   const labelsValid =
     resultLabels.length >= 2 &&

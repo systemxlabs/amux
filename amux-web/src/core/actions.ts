@@ -17,6 +17,7 @@ import type {
   Session,
   Skill,
   WorkflowPlanItem,
+  WorktreeBase,
 } from "../lib/types";
 import { entryPinned, entryTitle, execDir, worktreeBaseFromBranch } from "../lib/types";
 import { initialNewSession, panelAvailable } from "./core";
@@ -375,14 +376,15 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
   try {
     if (entry.kind === "session") {
       const useWorktree = entry.session.worktreeDir !== "";
-      let worktreeBase;
+      let worktreeBase: WorktreeBase | undefined;
       if (useWorktree) {
         const branch = (
           await core.client
             .listBranches(entry.session.machine, execDir(entry.session))
             .catch(() => ({ branches: [] }))
         ).branches.find((item) => item.isWorktreeBase);
-        worktreeBase = branch === undefined ? undefined : worktreeBaseFromBranch(branch);
+        // 开启 worktree 时必须携带基分支：源会话以 HEAD 为基分支时没有标记，按 HEAD 复制
+        worktreeBase = branch === undefined ? { kind: "head" } : worktreeBaseFromBranch(branch);
       }
       const session = await core.client.createSession({
         machine: entry.session.machine,
@@ -603,13 +605,21 @@ export async function createSession(core: Core): Promise<void> {
   if (!core.client) return;
   const { machine, agent, workspace, useWorktree, worktreeBase, project } =
     core.state.newSession;
+  let base: WorktreeBase | undefined;
+  if (useWorktree) {
+    if (worktreeBase === null) {
+      core.failure("开启 worktree 时必须指定基分支");
+      return;
+    }
+    base = worktreeBase;
+  }
   try {
     const session = await core.client.createSession({
       machine,
       agent,
       workspace,
       useWorktree,
-      worktreeBase: useWorktree ? (worktreeBase ?? undefined) : undefined,
+      worktreeBase: base,
       project,
     });
     core.update((state) => {
