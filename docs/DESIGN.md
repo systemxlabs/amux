@@ -440,7 +440,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 |---|---|
 | `list_agents` | 查询各机器的执行智能体列表，包括执行智能体状态（可用或不可用） |
 | `list_sessions` | 查询关联普通会话列表，包含会话 ID、状态、标题、工作目录、worktree 目录、机器、执行智能体等信息 |
-| `create_session` | 创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作，若未指定 worktree 基分支，则默认从当前仓库的 HEAD 切出 |
+| `create_session` | 创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作 |
 | `prompt_session` | 向指定关联普通会话以用户角色发送消息，驱动执行智能体工作 |
 | `cancel_session` | 取消指定关联普通会话中执行智能体正在进行中的工作，若无进行中的工作则立即返回成功 |
 | `configure_session` | 配置指定关联普通会话的会话标题和会话选项 |
