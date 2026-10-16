@@ -916,13 +916,17 @@ impl WorkflowTools {
                     .get("worktree")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false);
-                let requested_base = arguments
+                let base_branch = arguments
                     .get("base_branch")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string);
-                let worktree_base =
-                    resolve_worktree_base(&services.machines, &machine, &cwd, requested_base)
-                        .await?;
+                    .and_then(|value| value.as_str());
+                let worktree_base = if worktree {
+                    Some(
+                        resolve_worktree_base(&services.machines, &machine, &cwd, base_branch)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
                 let session = services
                     .sessions
                     .create(crate::sessions::CreateSessionParams {
@@ -1034,16 +1038,14 @@ async fn resolve_worktree_base(
     machines: &MachineHub,
     machine: &str,
     cwd: &str,
-    requested: Option<String>,
-) -> Result<Option<WorktreeBase>, String> {
-    let Some(requested) = requested
-        .map(|name| name.trim().to_string())
+    requested: Option<&str>,
+) -> Result<WorktreeBase, String> {
+    let requested = requested
+        .map(str::trim)
         .filter(|name| !name.is_empty())
-    else {
-        return Ok(None);
-    };
+        .ok_or("开启 worktree 时必须指定基分支")?;
     if requested.eq_ignore_ascii_case("HEAD") {
-        return Ok(Some(WorktreeBase::Head));
+        return Ok(WorktreeBase::Head);
     }
     let branches = machines.git_branches(machine, cwd).await?;
     let branch = branches
@@ -1052,15 +1054,15 @@ async fn resolve_worktree_base(
         .find(|branch| branch.name == requested || branch.full_name == requested)
         .ok_or_else(|| format!("worktree 基分支不存在: {requested}"))?;
     match branch.kind {
-        GitBranchKind::Local => Ok(Some(WorktreeBase::Local { name: branch.name })),
-        GitBranchKind::Remote => Ok(Some(WorktreeBase::Remote {
+        GitBranchKind::Local => Ok(WorktreeBase::Local { name: branch.name }),
+        GitBranchKind::Remote => Ok(WorktreeBase::Remote {
             remote: branch
                 .remote
                 .ok_or_else(|| format!("远端分支缺少 remote: {}", branch.name))?,
             branch: branch
                 .remote_branch
                 .ok_or_else(|| format!("远端分支缺少分支名: {}", branch.name))?,
-        })),
+        }),
     }
 }
 
@@ -1112,7 +1114,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "create_session".into(),
-            description: "创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作，若未指定 worktree 基分支，则默认从当前仓库的 HEAD 切出".into(),
+            description: "创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1120,7 +1122,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
                     "agent": string("agent 名"),
                     "cwd": string("工作目录"),
                     "worktree": { "type": "boolean", "description": "是否以 git worktree 方式工作；缺省 false" },
-                    "base_branch": string("worktree 基分支；缺省或 HEAD 表示当前仓库 HEAD")
+                    "base_branch": string("worktree 基分支；开启 worktree 时必填，HEAD 表示当前仓库 HEAD")
                 },
                 "required": ["machine", "agent", "cwd"]
             }),
@@ -1492,6 +1494,43 @@ mod tests {
         ] {
             assert!(names.contains(&expected.to_string()), "缺少工具 {expected}");
         }
+    }
+
+    #[tokio::test]
+    async fn create_session_requires_base_branch_when_worktree_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let workflow = service.create("计划", None, None).await.unwrap();
+        let tools = WorkflowTools {
+            service,
+            workflow_id: workflow.id,
+        };
+
+        for base_branch in [serde_json::Value::Null, serde_json::json!("  ")] {
+            let error = tools
+                .call(
+                    "create_session",
+                    serde_json::json!({
+                        "machine": "pc",
+                        "agent": "codex",
+                        "cwd": "/repo",
+                        "worktree": true,
+                        "base_branch": base_branch,
+                    }),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("基分支"), "{error}");
+        }
+
+        let output = tools
+            .call(
+                "create_session",
+                serde_json::json!({ "machine": "pc", "agent": "codex", "cwd": "/repo" }),
+            )
+            .await
+            .unwrap();
+        assert!(output.contains("已创建关联普通会话"), "{output}");
     }
 
     #[tokio::test]
