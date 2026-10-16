@@ -1,7 +1,7 @@
 // 新建会话类表单的可复用字段：工作目录联想、worktree 基分支和已保存计划选择。
 
 import { useEffect, useRef, useState } from "react";
-import { Folder } from "lucide-react";
+import { ChevronDown, Folder } from "lucide-react";
 
 import { deleteRecentWorkspace } from "../core/actions";
 import type { Core } from "../core/core";
@@ -20,13 +20,6 @@ import { listAllDirs, matchingPrefix, splitDirQuery } from "../lib/workspace";
 import { cn } from "../lib/utils";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "./ui/select";
 import { Textarea } from "./ui/textarea";
 
 type PlanPopupPlacement = { below: boolean; maxHeight: number };
@@ -44,6 +37,16 @@ function worktreeBranchLabel(branch: GitBranch): string {
     branch.isDefault ? "默认分支" : "",
   ].filter(Boolean);
   return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
+}
+
+/** 基分支展示名：优先用分支列表里的完整标注，列表未加载时退化为引用名。 */
+function worktreeBaseLabel(base: WorktreeBase, branches: readonly GitBranch[]): string {
+  const branch = branches.find(
+    (item) => worktreeBaseKey(worktreeBaseFromBranch(item)) === worktreeBaseKey(base),
+  );
+  if (branch !== undefined) return worktreeBranchLabel(branch);
+  if (base.kind === "head") return "HEAD";
+  return base.kind === "local" ? base.name : `${base.remote}/${base.branch}`;
 }
 
 function popupMaxHeight(anchor: DOMRect, below: boolean): number {
@@ -226,7 +229,10 @@ export function WorkspaceField({
   );
 }
 
-/** worktree 基分支字段：随机器和工作目录拉取可选项，HEAD 始终可选。 */
+/**
+ * worktree 基分支字段：随机器和工作目录拉取可搜索的可选项，
+ * 默认选择仓库默认分支，无法识别时保持未选择。
+ */
 export function WorktreeBranchField({
   core,
   machine,
@@ -237,13 +243,16 @@ export function WorktreeBranchField({
   core: Core;
   machine: string;
   workspace: string;
-  value: WorktreeBase;
-  onChange: (value: WorktreeBase) => void;
+  value: WorktreeBase | null;
+  onChange: (value: WorktreeBase | null) => void;
 }) {
+  const container = useRef<HTMLDivElement | null>(null);
   const request = useRef(0);
   const onChangeRef = useRef(onChange);
   const valueRef = useRef(value);
   const [branches, setBranches] = useState<GitBranch[]>([]);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   onChangeRef.current = onChange;
   valueRef.current = value;
 
@@ -260,16 +269,16 @@ export function WorktreeBranchField({
       (result) => {
         if (request.current !== seq) return;
         setBranches(result.branches);
-        if (
-          worktreeBaseKey(valueRef.current) !== "HEAD" &&
-          !result.branches.some(
+        const current = valueRef.current;
+        const selected =
+          current !== null &&
+          result.branches.some(
             (branch) =>
-              worktreeBaseKey(worktreeBaseFromBranch(branch)) ===
-              worktreeBaseKey(valueRef.current),
-          )
-        ) {
-          onChangeRef.current({ kind: "head" });
-        }
+              worktreeBaseKey(worktreeBaseFromBranch(branch)) === worktreeBaseKey(current),
+          );
+        if (selected) return;
+        const fallback = result.branches.find((branch) => branch.isDefault);
+        onChangeRef.current(fallback === undefined ? null : worktreeBaseFromBranch(fallback));
       },
       () => {
         if (request.current === seq) setBranches([]);
@@ -277,36 +286,100 @@ export function WorktreeBranchField({
     );
   }, [core, machine, workspace]);
 
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (container.current !== null && !container.current.contains(target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [open]);
+
+  const keyword = query.trim().toLowerCase();
+  const matched =
+    keyword === ""
+      ? branches
+      : branches.filter(
+          (branch) =>
+            branch.name.toLowerCase().includes(keyword) ||
+            branch.fullName.toLowerCase().includes(keyword),
+        );
+  const close = (): void => {
+    setOpen(false);
+    setQuery("");
+  };
+
   return (
     <div className="flex items-center justify-between gap-3">
       <Label>基分支</Label>
-      <Select
-        value={worktreeBaseKey(value)}
-        onValueChange={(next) => {
-          if (next === "HEAD") {
-            onChange({ kind: "head" });
-            return;
-          }
-          const branch = branches.find((item) => item.fullName === next);
-          if (branch !== undefined) onChange(worktreeBaseFromBranch(branch));
-        }}
-      >
-        <SelectTrigger
-          data-slot="worktree-base-select"
+      <div ref={container} className="relative w-64 max-w-[55%]">
+        <button
+          type="button"
+          role="combobox"
           aria-label="选择 worktree 基分支"
-          className="h-8 w-64 max-w-[55%]"
+          aria-expanded={open}
+          data-slot="worktree-base-select"
+          onClick={() => (open ? close() : setOpen(true))}
+          className={cn(
+            "flex h-8 w-full items-center gap-2 rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40",
+            open && "border-ring ring-2 ring-ring/40",
+          )}
         >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="HEAD">HEAD（本地当前提交）</SelectItem>
-          {branches.map((branch) => (
-            <SelectItem key={branch.fullName} value={branch.fullName}>
-              {worktreeBranchLabel(branch)}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+          <span
+            data-slot="worktree-base-value"
+            className={cn("min-w-0 flex-1 truncate text-left", value === null && "text-muted-foreground")}
+          >
+            {value === null ? "未选择" : worktreeBaseLabel(value, branches)}
+          </span>
+          <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+        </button>
+        {open ? (
+          <div
+            role="listbox"
+            data-slot="worktree-base-list"
+            className="absolute top-full right-0 z-20 mt-1 flex max-h-64 w-full flex-col overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg"
+          >
+            <Input
+              autoFocus
+              data-slot="worktree-base-search"
+              aria-label="搜索基分支"
+              placeholder="搜索分支"
+              className="mb-1 h-8"
+              value={query}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") close();
+              }}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            {matched.length === 0 ? (
+              <span className="px-2 py-1.5 text-xs text-muted-foreground">无匹配分支</span>
+            ) : (
+              matched.map((branch) => {
+                const base = worktreeBaseFromBranch(branch);
+                return (
+                  <button
+                    key={branch.fullName}
+                    type="button"
+                    role="option"
+                    aria-selected={
+                      value !== null && worktreeBaseKey(value) === worktreeBaseKey(base)
+                    }
+                    className="flex cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    onClick={() => {
+                      onChange(base);
+                      close();
+                    }}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{worktreeBranchLabel(branch)}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

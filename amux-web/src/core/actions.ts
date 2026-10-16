@@ -609,7 +609,7 @@ export async function createSession(core: Core): Promise<void> {
       agent,
       workspace,
       useWorktree,
-      worktreeBase: useWorktree && worktreeBase.kind !== "head" ? worktreeBase : undefined,
+      worktreeBase: useWorktree ? (worktreeBase ?? undefined) : undefined,
       project,
     });
     core.update((state) => {

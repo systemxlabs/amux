@@ -578,10 +578,10 @@ function AutomationEditor({
       ? initial.sessionOptions.useWorktree
       : false,
   );
-  const [worktreeBase, setWorktreeBase] = useState<WorktreeBase>(
+  const [worktreeBase, setWorktreeBase] = useState<WorktreeBase | null>(
     initial?.sessionOptions.mode === "new_session"
-      ? (initial.sessionOptions.worktreeBase ?? { kind: "head" })
-      : { kind: "head" },
+      ? (initial.sessionOptions.worktreeBase ?? null)
+      : null,
   );
   const [sessionProject, setSessionProject] = useState(
     initial?.sessionOptions.mode === "new_session"
@@ -664,8 +664,7 @@ function AutomationEditor({
             agent,
             workspace: workspace.trim(),
             useWorktree,
-            worktreeBase:
-              useWorktree && worktreeBase.kind !== "head" ? worktreeBase : undefined,
+            worktreeBase: useWorktree ? (worktreeBase ?? undefined) : undefined,
             project: sessionProject === "" ? undefined : sessionProject,
           };
         case "new_workflow":

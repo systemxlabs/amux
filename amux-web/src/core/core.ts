@@ -86,8 +86,8 @@ export type NewSessionState = {
   project?: string;
   workspace: string;
   useWorktree: boolean;
-  /** worktree 基点。 */
-  worktreeBase: WorktreeBase;
+  /** worktree 基点；null = 未选择（仓库无法识别默认分支）。 */
+  worktreeBase: WorktreeBase | null;
   /** 工作流模式：计划内容（手输或选择已保存计划） */
   plan: string;
   /** 工作流模式：选中的已保存计划名 */
@@ -220,7 +220,7 @@ export function initialNewSession(): NewSessionState {
     project: undefined,
     workspace: "",
     useWorktree: false,
-    worktreeBase: { kind: "head" },
+    worktreeBase: null,
     plan: "",
     selectedPlan: null,
   };
