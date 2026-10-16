@@ -567,21 +567,15 @@ impl GitRunner {
     }
 
     /// 新建 worktree：目录约定 `<amux_home>/worktrees/<仓库目录名>-<随机串>/`。
-    pub fn create_worktree(
-        &self,
-        repo: &str,
-        base: Option<&WorktreeBase>,
-    ) -> Result<String, String> {
+    pub fn create_worktree(&self, repo: &str, base: &WorktreeBase) -> Result<String, String> {
         let target = worktree_dir_for(repo, &amux_common::paths::worktrees_dir())?;
         log::info!(
             "创建 worktree: repo={repo} target={} base={}",
             target.display(),
-            base.map(WorktreeBase::display_name)
-                .unwrap_or_else(|| "HEAD".to_string())
+            base.display_name()
         );
         self.add_worktree(repo, &target, base)?;
-        let marker = resolve_worktree_base(repo, base)?;
-        write_worktree_base(&target, &marker)?;
+        write_worktree_base(&target, base)?;
         log::info!("worktree 创建完成: repo={repo} path={}", target.display());
         Ok(target.to_string_lossy().replace('\\', "/"))
     }
@@ -639,12 +633,12 @@ impl GitRunner {
     }
 
     /// 在 `repo_cwd` 仓库内创建指向 `target` 路径的 git worktree。分支名由目标目录
-    /// basename 生成，基点缺省为 HEAD。要求仓库已有提交（unborn HEAD 无法建 worktree）。
+    /// basename 生成。要求仓库已有提交（unborn HEAD 无法建 worktree）。
     fn add_worktree(
         &self,
         repo_cwd: &str,
         target: &Path,
-        base: Option<&WorktreeBase>,
+        base: &WorktreeBase,
     ) -> Result<(), String> {
         let target = target.to_string_lossy();
         let branch = Path::new(target.as_ref())
@@ -653,9 +647,9 @@ impl GitRunner {
             .to_string_lossy()
             .into_owned();
         let base_ref = match base {
-            None | Some(WorktreeBase::Head) => None,
-            Some(WorktreeBase::Local { name }) => Some(format!("refs/heads/{name}")),
-            Some(WorktreeBase::Remote { remote, branch }) => {
+            WorktreeBase::Head => None,
+            WorktreeBase::Local { name } => Some(format!("refs/heads/{name}")),
+            WorktreeBase::Remote { remote, branch } => {
                 run(repo_cwd, &["fetch", "--prune", remote])
                     .map_err(|error| format!("{}: {}", error.message, error.stderr.trim()))?;
                 Some(format!("refs/remotes/{remote}/{branch}"))
@@ -752,21 +746,6 @@ fn worktree_base(repo: &gix::Repository) -> Option<WorktreeBase> {
     let marker = std::fs::read_to_string(repo.git_dir().join(WORKTREE_BASE_FILE)).ok()?;
     let base = serde_json::from_str::<WorktreeBase>(&marker).ok()?;
     (!matches!(base, WorktreeBase::Head)).then_some(base)
-}
-
-fn resolve_worktree_base(repo: &str, base: Option<&WorktreeBase>) -> Result<WorktreeBase, String> {
-    if let Some(base) = base {
-        return Ok(base.clone());
-    }
-    let repo = gix::discover(repo).map_err(|error| format!("不是 git 仓库: {repo}: {error}"))?;
-    Ok(repo
-        .head_name()
-        .ok()
-        .flatten()
-        .map(|name| WorktreeBase::Local {
-            name: name.shorten().to_str_lossy().into_owned(),
-        })
-        .unwrap_or(WorktreeBase::Head))
 }
 
 fn write_worktree_base(worktree: &Path, base: &WorktreeBase) -> Result<(), String> {
@@ -1063,7 +1042,7 @@ mod tests {
             name: "feature".into(),
         };
         runner
-            .add_worktree(repo.to_str().unwrap(), &target, Some(&feature_base))
+            .add_worktree(repo.to_str().unwrap(), &target, &feature_base)
             .unwrap();
         write_worktree_base(&target, &feature_base).unwrap();
         let branches = runner.branches(target.to_str().unwrap()).unwrap();
@@ -1119,7 +1098,8 @@ mod tests {
         let target = worktree_dir_for(repo_str, &root).unwrap();
         let target_name = target.file_name().unwrap().to_string_lossy().into_owned();
 
-        git.add_worktree(repo_str, &target, None).unwrap();
+        git.add_worktree(repo_str, &target, &WorktreeBase::Head)
+            .unwrap();
         assert!(target.join(".git").exists(), "worktree 应为有效检出");
 
         let listed = git.worktrees(repo_str).unwrap();
@@ -1180,10 +1160,10 @@ mod tests {
             .add_worktree(
                 repo.to_str().unwrap(),
                 &target,
-                Some(&WorktreeBase::Remote {
+                &WorktreeBase::Remote {
                     remote: "origin".into(),
                     branch: "main".into(),
-                }),
+                },
             )
             .unwrap();
         assert_eq!(git(&target, &["rev-parse", "HEAD"]).trim(), latest);
@@ -1204,7 +1184,9 @@ mod tests {
         let target = worktree_dir_for(repo_str, &root).unwrap();
         let target_name = target.file_name().unwrap().to_string_lossy().into_owned();
 
-        runner.add_worktree(repo_str, &target, None).unwrap();
+        runner
+            .add_worktree(repo_str, &target, &WorktreeBase::Head)
+            .unwrap();
         std::fs::remove_dir_all(&target).unwrap();
 
         runner.worktree_remove(repo_str, target.to_str().unwrap());

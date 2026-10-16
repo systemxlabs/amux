@@ -286,7 +286,7 @@ async fn execute(
             let params: CreateWorktreeParams = decode(params)?;
             let dir = daemon
                 .git
-                .create_worktree(&params.repo, params.base.as_ref())
+                .create_worktree(&params.repo, &params.base)
                 .map_err(RpcError::git)?;
             to_value(WorktreeResult { worktree_dir: dir })
         }

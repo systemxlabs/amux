@@ -394,6 +394,23 @@ async fn server_daemon_agent_end_to_end() {
         "{agents:?}"
     );
 
+    assert_eq!(
+        client
+            .post(
+                "/sessions",
+                json!({
+                    "machine": MACHINE,
+                    "agent": "codex",
+                    "workspace": workspace.path().to_string_lossy(),
+                    "useWorktree": true,
+                }),
+            )
+            .await
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "开启 worktree 未指定基分支应拒绝请求"
+    );
+
     // 建会话（惰性创建 agent 侧会话）
     let session = client
         .post_ok(

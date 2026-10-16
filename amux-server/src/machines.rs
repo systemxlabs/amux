@@ -211,13 +211,12 @@ impl MachineHub {
         &self,
         machine: &str,
         repo: &str,
-        base: Option<&WorktreeBase>,
+        base: &WorktreeBase,
         session_id: &str,
     ) -> Result<String, String> {
         log::info!(
             "请求创建 worktree: session={session_id} machine={machine} repo={repo} base={}",
-            base.map(WorktreeBase::display_name)
-                .unwrap_or_else(|| "HEAD".to_string())
+            base.display_name()
         );
         let result: WorktreeResult = self
             .machine(machine)?
@@ -225,7 +224,7 @@ impl MachineHub {
                 method::GIT_CREATE_WORKTREE,
                 CreateWorktreeParams {
                     repo: repo.to_string(),
-                    base: base.cloned(),
+                    base: base.clone(),
                 },
             )
             .await?;

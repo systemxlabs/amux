@@ -17,7 +17,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::config_store::ConfigStore;
-use crate::sessions::SessionService;
+use crate::sessions::{SessionService, SessionWorktree};
 use crate::store::{AutomationRow, Store};
 use crate::timestamps::now_ms;
 use crate::workflows::WorkflowService;
@@ -161,14 +161,14 @@ impl AutomationService {
                     worktree_base,
                     project,
                 } => {
+                    let worktree = SessionWorktree::new(*use_worktree, worktree_base.as_ref())?;
                     let session = self
                         .sessions
                         .create(crate::sessions::CreateSessionParams {
                             machine,
                             agent,
                             workspace,
-                            use_worktree: *use_worktree,
-                            worktree_base: worktree_base.as_ref(),
+                            worktree,
                             project: project.as_deref(),
                         })
                         .await?;
@@ -441,6 +441,11 @@ fn normalize_input(mut input: AutomationInput) -> Result<AutomationInput, String
         } if machine.is_empty() || agent.is_empty() || workspace.is_empty() => {
             return Err("机器、智能体和工作目录不能为空".into());
         }
+        AutomationSessionOptions::NewSession {
+            use_worktree: true,
+            worktree_base: None,
+            ..
+        } => return Err("开启 worktree 时必须指定基分支".into()),
         AutomationSessionOptions::NewWorkflow { plan, .. } if plan.is_empty() => {
             return Err("工作流计划不能为空".into());
         }
@@ -731,6 +736,26 @@ mod tests {
         assert_eq!(machine, "pc");
         assert_eq!(worktree_base, None);
         assert_eq!(project.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn worktree_automation_requires_base_branch() {
+        let mut input = input();
+        let AutomationSessionOptions::NewSession {
+            use_worktree,
+            worktree_base,
+            ..
+        } = &mut input.session_options
+        else {
+            panic!("应为新建普通会话");
+        };
+        *use_worktree = true;
+        *worktree_base = None;
+
+        assert_eq!(
+            normalize_input(input).unwrap_err(),
+            "开启 worktree 时必须指定基分支"
+        );
     }
 
     #[test]

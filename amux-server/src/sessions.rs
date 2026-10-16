@@ -76,13 +76,31 @@ pub struct SessionService {
     pub caches: Arc<SessionCaches>,
 }
 
+/// 会话的 worktree 方式。
+pub enum SessionWorktree<'a> {
+    /// 直接在工作目录内工作。
+    Disabled,
+    /// 以指定基分支创建 worktree，agent 在 worktree 目录内工作。
+    Base(&'a WorktreeBase),
+}
+
+impl<'a> SessionWorktree<'a> {
+    /// 归一化外部输入：开启 worktree 时必须给出基分支。
+    pub fn new(use_worktree: bool, base: Option<&'a WorktreeBase>) -> Result<Self, String> {
+        match (use_worktree, base) {
+            (false, _) => Ok(Self::Disabled),
+            (true, Some(base)) => Ok(Self::Base(base)),
+            (true, None) => Err("开启 worktree 时必须指定基分支".to_string()),
+        }
+    }
+}
+
 /// 新建普通会话所需的输入。
 pub struct CreateSessionParams<'a> {
     pub machine: &'a str,
     pub agent: &'a str,
     pub workspace: &'a str,
-    pub use_worktree: bool,
-    pub worktree_base: Option<&'a WorktreeBase>,
+    pub worktree: SessionWorktree<'a>,
     pub project: Option<&'a str>,
 }
 
@@ -132,26 +150,24 @@ impl SessionService {
             machine,
             agent,
             workspace,
-            use_worktree,
-            worktree_base,
+            worktree,
             project,
         } = request;
         let id = Uuid::new_v4().to_string();
-        let worktree_dir = if use_worktree {
-            log::info!(
-                "会话 worktree 创建请求: session={id} machine={machine} repo={workspace} base={}",
-                worktree_base
-                    .map(WorktreeBase::display_name)
-                    .unwrap_or_else(|| "HEAD".to_string())
-            );
-            let dir = self
-                .machines
-                .create_worktree(machine, workspace, worktree_base, &id)
-                .await?;
-            log::info!("会话 worktree 已创建: session={id} machine={machine} path={dir}");
-            dir
-        } else {
-            String::new()
+        let worktree_dir = match worktree {
+            SessionWorktree::Disabled => String::new(),
+            SessionWorktree::Base(base) => {
+                log::info!(
+                    "会话 worktree 创建请求: session={id} machine={machine} repo={workspace} base={}",
+                    base.display_name()
+                );
+                let dir = self
+                    .machines
+                    .create_worktree(machine, workspace, base, &id)
+                    .await?;
+                log::info!("会话 worktree 已创建: session={id} machine={machine} path={dir}");
+                dir
+            }
         };
         let now = now_ms();
         let session = Session {
@@ -850,6 +866,19 @@ fn apply_tool_call_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_requires_base_branch() {
+        assert!(SessionWorktree::new(true, None).is_err());
+        assert!(matches!(
+            SessionWorktree::new(false, None).unwrap(),
+            SessionWorktree::Disabled
+        ));
+        assert!(matches!(
+            SessionWorktree::new(true, Some(&WorktreeBase::Head)).unwrap(),
+            SessionWorktree::Base(base) if matches!(base, WorktreeBase::Head)
+        ));
+    }
 
     fn session(state: SessionState) -> Session {
         Session {

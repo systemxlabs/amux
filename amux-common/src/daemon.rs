@@ -120,13 +120,12 @@ pub struct GitRepoParams {
     pub repo: String,
 }
 
-/// `git.create_worktree` 参数；`base` 缺省或 `Head` 时以当前 HEAD 为基点。
+/// `git.create_worktree` 参数；`base` 为创建 worktree 的基分支。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateWorktreeParams {
     pub repo: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<WorktreeBase>,
+    pub base: WorktreeBase,
 }
 
 /// `git.diff` 参数。

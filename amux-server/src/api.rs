@@ -20,6 +20,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::attachments::{AttachmentOwner, MAX_ATTACHMENT_BYTES};
+use crate::sessions::SessionWorktree;
 use crate::state::AppState;
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
@@ -345,14 +346,15 @@ async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateSessionRequest>,
 ) -> ApiResult<Session> {
+    let worktree = SessionWorktree::new(request.use_worktree, request.worktree_base.as_ref())
+        .map_err(bad_request)?;
     state
         .sessions
         .create(crate::sessions::CreateSessionParams {
             machine: &request.machine,
             agent: &request.agent,
             workspace: &request.workspace,
-            use_worktree: request.use_worktree,
-            worktree_base: request.worktree_base.as_ref(),
+            worktree,
             project: request.project.as_deref(),
         })
         .await

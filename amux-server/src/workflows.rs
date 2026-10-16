@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
 use crate::orchestrator;
-use crate::sessions::SessionService;
+use crate::sessions::{SessionService, SessionWorktree};
 use crate::store::Store;
 use crate::timestamps::now_ms;
 
@@ -927,14 +927,14 @@ impl WorkflowTools {
                 } else {
                     None
                 };
+                let worktree = SessionWorktree::new(worktree, worktree_base.as_ref())?;
                 let session = services
                     .sessions
                     .create(crate::sessions::CreateSessionParams {
                         machine: &machine,
                         agent: &agent,
                         workspace: &cwd,
-                        use_worktree: worktree,
-                        worktree_base: worktree_base.as_ref(),
+                        worktree,
                         project: None,
                     })
                     .await?;
@@ -1544,8 +1544,7 @@ mod tests {
                 machine: "pc",
                 agent: "codex",
                 workspace: "/repo",
-                use_worktree: false,
-                worktree_base: None,
+                worktree: SessionWorktree::Disabled,
                 project: None,
             })
             .await
