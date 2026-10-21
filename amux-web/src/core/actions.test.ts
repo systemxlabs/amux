@@ -100,7 +100,6 @@ it("从普通会话新建时保留机器、agent、工作目录、项目和 work
           fullName: "refs/heads/main",
           kind: "local",
           isWorktreeBase: true,
-          isLocalDefault: true,
           isRemoteDefault: false,
         },
       ],

@@ -18,6 +18,7 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { sendPrompt } from "../../core/actions";
 import { useCore, useCoreState } from "../../core/store";
+import { branchLabel, preferredDiffBase } from "../../lib/branch";
 import { buildDiffTree, type DiffNode } from "../../lib/difftree";
 import {
   execDir,
@@ -36,29 +37,6 @@ function linePrefix(kind: GitDiffLine["kind"]): string {
   if (kind === "add") return "+";
   if (kind === "remove") return "-";
   return " ";
-}
-
-function preferredDiffBase(branches: readonly GitBranch[], useWorktree: boolean): string {
-  if (useWorktree) {
-    const source = branches.find((branch) => branch.isWorktreeBase);
-    if (source !== undefined) return source.fullName;
-  }
-  const remoteDefaults = branches.filter((branch) => branch.isRemoteDefault);
-  return (
-    remoteDefaults.find((branch) => branch.kind === "remote" && branch.remote === "origin")
-      ?.fullName ??
-    remoteDefaults[0]?.fullName ??
-    "HEAD"
-  );
-}
-
-function branchLabel(branch: GitBranch): string {
-  const marks = [
-    branch.isWorktreeBase ? "worktree 基分支" : "",
-    branch.isLocalDefault ? "本地默认分支" : "",
-    branch.isRemoteDefault ? "远端默认分支" : "",
-  ].filter(Boolean);
-  return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
 }
 
 function lineNumbers(hunk: GitDiffHunk): { old: number | null; new: number | null }[] {
@@ -247,7 +225,7 @@ export function DiffPanel() {
 
   const [diff, setDiff] = useState<GitDiffResult | null>(null);
   const [branches, setBranches] = useState<GitBranch[]>([]);
-  const [base, setBase] = useState("HEAD");
+  const [base, setBase] = useState<string | null>(null);
   const [basePickerOpen, setBasePickerOpen] = useState(false);
   const [baseQuery, setBaseQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -278,7 +256,7 @@ export function DiffPanel() {
   useEffect(() => {
     setDiff(null);
     setBranches([]);
-    setBase("HEAD");
+    setBase(null);
     setBasePickerOpen(false);
     setBaseQuery("");
     setError(null);
@@ -306,6 +284,7 @@ export function DiffPanel() {
       const selected = preferredDiffBase(branchResult.branches, useWorktree);
       setBranches(branchResult.branches);
       setBase(selected);
+      if (selected === null) return;
       try {
         const result = await client.diff(sessionId, selected);
         if (!cancelled && request === diffRequestRef.current) setDiff(result);
@@ -338,7 +317,7 @@ export function DiffPanel() {
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
 
   const refreshDiff = () => {
-    if (sessionId === null || core.client === null) return;
+    if (sessionId === null || core.client === null || base === null) return;
     const request = ++diffRequestRef.current;
     setError(null);
     setDiff(null);
@@ -357,6 +336,8 @@ export function DiffPanel() {
     setBaseQuery("");
     if (sessionId === null || value === base) return;
     setBase(value);
+    setDiff(null);
+    setError(null);
     const request = ++diffRequestRef.current;
     const client = core.client;
     if (client === null) return;
@@ -381,7 +362,7 @@ export function DiffPanel() {
         );
   const selectedBranch = branches.find((branch) => branch.fullName === base);
   const baseLabel =
-    base === "HEAD" ? "HEAD（当前提交）" : selectedBranch === undefined ? base : branchLabel(selectedBranch);
+    selectedBranch === undefined ? (base ?? "未选择") : branchLabel(selectedBranch);
 
   const toggleDir = (key: string) => {
     setCollapsedDirs((prev) =>
@@ -559,6 +540,8 @@ export function DiffPanel() {
   let body: ReactNode;
   if (error !== null) {
     body = <Hint text={`读取改动失败：${error}`} />;
+  } else if (base === null) {
+    body = <Hint text="请选择基准分支" />;
   } else if (diff === null) {
     body = <Hint text="正在加载改动…" />;
   } else if (diff.notRepo === true) {
@@ -838,17 +821,6 @@ export function DiffPanel() {
                 }}
                 onChange={(event) => setBaseQuery(event.target.value)}
               />
-              {(baseKeyword === "" || "head".includes(baseKeyword)) && (
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={base === "HEAD"}
-                  className="flex cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                  onClick={() => selectBase("HEAD")}
-                >
-                  HEAD（当前提交）
-                </button>
-              )}
               {matchedBranches.length === 0 ? (
                 <span className="px-2 py-1.5 text-xs text-muted-foreground">无匹配分支</span>
               ) : (

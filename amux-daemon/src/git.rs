@@ -2,7 +2,7 @@
 //! - diff 查询、untracked 判定、分支/引用查询、merge-base：gitoxide（gix）结构化实现，
 //!   不依赖 git 二进制、无本地化输出解析
 //! - gitoxide 无等价能力处保留 git CLI：worktree 新增/删除（gix-worktree 仅有列出能力，
-//!   无增删管理）与远端 fetch（gix 的远端协议栈不完整支持 CLI 级别的配置和助手）
+//!   无增删管理）与远程 fetch（gix 的远程协议栈不完整支持 CLI 级别的配置和助手）
 //!
 //! 依赖上用 `gix` 伞 crate（DESIGN「Daemon 技术栈 - Git：gix」，只开 status / revision / sha1
 //! 三个特性）：这里需要的是「仓库访问 + status + revision 解析」这一整套跨子系统能力，
@@ -486,7 +486,7 @@ impl GitRunner {
         }
     }
 
-    /// 查询本地与远端跟踪分支，并标记 worktree 基分支及本地、远端默认分支。
+    /// 查询本地与远程跟踪分支，并标记 worktree 基分支及远程默认分支。
     pub fn branches(&self, cwd: &str) -> Result<GitBranchListResult, String> {
         let repo = gix::discover(cwd).map_err(|error| format!("不是 git 仓库: {cwd}: {error}"))?;
         let current = repo
@@ -495,7 +495,6 @@ impl GitRunner {
             .flatten()
             .map(|name| name.shorten().to_str_lossy().into_owned());
         let worktree_base = worktree_base(&repo);
-        let mut local_names = Vec::new();
         let mut branches = Vec::new();
         for reference in repo
             .references()
@@ -505,7 +504,6 @@ impl GitRunner {
         {
             let reference = reference.map_err(|error| format!("读取本地分支失败: {error}"))?;
             let name = reference.name().shorten().to_str_lossy().into_owned();
-            local_names.push(name.clone());
             branches.push(GitBranch {
                 name,
                 full_name: reference.name().to_string(),
@@ -513,21 +511,18 @@ impl GitRunner {
                 remote: None,
                 remote_branch: None,
                 is_worktree_base: false,
-                is_local_default: false,
                 is_remote_default: false,
             });
         }
-        local_names.sort();
-        let local_default = default_branch(&repo, &local_names, current.as_deref());
         let remote_defaults = remote_default_branches(&repo);
 
         for reference in repo
             .references()
             .map_err(|error| format!("读取分支失败: {error}"))?
             .remote_branches()
-            .map_err(|error| format!("读取远端跟踪分支失败: {error}"))?
+            .map_err(|error| format!("读取远程跟踪分支失败: {error}"))?
         {
-            let reference = reference.map_err(|error| format!("读取远端跟踪分支失败: {error}"))?;
+            let reference = reference.map_err(|error| format!("读取远程跟踪分支失败: {error}"))?;
             let name = reference.name().shorten().to_str_lossy().into_owned();
             if !name.ends_with("/HEAD") {
                 let remote = reference
@@ -543,7 +538,6 @@ impl GitRunner {
                     remote,
                     remote_branch,
                     is_worktree_base: false,
-                    is_local_default: false,
                     is_remote_default: false,
                 });
             }
@@ -552,8 +546,6 @@ impl GitRunner {
             branch.is_worktree_base = worktree_base
                 .as_ref()
                 .is_some_and(|base| branch_matches_worktree_base(base, branch));
-            branch.is_local_default = branch.kind == GitBranchKind::Local
-                && local_default.as_deref() == Some(branch.name.as_str());
             branch.is_remote_default =
                 branch.kind == GitBranchKind::Remote && remote_defaults.contains(&branch.name);
         }
@@ -649,18 +641,21 @@ impl GitRunner {
             .to_string_lossy()
             .into_owned();
         let base_ref = match base {
-            WorktreeBase::Head => None,
-            WorktreeBase::Local { name } => Some(format!("refs/heads/{name}")),
+            WorktreeBase::Local { name } => format!("refs/heads/{name}"),
             WorktreeBase::Remote { remote, branch } => {
                 run(repo_cwd, &["fetch", "--prune", remote])
                     .map_err(|error| format!("{}: {}", error.message, error.stderr.trim()))?;
-                Some(format!("refs/remotes/{remote}/{branch}"))
+                format!("refs/remotes/{remote}/{branch}")
             }
         };
-        let mut args = vec!["worktree", "add", "-b", branch.as_str(), target.as_ref()];
-        if let Some(base) = base_ref.as_deref() {
-            args.push(base);
-        }
+        let args = vec![
+            "worktree",
+            "add",
+            "-b",
+            branch.as_str(),
+            target.as_ref(),
+            base_ref.as_str(),
+        ];
         run(repo_cwd, &args)
             .map(|_| ())
             .map_err(|e| format!("{}: {}", e.message, e.stderr.trim()))
@@ -727,7 +722,6 @@ fn branch_kind_rank(kind: GitBranchKind) -> u8 {
 
 fn branch_matches_worktree_base(base: &WorktreeBase, branch: &GitBranch) -> bool {
     match base {
-        WorktreeBase::Head => false,
         WorktreeBase::Local { name } => branch.kind == GitBranchKind::Local && branch.name == *name,
         WorktreeBase::Remote {
             remote,
@@ -746,8 +740,7 @@ fn worktree_base(repo: &gix::Repository) -> Option<WorktreeBase> {
         return None;
     }
     let marker = std::fs::read_to_string(repo.git_dir().join(WORKTREE_BASE_FILE)).ok()?;
-    let base = serde_json::from_str::<WorktreeBase>(&marker).ok()?;
-    (!matches!(base, WorktreeBase::Head)).then_some(base)
+    serde_json::from_str::<WorktreeBase>(&marker).ok()
 }
 
 fn write_worktree_base(worktree: &Path, base: &WorktreeBase) -> Result<(), String> {
@@ -781,7 +774,7 @@ fn merge_base_commit<'a>(
     merge_base.object().ok()?.into_commit().into()
 }
 
-/// 远端跟踪基准在比较前必须通过其所属远端刷新；本地分支和任意修订表达式不触发网络操作。
+/// 远程跟踪基准在比较前必须通过其所属远程刷新；本地分支和任意修订表达式不触发网络操作。
 fn update_remote_tracking_base(cwd: &str, base: &str) -> Result<(), String> {
     let repo = match gix::discover(cwd) {
         Ok(repo) => repo,
@@ -795,7 +788,7 @@ fn update_remote_tracking_base(cwd: &str, base: &str) -> Result<(), String> {
         .map_err(|error| format!("{}: {}", error.message, error.stderr.trim()))
 }
 
-/// 若 `base` 是现有远端跟踪引用，返回其所属远端名称。
+/// 若 `base` 是现有远程跟踪引用，返回其所属远程名称。
 fn remote_for_tracking_branch(repo: &gix::Repository, base: &str) -> Option<String> {
     // base 可能是短名（origin/master）或完整引用名（refs/remotes/origin/master）
     let reference = if base.starts_with("refs/") {
@@ -820,58 +813,12 @@ fn remote_for_tracking_branch(repo: &gix::Repository, base: &str) -> Option<Stri
                 .strip_prefix(&format!("refs/remotes/{remote}/"))
                 .is_some()
         })
-        // 远端名可包含 `/`，优先选择最长匹配前缀。
+        // 远程名可包含 `/`，优先选择最长匹配前缀。
         .max_by_key(|remote| remote.len())
         .map(|remote| remote.to_string())
 }
 
-/// 默认分支优先取远端 origin/HEAD，其次取常见的 main/master，最后回退当前分支。
-fn default_branch(
-    repo: &gix::Repository,
-    branches: &[String],
-    current: Option<&str>,
-) -> Option<String> {
-    if let Some(target) = repo
-        .try_find_reference("refs/remotes/origin/HEAD")
-        .ok()
-        .flatten()
-        .and_then(|reference| reference.follow().transpose().ok().flatten())
-        .and_then(|reference| reference.target().try_name().map(|name| name.to_string()))
-        .and_then(|name| {
-            name.strip_prefix("refs/remotes/origin/")
-                .map(str::to_string)
-        })
-    {
-        let target_commit = repo
-            .rev_parse_single(target.as_str())
-            .ok()?
-            .object()
-            .ok()?
-            .peel_to_commit()
-            .ok()?
-            .id;
-        if branches.iter().any(|branch| {
-            Some(target_commit)
-                == repo
-                    .rev_parse_single(branch.as_str())
-                    .ok()
-                    .map(|id| id.detach())
-        }) && branches.iter().any(|branch| branch == &target)
-        {
-            return Some(target);
-        }
-    }
-    for candidate in ["main", "master"] {
-        if branches.iter().any(|branch| branch == candidate) {
-            return Some(candidate.to_string());
-        }
-    }
-    current
-        .filter(|name| branches.iter().any(|branch| branch == name))
-        .map(str::to_string)
-}
-
-/// 每个远端的 HEAD 引用指向各自的默认分支；仅依赖引用本身，不依赖 remote 配置。
+/// 每个远程的 HEAD 引用指向各自的默认分支；仅依赖引用本身，不依赖 remote 配置。
 fn remote_default_branches(repo: &gix::Repository) -> BTreeSet<String> {
     let mut defaults = BTreeSet::new();
     let refs = match repo.references().ok() {
@@ -1256,9 +1203,9 @@ mod tests {
             .iter()
             .find(|branch| branch.name == "main")
             .unwrap();
-        assert!(main.is_local_default);
         assert_eq!(main.kind, GitBranchKind::Local);
         assert_eq!(main.full_name, "refs/heads/main");
+        assert!(!main.is_worktree_base);
         assert!(
             branches.branches.iter().any(|branch| {
                 branch.name == "origin/main"
@@ -1333,8 +1280,14 @@ mod tests {
         let target = worktree_dir_for(repo_str, &root).unwrap();
         let target_name = target.file_name().unwrap().to_string_lossy().into_owned();
 
-        git.add_worktree(repo_str, &target, &WorktreeBase::Head)
-            .unwrap();
+        git.add_worktree(
+            repo_str,
+            &target,
+            &WorktreeBase::Local {
+                name: "main".into(),
+            },
+        )
+        .unwrap();
         assert!(target.join(".git").exists(), "worktree 应为有效检出");
 
         let listed = git.worktrees(repo_str).unwrap();
@@ -1420,7 +1373,13 @@ mod tests {
         let target_name = target.file_name().unwrap().to_string_lossy().into_owned();
 
         runner
-            .add_worktree(repo_str, &target, &WorktreeBase::Head)
+            .add_worktree(
+                repo_str,
+                &target,
+                &WorktreeBase::Local {
+                    name: "main".into(),
+                },
+            )
             .unwrap();
         std::fs::remove_dir_all(&target).unwrap();
 

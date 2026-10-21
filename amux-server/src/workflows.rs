@@ -1044,24 +1044,21 @@ async fn resolve_worktree_base(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .ok_or("开启 worktree 时必须指定基分支")?;
-    if requested.eq_ignore_ascii_case("HEAD") {
-        return Ok(WorktreeBase::Head);
-    }
     let branches = machines.git_branches(machine, cwd).await?;
     let branch = branches
         .branches
         .into_iter()
-        .find(|branch| branch.name == requested || branch.full_name == requested)
+        .find(|branch| branch.full_name == requested)
         .ok_or_else(|| format!("worktree 基分支不存在: {requested}"))?;
     match branch.kind {
         GitBranchKind::Local => Ok(WorktreeBase::Local { name: branch.name }),
         GitBranchKind::Remote => Ok(WorktreeBase::Remote {
             remote: branch
                 .remote
-                .ok_or_else(|| format!("远端分支缺少 remote: {}", branch.name))?,
+                .ok_or_else(|| format!("远程分支缺少 remote: {}", branch.name))?,
             branch: branch
                 .remote_branch
-                .ok_or_else(|| format!("远端分支缺少分支名: {}", branch.name))?,
+                .ok_or_else(|| format!("远程分支缺少分支名: {}", branch.name))?,
         }),
     }
 }
@@ -1122,7 +1119,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
                     "agent": string("agent 名"),
                     "cwd": string("工作目录"),
                     "worktree": { "type": "boolean", "description": "是否以 git worktree 方式工作；缺省 false" },
-                    "base_branch": string("worktree 基分支；开启 worktree 时必填，HEAD 表示当前仓库 HEAD")
+                    "base_branch": string("worktree 基分支完整引用名；开启 worktree 时必填，本地分支格式为 refs/heads/<name>，远程跟踪分支格式为 refs/remotes/<remote>/<branch>")
                 },
                 "required": ["machine", "agent", "cwd"]
             }),

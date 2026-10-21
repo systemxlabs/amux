@@ -503,7 +503,6 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
             *workspace = workspace.trim().to_string();
             if let Some(base) = worktree_base {
                 match base {
-                    WorktreeBase::Head => {}
                     WorktreeBase::Local { name } => {
                         *name = name.trim().to_string();
                         if name.is_empty() {

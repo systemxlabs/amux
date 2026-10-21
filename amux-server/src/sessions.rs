@@ -931,8 +931,14 @@ mod tests {
             SessionWorktree::Disabled
         ));
         assert!(matches!(
-            SessionWorktree::new(true, Some(&WorktreeBase::Head)).unwrap(),
-            SessionWorktree::Base(base) if matches!(base, WorktreeBase::Head)
+            SessionWorktree::new(
+                true,
+                Some(&WorktreeBase::Local {
+                    name: "main".into()
+                })
+            )
+            .unwrap(),
+            SessionWorktree::Base(base) if matches!(base, WorktreeBase::Local { name } if name == "main")
         ));
     }
 

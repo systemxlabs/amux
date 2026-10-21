@@ -242,7 +242,6 @@ describe("ApiClient", () => {
               fullName: "refs/heads/main",
               kind: "local",
               isWorktreeBase: true,
-              isLocalDefault: true,
               isRemoteDefault: false,
             },
             {
@@ -252,7 +251,6 @@ describe("ApiClient", () => {
               remote: "origin",
               remoteBranch: "main",
               isWorktreeBase: false,
-              isLocalDefault: false,
               isRemoteDefault: true,
             },
           ],
@@ -272,7 +270,6 @@ describe("ApiClient", () => {
       fullName: "refs/heads/main",
       kind: "local",
       isWorktreeBase: true,
-      isLocalDefault: true,
       isRemoteDefault: false,
     });
   });

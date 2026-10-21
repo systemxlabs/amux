@@ -383,8 +383,11 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
             .listBranches(entry.session.machine, execDir(entry.session))
             .catch(() => ({ branches: [] }))
         ).branches.find((item) => item.isWorktreeBase);
-        // 开启 worktree 时必须携带基分支：源会话以 HEAD 为基分支时没有标记，按 HEAD 复制
-        worktreeBase = branch === undefined ? { kind: "head" } : worktreeBaseFromBranch(branch);
+        if (branch === undefined) {
+          core.failure("无法识别 worktree 基分支");
+          return;
+        }
+        worktreeBase = worktreeBaseFromBranch(branch);
       }
       const session = await core.client.createSession({
         machine: entry.session.machine,

@@ -73,12 +73,13 @@ export function NewSessionView() {
   } = state.newSession;
   const agents = state.settings.agents.find((item) => item.machine === machine)?.agents ?? [];
   const selectedAgent = agents.find((item) => item.name === agent);
-  // PRD「新建会话视图」：已选择机器、已选择可用 agent、工作目录非空才可创建
+  // PRD「新建会话视图」：开启 worktree 时基分支也必须已选择
   const canCreate =
     machine !== "" &&
     selectedAgent !== undefined &&
     selectedAgent.available &&
-    workspace.trim() !== "";
+    workspace.trim() !== "" &&
+    (!useWorktree || worktreeBase !== null);
   /** 选中已保存计划：沿用新建会话行为，同时恢复该计划最近使用的项目。 */
   const pickPlan = (item: (typeof state.settings.plans)[number]): void => {
     core.update((draft) => {

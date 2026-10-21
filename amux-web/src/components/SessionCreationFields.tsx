@@ -6,6 +6,7 @@ import { ChevronDown, Folder } from "lucide-react";
 import { deleteRecentWorkspace } from "../core/actions";
 import type { Core } from "../core/core";
 import { useCoreState } from "../core/store";
+import { branchLabel, preferredRemoteDefault } from "../lib/branch";
 import { truncate } from "../lib/format";
 import {
   worktreeBaseFromBranch,
@@ -30,24 +31,13 @@ const PLAN_POPUP_HEIGHT = 224;
 const POPUP_GAP = 8;
 const POPUP_MIN_HEIGHT = 80;
 
-function worktreeBranchLabel(branch: GitBranch): string {
-  const marks = [
-    branch.kind === "remote" ? "创建时获取最新" : "",
-    branch.isWorktreeBase ? "worktree 基分支" : "",
-    branch.isLocalDefault ? "本地默认分支" : "",
-    branch.isRemoteDefault ? "远端默认分支" : "",
-  ].filter(Boolean);
-  return marks.length === 0 ? branch.name : `${branch.name}（${marks.join("、")}）`;
-}
-
 /** 基分支展示名：优先用分支列表里的完整标注，列表未加载时退化为引用名。 */
 function worktreeBaseLabel(base: WorktreeBase, branches: readonly GitBranch[]): string {
   const branch = branches.find(
     (item) => worktreeBaseKey(worktreeBaseFromBranch(item)) === worktreeBaseKey(base),
   );
-  if (branch !== undefined) return worktreeBranchLabel(branch);
-  if (base.kind === "head") return "HEAD";
-  return base.kind === "local" ? base.name : `${base.remote}/${base.branch}`;
+  if (branch !== undefined) return branchLabel(branch, true);
+  return base.kind === "local" ? `本地 ${base.name}` : `远程 ${base.remote}/${base.branch}`;
 }
 
 function popupMaxHeight(anchor: DOMRect, below: boolean): number {
@@ -232,7 +222,7 @@ export function WorkspaceField({
 
 /**
  * worktree 基分支字段：随机器和工作目录拉取可搜索的可选项，
- * 默认选择仓库默认分支，无法识别时保持未选择。
+ * 默认选择 origin 的远程仓库默认分支，否则取第一个远程默认分支。
  */
 export function WorktreeBranchField({
   core,
@@ -262,6 +252,7 @@ export function WorktreeBranchField({
     if (machine === "" || repo === "" || core.client === null) {
       request.current += 1;
       setBranches([]);
+      onChangeRef.current(null);
       return;
     }
     const seq = request.current + 1;
@@ -278,13 +269,14 @@ export function WorktreeBranchField({
               worktreeBaseKey(worktreeBaseFromBranch(branch)) === worktreeBaseKey(current),
           );
         if (selected) return;
-        const fallback = result.branches.find(
-          (branch) => branch.kind === "local" && branch.isLocalDefault,
-        );
+        const fallback = preferredRemoteDefault(result.branches);
         onChangeRef.current(fallback === undefined ? null : worktreeBaseFromBranch(fallback));
       },
       () => {
-        if (request.current === seq) setBranches([]);
+        if (request.current === seq) {
+          setBranches([]);
+          onChangeRef.current(null);
+        }
       },
     );
   }, [core, machine, workspace]);
@@ -375,7 +367,7 @@ export function WorktreeBranchField({
                       close();
                     }}
                   >
-                    <span className="min-w-0 flex-1 truncate">{worktreeBranchLabel(branch)}</span>
+                    <span className="min-w-0 flex-1 truncate">{branchLabel(branch, true)}</span>
                   </button>
                 );
               })

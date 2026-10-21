@@ -83,7 +83,6 @@ type GitBranchBase = {
   name: string;
   fullName: string;
   isWorktreeBase: boolean;
-  isLocalDefault: boolean;
   isRemoteDefault: boolean;
 };
 export type GitBranch =
@@ -96,7 +95,6 @@ export type GitBranch =
 export type GitBranchListResult = { currentBranch: string; branches: GitBranch[] };
 
 export type WorktreeBase =
-  | { kind: "head" }
   | { kind: "local"; name: string }
   | { kind: "remote"; remote: string; branch: string };
 
@@ -114,8 +112,6 @@ export function worktreeBaseFromBranch(branch: GitBranch): WorktreeBase {
 
 export function worktreeBaseKey(base: WorktreeBase): string {
   switch (base.kind) {
-    case "head":
-      return "HEAD";
     case "local":
       return `refs/heads/${base.name}`;
     case "remote":
