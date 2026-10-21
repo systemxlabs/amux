@@ -28,9 +28,9 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 | `machine.info` | 获取当前机器信息，包含操作系统、临时目录等 |
 | `agent.list` | 发现当前机器已安装的 agents，以及 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
-| `git.diff` | 查询指定仓库改动 diff，对基准分支与 HEAD 的 merge-base 后的工作区做三点对比，覆盖已提交与未提交改动及未跟踪文件。基准分支为远端跟踪分支时，先从其所属远端更新该分支，更新失败返回错误 |
-| `git.branches` | 查询指定仓库本地分支和远端跟踪分支，并标记 worktree 基分支、本地仓库默认分支、远端仓库默认分支 |
-| `git.create_worktree` | 从指定仓库指定基分支创建一个 worktree 和本地分支。基分支为远端跟踪分支时，先从其所属远端更新该分支，更新失败返回错误 |
+| `git.diff` | 查询指定仓库改动 diff，对基准分支与 HEAD 的 merge-base 后的工作区做三点对比，覆盖已提交与未提交改动及未跟踪文件。基准分支为远程跟踪分支时，先从其所属远程更新该分支，更新失败返回错误 |
+| `git.branches` | 查询指定仓库本地分支和远程跟踪分支，并标记 worktree 基分支和远程仓库默认分支 |
+| `git.create_worktree` | 从指定仓库指定基分支创建一个 worktree 和本地分支。基分支为远程跟踪分支时，先从其所属远程更新该分支，更新失败返回错误 |
 | `git.worktrees` | 查询指定仓库所有 worktrees |
 | `git.remove_worktree` | 删除指定 worktree |
 | `fs.list` | 分页查看指定路径文件夹列表 |
@@ -453,7 +453,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 |---|---|
 | `list_agents` | 查询各机器的执行智能体列表，包括执行智能体状态（可用或不可用） |
 | `list_sessions` | 查询关联普通会话列表，包含会话 ID、状态、标题、工作目录、worktree 目录、机器、执行智能体等信息 |
-| `create_session` | 创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作 |
+| `create_session` | 创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支（若为本地分支则格式为 `refs/heads/<name>`，若为远程跟踪分支则格式为 `refs/remotes/<remote>/<branch>`），若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作 |
 | `prompt_session` | 向指定关联普通会话以用户角色发送消息，驱动执行智能体工作 |
 | `cancel_session` | 取消指定关联普通会话中执行智能体正在进行中的工作，若无进行中的工作则立即返回成功 |
 | `configure_session` | 配置指定关联普通会话的会话标题和会话选项 |
@@ -704,9 +704,10 @@ Github Webhook 触发
 改动审查视图未打开时，不主动拉取改动内容。视图打开时，刷新一次，不自动刷新。
 
 改动审查视图基准分支优先顺序
-- 开启 worktree 会话：worktree 基分支 > 远端仓库默认分支 > HEAD
-- 未开启 worktree 会话：远端仓库默认分支 > HEAD
-- 如有多个远端默认分支，则优先 origin，否则选择第一个
+- 开启 worktree 会话：worktree 基分支 > 远程仓库默认分支
+- 未开启 worktree 会话：远程仓库默认分支
+- 如有多个远程默认分支，则优先 origin，否则选择第一个
+- 均无法识别时不自动选择，用户需手动选择；未选择时不加载 diff
 
 ### 会话详情视图
 
