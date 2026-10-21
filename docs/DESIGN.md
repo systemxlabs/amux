@@ -335,6 +335,19 @@ Server 作为 ACP client 与 Agents 通信
 
 普通会话用量存储在内存中，以 Agent 侧数据为权威，当接收 `session/update` ACP 通知的 `usage_update` 类型时，其通知中的上下文窗口总大小和当前上下文大小全量覆盖内存存储。
 
+### 普通会话实时活动
+
+普通会话实时活动生命周期
+- 思考：开始于接收 `agent_thought` 事件，结束于再次接收同一消息 ID 的 `agent_thought` 事件
+- 工具调用：开始于接收 `tool_call_update` 事件且状态为 `pending` / `in_progress`，结束于接收 `tool_call_update` 事件且状态为 `completed` / `failed` / `cancelled`
+- 上下文压缩：开始于接收 `compaction_update` 事件且状态为 `in_progress`，结束于接收 `compaction_update` 事件且状态为 `completed` / `failed` / `cancelled`
+- 通知 / 错误：不展示
+- 当接收到 `state_update` 事件且状态为 `idle` 时，立即结束正在展示的实时活动
+
+普通会话实时活动存储
+- 只在内存中记录普通会话实时活动 ID，活动内容通过 ID 从磁盘读取
+- Server 重启后则实时活动为空
+
 ### 普通会话删除
 
 当用户请求删除普通会话时，立即从元数据中删除该普通会话，然后发起异步任务清理相关资源（如关闭或删除 agent 侧会话，清理关联的 worktree），随后立即返回响应。异步清理资源采用尽力而为的方式，不无限重试。
