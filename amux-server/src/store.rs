@@ -288,6 +288,14 @@ impl Store {
         );
     }
 
+    pub fn set_title_if_empty(&self, id: &str, title: &str) {
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET title = ?2, updated_at = ?3
+             WHERE id = ?1 AND (title IS NULL OR title = '')",
+            params![id, title, now_ms() as i64],
+        );
+    }
+
     /// 会话活跃：更新最近活跃时间（会话详情展示用）。
     pub fn touch(&self, id: &str) {
         let _ = self.sessions.lock().execute(

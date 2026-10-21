@@ -187,7 +187,9 @@ impl WorkflowService {
         pinned: bool,
     ) -> Result<(), String> {
         self.store.workflow(id).ok_or("工作流不存在")?;
-        self.store.set_workflow_title(id, &title);
+        if !title.is_empty() {
+            self.store.set_workflow_title(id, &title);
+        }
         self.store.set_workflow_project(id, project.as_deref());
         self.store.set_workflow_pinned(id, pinned);
         log::info!("工作流配置已更新: workflow={id}");

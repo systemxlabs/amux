@@ -224,6 +224,9 @@ impl SessionService {
         let message_id = conn.prompt(&agent_session_id, input.clone()).await?;
 
         // prompt 已受理：用户消息立即落盘（忽略 Agent 回放的 user_message*）
+        let content = serde_json::to_string(&input).unwrap_or_default();
+        self.store
+            .upsert_message(id, &message_id, "user", &content, now_ms());
         let text: String = input
             .iter()
             .filter_map(|block| match block {
@@ -231,11 +234,8 @@ impl SessionService {
                 _ => None,
             })
             .collect();
-        let content = serde_json::to_string(&input).unwrap_or_default();
-        self.store
-            .upsert_message(id, &message_id, "user", &content, now_ms());
-        if session.title.is_empty() && !text.is_empty() {
-            self.store.set_title(id, &generate_title(&text));
+        if !text.is_empty() {
+            self.store.set_title_if_empty(id, &generate_title(&text));
         }
         self.store.touch(id);
         log::info!(
@@ -276,7 +276,9 @@ impl SessionService {
         pinned: bool,
     ) -> Result<(), String> {
         let session = self.get(id)?;
-        self.store.set_title(id, &title);
+        if !title.is_empty() {
+            self.store.set_title(id, &title);
+        }
         self.store.set_session_project(id, project.as_deref());
         self.store.set_session_pinned(id, pinned);
         let has_config = config.is_some();
