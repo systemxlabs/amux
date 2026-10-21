@@ -514,7 +514,7 @@ impl GitRunner {
                 is_remote_default: false,
             });
         }
-        let remote_defaults = remote_default_branches(&repo);
+        let remote_defaults = remote_default_branches(&repo, cwd);
 
         for reference in repo
             .references()
@@ -818,76 +818,81 @@ fn remote_for_tracking_branch(repo: &gix::Repository, base: &str) -> Option<Stri
         .map(|remote| remote.to_string())
 }
 
-/// 每个远程的 HEAD 引用指向各自的默认分支；仅依赖引用本身，不依赖 remote 配置。
-fn remote_default_branches(repo: &gix::Repository) -> BTreeSet<String> {
+/// 每个远程的默认分支。优先本地 `refs/remotes/<remote>/HEAD` 符号引用；缺失时向该远程
+/// `git ls-remote --symref <remote> HEAD` 解析（docs/DESIGN.md「git.branches」）。
+fn remote_default_branches(repo: &gix::Repository, cwd: &str) -> BTreeSet<String> {
     let mut defaults = BTreeSet::new();
-    let refs = match repo.references().ok() {
-        Some(refs) => refs,
-        None => return defaults,
-    };
-    let remotes: Vec<String> = match refs.prefixed("refs/remotes/").ok() {
-        Some(iter) => iter
-            .filter_map(|reference| reference.ok())
-            .filter_map(|reference| {
+    // remote 名取自 refs/remotes/ 引用前缀，兼容只配置了跟踪引用而没有 remote 配置的仓库。
+    let mut remotes: BTreeSet<String> = BTreeSet::new();
+    if let Ok(refs) = repo.references() {
+        if let Ok(iter) = refs.prefixed("refs/remotes/") {
+            for reference in iter.flatten() {
                 let name = reference.name().to_string();
-                let short = name.strip_prefix("refs/remotes/")?;
-                // refs/remotes/<remote>/HEAD 中 remote 部分是第一个路径段
-                short
-                    .strip_suffix("/HEAD")?
-                    .split('/')
-                    .next()
-                    .map(str::to_string)
-            })
-            .collect(),
-        None => return defaults,
-    };
+                let Some(short) = name.strip_prefix("refs/remotes/") else {
+                    continue;
+                };
+                // refs/remotes/<remote>/HEAD 中 remote 部分是第一个路径段；普通分支取首段
+                remotes.insert(short.split('/').next().unwrap_or(short).to_string());
+            }
+        }
+    }
     for remote in remotes {
-        let head_name = format!("refs/remotes/{remote}/HEAD");
-        let Some(head_ref) = repo.try_find_reference(head_name.as_str()).ok().flatten() else {
-            continue;
-        };
-        let Some(target_ref) = follow_symbolic_reference(head_ref) else {
-            continue;
-        };
-        let Some(commit_id) = target_ref.target().try_id().map(gix::hash::ObjectId::from) else {
-            continue;
-        };
         let prefix = format!("refs/remotes/{remote}/");
-        let refs = match repo.references().ok() {
-            Some(refs) => refs,
-            None => continue,
-        };
-        let mut iter = match refs.prefixed(prefix.as_str()).ok() {
-            Some(iter) => iter,
-            None => continue,
-        };
-        if let Some(target_name) = iter
-            .by_ref()
-            .filter_map(|reference| reference.ok())
-            .find_map(|reference| {
-                let name = reference.name().to_string();
-                if name == format!("{prefix}HEAD") {
-                    return None;
+        // 本地已有的该远程跟踪分支，避免把远端存在但本地未检出的分支误标为默认。
+        let mut local_tracking = BTreeSet::new();
+        if let Ok(refs) = repo.references() {
+            if let Ok(iter) = refs.prefixed(prefix.as_str()) {
+                for reference in iter.flatten() {
+                    let name = reference.name().to_string();
+                    if name != format!("{prefix}HEAD") {
+                        local_tracking.insert(name);
+                    }
                 }
-                let id = reference.target().try_id().map(gix::hash::ObjectId::from)?;
-                (id == commit_id).then_some(name)
-            })
-        {
-            if let Some(name) = target_name.strip_prefix(prefix.as_str()) {
-                defaults.insert(format!("{remote}/{name}"));
+            }
+        }
+        let head_name = format!("refs/remotes/{remote}/HEAD");
+        let default_branch = match repo.try_find_reference(head_name.as_str()).ok().flatten() {
+            Some(head_ref) => match head_ref.target().try_name().map(|n| n.to_string()) {
+                // origin/HEAD -> refs/remotes/origin/<branch>：直接取分支名。
+                Some(target_name) => target_name
+                    .strip_prefix(prefix.as_str())
+                    .map(str::to_string),
+                // origin/HEAD 直接指向 commit：在该远程的本地跟踪分支里按 commit 匹配。
+                None => head_ref
+                    .target()
+                    .try_id()
+                    .map(gix::hash::ObjectId::from)
+                    .and_then(|commit_id| {
+                        local_tracking.iter().find_map(|full| {
+                            let id = repo
+                                .find_reference(full.as_str())
+                                .ok()?
+                                .target()
+                                .try_id()
+                                .map(gix::hash::ObjectId::from)?;
+                            (id == commit_id).then(|| full[prefix.len()..].to_string())
+                        })
+                    }),
+            },
+            None => remote_default_via_ls_remote(cwd, &remote),
+        };
+        if let Some(branch) = default_branch {
+            let full = format!("{prefix}{branch}");
+            if local_tracking.contains(&full) {
+                defaults.insert(format!("{remote}/{branch}"));
             }
         }
     }
     defaults
 }
 
-/// 跟随符号引用直到找到最终引用；非符号引用则返回自身。
-fn follow_symbolic_reference(reference: gix::Reference<'_>) -> Option<gix::Reference<'_>> {
-    if matches!(reference.target().kind(), gix::reference::Kind::Symbolic) {
-        reference.follow()?.ok()
-    } else {
-        Some(reference)
-    }
+/// 向远程解析默认分支：`git ls-remote --symref <remote> HEAD` 输出首行
+/// `ref: refs/heads/<branch>\tHEAD`。best-effort，失败（无网络/认证）返回 None。
+fn remote_default_via_ls_remote(cwd: &str, remote: &str) -> Option<String> {
+    let output = run(cwd, &["ls-remote", "--symref", remote, "HEAD"]).ok()?;
+    let first = output.lines().next()?.trim();
+    let target = first.strip_prefix("ref: ")?.split('\t').next()?.trim();
+    target.strip_prefix("refs/heads/").map(str::to_string)
 }
 
 #[cfg(test)]
@@ -1242,6 +1247,74 @@ mod tests {
 
         runner.worktree_remove(repo.to_str().unwrap(), target.to_str().unwrap());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 多个远程跟踪分支指向同一提交时，默认分支必须取 origin/HEAD 真正指向的那个，
+    /// 而不是按引用顺序匹配到的第一个。
+    #[test]
+    fn remote_default_prefers_head_target_over_same_commit_sibling() {
+        let repo = init_repo();
+        let head = git(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        for name in ["origin/master", "origin/main", "upstream/main"] {
+            git(
+                &repo,
+                &["update-ref", &format!("refs/remotes/{name}"), &head],
+            );
+        }
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+
+        let branches = GitRunner::new().branches(repo.to_str().unwrap()).unwrap();
+        let default_of = |remote: &str, branch: &str| {
+            branches
+                .branches
+                .iter()
+                .find(|b| b.name == format!("{remote}/{branch}"))
+                .map(|b| b.is_remote_default)
+        };
+        assert_eq!(default_of("origin", "main"), Some(true));
+        assert_eq!(default_of("origin", "master"), Some(false));
+        assert_eq!(default_of("upstream", "main"), Some(false));
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// 缺失 refs/remotes/<remote>/HEAD 符号引用时（裸克隆、镜像、某些 fetch 配置），
+    /// 仍应通过 git 的 remote 默认分支解析识别默认分支。
+    #[test]
+    fn remote_default_falls_back_without_head_symref() {
+        let repo = init_repo();
+        git(&repo, &["branch", "feature"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/feature", "HEAD"],
+        );
+        // 不创建 refs/remotes/origin/HEAD；用本地裸仓库当 origin，ls-remote 走文件协议无需网络。
+        let bare = unique_dir("amux-default-bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare", "-q"]);
+        git(&repo, &["push", "-q", bare.to_str().unwrap(), "main"]);
+        git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+
+        let branches = GitRunner::new().branches(repo.to_str().unwrap()).unwrap();
+        let is_default = |name: &str| {
+            branches
+                .branches
+                .iter()
+                .find(|b| b.name == name)
+                .map(|b| b.is_remote_default)
+        };
+        assert_eq!(is_default("origin/main"), Some(true), "{branches:?}");
+
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 
     /// 目录约定：`<worktrees 根>/<仓库目录名>-<5 字符随机串>`。

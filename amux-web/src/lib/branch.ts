@@ -7,14 +7,8 @@ export function branchDisplayName(branch: GitBranch): string {
     : `远程 ${branch.remote}/${branch.remoteBranch}`;
 }
 
-export function branchLabel(branch: GitBranch, remoteFetchHint = false): string {
-  const marks = [
-    remoteFetchHint && branch.kind === "remote" ? "创建时获取最新" : "",
-    branch.isWorktreeBase ? "worktree 基分支" : "",
-    branch.isRemoteDefault ? "远程默认分支" : "",
-  ].filter(Boolean);
-  const name = branchDisplayName(branch);
-  return marks.length === 0 ? name : `${name}（${marks.join("、")}）`;
+export function branchLabel(branch: GitBranch): string {
+  return branchDisplayName(branch);
 }
 
 /** 多个远程都有默认分支时优先 origin，否则取第一个。 */

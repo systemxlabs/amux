@@ -36,7 +36,7 @@ function worktreeBaseLabel(base: WorktreeBase, branches: readonly GitBranch[]): 
   const branch = branches.find(
     (item) => worktreeBaseKey(worktreeBaseFromBranch(item)) === worktreeBaseKey(base),
   );
-  if (branch !== undefined) return branchLabel(branch, true);
+  if (branch !== undefined) return branchLabel(branch);
   return base.kind === "local" ? `本地 ${base.name}` : `远程 ${base.remote}/${base.branch}`;
 }
 
@@ -252,7 +252,6 @@ export function WorktreeBranchField({
     if (machine === "" || repo === "" || core.client === null) {
       request.current += 1;
       setBranches([]);
-      onChangeRef.current(null);
       return;
     }
     const seq = request.current + 1;
@@ -275,7 +274,6 @@ export function WorktreeBranchField({
       () => {
         if (request.current === seq) {
           setBranches([]);
-          onChangeRef.current(null);
         }
       },
     );
@@ -367,7 +365,7 @@ export function WorktreeBranchField({
                       close();
                     }}
                   >
-                    <span className="min-w-0 flex-1 truncate">{branchLabel(branch, true)}</span>
+                    <span className="min-w-0 flex-1 truncate">{branchLabel(branch)}</span>
                   </button>
                 );
               })
