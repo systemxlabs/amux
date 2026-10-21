@@ -19,8 +19,8 @@ export type Activity =
       kind: "tool_call";
       id: string;
       timestamp: number;
-      tool_call_id: string;
-      tool_name: string;
+      tool_call_id?: string;
+      tool_name?: string;
       title?: string;
       parameters?: string;
     }

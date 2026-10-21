@@ -521,14 +521,14 @@ impl Store {
         at.map(|at| at as u64)
     }
 
-    /// 最近一条活动（进行中活动展示用）。
-    pub fn latest_activity(&self, session_id: &str) -> Option<Activity> {
+    /// 按活动 ID 读取单条活动内容（实时活动用）。
+    pub fn activity_by_id(&self, session_id: &str, activity_id: &str) -> Option<Activity> {
         let transcript = self.transcript(session_id, false).ok()??;
         let content = transcript
             .lock()
             .query_row(
-                "SELECT content FROM activities ORDER BY updated_at DESC LIMIT 1",
-                [],
+                "SELECT content FROM activities WHERE activity_id = ?1",
+                params![activity_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()

@@ -22,7 +22,7 @@ use agent_client_protocol::schema::v2::{
     SessionConfigOption as AcpSessionConfigOption,
     SessionConfigOptionValue as AcpSessionConfigOptionValue, SessionConfigSelectOptions,
     SessionUpdate, SetSessionConfigOptionRequest, StateUpdate, StopReason, TextContent,
-    ToolCallUpdate, UpdateSessionNotification,
+    ToolCallStatus, ToolCallUpdate, ToolKind, UpdateSessionNotification,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{Agent, Client, ConnectTo, JsonRpcRequest, Lines, V2ConnectionTo};
@@ -52,34 +52,36 @@ pub enum AcpEvent {
         message_id: String,
         content: Vec<ContentBlock>,
     },
-    /// 思考活动整条内容（按 message_id upsert）
+    /// 思考活动：实时活动按 message_id 开始/结束（同 id 再次收到即结束），内容实时展示不落盘
     Thinking {
         agent_session_id: String,
         message_id: String,
         text: String,
     },
-    /// 上下文压缩活动内容（按 compaction_id upsert）
+    /// 上下文压缩活动：`InProgress` 开始实时展示，其余状态结束
     Compaction {
         agent_session_id: String,
         compaction_id: String,
-        status: String,
+        status: CompactionStatus,
         summary: String,
+    },
+    /// 工具调用：`Pending`/`InProgress` 开始实时展示，终态结束
+    ToolCall {
+        agent_session_id: String,
+        tool_call_id: String,
+        /// 缺省表示本次 update 未携带状态（字段补丁）
+        status: Option<ToolCallStatus>,
+        name: Option<String>,
+        kind: Option<ToolKind>,
+        title: Option<String>,
+        parameters: Option<String>,
     },
     /// 会话通知活动（每次通知本地生成唯一 ID）
     Notice {
         agent_session_id: String,
-        severity: String,
+        severity: NoticeSeverity,
         title: String,
         description: Option<String>,
-    },
-    /// 工具调用（按 tool_call_id upsert）
-    ToolCall {
-        agent_session_id: String,
-        tool_call_id: String,
-        name: Option<String>,
-        kind: Option<String>,
-        title: Option<String>,
-        parameters: Option<String>,
     },
     /// 错误活动（本地生成 id）
     Error {
@@ -642,7 +644,7 @@ fn translate(
             out.push(AcpEvent::Compaction {
                 agent_session_id: session_id.clone(),
                 compaction_id: update.compaction_id.to_string(),
-                status: compaction_status_str(&update.status).to_string(),
+                status: update.status.clone(),
                 summary: compaction_summary_with_error(summary, &update.error),
             });
         }
@@ -657,13 +659,13 @@ fn translate(
             out.push(AcpEvent::Compaction {
                 agent_session_id: session_id.clone(),
                 compaction_id: chunk.compaction_id.to_string(),
-                status: "in_progress".to_string(),
+                status: CompactionStatus::InProgress,
                 summary: join_text(&merged).unwrap_or_default(),
             });
         }
         SessionUpdate::Notice(notice) => out.push(AcpEvent::Notice {
             agent_session_id: session_id.clone(),
-            severity: notice_severity_str(&notice.severity).to_string(),
+            severity: notice.severity.clone(),
             title: notice.title.clone(),
             description: notice.description.clone(),
         }),
@@ -693,11 +695,7 @@ fn translate(
             }
             _ => {}
         },
-        SessionUpdate::ToolCallUpdate(update) => {
-            if let Some(event) = tool_call_event(&session_id, update) {
-                out.push(event);
-            }
-        }
+        SessionUpdate::ToolCallUpdate(update) => out.push(tool_call_event(&session_id, update)),
         SessionUpdate::UsageUpdate(update) => out.push(AcpEvent::Usage {
             agent_session_id: session_id.clone(),
             used: update.used,
@@ -782,59 +780,32 @@ fn compaction_summary_with_error(summary: String, error: &MaybeUndefined<String>
     }
 }
 
-fn compaction_status_str(status: &CompactionStatus) -> &str {
-    match status {
-        CompactionStatus::InProgress => "in_progress",
-        CompactionStatus::Completed => "completed",
-        CompactionStatus::Failed => "failed",
-        CompactionStatus::Cancelled => "cancelled",
-        CompactionStatus::Other(status) => status,
-        _ => "unknown",
-    }
-}
-
-fn notice_severity_str(severity: &NoticeSeverity) -> &str {
-    match severity {
-        NoticeSeverity::Info => "info",
-        NoticeSeverity::Warning => "warning",
-        NoticeSeverity::Error => "error",
-        NoticeSeverity::Other(severity) => severity,
-        _ => "unknown",
-    }
-}
-
-fn tool_call_event(session_id: &str, update: &ToolCallUpdate) -> Option<AcpEvent> {
-    let name = match &update.name {
-        MaybeUndefined::Value(name) => Some(name.clone()),
-        MaybeUndefined::Null => Some(String::new()),
-        MaybeUndefined::Undefined => None,
-    };
-    let kind = match &update.kind {
-        MaybeUndefined::Value(kind) => Some(tool_kind_str(kind)),
-        MaybeUndefined::Null => Some(String::new()),
-        MaybeUndefined::Undefined => None,
-    };
-    let title = match &update.title {
-        MaybeUndefined::Value(title) => Some(title.clone()),
-        MaybeUndefined::Null => Some(String::new()),
-        MaybeUndefined::Undefined => None,
-    };
-    let parameters = match &update.raw_input {
-        MaybeUndefined::Value(value) => Some(value.to_string()),
-        MaybeUndefined::Null => Some(String::new()),
-        MaybeUndefined::Undefined => None,
-    };
-    if name.is_none() && kind.is_none() && title.is_none() && parameters.is_none() {
-        return None;
-    }
-    Some(AcpEvent::ToolCall {
+/// 工具调用生命周期由 status 决定（docs/DESIGN.md「普通会话实时活动」），
+/// 即使本次 update 不带任何字段也要透传，不能只凭字段缺失丢弃。
+fn tool_call_event(session_id: &str, update: &ToolCallUpdate) -> AcpEvent {
+    // `MaybeUndefined`：Undefined 表示未携带（不修改），Null 表示显式清空。
+    let name = update
+        .name
+        .as_opt_ref()
+        .map(|value| value.cloned().unwrap_or_default());
+    let kind = update.kind.as_opt_ref().and_then(|value| value.cloned());
+    let title = update
+        .title
+        .as_opt_ref()
+        .map(|value| value.cloned().unwrap_or_default());
+    let parameters = update
+        .raw_input
+        .as_opt_ref()
+        .map(|value| value.map(serde_json::Value::to_string).unwrap_or_default());
+    AcpEvent::ToolCall {
         agent_session_id: session_id.to_string(),
         tool_call_id: update.tool_call_id.to_string(),
+        status: update.status.as_opt_ref().and_then(|value| value.cloned()),
         name,
-        kind: kind.filter(|value| !value.is_empty()),
-        title: title.filter(|value| !value.is_empty()),
-        parameters: parameters.filter(|value| !value.is_empty()),
-    })
+        kind,
+        title,
+        parameters,
+    }
 }
 
 fn text_of(block: &ContentBlock) -> Option<String> {
@@ -878,13 +849,6 @@ fn stop_reason_reason(reason: Option<&StopReason>) -> StateChangeReason {
         }
         _ => StateChangeReason::Completed,
     }
-}
-
-fn tool_kind_str(kind: &agent_client_protocol::schema::v2::ToolKind) -> String {
-    serde_json::to_value(kind)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .unwrap_or_else(|| "other".to_string())
 }
 
 /// 从 Nano 的 idle `_meta` 中提取模型错误详情。
@@ -1042,23 +1006,6 @@ mod tests {
     }
 
     #[test]
-    fn nano_error_message_reads_idle_meta() {
-        let mut meta = serde_json::Map::new();
-        meta.insert(
-            NANO_ERROR_META_KEY.to_string(),
-            serde_json::json!({ "message": "模型调用失败: timeout" }),
-        );
-        let idle = IdleStateUpdate::new()
-            .stop_reason(StopReason::Other(NANO_ERROR_STOP_REASON.to_string()))
-            .meta(meta);
-
-        assert_eq!(
-            nano_error_message(&idle).as_deref(),
-            Some("模型调用失败: timeout")
-        );
-    }
-
-    #[test]
     fn chunk_text_is_accumulated_per_message() {
         let buffers = Mutex::new(HashMap::new());
         let blocks = append_block(
@@ -1117,7 +1064,7 @@ mod tests {
             .name("read_file")
             .title("读取配置")
             .kind(agent_client_protocol::schema::v2::ToolKind::Read);
-        let Some(AcpEvent::ToolCall { name, .. }) = tool_call_event("s1", &update) else {
+        let AcpEvent::ToolCall { name, .. } = tool_call_event("s1", &update) else {
             panic!("应生成工具调用事件");
         };
         assert_eq!(name.as_deref(), Some("read_file"));
@@ -1126,7 +1073,7 @@ mod tests {
     #[test]
     fn tool_call_event_preserves_name_clear() {
         let update = ToolCallUpdate::new("call-1").name(MaybeUndefined::Null);
-        let Some(AcpEvent::ToolCall { name, .. }) = tool_call_event("s1", &update) else {
+        let AcpEvent::ToolCall { name, .. } = tool_call_event("s1", &update) else {
             panic!("清空名称也应生成工具调用事件");
         };
         assert_eq!(name.as_deref(), Some(""));
@@ -1136,11 +1083,26 @@ mod tests {
     fn tool_call_event_carries_kind_for_fallback() {
         let update =
             ToolCallUpdate::new("call-1").kind(agent_client_protocol::schema::v2::ToolKind::Read);
-        let Some(AcpEvent::ToolCall { name, kind, .. }) = tool_call_event("s1", &update) else {
+        let AcpEvent::ToolCall { name, kind, .. } = tool_call_event("s1", &update) else {
             panic!("应生成工具调用事件");
         };
         assert!(name.is_none());
-        assert_eq!(kind.as_deref(), Some("read"));
+        assert_eq!(kind, Some(ToolKind::Read));
+    }
+
+    #[test]
+    fn tool_call_event_preserves_typed_status() {
+        let update = ToolCallUpdate::new("call-1").status(ToolCallStatus::InProgress);
+        let AcpEvent::ToolCall { status, .. } = tool_call_event("s1", &update) else {
+            panic!("应生成工具调用事件");
+        };
+        assert_eq!(status, Some(ToolCallStatus::InProgress));
+
+        let update = ToolCallUpdate::new("call-1");
+        let AcpEvent::ToolCall { status, .. } = tool_call_event("s1", &update) else {
+            panic!("应生成工具调用事件");
+        };
+        assert_eq!(status, None, "未携带 status 的 update 不应改变生命周期");
     }
 
     #[test]

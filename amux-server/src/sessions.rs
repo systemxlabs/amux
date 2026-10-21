@@ -18,6 +18,10 @@ use amux_common::domain::{
 use parking_lot::Mutex;
 use uuid::Uuid;
 
+use agent_client_protocol::schema::v2::{
+    CompactionStatus, NoticeSeverity, ToolCallStatus, ToolKind,
+};
+
 use crate::acp::AcpEvent;
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
@@ -45,6 +49,8 @@ pub struct SessionCaches {
     usages: Mutex<HashMap<String, Usage>>,
     /// 工具调用活动的当前字段（`tool_call_update` 未携带的字段保持不变）
     tool_calls: Mutex<HashMap<(String, String), Activity>>,
+    /// 普通会话实时活动 ID（docs/DESIGN.md「普通会话实时活动」）；内容仍在磁盘
+    live_activity: Mutex<HashMap<String, String>>,
     /// agent 会话 id → amux 会话 id
     agent_sessions: Mutex<HashMap<String, String>>,
     /// 已完成（创建或恢复）agent 会话的 amux 会话
@@ -62,6 +68,7 @@ impl SessionCaches {
         self.commands.lock().remove(session_id);
         self.plans.lock().remove(session_id);
         self.usages.lock().remove(session_id);
+        self.live_activity.lock().remove(session_id);
         self.tool_calls
             .lock()
             .retain(|(current_session, _), _| current_session != session_id);
@@ -371,12 +378,17 @@ impl SessionService {
         self.caches.usages.lock().get(id).copied()
     }
 
-    /// 进行中的活动：会话工作中时取最近一条活动。
+    /// 记录实时活动 ID（docs/DESIGN.md「普通会话实时活动」）。
+    fn set_live_activity(&self, session_id: &str, live_id: String) {
+        self.caches
+            .live_activity
+            .lock()
+            .insert(session_id.to_string(), live_id);
+    }
+    /// 进行中的活动：按内存中的实时活动 ID 从磁盘读取。
     pub fn ongoing_activity(&self, id: &str) -> Option<Activity> {
-        let session = self.store.session(id)?;
-        (session.state == SessionState::Busy)
-            .then(|| self.store.latest_activity(id))
-            .flatten()
+        let live_id = self.caches.live_activity.lock().get(id)?.clone();
+        self.store.activity_by_id(id, &live_id)
     }
 
     pub fn history(&self, id: &str, limit: usize, offset: usize) -> (Vec<HistoryItem>, bool) {
@@ -586,6 +598,9 @@ impl SessionService {
                 reason,
             } => {
                 let session = self.session_of_agent(&agent_session_id)?;
+                if state == SessionState::Idle {
+                    self.caches.live_activity.lock().remove(&session.id);
+                }
                 let old_state = self.store.session(&session.id)?.state;
                 self.store.set_state(&session.id, state);
                 Some(StateApplied {
@@ -622,6 +637,7 @@ impl SessionService {
                 let content = serde_json::to_string(&activity).unwrap_or_default();
                 self.store
                     .upsert_activity(&session.id, &id, "thinking", &content, now_ms());
+                self.set_live_activity(&session.id, id);
                 None
             }
             AcpEvent::Compaction {
@@ -634,7 +650,7 @@ impl SessionService {
                 let activity = Activity::Compaction {
                     id: compaction_id.clone(),
                     timestamp: now_ms(),
-                    status,
+                    status: compaction_status_str(&status),
                     summary,
                 };
                 let content = serde_json::to_string(&activity).unwrap_or_default();
@@ -645,31 +661,15 @@ impl SessionService {
                     &content,
                     now_ms(),
                 );
-                None
-            }
-            AcpEvent::Notice {
-                agent_session_id,
-                severity,
-                title,
-                description,
-            } => {
-                let session = self.session_of_agent(&agent_session_id)?;
-                let id = format!("notice-{}", Uuid::new_v4());
-                let activity = Activity::Notice {
-                    id: id.clone(),
-                    timestamp: now_ms(),
-                    severity,
-                    title,
-                    description,
-                };
-                let content = serde_json::to_string(&activity).unwrap_or_default();
-                self.store
-                    .upsert_activity(&session.id, &id, "notice", &content, now_ms());
+                if status == CompactionStatus::InProgress {
+                    self.set_live_activity(&session.id, compaction_id);
+                }
                 None
             }
             AcpEvent::ToolCall {
                 agent_session_id,
                 tool_call_id,
+                status,
                 name,
                 kind,
                 title,
@@ -698,6 +698,34 @@ impl SessionService {
                     &content,
                     now_ms(),
                 );
+                match status {
+                    Some(ToolCallStatus::Pending | ToolCallStatus::InProgress) => {
+                        self.set_live_activity(&session.id, tool_call_id);
+                    }
+                    // 工具调用终态不立即结束实时活动；由 state_update=idle 统一清空，
+                    // 避免前台查询 ongoing_activity 时已提前为空（docs/DESIGN.md「普通会话实时活动」）。
+                    _ => {}
+                }
+                None
+            }
+            AcpEvent::Notice {
+                agent_session_id,
+                severity,
+                title,
+                description,
+            } => {
+                let session = self.session_of_agent(&agent_session_id)?;
+                let id = format!("notice-{}", Uuid::new_v4());
+                let activity = Activity::Notice {
+                    id: id.clone(),
+                    timestamp: now_ms(),
+                    severity: notice_severity_str(&severity),
+                    title,
+                    description,
+                };
+                let content = serde_json::to_string(&activity).unwrap_or_default();
+                self.store
+                    .upsert_activity(&session.id, &id, "notice", &content, now_ms());
                 None
             }
             AcpEvent::Error {
@@ -821,16 +849,40 @@ fn idle_expired(session: &Session, last_activity: u64, now: u64) -> bool {
     session.state == SessionState::Idle && now.saturating_sub(last_activity) > IDLE_CLOSE_AFTER_MS
 }
 
-/// 只有内存中仍标记为 resumed 的会话才需要关闭；关闭后该标记会被移除，
-/// 避免后续维护仅凭持久化的 agent_session_id 反复关闭同一会话。
-fn should_close_idle_agent_session(idle_expired: bool, resumed: bool) -> bool {
-    idle_expired && resumed
+/// ACP 强类型 → 活动历史中持久化/线上使用的字符串表示。
+fn compaction_status_str(status: &CompactionStatus) -> String {
+    match status {
+        CompactionStatus::InProgress => "in_progress".into(),
+        CompactionStatus::Completed => "completed".into(),
+        CompactionStatus::Failed => "failed".into(),
+        CompactionStatus::Cancelled => "cancelled".into(),
+        CompactionStatus::Other(value) => value.clone(),
+        _ => "unknown".into(),
+    }
 }
 
+fn notice_severity_str(severity: &NoticeSeverity) -> String {
+    match severity {
+        NoticeSeverity::Info => "info".into(),
+        NoticeSeverity::Warning => "warning".into(),
+        NoticeSeverity::Error => "error".into(),
+        NoticeSeverity::Other(value) => value.clone(),
+        _ => "unknown".into(),
+    }
+}
+
+fn tool_kind_str(kind: &ToolKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "other".into())
+}
+
+/// 工具调用字段补丁：`tool_call_update` 未携带的字段保持不变。
 fn apply_tool_call_patch(
     activity: &mut Activity,
     name: Option<String>,
-    kind: Option<String>,
+    kind: Option<ToolKind>,
     title: Option<String>,
     parameters: Option<String>,
 ) {
@@ -844,6 +896,7 @@ fn apply_tool_call_patch(
         return;
     };
 
+    let kind = kind.as_ref().map(tool_kind_str);
     if let Some(name) = name {
         if name.trim().is_empty() {
             *tool_name = kind.unwrap_or_default();
@@ -861,6 +914,12 @@ fn apply_tool_call_patch(
     if let Some(parameters) = parameters {
         *current_parameters = Some(parameters);
     }
+}
+
+/// 只有内存中仍标记为 resumed 的会话才需要关闭；关闭后该标记会被移除，
+/// 避免后续维护仅凭持久化的 agent_session_id 反复关闭同一会话。
+fn should_close_idle_agent_session(idle_expired: bool, resumed: bool) -> bool {
+    idle_expired && resumed
 }
 
 #[cfg(test)]
@@ -938,16 +997,16 @@ mod tests {
         apply_tool_call_patch(
             &mut activity,
             None,
-            Some("read".into()),
+            Some(ToolKind::Read),
             Some("读取配置".into()),
             None,
         );
         apply_tool_call_patch(&mut activity, Some("read_file".into()), None, None, None);
-        apply_tool_call_patch(&mut activity, None, Some("edit".into()), None, None);
+        apply_tool_call_patch(&mut activity, None, Some(ToolKind::Edit), None, None);
         apply_tool_call_patch(
             &mut activity,
             Some(String::new()),
-            Some("execute".into()),
+            Some(ToolKind::Execute),
             None,
             None,
         );
@@ -988,6 +1047,10 @@ mod tests {
                 parameters: None,
             },
         );
+        caches
+            .live_activity
+            .lock()
+            .insert("s1".into(), "call-1".into());
 
         caches.forget("s1");
 
@@ -1001,5 +1064,6 @@ mod tests {
             .tool_calls
             .lock()
             .contains_key(&("s1".into(), "call-1".into())));
+        assert!(!caches.live_activity.lock().contains_key("s1"));
     }
 }

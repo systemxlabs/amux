@@ -815,7 +815,11 @@ fn remote_for_tracking_branch(repo: &gix::Repository, base: &str) -> Option<Stri
 
     repo.remote_names()
         .into_iter()
-        .filter(|remote| reference.strip_prefix(&format!("refs/remotes/{remote}/")).is_some())
+        .filter(|remote| {
+            reference
+                .strip_prefix(&format!("refs/remotes/{remote}/"))
+                .is_some()
+        })
         // 远端名可包含 `/`，优先选择最长匹配前缀。
         .max_by_key(|remote| remote.len())
         .map(|remote| remote.to_string())

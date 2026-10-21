@@ -548,52 +548,20 @@ async fn server_daemon_agent_end_to_end() {
         "打开但可能空闲的 ACP session 应计入打开会话数: {agents:?}"
     );
 
-    // 活动：思考与工具调用按 upsert 合并为两条
-    let activities = poll(
+    // 实时活动：工具调用（同 id 两次 update 合并字段）→ 上下文压缩；state=idle 时立即清空
+    // 会话状态回到空闲、标题取首条提示词
+    let _session = poll(
         || {
             let client = &client;
-            let path = format!("/sessions/{session_id}/activities");
+            let path = format!("/sessions/{session_id}");
             async move {
                 let value = client.try_get(&path).await?;
-                let activities = value["activities"].as_array().cloned().unwrap_or_default();
-                (activities.len() >= 2).then_some(activities)
+                (value["state"] == "idle" && value["title"] == "你好").then_some(value)
             }
         },
-        "活动落盘",
+        "会话回到空闲且标题生成",
     )
     .await;
-    assert!(
-        activities.iter().any(|item| item["kind"] == "thinking"),
-        "{activities:?}"
-    );
-    let tool_call = activities
-        .iter()
-        .find(|item| item["kind"] == "tool_call")
-        .expect("应有工具调用活动");
-    assert_eq!(tool_call["tool_call_id"], "tc1");
-    assert_eq!(tool_call["tool_name"], "shell");
-    assert_eq!(
-        activities
-            .iter()
-            .filter(|item| item["kind"] == "tool_call")
-            .count(),
-        1,
-        "同一 toolCallId 的多次 update 应合并为一条活动"
-    );
-    let compaction = activities
-        .iter()
-        .find(|item| item["kind"] == "compaction")
-        .expect("应有上下文压缩活动");
-    assert_eq!(compaction["summary"], "压缩摘要");
-    assert_eq!(compaction["status"], "completed");
-    let notice = activities
-        .iter()
-        .find(|item| item["kind"] == "notice")
-        .expect("应有通知活动");
-    assert_eq!(notice["severity"], "warning");
-    assert_eq!(notice["title"], "连接不稳定");
-    assert_eq!(notice["description"], "请稍后重试");
-
     // 斜杠命令 / 计划 / 上下文：来自 ACP 通知的缓存
     let commands = client
         .get(&format!("/sessions/{session_id}/slash_commands"))

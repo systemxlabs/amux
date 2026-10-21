@@ -523,7 +523,7 @@ fn send_profile_updates(cx: &V2ConnectionTo<Client>, sid: &SessionId) -> Result<
         sid,
         SessionUpdate::CompactionUpdate(CompactionUpdate::new(
             "cmp_1",
-            CompactionStatus::Completed,
+            CompactionStatus::InProgress,
         )),
     )?;
     send_update(
