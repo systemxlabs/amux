@@ -1,6 +1,6 @@
 // 改动审查视图：改动文件树 + inline 改动（docs/PRD.md「改动审查视图」、docs/DESIGN.md「改动审查视图」）。
 //
-// 面板打开时拉取一次改动，不定时刷新；折叠状态只存在于本地。
+// 面板打开时拉取一次改动，不自动刷新；折叠状态只存在于本地。
 
 import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
@@ -10,6 +10,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Plus,
+  RefreshCw,
 } from "lucide-react";
 
 import { ResizableTreePane } from "../../components/ResizableTreePane";
@@ -328,6 +329,21 @@ export function DiffPanel() {
   const nodes = useMemo(() => buildDiffTree(diff?.files ?? []), [diff]);
   const additions = files.reduce((total, file) => total + file.additions, 0);
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
+
+  const refreshDiff = () => {
+    if (sessionId === null || core.client === null) return;
+    const request = ++diffRequestRef.current;
+    setError(null);
+    setDiff(null);
+    core.client.diff(sessionId, base).then(
+      (result) => {
+        if (request === diffRequestRef.current) setDiff(result);
+      },
+      (cause: unknown) => {
+        if (request === diffRequestRef.current) setError(messageOf(cause));
+      },
+    );
+  };
 
   const selectBase = (value: string) => {
     setBasePickerOpen(false);
@@ -674,6 +690,17 @@ export function DiffPanel() {
           <span data-slot="diff-file-count" className="text-xs text-muted-foreground">
             {files.length} 个文件
           </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            data-slot="diff-refresh"
+            aria-label="刷新改动"
+            title="刷新改动"
+            onClick={refreshDiff}
+          >
+            <RefreshCw />
+          </Button>
         </div>
         <div ref={basePickerRef} className="relative w-40 lg:w-56">
           <button

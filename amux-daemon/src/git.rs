@@ -1,13 +1,13 @@
 //! git 能力：
-//! - diff 查询、untracked 判定：gitoxide（gix）结构化实现，不依赖 git 二进制、
-//!   无本地化输出解析
-//! - gitoxide 无等价能力处保留 git CLI：worktree 新增/删除（gix-worktree
-//!   仅有列出能力，无增删管理）
+//! - diff 查询、untracked 判定、分支/引用查询、merge-base：gitoxide（gix）结构化实现，
+//!   不依赖 git 二进制、无本地化输出解析
+//! - gitoxide 无等价能力处保留 git CLI：worktree 新增/删除（gix-worktree 仅有列出能力，
+//!   无增删管理）与远端 fetch（gix 的远端协议栈不完整支持 CLI 级别的配置和助手）
 //!
-//! 依赖上用 `gix` 伞 crate（DESIGN「Daemon 技术栈 - Git：gix」，只开 status / sha1 两个
-//! 特性）：这里需要的是「仓库访问 + status（含 dirwalk、忽略规则、attributes、过滤）」
-//! 这一整套跨子系统能力，正是伞 crate 的 status 特性所封装的部分；改用细粒度子 crate 得
-//! 自己复刻那几百行装配，收益仅是去掉伞 crate 作为非可选依赖带进来的 gix-protocol /
+//! 依赖上用 `gix` 伞 crate（DESIGN「Daemon 技术栈 - Git：gix」，只开 status / revision / sha1
+//! 三个特性）：这里需要的是「仓库访问 + status + revision 解析」这一整套跨子系统能力，
+//! 正是伞 crate 的 status 与 revision 特性所封装的部分；改用细粒度子 crate 得自己复刻
+//! 那几百行装配，收益仅是去掉伞 crate 作为非可选依赖带进来的 gix-protocol /
 //! gix-revision 等（本项目用不到），代价与收益不成比例，故保留伞 crate。
 
 use std::collections::BTreeSet;
@@ -273,7 +273,12 @@ impl GitRunner {
 
     /// 结构化 diff：gitoxide 实现。
     /// cwd 非 git 仓库时返回 `not_repo` 标记。
-    pub fn diff(&self, cwd: &str, base: &str) -> GitDiffResult {
+    pub fn diff(&self, cwd: &str, base: &str) -> Result<GitDiffResult, String> {
+        update_remote_tracking_base(cwd, base)?;
+        Ok(self.diff_inner(cwd, base))
+    }
+
+    fn diff_inner(&self, cwd: &str, base: &str) -> GitDiffResult {
         let empty = || GitDiffResult {
             files: Vec::new(),
             not_repo: false,
@@ -300,19 +305,10 @@ impl GitRunner {
             return empty();
         };
         let baseline_tree = if base != "HEAD" {
-            let Ok(merge_base) = run(cwd, &["merge-base", base, "HEAD"]) else {
+            let Some(merge_base) = merge_base_commit(&repo, base, head.id) else {
                 return empty();
             };
-            let Ok(merge_base) = gix::ObjectId::from_hex(merge_base.trim().as_bytes()) else {
-                return empty();
-            };
-            let Ok(object) = repo.find_object(merge_base) else {
-                return empty();
-            };
-            let Ok(commit) = object.peel_to_commit() else {
-                return empty();
-            };
-            let Ok(baseline_tree) = commit.tree() else {
+            let Ok(baseline_tree) = merge_base.tree() else {
                 return empty();
             };
             baseline_tree
@@ -522,8 +518,8 @@ impl GitRunner {
             });
         }
         local_names.sort();
-        let local_default = default_branch(cwd, &local_names, current.as_deref());
-        let remote_defaults = remote_default_branches(cwd);
+        let local_default = default_branch(&repo, &local_names, current.as_deref());
+        let remote_defaults = remote_default_branches(&repo);
 
         for reference in repo
             .references()
@@ -768,20 +764,92 @@ fn worktree_suffix() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..5].to_string()
 }
 
+/// 把 `base` 视为任意修订表达式解析为提交，再计算它与 HEAD 的最佳 merge-base。
+fn merge_base_commit<'a>(
+    repo: &'a gix::Repository,
+    base: &str,
+    head: gix::hash::ObjectId,
+) -> Option<gix::Commit<'a>> {
+    let base_commit = repo
+        .rev_parse_single(base)
+        .ok()?
+        .object()
+        .ok()?
+        .peel_to_commit()
+        .ok()?;
+    let merge_base = repo.merge_base(base_commit.id, head).ok()?;
+    merge_base.object().ok()?.into_commit().into()
+}
+
+/// 远端跟踪基准在比较前必须通过其所属远端刷新；本地分支和任意修订表达式不触发网络操作。
+fn update_remote_tracking_base(cwd: &str, base: &str) -> Result<(), String> {
+    let repo = match gix::discover(cwd) {
+        Ok(repo) => repo,
+        Err(_) => return Ok(()),
+    };
+    let Some(remote) = remote_for_tracking_branch(&repo, base) else {
+        return Ok(());
+    };
+    run(cwd, &["fetch", "--prune", remote.as_str()])
+        .map(|_| ())
+        .map_err(|error| format!("{}: {}", error.message, error.stderr.trim()))
+}
+
+/// 若 `base` 是现有远端跟踪引用，返回其所属远端名称。
+fn remote_for_tracking_branch(repo: &gix::Repository, base: &str) -> Option<String> {
+    let reference = format!("refs/remotes/{base}");
+    let refs = repo.references().ok()?;
+    let mut names = refs.prefixed("refs/remotes/").ok()?;
+    if !names.by_ref().any(|entry| {
+        entry
+            .map(|item| item.name().to_string() == reference)
+            .unwrap_or(false)
+    }) {
+        return None;
+    }
+
+    repo.remote_names()
+        .into_iter()
+        .filter(|remote| base.strip_prefix(&format!("{remote}/")).is_some())
+        // 远端名可包含 `/`，优先选择最长匹配前缀。
+        .max_by_key(|remote| remote.len())
+        .map(|remote| remote.to_string())
+}
+
 /// 默认分支优先取远端 origin/HEAD，其次取常见的 main/master，最后回退当前分支。
-fn default_branch(cwd: &str, branches: &[String], current: Option<&str>) -> Option<String> {
-    if let Ok(remote_head) = run(
-        cwd,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-    ) {
-        if let Some(name) = remote_head.trim().strip_prefix("origin/") {
-            if branches.iter().any(|branch| branch == name) {
-                return Some(name.to_string());
+fn default_branch(
+    repo: &gix::Repository,
+    branches: &[String],
+    current: Option<&str>,
+) -> Option<String> {
+    if let Some(target) = repo
+        .try_find_reference("refs/remotes/origin/HEAD")
+        .ok()
+        .flatten()
+        .and_then(|reference| reference.follow().transpose().ok().flatten())
+        .and_then(|reference| reference.target().try_name().map(|name| name.to_string()))
+        .and_then(|name| {
+            name.strip_prefix("refs/remotes/origin/")
+                .map(str::to_string)
+        })
+    {
+        let target_commit = repo
+            .rev_parse_single(target.as_str())
+            .ok()?
+            .object()
+            .ok()?
+            .peel_to_commit()
+            .ok()?
+            .id;
+        if branches.iter().any(|branch| {
+            Some(target_commit)
+                == repo
+                    .rev_parse_single(branch.as_str())
+                    .ok()
+                    .map(|id| id.detach())
+        }) {
+            if branches.iter().any(|branch| branch == &target) {
+                return Some(target);
             }
         }
     }
@@ -795,27 +863,83 @@ fn default_branch(cwd: &str, branches: &[String], current: Option<&str>) -> Opti
         .map(str::to_string)
 }
 
-/// 每个远端的 HEAD 引用指向各自的默认分支；无法读取的远端不标记默认分支。
-fn remote_default_branches(cwd: &str) -> BTreeSet<String> {
-    let Ok(references) = run(
-        cwd,
-        &["for-each-ref", "--format=%(refname)", "refs/remotes"],
-    ) else {
-        return BTreeSet::new();
+/// 每个远端的 HEAD 引用指向各自的默认分支；仅依赖引用本身，不依赖 remote 配置。
+fn remote_default_branches(repo: &gix::Repository) -> BTreeSet<String> {
+    let mut defaults = BTreeSet::new();
+    let refs = match repo.references().ok() {
+        Some(refs) => refs,
+        None => return defaults,
     };
-    references
-        .lines()
-        .filter_map(|reference| {
-            let remote = reference
-                .strip_prefix("refs/remotes/")?
-                .strip_suffix("/HEAD")?;
-            let output = run(cwd, &["symbolic-ref", "--quiet", "--short", reference]).ok()?;
-            output
-                .trim()
-                .strip_prefix(&format!("{remote}/"))
-                .map(|branch| format!("{remote}/{branch}"))
-        })
-        .collect()
+    let remotes: Vec<String> = match refs.prefixed("refs/remotes/").ok() {
+        Some(iter) => iter
+            .filter_map(|reference| reference.ok())
+            .filter_map(|reference| {
+                let name = reference.name().to_string();
+                let short = name.strip_prefix("refs/remotes/")?;
+                // refs/remotes/<remote>/HEAD 中 remote 部分是第一个路径段
+                short
+                    .strip_suffix("/HEAD")?
+                    .split('/')
+                    .next()
+                    .map(str::to_string)
+            })
+            .collect(),
+        None => return defaults,
+    };
+    for remote in remotes {
+        let head_name = format!("refs/remotes/{remote}/HEAD");
+        let Some(head_ref) = repo.try_find_reference(head_name.as_str()).ok().flatten() else {
+            continue;
+        };
+        let Some(target_ref) = follow_symbolic_reference(head_ref) else {
+            continue;
+        };
+        let Some(commit_id) = target_ref
+            .target()
+            .try_id()
+            .map(|id| gix::hash::ObjectId::from(id))
+        else {
+            continue;
+        };
+        let prefix = format!("refs/remotes/{remote}/");
+        let refs = match repo.references().ok() {
+            Some(refs) => refs,
+            None => continue,
+        };
+        let mut iter = match refs.prefixed(prefix.as_str()).ok() {
+            Some(iter) => iter,
+            None => continue,
+        };
+        if let Some(target_name) = iter
+            .by_ref()
+            .filter_map(|reference| reference.ok())
+            .find_map(|reference| {
+                let name = reference.name().to_string();
+                if name == format!("{prefix}HEAD") {
+                    return None;
+                }
+                let id = reference
+                    .target()
+                    .try_id()
+                    .map(|id| gix::hash::ObjectId::from(id))?;
+                (id == commit_id).then_some(name)
+            })
+        {
+            if let Some(name) = target_name.strip_prefix(prefix.as_str()) {
+                defaults.insert(format!("{remote}/{name}"));
+            }
+        }
+    }
+    defaults
+}
+
+/// 跟随符号引用直到找到最终引用；非符号引用则返回自身。
+fn follow_symbolic_reference(reference: gix::Reference<'_>) -> Option<gix::Reference<'_>> {
+    if matches!(reference.target().kind(), gix::reference::Kind::Symbolic) {
+        reference.follow()?.ok()
+    } else {
+        Some(reference)
+    }
 }
 
 #[cfg(test)]
@@ -863,7 +987,7 @@ mod tests {
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
         git(&dir, &["add", "new.txt"]);
         let r = GitRunner::new();
-        let st = r.diff(dir.to_str().unwrap(), "HEAD");
+        let st = r.diff(dir.to_str().unwrap(), "HEAD").unwrap();
         assert!(!st.not_repo);
         assert!(st
             .files
@@ -889,7 +1013,9 @@ mod tests {
     fn diff_includes_untracked_files() {
         let dir = init_repo();
         std::fs::write(dir.join("untracked.txt"), "not staged\n").unwrap();
-        let result = GitRunner::new().diff(dir.to_str().unwrap(), "HEAD");
+        let result = GitRunner::new()
+            .diff(dir.to_str().unwrap(), "HEAD")
+            .unwrap();
         let file = result
             .files
             .iter()
@@ -909,7 +1035,7 @@ mod tests {
 
         std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("untracked-link")).unwrap();
         let runner = GitRunner::new();
-        let diff = runner.diff(dir.to_str().unwrap(), "HEAD");
+        let diff = runner.diff(dir.to_str().unwrap(), "HEAD").unwrap();
         let untracked = diff
             .files
             .iter()
@@ -920,7 +1046,7 @@ mod tests {
 
         std::fs::remove_file(dir.join("a.txt")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("a.txt")).unwrap();
-        let diff = runner.diff(dir.to_str().unwrap(), "HEAD");
+        let diff = runner.diff(dir.to_str().unwrap(), "HEAD").unwrap();
         let replaced = diff
             .files
             .iter()
@@ -936,6 +1062,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let st = GitRunner::new()
             .diff(dir.to_str().unwrap(), "HEAD")
+            .unwrap()
             .not_repo;
         assert!(st);
     }
@@ -946,7 +1073,9 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "line1\nCHANGED\nline3\n").unwrap();
         std::fs::write(dir.join("new.txt"), "hello\nworld\n").unwrap();
         git(&dir, &["add", "new.txt"]);
-        let d = GitRunner::new().diff(dir.to_str().unwrap(), "HEAD");
+        let d = GitRunner::new()
+            .diff(dir.to_str().unwrap(), "HEAD")
+            .unwrap();
         assert!(!d.not_repo);
         let a = d.files.iter().find(|f| f.path == "a.txt").expect("a.txt");
         assert_eq!(a.additions, 2);
@@ -978,7 +1107,9 @@ mod tests {
         git(&dir, &["commit", "-m", "base change", "-q"]);
         git(&dir, &["checkout", "main", "-q"]);
 
-        let diff = GitRunner::new().diff(dir.to_str().unwrap(), "base");
+        let diff = GitRunner::new()
+            .diff(dir.to_str().unwrap(), "base")
+            .unwrap();
         assert!(
             diff.files.iter().any(|file| file.path == "a.txt"),
             "应包含基准分支 merge-base 之后的 HEAD 提交内容: {diff:?}"
@@ -998,11 +1129,75 @@ mod tests {
         git(&dir, &["commit", "-m", "change", "-q"]);
         std::fs::write(dir.join("a.txt"), "line1\nline2\n").unwrap();
 
-        let diff = GitRunner::new().diff(dir.to_str().unwrap(), "base");
+        let diff = GitRunner::new()
+            .diff(dir.to_str().unwrap(), "base")
+            .unwrap();
         assert!(
             !diff.files.iter().any(|file| file.path == "a.txt"),
             "恢复到基准内容后不应显示空 diff: {diff:?}"
         );
+    }
+
+    #[test]
+    fn diff_remote_tracking_branch_fetches_latest_base() {
+        let repo = init_repo();
+        let remote = unique_dir("amux-diff-remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "--bare", "-q"]);
+        git(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&repo, &["push", "-u", "origin", "main"]);
+        let stale = git(&repo, &["rev-parse", "origin/main"]).trim().to_string();
+
+        let producer = unique_dir("amux-diff-producer");
+        git(
+            remote.parent().unwrap(),
+            &[
+                "clone",
+                "-q",
+                "--branch",
+                "main",
+                remote.to_str().unwrap(),
+                producer.to_str().unwrap(),
+            ],
+        );
+        git(&producer, &["config", "user.email", "t@t"]);
+        git(&producer, &["config", "user.name", "t"]);
+        std::fs::write(producer.join("latest.txt"), "latest\n").unwrap();
+        git(&producer, &["add", "."]);
+        git(&producer, &["commit", "-m", "latest", "-q"]);
+        git(&producer, &["push", "-q"]);
+        let latest = git(&producer, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_ne!(latest, stale);
+
+        GitRunner::new()
+            .diff(repo.to_str().unwrap(), "origin/main")
+            .unwrap();
+        assert_eq!(git(&repo, &["rev-parse", "origin/main"]).trim(), latest);
+
+        let _ = std::fs::remove_dir_all(&producer);
+        let _ = std::fs::remove_dir_all(&remote);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn diff_returns_error_when_remote_tracking_base_cannot_be_updated() {
+        let repo = init_repo();
+        let missing = unique_dir("amux-missing-remote");
+        git(
+            &repo,
+            &["remote", "add", "origin", missing.to_str().unwrap()],
+        );
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        let error = GitRunner::new()
+            .diff(repo.to_str().unwrap(), "origin/main")
+            .unwrap_err();
+        assert!(error.contains("git fetch --prune origin 失败"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -1015,7 +1210,9 @@ mod tests {
         git(&dir, &["mv", "before", "after"]);
         git(&dir, &["commit", "-m", "rename directory", "-q"]);
 
-        let diff = GitRunner::new().diff(dir.to_str().unwrap(), "HEAD~1");
+        let diff = GitRunner::new()
+            .diff(dir.to_str().unwrap(), "HEAD~1")
+            .unwrap();
         assert!(
             !diff
                 .files

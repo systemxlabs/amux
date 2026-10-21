@@ -276,7 +276,12 @@ async fn execute(
             if params.base.trim().is_empty() {
                 return Err(RpcError::invalid_params("base 不能为空"));
             }
-            to_value(daemon.git.diff(&params.repo, &params.base))
+            to_value(
+                daemon
+                    .git
+                    .diff(&params.repo, &params.base)
+                    .map_err(RpcError::git)?,
+            )
         }
         method::GIT_BRANCHES => {
             let params: GitRepoParams = decode(params)?;

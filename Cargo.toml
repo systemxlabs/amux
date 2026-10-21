@@ -31,10 +31,10 @@ parking_lot = "=0.12.5"
 tempfile = "=3.27.0"
 futures-util = "0.3.34"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-# 只开 status / sha1：daemon 需要「仓库访问 + status（dirwalk、忽略规则、attributes、过滤）」
+# 只开 status / revision / sha1：daemon 需要「仓库访问 + status + revision 解析」
 # 这一整套跨子系统能力（DESIGN「Daemon 技术栈 - Git：gix」）；改用细粒度子 crate 需自行复刻
-# 那几百行装配，才能去掉伞 crate 非可选带进来的 gix-protocol / gix-revision
-gix = { version = "0.87.1", default-features = false, features = ["status", "sha1"] }
+# 那几百行装配，才能去掉伞 crate 非可选带进来的 gix-protocol / gix-transport
+gix = { version = "0.87.1", default-features = false, features = ["status", "revision", "sha1"] }
 gethostname = "1.1.0"
 portable-pty = "0.9.0"
 base64 = "0.23.1"
