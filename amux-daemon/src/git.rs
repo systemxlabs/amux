@@ -797,7 +797,12 @@ fn update_remote_tracking_base(cwd: &str, base: &str) -> Result<(), String> {
 
 /// 若 `base` 是现有远端跟踪引用，返回其所属远端名称。
 fn remote_for_tracking_branch(repo: &gix::Repository, base: &str) -> Option<String> {
-    let reference = format!("refs/remotes/{base}");
+    // base 可能是短名（origin/master）或完整引用名（refs/remotes/origin/master）
+    let reference = if base.starts_with("refs/") {
+        base.to_string()
+    } else {
+        format!("refs/remotes/{base}")
+    };
     let refs = repo.references().ok()?;
     let mut names = refs.prefixed("refs/remotes/").ok()?;
     if !names.by_ref().any(|entry| {
@@ -810,7 +815,7 @@ fn remote_for_tracking_branch(repo: &gix::Repository, base: &str) -> Option<Stri
 
     repo.remote_names()
         .into_iter()
-        .filter(|remote| base.strip_prefix(&format!("{remote}/")).is_some())
+        .filter(|remote| reference.strip_prefix(&format!("refs/remotes/{remote}/")).is_some())
         // 远端名可包含 `/`，优先选择最长匹配前缀。
         .max_by_key(|remote| remote.len())
         .map(|remote| remote.to_string())

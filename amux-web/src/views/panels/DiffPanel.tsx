@@ -41,13 +41,13 @@ function linePrefix(kind: GitDiffLine["kind"]): string {
 function preferredDiffBase(branches: readonly GitBranch[], useWorktree: boolean): string {
   if (useWorktree) {
     const source = branches.find((branch) => branch.isWorktreeBase);
-    if (source !== undefined) return source.name;
+    if (source !== undefined) return source.fullName;
   }
   const remoteDefaults = branches.filter((branch) => branch.isRemoteDefault);
   return (
     remoteDefaults.find((branch) => branch.kind === "remote" && branch.remote === "origin")
-      ?.name ??
-    remoteDefaults[0]?.name ??
+      ?.fullName ??
+    remoteDefaults[0]?.fullName ??
     "HEAD"
   );
 }
@@ -262,6 +262,10 @@ export function DiffPanel() {
   const [dragRange, setDragRange] = useState<DiffDrag | null>(null);
   const [hoveredGutter, setHoveredGutter] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  /** 悬浮横向滚动条是否按下（用原生事件同步，避免拖动时 React 重渲染卡顿） */
+  const hScrollDragRef = useRef(false);
+  /** 悬浮横向滚动条槽按下位置与按下时的 scrollLeft，用于 pointer capture 拖动 */
+  const hScrollTrackRef = useRef<{ pointerId: number; x: number; scrollLeft: number } | null>(null);
   const dragRef = useRef<DiffDrag | null>(null);
   const dragPointerRef = useRef<number | null>(null);
   const diffRequestRef = useRef(0);
@@ -288,6 +292,8 @@ export function DiffPanel() {
     setHoveredGutter(null);
     dragRef.current = null;
     dragPointerRef.current = null;
+    hScrollDragRef.current = false;
+    hScrollTrackRef.current = null;
     const request = ++diffRequestRef.current;
     const client = core.client;
     if (client === null || sessionId === null || branchMachine === null || branchRepo === null) return;
@@ -373,7 +379,7 @@ export function DiffPanel() {
             branch.name.toLowerCase().includes(baseKeyword) ||
             branch.fullName.toLowerCase().includes(baseKeyword),
         );
-  const selectedBranch = branches.find((branch) => branch.name === base);
+  const selectedBranch = branches.find((branch) => branch.fullName === base);
   const baseLabel =
     base === "HEAD" ? "HEAD（当前提交）" : selectedBranch === undefined ? base : branchLabel(selectedBranch);
 
@@ -391,6 +397,65 @@ export function DiffPanel() {
     if (file === null) return;
     // 手动换算滚动量：文件顶部贴住内容区顶部，不滚动横向滚动条
     content.scrollTop = file.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
+  };
+
+  const syncFloatingHScroll = () => {
+    const content = contentRef.current;
+    const track = document.querySelector<HTMLElement>("[data-slot='diff-hscroll-track']");
+    const thumb = track?.querySelector<HTMLElement>("[data-slot='diff-hscroll-thumb']");
+    if (content === null || track === null || thumb == null) return;
+    const client = content.clientWidth;
+    const scroll = content.scrollWidth;
+    if (scroll <= client) {
+      track.style.display = "none";
+      return;
+    }
+    track.style.display = "";
+    const thumbWidth = Math.max((client / scroll) * client, 24);
+    const maxLeft = client - thumbWidth;
+    thumb.style.width = `${thumbWidth}px`;
+    thumb.style.transform = `translateX(${(content.scrollLeft / (scroll - client)) * maxLeft}px)`;
+  };
+
+  const beginHScroll = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const content = contentRef.current;
+    const thumb = event.currentTarget.querySelector<HTMLElement>("[data-slot='diff-hscroll-thumb']");
+    if (content === null || thumb === null) return;
+    hScrollDragRef.current = true;
+    hScrollTrackRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      scrollLeft: content.scrollLeft,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    // 点到滑槽空白处：按点击位置比例跳转滚动位置
+    if (!thumb.contains(event.target as Node)) {
+      const client = content.clientWidth;
+      const scroll = content.scrollWidth;
+      const thumbWidth = thumb.getBoundingClientRect().width;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const maxLeft = client - thumbWidth;
+      const ratio = (event.clientX - rect.left - thumbWidth / 2) / maxLeft;
+      content.scrollLeft = Math.min(Math.max(ratio, 0), 1) * (scroll - client);
+    }
+  };
+
+  const moveHScroll = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const track = hScrollTrackRef.current;
+    const content = contentRef.current;
+    if (track === null || content === null || track.pointerId !== event.pointerId) return;
+    const client = content.clientWidth;
+    const scroll = content.scrollWidth;
+    const thumbWidth = Math.max((client / scroll) * client, 24);
+    const maxLeft = client - thumbWidth;
+    content.scrollLeft =
+      track.scrollLeft + ((event.clientX - track.x) / maxLeft) * (scroll - client);
+  };
+
+  const endHScroll = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (hScrollTrackRef.current?.pointerId !== event.pointerId) return;
+    hScrollTrackRef.current = null;
+    hScrollDragRef.current = false;
   };
 
   const openFileComment = (path: string) => {
@@ -671,8 +736,32 @@ export function DiffPanel() {
         contentSlot="diff-files"
         treeClassName="max-h-[40%] min-h-0 overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none"
         contentClassName="min-h-0 flex-1 overflow-y-auto rounded-md bg-muted/20 lg:h-full"
-        contentRef={contentRef}
+        contentRef={(node) => {
+          contentRef.current = node;
+          if (node === null) return;
+          // 悬浮横向滚动条用原生监听同步，避开 React 滚动重渲染
+          node.addEventListener("scroll", syncFloatingHScroll);
+          syncFloatingHScroll();
+        }}
         contentCollapsed={diffsCollapsed}
+        contentFooter={
+          // 悬浮横向滚动条：固定在内容区可视底部，内容超长时无需滚到底即可左右滚动
+          <div
+            data-slot="diff-hscroll-track"
+            role="scrollbar"
+            aria-orientation="horizontal"
+            className="absolute right-0 bottom-1 left-0 z-10 mx-3 hidden h-3 cursor-pointer touch-none rounded-full bg-background/80 lg:flex lg:items-center"
+            onPointerDown={beginHScroll}
+            onPointerMove={moveHScroll}
+            onPointerUp={endHScroll}
+            onPointerCancel={endHScroll}
+          >
+            <div
+              data-slot="diff-hscroll-thumb"
+              className="h-1.5 rounded-full bg-border"
+            />
+          </div>
+        }
       />
     );
   }
@@ -768,9 +857,9 @@ export function DiffPanel() {
                     key={branch.fullName}
                     type="button"
                     role="option"
-                    aria-selected={base === branch.name}
+                    aria-selected={base === branch.fullName}
                     className="flex cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                    onClick={() => selectBase(branch.name)}
+                    onClick={() => selectBase(branch.fullName)}
                   >
                     <span className="min-w-0 flex-1 truncate">{branchLabel(branch)}</span>
                   </button>
