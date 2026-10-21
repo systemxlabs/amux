@@ -698,13 +698,10 @@ impl SessionService {
                     &content,
                     now_ms(),
                 );
-                match status {
-                    Some(ToolCallStatus::Pending | ToolCallStatus::InProgress) => {
-                        self.set_live_activity(&session.id, tool_call_id);
-                    }
+                if let Some(ToolCallStatus::Pending | ToolCallStatus::InProgress) = status {
                     // 工具调用终态不立即结束实时活动；由 state_update=idle 统一清空，
                     // 避免前台查询 ongoing_activity 时已提前为空（docs/DESIGN.md「普通会话实时活动」）。
-                    _ => {}
+                    self.set_live_activity(&session.id, tool_call_id);
                 }
                 None
             }

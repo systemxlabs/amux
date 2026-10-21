@@ -807,8 +807,8 @@ fn remote_for_tracking_branch(repo: &gix::Repository, base: &str) -> Option<Stri
     let mut names = refs.prefixed("refs/remotes/").ok()?;
     if !names.by_ref().any(|entry| {
         entry
-            .map(|item| item.name().to_string() == reference)
-            .unwrap_or(false)
+            .as_ref()
+            .is_ok_and(|item| item.name().as_bstr() == reference.as_str())
     }) {
         return None;
     }
@@ -856,10 +856,9 @@ fn default_branch(
                     .rev_parse_single(branch.as_str())
                     .ok()
                     .map(|id| id.detach())
-        }) {
-            if branches.iter().any(|branch| branch == &target) {
-                return Some(target);
-            }
+        }) && branches.iter().any(|branch| branch == &target)
+        {
+            return Some(target);
         }
     }
     for candidate in ["main", "master"] {
@@ -903,11 +902,7 @@ fn remote_default_branches(repo: &gix::Repository) -> BTreeSet<String> {
         let Some(target_ref) = follow_symbolic_reference(head_ref) else {
             continue;
         };
-        let Some(commit_id) = target_ref
-            .target()
-            .try_id()
-            .map(|id| gix::hash::ObjectId::from(id))
-        else {
+        let Some(commit_id) = target_ref.target().try_id().map(gix::hash::ObjectId::from) else {
             continue;
         };
         let prefix = format!("refs/remotes/{remote}/");
@@ -927,10 +922,7 @@ fn remote_default_branches(repo: &gix::Repository) -> BTreeSet<String> {
                 if name == format!("{prefix}HEAD") {
                     return None;
                 }
-                let id = reference
-                    .target()
-                    .try_id()
-                    .map(|id| gix::hash::ObjectId::from(id))?;
+                let id = reference.target().try_id().map(gix::hash::ObjectId::from)?;
                 (id == commit_id).then_some(name)
             })
         {
