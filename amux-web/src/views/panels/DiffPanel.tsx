@@ -261,6 +261,7 @@ export function DiffPanel() {
   const [commentSending, setCommentSending] = useState(false);
   const [dragRange, setDragRange] = useState<DiffDrag | null>(null);
   const [hoveredGutter, setHoveredGutter] = useState<string | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DiffDrag | null>(null);
   const dragPointerRef = useRef<number | null>(null);
   const diffRequestRef = useRef(0);
@@ -384,7 +385,12 @@ export function DiffPanel() {
 
   const selectFile = (index: number) => {
     setSelected(index);
-    document.getElementById(`diff-file-${index}`)?.scrollIntoView({ block: "start" });
+    const content = contentRef.current;
+    if (content === null) return;
+    const file = content.querySelector(`#diff-file-${index}`);
+    if (file === null) return;
+    // 手动换算滚动量：文件顶部贴住内容区顶部，不滚动横向滚动条
+    content.scrollTop = file.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
   };
 
   const openFileComment = (path: string) => {
@@ -664,7 +670,8 @@ export function DiffPanel() {
         treeSlot="diff-tree"
         contentSlot="diff-files"
         treeClassName="max-h-[40%] min-h-0 overflow-y-auto rounded-md bg-muted/40 p-1 lg:h-full lg:max-h-none"
-        contentClassName="min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-md bg-muted/20 lg:h-full"
+        contentClassName="min-h-0 flex-1 overflow-y-auto rounded-md bg-muted/20 lg:h-full"
+        contentRef={contentRef}
         contentCollapsed={diffsCollapsed}
       />
     );

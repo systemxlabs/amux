@@ -1,4 +1,4 @@
-import { useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
+import { useRef, useState, type CSSProperties, type PointerEvent, type ReactNode, type RefObject } from "react";
 
 import { cn } from "../lib/utils";
 
@@ -20,6 +20,7 @@ type ResizableTreePaneProps = {
   contentSlot: string;
   treeClassName: string;
   contentClassName: string;
+  contentRef?: RefObject<HTMLDivElement | null>;
   contentCollapsed?: boolean;
 };
 
@@ -31,6 +32,7 @@ export function ResizableTreePane({
   contentSlot,
   treeClassName,
   contentClassName,
+  contentRef,
   contentCollapsed,
 }: ResizableTreePaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -107,6 +109,7 @@ export function ResizableTreePane({
       ) : null}
       {content !== null ? (
         <div
+          ref={contentRef}
           data-slot={contentSlot}
           data-collapsed={contentCollapsed === undefined ? undefined : String(contentCollapsed)}
           className={contentClassName}
