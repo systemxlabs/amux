@@ -10,7 +10,7 @@ use amux_common::domain::{generate_title, rand_id, ContentBlock, SessionState, S
 use uuid::Uuid;
 
 use crate::sessions::{CreateSessionParams, SessionService, SessionWorktree};
-use crate::store::{GroupRow, MemberRow, Store};
+use crate::store::{self, GroupRow, MemberRow, Store};
 use crate::timestamps::now_ms;
 
 /// 群聊会话及成员普通会话的驱动逻辑。
@@ -282,7 +282,7 @@ impl GroupService {
     async fn drive_mentioned(&self, group_id: &str, content: &[ContentBlock]) {
         let text = blocks_text(content);
         let members = self.store.group_members(group_id);
-        for member_id in mentioned_members(&text, &members) {
+        for member_id in mentioned_members(&text, &members, None) {
             self.drive_member(&member_id).await;
         }
     }
@@ -312,7 +312,7 @@ impl GroupService {
                     .map(|content| blocks_text(&content))
                     .unwrap_or_default(),
             };
-            for member_id in mentioned_members(&text, &members) {
+            for member_id in mentioned_members(&text, &members, row.member_id.as_deref()) {
                 if seen.insert(member_id.clone()) {
                     mentions.push(member_id);
                 }
@@ -337,7 +337,7 @@ impl GroupService {
             .store
             .group_messages_since(&group.id, since)
             .into_iter()
-            .filter_map(|row| self.message_line(&row))
+            .filter_map(|row| self.unread_message(&row))
             .collect::<Vec<_>>();
         let prompt = drive_prompt(&member, &members, &unread);
         match self
@@ -370,8 +370,8 @@ impl GroupService {
         }
     }
 
-    fn message_line(&self, row: &crate::store::GroupMessageRow) -> Option<String> {
-        let name = match &row.member_id {
+    fn unread_message(&self, row: &store::GroupMessageRow) -> Option<UnreadMessage> {
+        let member = match &row.member_id {
             Some(member_id) => self.store.group_member(member_id)?.name,
             None => "user".to_string(),
         };
@@ -392,7 +392,11 @@ impl GroupService {
         if text.trim().is_empty() {
             return None;
         }
-        Some(format!("{name}: {text}"))
+        Some(UnreadMessage {
+            time: format_prompt_time(row.created_at),
+            member,
+            text,
+        })
     }
 }
 
@@ -440,10 +444,17 @@ fn validate_members(members: &[GroupMemberTemplate]) -> Result<(), String> {
 /// 按 `<成员名>` 解析消息中的 `@name`；用户名为 `user`，`@all` 匹配所有 agent 成员。
 ///
 /// 在整个消息内容中按大小写精确匹配（docs/DESIGN.md「群聊会话驱动」）。
-fn mentioned_members(text: &str, members: &[MemberRow]) -> Vec<String> {
+fn mentioned_members(
+    text: &str,
+    members: &[MemberRow],
+    sender_member_id: Option<&str>,
+) -> Vec<String> {
     let mut mentions = Vec::new();
     let all = has_mention(text, "all");
     for member in members {
+        if sender_member_id == Some(member.id.as_str()) {
+            continue;
+        }
         if all || has_mention(text, &member.name) {
             mentions.push(member.id.clone());
         }
@@ -474,8 +485,26 @@ fn is_blank_output(content: &[ContentBlock]) -> bool {
     })
 }
 
+#[derive(serde::Serialize)]
+struct UnreadMessage {
+    time: String,
+    member: String,
+    text: String,
+}
+
+fn format_prompt_time(timestamp_ms: u64) -> String {
+    jiff::Timestamp::from_millisecond(timestamp_ms as i64)
+        .map(|timestamp| {
+            timestamp
+                .to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
 /// 成员驱动消息模板（docs/DESIGN.md「群聊会话驱动」）。
-fn drive_prompt(member: &MemberRow, members: &[MemberRow], unread: &[String]) -> String {
+fn drive_prompt(member: &MemberRow, members: &[MemberRow], unread: &[UnreadMessage]) -> String {
     let others = members
         .iter()
         .filter(|candidate| candidate.id != member.id)
@@ -489,14 +518,15 @@ fn drive_prompt(member: &MemberRow, members: &[MemberRow], unread: &[String]) ->
         .join("\n");
     let unread = unread
         .iter()
-        .map(|line| format!("- {line}"))
+        .map(|message| serde_json::to_string(message).expect("未读消息应可序列化为 JSON"))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
         "你现在在一个群聊会话中，你的每个非空输出都会作为群聊消息，系统会解析每条群聊消息内容的 @ 提及，若 @ agent 成员则会唤醒 agent 读取群聊消息并执行任务。\n\n\
          你在群聊中的名称是 `{}`，角色描述是：{}，运行在机器 `{}` 上。\n\n\
          群聊成员除了用户（用户的群聊名称为 `user`）和你，还有以下 agent 成员：\n{}\n\n\
-         当前有成员发送消息 @ 你，这是群聊自上次读取以来未读的消息列表\n{}\n\n\
+         当前有成员发送消息 @ 你，这是群聊自上次读取以来的所有未读消息\n\
+         <unread_messages>\n{}\n</unread_messages>\n\n\
          行为准则\n\
          - 当你需要其他成员协助或需要通知其他成员时，可以使用 @ 成员（格式为 @<name>，前后空格）来唤醒其他 agent 成员或通知用户\n\
          - 当你读取未读消息后，判断无需做任何事时，保持静默不输出任何内容",
@@ -526,18 +556,32 @@ mod tests {
     #[test]
     fn mentions_match_exact_text_without_whitespace_boundaries() {
         let members = vec![member("m1", "coder"), member("m2", "reviewer")];
-        assert_eq!(mentioned_members("@coder 实现", &members), ["m1"]);
-        assert_eq!(mentioned_members("请@reviewer审查", &members), ["m2"]);
-        assert_eq!(mentioned_members("@coder@reviewer", &members), ["m1", "m2"]);
-        assert_eq!(mentioned_members("mail@coder", &members), ["m1"]);
-        assert!(mentioned_members("@Coder 实现", &members).is_empty());
-        assert!(mentioned_members("@user 请确认", &members).is_empty());
+        assert_eq!(mentioned_members("@coder 实现", &members, None), ["m1"]);
+        assert_eq!(mentioned_members("请@reviewer审查", &members, None), ["m2"]);
+        assert_eq!(
+            mentioned_members("@coder@reviewer", &members, None),
+            ["m1", "m2"]
+        );
+        assert_eq!(mentioned_members("mail@coder", &members, None), ["m1"]);
+        assert!(mentioned_members("@Coder 实现", &members, None).is_empty());
+        assert!(mentioned_members("@user 请确认", &members, None).is_empty());
+    }
+
+    #[test]
+    fn mentions_exclude_sender() {
+        let members = vec![member("m1", "coder"), member("m2", "reviewer")];
+        assert_eq!(
+            mentioned_members("@coder @reviewer", &members, Some("m1")),
+            ["m2"]
+        );
+        assert_eq!(mentioned_members("@all", &members, Some("m2")), ["m1"]);
+        assert!(mentioned_members("@reviewer", &members, Some("m2")).is_empty());
     }
 
     #[test]
     fn all_mentions_every_member() {
         let members = vec![member("m1", "coder"), member("m2", "reviewer")];
-        assert_eq!(mentioned_members("@all开始", &members), ["m1", "m2"]);
+        assert_eq!(mentioned_members("@all开始", &members, None), ["m1", "m2"]);
     }
 
     #[test]
@@ -571,11 +615,18 @@ mod tests {
         let prompt = drive_prompt(
             &members[1],
             &members,
-            &["user: @reviewer 请审查".to_string()],
+            &[UnreadMessage {
+                time: "2026-10-22 22:15:03".to_string(),
+                member: "user".to_string(),
+                text: "@reviewer 请审查".to_string(),
+            }],
         );
         assert!(prompt.contains("你在群聊中的名称是 `reviewer`"));
         assert!(prompt.contains("- coder（运行在机器 `pc`）：负责实现"));
-        assert!(prompt.contains("- user: @reviewer 请审查"));
+        assert!(prompt.contains(
+            r#"{"time":"2026-10-22 22:15:03","member":"user","text":"@reviewer 请审查"}"#
+        ));
+        assert!(prompt.contains("<unread_messages>"));
         assert!(!prompt.contains("- reviewer（运行在机器"));
     }
 }
