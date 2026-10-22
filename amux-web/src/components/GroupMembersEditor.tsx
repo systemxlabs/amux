@@ -14,7 +14,8 @@ import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 
 /**
- * 成员能否用于创建群聊。预设列表允许名称重复，但同一群聊内必须唯一。
+ * 成员能否用于创建群聊。预设列表允许名称重复，但同一群聊内必须唯一，
+ * 且不能占用 `all` / `user` 特殊提及名称。
  */
 export function groupMembersError(
   members: readonly GroupMemberTemplate[],
@@ -32,6 +33,9 @@ export function groupMembersError(
       member.workspace.trim() === ""
     ) {
       return "请填写成员名称、角色描述、机器、agent 和工作目录";
+    }
+    if (name === "all" || name === "user") {
+      return "成员名称不能为 all 或 user";
     }
     if (names.has(name)) return "群聊内的成员名称不能重复";
     names.add(name);

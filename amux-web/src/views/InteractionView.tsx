@@ -32,6 +32,7 @@ import {
   formatUsage,
   usagePercent,
 } from "../lib/format";
+import { completeMention, matchMentions } from "../lib/mention";
 import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
 import { execDir } from "../lib/types";
@@ -153,6 +154,10 @@ export function InteractionView() {
   const slashMatches = useMemo(
     () => matchSlashCommands(detail.slashCommands, draft),
     [detail.slashCommands, draft],
+  );
+  const mentionMatches = useMemo(
+    () => (isGroup ? matchMentions(detail.group?.members ?? [], draft) : []),
+    [detail.group?.members, draft, isGroup],
   );
 
   if (!target) {
@@ -435,6 +440,31 @@ export function InteractionView() {
           </div>
         ) : null}
 
+        {isGroup && mentionMatches.length > 0 ? (
+          <div
+            data-slot="mention-popup"
+            className="absolute bottom-full left-3 mb-1 max-h-56 w-72 overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg"
+          >
+            {mentionMatches.map((candidate) => (
+              <button
+                key={candidate.name}
+                type="button"
+                data-slot="mention-candidate"
+                className="flex w-full flex-col items-start px-2 py-2 text-left hover:bg-accent lg:py-1"
+                onClick={() => {
+                  core.update((next) => {
+                    next.inputDraft = completeMention(draft, candidate.name);
+                  });
+                  inputRef.current?.focus();
+                }}
+              >
+                <span>@{candidate.name}</span>
+                <span className="text-xs text-muted-foreground">{candidate.description}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         {state.attachments.length > 0 ? (
           <div className="mb-2 flex flex-wrap gap-1">
             {state.attachments.map((attachment) => (
@@ -647,10 +677,10 @@ function MessageBubble({ item }: { item: HistoryItem }) {
         )}
       >
         <MessageContent content={item.content} />
+        <span data-slot="message-time" className="text-xs opacity-70">
+          {formatTime(item.timestamp)}
+        </span>
       </div>
-      <span data-slot="message-time" className="mt-1 text-xs text-muted-foreground">
-        {formatTime(item.timestamp)}
-      </span>
     </div>
   );
 }
@@ -666,43 +696,62 @@ function GroupMessageBubble({ item }: { item: GroupMessage }) {
       className={cn("mb-3 flex flex-col", mine ? "items-end" : "items-start")}
     >
       <div
-        data-slot="group-message-content"
         className={cn(
-          "flex max-w-[80%] flex-col gap-1.5 rounded-md px-3 py-2",
-          mine ? "bg-primary text-primary-foreground" : "bg-muted",
-          highlightsUser && "ring-2 ring-warning ring-offset-1 ring-offset-background",
+          "flex w-fit max-w-[80%] flex-col",
+          mine ? "items-end" : "items-start",
+          highlightsUser && "rounded-md ring-2 ring-warning ring-offset-1 ring-offset-background",
         )}
       >
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span data-slot="group-message-name" className="text-sm font-medium">
-            {item.name}
-          </span>
-          {item.agent ? (
-            <span data-slot="group-message-agent" className="text-xs opacity-75">
-              {item.agent}
+        {!mine ? (
+          <div
+            data-slot="group-message-meta"
+            className="mb-1 flex w-full min-w-0 items-baseline gap-2 px-1 text-xs text-muted-foreground"
+          >
+            <span
+              data-slot="group-message-name"
+              className="shrink-0 text-sm font-medium text-foreground"
+            >
+              {item.name}
             </span>
-          ) : null}
-        </div>
-        {item.description ? (
-          <p data-slot="group-message-description" className="text-xs opacity-75">
-            {item.description}
-          </p>
+            {item.agent ? (
+              <span data-slot="group-message-agent" className="shrink-0">
+                {item.agent}
+              </span>
+            ) : null}
+            {item.description ? (
+              <span
+                data-slot="group-message-description"
+                className="min-w-0 flex-1 truncate"
+                title={item.description}
+              >
+                {item.description}
+              </span>
+            ) : null}
+          </div>
         ) : null}
-        <MessageContent content={item.content} />
-        <span data-slot="group-message-time" className="text-xs opacity-70">
-          {formatTime(item.timestamp)}
-        </span>
+        <div
+          data-slot="group-message-content"
+          className={cn(
+            "flex max-w-full flex-col gap-1.5 rounded-md px-3 py-2",
+            mine ? "bg-primary text-primary-foreground" : "bg-muted",
+          )}
+        >
+          <MessageContent content={item.content} />
+          <span data-slot="group-message-time" className="text-xs opacity-70">
+            {formatTime(item.timestamp)}
+          </span>
+        </div>
       </div>
     </div>
   );
 }
 
-/** 群聊 @ 提及规定前后为空白，因此这里不把 `foo@user` 当作提及。 */
+/** 群聊 @ 提及按完整消息内容做大小写精确匹配。 */
 function mentionsUser(content: readonly ContentBlock[]): boolean {
   const text = content
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
     .join("\n");
-  return /(^|\s)@user(?=\s|$)/u.test(text);
+  return text.includes("@user");
 }
 
 /** 消息气泡内容：文本块直接展示，资源块展示文本内容与图片，URI 资源提供打开入口。 */

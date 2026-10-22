@@ -902,7 +902,7 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
     client
         .post_ok(
             &format!("/groups/{group_id}"),
-            json!({ "input": [{ "type": "text", "text": "@coder 你好" }] }),
+            json!({ "input": [{ "type": "text", "text": "@coder你好" }] }),
         )
         .await;
 
@@ -944,7 +944,7 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
         "群聊回到空闲",
     )
     .await;
-    assert_eq!(group["title"], "@coder 你好");
+    assert_eq!(group["title"], "@coder你好");
 
     assert_eq!(
         client.delete(&format!("/groups/{group_id}")).await,

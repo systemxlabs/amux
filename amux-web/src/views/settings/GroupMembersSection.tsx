@@ -55,6 +55,10 @@ export function GroupMembersSection() {
       core.failure("请填写成员名称、角色描述、机器、agent 和工作目录");
       return;
     }
+    if (member.name === "all" || member.name === "user") {
+      core.failure("群聊预设成员名称不能为 all 或 user");
+      return;
+    }
     if (member.useWorktree && member.worktreeBase === undefined) {
       core.failure("开启 worktree 时必须选择基分支");
       return;

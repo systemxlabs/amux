@@ -47,16 +47,20 @@ impl ConfigStore {
         read_json::<Vec<GroupMemberTemplate>>(&self.path("group_members")).unwrap_or_default()
     }
 
-    /// 全量更新群聊预设成员；name 可重复（docs/DESIGN.md「群聊会话存储」）。
+    /// 全量更新群聊预设成员；name 可重复但不能为特殊提及名称。
     pub fn set_group_members(&self, members: &[GroupMemberTemplate]) -> Result<(), String> {
         for member in members {
-            if member.name.trim().is_empty()
+            let name = member.name.trim();
+            if name.is_empty()
                 || member.description.trim().is_empty()
                 || member.machine.trim().is_empty()
                 || member.agent.trim().is_empty()
                 || member.workspace.trim().is_empty()
             {
                 return Err("群聊预设成员的名称、角色描述、机器、agent 和工作目录不能为空".into());
+            }
+            if matches!(name, "all" | "user") {
+                return Err(format!("群聊预设成员名称不能为 {name}"));
             }
             if member.use_worktree && member.worktree_base.is_none() {
                 return Err("开启 worktree 时必须指定基分支".into());
@@ -440,9 +444,15 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("config/group_members.json")).unwrap();
         assert!(text.contains(r#""worktreeBase": "refs/heads/main""#));
 
-        let mut missing_description = member;
+        let mut missing_description = member.clone();
         missing_description.description.clear();
         assert!(store.set_group_members(&[missing_description]).is_err());
+
+        for name in ["all", "user"] {
+            let mut reserved = member.clone();
+            reserved.name = name.into();
+            assert!(store.set_group_members(&[reserved]).is_err(), "{name}");
+        }
     }
 
     #[test]

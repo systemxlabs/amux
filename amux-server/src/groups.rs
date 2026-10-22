@@ -424,6 +424,9 @@ fn validate_members(members: &[GroupMemberTemplate]) -> Result<(), String> {
         {
             return Err("群聊成员的名称、角色描述、机器、agent 和工作目录不能为空".into());
         }
+        if matches!(member.name.as_str(), "all" | "user") {
+            return Err("群聊成员名称不能为 all 或 user".into());
+        }
         if !names.insert(member.name.trim()) {
             return Err(format!("群聊成员名称重复: {}", member.name));
         }
@@ -436,7 +439,7 @@ fn validate_members(members: &[GroupMemberTemplate]) -> Result<(), String> {
 
 /// 按 `<成员名>` 解析消息中的 `@name`；用户名为 `user`，`@all` 匹配所有 agent 成员。
 ///
-/// 提及格式为前后空白分隔（docs/DESIGN.md「群聊会话驱动」）。
+/// 在整个消息内容中按大小写精确匹配（docs/DESIGN.md「群聊会话驱动」）。
 fn mentioned_members(text: &str, members: &[MemberRow]) -> Vec<String> {
     let mut mentions = Vec::new();
     let all = has_mention(text, "all");
@@ -449,22 +452,7 @@ fn mentioned_members(text: &str, members: &[MemberRow]) -> Vec<String> {
 }
 
 fn has_mention(text: &str, name: &str) -> bool {
-    let pattern = format!("@{name}");
-    let mut from = 0;
-    while let Some(index) = text[from..].find(&pattern) {
-        let start = from + index;
-        let end = start + pattern.len();
-        let before_ok = text[..start]
-            .chars()
-            .next_back()
-            .is_none_or(char::is_whitespace);
-        let after_ok = text[end..].chars().next().is_none_or(char::is_whitespace);
-        if before_ok && after_ok {
-            return true;
-        }
-        from = start + pattern.len();
-    }
-    false
+    text.contains(&format!("@{name}"))
 }
 
 fn blocks_text(content: &[ContentBlock]) -> String {
@@ -536,20 +524,36 @@ mod tests {
     }
 
     #[test]
-    fn mentions_require_whitespace_boundaries() {
+    fn mentions_match_exact_text_without_whitespace_boundaries() {
         let members = vec![member("m1", "coder"), member("m2", "reviewer")];
         assert_eq!(mentioned_members("@coder 实现", &members), ["m1"]);
-        assert_eq!(mentioned_members("请 @reviewer 审查", &members), ["m2"]);
-        assert!(mentioned_members("@coder@reviewer", &members).is_empty());
-        assert!(mentioned_members("mail@coder", &members).is_empty());
-        assert!(mentioned_members("@coders 实现", &members).is_empty());
+        assert_eq!(mentioned_members("请@reviewer审查", &members), ["m2"]);
+        assert_eq!(mentioned_members("@coder@reviewer", &members), ["m1", "m2"]);
+        assert_eq!(mentioned_members("mail@coder", &members), ["m1"]);
+        assert!(mentioned_members("@Coder 实现", &members).is_empty());
         assert!(mentioned_members("@user 请确认", &members).is_empty());
     }
 
     #[test]
     fn all_mentions_every_member() {
         let members = vec![member("m1", "coder"), member("m2", "reviewer")];
-        assert_eq!(mentioned_members("@all 开始", &members), ["m1", "m2"]);
+        assert_eq!(mentioned_members("@all开始", &members), ["m1", "m2"]);
+    }
+
+    #[test]
+    fn reserved_member_names_are_rejected() {
+        for name in ["all", "user"] {
+            let member = GroupMemberTemplate {
+                name: name.into(),
+                description: "负责实现".into(),
+                machine: "pc".into(),
+                agent: "codex".into(),
+                workspace: "/repo".into(),
+                use_worktree: false,
+                worktree_base: None,
+            };
+            assert!(validate_members(&[member]).is_err(), "{name}");
+        }
     }
 
     #[test]
