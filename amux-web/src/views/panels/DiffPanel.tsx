@@ -571,7 +571,6 @@ export function DiffPanel() {
         content={
           <div
             data-slot="diff-content"
-            className="select-none"
             onPointerMove={extendCodeSelectionAtEvent}
             onPointerUp={finishCodeSelectionAtEvent}
             onPointerCancel={cancelCodeSelection}
@@ -655,7 +654,7 @@ export function DiffPanel() {
                                 >
                                   <span
                                     data-diff-gutter="true"
-                                    className="relative flex w-6 shrink-0 cursor-pointer touch-none items-center justify-center text-muted-foreground"
+                                    className="relative flex w-6 shrink-0 cursor-pointer touch-none items-center justify-center text-muted-foreground select-none"
                                     onPointerDown={(event) =>
                                       beginCodeSelection(event, {
                                         path: file.path,
@@ -676,7 +675,7 @@ export function DiffPanel() {
                                       (lineNumber.old ?? "")
                                     )}
                                   </span>
-                                  <span className="w-9 shrink-0 px-2 text-right text-muted-foreground">
+                                  <span className="w-9 shrink-0 px-2 text-right text-muted-foreground select-none">
                                     {lineNumber.new ?? ""}
                                   </span>
                                   <span
