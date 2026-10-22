@@ -37,6 +37,7 @@ import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
 import { execDir } from "../lib/types";
 import type {
+  Activity,
   ContentBlock,
   GroupMessage,
   HistoryItem,
@@ -378,7 +379,16 @@ export function InteractionView() {
       >
         {isGroup
           ? detail.groupHistory.map((item) => (
-              <GroupMessageBubble key={item.id} item={item} />
+              <GroupMessageBubble
+                key={item.id}
+                item={item}
+                sessionId={
+                  item.memberId === undefined
+                    ? undefined
+                    : detail.group?.members.find((member) => member.id === item.memberId)
+                        ?.sessionId
+                }
+              />
             ))
           : detail.history.map((item) => (
               <MessageBubble key={item.id} item={item} />
@@ -732,7 +742,13 @@ function MessageBubble({ item }: { item: HistoryItem }) {
   );
 }
 
-function GroupMessageBubble({ item }: { item: GroupMessage }) {
+function GroupMessageBubble({
+  item,
+  sessionId,
+}: {
+  item: GroupMessage;
+  sessionId?: string;
+}) {
   const mine = item.memberId === undefined;
   const highlightsUser = mentionsUser(item.content);
   return (
@@ -754,12 +770,7 @@ function GroupMessageBubble({ item }: { item: GroupMessage }) {
             data-slot="group-message-meta"
             className="mb-1 flex w-full min-w-0 items-baseline gap-2 px-1 text-xs text-muted-foreground"
           >
-            <span
-              data-slot="group-message-name"
-              className="shrink-0 text-sm font-medium text-foreground"
-            >
-              {item.name}
-            </span>
+            <GroupMemberName name={item.name} sessionId={sessionId} />
             {item.agent ? (
               <span data-slot="group-message-agent" className="shrink-0">
                 {item.agent}
@@ -789,6 +800,116 @@ function GroupMessageBubble({ item }: { item: GroupMessage }) {
           </span>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** 成员名称悬浮卡片：按最新优先展示成员普通会话最近 5 条活动。 */
+function GroupMemberName({ name, sessionId }: { name: string; sessionId?: string }) {
+  const core = useCore();
+  const [activities, setActivities] = useState<Activity[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [position, setPosition] = useState<{
+    left: number;
+    top: number;
+    width: number;
+  } | null>(null);
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const requestRef = useRef(0);
+  const open = position !== null;
+
+  useEffect(
+    () => () => {
+      requestRef.current += 1;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setPosition(null);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open]);
+
+  const show = (): void => {
+    const anchor = anchorRef.current;
+    if (anchor === null || sessionId === undefined) return;
+    const box = anchor.getBoundingClientRect();
+    const width = Math.min(320, window.innerWidth - 16);
+    const estimatedHeight = 240;
+    const left = Math.min(Math.max(8, box.left), window.innerWidth - width - 8);
+    const top =
+      box.bottom + estimatedHeight <= window.innerHeight
+        ? box.bottom
+        : Math.max(8, box.top - estimatedHeight);
+    setPosition({ left, top, width });
+
+    const client = core.client;
+    if (client === null) return;
+    const request = requestRef.current + 1;
+    requestRef.current = request;
+    setFailed(false);
+    void client.activities(sessionId, 5, 0).then(
+      (page) => {
+        if (requestRef.current !== request) return;
+        // 活动接口返回窗口内时间正序；卡片按最新优先展示。
+        setActivities([...page.activities].reverse());
+      },
+      () => {
+        if (requestRef.current !== request) return;
+        setFailed(true);
+      },
+    );
+  };
+
+  return (
+    <div
+      ref={anchorRef}
+      data-slot="group-message-name"
+      className="relative shrink-0 cursor-default text-sm font-medium text-foreground"
+      onMouseEnter={show}
+      onMouseLeave={() => setPosition(null)}
+    >
+      {name}
+      {open ? (
+        <div
+          data-slot="member-activity-card"
+          role="tooltip"
+          className="fixed z-50 max-h-60 overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg"
+          style={position}
+        >
+          {failed ? (
+            <p className="px-3 py-2 text-xs text-destructive">加载会话活动失败</p>
+          ) : activities === null ? (
+            <p className="px-3 py-2 text-xs text-muted-foreground">加载中…</p>
+          ) : activities.length === 0 ? (
+            <p className="px-3 py-2 text-xs text-muted-foreground">无会话活动</p>
+          ) : (
+            activities.map((activity) => (
+              <div
+                key={activity.id}
+                data-slot="member-activity-item"
+                className="flex items-start gap-2 px-3 py-1.5"
+              >
+                <span
+                  className="min-w-0 flex-1 truncate text-xs"
+                  title={activityBarText(activity)}
+                >
+                  {activityBarText(activity)}
+                </span>
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {formatTime(activity.timestamp)}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
