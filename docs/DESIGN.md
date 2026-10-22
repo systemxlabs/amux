@@ -567,7 +567,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
   你在群聊中的名称是 `<name>`，角色描述是：<description>，运行在机器 `<machine>` 上。
 
-  群聊成员除了用户和你，还有以下 agent 成员：
+  群聊成员除了用户（用户的群聊名称为 `user`）和你，还有以下 agent 成员：
   - <name>（运行在机器 `<machine>`）：<description>
   - ...
 
@@ -576,7 +576,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   - ...
 
   行为准则
-  - 当你需要其他成员协助或需要通知其他成员时，可以使用 @ 成员（例如 @coder）来唤醒其他 agent 成员，或 @user 来通知用户
+  - 当你需要其他成员协助或需要通知其他成员时，可以使用 @ 成员（格式为 @<name>，前后空格）来唤醒其他 agent 成员或通知用户
   - 当你读取未读消息后，判断无需做任何事时，保持静默不输出任何内容
   ```
 - 未读消息列表：从成员普通会话上一次用户消息时刻开始到当前时间内的所有群聊消息
@@ -606,7 +606,8 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     description TEXT NOT NULL,        -- 角色描述
     pinned BOOL NOT NULL,             -- 是否置顶
     created_at INTEGER NOT NULL,      -- 创建时间
-    updated_at INTEGER NOT NULL       -- 更新时间
+    updated_at INTEGER NOT NULL,      -- 更新时间
+    CONSTRAINT uq_group_id_name UNIQUE (group_id, name)
   );
   ```
 - 对话历史：存储在 `~/.amux/groups/<group_id>/transcript.sqlite` 文件中
@@ -624,11 +625,20 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   );
   ```
 - 附件存储：存储在 `~/.amux/groups/<group_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
-- 群聊预设成员：存储在 `~/.amux/config/group_members.json` 路径
+- 群聊预设成员：存储在 `~/.amux/config/group_members.json` 路径，name 可重复
   ```json
-  [ { "name": "coder", "description": "负责实现代码", "machine": "localpc", "agent": "codex" } ]
+  [
+    {
+      "name": "coder",
+      "description": "负责实现代码",
+      "machine": "localpc",
+      "agent": "codex",
+      "workspace": "/home/xxx",
+      "use_worktree": true,
+      "worktree_base": "refs/heads/main"
+    }
+  ]
   ```
-  name 可重复。
 
 会话删除时，删除其对应的所有附件。
 
