@@ -381,13 +381,17 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
         setRenaming({ kind: entry.kind, id, depth, value: title });
       },
     },
-    {
-      label: "新建会话",
-      onSelect: () => {
-        onNavigate();
-        void createFromEntry(core, entry);
-      },
-    },
+    ...(depth === 0
+      ? [
+          {
+            label: "新建会话",
+            onSelect: () => {
+              onNavigate();
+              void createFromEntry(core, entry);
+            },
+          },
+        ]
+      : []),
     {
       label: entryPinned(entry) ? "取消置顶" : "置顶",
       onSelect: () => {
