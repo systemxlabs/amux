@@ -142,6 +142,8 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | DELETE `/config/projects/<project_name>` | 删除指定项目 |
 | GET `/config/automation` | 查询自动化配置 |
 | PUT `/config/automation` | 更新自动化配置 |
+| GET `/config/group_members` | 查询群聊预设成员配置 |
+| PUT `/config/group_members` | 更新群聊预设成员配置 |
 | GET `/automations` | 查询所有自动化列表，包含最近一次运行记录 |
 | POST `/automations` | 创建自动化 |
 | PUT `/automations/<automation_id>` | 全量更新自动化 |
@@ -625,17 +627,17 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   );
   ```
 - 附件存储：存储在 `~/.amux/groups/<group_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
-- 群聊预设成员：存储在 `~/.amux/config/group_members.json` 路径，name 可重复
+- 群聊预设成员：存储在 `~/.amux/config/group_members.json` 路径
   ```json
   [
     {
-      "name": "coder",
-      "description": "负责实现代码",
-      "machine": "localpc",
-      "agent": "codex",
-      "workspace": "/home/xxx",
-      "use_worktree": true,
-      "worktree_base": "refs/heads/main"
+      "name": "coder",              // 预设成员之间可重名，不可为空
+      "description": "负责实现代码",  // 不可为空
+      "machine": "localpc",         // 不可为空
+      "agent": "codex",             // 不可为空
+      "workspace": "/home/xxx",     // 不可为空
+      "useWorktree": true,          // 不可为空
+      "worktreeBase": "refs/heads/main"
     }
   ]
   ```
@@ -698,6 +700,7 @@ Github Webhook 触发
     automation_id TEXT NOT NULL,            -- 自动化 ID
     session_id TEXT,                        -- 普通会话 ID
     workflow_id TEXT,                       -- 工作流会话 ID
+    group_id TEXT,                          -- 群聊会话 ID
     state TEXT NOT NULL,                    -- 运行状态 queued / running / finished / failed
     error TEXT,                             -- 错误信息
     result_label TEXT,                      -- 结果标签
