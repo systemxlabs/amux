@@ -381,6 +381,7 @@ async fn create_session(
             agent: &request.agent,
             workspace: &request.workspace,
             worktree,
+            title: None,
             project: request.project.as_deref(),
         })
         .await

@@ -829,6 +829,46 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
     )
     .await;
 
+    let failed_group = client
+        .post(
+            "/groups",
+            json!({
+                "members": [
+                    {
+                        "name": "coder",
+                        "description": "负责实现",
+                        "machine": MACHINE,
+                        "agent": "codex",
+                        "workspace": workspace.path().to_string_lossy(),
+                        "useWorktree": false,
+                    },
+                    {
+                        "name": "reviewer",
+                        "description": "负责审查",
+                        "machine": MACHINE,
+                        "agent": "codex",
+                        "workspace": workspace.path().join("missing").to_string_lossy(),
+                        "useWorktree": true,
+                        "worktreeBase": "refs/heads/main",
+                    }
+                ],
+            }),
+        )
+        .await;
+    assert_eq!(failed_group.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        client.get("/groups").await["groups"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "成员会话创建失败后不应保留群聊"
+    );
+    let sessions = rusqlite::Connection::open(home.path().join("session.sqlite")).unwrap();
+    let session_count: i64 = sessions
+        .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(session_count, 0, "成员会话创建失败后应回滚已创建会话");
+
     let group = client
         .post_ok(
             "/groups",
@@ -848,16 +888,16 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
     let member_session_id = group["sessions"][0]["id"].as_str().unwrap().to_string();
     assert_eq!(group["state"], "idle");
     assert_eq!(group["members"][0]["name"], "coder");
+    assert_eq!(group["sessions"][0]["title"], "coder：负责实现");
 
     let sessions = client.get("/sessions").await;
     assert!(
         sessions["sessions"].as_array().unwrap().is_empty(),
         "群聊成员的普通会话不应出现在会话列表: {sessions}"
     );
-    assert_eq!(
-        client.get(&format!("/sessions/{member_session_id}")).await["id"],
-        member_session_id
-    );
+    let member_session = client.get(&format!("/sessions/{member_session_id}")).await;
+    assert_eq!(member_session["id"], member_session_id);
+    assert_eq!(member_session["title"], "coder：负责实现");
 
     client
         .post_ok(

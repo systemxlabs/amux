@@ -179,6 +179,7 @@ impl AutomationService {
                             agent,
                             workspace,
                             worktree,
+                            title: None,
                             project: project.as_deref(),
                         })
                         .await?;

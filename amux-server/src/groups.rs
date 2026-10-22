@@ -54,6 +54,7 @@ impl GroupService {
 
         let mut created: Vec<String> = Vec::new();
         for template in &members {
+            let title = format!("{}：{}", template.name, template.description);
             let session = match SessionWorktree::new(
                 template.use_worktree,
                 template.worktree_base.as_ref(),
@@ -65,6 +66,7 @@ impl GroupService {
                             agent: &template.agent,
                             workspace: &template.workspace,
                             worktree,
+                            title: Some(&title),
                             project,
                         })
                         .await

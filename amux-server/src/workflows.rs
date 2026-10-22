@@ -937,6 +937,7 @@ impl WorkflowTools {
                         agent: &agent,
                         workspace: &cwd,
                         worktree,
+                        title: None,
                         project: None,
                     })
                     .await?;
@@ -1534,6 +1535,7 @@ mod tests {
                 agent: "codex",
                 workspace: "/repo",
                 worktree: SessionWorktree::Disabled,
+                title: None,
                 project: None,
             })
             .await

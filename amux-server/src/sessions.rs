@@ -108,6 +108,7 @@ pub struct CreateSessionParams<'a> {
     pub agent: &'a str,
     pub workspace: &'a str,
     pub worktree: SessionWorktree<'a>,
+    pub title: Option<&'a str>,
     pub project: Option<&'a str>,
 }
 
@@ -167,6 +168,7 @@ impl SessionService {
             agent,
             workspace,
             worktree,
+            title,
             project,
         } = request;
         let id = Uuid::new_v4().to_string();
@@ -192,7 +194,7 @@ impl SessionService {
             group_id: None,
             machine: machine.to_string(),
             agent: agent.to_string(),
-            title: String::new(),
+            title: title.unwrap_or_default().to_string(),
             state: SessionState::Idle,
             project: project.map(str::to_string),
             pinned: false,
