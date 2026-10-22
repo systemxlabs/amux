@@ -1300,6 +1300,8 @@ mod tests {
         let bare = unique_dir("amux-default-bare");
         std::fs::create_dir_all(&bare).unwrap();
         git(&bare, &["init", "--bare", "-q"]);
+        // init.defaultBranch 因环境而异；显式设置远端 HEAD，避免测试依赖本机全局配置。
+        git(&bare, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git(&repo, &["push", "-q", bare.to_str().unwrap(), "main"]);
         git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
 
