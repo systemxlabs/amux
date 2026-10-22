@@ -5,6 +5,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   ChevronDown,
+  MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -232,6 +233,7 @@ export function DiffPanel() {
   const [treeVisible, setTreeVisible] = useState(true);
   /** 折叠全部文件改动：折叠后仅显示文件名（docs/PRD.md「改动审查视图」） */
   const [diffsCollapsed, setDiffsCollapsed] = useState(false);
+  const [collapsedFiles, setCollapsedFiles] = useState<string[]>([]);
   const [collapsedDirs, setCollapsedDirs] = useState<string[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [commentTarget, setCommentTarget] = useState<DiffCommentTarget | null>(null);
@@ -367,6 +369,12 @@ export function DiffPanel() {
   const toggleDir = (key: string) => {
     setCollapsedDirs((prev) =>
       prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key],
+    );
+  };
+
+  const toggleFile = (path: string) => {
+    setCollapsedFiles((prev) =>
+      prev.includes(path) ? prev.filter((item) => item !== path) : [...prev, path],
     );
   };
 
@@ -589,12 +597,35 @@ export function DiffPanel() {
                   <Button
                     type="button"
                     variant="ghost"
-                    size="sm"
+                    size="icon"
                     data-slot="diff-comment-file"
-                    className="h-9 shrink-0 text-xs lg:h-5"
+                    className="size-9 shrink-0 lg:size-6"
+                    aria-label="评论"
+                    title="评论"
                     onClick={() => openFileComment(file.path)}
                   >
-                    评论
+                    <MessageSquare />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    data-slot="diff-toggle-file"
+                    className="size-9 shrink-0 lg:size-6"
+                    aria-label={
+                      collapsedFiles.includes(file.path) ? "展开文件改动" : "折叠文件改动"
+                    }
+                    title={
+                      collapsedFiles.includes(file.path) ? "展开文件改动" : "折叠文件改动"
+                    }
+                    onClick={() => toggleFile(file.path)}
+                  >
+                    <ChevronDown
+                      className={cn(
+                        "transition-transform",
+                        collapsedFiles.includes(file.path) && "-rotate-90",
+                      )}
+                    />
                   </Button>
                 </div>
                 {commentTarget?.kind === "file" && commentTarget.path === file.path ? (
@@ -607,7 +638,7 @@ export function DiffPanel() {
                     onSubmit={() => void submitComment()}
                   />
                 ) : null}
-                {!diffsCollapsed ? (
+                {!diffsCollapsed && !collapsedFiles.includes(file.path) ? (
                   <div data-slot="diff-file-scroll" className="overflow-x-auto">
                     {file.hunks.map((hunk, hunkIx) => {
                       const numbers = lineNumbers(hunk);
