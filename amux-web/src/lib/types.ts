@@ -94,30 +94,8 @@ export type GitBranch =
     });
 export type GitBranchListResult = { currentBranch: string; branches: GitBranch[] };
 
-export type WorktreeBase =
-  | { kind: "local"; name: string }
-  | { kind: "remote"; remote: string; branch: string };
-
-/** 分支引用转换为创建请求使用的 worktree 基点。 */
-export function worktreeBaseFromBranch(branch: GitBranch): WorktreeBase {
-  if (branch.kind === "local") {
-    return { kind: "local", name: branch.name };
-  }
-  return {
-    kind: "remote",
-    remote: branch.remote,
-    branch: branch.remoteBranch,
-  };
-}
-
-export function worktreeBaseKey(base: WorktreeBase): string {
-  switch (base.kind) {
-    case "local":
-      return `refs/heads/${base.name}`;
-    case "remote":
-      return `refs/remotes/${base.remote}/${base.branch}`;
-  }
-}
+/** worktree 基分支的完整引用名，如 `refs/heads/main`。 */
+export type WorktreeBase = string;
 
 export type FsEntry = { name: string; path: string; isDir: boolean; size: number };
 export type FsListResult = {

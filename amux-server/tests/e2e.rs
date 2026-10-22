@@ -303,6 +303,48 @@ impl Client {
 }
 
 #[tokio::test]
+async fn group_member_presets_use_documented_api_and_full_worktree_reference() {
+    let home = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let _server = spawn_server(port, home.path());
+    let client = Client {
+        http: reqwest::Client::new(),
+        base: format!("http://127.0.0.1:{port}"),
+    };
+    poll(
+        || {
+            let client = &client;
+            async move {
+                client
+                    .http
+                    .get(format!("{}/machines", client.base))
+                    .send()
+                    .await
+                    .ok()
+            }
+        },
+        "server 监听",
+    )
+    .await;
+
+    let members = json!([
+        {
+            "name": "coder",
+            "description": "负责实现",
+            "machine": MACHINE,
+            "agent": "codex",
+            "workspace": "/repo",
+            "useWorktree": true,
+            "worktreeBase": "refs/heads/main"
+        }
+    ]);
+    client
+        .put_ok("/config/group_members", members.clone())
+        .await;
+    assert_eq!(client.get("/config/group_members").await, members);
+}
+
+#[tokio::test]
 async fn server_daemon_agent_end_to_end() {
     // 诊断用：AMUX_E2E_HOME 指定时保留运行目录（便于复现失败现场）
     let home = match std::env::var("AMUX_E2E_HOME") {

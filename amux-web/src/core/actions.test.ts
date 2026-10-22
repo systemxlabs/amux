@@ -134,7 +134,7 @@ it("从普通会话新建时保留机器、agent、工作目录、项目和 work
     agent: "codex",
     workspace: "/w",
     useWorktree: true,
-    worktreeBase: { kind: "local", name: "main" },
+    worktreeBase: "refs/heads/main",
     project: "project-a",
   });
   expect(core.state.open).toEqual({ kind: "session", id: "s2" });
@@ -244,7 +244,7 @@ it("从群聊会话新建时保留成员、项目和 worktree 设置", async () 
         agent: "codex",
         workspace: "/repo",
         useWorktree: true,
-        worktreeBase: { kind: "local", name: "main" },
+        worktreeBase: "refs/heads/main",
       },
     ],
     "project-a",

@@ -105,13 +105,7 @@ export function GroupMembersSection() {
                     onClick={() =>
                       setForm({
                         index,
-                        member: {
-                          ...member,
-                          worktreeBase:
-                            member.worktreeBase === undefined
-                              ? undefined
-                              : { ...member.worktreeBase },
-                        },
+                        member: { ...member },
                       })
                     }
                   >

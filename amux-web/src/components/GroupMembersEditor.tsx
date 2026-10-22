@@ -243,10 +243,7 @@ export function GroupMembersEditor({
                     ...members,
                     {
                       ...template,
-                      worktreeBase:
-                        template.worktreeBase === undefined
-                          ? undefined
-                          : { ...template.worktreeBase },
+                      worktreeBase: template.worktreeBase,
                     },
                   ])
                 }

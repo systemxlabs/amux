@@ -640,21 +640,22 @@ impl GitRunner {
             .ok_or_else(|| format!("无效 worktree 路径: {target}"))?
             .to_string_lossy()
             .into_owned();
-        let base_ref = match base {
-            WorktreeBase::Local { name } => format!("refs/heads/{name}"),
-            WorktreeBase::Remote { remote, branch } => {
-                run(repo_cwd, &["fetch", "--prune", remote])
-                    .map_err(|error| format!("{}: {}", error.message, error.stderr.trim()))?;
-                format!("refs/remotes/{remote}/{branch}")
-            }
-        };
+        if base.is_remote() {
+            let repo = gix::discover(repo_cwd)
+                .map_err(|error| format!("不是 git 仓库: {repo_cwd}: {error}"))?;
+            let remote = remote_for_tracking_branch(&repo, base.as_str())
+                .ok_or_else(|| format!("worktree 基分支不属于已配置远程: {}", base.as_str()))?;
+            run(repo_cwd, &["fetch", "--prune", remote.as_str()])
+                .map_err(|error| format!("{}: {}", error.message, error.stderr.trim()))?;
+        }
+        let base_ref = base.as_str();
         let args = vec![
             "worktree",
             "add",
             "-b",
             branch.as_str(),
             target.as_ref(),
-            base_ref.as_str(),
+            base_ref,
         ];
         run(repo_cwd, &args)
             .map(|_| ())
@@ -721,17 +722,7 @@ fn branch_kind_rank(kind: GitBranchKind) -> u8 {
 }
 
 fn branch_matches_worktree_base(base: &WorktreeBase, branch: &GitBranch) -> bool {
-    match base {
-        WorktreeBase::Local { name } => branch.kind == GitBranchKind::Local && branch.name == *name,
-        WorktreeBase::Remote {
-            remote,
-            branch: name,
-        } => {
-            branch.kind == GitBranchKind::Remote
-                && branch.remote.as_deref() == Some(remote)
-                && branch.remote_branch.as_deref() == Some(name)
-        }
-    }
+    branch.full_name == base.as_str()
 }
 
 /// 读取 linked worktree 的基点标记。
@@ -1225,9 +1216,7 @@ mod tests {
 
         let root = unique_dir("amux-branches-worktree");
         let target = worktree_dir_for(repo.to_str().unwrap(), &root).unwrap();
-        let feature_base = WorktreeBase::Local {
-            name: "feature".into(),
-        };
+        let feature_base = WorktreeBase::parse("refs/heads/feature").unwrap();
         runner
             .add_worktree(repo.to_str().unwrap(), &target, &feature_base)
             .unwrap();
@@ -1358,9 +1347,7 @@ mod tests {
         git.add_worktree(
             repo_str,
             &target,
-            &WorktreeBase::Local {
-                name: "main".into(),
-            },
+            &WorktreeBase::parse("refs/heads/main").unwrap(),
         )
         .unwrap();
         assert!(target.join(".git").exists(), "worktree 应为有效检出");
@@ -1423,10 +1410,7 @@ mod tests {
             .add_worktree(
                 repo.to_str().unwrap(),
                 &target,
-                &WorktreeBase::Remote {
-                    remote: "origin".into(),
-                    branch: "main".into(),
-                },
+                &WorktreeBase::parse("refs/remotes/origin/main").unwrap(),
             )
             .unwrap();
         assert_eq!(git(&target, &["rev-parse", "HEAD"]).trim(), latest);
@@ -1451,9 +1435,7 @@ mod tests {
             .add_worktree(
                 repo_str,
                 &target,
-                &WorktreeBase::Local {
-                    name: "main".into(),
-                },
+                &WorktreeBase::parse("refs/heads/main").unwrap(),
             )
             .unwrap();
         std::fs::remove_dir_all(&target).unwrap();

@@ -113,7 +113,7 @@ pub struct CreateSessionRequest {
     pub workspace: String,
     #[serde(default)]
     pub use_worktree: bool,
-    /// worktree 基点；None 或 Head = 当前仓库 HEAD
+    /// worktree 基点；开启 worktree 时必填
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_base: Option<WorktreeBase>,
     /// 所属项目；None = 未归属项目
@@ -330,7 +330,6 @@ pub struct GroupMemberTemplate {
     pub machine: String,
     pub agent: String,
     pub workspace: String,
-    #[serde(default)]
     pub use_worktree: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_base: Option<WorktreeBase>,
@@ -824,17 +823,24 @@ mod tests {
             agent: "codex".into(),
             workspace: "/repo".into(),
             use_worktree: true,
-            worktree_base: Some(WorktreeBase::Remote {
-                remote: "origin".into(),
-                branch: "main".into(),
-            }),
+            worktree_base: Some(WorktreeBase::parse("refs/remotes/origin/main").unwrap()),
             project: None,
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["useWorktree"], true);
-        assert_eq!(json["worktreeBase"]["kind"], "remote");
-        assert_eq!(json["worktreeBase"]["remote"], "origin");
-        assert_eq!(json["worktreeBase"]["branch"], "main");
+        assert_eq!(json["worktreeBase"], "refs/remotes/origin/main");
+    }
+
+    #[test]
+    fn group_member_template_requires_worktree_choice() {
+        let json = serde_json::json!({
+            "name": "coder",
+            "description": "负责实现",
+            "machine": "pc",
+            "agent": "codex",
+            "workspace": "/repo"
+        });
+        assert!(serde_json::from_value::<GroupMemberTemplate>(json).is_err());
     }
 
     #[test]
@@ -927,16 +933,13 @@ mod tests {
             agent: "codex".into(),
             workspace: "/repo".into(),
             use_worktree: true,
-            worktree_base: Some(WorktreeBase::Local {
-                name: "main".into(),
-            }),
+            worktree_base: Some(WorktreeBase::parse("refs/heads/main").unwrap()),
             project: Some("p".into()),
         })
         .unwrap();
         assert_eq!(new_session["mode"], "new_session");
         assert_eq!(new_session["useWorktree"], true);
-        assert_eq!(new_session["worktreeBase"]["kind"], "local");
-        assert_eq!(new_session["worktreeBase"]["name"], "main");
+        assert_eq!(new_session["worktreeBase"], "refs/heads/main");
     }
 
     #[test]

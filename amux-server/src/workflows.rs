@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use agent_client_protocol::schema::v2::TextContent;
 use amux_common::domain::{
-    generate_title, Activity, ContentBlock, GitBranchKind, HistoryItem, SessionConfigOption,
-    SessionState, StateChangeReason, WorktreeBase,
+    generate_title, Activity, ContentBlock, HistoryItem, SessionConfigOption, SessionState,
+    StateChangeReason, WorktreeBase,
 };
 use amux_common::{
     api::{Session, SessionConfigSetting, Usage, Workflow},
@@ -1052,17 +1052,7 @@ async fn resolve_worktree_base(
         .into_iter()
         .find(|branch| branch.full_name == requested)
         .ok_or_else(|| format!("worktree 基分支不存在: {requested}"))?;
-    match branch.kind {
-        GitBranchKind::Local => Ok(WorktreeBase::Local { name: branch.name }),
-        GitBranchKind::Remote => Ok(WorktreeBase::Remote {
-            remote: branch
-                .remote
-                .ok_or_else(|| format!("远程分支缺少 remote: {}", branch.name))?,
-            branch: branch
-                .remote_branch
-                .ok_or_else(|| format!("远程分支缺少分支名: {}", branch.name))?,
-        }),
-    }
+    WorktreeBase::parse(branch.full_name)
 }
 
 /// 工具调用的参数（transcript 中以 JSON 字符串存放）转回 JSON 值。

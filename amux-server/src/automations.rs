@@ -556,21 +556,7 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
             *agent = agent.trim().to_string();
             *workspace = workspace.trim().to_string();
             if let Some(base) = worktree_base {
-                match base {
-                    WorktreeBase::Local { name } => {
-                        *name = name.trim().to_string();
-                        if name.is_empty() {
-                            *worktree_base = None;
-                        }
-                    }
-                    WorktreeBase::Remote { remote, branch } => {
-                        *remote = remote.trim().to_string();
-                        *branch = branch.trim().to_string();
-                        if remote.is_empty() || branch.is_empty() {
-                            *worktree_base = None;
-                        }
-                    }
-                }
+                *worktree_base = WorktreeBase::parse(base.as_str().trim()).ok();
             }
             *project = project
                 .take()
@@ -838,7 +824,7 @@ mod tests {
                 agent: " codex ".into(),
                 workspace: " /repo ".into(),
                 use_worktree: false,
-                worktree_base: Some(WorktreeBase::Local { name: " ".into() }),
+                worktree_base: None,
                 project: Some(" p ".into()),
             },
             result_labels: labels(),

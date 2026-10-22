@@ -9,8 +9,6 @@ import { useCoreState } from "../core/store";
 import { branchLabel, preferredRemoteDefault } from "../lib/branch";
 import { truncate } from "../lib/format";
 import {
-  worktreeBaseFromBranch,
-  worktreeBaseKey,
   type FsEntry,
   type GitBranch,
   type RecentWorkspace,
@@ -33,11 +31,9 @@ const POPUP_MIN_HEIGHT = 80;
 
 /** 基分支展示名：优先用分支列表里的完整标注，列表未加载时退化为引用名。 */
 function worktreeBaseLabel(base: WorktreeBase, branches: readonly GitBranch[]): string {
-  const branch = branches.find(
-    (item) => worktreeBaseKey(worktreeBaseFromBranch(item)) === worktreeBaseKey(base),
-  );
+  const branch = branches.find((item) => item.fullName === base);
   if (branch !== undefined) return branchLabel(branch);
-  return base.kind === "local" ? `本地 ${base.name}` : `远程 ${base.remote}/${base.branch}`;
+  return base;
 }
 
 function popupMaxHeight(anchor: DOMRect, below: boolean): number {
@@ -263,13 +259,10 @@ export function WorktreeBranchField({
         const current = valueRef.current;
         const selected =
           current !== null &&
-          result.branches.some(
-            (branch) =>
-              worktreeBaseKey(worktreeBaseFromBranch(branch)) === worktreeBaseKey(current),
-          );
+          result.branches.some((branch) => branch.fullName === current);
         if (selected) return;
         const fallback = preferredRemoteDefault(result.branches);
-        onChangeRef.current(fallback === undefined ? null : worktreeBaseFromBranch(fallback));
+        onChangeRef.current(fallback?.fullName ?? null);
       },
       () => {
         if (request.current === seq) {
@@ -350,18 +343,15 @@ export function WorktreeBranchField({
               <span className="px-2 py-1.5 text-xs text-muted-foreground">无匹配分支</span>
             ) : (
               matched.map((branch) => {
-                const base = worktreeBaseFromBranch(branch);
                 return (
                   <button
                     key={branch.fullName}
                     type="button"
                     role="option"
-                    aria-selected={
-                      value !== null && worktreeBaseKey(value) === worktreeBaseKey(base)
-                    }
+                    aria-selected={value === branch.fullName}
                     className="flex cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
                     onClick={() => {
-                      onChange(base);
+                      onChange(branch.fullName);
                       close();
                     }}
                   >

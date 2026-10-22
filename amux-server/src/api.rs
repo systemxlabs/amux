@@ -181,7 +181,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/config/skills/", get(get_skills).put(put_skills))
         .route("/config/workflows/", get(get_plans).put(put_plans))
         .route(
-            "/config/group_members/",
+            "/config/group_members",
             get(get_group_members).put(put_group_members),
         )
         .route(

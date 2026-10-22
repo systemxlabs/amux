@@ -561,11 +561,11 @@ export class ApiClient {
   }
 
   groupMembers(): Promise<GroupMemberTemplate[]> {
-    return this.getJson("/config/group_members/");
+    return this.getJson("/config/group_members");
   }
 
   setGroupMembers(members: GroupMemberTemplate[]): Promise<void> {
-    return this.putEmpty("/config/group_members/", members);
+    return this.putEmpty("/config/group_members", members);
   }
 
   recentWorkspaces(): Promise<RecentWorkspace[]> {

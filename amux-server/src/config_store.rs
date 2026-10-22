@@ -51,11 +51,12 @@ impl ConfigStore {
     pub fn set_group_members(&self, members: &[GroupMemberTemplate]) -> Result<(), String> {
         for member in members {
             if member.name.trim().is_empty()
+                || member.description.trim().is_empty()
                 || member.machine.trim().is_empty()
                 || member.agent.trim().is_empty()
                 || member.workspace.trim().is_empty()
             {
-                return Err("群聊预设成员的名称、机器、agent 和工作目录不能为空".into());
+                return Err("群聊预设成员的名称、角色描述、机器、agent 和工作目录不能为空".into());
             }
             if member.use_worktree && member.worktree_base.is_none() {
                 return Err("开启 worktree 时必须指定基分支".into());
@@ -414,6 +415,34 @@ mod tests {
                 .is_ok(),
             "不同项目下快捷指令可以同名"
         );
+    }
+
+    #[test]
+    fn group_member_presets_allow_duplicate_names_but_require_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(dir.path().to_path_buf());
+        let member = GroupMemberTemplate {
+            name: "coder".into(),
+            description: "负责实现".into(),
+            machine: "pc".into(),
+            agent: "codex".into(),
+            workspace: "/repo".into(),
+            use_worktree: true,
+            worktree_base: Some(
+                amux_common::domain::WorktreeBase::parse("refs/heads/main").unwrap(),
+            ),
+        };
+
+        store
+            .set_group_members(&[member.clone(), member.clone()])
+            .unwrap();
+        assert_eq!(store.group_members().len(), 2);
+        let text = std::fs::read_to_string(dir.path().join("config/group_members.json")).unwrap();
+        assert!(text.contains(r#""worktreeBase": "refs/heads/main""#));
+
+        let mut missing_description = member;
+        missing_description.description.clear();
+        assert!(store.set_group_members(&[missing_description]).is_err());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Daemon 与 Server 两侧共享的领域类型。
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// 会话状态：空闲或工作中（普通会话与工作流会话共用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,21 +329,55 @@ pub enum GitBranchKind {
     Remote,
 }
 
-/// worktree 创建基点。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WorktreeBase {
-    Local { name: String },
-    Remote { remote: String, branch: String },
-}
+/// worktree 创建基点；使用 `refs/heads/...` 或 `refs/remotes/...` 完整引用名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeBase(String);
 
 impl WorktreeBase {
-    /// 日志与 worktree 标记使用的稳定名称。
-    pub fn display_name(&self) -> String {
-        match self {
-            Self::Local { name } => name.clone(),
-            Self::Remote { remote, branch } => format!("{remote}/{branch}"),
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let value = value.trim();
+        let valid = value
+            .strip_prefix("refs/heads/")
+            .is_some_and(|name| !name.is_empty())
+            || value
+                .strip_prefix("refs/remotes/")
+                .and_then(|rest| rest.rsplit_once('/'))
+                .is_some_and(|(remote, branch)| !remote.is_empty() && !branch.is_empty());
+        if !valid {
+            return Err(format!("无效的 worktree 基分支引用: {value}"));
         }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.0.starts_with("refs/remotes/")
+    }
+
+    /// 日志使用的稳定展示名。
+    pub fn display_name(&self) -> String {
+        self.0
+            .strip_prefix("refs/heads/")
+            .or_else(|| self.0.strip_prefix("refs/remotes/"))
+            .unwrap_or(&self.0)
+            .to_string()
+    }
+}
+
+impl Serialize for WorktreeBase {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for WorktreeBase {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -641,5 +675,34 @@ mod tests {
         assert_eq!(json["isWorktreeBase"], true);
         assert_eq!(json["isRemoteDefault"], false);
         assert!(json.get("isLocalDefault").is_none());
+    }
+
+    #[test]
+    fn worktree_base_uses_full_reference_name() {
+        let base = WorktreeBase::parse("refs/remotes/origin/main").unwrap();
+        assert_eq!(
+            serde_json::to_value(&base).unwrap(),
+            "refs/remotes/origin/main"
+        );
+        assert_eq!(base.display_name(), "origin/main");
+        assert!(base.is_remote());
+
+        let local = WorktreeBase::parse("refs/heads/main").unwrap();
+        assert_eq!(serde_json::to_value(&local).unwrap(), "refs/heads/main");
+        assert_eq!(local.display_name(), "main");
+        assert!(!local.is_remote());
+    }
+
+    #[test]
+    fn worktree_base_rejects_non_branch_references() {
+        for value in [
+            "",
+            "main",
+            "refs/tags/v1",
+            "refs/heads/",
+            "refs/remotes/origin",
+        ] {
+            assert!(WorktreeBase::parse(value).is_err(), "{value}");
+        }
     }
 }

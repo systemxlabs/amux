@@ -20,7 +20,7 @@ import type {
   WorkflowPlanItem,
   WorktreeBase,
 } from "../lib/types";
-import { entryId, entryPinned, entryTitle, execDir, worktreeBaseFromBranch } from "../lib/types";
+import { entryId, entryPinned, entryTitle, execDir } from "../lib/types";
 import { initialNewSession, panelAvailable } from "./core";
 import type { Core, PendingAttachment, SidePanel } from "./core";
 import {
@@ -401,7 +401,7 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
           core.failure("无法识别 worktree 基分支");
           return;
         }
-        worktreeBase = worktreeBaseFromBranch(branch);
+        worktreeBase = branch.fullName;
       }
       const session = await core.client.createSession({
         machine: entry.session.machine,
@@ -441,7 +441,7 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
             core.failure("无法识别 worktree 基分支");
             return;
           }
-          worktreeBase = worktreeBaseFromBranch(branch);
+          worktreeBase = branch.fullName;
         }
         members.push({
           name: member.name,

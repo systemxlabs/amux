@@ -945,12 +945,10 @@ mod tests {
         assert!(matches!(
             SessionWorktree::new(
                 true,
-                Some(&WorktreeBase::Local {
-                    name: "main".into()
-                })
+                Some(&WorktreeBase::parse("refs/heads/main").unwrap())
             )
             .unwrap(),
-            SessionWorktree::Base(base) if matches!(base, WorktreeBase::Local { name } if name == "main")
+            SessionWorktree::Base(base) if base.as_str() == "refs/heads/main"
         ));
     }
 

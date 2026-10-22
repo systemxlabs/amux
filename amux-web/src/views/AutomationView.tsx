@@ -622,11 +622,7 @@ function AutomationEditor({
   );
   const [groupMembers, setGroupMembers] = useState<GroupMemberTemplate[]>(
     initial?.sessionOptions.mode === "new_group"
-      ? initial.sessionOptions.members.map((member) => ({
-          ...member,
-          worktreeBase:
-            member.worktreeBase === undefined ? undefined : { ...member.worktreeBase },
-        }))
+      ? initial.sessionOptions.members.map((member) => ({ ...member }))
       : [],
   );
   const [groupProject, setGroupProject] = useState(
