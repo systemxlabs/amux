@@ -68,6 +68,8 @@ export function InteractionView() {
   const [inputHeight, setInputHeight] = useState<number | null>(null);
   const [inputResizing, setInputResizing] = useState(false);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
+  const [popupIndex, setPopupIndex] = useState(0);
+  const [popupDismissed, setPopupDismissed] = useState(false);
   const inputDrag = useRef<{ startY: number; startHeight: number } | null>(null);
   const targetKey = target === null ? null : `${target.kind}:${target.id}`;
   const isGroup = target?.kind === "group";
@@ -125,6 +127,11 @@ export function InteractionView() {
     });
   }, [core, target?.kind, target?.id]);
 
+  useEffect(() => {
+    setPopupIndex(0);
+    setPopupDismissed(false);
+  }, [draft, targetKey]);
+
   // 更早一页插入后，在浏览器绘制前把原首条目保持在原位置
   // （docs/DESIGN.md「对话滚动机制」）。
   useLayoutEffect(() => {
@@ -159,6 +166,18 @@ export function InteractionView() {
     () => (isGroup ? matchMentions(detail.group?.members ?? [], draft) : []),
     [detail.group?.members, draft, isGroup],
   );
+  const popupCount = isGroup ? mentionMatches.length : slashMatches.length;
+  const popupOpen = popupCount > 0 && !popupDismissed;
+
+  const choosePopup = (index: number): void => {
+    const selected = isGroup ? mentionMatches[index] : slashMatches[index];
+    if (selected === undefined) return;
+    core.update((next) => {
+      next.inputDraft = isGroup ? completeMention(draft, selected.name) : `/${selected.name} `;
+    });
+    setPopupDismissed(true);
+    inputRef.current?.focus();
+  };
 
   if (!target) {
     return (
@@ -415,23 +434,26 @@ export function InteractionView() {
       ) : null}
 
       <div className="relative border-t border-border p-3">
-        {!isGroup && slashMatches.length > 0 ? (
+        {!isGroup && popupOpen ? (
           <div
             data-slot="slash-popup"
+            role="listbox"
             className="absolute bottom-full left-3 mb-1 max-h-56 w-72 overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg"
           >
-            {slashMatches.map((command) => (
+            {slashMatches.map((command, index) => (
               <button
                 key={command.name}
                 type="button"
+                role="option"
+                aria-selected={popupOpen && index === popupIndex}
                 data-slot="slash-command"
-                className="flex w-full flex-col items-start px-2 py-2 text-left hover:bg-accent lg:py-1"
+                data-active={popupOpen && index === popupIndex ? "true" : "false"}
+                className={cn(
+                  "flex w-full flex-col items-start px-2 py-2 text-left hover:bg-accent lg:py-1",
+                  popupOpen && index === popupIndex && "bg-accent",
+                )}
 
-                onClick={() =>
-                  core.update((next) => {
-                    next.inputDraft = `/${command.name} `;
-                  })
-                }
+                onClick={() => choosePopup(index)}
               >
                 <span>/{command.name}</span>
                 <span className="text-xs text-muted-foreground">{command.description}</span>
@@ -440,23 +462,25 @@ export function InteractionView() {
           </div>
         ) : null}
 
-        {isGroup && mentionMatches.length > 0 ? (
+        {isGroup && popupOpen ? (
           <div
             data-slot="mention-popup"
+            role="listbox"
             className="absolute bottom-full left-3 mb-1 max-h-56 w-72 overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg"
           >
-            {mentionMatches.map((candidate) => (
+            {mentionMatches.map((candidate, index) => (
               <button
                 key={candidate.name}
                 type="button"
+                role="option"
+                aria-selected={popupOpen && index === popupIndex}
                 data-slot="mention-candidate"
-                className="flex w-full flex-col items-start px-2 py-2 text-left hover:bg-accent lg:py-1"
-                onClick={() => {
-                  core.update((next) => {
-                    next.inputDraft = completeMention(draft, candidate.name);
-                  });
-                  inputRef.current?.focus();
-                }}
+                data-active={popupOpen && index === popupIndex ? "true" : "false"}
+                className={cn(
+                  "flex w-full flex-col items-start px-2 py-2 text-left hover:bg-accent lg:py-1",
+                  popupOpen && index === popupIndex && "bg-accent",
+                )}
+                onClick={() => choosePopup(index)}
               >
                 <span>@{candidate.name}</span>
                 <span className="text-xs text-muted-foreground">{candidate.description}</span>
@@ -550,11 +574,12 @@ export function InteractionView() {
               style={inputHeight === null ? undefined : { height: inputHeight }}
               placeholder="输入指令，Enter 发送，Shift+Enter 换行"
               value={draft}
-              onChange={(event) =>
+              onChange={(event) => {
+                setPopupDismissed(false);
                 core.update((next) => {
                   next.inputDraft = event.target.value;
-                })
-              }
+                });
+              }}
               onPaste={(event) => {
                 const files = [...event.clipboardData.files];
                 if (files.length > 0) {
@@ -563,9 +588,31 @@ export function InteractionView() {
                 }
               }}
               onKeyDown={(event) => {
-                if (event.key !== "Enter" || event.shiftKey) return;
-                // 输入法组字中的回车是候选确认，不是发送
+                // 输入法组字中的按键只交给输入法处理。
                 if (event.nativeEvent.isComposing) return;
+                if (popupOpen) {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setPopupIndex((index) => (index + 1) % popupCount);
+                    return;
+                  }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setPopupIndex((index) => (index - 1 + popupCount) % popupCount);
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setPopupDismissed(true);
+                    return;
+                  }
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    choosePopup(Math.min(popupIndex, popupCount - 1));
+                    return;
+                  }
+                }
+                if (event.key !== "Enter" || event.shiftKey) return;
                 // 软键盘没有 Shift，回车用于换行，发送交给发送按钮
                 if (isMobile) return;
                 event.preventDefault();
