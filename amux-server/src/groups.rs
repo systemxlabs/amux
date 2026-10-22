@@ -525,11 +525,11 @@ fn drive_prompt(member: &MemberRow, members: &[MemberRow], unread: &[UnreadMessa
         "你现在在一个群聊会话中，你的每个非空输出都会作为群聊消息，系统会解析每条群聊消息内容的 @ 提及，若 @ agent 成员则会唤醒 agent 读取群聊消息并执行任务。\n\n\
          你在群聊中的名称是 `{}`，角色描述是：{}，运行在机器 `{}` 上。\n\n\
          群聊成员除了用户（用户的群聊名称为 `user`）和你，还有以下 agent 成员：\n{}\n\n\
-         当前有成员发送消息 @ 你，这是群聊自上次读取以来的所有未读消息\n\
-         <unread_messages>\n{}\n</unread_messages>\n\n\
          行为准则\n\
-         - 当你需要其他成员协助或需要通知其他成员时，可以使用 @ 成员（格式为 @<name>，前后空格）来唤醒其他 agent 成员或通知用户\n\
-         - 当你读取未读消息后，判断无需做任何事时，保持静默不输出任何内容",
+         - 当你需要其他成员协助或需要通知其他成员时，可以使用 @ 成员（格式为 @<name>）来唤醒其他 agent 成员或通知用户\n\
+         - 当你读取未读消息后判断无需做任何事时，保持静默不输出任何内容（包括「静默」「无需操作」这类占位回复）\n\n\
+         当前有成员发送消息 @ 你，这是你自上次读取后的所有未读消息\n\
+         <unread_messages>\n{}\n</unread_messages>",
         member.name, member.description, member.machine, others, unread
     )
 }
