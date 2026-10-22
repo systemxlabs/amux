@@ -762,7 +762,6 @@ function GroupMessageBubble({
         className={cn(
           "flex w-fit max-w-[80%] flex-col",
           mine ? "items-end" : "items-start",
-          highlightsUser && "rounded-md ring-2 ring-warning ring-offset-1 ring-offset-background",
         )}
       >
         {!mine ? (
@@ -792,6 +791,7 @@ function GroupMessageBubble({
           className={cn(
             "flex max-w-full flex-col gap-1.5 rounded-md px-3 py-2",
             mine ? "bg-primary text-primary-foreground" : "bg-muted",
+            highlightsUser && "ring-2 ring-warning ring-offset-1 ring-offset-background",
           )}
         >
           <MessageContent content={item.content} />
