@@ -199,6 +199,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     const entry = row.entry;
     const id = entryId(entry);
     const title = entryTitle(entry) || "未命名会话";
+    const busy = entryState(entry) === "busy";
     const active =
       state.open !== null && state.open.kind === entry.kind && state.open.id === id;
     const expandId = entry.kind === "session" ? null : id;
@@ -254,7 +255,13 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
             <span className="absolute top-1/2 left-0 h-px w-4 bg-border" />
           </span>
         ) : null}
-        {entry.kind === "workflow" ? (
+        {busy ? (
+          <Loader2
+            data-slot="session-spinner"
+            aria-label="工作中"
+            className="size-4 shrink-0 animate-spin text-muted-foreground"
+          />
+        ) : entry.kind === "workflow" ? (
           <Network className="size-4 shrink-0 text-muted-foreground" />
         ) : entry.kind === "group" ? (
           <MessagesSquare className="size-4 shrink-0 text-muted-foreground" />
@@ -332,13 +339,6 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
           >
             {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
           </button>
-        ) : null}
-        {entryState(entry) === "busy" ? (
-          <Loader2
-            data-slot="session-spinner"
-            aria-label="工作中"
-            className="size-4 shrink-0 animate-spin text-muted-foreground"
-          />
         ) : null}
         <button
           type="button"
