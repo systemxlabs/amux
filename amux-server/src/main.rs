@@ -10,6 +10,7 @@ mod automations;
 mod config_store;
 mod events;
 mod frames;
+mod groups;
 mod machines;
 mod orchestrator;
 mod sessions;
@@ -34,6 +35,7 @@ use tokio::sync::mpsc;
 use crate::attachments::AttachmentStore;
 use crate::automations::AutomationService;
 use crate::config_store::ConfigStore;
+use crate::groups::GroupService;
 use crate::machines::MachineHub;
 use crate::sessions::SessionService;
 use crate::state::AppState;
@@ -101,10 +103,12 @@ async fn run(args: Args) -> Result<(), String> {
         Arc::clone(&config),
         home.clone(),
     ));
+    let groups = Arc::new(GroupService::new(Arc::clone(&store), Arc::clone(&sessions)));
     let automations = AutomationService::new(
         Arc::clone(&store),
         Arc::clone(&sessions),
         Arc::clone(&workflows),
+        Arc::clone(&groups),
         Arc::clone(&config),
     );
     automations.start();
@@ -113,6 +117,7 @@ async fn run(args: Args) -> Result<(), String> {
         events_rx,
         Arc::clone(&sessions),
         Arc::clone(&workflows),
+        Arc::clone(&groups),
         Arc::clone(&automations),
         Arc::clone(&store),
     ));
@@ -134,6 +139,7 @@ async fn run(args: Args) -> Result<(), String> {
         machines,
         sessions,
         workflows,
+        groups,
         automations,
         attachments,
     });

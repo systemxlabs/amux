@@ -13,14 +13,20 @@ import type {
   AutomationRun,
   AutomationRunList,
   ConfigOptions,
+  ConfigureGroupRequest,
   ConfigureSessionRequest,
   CreateSessionRequest,
+  CreateGroupRequest,
   CreateWorkflowRequest,
   ConfigureWorkflowRequest,
   FsListResult,
   FsReadResult,
   GitBranchListResult,
   GitDiffResult,
+  Group,
+  GroupHistoryPage,
+  GroupList,
+  GroupMemberTemplate,
   HistoryPage,
   Machine,
   OngoingActivity,
@@ -404,6 +410,82 @@ export class ApiClient {
     return this.delete(`/workflows/${encodeURIComponent(id)}/attachments`);
   }
 
+  // ---------- 群聊会话 ----------
+
+  createGroup(members: GroupMemberTemplate[], project?: string): Promise<Group> {
+    const body: CreateGroupRequest = { members };
+    if (project !== undefined) body.project = project;
+    return this.postJson("/groups", body);
+  }
+
+  groups(limit: number, offset: number, project?: string): Promise<GroupList> {
+    const params = { limit, offset };
+    if (project !== undefined) Object.assign(params, { project });
+    return this.getJson(`/groups?${query(params)}`);
+  }
+
+  group(id: string): Promise<Group> {
+    return this.getJson(`/groups/${encodeURIComponent(id)}`);
+  }
+
+  promptGroup(id: string, input: PromptRequest["input"]): Promise<void> {
+    return this.postEmpty(`/groups/${encodeURIComponent(id)}`, { input });
+  }
+
+  cancelGroup(id: string): Promise<void> {
+    return this.postEmpty(`/groups/${encodeURIComponent(id)}/cancel`, {});
+  }
+
+  deleteGroup(id: string): Promise<void> {
+    return this.delete(`/groups/${encodeURIComponent(id)}`);
+  }
+
+  configureGroup(
+    id: string,
+    title: string,
+    project: string | null,
+    pinned: boolean,
+  ): Promise<void> {
+    const body: ConfigureGroupRequest = { title, project, pinned };
+    return this.postEmpty(`/groups/${encodeURIComponent(id)}/configure`, body);
+  }
+
+  groupHistory(id: string, limit: number, offset: number): Promise<GroupHistoryPage> {
+    return this.getJson(
+      `/groups/${encodeURIComponent(id)}/history?${query({ limit: clamp(limit), offset })}`,
+    );
+  }
+
+  groupAttachments(id: string, limit: number, offset: number): Promise<AttachmentList> {
+    return this.getJson(
+      `/groups/${encodeURIComponent(id)}/attachments?${query({ limit: clamp(limit), offset })}`,
+    );
+  }
+
+  uploadGroupAttachment(id: string, file: File, signal?: AbortSignal): Promise<Attachment> {
+    return this.uploadAttachment(
+      `/groups/${encodeURIComponent(id)}/attachments`,
+      file,
+      signal,
+    );
+  }
+
+  groupAttachmentUri(id: string, name: string): string {
+    return this.absoluteUrl(
+      `/groups/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
+    );
+  }
+
+  deleteGroupAttachment(id: string, name: string): Promise<void> {
+    return this.delete(
+      `/groups/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
+    );
+  }
+
+  deleteGroupAttachments(id: string): Promise<void> {
+    return this.delete(`/groups/${encodeURIComponent(id)}/attachments`);
+  }
+
   // ---------- 自动化 ----------
 
   automations(): Promise<Automation[]> {
@@ -476,6 +558,14 @@ export class ApiClient {
 
   setWorkflowPlans(plans: WorkflowPlanItem[]): Promise<void> {
     return this.putEmpty("/config/workflows/", plans);
+  }
+
+  groupMembers(): Promise<GroupMemberTemplate[]> {
+    return this.getJson("/config/group_members/");
+  }
+
+  setGroupMembers(members: GroupMemberTemplate[]): Promise<void> {
+    return this.putEmpty("/config/group_members/", members);
   }
 
   recentWorkspaces(): Promise<RecentWorkspace[]> {

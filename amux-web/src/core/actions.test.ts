@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../lib/api";
 import type {
   ContentBlock,
+  Group,
+  GroupList,
   ListEntry,
   Session,
   SessionList,
@@ -54,6 +56,19 @@ function workflow(): Workflow {
     createdAt: 1,
     updatedAt: 1,
     linkedSessions: [],
+  };
+}
+
+function group(): Group {
+  return {
+    id: "g1",
+    title: "群聊",
+    state: "idle",
+    pinned: false,
+    createdAt: 1,
+    updatedAt: 1,
+    members: [],
+    sessions: [],
   };
 }
 
@@ -145,6 +160,96 @@ it("从工作流会话新建时保留计划与项目并切换", async () => {
 
   expect(request).toEqual(["计划", null, "project-a"]);
   expect(core.state.open).toEqual({ kind: "workflow", id: "w2" });
+});
+
+it("从群聊会话新建时保留成员、项目和 worktree 设置", async () => {
+  const core = new Core();
+  core.state.status = "online";
+  let request: unknown[] = [];
+  core.client = {
+    createGroup: async (...args: unknown[]) => {
+      request = args;
+      return { ...group(), id: "g2" };
+    },
+    listBranches: async () => ({
+      branches: [
+        {
+          name: "main",
+          fullName: "refs/heads/main",
+          kind: "local",
+          isWorktreeBase: true,
+          isRemoteDefault: false,
+        },
+      ],
+    }),
+    sessions: async (): Promise<SessionList> => ({ sessions: [], hasMore: false }),
+    workflows: async (): Promise<WorkflowList> => ({ workflows: [], hasMore: false }),
+    groups: async (): Promise<GroupList> => ({ groups: [], hasMore: false }),
+  } as unknown as ApiClient;
+
+  const ordinary = { ...session(), id: "s1", workspace: "/ordinary" };
+  const worktree = {
+    ...session(),
+    id: "s2",
+    workspace: "/repo",
+    worktreeDir: "/worktrees/s2",
+  };
+  const source: Group = {
+    ...group(),
+    project: "project-a",
+    members: [
+      {
+        id: "m1",
+        name: "coder",
+        description: "负责实现",
+        machine: "localpc",
+        agent: "codex",
+        sessionId: "s1",
+        pinned: false,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: "m2",
+        name: "reviewer",
+        description: "负责审查",
+        machine: "localpc",
+        agent: "codex",
+        sessionId: "s2",
+        pinned: false,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ],
+    sessions: [ordinary, worktree],
+  };
+
+  await createFromEntry(core, { kind: "group", group: source });
+
+  expect(request).toEqual([
+    [
+      {
+        name: "coder",
+        description: "负责实现",
+        machine: "localpc",
+        agent: "codex",
+        workspace: "/ordinary",
+        useWorktree: false,
+        worktreeBase: undefined,
+      },
+      {
+        name: "reviewer",
+        description: "负责审查",
+        machine: "localpc",
+        agent: "codex",
+        workspace: "/repo",
+        useWorktree: true,
+        worktreeBase: { kind: "local", name: "main" },
+      },
+    ],
+    "project-a",
+  ]);
+  expect(core.state.open).toEqual({ kind: "group", id: "g2" });
 });
 
 it("附件上传成功后以待发送 ResourceLink 保存，不再内联文件内容", async () => {

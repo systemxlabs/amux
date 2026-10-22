@@ -1,7 +1,7 @@
 // 会话列表视图（docs/PRD.md「会话列表视图」、docs/DESIGN.md「会话列表视图」）。
 //
-// 顶部「+」进入新建会话视图；置顶会话在前，其余普通会话与工作流会话按创建时间倒序，
-// 工作流会话可展开关联普通会话；未归属会话区域滚到最下方时加载更早一页。
+// 顶部「+」进入新建会话视图；置顶会话在前，其余会话按创建时间倒序，
+// 工作流/群聊会话可展开关联普通会话；未归属会话区域滚到最下方时加载更早一页。
 
 import {
   Fragment,
@@ -16,6 +16,7 @@ import {
   ChevronDown,
   ChevronRight,
   Loader2,
+  MessagesSquare,
   MoreHorizontal,
   Network,
   Pin,
@@ -122,16 +123,19 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
         }));
       }
       try {
-        const [sessions, workflows] = await Promise.all([
+        const [sessions, workflows, groups] = await Promise.all([
           client.sessions(limit, 0, project ?? ""),
           client.workflows(limit, 0, project ?? ""),
+          client.groups(limit, 0, project ?? ""),
         ]);
         const window = buildProjectGroupWindow(
           sessions.sessions,
           workflows.workflows,
+          groups.groups,
           limit,
           sessions.hasMore,
           workflows.hasMore,
+          groups.hasMore,
         );
         loadedCountsRef.current[key] = limit;
         setGroupData((current) => {
@@ -197,8 +201,8 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
     const title = entryTitle(entry) || "未命名会话";
     const active =
       state.open !== null && state.open.kind === entry.kind && state.open.id === id;
-    const expanded =
-      entry.kind === "workflow" && state.expanded.includes(entry.workflow.id);
+    const expandId = entry.kind === "session" ? null : id;
+    const expanded = expandId !== null && state.expanded.includes(expandId);
     const editing =
       renaming !== null &&
       renaming.kind === entry.kind &&
@@ -252,6 +256,8 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
         ) : null}
         {entry.kind === "workflow" ? (
           <Network className="size-4 shrink-0 text-muted-foreground" />
+        ) : entry.kind === "group" ? (
+          <MessagesSquare className="size-4 shrink-0 text-muted-foreground" />
         ) : (
           <SquareTerminal className="size-4 shrink-0 text-muted-foreground" />
         )}
@@ -304,15 +310,23 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
             </div>
           )}
         </div>
-        {entry.kind === "workflow" && canExpand(entry) ? (
+        {canExpand(entry) ? (
           <button
             type="button"
             data-slot="session-expand"
             data-expanded={expanded ? "true" : "false"}
-            aria-label={expanded ? "折叠关联普通会话" : "展开关联普通会话"}
+            aria-label={
+              expanded
+                ? entry.kind === "group"
+                  ? "折叠成员普通会话"
+                  : "折叠关联普通会话"
+                : entry.kind === "group"
+                  ? "展开成员普通会话"
+                  : "展开关联普通会话"
+            }
             onClick={(event) => {
               event.stopPropagation();
-              toggleExpand(core, entry.workflow.id);
+              toggleExpand(core, id);
             }}
             className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground hover:text-foreground lg:size-4"
           >
@@ -554,7 +568,7 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
       <ConfirmDialog
         open={deleting !== null}
         title="删除会话"
-        description="删除后不可恢复；删除工作流会话会同时删除其关联普通会话。"
+        description="删除后不可恢复；删除工作流会话会同时删除其关联普通会话，删除群聊会话会同时删除其成员普通会话。"
         confirmLabel="删除"
         onCancel={() => setDeleting(null)}
         onConfirm={() => {

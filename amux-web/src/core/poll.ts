@@ -4,6 +4,7 @@
 
 import type {
   Activity,
+  GroupMessage,
   HistoryItem,
   ListEntry,
   OpenTarget,
@@ -113,14 +114,18 @@ export async function resetAutomationTargets(core: Core): Promise<void> {
   core.update((state) => {
     state.automationSessions = [];
     state.automationWorkflows = [];
+    state.automationGroups = [];
     state.automationSessionsHasMore = false;
     state.automationWorkflowsHasMore = false;
+    state.automationGroupsHasMore = false;
     state.automationSessionOffset = 0;
     state.automationWorkflowOffset = 0;
+    state.automationGroupOffset = 0;
   });
   await Promise.all([
     loadMoreAutomationSessions(core),
     loadMoreAutomationWorkflows(core),
+    loadMoreAutomationGroups(core),
   ]);
 }
 
@@ -188,6 +193,37 @@ export async function loadMoreAutomationWorkflows(core: Core): Promise<void> {
   }
 }
 
+export async function loadMoreAutomationGroups(core: Core): Promise<void> {
+  const client = core.client;
+  if (
+    !client ||
+    core.state.automationGroupsLoading ||
+    (core.state.automationGroups.length > 0 && !core.state.automationGroupsHasMore)
+  ) {
+    return;
+  }
+  const offset = core.state.automationGroupOffset;
+  core.update((state) => {
+    state.automationGroupsLoading = true;
+  });
+  try {
+    const page = await client.groups(AUTOMATION_TARGET_PAGE, offset);
+    const merged = new Map(core.state.automationGroups.map((group) => [group.id, group]));
+    for (const group of page.groups) merged.set(group.id, group);
+    core.update((state) => {
+      state.automationGroups = sortAutomationTargets([...merged.values()]);
+      state.automationGroupOffset += page.groups.filter((group) => !group.pinned).length;
+      state.automationGroupsHasMore = page.hasMore;
+    });
+  } catch (error) {
+    core.failure(`读取可选群聊失败：${messageOf(error)}`);
+  } finally {
+    core.update((state) => {
+      state.automationGroupsLoading = false;
+    });
+  }
+}
+
 function sortAutomationTargets<T extends { pinned: boolean; createdAt: number }>(
   items: T[],
 ): T[] {
@@ -207,16 +243,18 @@ export async function refreshList(core: Core): Promise<void> {
   if (!client) return;
   const limit = refreshLimit(core.state.entries.length, core.state.listPaging.pageSize);
   try {
-    const [sessions, workflows] = await Promise.all([
+    const [sessions, workflows, groups] = await Promise.all([
       client.sessions(limit, 0),
       client.workflows(limit, 0),
+      client.groups(limit, 0),
     ]);
     core.update((state) => {
       const window = buildListWindow(
         state.listPaging,
         sessions.sessions,
         workflows.workflows,
-        sessions.hasMore || workflows.hasMore,
+        groups.groups,
+        sessions.hasMore || workflows.hasMore || groups.hasMore,
       );
       if (!sameListEntries(state.entries, window.entries)) {
         state.entries = window.entries;
@@ -246,15 +284,20 @@ export async function loadOlderList(core: Core): Promise<void> {
   const workflowsOffset = core.state.entries.filter(
     (entry) => entry.kind === "workflow" && !entryPinned(entry),
   ).length;
+  const groupsOffset = core.state.entries.filter(
+    (entry) => entry.kind === "group" && !entryPinned(entry),
+  ).length;
   try {
-    const [sessions, workflows] = await Promise.all([
+    const [sessions, workflows, groups] = await Promise.all([
       client.sessions(started.limit, sessionsOffset),
       client.workflows(started.limit, workflowsOffset),
+      client.groups(started.limit, groupsOffset),
     ]);
     core.update((state) => {
       const page: ListEntry[] = [
         ...sessions.sessions.map((session): ListEntry => ({ kind: "session", session })),
         ...workflows.workflows.map((workflow): ListEntry => ({ kind: "workflow", workflow })),
+        ...groups.groups.map((group): ListEntry => ({ kind: "group", group })),
       ];
       const pageIds = new Set(page.map(entryId));
       const kept = state.entries.filter((entry) => !pageIds.has(entryId(entry)));
@@ -262,7 +305,7 @@ export async function loadOlderList(core: Core): Promise<void> {
       state.listPaging = {
         ...state.listPaging,
         loadingOlder: false,
-        hasOlder: sessions.hasMore || workflows.hasMore,
+        hasOlder: sessions.hasMore || workflows.hasMore || groups.hasMore,
       };
     });
   } catch (error) {
@@ -283,7 +326,7 @@ async function refreshOpen(core: Core): Promise<void> {
 
   if (due(core.last.usage, USAGE_INTERVAL)) {
     core.last.usage = Date.now();
-    await refreshUsage(core);
+    if (target.kind !== "group") await refreshUsage(core);
   }
 
   // 会话详情只在详情视图打开时刷新一次（refreshDetails），不随节拍拉取
@@ -306,7 +349,7 @@ async function refreshOpen(core: Core): Promise<void> {
       // 计划仅普通会话有；失败留待下一周期
     }
   }
-  if (due(core.last.ongoing, ONGOING_INTERVAL)) {
+  if (target.kind !== "group" && due(core.last.ongoing, ONGOING_INTERVAL)) {
     core.last.ongoing = Date.now();
     try {
       const activity =
@@ -460,10 +503,32 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 export async function refreshHistory(core: Core): Promise<void> {
   const target = core.state.open;
   if (!target) return;
-  const paging = core.state.detail.historyPaging;
-  const loaded = core.state.detail.history.length;
+  const paging =
+    target.kind === "group"
+      ? core.state.detail.groupHistoryPaging
+      : core.state.detail.historyPaging;
+  const loaded =
+    target.kind === "group"
+      ? core.state.detail.groupHistory.length
+      : core.state.detail.history.length;
   const { offset, limit } = refreshFetch(paging, loaded);
   try {
+    if (target.kind === "group") {
+      const page = await core.client!.groupHistory(target.id, limit, offset);
+      core.update((state) => {
+        if (!sameTarget(state.open, target)) return;
+        const merged = replaceWindow<GroupMessage>(
+          state.detail.groupHistory,
+          state.detail.groupHistoryPaging,
+          page.items,
+          offset,
+          page.hasMore,
+        );
+        state.detail.groupHistory = merged.items;
+        state.detail.groupHistoryPaging = merged.paging;
+      });
+      return;
+    }
     const page =
       target.kind === "session"
         ? await core.client!.history(target.id, limit, offset)
@@ -489,6 +554,39 @@ export async function refreshHistory(core: Core): Promise<void> {
 export async function loadOlderHistory(core: Core): Promise<void> {
   const target = core.state.open;
   if (!target) return;
+  if (target.kind === "group") {
+    const started = beginOlderPage(
+      core.state.detail.groupHistoryPaging,
+      core.state.detail.groupHistory.length,
+    );
+    if (!started) return;
+    core.update((state) => {
+      state.detail.groupHistoryPaging = started.paging;
+    });
+    try {
+      const page = await core.client!.groupHistory(target.id, started.limit, started.offset);
+      core.update((state) => {
+        if (!sameTarget(state.open, target)) return;
+        const merged = prependOlder<GroupMessage>(
+          state.detail.groupHistory,
+          state.detail.groupHistoryPaging,
+          page.items,
+        );
+        const trimmed = trimNewest(merged.items, merged.paging);
+        state.detail.groupHistory = trimmed.items;
+        state.detail.groupHistoryPaging = { ...trimmed.paging, hasOlder: page.hasMore };
+      });
+    } catch (error) {
+      core.update((state) => {
+        state.detail.groupHistoryPaging = {
+          ...state.detail.groupHistoryPaging,
+          loadingOlder: false,
+        };
+      });
+      core.failure(`加载更早对话失败：${messageOf(error)}`);
+    }
+    return;
+  }
   const started = beginOlderPage(
     core.state.detail.historyPaging,
     core.state.detail.history.length,
@@ -525,6 +623,37 @@ export async function loadOlderHistory(core: Core): Promise<void> {
 export async function loadNewerHistory(core: Core): Promise<void> {
   const target = core.state.open;
   if (!target) return;
+  if (target.kind === "group") {
+    const started = beginNewerPage(core.state.detail.groupHistoryPaging);
+    if (!started) return;
+    core.update((state) => {
+      state.detail.groupHistoryPaging = started.paging;
+    });
+    try {
+      const page = await core.client!.groupHistory(target.id, started.limit, started.offset);
+      core.update((state) => {
+        if (!sameTarget(state.open, target)) return;
+        const merged = prependNewer<GroupMessage>(
+          state.detail.groupHistory,
+          state.detail.groupHistoryPaging,
+          page.items,
+          started.offset,
+        );
+        const trimmed = trimOldest(merged.items, merged.paging);
+        state.detail.groupHistory = trimmed.items;
+        state.detail.groupHistoryPaging = trimmed.paging;
+      });
+    } catch (error) {
+      core.update((state) => {
+        state.detail.groupHistoryPaging = {
+          ...state.detail.groupHistoryPaging,
+          loadingNewer: false,
+        };
+      });
+      core.failure(`加载更新对话失败：${messageOf(error)}`);
+    }
+    return;
+  }
   const started = beginNewerPage(core.state.detail.historyPaging);
   if (!started) return;
   core.update((state) => {
@@ -692,6 +821,7 @@ export async function refreshNewSession(core: Core): Promise<void> {
     refreshRecentWorkspaces(core),
     refreshPlans(core),
     refreshProjects(core),
+    refreshGroupMembers(core),
   ]);
 }
 
@@ -718,7 +848,7 @@ export async function refreshInteraction(core: Core): Promise<void> {
 async function refreshUsage(core: Core): Promise<void> {
   const client = core.client;
   const target = core.state.open;
-  if (!client || !target) return;
+  if (!client || !target || target.kind === "group") return;
   try {
     const usage =
       target.kind === "session"
@@ -765,6 +895,9 @@ export async function refreshSettings(core: Core, tab: SettingsTab): Promise<voi
       return refreshMachines(core);
     case "workflow":
       await Promise.all([refreshOrchestrator(core), refreshPlans(core)]);
+      return;
+    case "group":
+      await Promise.all([refreshMachines(core), refreshGroupMembers(core)]);
       return;
     case "automation":
       return refreshAutomationConfig(core);
@@ -868,6 +1001,19 @@ export async function refreshPlans(core: Core): Promise<void> {
   }
 }
 
+export async function refreshGroupMembers(core: Core): Promise<void> {
+  const client = core.client;
+  if (!client) return;
+  try {
+    const members = await client.groupMembers();
+    core.update((state) => {
+      state.settings.groupMembers = members;
+    });
+  } catch (error) {
+    core.failure(`读取群聊预设成员失败：${messageOf(error)}`);
+  }
+}
+
 export async function refreshQuickCommands(core: Core): Promise<void> {
   const client = core.client;
   if (!client) return;
@@ -905,6 +1051,18 @@ export async function refreshDetails(core: Core): Promise<void> {
       core.update((state) => {
         if (!sameTarget(state.open, target)) return;
         state.detail.session = session;
+      });
+    } catch (error) {
+      core.failure(`读取会话详情失败：${messageOf(error)}`);
+    }
+    return;
+  }
+  if (target.kind === "group") {
+    try {
+      const group = await client.group(target.id);
+      core.update((state) => {
+        if (!sameTarget(state.open, target)) return;
+        state.detail.group = group;
       });
     } catch (error) {
       core.failure(`读取会话详情失败：${messageOf(error)}`);

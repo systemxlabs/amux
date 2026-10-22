@@ -17,6 +17,7 @@ pub mod path {
     pub const MACHINES: &str = "/machines";
     pub const SESSIONS: &str = "/sessions";
     pub const WORKFLOWS: &str = "/workflows";
+    pub const GROUPS: &str = "/groups";
     pub const CONFIG_SKILLS: &str = "/config/skills/";
     pub const CONFIG_WORKFLOWS: &str = "/config/workflows/";
     pub const CONFIG_RECENT_WORKSPACES: &str = "/config/recent_workspaces/";
@@ -60,6 +61,9 @@ pub struct Session {
     /// 所属工作流会话 ID；None = 非关联普通会话
     #[serde(skip)]
     pub workflow_id: Option<String>,
+    /// 所属群聊会话 ID；None = 非群聊成员会话
+    #[serde(skip)]
+    pub group_id: Option<String>,
     /// 所属机器
     pub machine: String,
     /// 所属 agent
@@ -316,6 +320,114 @@ pub struct WorkflowList {
     pub has_more: bool,
 }
 
+/// 群聊预设成员（`~/.amux/config/group_members.json`；name 可重复）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Eq)]
+pub struct GroupMemberTemplate {
+    pub name: String,
+    pub description: String,
+    pub machine: String,
+    pub agent: String,
+    pub workspace: String,
+    #[serde(default)]
+    pub use_worktree: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_base: Option<WorktreeBase>,
+}
+
+/// 群聊成员：每个 agent 成员背后对应一个成员普通会话。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMember {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub machine: String,
+    pub agent: String,
+    pub session_id: String,
+    pub pinned: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// 群聊会话。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Group {
+    pub id: String,
+    pub title: String,
+    pub state: SessionState,
+    /// 所属项目；None = 未归属项目
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub pinned: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+    /// 成员普通会话对应的成员信息
+    pub members: Vec<GroupMember>,
+    /// 成员普通会话（供会话列表展开与成员状态展示）
+    pub sessions: Vec<Session>,
+}
+
+/// `GET /groups` 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupList {
+    pub groups: Vec<Group>,
+    pub has_more: bool,
+}
+
+/// `POST /groups` 请求：成员列表（名称在群聊内必须唯一）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateGroupRequest {
+    pub members: Vec<GroupMemberTemplate>,
+    /// 所属项目；None = 未归属项目
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+/// `POST /groups/<id>/configure` 请求。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigureGroupRequest {
+    pub title: String,
+    /// 所属项目；None = 未归属项目
+    pub project: Option<String>,
+    pub pinned: bool,
+}
+
+/// 群聊历史消息：服务端已把成员会话引用解析为完整内容。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMessage {
+    pub id: String,
+    /// 发送成员 ID；None = 用户消息
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_id: Option<String>,
+    /// 发送者展示名（用户为 `user`）
+    pub name: String,
+    /// 成员所属 agent（`<agent>@<machine>`）；用户消息为空串
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    /// 成员角色描述；用户消息为空串
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub content: Vec<ContentBlock>,
+    pub timestamp: u64,
+}
+
+/// `GET /groups/<id>/history` 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupHistoryPage {
+    pub items: Vec<GroupMessage>,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
+}
+
 /// `POST /workflows` 请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -367,6 +479,8 @@ pub enum AutomationSessionOptions {
     ExistingSession { session_id: String },
     /// 使用已有工作流会话。
     ExistingWorkflow { workflow_id: String },
+    /// 使用已有群聊会话。
+    ExistingGroup { group_id: String },
     /// 新建普通会话并执行任务。
     NewSession {
         machine: String,
@@ -382,6 +496,12 @@ pub enum AutomationSessionOptions {
     /// 新建工作流会话并执行任务。
     NewWorkflow {
         plan: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// 新建群聊会话并执行任务。
+    NewGroup {
+        members: Vec<GroupMemberTemplate>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
     },
@@ -428,6 +548,8 @@ pub struct AutomationRun {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     pub state: AutomationRunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_label: Option<String>,
@@ -675,6 +797,7 @@ mod tests {
         let session = Session {
             id: "s1".into(),
             workflow_id: None,
+            group_id: None,
             machine: "localpc".into(),
             agent: "codex".into(),
             title: "标题".into(),

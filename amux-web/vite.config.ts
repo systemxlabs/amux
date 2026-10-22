@@ -22,6 +22,7 @@ export default defineConfig({
       "/machines": "http://127.0.0.1:34567",
       "/sessions": "http://127.0.0.1:34567",
       "/workflows": "http://127.0.0.1:34567",
+      "/groups": "http://127.0.0.1:34567",
       "/config": "http://127.0.0.1:34567",
     },
   },

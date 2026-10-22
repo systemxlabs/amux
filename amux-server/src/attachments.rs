@@ -1,4 +1,4 @@
-//! 会话附件存储：文件位于 `~/.amux/{sessions|workflows}/<会话 ID>/attachments/`。
+//! 会话附件存储：文件位于 `~/.amux/{sessions|workflows|groups}/<会话 ID>/attachments/`。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ pub const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 pub enum AttachmentOwner<'a> {
     Session(&'a str),
     Workflow(&'a str),
+    Group(&'a str),
 }
 
 impl<'a> AttachmentOwner<'a> {
@@ -22,12 +23,13 @@ impl<'a> AttachmentOwner<'a> {
         match self {
             Self::Session(_) => "sessions",
             Self::Workflow(_) => "workflows",
+            Self::Group(_) => "groups",
         }
     }
 
     fn id(self) -> &'a str {
         match self {
-            Self::Session(id) | Self::Workflow(id) => id,
+            Self::Session(id) | Self::Workflow(id) | Self::Group(id) => id,
         }
     }
 }

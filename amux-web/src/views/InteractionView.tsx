@@ -1,5 +1,5 @@
-// 会话交互视图（docs/PRD.md「会话交互视图」）：agent 状态、对话气泡、实时活动、
-// 快捷指令栏、输入区（Enter 发送 / Shift+Enter 换行、斜杠命令上拉框、附件）、会话选项。
+// 会话交互视图（docs/PRD.md「会话交互视图」）：普通/工作流的 agent 状态、对话气泡、
+// 实时活动与控件，以及群聊的成员消息气泡；共用快捷指令、附件和输入区。
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { AlertCircle, GitBranch, LoaderCircle, Paperclip, RotateCw, SendHorizontal, Square } from "lucide-react";
@@ -26,11 +26,22 @@ import {
 } from "../core/actions";
 import { loadNewerHistory, loadOlderHistory } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
-import { activityBarText, formatTime, formatUsage, usagePercent } from "../lib/format";
+import {
+  activityBarText,
+  formatTime,
+  formatUsage,
+  usagePercent,
+} from "../lib/format";
 import { pageSizeForViewport } from "../lib/paging";
 import { matchSlashCommands } from "../lib/slash";
 import { execDir } from "../lib/types";
-import type { ContentBlock, HistoryItem, SessionConfigOption, Usage } from "../lib/types";
+import type {
+  ContentBlock,
+  GroupMessage,
+  HistoryItem,
+  SessionConfigOption,
+  Usage,
+} from "../lib/types";
 import { cn } from "../lib/utils";
 import { useIsMobile } from "../lib/viewport";
 
@@ -58,6 +69,9 @@ export function InteractionView() {
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const inputDrag = useRef<{ startY: number; startHeight: number } | null>(null);
   const targetKey = target === null ? null : `${target.kind}:${target.id}`;
+  const isGroup = target?.kind === "group";
+  const historyCount = isGroup ? detail.groupHistory.length : detail.history.length;
+  const historyPaging = isGroup ? detail.groupHistoryPaging : detail.historyPaging;
 
   /** 开始拖拽输入框高度（docs/PRD.md「会话交互视图」：多行输入框，可拖拽高度）。 */
   const startInputResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
@@ -98,7 +112,7 @@ export function InteractionView() {
     }
     const element = listRef.current;
     // 打开时历史异步加载；首次有消息再定位，不能在空列表上消耗此次滚动。
-    if (!element || detail.history.length === 0) return;
+    if (!element || historyCount === 0) return;
     if (!scrollOnEntry.current && !followingBottom.current) return;
     element.scrollTop = element.scrollHeight;
     scrollOnEntry.current = false;
@@ -116,17 +130,25 @@ export function InteractionView() {
     const element = listRef.current;
     if (!element) return;
     const height = element.scrollHeight;
-    const shift = detail.historyPaging.shift;
+    const shift = historyPaging.shift;
     if (shift !== null) {
       if (shift > 0 && previousHeight.current > 0) {
         element.scrollTop += height - previousHeight.current;
       }
       core.update((next) => {
-        next.detail.historyPaging.shift = null;
+        if (isGroup) next.detail.groupHistoryPaging.shift = null;
+        else next.detail.historyPaging.shift = null;
       });
     }
     previousHeight.current = height;
-  }, [core, detail.history, detail.historyPaging.shift]);
+  }, [
+    core,
+    detail.groupHistory,
+    detail.history,
+    historyCount,
+    historyPaging.shift,
+    isGroup,
+  ]);
 
   const slashMatches = useMemo(
     () => matchSlashCommands(detail.slashCommands, draft),
@@ -142,17 +164,21 @@ export function InteractionView() {
   }
 
   const isSession = target.kind === "session";
+  const isWorkflow = target.kind === "workflow";
   const title = isSession
     ? `${detail.session?.agent ?? ""}@${detail.session?.machine ?? ""}`
-    : "工作流智能体";
+    : isWorkflow
+      ? "工作流智能体"
+      : detail.group?.title || "群聊会话";
   const available = isSession
     ? (state.settings.agents
         .find((entry) => entry.machine === detail.session?.machine)
         ?.agents.find((agent) => agent.name === detail.session?.agent)?.available ?? false)
     : state.settings.orchestrator.status === "ready" && state.settings.orchestrator.config !== null;
   const execDirPath = isSession && detail.session ? execDir(detail.session) : "";
-  const workflowPlan = !isSession && detail.workflow ? detail.workflow.plan : "";
-  const project = detail.session?.project ?? detail.workflow?.project;
+  const workflowPlan = isWorkflow && detail.workflow ? detail.workflow.plan : "";
+  const project =
+    detail.session?.project ?? detail.workflow?.project ?? detail.group?.project;
   const quickCommands = state.settings.quickCommands.filter(
     (command) => command.project === undefined || command.project === project,
   );
@@ -195,10 +221,11 @@ export function InteractionView() {
       const size = pageSizeForViewport(
         element.clientHeight,
         element.scrollHeight,
-        detail.history.length,
+        historyCount,
       );
       core.update((next) => {
-        next.detail.historyPaging.pageSize = size;
+        if (isGroup) next.detail.groupHistoryPaging.pageSize = size;
+        else next.detail.historyPaging.pageSize = size;
       });
     };
     updatePageSize();
@@ -209,7 +236,7 @@ export function InteractionView() {
       observer.disconnect();
       window.removeEventListener("resize", updatePageSize);
     };
-  }, [core, detail.history.length]);
+  }, [core, historyCount, isGroup]);
 
   const onScroll = () => {
     const element = listRef.current;
@@ -219,11 +246,12 @@ export function InteractionView() {
     const size = pageSizeForViewport(
       element.clientHeight,
       element.scrollHeight,
-      detail.history.length,
+      historyCount,
     );
-    if (size !== detail.historyPaging.pageSize) {
+    if (size !== historyPaging.pageSize) {
       core.update((next) => {
-        next.detail.historyPaging.pageSize = size;
+        if (isGroup) next.detail.groupHistoryPaging.pageSize = size;
+        else next.detail.historyPaging.pageSize = size;
       });
     }
     const nearOlderEdge = element.scrollTop <= element.clientHeight;
@@ -231,15 +259,15 @@ export function InteractionView() {
       element.scrollHeight - element.scrollTop - element.clientHeight <= element.clientHeight;
     if (
       nearOlderEdge &&
-      detail.historyPaging.hasOlder &&
-      !detail.historyPaging.loadingOlder
+      historyPaging.hasOlder &&
+      !historyPaging.loadingOlder
     ) {
       void loadOlderHistory(core);
     }
     if (
       nearNewerEdge &&
-      detail.historyPaging.hasNewer &&
-      !detail.historyPaging.loadingNewer
+      historyPaging.hasNewer &&
+      !historyPaging.loadingNewer
     ) {
       void loadNewerHistory(core);
     }
@@ -263,23 +291,34 @@ export function InteractionView() {
     <div data-slot="interaction-view" className="flex h-full min-h-0 flex-col">
       {/* pl-12/pr-12：为左上角的抽屉按钮与右上角的悬浮按钮留出空间 */}
       <header className="flex items-center gap-2 border-b border-border py-2 pr-12 pl-12 lg:pl-3">
-        <span data-slot="interaction-agent" className="font-medium">
-          {title}
-        </span>
-        <span
-          data-slot="interaction-agent-state"
-          data-available={available}
-          className={cn(
-            "flex items-center gap-1 text-xs",
-            available ? "text-muted-foreground" : "text-destructive",
-          )}
-        >
-          <span
-            data-slot="interaction-agent-state-dot"
-            className={cn("size-1.5 rounded-full", available ? "bg-success" : "bg-destructive")}
-          />
-          {available ? "可用" : "不可用"}
-        </span>
+        {isGroup ? (
+          <span data-slot="interaction-group-title" className="font-medium">
+            {title}
+          </span>
+        ) : (
+          <>
+            <span data-slot="interaction-agent" className="font-medium">
+              {title}
+            </span>
+            <span
+              data-slot="interaction-agent-state"
+              data-available={available}
+              className={cn(
+                "flex items-center gap-1 text-xs",
+                available ? "text-muted-foreground" : "text-destructive",
+              )}
+            >
+              <span
+                data-slot="interaction-agent-state-dot"
+                className={cn(
+                  "size-1.5 rounded-full",
+                  available ? "bg-success" : "bg-destructive",
+                )}
+              />
+              {available ? "可用" : "不可用"}
+            </span>
+          </>
+        )}
         {isSession && execDirPath !== "" ? (
           <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground">
             <span data-slot="interaction-exec-dir" title={execDirPath} className="min-w-0 truncate">
@@ -293,7 +332,7 @@ export function InteractionView() {
             ) : null}
           </div>
         ) : null}
-        {!isSession && workflowPlan !== "" ? (
+        {isWorkflow && workflowPlan !== "" ? (
           <span
             data-slot="interaction-workflow-plan"
             title={workflowPlan}
@@ -313,12 +352,16 @@ export function InteractionView() {
         style={{ overflowAnchor: "none" }}
         onScroll={onScroll}
       >
-        {detail.history.map((item) => (
-          <MessageBubble key={item.id} item={item} />
-        ))}
+        {isGroup
+          ? detail.groupHistory.map((item) => (
+              <GroupMessageBubble key={item.id} item={item} />
+            ))
+          : detail.history.map((item) => (
+              <MessageBubble key={item.id} item={item} />
+            ))}
       </div>
 
-      {detail.ongoing ? (
+      {!isGroup && detail.ongoing ? (
         <div
           data-slot="live-activity"
           className="truncate border-t border-border py-1 pr-12 pl-3 text-xs text-muted-foreground"
@@ -367,7 +410,7 @@ export function InteractionView() {
       ) : null}
 
       <div className="relative border-t border-border p-3">
-        {slashMatches.length > 0 ? (
+        {!isGroup && slashMatches.length > 0 ? (
           <div
             data-slot="slash-popup"
             className="absolute bottom-full left-3 mb-1 max-h-56 w-72 overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-lg"
@@ -524,7 +567,7 @@ export function InteractionView() {
               附件
             </Button>
             <div className="flex items-center gap-2">
-              {detail.usage !== null ? (
+              {!isGroup && detail.usage !== null ? (
                 <UsageIndicator usage={detail.usage} />
               ) : null}
               <Button
@@ -610,6 +653,56 @@ function MessageBubble({ item }: { item: HistoryItem }) {
       </span>
     </div>
   );
+}
+
+function GroupMessageBubble({ item }: { item: GroupMessage }) {
+  const mine = item.memberId === undefined;
+  const highlightsUser = mentionsUser(item.content);
+  return (
+    <div
+      data-slot="group-message"
+      data-role={mine ? "user" : "agent"}
+      data-highlight={highlightsUser ? "true" : "false"}
+      className={cn("mb-3 flex flex-col", mine ? "items-end" : "items-start")}
+    >
+      <div
+        data-slot="group-message-content"
+        className={cn(
+          "flex max-w-[80%] flex-col gap-1.5 rounded-md px-3 py-2",
+          mine ? "bg-primary text-primary-foreground" : "bg-muted",
+          highlightsUser && "ring-2 ring-warning ring-offset-1 ring-offset-background",
+        )}
+      >
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span data-slot="group-message-name" className="text-sm font-medium">
+            {item.name}
+          </span>
+          {item.agent ? (
+            <span data-slot="group-message-agent" className="text-xs opacity-75">
+              {item.agent}
+            </span>
+          ) : null}
+        </div>
+        {item.description ? (
+          <p data-slot="group-message-description" className="text-xs opacity-75">
+            {item.description}
+          </p>
+        ) : null}
+        <MessageContent content={item.content} />
+        <span data-slot="group-message-time" className="text-xs opacity-70">
+          {formatTime(item.timestamp)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** 群聊 @ 提及规定前后为空白，因此这里不把 `foo@user` 当作提及。 */
+function mentionsUser(content: readonly ContentBlock[]): boolean {
+  const text = content
+    .flatMap((block) => (block.type === "text" ? [block.text] : []))
+    .join("\n");
+  return /(^|\s)@user(?=\s|$)/u.test(text);
 }
 
 /** 消息气泡内容：文本块直接展示，资源块展示文本内容与图片，URI 资源提供打开入口。 */

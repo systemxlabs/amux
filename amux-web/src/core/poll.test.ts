@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../lib/api";
 import { newPaging } from "../lib/paging";
 import type {
+  Group,
+  GroupList,
   HistoryPage,
   ListEntry,
   Session,
@@ -78,10 +80,34 @@ function workflow(id: string, updatedAt: number): Workflow {
   };
 }
 
-function fakeClient(sessions: SessionList, workflows: WorkflowList): ApiClient {
+function group(id: string, updatedAt: number): Group {
+  return {
+    id,
+    title: id,
+    state: "idle",
+    pinned: false,
+    createdAt: 1,
+    updatedAt,
+    members: [],
+    sessions: [],
+  };
+}
+
+function entryKey(entry: ListEntry): string {
+  if (entry.kind === "session") return entry.session.id;
+  if (entry.kind === "workflow") return entry.workflow.id;
+  return entry.group.id;
+}
+
+function fakeClient(
+  sessions: SessionList,
+  workflows: WorkflowList,
+  groups: GroupList = { groups: [], hasMore: false },
+): ApiClient {
   const client = {
     sessions: vi.fn(async (_limit: number, _offset: number): Promise<SessionList> => sessions),
     workflows: vi.fn(async (_limit: number, _offset: number): Promise<WorkflowList> => workflows),
+    groups: vi.fn(async (_limit: number, _offset: number): Promise<GroupList> => groups),
   };
   return client as unknown as ApiClient;
 }
@@ -101,11 +127,7 @@ describe("refreshList", () => {
 
     await refreshList(core);
 
-    expect(
-      core.state.entries.map((entry) =>
-        entry.kind === "session" ? entry.session.id : entry.workflow.id,
-      ),
-    ).toEqual(["alive"]);
+    expect(core.state.entries.map(entryKey)).toEqual(["alive"]);
     expect(core.state.listPaging.hasOlder).toBe(true);
     expect(core.state.listRefreshVersion).toBe(1);
   });
@@ -125,6 +147,19 @@ describe("refreshList", () => {
     expect(core.state.listRefreshVersion).toBe(1);
   });
 
+  it("群聊会话进入同一刷新窗口", async () => {
+    const core = new Core();
+    core.client = fakeClient(
+      { sessions: [], hasMore: false },
+      { workflows: [], hasMore: false },
+      { groups: [group("g1", 500)], hasMore: false },
+    );
+
+    await refreshList(core);
+
+    expect(core.state.entries.map(entryKey)).toEqual(["g1"]);
+  });
+
   it("普通请求失败时保留登录状态并提示错误", async () => {
     const core = new Core();
     const client = {
@@ -132,6 +167,7 @@ describe("refreshList", () => {
         throw new Error("network down");
       }),
       workflows: vi.fn(async () => ({ workflows: [], hasMore: false })),
+      groups: vi.fn(async () => ({ groups: [], hasMore: false })),
     } as unknown as ApiClient;
     core.client = client;
     core.state.status = "online";
@@ -167,11 +203,14 @@ describe("loadOlderList", () => {
 
     expect(client.sessions).toHaveBeenCalledWith(1, 2);
     expect(client.workflows).toHaveBeenCalledWith(1, 1);
-    expect(
-      core.state.entries.map((entry) =>
-        entry.kind === "session" ? entry.session.id : entry.workflow.id,
-      ),
-    ).toEqual(["pinned", "s1", "s2", "s3", "w1", "w2"]);
+    expect(core.state.entries.map(entryKey)).toEqual([
+      "pinned",
+      "s1",
+      "s2",
+      "s3",
+      "w1",
+      "w2",
+    ]);
     expect(core.state.listPaging.loadingOlder).toBe(false);
   });
 });
@@ -187,6 +226,7 @@ function recordingClient(overrides: Record<string, unknown> = {}): {
   const handlers: Record<string, unknown> = {
     sessions: (): SessionList => ({ sessions: [session("s1", 1)], hasMore: false }),
     workflows: (): WorkflowList => ({ workflows: [], hasMore: false }),
+    groups: (): GroupList => ({ groups: [], hasMore: false }),
     history: (): HistoryPage => ({ items: [], hasMore: false }),
     session: () => session("s1", 1),
     workflow: () => workflow("w1", 1),

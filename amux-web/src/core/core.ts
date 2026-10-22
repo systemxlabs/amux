@@ -11,6 +11,9 @@ import type {
   Automation,
   AutomationConfig,
   ContentBlock,
+  Group,
+  GroupMemberTemplate,
+  GroupMessage,
   HistoryItem,
   ListEntry,
   Machine,
@@ -55,10 +58,14 @@ export type SidePanel =
 
 /** 仅普通会话有的右侧面板（docs/PRD.md「主页面」）。 */
 const SESSION_ONLY_PANELS: readonly SidePanel[] = ["exec", "diff", "plan", "terminal"];
+/** 群聊会话没有会话活动视图。 */
+const NON_GROUP_PANELS: readonly SidePanel[] = ["activities"];
 
-/** 右侧面板是否适用于该会话：普通会话专属面板在工作流会话下不展示。 */
+/** 右侧面板是否适用于该会话。 */
 export function panelAvailable(panel: SidePanel, target: OpenTarget): boolean {
-  return target.kind === "session" || !SESSION_ONLY_PANELS.includes(panel);
+  if (target.kind === "session") return true;
+  if (target.kind === "group") return !NON_GROUP_PANELS.includes(panel) && !SESSION_ONLY_PANELS.includes(panel);
+  return !SESSION_ONLY_PANELS.includes(panel);
 }
 
 export type Notice = { kind: "success" | "error"; text: string };
@@ -77,7 +84,7 @@ export type PendingAttachment = {
 
 /** 新建会话视图状态（docs/PRD.md「新建会话视图」）。 */
 export type NewSessionState = {
-  mode: "normal" | "workflow";
+  mode: "normal" | "workflow" | "group";
   /** 选中的机器名；空串 = 未选 */
   machine: string;
   /** 选中的 agent 名；空串 = 未选 */
@@ -92,6 +99,8 @@ export type NewSessionState = {
   plan: string;
   /** 工作流模式：选中的已保存计划名 */
   selectedPlan: string | null;
+  /** 群聊模式：成员草稿 */
+  groupMembers: GroupMemberTemplate[];
 };
 
 /** 设置浮窗分类。 */
@@ -99,6 +108,7 @@ export type SettingsTab =
   | "connection"
   | "machines"
   | "workflow"
+  | "group"
   | "automation"
   | "quickCommands"
   | "skills"
@@ -125,6 +135,7 @@ export type SettingsState = {
   quickCommands: QuickCommand[];
   skills: Skill[];
   plans: WorkflowPlanItem[];
+  groupMembers: GroupMemberTemplate[];
   projects: Project[];
 };
 
@@ -135,8 +146,11 @@ export type TerminalChunk = { seq: number; bytes: Uint8Array; reset: boolean };
 export type DetailState = {
   session: Session | null;
   workflow: Workflow | null;
+  group: Group | null;
   history: HistoryItem[];
   historyPaging: Paging;
+  groupHistory: GroupMessage[];
+  groupHistoryPaging: Paging;
   activities: Activity[];
   activitiesPaging: Paging;
   plan: SessionPlanEntry[];
@@ -162,7 +176,7 @@ export type CoreState = {
   /** 会话列表成功刷新的版本号；项目列表据此执行静默刷新 */
   listRefreshVersion: number;
   listPaging: Paging;
-  /** 展开的工作流会话 id */
+  /** 展开的工作流/群聊会话 id */
   expanded: string[];
   middle: MiddleView;
   open: OpenTarget | null;
@@ -173,12 +187,16 @@ export type CoreState = {
   /** 自动化“已有会话”下拉框的全量候选项。 */
   automationSessions: Session[];
   automationWorkflows: Workflow[];
+  automationGroups: Group[];
   automationSessionsHasMore: boolean;
   automationWorkflowsHasMore: boolean;
+  automationGroupsHasMore: boolean;
   automationSessionsLoading: boolean;
   automationWorkflowsLoading: boolean;
+  automationGroupsLoading: boolean;
   automationSessionOffset: number;
   automationWorkflowOffset: number;
+  automationGroupOffset: number;
   /** 自动化右侧面板；null = 收起 */
   automationPanel: AutomationPanel | null;
   /** 会话交互视图输入框草稿（改动审查引用会往这里追加） */
@@ -193,8 +211,11 @@ export function initialDetail(): DetailState {
   return {
     session: null,
     workflow: null,
+    group: null,
     history: [],
     historyPaging: newPaging(),
+    groupHistory: [],
+    groupHistoryPaging: newPaging(),
     activities: [],
     activitiesPaging: newPaging(),
     plan: [],
@@ -223,6 +244,7 @@ export function initialNewSession(): NewSessionState {
     worktreeBase: null,
     plan: "",
     selectedPlan: null,
+    groupMembers: [],
   };
 }
 
@@ -238,6 +260,7 @@ export function initialSettings(): SettingsState {
     quickCommands: [],
     skills: [],
     plans: [],
+    groupMembers: [],
     projects: [],
   };
 }
@@ -258,12 +281,16 @@ export function initialState(): CoreState {
     automations: [],
     automationSessions: [],
     automationWorkflows: [],
+    automationGroups: [],
     automationSessionsHasMore: false,
     automationWorkflowsHasMore: false,
+    automationGroupsHasMore: false,
     automationSessionsLoading: false,
     automationWorkflowsLoading: false,
+    automationGroupsLoading: false,
     automationSessionOffset: 0,
     automationWorkflowOffset: 0,
+    automationGroupOffset: 0,
     automationPanel: null,
     inputDraft: "",
     newSession: initialNewSession(),

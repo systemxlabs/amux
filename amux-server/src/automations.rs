@@ -17,6 +17,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::config_store::ConfigStore;
+use crate::groups::GroupService;
 use crate::sessions::{SessionService, SessionWorktree};
 use crate::store::{AutomationRow, Store};
 use crate::timestamps::now_ms;
@@ -28,12 +29,14 @@ const SCHEDULER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 enum RunTarget {
     Session(String),
     Workflow(String),
+    Group(String),
 }
 
 pub struct AutomationService {
     store: Arc<Store>,
     sessions: Arc<SessionService>,
     workflows: Arc<WorkflowService>,
+    groups: Arc<GroupService>,
     config: Arc<ConfigStore>,
     last_schedule_check: Mutex<u64>,
 }
@@ -43,12 +46,14 @@ impl AutomationService {
         store: Arc<Store>,
         sessions: Arc<SessionService>,
         workflows: Arc<WorkflowService>,
+        groups: Arc<GroupService>,
         config: Arc<ConfigStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             sessions,
             workflows,
+            groups,
             config,
             last_schedule_check: Mutex::new(now_ms()),
         })
@@ -130,6 +135,7 @@ impl AutomationService {
             automation_id: automation.id.clone(),
             session_id: None,
             workflow_id: None,
+            group_id: None,
             state: AutomationRunState::Queued,
             result_label: None,
             error: None,
@@ -152,6 +158,10 @@ impl AutomationService {
                 AutomationSessionOptions::ExistingWorkflow { workflow_id } => {
                     self.workflows.prompt(workflow_id, prompt()).await?;
                     Ok(RunTarget::Workflow(workflow_id.clone()))
+                }
+                AutomationSessionOptions::ExistingGroup { group_id } => {
+                    self.groups.prompt(group_id, prompt()).await?;
+                    Ok(RunTarget::Group(group_id.clone()))
                 }
                 AutomationSessionOptions::NewSession {
                     machine,
@@ -186,6 +196,14 @@ impl AutomationService {
                     self.workflows.prompt(&workflow.id, prompt()).await?;
                     Ok(RunTarget::Workflow(workflow.id))
                 }
+                AutomationSessionOptions::NewGroup { members, project } => {
+                    let group = self
+                        .groups
+                        .create(members, Some(automation.title.clone()), project.as_deref())
+                        .await?;
+                    self.groups.prompt(&group.id, prompt()).await?;
+                    Ok(RunTarget::Group(group.id))
+                }
             }
         }
         .await;
@@ -200,11 +218,15 @@ impl AutomationService {
         match &target {
             RunTarget::Session(session_id) => {
                 self.store
-                    .start_automation_run(&run_id, Some(session_id), None, started_at);
+                    .start_automation_run(&run_id, Some(session_id), None, None, started_at);
             }
             RunTarget::Workflow(workflow_id) => {
                 self.store
-                    .start_automation_run(&run_id, None, Some(workflow_id), started_at);
+                    .start_automation_run(&run_id, None, Some(workflow_id), None, started_at);
+            }
+            RunTarget::Group(group_id) => {
+                self.store
+                    .start_automation_run(&run_id, None, None, Some(group_id), started_at);
             }
         }
         log::info!("自动化已触发: automation={id} run={run_id}");
@@ -230,7 +252,12 @@ impl AutomationService {
                     workflow.state == amux_common::domain::SessionState::Idle
                 })
             });
-            if idle_session || idle_workflow {
+            let idle_group = run.group_id.as_deref().is_some_and(|group_id| {
+                self.store
+                    .group(group_id)
+                    .is_some_and(|group| group.state == amux_common::domain::SessionState::Idle)
+            });
+            if idle_session || idle_workflow || idle_group {
                 self.finish_run(&run).await;
             }
         }
@@ -249,6 +276,17 @@ impl AutomationService {
                     .fail_automation_run(&run.id, "会话异常终止", now_ms());
                 return;
             }
+            service.finish_run(&run).await;
+        });
+    }
+
+    /// 群聊会话结束时的主动回收。
+    pub fn on_group_idle(self: &Arc<Self>, group_id: &str) {
+        let Some(run) = self.store.running_automation_run_for_group(group_id) else {
+            return;
+        };
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
             service.finish_run(&run).await;
         });
     }
@@ -273,17 +311,24 @@ impl AutomationService {
         let finished_at = now_ms();
         self.store.finish_automation_run(&run.id, finished_at);
         let started_at = run.started_at.unwrap_or(run.created_at);
-        let context = match (&run.session_id, &run.workflow_id) {
-            (Some(session_id), _) => session_context(
+        let context = match (&run.session_id, &run.workflow_id, &run.group_id) {
+            (Some(session_id), _, _) => session_context(
                 &self.sessions,
                 session_id,
                 &automation.task,
                 started_at,
                 finished_at,
             ),
-            (_, Some(workflow_id)) => workflow_context(
+            (_, Some(workflow_id), _) => workflow_context(
                 &self.workflows,
                 workflow_id,
+                &automation.task,
+                started_at,
+                finished_at,
+            ),
+            (_, _, Some(group_id)) => group_context(
+                &self.groups,
+                group_id,
                 &automation.task,
                 started_at,
                 finished_at,
@@ -433,6 +478,9 @@ fn normalize_input(mut input: AutomationInput) -> Result<AutomationInput, String
         AutomationSessionOptions::ExistingWorkflow { workflow_id } if workflow_id.is_empty() => {
             return Err("已有工作流会话不能为空".into());
         }
+        AutomationSessionOptions::ExistingGroup { group_id } if group_id.is_empty() => {
+            return Err("已有群聊会话不能为空".into());
+        }
         AutomationSessionOptions::NewSession {
             machine,
             agent,
@@ -448,6 +496,9 @@ fn normalize_input(mut input: AutomationInput) -> Result<AutomationInput, String
         } => return Err("开启 worktree 时必须指定基分支".into()),
         AutomationSessionOptions::NewWorkflow { plan, .. } if plan.is_empty() => {
             return Err("工作流计划不能为空".into());
+        }
+        AutomationSessionOptions::NewGroup { members, .. } if members.is_empty() => {
+            return Err("群聊成员不能为空".into());
         }
         _ => {}
     }
@@ -490,6 +541,9 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
         AutomationSessionOptions::ExistingWorkflow { workflow_id } => {
             *workflow_id = workflow_id.trim().to_string();
         }
+        AutomationSessionOptions::ExistingGroup { group_id } => {
+            *group_id = group_id.trim().to_string();
+        }
         AutomationSessionOptions::NewSession {
             machine,
             agent,
@@ -525,6 +579,20 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
         }
         AutomationSessionOptions::NewWorkflow { plan, project } => {
             *plan = plan.trim().to_string();
+            *project = project
+                .take()
+                .map(|project| project.trim().to_string())
+                .filter(|project| !project.is_empty());
+        }
+        AutomationSessionOptions::NewGroup { members, project } => {
+            for member in members.iter_mut() {
+                member.name = member.name.trim().to_string();
+                member.description = member.description.trim().to_string();
+                member.machine = member.machine.trim().to_string();
+                member.agent = member.agent.trim().to_string();
+                member.workspace = member.workspace.trim().to_string();
+            }
+            members.retain(|member| !member.name.is_empty());
             *project = project
                 .take()
                 .map(|project| project.trim().to_string())
@@ -599,6 +667,64 @@ fn workflow_context(
         started_at,
         finished_at,
     )
+}
+
+fn group_context(
+    groups: &GroupService,
+    group_id: &str,
+    task: &str,
+    started_at: u64,
+    finished_at: u64,
+) -> Result<String, String> {
+    const PAGE_SIZE: usize = 100;
+    let mut history = Vec::new();
+    let mut offset = 0;
+    loop {
+        let (mut items, has_more) = groups.history(group_id, PAGE_SIZE, offset);
+        // 分页位置按原始行数推进；无法解析的成员引用会被过滤，不能用返回条数计算偏移。
+        offset += PAGE_SIZE;
+        if items.is_empty() && !has_more {
+            break;
+        }
+        items.append(&mut history);
+        history = items;
+        if !has_more {
+            break;
+        }
+    }
+    let mut lines = Vec::new();
+    let mut has_agent_message = false;
+    for message in history
+        .into_iter()
+        .filter(|message| (started_at..=finished_at).contains(&message.timestamp))
+    {
+        if message.member_id.is_some() {
+            has_agent_message = true;
+        }
+        lines.push(format!(
+            "{}: {}",
+            message.name,
+            group_blocks_text(&message.content)
+        ));
+    }
+    if !has_agent_message {
+        return Err("Agent 无任何输出".into());
+    }
+    Ok(format!(
+        "智能体正在执行一个自动化任务，任务内容是：{task}。\n\n以下是智能体会话消息：\n{}",
+        lines.join("\n")
+    ))
+}
+
+fn group_blocks_text(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 历史接口按最新优先分页，每页内部再按时间正序返回；按页前插可还原完整时序。

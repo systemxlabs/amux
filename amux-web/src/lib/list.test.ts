@@ -1,4 +1,4 @@
-// 会话列表统一排序与工作流关联会话的折叠展开（docs/PRD.md「会话列表视图」）。
+// 会话列表统一排序与工作流/群聊关联会话的折叠展开（docs/PRD.md「会话列表视图」）。
 
 import { describe, expect, it } from "vitest";
 
@@ -11,7 +11,7 @@ import {
   sortEntries,
 } from "./list";
 import { newPaging } from "./paging";
-import type { ListEntry, Session, Workflow } from "./types";
+import type { Group, ListEntry, Session, Workflow } from "./types";
 
 function session(
   id: string,
@@ -53,6 +53,31 @@ function workflow(
   };
 }
 
+function group(
+  id: string,
+  updatedAt: number,
+  linked: Session[],
+  createdAt = 1,
+  pinned = false,
+): Group {
+  return {
+    id,
+    title: id,
+    state: "idle",
+    pinned,
+    createdAt,
+    updatedAt,
+    members: [],
+    sessions: linked,
+  };
+}
+
+function entryKey(entry: ListEntry): string {
+  if (entry.kind === "session") return entry.session.id;
+  if (entry.kind === "workflow") return entry.workflow.id;
+  return entry.group.id;
+}
+
 describe("sortEntries", () => {
   it("置顶条目在前，其余按创建时间倒序", () => {
     const entries: ListEntry[] = [
@@ -61,7 +86,7 @@ describe("sortEntries", () => {
       { kind: "session", session: session("s-new", 0, "idle", 500) },
       { kind: "session", session: session("s-pinned", 0, "idle", 50, true) },
     ];
-    expect(sortEntries(entries).map((entry) => (entry.kind === "session" ? entry.session.id : entry.workflow.id))).toEqual([
+    expect(sortEntries(entries).map(entryKey)).toEqual([
       "s-pinned",
       "s-new",
       "w",
@@ -87,9 +112,10 @@ describe("buildListWindow", () => {
       newPaging(),
       [session("s1", 0, "idle", 100)],
       [workflow("w1", 0, [session("linked", 0, "idle", 150)], 200)],
+      [],
       true,
     );
-    expect(result.entries.map((entry) => (entry.kind === "session" ? entry.session.id : entry.workflow.id))).toEqual([
+    expect(result.entries.map(entryKey)).toEqual([
       "w1",
       "s1",
     ]);
@@ -101,9 +127,10 @@ describe("buildListWindow", () => {
       newPaging(),
       [session("alive", 300)],
       [workflow("kept", 200, [])],
+      [],
       false,
     );
-    expect(result.entries.map((entry) => (entry.kind === "session" ? entry.session.id : entry.workflow.id))).toEqual([
+    expect(result.entries.map(entryKey)).toEqual([
       "alive",
       "kept",
     ]);
@@ -115,15 +142,13 @@ describe("buildProjectGroupWindow", () => {
     const result = buildProjectGroupWindow(
       [session("s1", 100, "idle", 300), session("s2", 100, "idle", 100)],
       [workflow("w1", 100, [], 200)],
+      [],
       2,
       false,
       false,
+      false,
     );
-    expect(
-      result.entries.map((entry) =>
-        entry.kind === "session" ? entry.session.id : entry.workflow.id,
-      ),
-    ).toEqual(["s1", "w1"]);
+    expect(result.entries.map(entryKey)).toEqual(["s1", "w1"]);
     expect(result.hasMore).toBe(true);
   });
 
@@ -131,8 +156,10 @@ describe("buildProjectGroupWindow", () => {
     const result = buildProjectGroupWindow(
       [session("s1", 100)],
       [],
+      [],
       20,
       true,
+      false,
       false,
     );
     expect(result.entries).toHaveLength(1);
@@ -147,16 +174,27 @@ describe("buildProjectGroupWindow", () => {
         session("old", 0, "idle", 80),
       ],
       [],
+      [],
       1,
       false,
       false,
+      false,
     );
-    expect(
-      result.entries.map((entry) =>
-        entry.kind === "session" ? entry.session.id : entry.workflow.id,
-      ),
-    ).toEqual(["pinned", "new"]);
+    expect(result.entries.map(entryKey)).toEqual(["pinned", "new"]);
     expect(result.hasMore).toBe(true);
+  });
+
+  it("群聊会话与其他条目按创建时间统一排序", () => {
+    const result = buildProjectGroupWindow(
+      [session("s1", 100, "idle", 200)],
+      [],
+      [group("g1", 100, [], 300)],
+      5,
+      false,
+      false,
+      false,
+    );
+    expect(result.entries.map(entryKey)).toEqual(["g1", "s1"]);
   });
 });
 
@@ -172,9 +210,7 @@ describe("listRows", () => {
 
   it("默认折叠：工作流会话只占一行", () => {
     const rows = listRows(entries, new Set());
-    expect(rows.map((row) => (row.entry.kind === "session" ? row.entry.session.id : row.entry.workflow.id))).toEqual(
-      ["w", "s"],
-    );
+    expect(rows.map((row) => entryKey(row.entry))).toEqual(["w", "s"]);
     expect(rows.every((row) => row.depth === 0)).toBe(true);
   });
 
@@ -182,7 +218,7 @@ describe("listRows", () => {
     const rows = listRows(entries, new Set(["w"]));
     expect(
       rows.map((row) => ({
-        id: row.entry.kind === "session" ? row.entry.session.id : row.entry.workflow.id,
+        id: entryKey(row.entry),
         depth: row.depth,
         connector: row.connector,
       })),
@@ -216,10 +252,20 @@ describe("listRows", () => {
       ],
       new Set(["w"]),
     );
-    expect(
-      rows.slice(1).map((row) =>
-        row.entry.kind === "session" ? row.entry.session.id : row.entry.workflow.id,
-      ),
-    ).toEqual(["pinned", "new"]);
+    expect(rows.slice(1).map((row) => entryKey(row.entry))).toEqual(["pinned", "new"]);
+  });
+
+  it("群聊会话展开成员会话并支持折叠", () => {
+    const entry: ListEntry = {
+      kind: "group",
+      group: group("g", 300, linked),
+    };
+    expect(canExpand(entry)).toBe(true);
+    expect(listRows([entry], new Set()).map((row) => entryKey(row.entry))).toEqual(["g"]);
+    expect(listRows([entry], new Set(["g"])).map((row) => entryKey(row.entry))).toEqual([
+      "g",
+      "l-high",
+      "l-low",
+    ]);
   });
 });

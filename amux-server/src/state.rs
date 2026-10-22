@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::attachments::AttachmentStore;
 use crate::automations::AutomationService;
 use crate::config_store::ConfigStore;
+use crate::groups::GroupService;
 use crate::machines::MachineHub;
 use crate::sessions::SessionService;
 use crate::workflows::WorkflowService;
@@ -15,6 +16,7 @@ pub struct AppState {
     pub machines: MachineHub,
     pub sessions: Arc<SessionService>,
     pub workflows: Arc<WorkflowService>,
+    pub groups: Arc<GroupService>,
     pub automations: Arc<AutomationService>,
     pub attachments: Arc<AttachmentStore>,
 }

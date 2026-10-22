@@ -9,6 +9,7 @@ import type {
   AutomationConfig,
   AutomationInput,
   ContentBlock,
+  GroupMemberTemplate,
   ListEntry,
   OpenTarget,
   OrchestratorConfig,
@@ -19,7 +20,7 @@ import type {
   WorkflowPlanItem,
   WorktreeBase,
 } from "../lib/types";
-import { entryPinned, entryTitle, execDir, worktreeBaseFromBranch } from "../lib/types";
+import { entryId, entryPinned, entryTitle, execDir, worktreeBaseFromBranch } from "../lib/types";
 import { initialNewSession, panelAvailable } from "./core";
 import type { Core, PendingAttachment, SidePanel } from "./core";
 import {
@@ -143,11 +144,11 @@ export function showNewSession(core: Core): void {
   void refreshNewSession(core);
 }
 
-export function toggleExpand(core: Core, workflowId: string): void {
+export function toggleExpand(core: Core, id: string): void {
   core.update((state) => {
-    state.expanded = state.expanded.includes(workflowId)
-      ? state.expanded.filter((id) => id !== workflowId)
-      : [...state.expanded, workflowId];
+    state.expanded = state.expanded.includes(id)
+      ? state.expanded.filter((item) => item !== id)
+      : [...state.expanded, id];
   });
 }
 
@@ -156,7 +157,9 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
   const target: OpenTarget =
     entry.kind === "session"
       ? { kind: "session", id: entry.session.id }
-      : { kind: "workflow", id: entry.workflow.id };
+      : entry.kind === "workflow"
+        ? { kind: "workflow", id: entry.workflow.id }
+        : { kind: "group", id: entry.group.id };
   core.resetDetail();
   core.update((state) => {
     state.open = target;
@@ -171,8 +174,10 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
     }
     if (entry.kind === "session") {
       state.detail.session = entry.session;
-    } else {
+    } else if (entry.kind === "workflow") {
       state.detail.workflow = entry.workflow;
+    } else {
+      state.detail.group = entry.group;
     }
   });
   core.resetTicks();
@@ -326,10 +331,12 @@ export async function deleteEntry(core: Core, entry: ListEntry): Promise<void> {
   try {
     if (entry.kind === "session") {
       await core.client.deleteSession(entry.session.id);
-    } else {
+    } else if (entry.kind === "workflow") {
       await core.client.deleteWorkflow(entry.workflow.id);
+    } else {
+      await core.client.deleteGroup(entry.group.id);
     }
-    if (core.state.open?.id === (entry.kind === "session" ? entry.session.id : entry.workflow.id)) {
+    if (core.state.open?.id === entryId(entry)) {
       core.update((state) => {
         state.open = null;
       });
@@ -355,12 +362,19 @@ export async function renameEntry(core: Core, entry: ListEntry, title: string): 
         entry.session.project ?? null,
         entry.session.pinned,
       );
-    } else {
+    } else if (entry.kind === "workflow") {
       await core.client.configureWorkflow(
         entry.workflow.id,
         title,
         entry.workflow.project ?? null,
         entry.workflow.pinned,
+      );
+    } else {
+      await core.client.configureGroup(
+        entry.group.id,
+        title,
+        entry.group.project ?? null,
+        entry.group.pinned,
       );
     }
     core.success("标题已更新");
@@ -370,7 +384,7 @@ export async function renameEntry(core: Core, entry: ListEntry, title: string): 
   }
 }
 
-/** 以列表项的相同设置快速新建并打开一个普通会话或工作流会话。 */
+/** 以列表项的相同设置快速新建并打开一个普通、工作流或群聊会话。 */
 export async function createFromEntry(core: Core, entry: ListEntry): Promise<void> {
   if (!core.client) return;
   try {
@@ -399,7 +413,7 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
       });
       await refreshList(core);
       await openEntry(core, { kind: "session", session });
-    } else {
+    } else if (entry.kind === "workflow") {
       const workflow = await core.client.createWorkflow(
         entry.workflow.plan,
         null,
@@ -407,6 +421,41 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
       );
       await refreshList(core);
       await openEntry(core, { kind: "workflow", workflow });
+    } else {
+      const members: GroupMemberTemplate[] = [];
+      for (const member of entry.group.members) {
+        const session = entry.group.sessions.find((item) => item.id === member.sessionId);
+        if (session === undefined) {
+          core.failure(`无法读取群聊成员「${member.name}」的会话`);
+          return;
+        }
+        const useWorktree = session.worktreeDir !== "";
+        let worktreeBase: WorktreeBase | undefined;
+        if (useWorktree) {
+          const branch = (
+            await core.client
+              .listBranches(session.machine, execDir(session))
+              .catch(() => ({ branches: [] }))
+          ).branches.find((item) => item.isWorktreeBase);
+          if (branch === undefined) {
+            core.failure("无法识别 worktree 基分支");
+            return;
+          }
+          worktreeBase = worktreeBaseFromBranch(branch);
+        }
+        members.push({
+          name: member.name,
+          description: member.description,
+          machine: member.machine,
+          agent: member.agent,
+          workspace: session.workspace,
+          useWorktree,
+          worktreeBase,
+        });
+      }
+      const group = await core.client.createGroup(members, entry.group.project);
+      await refreshList(core);
+      await openEntry(core, { kind: "group", group });
     }
   } catch (error) {
     core.failure(`新建会话失败：${messageOf(error)}`);
@@ -461,7 +510,7 @@ export async function setEntryProject(
           state.detail.session.project = project;
         }
       });
-    } else {
+    } else if (entry.kind === "workflow") {
       await core.client.configureWorkflow(
         entry.workflow.id,
         entry.workflow.title,
@@ -476,6 +525,22 @@ export async function setEntryProject(
         if (item?.kind === "workflow") item.workflow.project = project;
         if (state.detail.workflow?.id === entry.workflow.id) {
           state.detail.workflow.project = project;
+        }
+      });
+    } else {
+      await core.client.configureGroup(
+        entry.group.id,
+        entry.group.title,
+        project ?? null,
+        entry.group.pinned,
+      );
+      core.update((state) => {
+        const item = state.entries.find(
+          (candidate) => candidate.kind === "group" && candidate.group.id === entry.group.id,
+        );
+        if (item?.kind === "group") item.group.project = project;
+        if (state.detail.group?.id === entry.group.id) {
+          state.detail.group.project = project;
         }
       });
     }
@@ -509,7 +574,7 @@ export async function toggleEntryPinned(core: Core, entry: ListEntry): Promise<v
           state.detail.session.pinned = pinned;
         }
       });
-    } else {
+    } else if (entry.kind === "workflow") {
       await core.client.configureWorkflow(
         entry.workflow.id,
         entry.workflow.title,
@@ -525,6 +590,22 @@ export async function toggleEntryPinned(core: Core, entry: ListEntry): Promise<v
         if (item?.kind === "workflow") item.workflow.pinned = pinned;
         if (state.detail.workflow?.id === entry.workflow.id) {
           state.detail.workflow.pinned = pinned;
+        }
+      });
+    } else {
+      await core.client.configureGroup(
+        entry.group.id,
+        entry.group.title,
+        entry.group.project ?? null,
+        pinned,
+      );
+      core.update((state) => {
+        const item = state.entries.find(
+          (candidate) => candidate.kind === "group" && candidate.group.id === entry.group.id,
+        );
+        if (item?.kind === "group") item.group.pinned = pinned;
+        if (state.detail.group?.id === entry.group.id) {
+          state.detail.group.pinned = pinned;
         }
       });
     }
@@ -663,6 +744,22 @@ export async function createWorkflow(core: Core): Promise<void> {
   }
 }
 
+/** 群聊模式创建会话。 */
+export async function createGroup(core: Core): Promise<void> {
+  if (!core.client) return;
+  const { groupMembers, project } = core.state.newSession;
+  try {
+    const group = await core.client.createGroup(groupMembers, project);
+    core.update((state) => {
+      state.newSession = { ...initialNewSession(), mode: state.newSession.mode };
+    });
+    await refreshList(core);
+    await openEntry(core, { kind: "group", group });
+  } catch (error) {
+    core.failure(`创建群聊会话失败：${messageOf(error)}`);
+  }
+}
+
 // ---------- 会话交互 ----------
 
 function nextAttachmentId(): string {
@@ -695,24 +792,18 @@ async function uploadPendingAttachment(core: Core, id: string): Promise<void> {
     const uploaded =
       target.kind === "session"
         ? await client.uploadSessionAttachment(target.id, attachment.file, controller.signal)
-        : await client.uploadWorkflowAttachment(target.id, attachment.file, controller.signal);
+        : target.kind === "workflow"
+          ? await client.uploadWorkflowAttachment(target.id, attachment.file, controller.signal)
+          : await client.uploadGroupAttachment(target.id, attachment.file, controller.signal);
     if (core.state.open?.kind !== target.kind || core.state.open.id !== target.id) {
-      if (target.kind === "session") {
-        await client.deleteSessionAttachment(target.id, uploaded.name);
-      } else {
-        await client.deleteWorkflowAttachment(target.id, uploaded.name);
-      }
+      await deleteRemoteAttachment(client, target, uploaded.name);
       core.update((state) => {
         state.attachments = state.attachments.filter((item) => item.id !== id);
       });
       return;
     }
     if (!core.state.attachments.some((item) => item.id === id)) {
-      if (target.kind === "session") {
-        await client.deleteSessionAttachment(target.id, uploaded.name);
-      } else {
-        await client.deleteWorkflowAttachment(target.id, uploaded.name);
-      }
+      await deleteRemoteAttachment(client, target, uploaded.name);
       return;
     }
     updatePendingAttachment(core, id, (item) => {
@@ -724,7 +815,9 @@ async function uploadPendingAttachment(core: Core, id: string): Promise<void> {
         uri:
           target.kind === "session"
             ? client.sessionAttachmentUri(target.id, uploaded.name)
-            : client.workflowAttachmentUri(target.id, uploaded.name),
+            : target.kind === "workflow"
+              ? client.workflowAttachmentUri(target.id, uploaded.name)
+              : client.groupAttachmentUri(target.id, uploaded.name),
         name: item.label,
         mimeType: item.file.type || undefined,
       };
@@ -783,11 +876,7 @@ export async function removeAttachment(core: Core, id: string): Promise<void> {
   });
   if (attachment.status !== "uploaded" || attachment.remoteName === undefined) return;
   try {
-    if (target.kind === "session") {
-      await core.client.deleteSessionAttachment(target.id, attachment.remoteName);
-    } else {
-      await core.client.deleteWorkflowAttachment(target.id, attachment.remoteName);
-    }
+    await deleteRemoteAttachment(core.client, target, attachment.remoteName);
     if (core.state.sidePanel === "attachments") {
       await refreshAttachments(core);
     }
@@ -798,6 +887,31 @@ export async function removeAttachment(core: Core, id: string): Promise<void> {
 
 const ATTACHMENTS_PAGE_SIZE = 50;
 
+async function deleteRemoteAttachment(
+  client: ApiClient,
+  target: OpenTarget,
+  name: string,
+): Promise<void> {
+  if (target.kind === "session") {
+    await client.deleteSessionAttachment(target.id, name);
+  } else if (target.kind === "workflow") {
+    await client.deleteWorkflowAttachment(target.id, name);
+  } else {
+    await client.deleteGroupAttachment(target.id, name);
+  }
+}
+
+async function loadAttachmentPage(
+  client: ApiClient,
+  target: OpenTarget,
+  limit: number,
+  offset: number,
+) {
+  if (target.kind === "session") return client.sessionAttachments(target.id, limit, offset);
+  if (target.kind === "workflow") return client.workflowAttachments(target.id, limit, offset);
+  return client.groupAttachments(target.id, limit, offset);
+}
+
 /** 会话附件面板打开时刷新第一页。 */
 export async function refreshAttachments(core: Core): Promise<void> {
   const target = core.state.open;
@@ -807,10 +921,7 @@ export async function refreshAttachments(core: Core): Promise<void> {
     state.detail.attachmentsLoading = true;
   });
   try {
-    const page =
-      target.kind === "session"
-        ? await client.sessionAttachments(target.id, ATTACHMENTS_PAGE_SIZE, 0)
-        : await client.workflowAttachments(target.id, ATTACHMENTS_PAGE_SIZE, 0);
+    const page = await loadAttachmentPage(client, target, ATTACHMENTS_PAGE_SIZE, 0);
     core.update((state) => {
       if (state.open?.kind !== target.kind || state.open.id !== target.id) return;
       state.detail.attachments = page.attachments;
@@ -842,10 +953,7 @@ export async function loadMoreAttachments(core: Core): Promise<void> {
     state.detail.attachmentsLoading = true;
   });
   try {
-    const page =
-      target.kind === "session"
-        ? await client.sessionAttachments(target.id, ATTACHMENTS_PAGE_SIZE, offset)
-        : await client.workflowAttachments(target.id, ATTACHMENTS_PAGE_SIZE, offset);
+    const page = await loadAttachmentPage(client, target, ATTACHMENTS_PAGE_SIZE, offset);
     core.update((state) => {
       if (state.open?.kind !== target.kind || state.open.id !== target.id) return;
       state.detail.attachments = [...state.detail.attachments, ...page.attachments];
@@ -866,11 +974,7 @@ export async function deleteAttachment(core: Core, name: string): Promise<void> 
   const client = core.client;
   if (target === null || client === null) return;
   try {
-    if (target.kind === "session") {
-      await client.deleteSessionAttachment(target.id, name);
-    } else {
-      await client.deleteWorkflowAttachment(target.id, name);
-    }
+    await deleteRemoteAttachment(client, target, name);
     core.update((state) => {
       state.attachments = state.attachments.filter(
         (attachment) => attachment.remoteName !== name,
@@ -890,8 +994,10 @@ export async function deleteAllAttachments(core: Core): Promise<void> {
   try {
     if (target.kind === "session") {
       await client.deleteSessionAttachments(target.id);
-    } else {
+    } else if (target.kind === "workflow") {
       await client.deleteWorkflowAttachments(target.id);
+    } else {
+      await client.deleteGroupAttachments(target.id);
     }
     core.update((state) => {
       state.detail.attachments = [];
@@ -932,8 +1038,10 @@ export async function sendPrompt(
   try {
     if (target.kind === "session") {
       await core.client.promptSession(target.id, input);
-    } else {
+    } else if (target.kind === "workflow") {
       await core.client.promptWorkflow(target.id, input);
+    } else {
+      await core.client.promptGroup(target.id, input);
     }
   } catch (error) {
     core.failure(`发送失败：${messageOf(error)}`);
@@ -958,12 +1066,14 @@ export async function cancelOpen(core: Core): Promise<void> {
   try {
     if (target.kind === "session") {
       await core.client.cancelSession(target.id);
-    } else {
+    } else if (target.kind === "workflow") {
       await core.client.promptWorkflow(target.id, [
         { type: "text", text: "取消当前进行中的全部工作" },
       ]);
       await refreshList(core);
       core.last.list = Date.now();
+    } else {
+      await core.client.cancelGroup(target.id);
     }
     await refreshHistory(core);
   } catch (error) {
@@ -1163,6 +1273,22 @@ export async function savePlans(core: Core, plans: WorkflowPlanItem[]): Promise<
       state.settings.plans = plans;
     });
     core.success("工作流计划已保存");
+  } catch (error) {
+    core.failure(`保存失败：${messageOf(error)}`);
+  }
+}
+
+export async function saveGroupMembers(
+  core: Core,
+  members: GroupMemberTemplate[],
+): Promise<void> {
+  if (!core.client) return;
+  try {
+    await core.client.setGroupMembers(members);
+    core.update((state) => {
+      state.settings.groupMembers = members;
+    });
+    core.success("群聊预设成员已保存");
   } catch (error) {
     core.failure(`保存失败：${messageOf(error)}`);
   }

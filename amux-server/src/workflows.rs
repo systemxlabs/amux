@@ -1639,6 +1639,7 @@ mod tests {
                 .insert_session(&Session {
                     id: session_id.into(),
                     workflow_id: None,
+                    group_id: None,
                     machine: "pc".into(),
                     agent: "codex".into(),
                     title: String::new(),

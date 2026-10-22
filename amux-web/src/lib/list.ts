@@ -5,6 +5,7 @@ import {
   entryCreatedAt,
   entryId,
   entryPinned,
+  type Group,
   type ListEntry,
   type Session,
   type Workflow,
@@ -41,11 +42,13 @@ export function buildListWindow(
   paging: Paging,
   sessions: readonly Session[],
   workflows: readonly Workflow[],
+  groups: readonly Group[],
   hasMore: boolean,
 ): { entries: ListEntry[]; paging: Paging } {
   const page: ListEntry[] = [
     ...sessions.map((session): ListEntry => ({ kind: "session", session })),
     ...workflows.map((workflow): ListEntry => ({ kind: "workflow", workflow })),
+    ...groups.map((group): ListEntry => ({ kind: "group", group })),
   ];
   return { entries: sortEntries(page), paging: { ...paging, hasOlder: hasMore } };
 }
@@ -57,13 +60,16 @@ export function buildListWindow(
 export function buildProjectGroupWindow(
   sessions: readonly Session[],
   workflows: readonly Workflow[],
+  groups: readonly Group[],
   limit: number,
   sessionsHaveMore: boolean,
   workflowsHaveMore: boolean,
+  groupsHaveMore: boolean,
 ): { entries: ListEntry[]; hasMore: boolean } {
   const entries: ListEntry[] = [
     ...sessions.map((session): ListEntry => ({ kind: "session", session })),
     ...workflows.map((workflow): ListEntry => ({ kind: "workflow", workflow })),
+    ...groups.map((group): ListEntry => ({ kind: "group", group })),
   ];
   const pinned = entries
     .filter(entryPinned)
@@ -73,7 +79,7 @@ export function buildProjectGroupWindow(
     .sort((a, b) => entryCreatedAt(b) - entryCreatedAt(a) || entryId(a).localeCompare(entryId(b)));
   return {
     entries: [...pinned, ...unpinned.slice(0, limit)],
-    hasMore: unpinned.length > limit || sessionsHaveMore || workflowsHaveMore,
+    hasMore: unpinned.length > limit || sessionsHaveMore || workflowsHaveMore || groupsHaveMore,
   };
 }
 
@@ -96,8 +102,20 @@ export function listRows(entries: readonly ListEntry[], expanded: ReadonlySet<st
   const rows: ListRow[] = [];
   for (const entry of entries) {
     rows.push({ entry, depth: 0 });
-    if (entry.kind !== "workflow" || !expanded.has(entry.workflow.id)) continue;
-    const linked = [...entry.workflow.linkedSessions].sort(
+    const expandId =
+      entry.kind === "workflow"
+        ? entry.workflow.id
+        : entry.kind === "group"
+          ? entry.group.id
+          : null;
+    if (expandId === null || !expanded.has(expandId)) continue;
+    const linkedSessions =
+      entry.kind === "workflow"
+        ? entry.workflow.linkedSessions
+        : entry.kind === "group"
+          ? entry.group.sessions
+          : [];
+    const linked = [...linkedSessions].sort(
       (a, b) =>
         Number(b.pinned) - Number(a.pinned) ||
         b.createdAt - a.createdAt ||
@@ -118,7 +136,9 @@ export function listRows(entries: readonly ListEntry[], expanded: ReadonlySet<st
   return rows;
 }
 
-/** 工作流会话是否可展开（有关联普通会话）。 */
+/** 工作流/群聊会话是否可展开（有关联普通会话）。 */
 export function canExpand(entry: ListEntry): boolean {
-  return entry.kind === "workflow" && entry.workflow.linkedSessions.length > 0;
+  if (entry.kind === "workflow") return entry.workflow.linkedSessions.length > 0;
+  if (entry.kind === "group") return entry.group.sessions.length > 0;
+  return false;
 }

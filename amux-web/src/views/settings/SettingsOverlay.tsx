@@ -9,6 +9,7 @@ import { useCore, useCoreState } from "../../core/store";
 import { cn } from "../../lib/utils";
 import { ConnectionSection } from "./ConnectionSection";
 import { AutomationSection } from "./AutomationSection";
+import { GroupMembersSection } from "./GroupMembersSection";
 import { MachinesSection } from "./MachinesSection";
 import { OrchestratorSection } from "./OrchestratorSection";
 import { QuickCommandsSection } from "./QuickCommandsSection";
@@ -21,6 +22,7 @@ const TABS: { tab: SettingsTab; label: string }[] = [
   { tab: "connection", label: "连接" },
   { tab: "machines", label: "机器管理" },
   { tab: "workflow", label: "工作流" },
+  { tab: "group", label: "群聊设置" },
   { tab: "automation", label: "自动化" },
   { tab: "quickCommands", label: "快捷指令" },
   { tab: "skills", label: "技能管理" },
@@ -40,6 +42,8 @@ function section(tab: SettingsTab) {
           <WorkflowPlansSection />
         </div>
       );
+    case "group":
+      return <GroupMembersSection />;
     case "automation":
       return <AutomationSection />;
     case "quickCommands":

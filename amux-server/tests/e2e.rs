@@ -743,6 +743,142 @@ async fn server_daemon_agent_end_to_end() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn group_chat_drives_mentioned_member_and_hides_member_session() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let state_file = home.path().join("mock_state");
+    let bin = fake_bin(Path::new(env!("CARGO_BIN_EXE_mock_acp")), &state_file);
+    let port = free_port();
+
+    let _server = spawn_server(port, home.path());
+    let client = Client {
+        http: reqwest::Client::new(),
+        base: format!("http://127.0.0.1:{port}"),
+    };
+    poll(
+        || {
+            let client = &client;
+            async move {
+                client
+                    .http
+                    .get(format!("{}/machines", client.base))
+                    .send()
+                    .await
+                    .ok()
+            }
+        },
+        "server 监听",
+    )
+    .await;
+
+    let _daemon = spawn_daemon(port, home.path(), &[&bin]);
+    poll(
+        || async {
+            let agents = client
+                .try_get(&format!("/machines/{MACHINE}/agents"))
+                .await?;
+            agents
+                .as_array()?
+                .iter()
+                .any(|agent| agent["name"] == "codex" && agent["available"] == true)
+                .then_some(())
+        },
+        "codex 可用",
+    )
+    .await;
+
+    let group = client
+        .post_ok(
+            "/groups",
+            json!({
+                "members": [{
+                    "name": "coder",
+                    "description": "负责实现",
+                    "machine": MACHINE,
+                    "agent": "codex",
+                    "workspace": workspace.path().to_string_lossy(),
+                    "useWorktree": false,
+                }],
+            }),
+        )
+        .await;
+    let group_id = group["id"].as_str().unwrap().to_string();
+    let member_session_id = group["sessions"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(group["state"], "idle");
+    assert_eq!(group["members"][0]["name"], "coder");
+
+    let sessions = client.get("/sessions").await;
+    assert!(
+        sessions["sessions"].as_array().unwrap().is_empty(),
+        "群聊成员的普通会话不应出现在会话列表: {sessions}"
+    );
+    assert_eq!(
+        client.get(&format!("/sessions/{member_session_id}")).await["id"],
+        member_session_id
+    );
+
+    client
+        .post_ok(
+            &format!("/groups/{group_id}"),
+            json!({ "input": [{ "type": "text", "text": "@coder 你好" }] }),
+        )
+        .await;
+
+    let history = poll(
+        || {
+            let client = &client;
+            let path = format!("/groups/{group_id}/history");
+            async move {
+                let value = client.try_get(&path).await?;
+                let items = value["items"].as_array().cloned().unwrap_or_default();
+                items
+                    .iter()
+                    .any(|item| {
+                        item["name"] == "coder"
+                            && item["content"][0]["text"]
+                                .as_str()
+                                .is_some_and(|text| text.contains("完成：你现在在一个群聊会话中"))
+                    })
+                    .then_some(items)
+            }
+        },
+        "群聊成员回复进入历史",
+    )
+    .await;
+    assert_eq!(history[0]["name"], "user");
+    assert_eq!(history[1]["name"], "coder");
+    assert_eq!(history[1]["agent"], "codex@testpc");
+    assert_eq!(history[1]["description"], "负责实现");
+
+    let group = poll(
+        || {
+            let client = &client;
+            let path = format!("/groups/{group_id}");
+            async move {
+                let value = client.try_get(&path).await?;
+                (value["state"] == "idle").then_some(value)
+            }
+        },
+        "群聊回到空闲",
+    )
+    .await;
+    assert_eq!(group["title"], "@coder 你好");
+
+    assert_eq!(
+        client.delete(&format!("/groups/{group_id}")).await,
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .get_status(&format!("/sessions/{member_session_id}"))
+            .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "删除群聊应级联删除成员普通会话"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn server_shutdown_closes_all_open_agent_sessions() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

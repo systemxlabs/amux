@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 
 use amux_common::api::{
-    AutomationConfig, OrchestratorConfig, Project, QuickCommand, RecentWorkspace, Skill,
-    WorkflowPlanItem,
+    AutomationConfig, GroupMemberTemplate, OrchestratorConfig, Project, QuickCommand,
+    RecentWorkspace, Skill, WorkflowPlanItem,
 };
 use parking_lot::Mutex;
 
@@ -41,6 +41,27 @@ impl ConfigStore {
 
     pub fn workflow_plans(&self) -> Vec<WorkflowPlanItem> {
         read_json::<Vec<WorkflowPlanItem>>(&self.path("workflows")).unwrap_or_default()
+    }
+
+    pub fn group_members(&self) -> Vec<GroupMemberTemplate> {
+        read_json::<Vec<GroupMemberTemplate>>(&self.path("group_members")).unwrap_or_default()
+    }
+
+    /// 全量更新群聊预设成员；name 可重复（docs/DESIGN.md「群聊会话存储」）。
+    pub fn set_group_members(&self, members: &[GroupMemberTemplate]) -> Result<(), String> {
+        for member in members {
+            if member.name.trim().is_empty()
+                || member.machine.trim().is_empty()
+                || member.agent.trim().is_empty()
+                || member.workspace.trim().is_empty()
+            {
+                return Err("群聊预设成员的名称、机器、agent 和工作目录不能为空".into());
+            }
+            if member.use_worktree && member.worktree_base.is_none() {
+                return Err("开启 worktree 时必须指定基分支".into());
+            }
+        }
+        write_json(&self.path("group_members"), members)
     }
 
     pub fn set_workflow_plans(&self, plans: &[WorkflowPlanItem]) -> Result<(), String> {

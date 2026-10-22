@@ -14,6 +14,10 @@ import {
 
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ContextMenu, type MenuItem, type MenuState } from "../components/ContextMenu";
+import {
+  GroupMembersEditor,
+  groupMembersError,
+} from "../components/GroupMembersEditor";
 import { MultiSelectCombobox } from "../components/MultiSelectCombobox";
 import {
   WorkflowPlanField,
@@ -45,6 +49,7 @@ import {
   triggerAutomation,
 } from "../core/actions";
 import {
+  loadMoreAutomationGroups,
   loadMoreAutomationSessions,
   loadMoreAutomationWorkflows,
   resetAutomationTargets,
@@ -62,6 +67,7 @@ import type {
   AutomationRunState,
   AutomationSessionOptions,
   AutomationTrigger,
+  GroupMemberTemplate,
   WorktreeBase,
 } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -69,8 +75,10 @@ import { cn } from "../lib/utils";
 type EditorSessionMode =
   | "existing_session"
   | "existing_workflow"
+  | "existing_group"
   | "new_session"
-  | "new_workflow";
+  | "new_workflow"
+  | "new_group";
 
 const GITHUB_WEBHOOK_EVENTS = [
   "push",
@@ -112,10 +120,14 @@ function sessionOptionsSummary(options: AutomationSessionOptions): string {
       return `已有普通会话 · ${options.sessionId}`;
     case "existing_workflow":
       return `已有工作流会话 · ${options.workflowId}`;
+    case "existing_group":
+      return `已有群聊会话 · ${options.groupId}`;
     case "new_session":
       return `新建普通会话 · ${options.agent}@${options.machine} · ${options.workspace}`;
     case "new_workflow":
       return `新建工作流会话 · ${options.plan}`;
+    case "new_group":
+      return `新建群聊会话 · ${options.members.map((member) => member.name).join("、")}`;
   }
 }
 
@@ -463,7 +475,12 @@ function AutomationDetail({ automation }: { automation: Automation }) {
                           .filter((workflow) => workflow.id === run.workflowId)
                           .map((workflow) => ({ kind: "workflow" as const, workflow }))
                           .at(0)
-                      : undefined;
+                      : run.groupId !== undefined
+                        ? state.automationGroups
+                            .filter((group) => group.id === run.groupId)
+                            .map((group) => ({ kind: "group" as const, group }))
+                            .at(0)
+                        : undefined;
                 if (entry !== undefined) void openEntry(core, entry);
               }}
             >
@@ -560,6 +577,11 @@ function AutomationEditor({
       ? initial.sessionOptions.workflowId
       : "",
   );
+  const [existingGroupId, setExistingGroupId] = useState(
+    initial?.sessionOptions.mode === "existing_group"
+      ? initial.sessionOptions.groupId
+      : "",
+  );
   const [machine, setMachine] = useState(
     initial?.sessionOptions.mode === "new_session"
       ? initial.sessionOptions.machine
@@ -598,6 +620,20 @@ function AutomationEditor({
       ? (initial.sessionOptions.project ?? "")
       : "",
   );
+  const [groupMembers, setGroupMembers] = useState<GroupMemberTemplate[]>(
+    initial?.sessionOptions.mode === "new_group"
+      ? initial.sessionOptions.members.map((member) => ({
+          ...member,
+          worktreeBase:
+            member.worktreeBase === undefined ? undefined : { ...member.worktreeBase },
+        }))
+      : [],
+  );
+  const [groupProject, setGroupProject] = useState(
+    initial?.sessionOptions.mode === "new_group"
+      ? (initial.sessionOptions.project ?? "")
+      : "",
+  );
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [resultLabels, setResultLabels] = useState<AutomationResultLabel[]>(
     initial?.resultLabels.map((label) => ({ ...label })) ?? [
@@ -616,12 +652,15 @@ function AutomationEditor({
   const sessionValid =
     (sessionMode === "existing_session" && existingSessionId !== "") ||
     (sessionMode === "existing_workflow" && existingWorkflowId !== "") ||
+    (sessionMode === "existing_group" && existingGroupId !== "") ||
     (sessionMode === "new_session" &&
       machine !== "" &&
       agent !== "" &&
       workspace.trim() !== "" &&
       (!useWorktree || worktreeBase !== null)) ||
-    (sessionMode === "new_workflow" && plan.trim() !== "");
+    (sessionMode === "new_workflow" && plan.trim() !== "") ||
+    (sessionMode === "new_group" &&
+      groupMembersError(groupMembers, state.settings.agents) === null);
   const labelsValid =
     resultLabels.length >= 2 &&
     resultLabels.every(
@@ -658,6 +697,8 @@ function AutomationEditor({
           return { mode: "existing_session", sessionId: existingSessionId };
         case "existing_workflow":
           return { mode: "existing_workflow", workflowId: existingWorkflowId };
+        case "existing_group":
+          return { mode: "existing_group", groupId: existingGroupId };
         case "new_session":
           return {
             mode: "new_session",
@@ -673,6 +714,12 @@ function AutomationEditor({
             mode: "new_workflow",
             plan: plan.trim(),
             project: workflowProject === "" ? undefined : workflowProject,
+          };
+        case "new_group":
+          return {
+            mode: "new_group",
+            members: groupMembers,
+            project: groupProject === "" ? undefined : groupProject,
           };
       }
     })();
@@ -795,11 +842,17 @@ function AutomationEditor({
               <TabsTrigger className="flex-1" value="existing_workflow">
                 已有工作流会话
               </TabsTrigger>
+              <TabsTrigger className="flex-1" value="existing_group">
+                已有群聊会话
+              </TabsTrigger>
               <TabsTrigger className="flex-1" value="new_session">
                 新建普通会话
               </TabsTrigger>
               <TabsTrigger className="flex-1" value="new_workflow">
                 新建工作流会话
+              </TabsTrigger>
+              <TabsTrigger className="flex-1" value="new_group">
+                新建群聊会话
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -854,6 +907,34 @@ function AutomationEditor({
                 {state.automationWorkflows.map((workflow) => (
                   <SelectItem key={workflow.id} value={workflow.id}>
                     {(workflow.pinned ? "置顶 · " : "") + (workflow.title || workflow.id)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        ) : null}
+        {sessionMode === "existing_group" ? (
+          <Field label="群聊会话">
+            <Select
+              value={existingGroupId || "none"}
+              onValueChange={(value) => setExistingGroupId(value === "none" ? "" : value)}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="选择群聊会话" />
+              </SelectTrigger>
+              <SelectContent
+                className="w-[var(--radix-select-trigger-width)]"
+                onViewportScroll={(event) => {
+                  const node = event.currentTarget;
+                  if (node.scrollTop + node.clientHeight >= node.scrollHeight - 24) {
+                    void loadMoreAutomationGroups(core);
+                  }
+                }}
+              >
+                <SelectItem value="none">未选择</SelectItem>
+                {state.automationGroups.map((group) => (
+                  <SelectItem key={group.id} value={group.id}>
+                    {(group.pinned ? "置顶 · " : "") + (group.title || group.id)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -975,6 +1056,31 @@ function AutomationEditor({
                     selected={workflowProject === item.name}
                     onClick={() =>
                       setWorkflowProject(workflowProject === item.name ? "" : item.name)
+                    }
+                  >
+                    {item.name}
+                  </OptionButton>
+                ))}
+              </OptionGroup>
+            </Field>
+          </div>
+        ) : null}
+        {sessionMode === "new_group" ? (
+          <div className="space-y-4">
+            <GroupMembersEditor
+              core={core}
+              members={groupMembers}
+              onChange={setGroupMembers}
+              slotPrefix="automation-group-member"
+            />
+            <Field label="项目">
+              <OptionGroup>
+                {state.settings.projects.map((item) => (
+                  <OptionButton
+                    key={item.name}
+                    selected={groupProject === item.name}
+                    onClick={() =>
+                      setGroupProject(groupProject === item.name ? "" : item.name)
                     }
                   >
                     {item.name}

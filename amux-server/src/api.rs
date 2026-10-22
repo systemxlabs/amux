@@ -160,8 +160,30 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/workflows/{id}/attachments/{name}",
             axum::routing::delete(delete_workflow_attachment),
         )
+        .route("/groups", post(create_group).get(list_groups))
+        .route(
+            "/groups/{id}",
+            get(get_group).post(prompt_group).delete(delete_group),
+        )
+        .route("/groups/{id}/cancel", post(cancel_group))
+        .route("/groups/{id}/configure", post(configure_group))
+        .route("/groups/{id}/history", get(group_history))
+        .route(
+            "/groups/{id}/attachments",
+            get(list_group_attachments)
+                .post(upload_group_attachment)
+                .delete(delete_group_attachments),
+        )
+        .route(
+            "/groups/{id}/attachments/{name}",
+            axum::routing::delete(delete_group_attachment),
+        )
         .route("/config/skills/", get(get_skills).put(put_skills))
         .route("/config/workflows/", get(get_plans).put(put_plans))
+        .route(
+            "/config/group_members/",
+            get(get_group_members).put(put_group_members),
+        )
         .route(
             "/config/recent_workspaces/",
             get(get_recent_workspaces).put(put_recent_workspaces),
@@ -207,6 +229,10 @@ pub fn public_router(state: Arc<AppState>) -> Router {
         .route(
             "/workflows/{id}/attachments/{name}",
             get(download_workflow_attachment),
+        )
+        .route(
+            "/groups/{id}/attachments/{name}",
+            get(download_group_attachment),
         )
         .route("/webhooks/github", post(github_webhook))
         .with_state(state)
@@ -683,6 +709,167 @@ async fn resize_terminal(
         .map_err(bad_request)
 }
 
+// ---------- 群聊会话 ----------
+
+async fn create_group(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateGroupRequest>,
+) -> ApiResult<Group> {
+    state
+        .groups
+        .create(&request.members, None, request.project.as_deref())
+        .await
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn list_groups(
+    State(state): State<Arc<AppState>>,
+    Query(page): Query<Page>,
+) -> Json<GroupList> {
+    let (groups, has_more) = state.groups.list(
+        page.limit(SESSION_LIST_DEFAULT_LIMIT),
+        page.offset(),
+        page.project.as_deref(),
+    );
+    Json(GroupList { groups, has_more })
+}
+
+async fn get_group(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResult<Group> {
+    state.groups.get(&id).map(Json).map_err(not_found)
+}
+
+async fn prompt_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<PromptRequest>,
+) -> ApiResult<OpAck> {
+    state
+        .groups
+        .prompt(&id, request.input)
+        .await
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn cancel_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    state
+        .groups
+        .cancel(&id)
+        .await
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn delete_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    let group = state.groups.get(&id).map_err(not_found)?;
+    state.groups.delete(&id).await.map_err(bad_request)?;
+    if let Err(error) = state.attachments.delete_all(AttachmentOwner::Group(&id)) {
+        log::warn!("删除群聊附件失败: group={id}: {error}");
+    }
+    for member in group.members {
+        if let Err(error) = state
+            .attachments
+            .delete_all(AttachmentOwner::Session(&member.session_id))
+        {
+            log::warn!(
+                "删除成员会话附件失败: session={}: {error}",
+                member.session_id
+            );
+        }
+    }
+    Ok(Json(OpAck { ok: true }))
+}
+
+async fn configure_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<ConfigureGroupRequest>,
+) -> ApiResult<OpAck> {
+    state
+        .groups
+        .configure(&id, request.title, request.project, request.pinned)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn group_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(page): Query<Page>,
+) -> ApiResult<GroupHistoryPage> {
+    state.groups.get(&id).map_err(not_found)?;
+    let limit = page.limit(SESSION_PAGE_DEFAULT_LIMIT);
+    let offset = page.offset();
+    let (messages, has_more) = state.groups.history(&id, limit, offset);
+    Ok(Json(GroupHistoryPage {
+        items: messages,
+        has_more,
+        next_offset: has_more.then_some(offset + limit),
+    }))
+}
+
+async fn list_group_attachments(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(page): Query<Page>,
+) -> ApiResult<AttachmentList> {
+    state.groups.get(&id).map_err(not_found)?;
+    state
+        .attachments
+        .list(AttachmentOwner::Group(&id), page.limit(50), page.offset())
+        .map(Json)
+        .map_err(bad_request)
+}
+
+async fn upload_group_attachment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(upload): Query<UploadAttachment>,
+    body: Bytes,
+) -> ApiResult<Attachment> {
+    state.groups.get(&id).map_err(not_found)?;
+    upload_attachment(&state, AttachmentOwner::Group(&id), &upload.filename, body)
+}
+
+async fn delete_group_attachments(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    state.groups.get(&id).map_err(not_found)?;
+    state
+        .attachments
+        .delete_all(AttachmentOwner::Group(&id))
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn delete_group_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<OpAck> {
+    state.groups.get(&id).map_err(not_found)?;
+    state
+        .attachments
+        .delete(AttachmentOwner::Group(&id), &name)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn download_group_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    state.groups.get(&id).map_err(not_found)?;
+    download_attachment(&state, AttachmentOwner::Group(&id), &name)
+}
+
 // ---------- 工作流会话 ----------
 
 async fn create_workflow(
@@ -1061,6 +1248,23 @@ async fn delete_project(
     // 项目删除后，其下会话回到未归属（docs/PRD.md「项目管理」）
     state.sessions.unassign_project(&name);
     state.workflows.unassign_project(&name);
+    state.groups.unassign_project(&name);
+    Ok(Json(OpAck { ok: true }))
+}
+
+async fn get_group_members(State(state): State<Arc<AppState>>) -> Json<Vec<GroupMemberTemplate>> {
+    Json(state.config.group_members())
+}
+
+async fn put_group_members(
+    State(state): State<Arc<AppState>>,
+    Json(members): Json<Vec<GroupMemberTemplate>>,
+) -> ApiResult<OpAck> {
+    state
+        .config
+        .set_group_members(&members)
+        .map_err(bad_request)?;
+    log::info!("群聊预设成员配置已更新: {} 项", members.len());
     Ok(Json(OpAck { ok: true }))
 }
 

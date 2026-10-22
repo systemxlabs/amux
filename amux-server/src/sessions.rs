@@ -147,6 +147,15 @@ impl SessionService {
         self.store.agent_session_id(id)
     }
 
+    /// 反查 ACP 会话对应的 amux 会话 ID。
+    pub fn session_id_of_agent(&self, agent_session_id: &str) -> Option<String> {
+        self.caches
+            .agent_sessions
+            .lock()
+            .get(agent_session_id)
+            .cloned()
+    }
+
     /// 新建会话：仅在 Server 侧写入；worktree 方式立即在机器上创建。
     ///
     /// 不再校验 agent 是否可用：新建会话视图只允许选择已发现的可用 agent，真正不可用
@@ -180,6 +189,7 @@ impl SessionService {
         let session = Session {
             id,
             workflow_id: None,
+            group_id: None,
             machine: machine.to_string(),
             agent: agent.to_string(),
             title: String::new(),
@@ -948,6 +958,7 @@ mod tests {
         Session {
             id: "s1".into(),
             workflow_id: None,
+            group_id: None,
             machine: "pc".into(),
             agent: "codex".into(),
             title: String::new(),

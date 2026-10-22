@@ -1,10 +1,14 @@
 // 新建会话视图（docs/PRD.md「新建会话视图」、docs/DESIGN.md「新建会话视图」）。
 //
-// 顶部为模式切换（普通/工作流）：普通模式选择机器与可用 agent、输入工作目录（前缀匹配联想与最近目录）、
-// worktree 开关；工作流模式选择或输入工作计划（内置智能体未配置时引导去设置）。
+// 顶部为模式切换（普通/工作流/群聊）：普通模式选择机器与可用 agent、输入工作目录（前缀匹配联想与最近目录）、
+// worktree 开关；工作流模式选择或输入工作计划；群聊模式配置多个成员。
 
 import type { ReactNode } from "react";
 
+import {
+  GroupMembersEditor,
+  groupMembersError,
+} from "../components/GroupMembersEditor";
 import {
   WorkflowPlanField,
   WorkspaceField,
@@ -14,7 +18,12 @@ import { Button } from "../components/ui/button";
 import { Label } from "../components/ui/label";
 import { Switch } from "../components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { createSession, createWorkflow, openSettings } from "../core/actions";
+import {
+  createGroup,
+  createSession,
+  createWorkflow,
+  openSettings,
+} from "../core/actions";
 import { refreshWorkflowSetup } from "../core/poll";
 import { useCore, useCoreState } from "../core/store";
 import { cn } from "../lib/utils";
@@ -70,6 +79,7 @@ export function NewSessionView() {
     worktreeBase,
     plan,
     selectedPlan,
+    groupMembers,
   } = state.newSession;
   const agents = state.settings.agents.find((item) => item.machine === machine)?.agents ?? [];
   const selectedAgent = agents.find((item) => item.name === agent);
@@ -319,6 +329,48 @@ export function NewSessionView() {
       </div>
     );
 
+  const groupForm = (
+    <div className="flex flex-col gap-3">
+      <GroupMembersEditor
+        core={core}
+        members={groupMembers}
+        onChange={(members) =>
+          core.update((draft) => {
+            draft.newSession.groupMembers = members;
+          })
+        }
+        slotPrefix="new-group-member"
+      />
+      <div className="flex flex-col gap-2">
+        <Label>项目</Label>
+        <div data-slot="group-project-group" className="flex flex-wrap gap-1">
+          {state.settings.projects.map((project) => (
+            <OptionButton
+              key={project.name}
+              slot="project-option"
+              selected={state.newSession.project === project.name}
+              onClick={() =>
+                core.update((draft) => {
+                  draft.newSession.project =
+                    draft.newSession.project === project.name ? undefined : project.name;
+                })
+              }
+            >
+              {project.name}
+            </OptionButton>
+          ))}
+        </div>
+      </div>
+      <Button
+        data-slot="create-group"
+        disabled={groupMembersError(groupMembers, state.settings.agents) !== null}
+        onClick={() => void createGroup(core)}
+      >
+        创建会话
+      </Button>
+    </div>
+  );
+
   return (
     <div data-slot="new-session-view" className="flex h-full overflow-auto p-4 lg:p-6">
       {/* PRD「新建会话视图」：无连接机器时整个视图仅展示居中提示 */}
@@ -334,26 +386,32 @@ export function NewSessionView() {
             data-slot="new-session-mode"
             value={mode}
             onValueChange={(value) => {
-              const next = value === "workflow" ? "workflow" : "normal";
+              const next =
+                value === "workflow" ? "workflow" : value === "group" ? "group" : "normal";
               core.update((draft) => {
                 draft.newSession.mode = next;
               });
               if (next === "workflow") void refreshWorkflowSetup(core);
             }}
           >
-            <TabsList className="w-48 self-center">
+            <TabsList className="w-64 self-center">
               <TabsTrigger data-slot="mode-normal" value="normal">
                 普通
               </TabsTrigger>
               <TabsTrigger data-slot="mode-workflow" value="workflow">
                 工作流
               </TabsTrigger>
+              <TabsTrigger data-slot="mode-group" value="group">
+                群聊
+              </TabsTrigger>
             </TabsList>
           </Tabs>
           {mode === "normal" ? (
             normalForm
-          ) : (
+          ) : mode === "workflow" ? (
             workflowForm
+          ) : (
+            groupForm
           )}
         </div>
       )}

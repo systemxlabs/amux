@@ -534,6 +534,48 @@ pub fn generate_title(input: &str) -> String {
     out
 }
 
+/// 短随机 ID：群聊消息等局部标识用（5 字符随机串）。
+pub fn rand_id() -> String {
+    use std::fmt::Write as _;
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = [0u8; 5];
+    fill_random(&mut bytes);
+    let mut out = String::with_capacity(5);
+    for byte in bytes {
+        let _ = write!(
+            out,
+            "{}",
+            ALPHABET[(byte % ALPHABET.len() as u8) as usize] as char
+        );
+    }
+    out
+}
+
+/// 简单随机字节源：优先 OS，退化到时间+地址混合（标识碰撞仅影响单条展示）。
+fn fill_random(bytes: &mut [u8]) {
+    #[cfg(unix)]
+    {
+        use std::io::Read as _;
+        if std::fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(bytes))
+            .is_ok()
+        {
+            return;
+        }
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64)
+        ^ (bytes.as_ptr() as usize as u64);
+    let mut state = seed | 1;
+    for byte in bytes.iter_mut() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *byte = (state >> 33) as u8;
+    }
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }

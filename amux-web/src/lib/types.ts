@@ -231,6 +231,69 @@ export type ConfigureWorkflowRequest = {
   pinned: boolean;
 };
 
+/** 群聊预设成员。 */
+export type GroupMemberTemplate = {
+  name: string;
+  description: string;
+  machine: string;
+  agent: string;
+  workspace: string;
+  useWorktree: boolean;
+  worktreeBase?: WorktreeBase;
+};
+
+export type GroupMember = {
+  id: string;
+  name: string;
+  description: string;
+  machine: string;
+  agent: string;
+  sessionId: string;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type Group = {
+  id: string;
+  title: string;
+  state: SessionState;
+  project?: string;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+  members: GroupMember[];
+  sessions: Session[];
+};
+
+export type GroupList = { groups: Group[]; hasMore: boolean };
+export type CreateGroupRequest = {
+  members: GroupMemberTemplate[];
+  project?: string;
+};
+export type ConfigureGroupRequest = {
+  title: string;
+  project: string | null;
+  pinned: boolean;
+};
+
+/** 群聊消息：服务端已解析成员会话引用。 */
+export type GroupMessage = {
+  id: string;
+  memberId?: string;
+  name: string;
+  agent?: string;
+  description?: string;
+  content: ContentBlock[];
+  timestamp: number;
+};
+
+export type GroupHistoryPage = {
+  items: GroupMessage[];
+  hasMore: boolean;
+  nextOffset?: number;
+};
+
 /** 管理类操作的通用应答。 */
 export type OpAck = { ok: boolean };
 
@@ -265,6 +328,7 @@ export type AutomationTrigger =
 export type AutomationSessionOptions =
   | { mode: "existing_session"; sessionId: string }
   | { mode: "existing_workflow"; workflowId: string }
+  | { mode: "existing_group"; groupId: string }
   | {
       mode: "new_session";
       machine: string;
@@ -274,7 +338,8 @@ export type AutomationSessionOptions =
       worktreeBase?: WorktreeBase;
       project?: string;
     }
-  | { mode: "new_workflow"; plan: string; project?: string };
+  | { mode: "new_workflow"; plan: string; project?: string }
+  | { mode: "new_group"; members: GroupMemberTemplate[]; project?: string };
 
 export type AutomationRunState = "queued" | "running" | "finished" | "failed";
 
@@ -283,6 +348,7 @@ export type AutomationRun = {
   automationId: string;
   sessionId?: string;
   workflowId?: string;
+  groupId?: string;
   state: AutomationRunState;
   resultLabel?: string;
   error?: string;
@@ -326,15 +392,17 @@ export type AutomationConfig = {
   model: string;
 };
 
-/** 会话目标：普通会话或工作流会话（对话/活动/取消等操作共用）。 */
+/** 会话目标：普通、工作流或群聊会话（对话/活动/取消等操作共用）。 */
 export type OpenTarget =
   | { kind: "session"; id: string }
-  | { kind: "workflow"; id: string };
+  | { kind: "workflow"; id: string }
+  | { kind: "group"; id: string };
 
-/** 会话列表条目：普通会话或工作流会话（置顶优先，其余按创建时间排序）。 */
+/** 会话列表条目：普通、工作流或群聊会话（置顶优先，其余按创建时间排序）。 */
 export type ListEntry =
   | { kind: "session"; session: Session }
-  | { kind: "workflow"; workflow: Workflow };
+  | { kind: "workflow"; workflow: Workflow }
+  | { kind: "group"; group: Group };
 
 /** 会话实际执行目录：启用 worktree 时为 worktree 目录。 */
 export function execDir(session: Session): string {
@@ -342,30 +410,44 @@ export function execDir(session: Session): string {
 }
 
 export function entryId(entry: ListEntry): string {
-  return entry.kind === "session" ? entry.session.id : entry.workflow.id;
+  if (entry.kind === "session") return entry.session.id;
+  if (entry.kind === "workflow") return entry.workflow.id;
+  return entry.group.id;
 }
 
 export function entryState(entry: ListEntry): SessionState {
-  return entry.kind === "session" ? entry.session.state : entry.workflow.state;
+  if (entry.kind === "session") return entry.session.state;
+  if (entry.kind === "workflow") return entry.workflow.state;
+  return entry.group.state;
 }
 
 export function entryTitle(entry: ListEntry): string {
-  return entry.kind === "session" ? entry.session.title : entry.workflow.title;
+  if (entry.kind === "session") return entry.session.title;
+  if (entry.kind === "workflow") return entry.workflow.title;
+  return entry.group.title;
 }
 
 export function entryPinned(entry: ListEntry): boolean {
-  return entry.kind === "session" ? entry.session.pinned : entry.workflow.pinned;
+  if (entry.kind === "session") return entry.session.pinned;
+  if (entry.kind === "workflow") return entry.workflow.pinned;
+  return entry.group.pinned;
 }
 
 export function entryCreatedAt(entry: ListEntry): number {
-  return entry.kind === "session" ? entry.session.createdAt : entry.workflow.createdAt;
+  if (entry.kind === "session") return entry.session.createdAt;
+  if (entry.kind === "workflow") return entry.workflow.createdAt;
+  return entry.group.createdAt;
 }
 
 export function entryProject(entry: ListEntry): string | undefined {
-  return entry.kind === "session" ? entry.session.project : entry.workflow.project;
+  if (entry.kind === "session") return entry.session.project;
+  if (entry.kind === "workflow") return entry.workflow.project;
+  return entry.group.project;
 }
 
-/** 会话列表条目关联的普通会话（仅工作流会话有）。 */
+/** 会话列表条目关联的普通会话（工作流/群聊会话有）。 */
 export function linkedSessions(entry: ListEntry): Session[] {
-  return entry.kind === "workflow" ? entry.workflow.linkedSessions : [];
+  if (entry.kind === "workflow") return entry.workflow.linkedSessions;
+  if (entry.kind === "group") return entry.group.sessions;
+  return [];
 }

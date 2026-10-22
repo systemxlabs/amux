@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use amux_common::api::{
     parse_automation_run_state, AutomationInput, AutomationResultLabel, AutomationRun,
-    AutomationSessionOptions, AutomationTrigger, Session,
+    AutomationSessionOptions, AutomationTrigger, GroupMessage, Session,
 };
-use amux_common::domain::{Activity, HistoryItem, SessionState};
+use amux_common::domain::{Activity, ContentBlock, HistoryItem, SessionState};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -68,8 +68,10 @@ pub struct Store {
     home: PathBuf,
     sessions: Mutex<Connection>,
     workflows: Mutex<Connection>,
+    groups: Mutex<Connection>,
     automations: Mutex<Connection>,
     transcripts: Mutex<TranscriptCache>,
+    group_transcripts: Mutex<TranscriptCache>,
 }
 
 /// 新建工作流元数据所需的输入。
@@ -88,6 +90,7 @@ impl Store {
         std::fs::create_dir_all(&home).map_err(|e| format!("创建 {} 失败: {e}", home.display()))?;
         let sessions = open_db(&home.join("session.sqlite"), SESSION_SCHEMA)?;
         let workflows = open_db(&home.join("workflow.sqlite"), WORKFLOW_SCHEMA)?;
+        let groups = open_db(&home.join("group.sqlite"), GROUP_SCHEMA)?;
         let automations = open_db(&home.join("automation.sqlite"), AUTOMATION_SCHEMA)?;
         // Server 重启后残留的「工作中」不再有 agent 侧 turn 支撑，统一回到空闲
         sessions
@@ -102,12 +105,18 @@ impl Store {
                 [],
             )
             .map_err(|e| format!("重置工作流状态失败: {e}"))?;
+        // Server 重启后残留的「工作中」不再有 agent 侧 turn 支撑，统一回到空闲
+        groups
+            .execute("UPDATE groups SET state = 'idle' WHERE state = 'busy'", [])
+            .map_err(|e| format!("重置群聊会话状态失败: {e}"))?;
         Ok(Self {
             home,
             sessions: Mutex::new(sessions),
             workflows: Mutex::new(workflows),
+            groups: Mutex::new(groups),
             automations: Mutex::new(automations),
             transcripts: Mutex::new(TranscriptCache::default()),
+            group_transcripts: Mutex::new(TranscriptCache::default()),
         })
     }
 
@@ -150,11 +159,12 @@ impl Store {
         self.sessions
             .lock()
             .execute(
-                "INSERT INTO sessions (id, workflow_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12)",
+                "INSERT INTO sessions (id, workflow_id, group_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13)",
                 params![
                     session.id,
                     session.workflow_id,
+                    session.group_id,
                     session.state.as_str(),
                     session.title,
                     session.project.as_deref(),
@@ -175,7 +185,7 @@ impl Store {
         self.sessions
             .lock()
             .query_row(
-                "SELECT id, workflow_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+                "SELECT id, workflow_id, group_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 row_to_session,
@@ -189,7 +199,7 @@ impl Store {
     pub fn sessions_all(&self) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, workflow_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+            "SELECT id, workflow_id, group_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions ORDER BY pinned DESC, created_at DESC, id DESC",
         ) {
             Ok(stmt) => stmt,
@@ -211,7 +221,7 @@ impl Store {
         let sessions: Vec<Session> = self
             .sessions_all()
             .into_iter()
-            .filter(|session| session.workflow_id.is_none())
+            .filter(|session| session.workflow_id.is_none() && session.group_id.is_none())
             .filter(|session| match project {
                 None => true,
                 Some("") => session.project.is_none(),
@@ -248,7 +258,7 @@ impl Store {
     pub fn sessions_of_agent(&self, machine: &str, agent: &str) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, workflow_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+            "SELECT id, workflow_id, group_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions WHERE machine = ?1 AND agent = ?2",
         ) {
             Ok(stmt) => stmt,
@@ -272,6 +282,20 @@ impl Store {
             .ok()
             .flatten()?;
         workflow_id
+    }
+
+    /// 成员会话所属群聊会话 id。
+    pub fn group_of_session(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .query_row(
+                "SELECT group_id FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()?
     }
 
     pub fn set_state(&self, id: &str, state: SessionState) {
@@ -343,6 +367,14 @@ impl Store {
         let _ = self.sessions.lock().execute(
             "UPDATE sessions SET workflow_id = ?2, updated_at = ?3 WHERE id = ?1",
             params![session_id, workflow_id, now_ms() as i64],
+        );
+    }
+
+    /// 标记群聊成员会话（供 `GET /sessions` 排除）。
+    pub fn link_group_session(&self, group_id: &str, session_id: &str) {
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET group_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![session_id, group_id, now_ms() as i64],
         );
     }
 
@@ -677,6 +709,10 @@ impl Store {
             "UPDATE workflows SET project = NULL WHERE project = ?1",
             params![project],
         );
+        let _ = self.groups.lock().execute(
+            "UPDATE groups SET project = NULL WHERE project = ?1",
+            params![project],
+        );
     }
 
     pub fn delete_workflow(&self, id: &str) {
@@ -692,6 +728,416 @@ impl Store {
             .filter(|session| session.workflow_id.as_deref() == Some(workflow_id))
             .map(|session| session.id)
             .collect()
+    }
+
+    // ---------- 群聊会话 ----------
+
+    pub fn group_dir(&self, group_id: &str) -> PathBuf {
+        self.home.join("groups").join(group_id)
+    }
+
+    pub fn insert_group(&self, id: &str, project: Option<&str>, created_at: u64) {
+        let _ = self.groups.lock().execute(
+            "INSERT INTO groups (id, title, state, project, pinned, created_at, updated_at)
+             VALUES (?1, '', 'idle', ?2, 0, ?3, ?3)",
+            params![id, project, created_at as i64],
+        );
+    }
+
+    pub fn group(&self, id: &str) -> Option<GroupRow> {
+        self.groups
+            .lock()
+            .query_row(
+                "SELECT id, title, state, project, pinned, created_at, updated_at FROM groups WHERE id = ?1",
+                params![id],
+                row_to_group,
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// 群聊列表：分页返回非置顶群聊会话，并始终附带该项目全部置顶会话。
+    pub fn groups_page(
+        &self,
+        limit: usize,
+        offset: usize,
+        project: Option<&str>,
+    ) -> (Vec<GroupRow>, bool) {
+        let conn = self.groups.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, title, state, project, pinned, created_at, updated_at FROM groups
+             WHERE (?1 IS NULL OR (?1 = '' AND project IS NULL) OR project = ?1)
+             ORDER BY pinned DESC, created_at DESC, id DESC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return (Vec::new(), false),
+        };
+        let rows = stmt.query_map(params![project], row_to_group);
+        let groups = collect(rows);
+        let mut pinned = Vec::new();
+        let mut unpinned = Vec::new();
+        for group in groups {
+            if group.pinned {
+                pinned.push(group);
+            } else {
+                unpinned.push(group);
+            }
+        }
+        let has_more = unpinned.len() > offset + limit;
+        let mut page = pinned;
+        page.extend(unpinned.into_iter().skip(offset).take(limit));
+        (page, has_more)
+    }
+
+    pub fn set_group_state(&self, id: &str, state: SessionState) {
+        let _ = self.groups.lock().execute(
+            "UPDATE groups SET state = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, state.as_str(), now_ms() as i64],
+        );
+    }
+
+    pub fn set_group_title(&self, id: &str, title: &str) {
+        let _ = self.groups.lock().execute(
+            "UPDATE groups SET title = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, title, now_ms() as i64],
+        );
+    }
+
+    pub fn set_group_title_if_empty(&self, id: &str, title: &str) {
+        let _ = self.groups.lock().execute(
+            "UPDATE groups SET title = ?2, updated_at = ?3
+             WHERE id = ?1 AND (title IS NULL OR title = '')",
+            params![id, title, now_ms() as i64],
+        );
+    }
+
+    pub fn touch_group(&self, id: &str) {
+        let _ = self.groups.lock().execute(
+            "UPDATE groups SET updated_at = ?2 WHERE id = ?1",
+            params![id, now_ms() as i64],
+        );
+    }
+
+    pub fn set_group_project(&self, id: &str, project: Option<&str>) {
+        let _ = self.groups.lock().execute(
+            "UPDATE groups SET project = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, project, now_ms() as i64],
+        );
+    }
+
+    pub fn set_group_pinned(&self, id: &str, pinned: bool) {
+        let _ = self.groups.lock().execute(
+            "UPDATE groups SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, pinned, now_ms() as i64],
+        );
+    }
+
+    pub fn delete_group(&self, id: &str) {
+        let conn = self.groups.lock();
+        let _ = conn.execute("DELETE FROM members WHERE group_id = ?1", params![id]);
+        let _ = conn.execute("DELETE FROM groups WHERE id = ?1", params![id]);
+        drop(conn);
+        self.group_transcripts.lock().remove(id);
+        let dir = self.group_dir(id);
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("删除群聊数据目录 {} 失败: {error}", dir.display());
+            }
+        }
+    }
+
+    pub fn insert_group_member(&self, member: &GroupMemberInsert<'_>) {
+        let GroupMemberInsert {
+            id,
+            group_id,
+            machine,
+            agent,
+            session_id,
+            name,
+            description,
+            created_at,
+        } = member;
+        let _ = self.groups.lock().execute(
+            "INSERT INTO members (id, group_id, machine, agent, session_id, name, description, pinned, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?8)",
+            params![
+                id,
+                group_id,
+                machine,
+                agent,
+                session_id,
+                name,
+                description,
+                *created_at as i64
+            ],
+        );
+    }
+
+    pub fn group_member(&self, member_id: &str) -> Option<MemberRow> {
+        self.groups
+            .lock()
+            .query_row(
+                "SELECT id, group_id, machine, agent, session_id, name, description, pinned, created_at, updated_at
+                 FROM members WHERE id = ?1",
+                params![member_id],
+                row_to_member,
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    pub fn group_member_by_session(&self, session_id: &str) -> Option<MemberRow> {
+        self.groups
+            .lock()
+            .query_row(
+                "SELECT id, group_id, machine, agent, session_id, name, description, pinned, created_at, updated_at
+                 FROM members WHERE session_id = ?1",
+                params![session_id],
+                row_to_member,
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    pub fn group_members(&self, group_id: &str) -> Vec<MemberRow> {
+        let conn = self.groups.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, group_id, machine, agent, session_id, name, description, pinned, created_at, updated_at
+             FROM members WHERE group_id = ?1
+             ORDER BY pinned DESC, created_at DESC, id DESC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        collect(stmt.query_map(params![group_id], row_to_member))
+    }
+
+    pub fn member_sessions(&self, group_id: &str) -> Vec<String> {
+        self.group_members(group_id)
+            .into_iter()
+            .map(|member| member.session_id)
+            .collect()
+    }
+
+    /// 追加一条群聊消息（用户消息直接存内容；成员消息存普通会话消息引用）。
+    pub fn insert_group_message(
+        &self,
+        group_id: &str,
+        id: &str,
+        member_id: Option<&str>,
+        session_message_id: Option<&str>,
+        user_content: Option<&str>,
+        created_at: u64,
+    ) {
+        let Ok(Some(conn)) = self.group_transcript(group_id, true) else {
+            return;
+        };
+        let conn = conn.lock();
+        // ACP 流式消息会以同一 message_id 多次 upsert；群聊只保留一条引用，
+        // 展示时始终读取普通会话中的最新完整内容。
+        if let (Some(member_id), Some(session_message_id)) = (member_id, session_message_id) {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM messages
+                        WHERE group_id = ?1 AND member_id = ?2 AND session_message_id = ?3
+                     )",
+                    params![group_id, member_id, session_message_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if exists {
+                return;
+            }
+        }
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO messages (id, group_id, member_id, session_message_id, user_content, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                id,
+                group_id,
+                member_id,
+                session_message_id,
+                user_content,
+                created_at as i64
+            ],
+        );
+    }
+
+    /// 获取群聊 transcript 连接；与普通会话 transcript 一样按群聊缓存。
+    fn group_transcript(
+        &self,
+        group_id: &str,
+        create: bool,
+    ) -> Result<Option<Arc<Mutex<Connection>>>, String> {
+        let mut transcripts = self.group_transcripts.lock();
+        if let Some(transcript) = transcripts.get(group_id) {
+            return Ok(Some(transcript));
+        }
+        let path = self.group_dir(group_id).join("transcript.sqlite");
+        if !create && !path.is_file() {
+            return Ok(None);
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("群聊 transcript 路径无效: {}", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建 {} 失败: {error}", parent.display()))?;
+        let transcript = Arc::new(Mutex::new(open_db(&path, GROUP_TRANSCRIPT_SCHEMA)?));
+        transcripts.insert(group_id.to_string(), Arc::clone(&transcript));
+        Ok(Some(transcript))
+    }
+
+    /// 群聊消息分页（最新优先，返回前按时间正序）。
+    fn group_message_rows(
+        &self,
+        group_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> (Vec<GroupMessageRow>, bool) {
+        let Some(conn) = self.group_transcript(group_id, false).ok().flatten() else {
+            return (Vec::new(), false);
+        };
+        let conn = conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, member_id, session_message_id, user_content, created_at FROM messages
+             ORDER BY created_at DESC, id DESC LIMIT ?1 OFFSET ?2",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return (Vec::new(), false),
+        };
+        let rows = stmt.query_map(params![(limit + 1) as i64, offset as i64], |row| {
+            Ok(GroupMessageRow {
+                id: row.get(0)?,
+                member_id: row.get(1)?,
+                session_message_id: row.get(2)?,
+                user_content: row.get(3)?,
+                created_at: row.get::<_, i64>(4)? as u64,
+            })
+        });
+        let mut items = match rows {
+            Ok(rows) => rows.flatten().collect::<Vec<_>>(),
+            Err(_) => Vec::new(),
+        };
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        items.reverse();
+        (items, has_more)
+    }
+
+    /// 某时间之后的全部群聊消息（按时间正序）。
+    pub fn group_messages_since(&self, group_id: &str, after_ms: u64) -> Vec<GroupMessageRow> {
+        let Some(conn) = self.group_transcript(group_id, false).ok().flatten() else {
+            return Vec::new();
+        };
+        let conn = conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, member_id, session_message_id, user_content, created_at FROM messages
+             WHERE created_at > ?1 ORDER BY created_at ASC, id ASC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![after_ms as i64], |row| {
+            Ok(GroupMessageRow {
+                id: row.get(0)?,
+                member_id: row.get(1)?,
+                session_message_id: row.get(2)?,
+                user_content: row.get(3)?,
+                created_at: row.get::<_, i64>(4)? as u64,
+            })
+        });
+        match rows {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 成员普通会话上一次用户消息时刻；从未驱动过时取会话创建时间。
+    pub fn last_user_message_at(&self, session_id: &str, fallback: u64) -> u64 {
+        let Some(transcript) = self.transcript(session_id, false).ok().flatten() else {
+            return fallback;
+        };
+        let at: Option<i64> = transcript
+            .lock()
+            .query_row(
+                "SELECT MAX(created_at) FROM messages WHERE role = 'user'",
+                [],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        at.map(|at| at as u64).unwrap_or(fallback)
+    }
+
+    /// 按普通会话消息 ID 读取消息内容块。
+    pub fn session_message(&self, session_id: &str, message_id: &str) -> Option<Vec<ContentBlock>> {
+        let transcript = self.transcript(session_id, false).ok()??;
+        let content = transcript
+            .lock()
+            .query_row(
+                "SELECT content FROM messages WHERE message_id = ?1",
+                params![message_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// 群聊历史分页：解析成员消息引用为完整内容。
+    pub fn group_messages_page(
+        &self,
+        group_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> (Vec<GroupMessage>, bool) {
+        let (rows, has_more) = self.group_message_rows(group_id, limit, offset);
+        let members: HashMap<String, MemberRow> = self
+            .group_members(group_id)
+            .into_iter()
+            .map(|member| (member.id.clone(), member))
+            .collect();
+        let messages = rows
+            .into_iter()
+            .filter_map(|row| {
+                let member = row.member_id.as_ref().and_then(|id| members.get(id));
+                match member {
+                    Some(member) => {
+                        let session_message_id = row.session_message_id?;
+                        let content =
+                            self.session_message(&member.session_id, &session_message_id)?;
+                        Some(GroupMessage {
+                            id: row.id,
+                            member_id: Some(member.id.clone()),
+                            name: member.name.clone(),
+                            agent: format!("{}@{}", member.agent, member.machine),
+                            description: member.description.clone(),
+                            content,
+                            timestamp: row.created_at,
+                        })
+                    }
+                    None => {
+                        let content: Vec<ContentBlock> =
+                            serde_json::from_str(row.user_content.as_deref()?).ok()?;
+                        Some(GroupMessage {
+                            id: row.id,
+                            member_id: None,
+                            name: "user".to_string(),
+                            agent: String::new(),
+                            description: String::new(),
+                            content,
+                            timestamp: row.created_at,
+                        })
+                    }
+                }
+            })
+            .collect();
+        (messages, has_more)
     }
 
     // ---------- 自动化 ----------
@@ -797,14 +1243,15 @@ impl Store {
     pub fn insert_automation_run(&self, run: &AutomationRun) {
         let _ = self.automations.lock().execute(
             "INSERT INTO runs (
-                id, automation_id, session_id, workflow_id, state, error, result_label,
+                id, automation_id, session_id, workflow_id, group_id, state, error, result_label,
                 created_at, started_at, finished_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 run.id,
                 run.automation_id,
                 run.session_id,
                 run.workflow_id,
+                run.group_id,
                 run.state.as_str(),
                 run.error,
                 run.result_label,
@@ -820,13 +1267,15 @@ impl Store {
         run_id: &str,
         session_id: Option<&str>,
         workflow_id: Option<&str>,
+        group_id: Option<&str>,
         started_at: u64,
     ) {
         let _ = self.automations.lock().execute(
             "UPDATE runs
-             SET state = 'running', session_id = ?2, workflow_id = ?3, started_at = ?4
+             SET state = 'running', session_id = ?2, workflow_id = ?3, group_id = ?4,
+                 started_at = ?5
              WHERE id = ?1 AND state = 'queued'",
-            params![run_id, session_id, workflow_id, started_at as i64],
+            params![run_id, session_id, workflow_id, group_id, started_at as i64],
         );
     }
 
@@ -865,7 +1314,7 @@ impl Store {
             .automations
             .lock()
             .query_row(
-                "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                "SELECT id, automation_id, session_id, workflow_id, group_id, state, error, result_label,
                         created_at, started_at, finished_at
                  FROM runs WHERE id = ?1",
                 params![id],
@@ -882,7 +1331,7 @@ impl Store {
             .automations
             .lock()
             .query_row(
-                "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                "SELECT id, automation_id, session_id, workflow_id, group_id, state, error, result_label,
                         created_at, started_at, finished_at
                  FROM runs WHERE automation_id = ?1
                  ORDER BY created_at DESC, id DESC LIMIT 1",
@@ -900,7 +1349,7 @@ impl Store {
             .automations
             .lock()
             .query_row(
-                "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                "SELECT id, automation_id, session_id, workflow_id, group_id, state, error, result_label,
                         created_at, started_at, finished_at
                  FROM runs
                  WHERE session_id = ?1 AND state = 'running'
@@ -919,7 +1368,7 @@ impl Store {
             .automations
             .lock()
             .query_row(
-                "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+                "SELECT id, automation_id, session_id, workflow_id, group_id, state, error, result_label,
                         created_at, started_at, finished_at
                  FROM runs
                  WHERE workflow_id = ?1 AND state = 'running'
@@ -933,10 +1382,29 @@ impl Store {
         record.decode()
     }
 
+    pub fn running_automation_run_for_group(&self, group_id: &str) -> Option<AutomationRun> {
+        let record = self
+            .automations
+            .lock()
+            .query_row(
+                "SELECT id, automation_id, session_id, workflow_id, group_id, state, error, result_label,
+                        created_at, started_at, finished_at
+                 FROM runs
+                 WHERE group_id = ?1 AND state = 'running'
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![group_id],
+                row_to_automation_run,
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        record.decode()
+    }
+
     pub fn running_automation_runs(&self) -> Vec<AutomationRun> {
         let conn = self.automations.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+            "SELECT id, automation_id, session_id, workflow_id, group_id, state, error, result_label,
                     created_at, started_at, finished_at
              FROM runs WHERE state = 'running'
              ORDER BY created_at ASC, id ASC",
@@ -958,7 +1426,7 @@ impl Store {
     ) -> (Vec<AutomationRun>, bool) {
         let conn = self.automations.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, automation_id, session_id, workflow_id, state, error, result_label,
+            "SELECT id, automation_id, session_id, workflow_id, group_id, state, error, result_label,
                     created_at, started_at, finished_at
              FROM runs WHERE automation_id = ?1
              ORDER BY created_at DESC, id DESC LIMIT ?2 OFFSET ?3",
@@ -991,6 +1459,55 @@ pub struct WorkflowRow {
     pub pinned: bool,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// 群聊会话元数据行。
+#[derive(Debug, Clone)]
+pub struct GroupRow {
+    pub id: String,
+    pub title: String,
+    pub state: SessionState,
+    pub project: Option<String>,
+    pub pinned: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// 群聊成员行。
+#[derive(Debug, Clone)]
+pub struct MemberRow {
+    pub id: String,
+    pub group_id: String,
+    pub machine: String,
+    pub agent: String,
+    pub session_id: String,
+    pub name: String,
+    pub description: String,
+    pub pinned: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// 新建群聊成员所需输入。
+pub struct GroupMemberInsert<'a> {
+    pub id: &'a str,
+    pub group_id: &'a str,
+    pub machine: &'a str,
+    pub agent: &'a str,
+    pub session_id: &'a str,
+    pub name: &'a str,
+    pub description: &'a str,
+    pub created_at: u64,
+}
+
+/// 群聊 transcript 消息行：成员消息经引用指向成员普通会话数据。
+#[derive(Debug, Clone)]
+pub struct GroupMessageRow {
+    pub id: String,
+    pub member_id: Option<String>,
+    pub session_message_id: Option<String>,
+    pub user_content: Option<String>,
+    pub created_at: u64,
 }
 
 /// 自动化元数据行；JSON 列在读取时解码成强类型字段。
@@ -1042,6 +1559,7 @@ struct AutomationRunRecord {
     automation_id: String,
     session_id: Option<String>,
     workflow_id: Option<String>,
+    group_id: Option<String>,
     state: String,
     error: Option<String>,
     result_label: Option<String>,
@@ -1057,6 +1575,7 @@ impl AutomationRunRecord {
             automation_id: self.automation_id,
             session_id: self.session_id,
             workflow_id: self.workflow_id,
+            group_id: self.group_id,
             state: parse_automation_run_state(&self.state)?,
             error: self.error,
             result_label: self.result_label,
@@ -1072,6 +1591,7 @@ const SESSION_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         workflow_id TEXT,
+        group_id TEXT,
         state TEXT NOT NULL,
         title TEXT,
         project TEXT,
@@ -1115,6 +1635,43 @@ const WORKFLOW_SCHEMA: &str = "
         updated_at INTEGER NOT NULL
     );";
 
+/// `group.sqlite` 表结构（docs/DESIGN.md「群聊会话存储」）。
+const GROUP_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS groups (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        state TEXT NOT NULL,
+        project TEXT,
+        pinned BOOL NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS members (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        machine TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        pinned BOOL NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CONSTRAINT uq_group_id_name UNIQUE (group_id, name)
+    );";
+
+/// 每群聊 `transcript.sqlite` 表结构（docs/DESIGN.md「群聊会话存储」）。
+const GROUP_TRANSCRIPT_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        member_id TEXT,
+        session_message_id TEXT,
+        user_content TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );";
+
 /// `automation.sqlite` 表结构（独立数据库按 docs/DESIGN.md「自动化存储」）。
 const AUTOMATION_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS automations (
@@ -1133,6 +1690,7 @@ const AUTOMATION_SCHEMA: &str = "
         automation_id TEXT NOT NULL,
         session_id TEXT,
         workflow_id TEXT,
+        group_id TEXT,
         state TEXT NOT NULL,
         error TEXT,
         result_label TEXT,
@@ -1151,20 +1709,21 @@ fn open_db(path: &Path, schema: &str) -> Result<Connection, String> {
 }
 
 fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
-    let state: String = row.get(2)?;
     Ok(Session {
         id: row.get(0)?,
         workflow_id: row.get(1)?,
-        state: amux_common::domain::parse_session_state(&state).unwrap_or(SessionState::Idle),
-        title: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-        project: row.get(4)?,
-        pinned: row.get(5)?,
-        workspace: row.get(6)?,
-        worktree_dir: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-        machine: row.get(8)?,
-        agent: row.get(9)?,
-        created_at: row.get::<_, i64>(11)? as u64,
-        updated_at: row.get::<_, i64>(12)? as u64,
+        group_id: row.get(2)?,
+        state: amux_common::domain::parse_session_state(row.get::<_, String>(3)?.as_str())
+            .unwrap_or(SessionState::Idle),
+        title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        project: row.get(5)?,
+        pinned: row.get(6)?,
+        workspace: row.get(7)?,
+        worktree_dir: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+        machine: row.get(9)?,
+        agent: row.get(10)?,
+        created_at: row.get::<_, i64>(12)? as u64,
+        updated_at: row.get::<_, i64>(13)? as u64,
     })
 }
 
@@ -1179,6 +1738,34 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRow> {
         pinned: row.get(5)?,
         created_at: row.get::<_, i64>(6)? as u64,
         updated_at: row.get::<_, i64>(7)? as u64,
+    })
+}
+
+fn row_to_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
+    Ok(GroupRow {
+        id: row.get(0)?,
+        title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        state: amux_common::domain::parse_session_state(row.get::<_, String>(2)?.as_str())
+            .unwrap_or(SessionState::Idle),
+        project: row.get(3)?,
+        pinned: row.get(4)?,
+        created_at: row.get::<_, i64>(5)? as u64,
+        updated_at: row.get::<_, i64>(6)? as u64,
+    })
+}
+
+fn row_to_member(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemberRow> {
+    Ok(MemberRow {
+        id: row.get(0)?,
+        group_id: row.get(1)?,
+        machine: row.get(2)?,
+        agent: row.get(3)?,
+        session_id: row.get(4)?,
+        name: row.get(5)?,
+        description: row.get(6)?,
+        pinned: row.get(7)?,
+        created_at: row.get::<_, i64>(8)? as u64,
+        updated_at: row.get::<_, i64>(9)? as u64,
     })
 }
 
@@ -1202,12 +1789,13 @@ fn row_to_automation_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Automation
         automation_id: row.get(1)?,
         session_id: row.get(2)?,
         workflow_id: row.get(3)?,
-        state: row.get(4)?,
-        error: row.get(5)?,
-        result_label: row.get(6)?,
-        created_at: row.get::<_, i64>(7)? as u64,
-        started_at: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
-        finished_at: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
+        group_id: row.get(4)?,
+        state: row.get(5)?,
+        error: row.get(6)?,
+        result_label: row.get(7)?,
+        created_at: row.get::<_, i64>(8)? as u64,
+        started_at: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
+        finished_at: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
     })
 }
 
@@ -1230,6 +1818,7 @@ mod tests {
         Session {
             id: id.to_string(),
             workflow_id: None,
+            group_id: None,
             machine: machine.into(),
             agent: agent.into(),
             title: String::new(),
@@ -1518,6 +2107,7 @@ mod tests {
             automation_id: "a1".into(),
             session_id: None,
             workflow_id: None,
+            group_id: None,
             state: amux_common::api::AutomationRunState::Queued,
             result_label: None,
             error: None,
@@ -1525,7 +2115,7 @@ mod tests {
             started_at: None,
             finished_at: None,
         });
-        store.start_automation_run("r1", None, Some("w1"), 11);
+        store.start_automation_run("r1", None, Some("w1"), None, 11);
         store.finish_automation_run("r1", 12);
         store.set_automation_run_label("r1", Some("通过"), None);
 
@@ -1602,5 +2192,162 @@ mod tests {
         assert_eq!(store.messages_page("s1", 10, 0).0.len(), 0);
         assert_eq!(store.messages_page("s2", 10, 0).0.len(), 1);
         assert_eq!(store.activities_page("s2", 10, 0).0.len(), 1);
+    }
+
+    #[test]
+    fn sessions_page_excludes_group_member_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_session(&session("s1", "pc", "codex")).unwrap();
+        store.insert_session(&session("s2", "pc", "codex")).unwrap();
+        store.insert_group("g1", None, 1);
+        store.link_group_session("g1", "s2");
+
+        let (page, _) = store.sessions_page(10, 0, None);
+        assert_eq!(
+            page.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["s1"]
+        );
+        assert_eq!(store.group_of_session("s2").as_deref(), Some("g1"));
+    }
+
+    #[test]
+    fn group_member_names_are_unique_within_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_group("g1", None, 1);
+        store.insert_session(&session("s1", "pc", "codex")).unwrap();
+        store.insert_session(&session("s2", "pc", "codex")).unwrap();
+        for (id, session_id) in [("m1", "s1"), ("m2", "s2")] {
+            store.insert_group_member(&GroupMemberInsert {
+                id,
+                group_id: "g1",
+                machine: "pc",
+                agent: "codex",
+                session_id,
+                name: "coder",
+                description: "",
+                created_at: 1,
+            });
+        }
+        assert_eq!(
+            store.group_members("g1").len(),
+            1,
+            "同名成员写入应被唯一约束拒绝"
+        );
+    }
+
+    #[test]
+    fn group_history_resolves_member_session_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_group("g1", None, 1);
+        store.insert_session(&session("s1", "pc", "codex")).unwrap();
+        store.insert_group_member(&GroupMemberInsert {
+            id: "m1",
+            group_id: "g1",
+            machine: "pc",
+            agent: "codex",
+            session_id: "s1",
+            name: "coder",
+            description: "负责实现",
+            created_at: 1,
+        });
+        store.upsert_message(
+            "s1",
+            "agent-message",
+            "agent",
+            r#"[{"type":"text","text":"实现完成"}]"#,
+            20,
+        );
+        store.insert_group_message(
+            "g1",
+            "u1",
+            None,
+            None,
+            Some(r#"[{"type":"text","text":"@coder 开始"}]"#),
+            10,
+        );
+        store.insert_group_message("g1", "a1", Some("m1"), Some("agent-message"), None, 20);
+
+        let (messages, has_more) = store.group_messages_page("g1", 10, 0);
+        assert!(!has_more);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (message.name.as_str(), message.agent.as_str()))
+                .collect::<Vec<_>>(),
+            [("user", ""), ("coder", "codex@pc")]
+        );
+        assert_eq!(
+            messages[1].content,
+            vec![ContentBlock::Text(
+                agent_client_protocol::schema::v2::TextContent::new("实现完成")
+            )]
+        );
+    }
+
+    #[test]
+    fn group_history_keeps_one_reference_per_streamed_agent_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_group("g1", None, 1);
+        store.insert_session(&session("s1", "pc", "codex")).unwrap();
+        store.insert_group_member(&GroupMemberInsert {
+            id: "m1",
+            group_id: "g1",
+            machine: "pc",
+            agent: "codex",
+            session_id: "s1",
+            name: "coder",
+            description: "负责实现",
+            created_at: 1,
+        });
+
+        for (message_id, text, at) in [("a1", "实现", 10), ("a1", "实现完成", 11)] {
+            store.upsert_message(
+                "s1",
+                message_id,
+                "agent",
+                &serde_json::to_string(&vec![ContentBlock::Text(
+                    agent_client_protocol::schema::v2::TextContent::new(text),
+                )])
+                .unwrap(),
+                at,
+            );
+            store.insert_group_message(
+                "g1",
+                &format!("group-{at}"),
+                Some("m1"),
+                Some(message_id),
+                None,
+                at,
+            );
+        }
+
+        let (messages, _) = store.group_messages_page("g1", 10, 0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].content,
+            vec![ContentBlock::Text(
+                agent_client_protocol::schema::v2::TextContent::new("实现完成")
+            )]
+        );
+    }
+
+    #[test]
+    fn group_busy_state_is_reset_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_group("g1", None, 1);
+        store.set_group_state("g1", SessionState::Busy);
+        drop(store);
+
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.group("g1").unwrap().state,
+            SessionState::Idle,
+            "Server 重启后不应残留群聊工作中状态"
+        );
     }
 }
