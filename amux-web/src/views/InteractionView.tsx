@@ -192,9 +192,7 @@ export function InteractionView() {
   const isWorkflow = target.kind === "workflow";
   const title = isSession
     ? `${detail.session?.agent ?? ""}@${detail.session?.machine ?? ""}`
-    : isWorkflow
-      ? "工作流智能体"
-      : detail.group?.title || "群聊会话";
+    : "工作流智能体";
   const available = isSession
     ? (state.settings.agents
         .find((entry) => entry.machine === detail.session?.machine)
@@ -315,65 +313,62 @@ export function InteractionView() {
   return (
     <div data-slot="interaction-view" className="flex h-full min-h-0 flex-col">
       {/* pl-12/pr-12：为左上角的抽屉按钮与右上角的悬浮按钮留出空间 */}
-      <header className="flex items-center gap-2 border-b border-border py-2 pr-12 pl-12 lg:pl-3">
-        {isGroup ? (
-          <span data-slot="interaction-group-title" className="font-medium">
+      {!isGroup ? (
+        <header className="flex items-center gap-2 border-b border-border py-2 pr-12 pl-12 lg:pl-3">
+          <span data-slot="interaction-agent" className="font-medium">
             {title}
           </span>
-        ) : (
-          <>
-            <span data-slot="interaction-agent" className="font-medium">
-              {title}
-            </span>
-            <span
-              data-slot="interaction-agent-state"
-              data-available={available}
-              className={cn(
-                "flex items-center gap-1 text-xs",
-                available ? "text-muted-foreground" : "text-destructive",
-              )}
-            >
-              <span
-                data-slot="interaction-agent-state-dot"
-                className={cn(
-                  "size-1.5 rounded-full",
-                  available ? "bg-success" : "bg-destructive",
-                )}
-              />
-              {available ? "可用" : "不可用"}
-            </span>
-          </>
-        )}
-        {isSession && execDirPath !== "" ? (
-          <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground">
-            <span data-slot="interaction-exec-dir" title={execDirPath} className="min-w-0 truncate">
-              {execDirPath}
-            </span>
-            {gitBranch !== null ? (
-              <span data-slot="interaction-git-branch" title={gitBranch} className="flex shrink-0 items-center gap-1 truncate">
-                <GitBranch aria-hidden="true" className="size-3 shrink-0" />
-                <span className="truncate">{gitBranch}</span>
-              </span>
-            ) : null}
-          </div>
-        ) : null}
-        {isWorkflow && workflowPlan !== "" ? (
           <span
-            data-slot="interaction-workflow-plan"
-            title={workflowPlan}
-            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+            data-slot="interaction-agent-state"
+            data-available={available}
+            className={cn(
+              "flex items-center gap-1 text-xs",
+              available ? "text-muted-foreground" : "text-destructive",
+            )}
           >
-            {workflowPlan}
+            <span
+              data-slot="interaction-agent-state-dot"
+              className={cn(
+                "size-1.5 rounded-full",
+                available ? "bg-success" : "bg-destructive",
+              )}
+            />
+            {available ? "可用" : "不可用"}
           </span>
-        ) : null}
-      </header>
+          {isSession && execDirPath !== "" ? (
+            <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground">
+              <span data-slot="interaction-exec-dir" title={execDirPath} className="min-w-0 truncate">
+                {execDirPath}
+              </span>
+              {gitBranch !== null ? (
+                <span data-slot="interaction-git-branch" title={gitBranch} className="flex shrink-0 items-center gap-1 truncate">
+                  <GitBranch aria-hidden="true" className="size-3 shrink-0" />
+                  <span className="truncate">{gitBranch}</span>
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {isWorkflow && workflowPlan !== "" ? (
+            <span
+              data-slot="interaction-workflow-plan"
+              title={workflowPlan}
+              className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+            >
+              {workflowPlan}
+            </span>
+          ) : null}
+        </header>
+      ) : null}
 
-      {/* pr-12：为悬浮按钮留出空间，消息气泡不会被按钮遮挡 */}
+      {/* pr-12：为悬浮按钮留出空间；群聊没有顶部栏，窄视口用顶部内边距避让抽屉按钮 */}
       {/* 头部插入由本视图手动补偿；保留浏览器原生锚定会重复补偿并造成跳动。 */}
       <div
         ref={listRef}
         data-slot="history-list"
-        className="min-h-0 flex-1 overflow-y-auto p-3 pr-12"
+        className={cn(
+          "min-h-0 flex-1 overflow-y-auto p-3 pr-12",
+          isGroup && "pt-12 lg:pt-3",
+        )}
         style={{ overflowAnchor: "none" }}
         onScroll={onScroll}
       >
