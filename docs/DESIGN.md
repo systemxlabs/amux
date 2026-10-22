@@ -112,6 +112,19 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | DELETE `/workflows/<workflow_id>/attachments` | 删除会话所有附件 |
 | GET `/workflows/<workflow_id>/attachments/<attachment_name>` | 下载指定附件，无鉴权 |
 | DELETE `/workflows/<workflow_id>/attachments/<attachment_name>` | 删除指定附件 |
+| POST `/groups` | 新建一个群聊会话 |
+| GET `/groups` | 分页查询非置顶群聊会话列表，可指定项目，响应应包含该项目所有置顶群聊会话，每个群聊会话应包含其所有成员普通会话 |
+| GET `/groups/<group_id>` | 查询指定群聊会话 |
+| POST `/groups/<group_id>` | 往指定群聊会话发送指令 |
+| DELETE `/groups/<group_id>` | 删除指定群聊会话，级联删除成员普通会话 |
+| POST `/groups/<group_id>/cancel` | 取消指定群聊会话的所有成员普通会话 |
+| POST `/groups/<group_id>/configure` | 配置指定群聊会话：会话标题、所属项目、（取消）置顶等 |
+| GET `/groups/<group_id>/history` | 分页查询指定群聊会话的对话历史 |
+| GET `/groups/<group_id>/attachments` | 分页获取附件列表 |
+| POST `/groups/<group_id>/attachments` | 上传一个附件 |
+| DELETE `/groups/<group_id>/attachments` | 删除会话所有附件 |
+| GET `/groups/<group_id>/attachments/<attachment_name>` | 下载指定附件，无鉴权 |
+| DELETE `/groups/<group_id>/attachments/<attachment_name>` | 删除指定附件 |
 | GET `/config/skills/` | 查询所有配置的技能 |
 | PUT `/config/skills/` | 全量更新所有技能 |
 | GET `/config/workflows/` | 查询所有配置的工作流计划 |
@@ -360,6 +373,7 @@ Server 作为 ACP client 与 Agents 通信
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,             -- 会话 ID
     workflow_id TEXT,                -- 所属工作流会话 ID
+    group_id TEXT,                   -- 所属群聊会话 ID
     state TEXT NOT NULL,             -- 会话状态
     title TEXT,                      -- 会话标题
     project TEXT,                    -- 所属项目
@@ -535,6 +549,86 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
   ```
 
 内存中保留活跃工作流会话的上下文对话，当工作流会话长时间不活跃（超过 1h）且工作流会话和其所有关联普通会话状态均为空闲时，清理内存中的工作流会话数据。
+
+会话删除时，删除其对应的所有附件。
+
+### 群聊会话驱动
+
+群聊会话 @ 驱动
+- 解析时机：当用户消息写入磁盘后，解析用户消息；当成员普通会话进入空闲状态时，解析自上次用户消息以来的所有 agent 消息
+- 提及 agent 成员时：驱动该 agent 成员普通会话
+- @all 时：驱动所有 agent 成员普通会话
+- @user 时：暂不处理
+
+成员普通会话驱动
+- 驱动消息内容模板
+  ```
+  你现在在一个群聊会话中，你的每个非空输出都会作为群聊消息，系统会解析每条群聊消息内容的 @ 提及，若 @ agent 成员则会唤醒 agent 读取群聊消息并执行任务。
+
+  你在群聊中的名称是 `<name>`，角色描述是：<description>，运行在机器 `<machine>` 上。
+
+  群聊成员除了用户和你，还有以下 agent 成员：
+  - <name>（运行在机器 `<machine>`）：<description>
+  - ...
+
+  当前有成员发送消息 @ 你，这是群聊自上次读取以来未读的消息列表
+  - <name>: <message>
+  - ...
+
+  行为准则
+  - 当你需要其他成员协助或需要通知其他成员时，可以使用 @ 成员（例如 @coder）来唤醒其他 agent 成员，或 @user 来通知用户
+  - 当你读取未读消息后，判断无需做任何事时，保持静默不输出任何内容
+  ```
+- 未读消息列表：从成员普通会话上一次用户消息时刻开始到当前时间内的所有群聊消息
+
+### 群聊会话存储
+
+群聊会话数据包含如下部分
+- 元数据：存储在 `~/.amux/group.sqlite` 文件中
+  ```SQL
+  CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,              -- 群聊会话 ID
+    title TEXT,                       -- 会话标题
+    state TEXT NOT NULL,              -- 会话状态
+    project TEXT,                     -- 所属项目
+    pinned BOOL NOT NULL,             -- 是否置顶
+    created_at INTEGER NOT NULL,      -- 创建时间
+    updated_at INTEGER NOT NULL       -- 更新时间
+  );
+  
+  CREATE TABLE IF NOT EXISTS members (
+    id TEXT PRIMARY KEY,              -- 群聊成员 ID
+    group_id TEXT NOT NULL,           -- 群聊会话 ID
+    machine TEXT NOT NULL,            -- 所属机器
+    agent TEXT NOT NULL,              -- 所属 Agent
+    session_id TEXT NOT NULL,         -- 成员普通会话 ID
+    name TEXT NOT NULL,               -- 角色名称
+    description TEXT NOT NULL,        -- 角色描述
+    pinned BOOL NOT NULL,             -- 是否置顶
+    created_at INTEGER NOT NULL,      -- 创建时间
+    updated_at INTEGER NOT NULL       -- 更新时间
+  );
+  ```
+- 对话历史：存储在 `~/.amux/groups/<group_id>/transcript.sqlite` 文件中
+  - 用户消息内容直接存放表内，agent 消息使用引用指向成员普通会话数据
+  - 成员普通会话的所有非空 agent 输出均进入群聊消息中
+  ```SQL
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,                 -- 群聊消息 ID，采用 5 字符随机串
+    group_id TEXT NOT NULL,              -- 所属群聊会话 ID
+    member_id TEXT,                      -- 群聊成员 ID，空则为用户消息
+    session_message_id TEXT,             -- 普通会话消息 ID
+    user_content TEXT,                   -- 用户消息内容，以 ACP ContentBlock 数组格式转 json 后存放
+    created_at INTEGER NOT NULL,         -- 创建时间
+    updated_at INTEGER NOT NULL          -- 更新时间
+  );
+  ```
+- 附件存储：存储在 `~/.amux/groups/<group_id>/attachments/` 目录下，每个附件保留原始后缀名，命名为 `<uuid>.<后缀>`
+- 群聊预设成员：存储在 `~/.amux/config/group_members.json` 路径
+  ```json
+  [ { "name": "coder", "description": "负责实现代码", "machine": "localpc", "agent": "codex" } ]
+  ```
+  name 可重复。
 
 会话删除时，删除其对应的所有附件。
 
