@@ -393,8 +393,15 @@ export function ExecPanel() {
                 </div>
               ) : file !== null ? (
                 <div className="flex h-full flex-col">
-                  <pre className="whitespace-pre shrink-0 p-1 font-mono text-xs">
-                    {file.content}
+                  <pre className="shrink-0 whitespace-pre p-1 font-mono text-xs">
+                    {file.content.split("\n").map((line, index) => (
+                      <span key={index} className="flex">
+                        <span className="w-8 shrink-0 select-none pr-2 text-right text-muted-foreground">
+                          {index + 1}
+                        </span>
+                        <span>{line || " "}</span>
+                      </span>
+                    ))}
                   </pre>
                   {file.hasMore ? (
                     <div className="shrink-0 px-1 py-2 text-xs text-muted-foreground">
