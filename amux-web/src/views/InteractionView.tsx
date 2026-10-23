@@ -729,10 +729,10 @@ function MessageBubble({ item }: { item: HistoryItem }) {
         )}
       >
         <MessageContent content={item.content} />
-        <span data-slot="message-time" className="text-xs opacity-70">
-          {formatTime(item.timestamp)}
-        </span>
       </div>
+      <span data-slot="message-time" className="text-xs opacity-70">
+        {formatTime(item.timestamp)}
+      </span>
     </div>
   );
 }
@@ -790,10 +790,10 @@ function GroupMessageBubble({
           )}
         >
           <MessageContent content={item.content} />
-          <span data-slot="group-message-time" className="text-xs opacity-70">
-            {formatTime(item.timestamp)}
-          </span>
         </div>
+        <span data-slot="group-message-time" className="text-xs opacity-70">
+          {formatTime(item.timestamp)}
+        </span>
       </div>
     </div>
   );
