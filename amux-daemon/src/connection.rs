@@ -235,7 +235,12 @@ async fn handle_request(request: JsonRpcRequest, daemon: &Arc<Daemon>, outbox: &
     let frame = match execute(&request.method, params, daemon, outbox).await {
         Ok(value) => frames::response(id, &value),
         Err(error) => {
-            log::warn!("{} 失败: {}", request.method, error.message);
+            if request.method == method::GIT_BRANCHES && error.message.starts_with("不是 git 仓库:")
+            {
+                log::debug!("{} 失败: {}", request.method, error.message);
+            } else {
+                log::warn!("{} 失败: {}", request.method, error.message);
+            }
             frames::error_response(id, error.code, &error.message)
         }
     };
