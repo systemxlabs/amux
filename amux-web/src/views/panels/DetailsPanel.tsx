@@ -39,6 +39,7 @@ export function DetailsPanel() {
     rows.push({ label: "会话 ID", value: session.id });
     rows.push({ label: "所属机器", value: session.machine });
     rows.push({ label: "agent", value: session.agent });
+    rows.push({ label: "模型", value: session.model ?? "默认" });
     rows.push({ label: "工作目录", value: session.workspace });
     if (session.worktreeDir !== "") {
       rows.push({ label: "worktree 目录", value: session.worktreeDir });
