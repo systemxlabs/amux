@@ -68,6 +68,43 @@ export function panelAvailable(panel: SidePanel, target: OpenTarget): boolean {
   return !SESSION_ONLY_PANELS.includes(panel);
 }
 
+/** 标记已读后同步清除本地未读标记（docs/DESIGN.md「会话交互视图」）。 */
+export function markReadLocally(state: CoreState, kind: OpenTarget["kind"], id: string): void {
+  const clearSession = (session: Session) => {
+    if (session.id === id) session.unread = false;
+  };
+  const clearWorkflow = (workflow: Workflow) => {
+    if (workflow.id !== id) return;
+    workflow.unread = false;
+    for (const session of workflow.linkedSessions) session.unread = false;
+  };
+  const clearGroup = (group: Group) => {
+    if (group.id !== id) return;
+    group.unread = false;
+    for (const session of group.sessions) session.unread = false;
+  };
+
+  for (const entry of state.entries) {
+    if (entry.kind === "session") clearSession(entry.session);
+    else if (entry.kind === "workflow") clearWorkflow(entry.workflow);
+    else clearGroup(entry.group);
+    if (kind === "session") {
+      if (entry.kind === "workflow") entry.workflow.linkedSessions.forEach(clearSession);
+      if (entry.kind === "group") entry.group.sessions.forEach(clearSession);
+    }
+  }
+
+  if (kind === "session") {
+    if (state.detail.session) clearSession(state.detail.session);
+    state.detail.workflow?.linkedSessions.forEach(clearSession);
+    state.detail.group?.sessions.forEach(clearSession);
+  } else if (kind === "workflow") {
+    if (state.detail.workflow) clearWorkflow(state.detail.workflow);
+  } else if (state.detail.group) {
+    clearGroup(state.detail.group);
+  }
+}
+
 export type Notice = { kind: "success" | "error"; text: string };
 
 /** 待发送附件（已上传到 Server，发送时使用其公共 URI）。 */

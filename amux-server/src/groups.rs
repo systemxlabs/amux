@@ -136,6 +136,7 @@ impl GroupService {
             state: row.state,
             project: row.project,
             pinned: row.pinned,
+            unread: row.unread,
             created_at: row.created_at,
             updated_at: row.updated_at,
             members,
@@ -193,6 +194,16 @@ impl GroupService {
         self.store.set_group_project(id, project.as_deref());
         self.store.set_group_pinned(id, pinned);
         log::info!("群聊配置已更新: group={id}");
+        Ok(())
+    }
+
+    /// 标记群聊会话及其成员普通会话已读（docs/DESIGN.md「会话交互视图」）。
+    pub fn read(&self, id: &str) -> Result<(), String> {
+        self.store.group(id).ok_or("群聊会话不存在")?;
+        self.store.set_group_unread(id, false);
+        for session_id in self.store.member_sessions(id) {
+            self.store.set_session_unread(&session_id, false);
+        }
         Ok(())
     }
 
@@ -275,6 +286,7 @@ impl GroupService {
             None,
             now_ms(),
         );
+        self.store.set_group_unread(&member.group_id, true);
         self.store.touch_group(&member.group_id);
     }
 

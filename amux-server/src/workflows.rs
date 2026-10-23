@@ -117,6 +117,7 @@ impl WorkflowService {
             plan: row.plan,
             project: row.project,
             pinned: row.pinned,
+            unread: row.unread,
             created_at: row.created_at,
             updated_at: row.updated_at,
             linked_sessions: self.linked_sessions(id),
@@ -140,6 +141,7 @@ impl WorkflowService {
                     plan: row.plan,
                     project: row.project,
                     pinned: row.pinned,
+                    unread: row.unread,
                     created_at: row.created_at,
                     updated_at: row.updated_at,
                 })
@@ -193,6 +195,16 @@ impl WorkflowService {
         self.store.set_workflow_project(id, project.as_deref());
         self.store.set_workflow_pinned(id, pinned);
         log::info!("工作流配置已更新: workflow={id}");
+        Ok(())
+    }
+
+    /// 标记工作流会话及其关联普通会话已读（docs/DESIGN.md「会话交互视图」）。
+    pub fn read(&self, id: &str) -> Result<(), String> {
+        self.store.workflow(id).ok_or("工作流不存在")?;
+        self.store.set_workflow_unread(id, false);
+        for session_id in self.store.linked_sessions(id) {
+            self.store.set_session_unread(&session_id, false);
+        }
         Ok(())
     }
 
@@ -373,6 +385,7 @@ impl WorkflowService {
                             timestamp: now_ms(),
                         },
                     );
+                    self.store.set_workflow_unread(workflow_id, true);
                 }
             }
             Err(error) => {
@@ -1638,6 +1651,7 @@ mod tests {
                     state,
                     project: None,
                     pinned: false,
+                    unread: false,
                     workspace: "/repo".into(),
                     worktree_dir: String::new(),
                     created_at: 1,

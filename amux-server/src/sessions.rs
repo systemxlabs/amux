@@ -198,6 +198,7 @@ impl SessionService {
             state: SessionState::Idle,
             project: project.map(str::to_string),
             pinned: false,
+            unread: false,
             workspace: workspace.to_string(),
             worktree_dir,
             created_at: now,
@@ -311,6 +312,13 @@ impl SessionService {
             session.agent,
             has_config
         );
+        Ok(())
+    }
+
+    /// 标记会话已读（docs/DESIGN.md「会话交互视图」）。
+    pub fn read(&self, id: &str) -> Result<(), String> {
+        self.get(id)?;
+        self.store.set_session_unread(id, false);
         Ok(())
     }
 
@@ -633,6 +641,7 @@ impl SessionService {
                 let content = serde_json::to_string(&content).unwrap_or_default();
                 self.store
                     .upsert_message(&session.id, &message_id, "agent", &content, now_ms());
+                self.store.set_session_unread(&session.id, true);
                 self.store.touch(&session.id);
                 None
             }
@@ -965,6 +974,7 @@ mod tests {
             state,
             project: None,
             pinned: false,
+            unread: false,
             workspace: "/tmp".into(),
             worktree_dir: String::new(),
             created_at: 1,

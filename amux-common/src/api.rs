@@ -76,6 +76,8 @@ pub struct Session {
     pub project: Option<String>,
     /// 是否置顶
     pub pinned: bool,
+    /// 是否未读
+    pub unread: bool,
     /// 用户指定的工作目录
     pub workspace: String,
     /// worktree 目录；空串 = 未启用 worktree
@@ -306,6 +308,8 @@ pub struct Workflow {
     pub project: Option<String>,
     /// 是否置顶
     pub pinned: bool,
+    /// 是否未读
+    pub unread: bool,
     pub created_at: u64,
     pub updated_at: u64,
     /// 关联普通会话
@@ -361,6 +365,8 @@ pub struct Group {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     pub pinned: bool,
+    /// 是否未读
+    pub unread: bool,
     pub created_at: u64,
     pub updated_at: u64,
     /// 成员普通会话对应的成员信息
@@ -803,6 +809,7 @@ mod tests {
             state: SessionState::Idle,
             project: None,
             pinned: true,
+            unread: false,
             workspace: "/w".into(),
             worktree_dir: String::new(),
             created_at: 1,

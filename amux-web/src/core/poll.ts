@@ -24,7 +24,7 @@ import {
 import { buildListWindow, sameListEntries, sortEntries } from "../lib/list";
 import { decodeBase64 } from "../lib/terminal";
 import { ApiError } from "../lib/api";
-import type { Core, SettingsTab } from "./core";
+import { markReadLocally, type Core, type SettingsTab } from "./core";
 
 export const SESSION_LIST_INTERVAL = 10_000;
 export const AUTOMATION_LIST_INTERVAL = 10_000;
@@ -527,6 +527,7 @@ export async function refreshHistory(core: Core): Promise<void> {
         state.detail.groupHistory = merged.items;
         state.detail.groupHistoryPaging = merged.paging;
       });
+      void markRead(core, target);
       return;
     }
     const page =
@@ -545,8 +546,27 @@ export async function refreshHistory(core: Core): Promise<void> {
       state.detail.history = merged.items;
       state.detail.historyPaging = merged.paging;
     });
+    void markRead(core, target);
   } catch (error) {
     core.failure(`读取对话失败：${messageOf(error)}`);
+  }
+}
+
+/** 标记会话已读；打开期间每轮历史刷新后调用，保持当前会话已读。 */
+export async function markRead(core: Core, target: OpenTarget): Promise<void> {
+  const client = core.client;
+  if (!client) return;
+  try {
+    if (target.kind === "session") {
+      await client.readSession(target.id);
+    } else if (target.kind === "workflow") {
+      await client.readWorkflow(target.id);
+    } else {
+      await client.readGroup(target.id);
+    }
+    core.update((state) => markReadLocally(state, target.kind, target.id));
+  } catch {
+    // 已读标记失败不影响会话使用，下一轮历史刷新时重试。
   }
 }
 

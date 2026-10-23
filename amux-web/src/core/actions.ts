@@ -25,6 +25,7 @@ import { initialNewSession, panelAvailable } from "./core";
 import type { Core, PendingAttachment, SidePanel } from "./core";
 import {
   refreshHistory,
+  markRead,
   refreshAutomations,
   refreshInteraction,
   refreshList,
@@ -181,7 +182,7 @@ export async function openEntry(core: Core, entry: ListEntry): Promise<void> {
     }
   });
   core.resetTicks();
-  await Promise.all([refreshInteraction(core), tick(core)]);
+  await Promise.all([markRead(core, target), refreshInteraction(core), tick(core)]);
 }
 
 /** 打开自动化列表，并清空当前会话视图状态。 */

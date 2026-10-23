@@ -159,8 +159,8 @@ impl Store {
         self.sessions
             .lock()
             .execute(
-                "INSERT INTO sessions (id, workflow_id, group_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13)",
+                "INSERT INTO sessions (id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14)",
                 params![
                     session.id,
                     session.workflow_id,
@@ -169,6 +169,7 @@ impl Store {
                     session.title,
                     session.project.as_deref(),
                     session.pinned,
+                    session.unread,
                     session.workspace,
                     session.worktree_dir,
                     session.machine,
@@ -185,7 +186,7 @@ impl Store {
         self.sessions
             .lock()
             .query_row(
-                "SELECT id, workflow_id, group_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+                "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 row_to_session,
@@ -199,7 +200,7 @@ impl Store {
     pub fn sessions_all(&self) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, workflow_id, group_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+            "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions ORDER BY pinned DESC, created_at DESC, id DESC",
         ) {
             Ok(stmt) => stmt,
@@ -258,7 +259,7 @@ impl Store {
     pub fn sessions_of_agent(&self, machine: &str, agent: &str) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, workflow_id, group_id, state, title, project, pinned, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+            "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
              FROM sessions WHERE machine = ?1 AND agent = ?2",
         ) {
             Ok(stmt) => stmt,
@@ -589,8 +590,8 @@ impl Store {
             created_at,
         } = workflow;
         let _ = self.workflows.lock().execute(
-            "INSERT INTO workflows (id, title, state, plan, project, pinned, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+            "INSERT INTO workflows (id, title, state, plan, project, pinned, unread, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?6)",
             params![id, title, state.as_str(), plan, project, created_at as i64],
         );
     }
@@ -599,7 +600,7 @@ impl Store {
         self.workflows
             .lock()
             .query_row(
-                "SELECT id, title, state, plan, project, pinned, created_at, updated_at FROM workflows WHERE id = ?1",
+                "SELECT id, title, state, plan, project, pinned, created_at, updated_at, unread FROM workflows WHERE id = ?1",
                 params![id],
                 row_to_workflow,
             )
@@ -616,7 +617,7 @@ impl Store {
     ) -> (Vec<WorkflowRow>, bool) {
         let conn = self.workflows.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, title, state, plan, project, pinned, created_at, updated_at FROM workflows
+            "SELECT id, title, state, plan, project, pinned, created_at, updated_at, unread FROM workflows
              WHERE (?1 IS NULL OR (?1 = '' AND project IS NULL) OR project = ?1)
              ORDER BY pinned DESC, created_at DESC, id DESC",
         ) {
@@ -692,10 +693,24 @@ impl Store {
         );
     }
 
+    pub fn set_session_unread(&self, id: &str, unread: bool) {
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET unread = ?2 WHERE id = ?1",
+            params![id, unread],
+        );
+    }
+
     pub fn set_workflow_pinned(&self, id: &str, pinned: bool) {
         let _ = self.workflows.lock().execute(
             "UPDATE workflows SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, pinned, now_ms() as i64],
+        );
+    }
+
+    pub fn set_workflow_unread(&self, id: &str, unread: bool) {
+        let _ = self.workflows.lock().execute(
+            "UPDATE workflows SET unread = ?2 WHERE id = ?1",
+            params![id, unread],
         );
     }
 
@@ -738,8 +753,8 @@ impl Store {
 
     pub fn insert_group(&self, id: &str, project: Option<&str>, created_at: u64) {
         let _ = self.groups.lock().execute(
-            "INSERT INTO groups (id, title, state, project, pinned, created_at, updated_at)
-             VALUES (?1, '', 'idle', ?2, 0, ?3, ?3)",
+            "INSERT INTO groups (id, title, state, project, pinned, unread, created_at, updated_at)
+             VALUES (?1, '', 'idle', ?2, 0, 0, ?3, ?3)",
             params![id, project, created_at as i64],
         );
     }
@@ -748,7 +763,7 @@ impl Store {
         self.groups
             .lock()
             .query_row(
-                "SELECT id, title, state, project, pinned, created_at, updated_at FROM groups WHERE id = ?1",
+                "SELECT id, title, state, project, pinned, created_at, updated_at, unread FROM groups WHERE id = ?1",
                 params![id],
                 row_to_group,
             )
@@ -766,7 +781,7 @@ impl Store {
     ) -> (Vec<GroupRow>, bool) {
         let conn = self.groups.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, title, state, project, pinned, created_at, updated_at FROM groups
+            "SELECT id, title, state, project, pinned, created_at, updated_at, unread FROM groups
              WHERE (?1 IS NULL OR (?1 = '' AND project IS NULL) OR project = ?1)
              ORDER BY pinned DESC, created_at DESC, id DESC",
         ) {
@@ -830,6 +845,13 @@ impl Store {
         let _ = self.groups.lock().execute(
             "UPDATE groups SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, pinned, now_ms() as i64],
+        );
+    }
+
+    pub fn set_group_unread(&self, id: &str, unread: bool) {
+        let _ = self.groups.lock().execute(
+            "UPDATE groups SET unread = ?2 WHERE id = ?1",
+            params![id, unread],
         );
     }
 
@@ -1457,6 +1479,7 @@ pub struct WorkflowRow {
     pub plan: String,
     pub project: Option<String>,
     pub pinned: bool,
+    pub unread: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -1469,6 +1492,7 @@ pub struct GroupRow {
     pub state: SessionState,
     pub project: Option<String>,
     pub pinned: bool,
+    pub unread: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -1596,6 +1620,7 @@ const SESSION_SCHEMA: &str = "
         title TEXT,
         project TEXT,
         pinned BOOL NOT NULL,
+        unread BOOL NOT NULL,
         workspace TEXT NOT NULL,
         worktree_dir TEXT,
         machine TEXT NOT NULL,
@@ -1631,6 +1656,7 @@ const WORKFLOW_SCHEMA: &str = "
         plan TEXT NOT NULL,
         project TEXT,
         pinned BOOL NOT NULL,
+        unread BOOL NOT NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );";
@@ -1643,6 +1669,7 @@ const GROUP_SCHEMA: &str = "
         state TEXT NOT NULL,
         project TEXT,
         pinned BOOL NOT NULL,
+        unread BOOL NOT NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );
@@ -1718,12 +1745,13 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         project: row.get(5)?,
         pinned: row.get(6)?,
-        workspace: row.get(7)?,
-        worktree_dir: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-        machine: row.get(9)?,
-        agent: row.get(10)?,
-        created_at: row.get::<_, i64>(12)? as u64,
-        updated_at: row.get::<_, i64>(13)? as u64,
+        unread: row.get(7)?,
+        workspace: row.get(8)?,
+        worktree_dir: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        machine: row.get(10)?,
+        agent: row.get(11)?,
+        created_at: row.get::<_, i64>(13)? as u64,
+        updated_at: row.get::<_, i64>(14)? as u64,
     })
 }
 
@@ -1738,6 +1766,7 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRow> {
         pinned: row.get(5)?,
         created_at: row.get::<_, i64>(6)? as u64,
         updated_at: row.get::<_, i64>(7)? as u64,
+        unread: row.get(8)?,
     })
 }
 
@@ -1751,6 +1780,7 @@ fn row_to_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
         pinned: row.get(4)?,
         created_at: row.get::<_, i64>(5)? as u64,
         updated_at: row.get::<_, i64>(6)? as u64,
+        unread: row.get(7)?,
     })
 }
 
@@ -1825,6 +1855,7 @@ mod tests {
             state: SessionState::Idle,
             project: None,
             pinned: false,
+            unread: false,
             workspace: "/tmp".into(),
             worktree_dir: String::new(),
             created_at: 1,
@@ -2209,6 +2240,36 @@ mod tests {
             ["s1"]
         );
         assert_eq!(store.group_of_session("s2").as_deref(), Some("g1"));
+    }
+
+    #[test]
+    fn unread_flags_round_trip_for_all_session_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_session(&session("s1", "pc", "codex")).unwrap();
+        store.insert_workflow(WorkflowInsert {
+            id: "w1",
+            title: "workflow",
+            state: SessionState::Idle,
+            plan: "plan",
+            project: None,
+            created_at: 1,
+        });
+        store.insert_group("g1", None, 1);
+
+        store.set_session_unread("s1", true);
+        store.set_workflow_unread("w1", true);
+        store.set_group_unread("g1", true);
+        assert!(store.session("s1").unwrap().unread);
+        assert!(store.workflow("w1").unwrap().unread);
+        assert!(store.group("g1").unwrap().unread);
+
+        store.set_session_unread("s1", false);
+        store.set_workflow_unread("w1", false);
+        store.set_group_unread("g1", false);
+        assert!(!store.session("s1").unwrap().unread);
+        assert!(!store.workflow("w1").unwrap().unread);
+        assert!(!store.group("g1").unwrap().unread);
     }
 
     #[test]

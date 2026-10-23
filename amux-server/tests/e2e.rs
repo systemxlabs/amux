@@ -577,6 +577,12 @@ async fn server_daemon_agent_end_to_end() {
     .await;
     assert_eq!(session["machine"], MACHINE);
     assert_eq!(session["agent"], "codex");
+    assert_eq!(session["unread"], true, "agent 消息应将会话标记为未读");
+    client
+        .post_ok(&format!("/sessions/{session_id}/read"), json!({}))
+        .await;
+    let session = client.get(&format!("/sessions/{session_id}")).await;
+    assert_eq!(session["unread"], false, "标记已读后应清除未读");
 
     let agents = client.get(&format!("/machines/{MACHINE}/agents")).await;
     let codex = agents
@@ -945,6 +951,19 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
     )
     .await;
     assert_eq!(group["title"], "@coder你好");
+    assert_eq!(group["unread"], true, "成员输出应标记群聊未读");
+    let member_session = client.get(&format!("/sessions/{member_session_id}")).await;
+    assert_eq!(member_session["unread"], true, "成员输出应标记成员会话未读");
+    client
+        .post_ok(&format!("/groups/{group_id}/read"), json!({}))
+        .await;
+    let group = client.get(&format!("/groups/{group_id}")).await;
+    assert_eq!(group["unread"], false, "标记已读后应清除群聊未读");
+    let member_session = client.get(&format!("/sessions/{member_session_id}")).await;
+    assert_eq!(
+        member_session["unread"], false,
+        "标记群聊已读应级联清除成员会话未读"
+    );
 
     assert_eq!(
         client.delete(&format!("/groups/{group_id}")).await,

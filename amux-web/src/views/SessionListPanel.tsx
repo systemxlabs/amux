@@ -15,6 +15,7 @@ import {
 import {
   ChevronDown,
   ChevronRight,
+  Circle,
   Loader2,
   MessagesSquare,
   MoreHorizontal,
@@ -51,6 +52,7 @@ import {
   entryPinned,
   entryState,
   entryTitle,
+  entryUnread,
   type ListEntry,
 } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -261,6 +263,14 @@ export function SessionListPanel({ onNavigate }: { onNavigate: () => void }) {
             aria-label="工作中"
             className="size-4 shrink-0 animate-spin text-muted-foreground"
           />
+        ) : entryUnread(entry) ? (
+          <span
+            data-slot="session-unread"
+            aria-label="未读"
+            className="flex size-4 shrink-0 items-center justify-center"
+          >
+            <Circle className="size-2.5 fill-primary text-primary" />
+          </span>
         ) : entry.kind === "workflow" ? (
           <Network className="size-4 shrink-0 text-muted-foreground" />
         ) : entry.kind === "group" ? (

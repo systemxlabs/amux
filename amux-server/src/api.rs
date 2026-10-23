@@ -106,6 +106,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/sessions/{id}/cancel", post(cancel_session))
         .route("/sessions/{id}/configure", post(configure_session))
+        .route("/sessions/{id}/read", post(read_session))
         .route("/sessions/{id}/config_options", get(session_config_options))
         .route("/sessions/{id}/slash_commands", get(session_slash_commands))
         .route("/sessions/{id}/plan", get(session_plan))
@@ -146,6 +147,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(delete_workflow),
         )
         .route("/workflows/{id}/configure", post(configure_workflow))
+        .route("/workflows/{id}/read", post(read_workflow))
         .route("/workflows/{id}/usage", get(workflow_usage))
         .route("/workflows/{id}/history", get(workflow_history))
         .route("/workflows/{id}/activities", get(workflow_activities))
@@ -167,6 +169,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/groups/{id}/cancel", post(cancel_group))
         .route("/groups/{id}/configure", post(configure_group))
+        .route("/groups/{id}/read", post(read_group))
         .route("/groups/{id}/history", get(group_history))
         .route(
             "/groups/{id}/attachments",
@@ -459,6 +462,17 @@ async fn configure_session(
             request.pinned,
         )
         .await
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn read_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    state
+        .sessions
+        .read(&id)
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
 }
@@ -800,6 +814,17 @@ async fn configure_group(
         .map_err(bad_request)
 }
 
+async fn read_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    state
+        .groups
+        .read(&id)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
 async fn group_history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1012,6 +1037,17 @@ async fn configure_workflow(
     state
         .workflows
         .configure(&id, request.title, request.project, request.pinned)
+        .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn read_workflow(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<OpAck> {
+    state
+        .workflows
+        .read(&id)
         .map(|_| Json(OpAck { ok: true }))
         .map_err(bad_request)
 }

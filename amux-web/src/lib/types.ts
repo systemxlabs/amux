@@ -134,6 +134,7 @@ export type Session = {
   state: SessionState;
   project?: string;
   pinned: boolean;
+  unread: boolean;
   workspace: string;
   worktreeDir: string;
   createdAt: number;
@@ -197,6 +198,7 @@ export type Workflow = {
   plan: string;
   project?: string;
   pinned: boolean;
+  unread: boolean;
   createdAt: number;
   updatedAt: number;
   linkedSessions: Session[];
@@ -238,6 +240,7 @@ export type Group = {
   state: SessionState;
   project?: string;
   pinned: boolean;
+  unread: boolean;
   createdAt: number;
   updatedAt: number;
   members: GroupMember[];
@@ -409,6 +412,12 @@ export function entryPinned(entry: ListEntry): boolean {
   if (entry.kind === "session") return entry.session.pinned;
   if (entry.kind === "workflow") return entry.workflow.pinned;
   return entry.group.pinned;
+}
+
+export function entryUnread(entry: ListEntry): boolean {
+  if (entry.kind === "session") return entry.session.unread;
+  if (entry.kind === "workflow") return entry.workflow.unread;
+  return entry.group.unread;
 }
 
 export function entryCreatedAt(entry: ListEntry): number {

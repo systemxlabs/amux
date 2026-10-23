@@ -172,6 +172,10 @@ export class ApiClient {
     return this.postEmpty(`/sessions/${encodeURIComponent(id)}/configure`, body);
   }
 
+  readSession(id: string): Promise<void> {
+    return this.postEmpty(`/sessions/${encodeURIComponent(id)}/read`, {});
+  }
+
   async configOptions(id: string): Promise<SessionConfigOption[]> {
     const response = await this.getJson<ConfigOptions>(
       `/sessions/${encodeURIComponent(id)}/config_options`,
@@ -357,6 +361,10 @@ export class ApiClient {
     return this.postEmpty(`/workflows/${encodeURIComponent(id)}/configure`, body);
   }
 
+  readWorkflow(id: string): Promise<void> {
+    return this.postEmpty(`/workflows/${encodeURIComponent(id)}/read`, {});
+  }
+
   workflowHistory(id: string, limit: number, offset: number): Promise<HistoryPage> {
     return this.getJson(
       `/workflows/${encodeURIComponent(id)}/history?${query({ limit: clamp(limit), offset })}`,
@@ -448,6 +456,10 @@ export class ApiClient {
   ): Promise<void> {
     const body: ConfigureGroupRequest = { title, project, pinned };
     return this.postEmpty(`/groups/${encodeURIComponent(id)}/configure`, body);
+  }
+
+  readGroup(id: string): Promise<void> {
+    return this.postEmpty(`/groups/${encodeURIComponent(id)}/read`, {});
   }
 
   groupHistory(id: string, limit: number, offset: number): Promise<GroupHistoryPage> {
