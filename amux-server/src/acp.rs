@@ -7,7 +7,7 @@
 //!
 //! 通知一律翻译为 [`AcpEvent`] 交给会话层落盘与驱动工作流，本模块不碰存储。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +35,7 @@ use amux_common::domain::{
 use futures_util::sink;
 use futures_util::stream;
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 /// ACP 通知 → 会话层事件。
 #[derive(Debug, Clone)]
@@ -167,6 +167,47 @@ enum Call {
         value: SessionConfigOptionValue,
         reply: oneshot::Sender<Result<Vec<SessionConfigOption>, String>>,
     },
+}
+
+/// 每会话异步锁：不同会话可并行，同一会话按调用入队顺序执行。
+#[derive(Clone, Default)]
+struct SessionLocks {
+    locks: Arc<Mutex<HashMap<String, Arc<RwLock<()>>>>>,
+}
+
+impl SessionLocks {
+    fn lock(&self, session_id: &str) -> Arc<RwLock<()>> {
+        self.locks
+            .lock()
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone()
+    }
+}
+
+impl Call {
+    /// ACP request 的会话标识；`session/new` 稍后在响应中才知道会话。
+    fn session_id(&self) -> Option<&str> {
+        match self {
+            Call::NewSession { .. } => None,
+            Call::ResumeSession {
+                agent_session_id, ..
+            }
+            | Call::Prompt {
+                agent_session_id, ..
+            }
+            | Call::Cancel { agent_session_id }
+            | Call::Close {
+                agent_session_id, ..
+            }
+            | Call::Delete {
+                agent_session_id, ..
+            }
+            | Call::SetConfigOption {
+                agent_session_id, ..
+            } => Some(agent_session_id),
+        }
+    }
 }
 
 /// 一条 ACP 连接（`(machine, agent)` 维度）。
@@ -314,6 +355,7 @@ pub async fn connect(
     let (calls_tx, mut calls_rx) = mpsc::channel::<Call>(64);
     let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, String>>();
     let opened_sessions = Arc::new(Mutex::new(HashSet::new()));
+    let session_locks = SessionLocks::default();
     let machine_name = machine.to_string();
     let agent_name = agent.to_string();
     let task_opened_sessions = Arc::clone(&opened_sessions);
@@ -396,7 +438,20 @@ pub async fn connect(
                     }
 
                     while let Some(call) = calls_rx.recv().await {
-                        handle_call(call, &cx, &task_opened_sessions).await;
+                        let cx = cx.clone();
+                        if call.session_id().is_none_or(str::is_empty) {
+                            handle_call(call, &cx, &task_opened_sessions).await;
+                            continue;
+                        }
+                        let locks = session_locks.clone();
+                        let opened_sessions = task_opened_sessions.clone();
+                        tokio::spawn(async move {
+                            // RwLock 写锁排队保证同一会话按入队顺序执行；
+                            // 不同会话只竞争各自锁，可在同一条 ACP 连接上并行。
+                            let session_id = call.session_id().unwrap_or_default().to_string();
+                            let _guard = locks.lock(&session_id).write_owned().await;
+                            handle_call(call, &cx, &opened_sessions).await;
+                        });
                     }
                     Ok(())
                 }
