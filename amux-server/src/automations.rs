@@ -698,7 +698,7 @@ fn group_context(
         lines.push(format!(
             "{}: {}",
             message.name,
-            group_blocks_text(&message.content)
+            blocks_text(&message.content)
         ));
     }
     if !has_agent_message {
@@ -708,17 +708,6 @@ fn group_context(
         "智能体正在执行一个自动化任务，任务内容是：{task}。\n\n以下是智能体会话消息：\n{}",
         lines.join("\n")
     ))
-}
-
-fn group_blocks_text(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// 历史接口按最新优先分页，每页内部再按时间正序返回；按页前插可还原完整时序。
@@ -781,8 +770,7 @@ fn blocks_text(blocks: &[ContentBlock]) -> String {
             ContentBlock::Text(text) => Some(text.text.clone()),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 #[cfg(test)]
@@ -927,6 +915,27 @@ mod tests {
             context,
             "智能体正在执行一个自动化任务，任务内容是：检查构建。\n\n以下是智能体会话消息：\nuser: 开始构建\nagent: 构建通过"
         );
+    }
+
+    #[test]
+    fn classification_context_joins_stream_chunks_without_separators() {
+        let content = vec![
+            ContentBlock::Text(TextContent::new("构建")),
+            ContentBlock::Text(TextContent::new("通过")),
+        ];
+        let context = format_context(
+            "检查构建",
+            vec![HistoryItem::AgentMessage {
+                id: "agent-1".into(),
+                content,
+                timestamp: 10,
+            }],
+            10,
+            10,
+        )
+        .unwrap();
+
+        assert!(context.ends_with("agent: 构建通过"));
     }
 
     #[test]
