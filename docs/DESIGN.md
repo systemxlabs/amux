@@ -326,9 +326,9 @@ Server 作为 ACP client 与 Agents 通信
 - 权限自动审批
 - Client 能力支持：空
 - 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送指令或查询会话选项时，才向 Agent 发送 `session/new` 请求创建 agent 侧会话
-  - 如果群聊会话成员设置了模型偏好，则在每次 `session/new` 请求后立即发送 `session/set_config_option` 请求进行设置
 - 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 Agent 发送 `session/resume` 请求恢复 agent 侧已有会话
 - 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 Agent 发送 `session/set_config_option` 请求进行设置
+  - 如果普通会话设置了模型偏好，则在每次 `session/new` 和 `session/resume` 请求后立即发送 `session/set_config_option` 请求进行设置
 - 主动关闭长时间无活动会话：当会话长时间无新活动（大于 1h）且会话状态为空闲时，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，释放资源
 - 取消会话：当用户取消会话时，向 Agent 发送 `session/cancel` 通知来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，如果 Agent 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
@@ -386,6 +386,7 @@ Server 作为 ACP client 与 Agents 通信
 普通会话数据包含三部分
 - 元数据：存储在 `~/.amux/session.sqlite` 文件中
   - 当有新的 agent 消息插入时，将会话标记为未读
+  - 当用户通过会话配置成功修改模型时同步更新模型偏好
   ```SQL
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,             -- 会话 ID
@@ -400,6 +401,7 @@ Server 作为 ACP client 与 Agents 通信
     worktree_dir TEXT,               -- worktree 目录
     machine TEXT NOT NULL,           -- 所属机器
     agent TEXT NOT NULL,             -- 所属 Agent
+    model TEXT,                      -- 模型偏好
     agent_session_id TEXT,           -- Agent 会话 ID
     created_at INTEGER NOT NULL,     -- 创建时间
     updated_at INTEGER NOT NULL      -- 更新时间
@@ -485,7 +487,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 |---|---|
 | `list_agents` | 查询各机器的执行智能体列表，包括执行智能体状态（可用或不可用） |
 | `list_sessions` | 查询关联普通会话列表，包含会话 ID、状态、标题、工作目录、worktree 目录、机器、执行智能体等信息 |
-| `create_session` | 创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支（若为本地分支则格式为 `refs/heads/<name>`，若为远程跟踪分支则格式为 `refs/remotes/<remote>/<branch>`），若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作 |
+| `create_session` | 创建关联普通会话，需指定机器、执行智能体、模型偏好、工作目录、是否开启 worktree 和基分支（若为本地分支则格式为 `refs/heads/<name>`，若为远程跟踪分支则格式为 `refs/remotes/<remote>/<branch>`），若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作 |
 | `prompt_session` | 向指定关联普通会话以用户角色发送消息，驱动执行智能体工作 |
 | `cancel_session` | 取消指定关联普通会话中执行智能体正在进行中的工作，若无进行中的工作则立即返回成功 |
 | `configure_session` | 配置指定关联普通会话的会话标题和会话选项 |
@@ -617,7 +619,6 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 - 元数据：存储在 `~/.amux/group.sqlite` 文件中
   - 成员名称不能为 `all` 和 `user`
   - 当有新的 agent 消息插入时，将会话标记为未读
-  - 当用户通过会话配置成功修改成员模型时，如果模型偏好不为空则同步更新
   ```SQL
   CREATE TABLE IF NOT EXISTS groups (
     id TEXT PRIMARY KEY,              -- 群聊会话 ID
@@ -635,7 +636,6 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     group_id TEXT NOT NULL,           -- 群聊会话 ID
     machine TEXT NOT NULL,            -- 所属机器
     agent TEXT NOT NULL,              -- 所属 Agent
-    model TEXT,                       -- 模型偏好
     session_id TEXT NOT NULL,         -- 成员普通会话 ID
     name TEXT NOT NULL,               -- 角色名称
     description TEXT NOT NULL,        -- 角色描述
