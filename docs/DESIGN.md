@@ -28,6 +28,7 @@ Server-Daemon 通信采用 WebSocket，消息格式为 JSON-RPC 2.0。
 | `machine.info` | 获取当前机器信息，包含操作系统、临时目录等 |
 | `agent.list` | 发现当前机器已安装的 agents，以及 agent 是否启动 |
 | `agent.restart` | 重启指定 agent |
+| `agent.models` | 查询指定 agent 模型列表 |
 | `git.diff` | 查询指定仓库改动 diff，对基准分支与 HEAD 的 merge-base 后的工作区做三点对比，覆盖已提交与未提交改动及未跟踪文件。基准分支为远程跟踪分支时，先从其所属远程更新该分支，更新失败返回错误 |
 | `git.branches` | 查询指定仓库本地分支和远程跟踪分支，并标记 worktree 基分支和远程仓库默认分支 |
 | `git.create_worktree` | 从指定仓库指定基分支创建一个 worktree 和本地分支。基分支为远程跟踪分支时，先从其所属远程更新该分支，更新失败返回错误 |
@@ -68,6 +69,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | GET `/machines/<machine_name>/agents` | 查询当前机器的 agents，包含名称、状态和打开会话数 |
 | POST `/machines/<machine_name>/agents/rediscover` | 重新发现 agents |
 | POST `/machines/<machine_name>/agents/<agent_name>/restart` | 重启指定 agent |
+| GET `/machines/<machine_name>/agents/<agent_name>/models` | 查询指定 agent 模型列表 |
 | GET `/machines/<machine_name>/list_dir` | 分页查看指定路径文件夹列表 |
 | GET `/machines/<machine_name>/read_file` | 分页查看指定路径文本文件内容 |
 | GET `/machines/<machine_name>/list_branches` | 查看指定路径仓库的本地分支和远程跟踪分支列表 |
@@ -196,6 +198,14 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 | codex | `INITIAL_AGENT_MODE=agent-full-access bunx @nyssance/codex-acp-v2` |
 | claude | `CLAUDE_AGENT_ACP_EXPERIMENTAL_V2=1 npx -y @agentclientprotocol/claude-agent-acp` |
 
+### Agent 模型列表
+
+| agent | 模型列表 |
+|---|---|
+| nano | 返回 ACP 验证阶段传入的 `amuxModel` |
+| codex | 读取 `$CODEX_HOME/config.toml`，否则 `~/.codex/config.toml` |
+| claude | 读取 `$CLAUDE_CONFIG_DIR/settings.json`，否则 `~/.claude/settings.json` |
+
 ### Nano 智能体
 
 Nano 智能体为 Daemon 内置智能体，运行在进程内，采用非流式传输请求模型 API，只有一个 shell 工具，所有数据存储在内存中。
@@ -316,6 +326,7 @@ Server 作为 ACP client 与 Agents 通信
 - 权限自动审批
 - Client 能力支持：空
 - 惰性创建新会话：用户创建会话时，仅在 Server 侧写入，等待用户发送指令或查询会话选项时，才向 Agent 发送 `session/new` 请求创建 agent 侧会话
+  - 如果群聊会话成员设置了模型偏好，则在每次 `session/new` 请求后立即发送 `session/set_config_option` 请求进行设置
 - 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 Agent 发送 `session/resume` 请求恢复 agent 侧已有会话
 - 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 Agent 发送 `session/set_config_option` 请求进行设置
 - 主动关闭长时间无活动会话：当会话长时间无新活动（大于 1h）且会话状态为空闲时，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，释放资源
@@ -606,6 +617,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 - 元数据：存储在 `~/.amux/group.sqlite` 文件中
   - 成员名称不能为 `all` 和 `user`
   - 当有新的 agent 消息插入时，将会话标记为未读
+  - 当用户通过会话配置成功修改成员模型时，如果模型偏好不为空则同步更新
   ```SQL
   CREATE TABLE IF NOT EXISTS groups (
     id TEXT PRIMARY KEY,              -- 群聊会话 ID
@@ -623,6 +635,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     group_id TEXT NOT NULL,           -- 群聊会话 ID
     machine TEXT NOT NULL,            -- 所属机器
     agent TEXT NOT NULL,              -- 所属 Agent
+    model TEXT,                       -- 模型偏好
     session_id TEXT NOT NULL,         -- 成员普通会话 ID
     name TEXT NOT NULL,               -- 角色名称
     description TEXT NOT NULL,        -- 角色描述
@@ -655,6 +668,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
       "description": "负责实现代码",  // 不可为空
       "machine": "localpc",         // 不可为空
       "agent": "codex",             // 不可为空
+      "model": "deepseek-flash",    // 可为空
       "workspace": "/home/xxx",     // 不可为空
       "useWorktree": true,          // 不可为空
       "worktreeBase": "refs/heads/main"
