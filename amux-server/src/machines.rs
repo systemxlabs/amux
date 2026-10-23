@@ -43,7 +43,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct MachineHub {
     token: String,
     config: Arc<crate::config_store::ConfigStore>,
-    events: mpsc::Sender<AcpEvent>,
+    events: mpsc::UnboundedSender<AcpEvent>,
     terminals: Arc<TerminalCache>,
     machines: Arc<Mutex<HashMap<String, Arc<Machine>>>>,
 }
@@ -75,7 +75,7 @@ struct AgentSlot {
 impl MachineHub {
     pub fn new(
         token: String,
-        events: mpsc::Sender<AcpEvent>,
+        events: mpsc::UnboundedSender<AcpEvent>,
         terminals: Arc<TerminalCache>,
         config: Arc<crate::config_store::ConfigStore>,
     ) -> Self {
@@ -680,7 +680,7 @@ impl MachineHub {
     }
 
     fn notify_agent_restarted(&self, machine: &Arc<Machine>, agent: &str) {
-        let _ = self.events.try_send(AcpEvent::AgentRestarted {
+        let _ = self.events.send(AcpEvent::AgentRestarted {
             machine: machine.name.clone(),
             agent: agent.to_string(),
         });
@@ -858,7 +858,7 @@ mod tests {
 
     impl FakeDaemon {
         fn new(running: bool) -> Self {
-            let (events, _events_rx) = mpsc::channel(8);
+            let (events, _events_rx) = mpsc::unbounded_channel();
             let hub = Arc::new(MachineHub::new(
                 "token".to_string(),
                 events,

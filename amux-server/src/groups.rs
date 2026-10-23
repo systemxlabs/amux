@@ -278,13 +278,16 @@ impl GroupService {
     }
 
     /// 成员普通会话产生 agent 输出：非空输出进入群聊消息（引用普通会话消息）。
-    pub fn on_member_output(&self, session_id: &str, message_id: &str, content: &[ContentBlock]) {
-        if content.is_empty() || is_blank_output(content) {
-            return;
-        }
+    pub fn on_member_output(&self, session_id: &str, message_id: &str) {
         let Some(member) = self.store.group_member_by_session(session_id) else {
             return;
         };
+        let Some(content) = self.store.session_message(&member.session_id, message_id) else {
+            return;
+        };
+        if content.is_empty() || is_blank_output(&content) {
+            return;
+        }
         self.store.insert_group_message(
             &member.group_id,
             &rand_id(),

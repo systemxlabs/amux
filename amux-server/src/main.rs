@@ -46,9 +46,6 @@ use crate::workflows::WorkflowService;
 /// 后台维护周期（关闭长时间无活动会话、清理过期终端）。
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(600);
 
-/// ACP 事件队列容量。
-const EVENT_QUEUE: usize = 4096;
-
 #[derive(Debug, Parser)]
 #[command(name = "amux-server", about = "公网枢纽：对接 Client 与各机器 Daemon")]
 struct Args {
@@ -82,7 +79,7 @@ async fn run(args: Args) -> Result<(), String> {
     let config = Arc::new(ConfigStore::new(home.clone()));
     let terminals = Arc::new(TerminalCache::new());
     let attachments = Arc::new(AttachmentStore::new(home.clone()));
-    let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
 
     let machines = MachineHub::new(
         args.token.clone(),

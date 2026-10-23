@@ -2055,7 +2055,7 @@ mod tests {
         let store = Arc::new(Store::open(home).unwrap());
         let config = Arc::new(ConfigStore::new(home.to_path_buf()));
         let terminals = Arc::new(TerminalCache::new());
-        let (events, _events_rx) = tokio::sync::mpsc::channel(4);
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
         let machines = MachineHub::new(
             "token".into(),
             events,

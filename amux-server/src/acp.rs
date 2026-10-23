@@ -7,7 +7,7 @@
 //!
 //! 通知一律翻译为 [`AcpEvent`] 交给会话层落盘与驱动工作流，本模块不碰存储。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +21,8 @@ use agent_client_protocol::schema::v2::{
     SelectedPermissionOutcome, SessionConfigKind as AcpSessionConfigKind,
     SessionConfigOption as AcpSessionConfigOption,
     SessionConfigOptionValue as AcpSessionConfigOptionValue, SessionConfigSelectOptions,
-    SessionUpdate, SetSessionConfigOptionRequest, StateUpdate, StopReason, TextContent,
-    ToolCallStatus, ToolCallUpdate, ToolKind, UpdateSessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, StateUpdate, StopReason, ToolCallStatus,
+    ToolCallUpdate, ToolKind, UpdateSessionNotification,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::{Agent, Client, ConnectTo, JsonRpcRequest, Lines, V2ConnectionTo};
@@ -37,7 +37,7 @@ use futures_util::stream;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
-/// ACP 通知 → 会话层事件（文本已按 upsert 语义合并为整条内容）。
+/// ACP 通知 → 会话层事件。
 #[derive(Debug, Clone)]
 pub enum AcpEvent {
     /// 前台状态变更
@@ -46,24 +46,24 @@ pub enum AcpEvent {
         state: SessionState,
         reason: StateChangeReason,
     },
-    /// agent 消息整条内容（按 message_id upsert，ACP ContentBlock 数组）
+    /// agent 消息流式更新
     Message {
         agent_session_id: String,
         message_id: String,
-        content: Vec<ContentBlock>,
+        update: MessageUpdate,
     },
-    /// 思考活动：实时活动按 message_id 开始/结束（同 id 再次收到即结束），内容实时展示不落盘
+    /// 思考活动流式更新
     Thinking {
         agent_session_id: String,
         message_id: String,
-        text: String,
+        update: ThinkingUpdate,
     },
-    /// 上下文压缩活动：`InProgress` 开始实时展示，其余状态结束
+    /// 上下文压缩活动更新
     Compaction {
         agent_session_id: String,
         compaction_id: String,
         status: CompactionStatus,
-        summary: String,
+        update: CompactionPatch,
     },
     /// 工具调用：`Pending`/`InProgress` 开始实时展示，终态结束
     ToolCall {
@@ -113,14 +113,26 @@ pub enum AcpEvent {
     AgentRestarted { machine: String, agent: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum MessageBufferKind {
-    AgentMessage,
-    AgentThought,
-    CompactionSummary,
+#[derive(Debug, Clone)]
+pub enum MessageUpdate {
+    Chunk(Box<ContentBlock>),
+    Snapshot(Option<Vec<ContentBlock>>),
 }
 
-type MessageBuffers = Mutex<HashMap<(String, String, MessageBufferKind), Vec<ContentBlock>>>;
+#[derive(Debug, Clone)]
+pub enum ThinkingUpdate {
+    Chunk(String),
+    Snapshot(Option<String>),
+}
+
+#[derive(Debug, Clone)]
+pub enum CompactionPatch {
+    Chunk(String),
+    Patch {
+        summary: MaybeUndefined<String>,
+        error: MaybeUndefined<String>,
+    },
+}
 
 /// 会话层发往 ACP 连接的调用。
 enum Call {
@@ -296,7 +308,7 @@ pub async fn connect(
     agent: &str,
     outgoing: mpsc::Sender<String>,
     incoming: mpsc::Receiver<String>,
-    events: mpsc::Sender<AcpEvent>,
+    events: mpsc::UnboundedSender<AcpEvent>,
     config: Option<amux_common::api::OrchestratorConfig>,
 ) -> Result<Arc<AgentConnection>, String> {
     let (calls_tx, mut calls_rx) = mpsc::channel::<Call>(64);
@@ -304,16 +316,14 @@ pub async fn connect(
     let opened_sessions = Arc::new(Mutex::new(HashSet::new()));
     let machine_name = machine.to_string();
     let agent_name = agent.to_string();
-    let buffers = Arc::new(Mutex::new(HashMap::new()));
     let task_opened_sessions = Arc::clone(&opened_sessions);
 
     tokio::spawn(async move {
         let transport = DaemonTransport { outgoing, incoming };
         let notifications = {
             let events = events.clone();
-            let buffers = Arc::clone(&buffers);
             async move |notification: UpdateSessionNotification, _cx| {
-                translate(&notification, &buffers, &events);
+                translate(&notification, &events);
                 Ok(())
             }
         };
@@ -538,131 +548,61 @@ async fn request<R: JsonRpcRequest>(
         .map_err(|error| error.to_string())
 }
 
-/// ACP 通知 → 事件（消息内容按 messageId 累积为 ACP ContentBlock 数组）。
-fn translate(
-    notification: &UpdateSessionNotification,
-    buffers: &MessageBuffers,
-    events: &mpsc::Sender<AcpEvent>,
-) {
+/// ACP 通知 → 事件。消息/活动保留增量或快照语义，由存储层读取磁盘后合并。
+fn translate(notification: &UpdateSessionNotification, events: &mpsc::UnboundedSender<AcpEvent>) {
     let session_id = notification.session_id.to_string();
     let mut out: Vec<AcpEvent> = Vec::new();
 
     match &notification.update {
         // 用户消息由 Server 落盘（DESIGN：忽略 agent 回放的 user_message*）
         SessionUpdate::UserMessageChunk(_) | SessionUpdate::UserMessage(_) => {}
-        SessionUpdate::AgentMessageChunk(chunk) => {
-            let merged = append_block(
-                buffers,
-                &session_id,
-                &chunk.message_id.to_string(),
-                MessageBufferKind::AgentMessage,
-                &chunk.content,
-            );
-            out.push(AcpEvent::Message {
-                agent_session_id: session_id.clone(),
-                message_id: chunk.message_id.to_string(),
-                content: merged,
-            });
-        }
+        SessionUpdate::AgentMessageChunk(chunk) => out.push(AcpEvent::Message {
+            agent_session_id: session_id.clone(),
+            message_id: chunk.message_id.to_string(),
+            update: MessageUpdate::Chunk(Box::new(chunk.content.clone())),
+        }),
         SessionUpdate::AgentMessage(message) => {
-            if let Some(blocks) = snapshot_blocks(&message.content) {
-                let merged = replace_blocks(
-                    buffers,
-                    &session_id,
-                    &message.message_id.to_string(),
-                    MessageBufferKind::AgentMessage,
-                    blocks.clone(),
-                );
+            if let Some(content) = snapshot_blocks(&message.content) {
                 out.push(AcpEvent::Message {
                     agent_session_id: session_id.clone(),
                     message_id: message.message_id.to_string(),
-                    content: merged,
+                    update: MessageUpdate::Snapshot(content),
                 });
             }
         }
         SessionUpdate::AgentThoughtChunk(chunk) => {
             if let Some(text) = text_of(&chunk.content) {
-                let merged = append_block(
-                    buffers,
-                    &session_id,
-                    &chunk.message_id.to_string(),
-                    MessageBufferKind::AgentThought,
-                    &ContentBlock::Text(TextContent::new(text)),
-                );
                 out.push(AcpEvent::Thinking {
                     agent_session_id: session_id.clone(),
                     message_id: chunk.message_id.to_string(),
-                    text: join_text(&merged).unwrap_or_default(),
+                    update: ThinkingUpdate::Chunk(text),
                 });
             }
         }
         SessionUpdate::AgentThought(thought) => {
             if let Some(text) = snapshot_text(&thought.content) {
-                let blocks = text.map(|text| vec![ContentBlock::Text(TextContent::new(text))]);
-                let merged = replace_blocks(
-                    buffers,
-                    &session_id,
-                    &thought.message_id.to_string(),
-                    MessageBufferKind::AgentThought,
-                    blocks,
-                );
                 out.push(AcpEvent::Thinking {
                     agent_session_id: session_id.clone(),
                     message_id: thought.message_id.to_string(),
-                    text: join_text(&merged).unwrap_or_default(),
+                    update: ThinkingUpdate::Snapshot(text),
                 });
             }
         }
-        SessionUpdate::CompactionUpdate(update) => {
-            let summary = match snapshot_blocks(&update.summary) {
-                Some(Some(blocks)) => join_text(&replace_blocks(
-                    buffers,
-                    &session_id,
-                    &update.compaction_id.to_string(),
-                    MessageBufferKind::CompactionSummary,
-                    Some(blocks),
-                ))
-                .unwrap_or_default(),
-                Some(None) => {
-                    replace_blocks(
-                        buffers,
-                        &session_id,
-                        &update.compaction_id.to_string(),
-                        MessageBufferKind::CompactionSummary,
-                        None,
-                    );
-                    String::new()
-                }
-                None => join_text(&current_blocks(
-                    buffers,
-                    &session_id,
-                    &update.compaction_id.to_string(),
-                    MessageBufferKind::CompactionSummary,
-                ))
-                .unwrap_or_default(),
-            };
-            out.push(AcpEvent::Compaction {
-                agent_session_id: session_id.clone(),
-                compaction_id: update.compaction_id.to_string(),
-                status: update.status.clone(),
-                summary: compaction_summary_with_error(summary, &update.error),
-            });
-        }
-        SessionUpdate::CompactionSummaryChunk(chunk) => {
-            let merged = append_block(
-                buffers,
-                &session_id,
-                &chunk.compaction_id.to_string(),
-                MessageBufferKind::CompactionSummary,
-                &chunk.content,
-            );
-            out.push(AcpEvent::Compaction {
-                agent_session_id: session_id.clone(),
-                compaction_id: chunk.compaction_id.to_string(),
-                status: CompactionStatus::InProgress,
-                summary: join_text(&merged).unwrap_or_default(),
-            });
-        }
+        SessionUpdate::CompactionUpdate(update) => out.push(AcpEvent::Compaction {
+            agent_session_id: session_id.clone(),
+            compaction_id: update.compaction_id.to_string(),
+            status: update.status.clone(),
+            update: CompactionPatch::Patch {
+                summary: text_patch(&update.summary),
+                error: update.error.clone(),
+            },
+        }),
+        SessionUpdate::CompactionSummaryChunk(chunk) => out.push(AcpEvent::Compaction {
+            agent_session_id: session_id.clone(),
+            compaction_id: chunk.compaction_id.to_string(),
+            status: CompactionStatus::InProgress,
+            update: CompactionPatch::Chunk(text_of(&chunk.content).unwrap_or_default()),
+        }),
         SessionUpdate::Notice(notice) => out.push(AcpEvent::Notice {
             agent_session_id: session_id.clone(),
             severity: notice.severity.clone(),
@@ -721,62 +661,10 @@ fn translate(
     }
 
     for event in out {
-        if let Err(error) = events.try_send(event) {
-            log::warn!("ACP 事件积压，丢弃一条: {error}");
+        if events.send(event).is_err() {
+            log::warn!("ACP 事件通道已关闭");
+            break;
         }
-    }
-}
-
-fn append_block(
-    buffers: &MessageBuffers,
-    session_id: &str,
-    message_id: &str,
-    kind: MessageBufferKind,
-    block: &ContentBlock,
-) -> Vec<ContentBlock> {
-    let mut buffers = buffers.lock();
-    let entry = buffers
-        .entry((session_id.to_string(), message_id.to_string(), kind))
-        .or_default();
-    entry.push(block.clone());
-    entry.clone()
-}
-
-fn replace_blocks(
-    buffers: &MessageBuffers,
-    session_id: &str,
-    message_id: &str,
-    kind: MessageBufferKind,
-    blocks: Option<Vec<ContentBlock>>,
-) -> Vec<ContentBlock> {
-    let blocks = blocks.unwrap_or_default();
-    buffers.lock().insert(
-        (session_id.to_string(), message_id.to_string(), kind),
-        blocks.clone(),
-    );
-    blocks
-}
-
-fn current_blocks(
-    buffers: &MessageBuffers,
-    session_id: &str,
-    message_id: &str,
-    kind: MessageBufferKind,
-) -> Vec<ContentBlock> {
-    buffers
-        .lock()
-        .get(&(session_id.to_string(), message_id.to_string(), kind))
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn compaction_summary_with_error(summary: String, error: &MaybeUndefined<String>) -> String {
-    if !summary.is_empty() {
-        return summary;
-    }
-    match error {
-        MaybeUndefined::Value(error) => error.clone(),
-        MaybeUndefined::Null | MaybeUndefined::Undefined => String::new(),
     }
 }
 
@@ -835,6 +723,16 @@ fn snapshot_text(content: &MaybeUndefined<Vec<ContentBlock>>) -> Option<Option<S
         MaybeUndefined::Undefined => None,
         MaybeUndefined::Null => Some(None),
         MaybeUndefined::Value(blocks) => Some(join_text(blocks)),
+    }
+}
+
+fn text_patch(content: &MaybeUndefined<Vec<ContentBlock>>) -> MaybeUndefined<String> {
+    match content {
+        MaybeUndefined::Undefined => MaybeUndefined::Undefined,
+        MaybeUndefined::Null => MaybeUndefined::Null,
+        MaybeUndefined::Value(blocks) => {
+            MaybeUndefined::Value(join_text(blocks).unwrap_or_default())
+        }
     }
 }
 
@@ -1003,59 +901,6 @@ mod tests {
             stop_reason_reason(Some(&StopReason::EndTurn)),
             StateChangeReason::Completed
         );
-    }
-
-    #[test]
-    fn chunk_text_is_accumulated_per_message() {
-        let buffers = Mutex::new(HashMap::new());
-        let blocks = append_block(
-            &buffers,
-            "s1",
-            "m1",
-            MessageBufferKind::AgentMessage,
-            &ContentBlock::Text(TextContent::new("he")),
-        );
-        assert_eq!(join_text(&blocks), Some("he".to_string()));
-        let blocks = append_block(
-            &buffers,
-            "s1",
-            "m1",
-            MessageBufferKind::AgentMessage,
-            &ContentBlock::Text(TextContent::new("llo")),
-        );
-        assert_eq!(join_text(&blocks), Some("hello".to_string()));
-        let blocks = append_block(
-            &buffers,
-            "s1",
-            "m2",
-            MessageBufferKind::AgentMessage,
-            &ContentBlock::Text(TextContent::new("x")),
-        );
-        assert_eq!(join_text(&blocks), Some("x".to_string()));
-        // 整条快照替换累积内容；清空后为无文本
-        let blocks = replace_blocks(&buffers, "s1", "m1", MessageBufferKind::AgentMessage, None);
-        assert_eq!(join_text(&blocks), None);
-    }
-
-    #[test]
-    fn thought_and_agent_message_buffers_are_isolated() {
-        let buffers = Mutex::new(HashMap::new());
-        let thought = append_block(
-            &buffers,
-            "s1",
-            "shared",
-            MessageBufferKind::AgentThought,
-            &ContentBlock::Text(TextContent::new("private reasoning")),
-        );
-        let message = append_block(
-            &buffers,
-            "s1",
-            "shared",
-            MessageBufferKind::AgentMessage,
-            &ContentBlock::Text(TextContent::new("answer")),
-        );
-        assert_eq!(join_text(&thought), Some("private reasoning".to_string()));
-        assert_eq!(join_text(&message), Some("answer".to_string()));
     }
 
     #[test]

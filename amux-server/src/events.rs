@@ -13,7 +13,7 @@ use crate::store::Store;
 use crate::workflows::WorkflowService;
 
 pub async fn run(
-    mut events: mpsc::Receiver<AcpEvent>,
+    mut events: mpsc::UnboundedReceiver<AcpEvent>,
     sessions: Arc<SessionService>,
     workflows: Arc<WorkflowService>,
     groups: Arc<GroupService>,
@@ -26,18 +26,14 @@ pub async fn run(
             AcpEvent::Message {
                 agent_session_id,
                 message_id,
-                content,
-            } => Some((
-                agent_session_id.clone(),
-                message_id.clone(),
-                content.clone(),
-            )),
+                ..
+            } => Some((agent_session_id.clone(), message_id.clone())),
             _ => None,
         };
         let applied = sessions.apply(event);
-        if let Some((agent_session_id, message_id, content)) = agent_message {
+        if let Some((agent_session_id, message_id)) = agent_message {
             if let Some(session_id) = sessions.session_id_of_agent(&agent_session_id) {
-                groups.on_member_output(&session_id, &message_id, &content);
+                groups.on_member_output(&session_id, &message_id);
             }
         }
         let Some(applied) = applied else { continue };

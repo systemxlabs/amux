@@ -21,8 +21,9 @@ use uuid::Uuid;
 use agent_client_protocol::schema::v2::{
     CompactionStatus, NoticeSeverity, ToolCallStatus, ToolKind,
 };
+use agent_client_protocol::schema::MaybeUndefined;
 
-use crate::acp::AcpEvent;
+use crate::acp::{AcpEvent, CompactionPatch, MessageUpdate, ThinkingUpdate};
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
 use crate::store::Store;
@@ -47,8 +48,6 @@ pub struct SessionCaches {
     commands: Mutex<HashMap<String, Vec<SlashCommand>>>,
     plans: Mutex<HashMap<String, Vec<SessionPlanEntry>>>,
     usages: Mutex<HashMap<String, Usage>>,
-    /// 工具调用活动的当前字段（`tool_call_update` 未携带的字段保持不变）
-    tool_calls: Mutex<HashMap<(String, String), Activity>>,
     /// 普通会话实时活动 ID（docs/DESIGN.md「普通会话实时活动」）；内容仍在磁盘
     live_activity: Mutex<HashMap<String, String>>,
     /// agent 会话 id → amux 会话 id
@@ -69,9 +68,6 @@ impl SessionCaches {
         self.plans.lock().remove(session_id);
         self.usages.lock().remove(session_id);
         self.live_activity.lock().remove(session_id);
-        self.tool_calls
-            .lock()
-            .retain(|(current_session, _), _| current_session != session_id);
     }
 }
 
@@ -672,12 +668,20 @@ impl SessionService {
             AcpEvent::Message {
                 agent_session_id,
                 message_id,
-                content,
+                update,
             } => {
                 let session = self.session_of_agent(&agent_session_id)?;
-                let content = serde_json::to_string(&content).unwrap_or_default();
                 self.store
-                    .upsert_message(&session.id, &message_id, "agent", &content, now_ms());
+                    .update_message(&session.id, &message_id, "agent", now_ms(), |current| {
+                        match update {
+                            MessageUpdate::Chunk(block) => {
+                                let mut blocks = current.unwrap_or_default();
+                                blocks.push(*block);
+                                blocks
+                            }
+                            MessageUpdate::Snapshot(content) => content.unwrap_or_default(),
+                        }
+                    });
                 self.store.set_session_unread(&session.id, true);
                 self.store.touch(&session.id);
                 None
@@ -685,18 +689,29 @@ impl SessionService {
             AcpEvent::Thinking {
                 agent_session_id,
                 message_id,
-                text,
+                update,
             } => {
                 let session = self.session_of_agent(&agent_session_id)?;
                 let id = format!("think-{message_id}");
-                let activity = Activity::Thinking {
-                    id: id.clone(),
-                    timestamp: now_ms(),
-                    thinking: text,
-                };
-                let content = serde_json::to_string(&activity).unwrap_or_default();
+                let now = now_ms();
                 self.store
-                    .upsert_activity(&session.id, &id, "thinking", &content, now_ms());
+                    .update_activity(&session.id, &id, "thinking", now, |current| {
+                        let mut thinking = match current {
+                            Some(Activity::Thinking { thinking, .. }) => thinking,
+                            _ => String::new(),
+                        };
+                        match update {
+                            ThinkingUpdate::Chunk(text) => thinking.push_str(&text),
+                            ThinkingUpdate::Snapshot(text) => {
+                                thinking = text.unwrap_or_default();
+                            }
+                        }
+                        Activity::Thinking {
+                            id: id.clone(),
+                            timestamp: now,
+                            thinking,
+                        }
+                    });
                 self.set_live_activity(&session.id, id);
                 None
             }
@@ -704,22 +719,45 @@ impl SessionService {
                 agent_session_id,
                 compaction_id,
                 status,
-                summary,
+                update,
             } => {
                 let session = self.session_of_agent(&agent_session_id)?;
-                let activity = Activity::Compaction {
-                    id: compaction_id.clone(),
-                    timestamp: now_ms(),
-                    status: compaction_status_str(&status),
-                    summary,
-                };
-                let content = serde_json::to_string(&activity).unwrap_or_default();
-                self.store.upsert_activity(
+                let now = now_ms();
+                self.store.update_activity(
                     &session.id,
                     &compaction_id,
                     "compaction",
-                    &content,
-                    now_ms(),
+                    now,
+                    |current| {
+                        let mut summary = match current {
+                            Some(Activity::Compaction { summary, .. }) => summary,
+                            _ => String::new(),
+                        };
+                        match update {
+                            CompactionPatch::Chunk(text) => summary.push_str(&text),
+                            CompactionPatch::Patch {
+                                summary: next,
+                                error,
+                            } => {
+                                match next {
+                                    MaybeUndefined::Undefined => {}
+                                    MaybeUndefined::Null => summary.clear(),
+                                    MaybeUndefined::Value(text) => summary = text,
+                                }
+                                if summary.is_empty() {
+                                    if let MaybeUndefined::Value(error) = error {
+                                        summary = error;
+                                    }
+                                }
+                            }
+                        }
+                        Activity::Compaction {
+                            id: compaction_id.clone(),
+                            timestamp: now,
+                            status: compaction_status_str(&status),
+                            summary,
+                        }
+                    },
                 );
                 if status == CompactionStatus::InProgress {
                     self.set_live_activity(&session.id, compaction_id);
@@ -736,27 +774,27 @@ impl SessionService {
                 parameters,
             } => {
                 let session = self.session_of_agent(&agent_session_id)?;
-                let content = {
-                    let mut tool_calls = self.caches.tool_calls.lock();
-                    let entry = tool_calls
-                        .entry((session.id.clone(), tool_call_id.clone()))
-                        .or_insert_with(|| Activity::ToolCall {
-                            id: tool_call_id.clone(),
-                            timestamp: now_ms(),
-                            tool_call_id: tool_call_id.clone(),
-                            tool_name: String::new(),
-                            title: None,
-                            parameters: None,
-                        });
-                    apply_tool_call_patch(entry, name, kind, title, parameters);
-                    serde_json::to_string(&*entry).unwrap_or_default()
-                };
-                self.store.upsert_activity(
+                let now = now_ms();
+                self.store.update_activity(
                     &session.id,
                     &tool_call_id,
                     "tool_call",
-                    &content,
-                    now_ms(),
+                    now,
+                    |current| {
+                        let mut activity = match current {
+                            Some(activity @ Activity::ToolCall { .. }) => activity,
+                            _ => Activity::ToolCall {
+                                id: tool_call_id.clone(),
+                                timestamp: now,
+                                tool_call_id: tool_call_id.clone(),
+                                tool_name: String::new(),
+                                title: None,
+                                parameters: None,
+                            },
+                        };
+                        apply_tool_call_patch(&mut activity, name, kind, title, parameters);
+                        activity
+                    },
                 );
                 if let Some(ToolCallStatus::Pending | ToolCallStatus::InProgress) = status {
                     // 工具调用终态不立即结束实时活动；由 state_update=idle 统一清空，
@@ -1118,17 +1156,6 @@ mod tests {
             .usages
             .lock()
             .insert("s1".into(), Usage { used: 1, size: 2 });
-        caches.tool_calls.lock().insert(
-            ("s1".into(), "call-1".into()),
-            Activity::ToolCall {
-                id: "call-1".into(),
-                timestamp: 1,
-                tool_call_id: "call-1".into(),
-                tool_name: "shell".into(),
-                title: None,
-                parameters: None,
-            },
-        );
         caches
             .live_activity
             .lock()
@@ -1142,10 +1169,6 @@ mod tests {
         assert!(!caches.commands.lock().contains_key("s1"));
         assert!(!caches.plans.lock().contains_key("s1"));
         assert!(!caches.usages.lock().contains_key("s1"));
-        assert!(!caches
-            .tool_calls
-            .lock()
-            .contains_key(&("s1".into(), "call-1".into())));
         assert!(!caches.live_activity.lock().contains_key("s1"));
     }
 }

@@ -411,6 +411,49 @@ impl Store {
         );
     }
 
+    /// 读取磁盘中的消息内容，应用流式更新后立即写回。
+    pub fn update_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        role: &str,
+        created_at: u64,
+        update: impl FnOnce(Option<Vec<ContentBlock>>) -> Vec<ContentBlock>,
+    ) {
+        let transcript = match self.transcript(session_id, true) {
+            Ok(Some(transcript)) => transcript,
+            Err(error) => {
+                log::warn!("打开会话 transcript 失败（{session_id}）: {error}");
+                return;
+            }
+            Ok(None) => return,
+        };
+        let conn = transcript.lock();
+        let current = conn
+            .query_row(
+                "SELECT content FROM messages WHERE message_id = ?1",
+                params![message_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|content| serde_json::from_str(&content).ok());
+        let content = serde_json::to_string(&update(current)).unwrap_or_default();
+        let _ = conn.execute(
+            "INSERT INTO messages (message_id, role, content, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(message_id) DO UPDATE SET content = ?3, updated_at = ?5",
+            params![
+                message_id,
+                role,
+                content,
+                created_at as i64,
+                now_ms() as i64
+            ],
+        );
+    }
+
     pub fn messages_page(
         &self,
         session_id: &str,
@@ -493,6 +536,50 @@ impl Store {
             Ok(None) => return,
         };
         let _ = transcript.lock().execute(
+            "INSERT INTO activities (activity_id, kind, content, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(activity_id) DO UPDATE SET content = ?3, updated_at = ?5",
+            params![
+                activity_id,
+                kind,
+                content,
+                created_at as i64,
+                now_ms() as i64
+            ],
+        );
+    }
+
+    /// 读取磁盘中的活动内容，应用流式更新后立即写回。
+    pub fn update_activity(
+        &self,
+        session_id: &str,
+        activity_id: &str,
+        kind: &str,
+        created_at: u64,
+        update: impl FnOnce(Option<Activity>) -> Activity,
+    ) {
+        let transcript = match self.transcript(session_id, true) {
+            Ok(Some(transcript)) => transcript,
+            Err(error) => {
+                log::warn!("打开会话 transcript 失败（{session_id}）: {error}");
+                return;
+            }
+            Ok(None) => return,
+        };
+        let conn = transcript.lock();
+        let current = conn
+            .query_row(
+                "SELECT content FROM activities WHERE activity_id = ?1",
+                params![activity_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+            .and_then(|content| serde_json::from_str(&content).ok());
+        let content = serde_json::to_string(&update(current)).unwrap_or_default();
+        let _ = conn.execute(
             "INSERT INTO activities (activity_id, kind, content, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)
              ON CONFLICT(activity_id) DO UPDATE SET content = ?3, updated_at = ?5",
@@ -2240,6 +2327,57 @@ mod tests {
         assert_eq!(store.messages_page("s1", 10, 0).0.len(), 0);
         assert_eq!(store.messages_page("s2", 10, 0).0.len(), 1);
         assert_eq!(store.activities_page("s2", 10, 0).0.len(), 1);
+    }
+
+    #[test]
+    fn streamed_updates_merge_with_persisted_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_session(&session("s1", "pc", "codex")).unwrap();
+        let text = |value: &str| {
+            ContentBlock::Text(agent_client_protocol::schema::v2::TextContent::new(value))
+        };
+
+        store.update_message("s1", "m1", "agent", 1, |_| vec![text("he")]);
+        store.update_message("s1", "m1", "agent", 2, |current| {
+            let mut blocks = current.unwrap();
+            blocks.push(text("llo"));
+            blocks
+        });
+        assert_eq!(
+            store.session_message("s1", "m1"),
+            Some(vec![text("he"), text("llo")])
+        );
+
+        store.update_message("s1", "m1", "agent", 3, |_| vec![text("snapshot")]);
+        assert_eq!(
+            store.session_message("s1", "m1"),
+            Some(vec![text("snapshot")])
+        );
+
+        store.update_activity("s1", "think-1", "thinking", 1, |_| Activity::Thinking {
+            id: "think-1".into(),
+            timestamp: 1,
+            thinking: "he".into(),
+        });
+        store.update_activity("s1", "think-1", "thinking", 2, |current| {
+            let Some(Activity::Thinking { thinking, .. }) = current else {
+                panic!("应读取到磁盘中的思考活动");
+            };
+            Activity::Thinking {
+                id: "think-1".into(),
+                timestamp: 2,
+                thinking: format!("{thinking}llo"),
+            }
+        });
+        assert_eq!(
+            store.activity_by_id("s1", "think-1"),
+            Some(Activity::Thinking {
+                id: "think-1".into(),
+                timestamp: 2,
+                thinking: "hello".into(),
+            })
+        );
     }
 
     #[test]
