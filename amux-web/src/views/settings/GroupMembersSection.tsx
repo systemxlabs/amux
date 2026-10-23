@@ -130,6 +130,7 @@ export function GroupMembersSection() {
                 <span>
                   {member.agent}@{member.machine} · {member.workspace}
                 </span>
+                {member.model ? <span>模型 · {member.model}</span> : null}
               </CardContent>
             </Card>
           ))}

@@ -5,6 +5,7 @@
 import type {
   ActivitiesPage,
   Agent,
+  AgentModel,
   Attachment,
   AttachmentList,
   Automation,
@@ -101,6 +102,12 @@ export class ApiClient {
 
   agents(machine: string): Promise<Agent[]> {
     return this.getJson(`/machines/${encodeURIComponent(machine)}/agents`);
+  }
+
+  agentModels(machine: string, agent: string): Promise<AgentModel[]> {
+    return this.getJson(
+      `/machines/${encodeURIComponent(machine)}/agents/${encodeURIComponent(agent)}/models`,
+    );
   }
 
   rediscover(machine: string): Promise<Agent[]> {

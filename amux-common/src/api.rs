@@ -53,6 +53,16 @@ pub struct Agent {
     pub opened_sessions: usize,
 }
 
+/// Agent 本地配置中的模型候选。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModel {
+    /// ACP `session/set_config_option` 使用的模型值。
+    pub value: String,
+    /// 展示名称。
+    pub name: String,
+}
+
 /// 普通会话元数据。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -333,6 +343,9 @@ pub struct GroupMemberTemplate {
     pub description: String,
     pub machine: String,
     pub agent: String,
+    /// 模型偏好；None = 使用 Agent 默认模型
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub workspace: String,
     pub use_worktree: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -348,6 +361,8 @@ pub struct GroupMember {
     pub description: String,
     pub machine: String,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub session_id: String,
     pub pinned: bool,
     pub created_at: u64,

@@ -21,9 +21,11 @@ use crate::{frames, outbox::Outbox};
 
 #[derive(Default)]
 struct Nano {
-    config: Mutex<Option<OrchestratorConfig>>,
+    config: NanoConfig,
     sessions: Mutex<HashMap<SessionId, Session>>,
 }
+
+pub type NanoConfig = Arc<Mutex<Option<OrchestratorConfig>>>;
 
 struct Session {
     /// 会话内持久 shell：工作目录、环境变量、函数跨调用保留（见 `shell` 模块）
@@ -62,8 +64,15 @@ impl Nano {
     }
 }
 
-pub async fn run(incoming: mpsc::Receiver<String>, outbox: Arc<Outbox>) -> Result<(), Error> {
-    let nano = Arc::new(Nano::default());
+pub async fn run(
+    incoming: mpsc::Receiver<String>,
+    outbox: Arc<Outbox>,
+    config: NanoConfig,
+) -> Result<(), Error> {
+    let nano = Arc::new(Nano {
+        config,
+        sessions: Mutex::new(HashMap::new()),
+    });
     let outgoing = sink::unfold(outbox, |outbox, raw: String| async move {
         outbox.push(frames::notification(
             notify::ACP,
@@ -168,6 +177,12 @@ async fn serve(nano: Arc<Nano>, transport: impl ConnectTo<Agent>) -> Result<(), 
                         .or_insert_with(|| Session::new(request.cwd.0));
                     responder.respond(ResumeSessionResponse::new())
                 }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async |_request: SetSessionConfigOptionRequest, responder, _cx| {
+                responder.respond(SetSessionConfigOptionResponse::new(Vec::new()))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -351,7 +366,7 @@ mod tests {
     ) {
         let outbox = Arc::new(Outbox::new());
         let (tx, rx) = mpsc::channel(64);
-        let task = tokio::spawn(run(rx, Arc::clone(&outbox)));
+        let task = tokio::spawn(run(rx, Arc::clone(&outbox), Default::default()));
         send(
             &tx,
             1,
@@ -439,6 +454,45 @@ mod tests {
         let _ = task.await;
         server.abort();
         let _ = server.await;
+    }
+
+    /// Nano 没有可配置项：忽略 session/set_config_option，返回空选项列表。
+    #[tokio::test]
+    async fn set_config_option_is_accepted_and_ignored() {
+        let (tx, outbox, task) = started().await;
+        let _ = next_raw(&outbox).await;
+        send(
+            &tx,
+            2,
+            "auth/login",
+            serde_json::json!({"methodId": AMUX_AUTH_METHOD, "_meta": config_meta()}),
+        )
+        .await;
+        assert!(next_raw(&outbox).await.get("error").is_none());
+        send(&tx, 3, "session/new", serde_json::json!({"cwd": "/tmp"})).await;
+        let session_id = next_raw(&outbox).await["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        send(
+            &tx,
+            4,
+            "session/set_config_option",
+            serde_json::json!({
+                "sessionId": session_id,
+                "configId": "model",
+                "type": "id",
+                "value": "test-model",
+            }),
+        )
+        .await;
+        let response = next_raw(&outbox).await;
+        assert_eq!(response["id"], 4);
+        assert_eq!(response["result"]["configOptions"], serde_json::json!([]));
+
+        drop(tx);
+        let _ = task.await;
     }
 
     #[tokio::test]

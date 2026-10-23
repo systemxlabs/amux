@@ -430,6 +430,7 @@ mod tests {
             description: "负责实现".into(),
             machine: "pc".into(),
             agent: "codex".into(),
+            model: None,
             workspace: "/repo".into(),
             use_worktree: true,
             worktree_base: Some(

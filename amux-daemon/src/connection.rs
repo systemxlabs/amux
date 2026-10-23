@@ -252,6 +252,15 @@ async fn execute(
     match method {
         method::MACHINE_INFO => to_value(machine::machine_info(&daemon.machine)),
         method::AGENT_LIST => to_value(daemon.agents.list()),
+        method::AGENT_MODELS => {
+            let params: AgentParams = decode(params)?;
+            to_value(
+                daemon
+                    .agents
+                    .models(&params.agent)
+                    .map_err(RpcError::agent_unavailable)?,
+            )
+        }
         method::AGENT_RESTART => {
             let params: AgentParams = decode(params)?;
             log::info!(

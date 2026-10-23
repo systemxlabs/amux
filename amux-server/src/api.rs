@@ -93,6 +93,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/machines/{machine}/agents/{agent}/restart",
             post(restart_agent),
         )
+        .route(
+            "/machines/{machine}/agents/{agent}/models",
+            get(list_agent_models),
+        )
         .route("/machines/{machine}/list_dir", get(list_dir))
         .route("/machines/{machine}/read_file", get(read_file))
         .route(
@@ -308,6 +312,18 @@ async fn restart_agent(
         .restart_agent(&machine, &agent)
         .await
         .map(|_| Json(OpAck { ok: true }))
+        .map_err(bad_request)
+}
+
+async fn list_agent_models(
+    State(state): State<Arc<AppState>>,
+    Path((machine, agent)): Path<(String, String)>,
+) -> ApiResult<Vec<amux_common::api::AgentModel>> {
+    state
+        .machines
+        .agent_models(&machine, &agent)
+        .await
+        .map(Json)
         .map_err(bad_request)
 }
 

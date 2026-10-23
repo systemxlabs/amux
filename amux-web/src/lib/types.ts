@@ -126,6 +126,12 @@ export type Agent = {
   openedSessions: number;
 };
 
+/** Agent 本地配置中的模型候选。 */
+export type AgentModel = {
+  value: string;
+  name: string;
+};
+
 export type Session = {
   id: string;
   machine: string;
@@ -217,6 +223,8 @@ export type GroupMemberTemplate = {
   description: string;
   machine: string;
   agent: string;
+  /** 模型偏好；undefined = 使用 Agent 默认模型 */
+  model?: string;
   workspace: string;
   useWorktree: boolean;
   worktreeBase?: WorktreeBase;
@@ -228,6 +236,7 @@ export type GroupMember = {
   description: string;
   machine: string;
   agent: string;
+  model?: string;
   sessionId: string;
   pinned: boolean;
   createdAt: number;

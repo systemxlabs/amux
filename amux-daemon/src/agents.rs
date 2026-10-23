@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 
+use amux_common::api::AgentModel;
 use amux_common::daemon::{notify, AcpForward, AgentListResult, DiscoveredAgent};
 use parking_lot::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -72,6 +73,7 @@ enum AgentProcess {
 
 pub struct AgentRegistry {
     agents: Mutex<HashMap<String, RunningAgent>>,
+    nano_config: crate::nano::NanoConfig,
     next_instance: std::sync::atomic::AtomicU64,
 }
 
@@ -79,6 +81,7 @@ impl AgentRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             agents: Mutex::new(HashMap::new()),
+            nano_config: Default::default(),
             next_instance: std::sync::atomic::AtomicU64::new(1),
         })
     }
@@ -98,6 +101,19 @@ impl AgentRegistry {
         }
     }
 
+    /// 查询 agent 本地配置中的模型候选（不是 ACP 会话的实际选项）。
+    pub fn models(&self, agent: &str) -> Result<Vec<AgentModel>, String> {
+        if !is_installed(agent) {
+            return Err(format!("本机未安装 agent: {agent}"));
+        }
+        let nano_model = self
+            .nano_config
+            .lock()
+            .as_ref()
+            .map(|config| config.model.clone());
+        crate::agent_models::agent_models(agent, nano_model.as_deref())
+    }
+
     /// 启动（未启动）或重启（已启动）指定 agent。
     pub async fn restart(self: &Arc<Self>, agent: &str, outbox: Arc<Outbox>) -> Result<(), String> {
         if !is_installed(agent) {
@@ -109,8 +125,10 @@ impl AgentRegistry {
             let instance = self
                 .next_instance
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *self.nano_config.lock() = None;
+            let nano_config = Arc::clone(&self.nano_config);
             let task = tokio::spawn(async move {
-                if let Err(error) = crate::nano::run(incoming, outbox).await {
+                if let Err(error) = crate::nano::run(incoming, outbox, nano_config).await {
                     log::warn!("Nano 已停止: {error}");
                 }
             });

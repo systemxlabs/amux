@@ -12,6 +12,8 @@ pub mod method {
     pub const MACHINE_INFO: &str = "machine.info";
     /// 发现本机已安装的 agents 及各自是否已启动
     pub const AGENT_LIST: &str = "agent.list";
+    /// 查询指定 agent 的本地模型候选
+    pub const AGENT_MODELS: &str = "agent.models";
     /// 启动（未启动）或重启（已启动）指定 agent
     pub const AGENT_RESTART: &str = "agent.restart";
     pub const GIT_DIFF: &str = "git.diff";

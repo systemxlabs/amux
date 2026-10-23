@@ -449,6 +449,7 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
           description: member.description,
           machine: member.machine,
           agent: member.agent,
+          model: member.model,
           workspace: session.workspace,
           useWorktree,
           worktreeBase,

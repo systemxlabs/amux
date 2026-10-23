@@ -884,6 +884,7 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
                     "description": "负责实现",
                     "machine": MACHINE,
                     "agent": "codex",
+                    "model": "gpt-5",
                     "workspace": workspace.path().to_string_lossy(),
                     "useWorktree": false,
                 }],
@@ -894,7 +895,16 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
     let member_session_id = group["sessions"][0]["id"].as_str().unwrap().to_string();
     assert_eq!(group["state"], "idle");
     assert_eq!(group["members"][0]["name"], "coder");
+    assert_eq!(group["members"][0]["model"], "gpt-5");
     assert_eq!(group["sessions"][0]["title"], "coder：负责实现");
+
+    let options = client
+        .get(&format!("/sessions/{member_session_id}/config_options"))
+        .await;
+    assert_eq!(
+        options["options"][0]["current_value"], "gpt-5",
+        "新会话应应用群成员模型偏好: {options}"
+    );
 
     let sessions = client.get("/sessions").await;
     assert!(
@@ -963,6 +973,23 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
     assert_eq!(
         member_session["unread"], false,
         "标记群聊已读应级联清除成员会话未读"
+    );
+
+    client
+        .post_ok(
+            &format!("/sessions/{member_session_id}/configure"),
+            json!({
+                "title": "",
+                "config": { "configId": "model", "type": "value_id", "value": "gpt-4o" },
+                "project": null,
+                "pinned": false,
+            }),
+        )
+        .await;
+    let group = client.get(&format!("/groups/{group_id}")).await;
+    assert_eq!(
+        group["members"][0]["model"], "gpt-4o",
+        "成员会话切换模型后应同步模型偏好"
     );
 
     assert_eq!(

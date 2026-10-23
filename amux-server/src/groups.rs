@@ -38,6 +38,12 @@ impl GroupService {
                 description: member.description.trim().to_string(),
                 machine: member.machine.trim().to_string(),
                 agent: member.agent.trim().to_string(),
+                model: member
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(str::to_string),
                 workspace: member.workspace.trim().to_string(),
                 use_worktree: member.use_worktree,
                 worktree_base: member.worktree_base.clone(),
@@ -91,6 +97,7 @@ impl GroupService {
                     group_id: &id,
                     machine: &template.machine,
                     agent: &template.agent,
+                    model: template.model.as_deref(),
                     session_id: &session.id,
                     name: &template.name,
                     description: &template.description,
@@ -419,6 +426,7 @@ fn member_view(member: MemberRow) -> GroupMember {
         description: member.description,
         machine: member.machine,
         agent: member.agent,
+        model: member.model,
         session_id: member.session_id,
         pinned: member.pinned,
         created_at: member.created_at,
@@ -556,6 +564,7 @@ mod tests {
             group_id: "g1".into(),
             machine: "pc".into(),
             agent: "codex".into(),
+            model: None,
             session_id: format!("s-{id}"),
             name: name.into(),
             description: "".into(),
@@ -604,6 +613,7 @@ mod tests {
                 description: "负责实现".into(),
                 machine: "pc".into(),
                 agent: "codex".into(),
+                model: None,
                 workspace: "/repo".into(),
                 use_worktree: false,
                 worktree_base: None,

@@ -1,17 +1,27 @@
 // 群聊成员编辑器：新建会话、自动化和群聊预设设置共用同一套成员字段与校验。
 
+import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 
 import type { Core, CoreState } from "../core/core";
 import { useCoreState } from "../core/store";
-import type { GroupMemberTemplate } from "../lib/types";
+import type { AgentModel, GroupMemberTemplate } from "../lib/types";
 import { cn } from "../lib/utils";
 import { WorkspaceField, WorktreeBranchField } from "./SessionCreationFields";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
+
+const DEFAULT_MODEL = "__default__";
 
 /**
  * 成员能否用于创建群聊。预设列表允许名称重复，但同一群聊内必须唯一，
@@ -66,6 +76,39 @@ export function GroupMemberFields({
   const state = useCoreState();
   const agents =
     state.settings.agents.find((item) => item.machine === member.machine)?.agents ?? [];
+  const [models, setModels] = useState<AgentModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+
+  useEffect(() => {
+    const client = core.client;
+    if (client === null || member.machine === "" || member.agent === "") {
+      setModels([]);
+      setModelsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setModelsLoading(true);
+    void client.agentModels(member.machine, member.agent).then(
+      (next) => {
+        if (cancelled) return;
+        setModels(next);
+        setModelsLoading(false);
+      },
+      () => {
+        if (cancelled) return;
+        setModels([]);
+        setModelsLoading(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [core, member.machine, member.agent]);
+
+  const modelOptions =
+    member.model !== undefined && !models.some((model) => model.value === member.model)
+      ? [{ value: member.model, name: member.model }, ...models]
+      : models;
 
   return (
     <div className="grid gap-3">
@@ -96,7 +139,7 @@ export function GroupMemberFields({
               data-slot={`${slotPrefix}-machine`}
               aria-pressed={member.machine === machine.name}
               onClick={() =>
-                onChange({ ...member, machine: machine.name, agent: "" })
+                onChange({ ...member, machine: machine.name, agent: "", model: undefined })
               }
               className={cn(
                 "min-h-9 rounded-sm border border-border bg-card px-2.5 py-1 text-xs",
@@ -126,7 +169,9 @@ export function GroupMemberFields({
                 data-available={agent.available ? "true" : "false"}
                 aria-pressed={member.agent === agent.name}
                 disabled={!agent.available}
-                onClick={() => onChange({ ...member, agent: agent.name })}
+                onClick={() =>
+                  onChange({ ...member, agent: agent.name, model: undefined })
+                }
                 className={cn(
                   "min-h-9 rounded-sm border border-border bg-card px-2.5 py-1 text-xs",
                   member.agent === agent.name && "border-primary bg-accent",
@@ -140,6 +185,36 @@ export function GroupMemberFields({
             ))}
           </div>
         )}
+      </div>
+      <div className="grid gap-1.5">
+        <Label>模型（可选）</Label>
+        <Select
+          value={member.model ?? DEFAULT_MODEL}
+          onValueChange={(value) =>
+            onChange({
+              ...member,
+              model: value === DEFAULT_MODEL ? undefined : value,
+            })
+          }
+          disabled={member.agent === "" || modelsLoading}
+        >
+          <SelectTrigger className="w-full" data-slot={`${slotPrefix}-model`}>
+            <SelectValue placeholder="使用 Agent 默认模型" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={DEFAULT_MODEL}>使用 Agent 默认模型</SelectItem>
+            {modelOptions.map((model) => (
+              <SelectItem key={model.value} value={model.value}>
+                {model.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {modelsLoading ? (
+          <p className="text-xs text-muted-foreground">正在读取模型候选…</p>
+        ) : member.agent !== "" && modelOptions.length === 0 ? (
+          <p className="text-xs text-muted-foreground">未读取到模型候选，将使用 Agent 默认模型</p>
+        ) : null}
       </div>
       <div className="grid gap-1.5">
         <Label>工作目录</Label>

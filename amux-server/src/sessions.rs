@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use amux_common::api::{Session, SessionConfigSetting, Terminal as ApiTerminal, Usage};
 use amux_common::domain::{
-    generate_title, Activity, ContentBlock, HistoryItem, SessionConfigOption, SessionPlanEntry,
-    SessionState, SlashCommand, StateChangeReason, TerminalOpenParams, TerminalResizeParams,
-    WorktreeBase,
+    generate_title, Activity, ContentBlock, HistoryItem, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionValue, SessionPlanEntry, SessionState, SlashCommand, StateChangeReason,
+    TerminalOpenParams, TerminalResizeParams, WorktreeBase,
 };
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -301,9 +301,17 @@ impl SessionService {
                 .agent_session_id(id)
                 .ok_or_else(|| "agent 会话未就绪".to_string())?;
             let conn = self.machines.acp(&session.machine, &session.agent).await?;
+            let updates_model = self
+                .model_config_id(id)
+                .is_some_and(|config_id| config_id == config.config_id);
             let options = conn
                 .set_config_option(&agent_session_id, &config.config_id, config.value)
                 .await?;
+            if updates_model {
+                if let Some(model) = model_value(&options) {
+                    self.store.set_group_member_model(id, &model);
+                }
+            }
             self.caches.options.lock().insert(id.to_string(), options);
         }
         log::info!(
@@ -543,7 +551,28 @@ impl SessionService {
         let resumed = self.caches.resumed.lock().contains(&session.id);
         match self.store.agent_session_id(&session.id) {
             None => {
-                let (agent_session_id, options) = conn.new_session(&cwd).await?;
+                let (agent_session_id, mut options) = conn.new_session(&cwd).await?;
+                if let Some(model) = self
+                    .store
+                    .group_member_by_session(&session.id)
+                    .and_then(|member| member.model)
+                    .filter(|model| !model.trim().is_empty())
+                {
+                    let config_id = model_config_id(&options).unwrap_or("model");
+                    options = conn
+                        .set_config_option(
+                            &agent_session_id,
+                            config_id,
+                            SessionConfigOptionValue::ValueId {
+                                value: model.clone(),
+                            },
+                        )
+                        .await?;
+                    log::info!(
+                        "群聊成员模型偏好已应用: session={} agent_session={agent_session_id} model={model}",
+                        session.id
+                    );
+                }
                 log::info!(
                     "agent 会话已创建: session={} machine={} agent={} agent_session={agent_session_id} cwd={cwd}",
                     session.id,
@@ -608,6 +637,14 @@ impl SessionService {
         let content = serde_json::to_string(&activity).unwrap_or_default();
         self.store
             .upsert_activity(session_id, &id, "error", &content, now_ms());
+    }
+
+    fn model_config_id(&self, session_id: &str) -> Option<String> {
+        self.caches
+            .options
+            .lock()
+            .get(session_id)
+            .and_then(|options| model_config_id(options).map(str::to_string))
     }
 
     /// 应用 ACP 事件：状态、消息、活动、选项/命令/计划/上下文缓存。
@@ -858,6 +895,25 @@ impl SessionService {
             }
             log::info!("终端长时间无输入输出，已删除: session={session_id} terminal={terminal_id}");
         }
+    }
+}
+
+fn model_config_id(options: &[SessionConfigOption]) -> Option<&str> {
+    options
+        .iter()
+        .find(|option| option.category.as_deref() == Some("model") || option.id == "model")
+        .map(|option| option.id.as_str())
+}
+
+fn model_value(options: &[SessionConfigOption]) -> Option<String> {
+    let option = options
+        .iter()
+        .find(|option| option.category.as_deref() == Some("model") || option.id == "model")?;
+    match &option.kind {
+        SessionConfigKind::Select { current_value, .. } if !current_value.trim().is_empty() => {
+            Some(current_value.clone())
+        }
+        _ => None,
     }
 }
 

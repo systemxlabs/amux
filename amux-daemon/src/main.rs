@@ -3,6 +3,7 @@
 //! 职责（docs/DESIGN.md「Daemon」一节）：Agent 多路复用（stdio 转发）、Agent 生命周期
 //! 执行、终端、git 与 fs 等与机器绑定的能力；作为 Server 与 Agent 之间的桥梁。
 
+mod agent_models;
 mod agents;
 mod connection;
 mod daemon_lock;

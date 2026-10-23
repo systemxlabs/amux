@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use amux_common::api::Agent;
+use amux_common::api::{Agent, AgentModel};
 use amux_common::daemon::{
     header, method, notify, AcpForward, AgentListResult, AgentParams, CreateWorktreeParams,
     GitDiffParams, GitRepoParams, MachineInfo, WorktreeListResult, WorktreePathParams,
@@ -117,6 +117,23 @@ impl MachineHub {
                 }
             })
             .collect())
+    }
+
+    /// 查询指定 agent 的本地模型候选。
+    pub async fn agent_models(
+        &self,
+        machine_name: &str,
+        agent: &str,
+    ) -> Result<Vec<AgentModel>, String> {
+        let machine = self.machine(machine_name)?;
+        machine
+            .request(
+                method::AGENT_MODELS,
+                AgentParams {
+                    agent: agent.to_string(),
+                },
+            )
+            .await
     }
 
     /// 重新发现 agents：发现、启动未运行者、建立 ACP 连接，再回报最新状态。
