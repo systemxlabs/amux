@@ -78,6 +78,9 @@ pub struct Session {
     pub machine: String,
     /// 所属 agent
     pub agent: String,
+    /// 模型偏好；None = 使用 Agent 默认模型
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// 会话标题：默认取首条指令截断，用户可修改
     pub title: String,
     pub state: SessionState,
@@ -122,6 +125,9 @@ pub struct SessionList {
 pub struct CreateSessionRequest {
     pub machine: String,
     pub agent: String,
+    /// 模型偏好；None = 使用 Agent 默认模型
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub workspace: String,
     #[serde(default)]
     pub use_worktree: bool,
@@ -361,8 +367,6 @@ pub struct GroupMember {
     pub description: String,
     pub machine: String,
     pub agent: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
     pub session_id: String,
     pub pinned: bool,
     pub created_at: u64,
@@ -505,6 +509,8 @@ pub enum AutomationSessionOptions {
     NewSession {
         machine: String,
         agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         workspace: String,
         #[serde(default)]
         use_worktree: bool,
@@ -820,6 +826,7 @@ mod tests {
             group_id: None,
             machine: "localpc".into(),
             agent: "codex".into(),
+            model: None,
             title: "标题".into(),
             state: SessionState::Idle,
             project: None,
@@ -843,6 +850,7 @@ mod tests {
         let request = CreateSessionRequest {
             machine: "pc".into(),
             agent: "codex".into(),
+            model: None,
             workspace: "/repo".into(),
             use_worktree: true,
             worktree_base: Some(WorktreeBase::parse("refs/remotes/origin/main").unwrap()),
@@ -953,6 +961,7 @@ mod tests {
         let new_session = serde_json::to_value(AutomationSessionOptions::NewSession {
             machine: "pc".into(),
             agent: "codex".into(),
+            model: Some("gpt-5".into()),
             workspace: "/repo".into(),
             use_worktree: true,
             worktree_base: Some(WorktreeBase::parse("refs/heads/main").unwrap()),
@@ -960,6 +969,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(new_session["mode"], "new_session");
+        assert_eq!(new_session["model"], "gpt-5");
         assert_eq!(new_session["useWorktree"], true);
         assert_eq!(new_session["worktreeBase"], "refs/heads/main");
     }

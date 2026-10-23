@@ -398,6 +398,7 @@ async fn create_session(
         .create(crate::sessions::CreateSessionParams {
             machine: &request.machine,
             agent: &request.agent,
+            model: request.model.as_deref(),
             workspace: &request.workspace,
             worktree,
             title: None,

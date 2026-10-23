@@ -10,6 +10,7 @@ import {
   groupMembersError,
 } from "../components/GroupMembersEditor";
 import {
+  AgentModelField,
   WorkflowPlanField,
   WorkspaceField,
   WorktreeBranchField,
@@ -74,6 +75,7 @@ export function NewSessionView() {
     mode,
     machine,
     agent,
+    model,
     workspace,
     useWorktree,
     worktreeBase,
@@ -131,6 +133,7 @@ export function NewSessionView() {
                 core.update((draft) => {
                   draft.newSession.machine = item.name;
                   draft.newSession.agent = "";
+                  draft.newSession.model = undefined;
                 });
               }}
             >
@@ -158,6 +161,7 @@ export function NewSessionView() {
                 onClick={() =>
                   core.update((draft) => {
                     draft.newSession.agent = item.name;
+                    draft.newSession.model = undefined;
                   })
                 }
               >
@@ -166,6 +170,22 @@ export function NewSessionView() {
             ))}
           </div>
         )}
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label>模型</Label>
+        <AgentModelField
+          core={core}
+          machine={machine}
+          agent={agent}
+          value={model}
+          onChange={(value) => {
+            core.update((draft) => {
+              draft.newSession.model = value;
+            });
+          }}
+          slotPrefix="new-session-model"
+        />
       </div>
 
       <div className="flex flex-col gap-2">

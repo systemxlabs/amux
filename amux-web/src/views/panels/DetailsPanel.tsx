@@ -87,11 +87,6 @@ export function DetailsPanel() {
                     <span className="text-xs text-muted-foreground">
                       {member.agent}@{member.machine}
                     </span>
-                    {member.model ? (
-                      <span className="text-xs text-muted-foreground">
-                        模型 · {member.model}
-                      </span>
-                    ) : null}
                     {session !== undefined ? (
                       <span className="text-xs text-muted-foreground">
                         {stateLabel(session.state)}

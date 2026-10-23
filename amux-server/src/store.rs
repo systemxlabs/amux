@@ -159,8 +159,8 @@ impl Store {
         self.sessions
             .lock()
             .execute(
-                "INSERT INTO sessions (id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14)",
+                "INSERT INTO sessions (id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, model, agent_session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?15)",
                 params![
                     session.id,
                     session.workflow_id,
@@ -174,6 +174,7 @@ impl Store {
                     session.worktree_dir,
                     session.machine,
                     session.agent,
+                    session.model.as_deref(),
                     session.created_at as i64,
                     session.updated_at as i64,
                 ],
@@ -186,7 +187,7 @@ impl Store {
         self.sessions
             .lock()
             .query_row(
-                "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+                "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, model, agent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 row_to_session,
@@ -200,7 +201,7 @@ impl Store {
     pub fn sessions_all(&self) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+            "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, model, agent_session_id, created_at, updated_at
              FROM sessions ORDER BY pinned DESC, created_at DESC, id DESC",
         ) {
             Ok(stmt) => stmt,
@@ -259,7 +260,7 @@ impl Store {
     pub fn sessions_of_agent(&self, machine: &str, agent: &str) -> Vec<Session> {
         let conn = self.sessions.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, agent_session_id, created_at, updated_at
+            "SELECT id, workflow_id, group_id, state, title, project, pinned, unread, workspace, worktree_dir, machine, agent, model, agent_session_id, created_at, updated_at
              FROM sessions WHERE machine = ?1 AND agent = ?2",
         ) {
             Ok(stmt) => stmt,
@@ -765,6 +766,17 @@ impl Store {
         );
     }
 
+    /// 更新普通会话模型偏好（docs/DESIGN.md「普通会话存储」）。
+    pub fn set_session_model(&self, id: &str, model: &str) {
+        if model.trim().is_empty() {
+            return;
+        }
+        let _ = self.sessions.lock().execute(
+            "UPDATE sessions SET model = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, model, now_ms() as i64],
+        );
+    }
+
     /// 更新工作流会话所属项目（None = 未归属）。
     pub fn set_workflow_project(&self, id: &str, project: Option<&str>) {
         let _ = self.workflows.lock().execute(
@@ -962,21 +974,19 @@ impl Store {
             group_id,
             machine,
             agent,
-            model,
             session_id,
             name,
             description,
             created_at,
         } = member;
         let _ = self.groups.lock().execute(
-            "INSERT INTO members (id, group_id, machine, agent, model, session_id, name, description, pinned, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)",
+            "INSERT INTO members (id, group_id, machine, agent, session_id, name, description, pinned, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?8)",
             params![
                 id,
                 group_id,
                 machine,
                 agent,
-                model,
                 session_id,
                 name,
                 description,
@@ -989,7 +999,7 @@ impl Store {
         self.groups
             .lock()
             .query_row(
-                "SELECT id, group_id, machine, agent, model, session_id, name, description, pinned, created_at, updated_at
+                "SELECT id, group_id, machine, agent, session_id, name, description, pinned, created_at, updated_at
                  FROM members WHERE id = ?1",
                 params![member_id],
                 row_to_member,
@@ -1003,7 +1013,7 @@ impl Store {
         self.groups
             .lock()
             .query_row(
-                "SELECT id, group_id, machine, agent, model, session_id, name, description, pinned, created_at, updated_at
+                "SELECT id, group_id, machine, agent, session_id, name, description, pinned, created_at, updated_at
                  FROM members WHERE session_id = ?1",
                 params![session_id],
                 row_to_member,
@@ -1016,7 +1026,7 @@ impl Store {
     pub fn group_members(&self, group_id: &str) -> Vec<MemberRow> {
         let conn = self.groups.lock();
         let mut stmt = match conn.prepare(
-            "SELECT id, group_id, machine, agent, model, session_id, name, description, pinned, created_at, updated_at
+            "SELECT id, group_id, machine, agent, session_id, name, description, pinned, created_at, updated_at
              FROM members WHERE group_id = ?1
              ORDER BY pinned DESC, created_at DESC, id DESC",
         ) {
@@ -1031,17 +1041,6 @@ impl Store {
             .into_iter()
             .map(|member| member.session_id)
             .collect()
-    }
-
-    /// 用户通过成员普通会话修改模型后，同步持久化群成员模型偏好。
-    pub fn set_group_member_model(&self, session_id: &str, model: &str) {
-        if model.trim().is_empty() {
-            return;
-        }
-        let _ = self.groups.lock().execute(
-            "UPDATE members SET model = ?2, updated_at = ?3 WHERE session_id = ?1",
-            params![session_id, model, now_ms() as i64],
-        );
     }
 
     /// 追加一条群聊消息（用户消息直接存内容；成员消息存普通会话消息引用）。
@@ -1604,7 +1603,6 @@ pub struct MemberRow {
     pub group_id: String,
     pub machine: String,
     pub agent: String,
-    pub model: Option<String>,
     pub session_id: String,
     pub name: String,
     pub description: String,
@@ -1619,7 +1617,6 @@ pub struct GroupMemberInsert<'a> {
     pub group_id: &'a str,
     pub machine: &'a str,
     pub agent: &'a str,
-    pub model: Option<&'a str>,
     pub session_id: &'a str,
     pub name: &'a str,
     pub description: &'a str,
@@ -1727,6 +1724,7 @@ const SESSION_SCHEMA: &str = "
         worktree_dir TEXT,
         machine TEXT NOT NULL,
         agent TEXT NOT NULL,
+        model TEXT,
         agent_session_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -1780,7 +1778,6 @@ const GROUP_SCHEMA: &str = "
         group_id TEXT NOT NULL,
         machine TEXT NOT NULL,
         agent TEXT NOT NULL,
-        model TEXT,
         session_id TEXT NOT NULL,
         name TEXT NOT NULL,
         description TEXT NOT NULL,
@@ -1853,8 +1850,9 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         worktree_dir: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
         machine: row.get(10)?,
         agent: row.get(11)?,
-        created_at: row.get::<_, i64>(13)? as u64,
-        updated_at: row.get::<_, i64>(14)? as u64,
+        model: row.get(12)?,
+        created_at: row.get::<_, i64>(14)? as u64,
+        updated_at: row.get::<_, i64>(15)? as u64,
     })
 }
 
@@ -1893,13 +1891,12 @@ fn row_to_member(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemberRow> {
         group_id: row.get(1)?,
         machine: row.get(2)?,
         agent: row.get(3)?,
-        model: row.get(4)?,
-        session_id: row.get(5)?,
-        name: row.get(6)?,
-        description: row.get(7)?,
-        pinned: row.get(8)?,
-        created_at: row.get::<_, i64>(9)? as u64,
-        updated_at: row.get::<_, i64>(10)? as u64,
+        session_id: row.get(4)?,
+        name: row.get(5)?,
+        description: row.get(6)?,
+        pinned: row.get(7)?,
+        created_at: row.get::<_, i64>(8)? as u64,
+        updated_at: row.get::<_, i64>(9)? as u64,
     })
 }
 
@@ -1955,6 +1952,7 @@ mod tests {
             group_id: None,
             machine: machine.into(),
             agent: agent.into(),
+            model: None,
             title: String::new(),
             state: SessionState::Idle,
             project: None,
@@ -1990,6 +1988,22 @@ mod tests {
         );
         assert!(!has_more);
         assert_eq!(store.linked_sessions("w1"), ["s2"]);
+    }
+
+    #[test]
+    fn session_model_round_trips_and_can_be_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut row = session("s1", "pc", "codex");
+        row.model = Some("gpt-5".into());
+        store.insert_session(&row).unwrap();
+        assert_eq!(store.session("s1").unwrap().model.as_deref(), Some("gpt-5"));
+
+        store.set_session_model("s1", "gpt-4o");
+        assert_eq!(
+            store.session("s1").unwrap().model.as_deref(),
+            Some("gpt-4o")
+        );
     }
 
     #[test]
@@ -2220,6 +2234,7 @@ mod tests {
             session_options: AutomationSessionOptions::NewSession {
                 machine: "pc".into(),
                 agent: "codex".into(),
+                model: None,
                 workspace: "/repo".into(),
                 use_worktree: false,
                 worktree_base: None,
@@ -2440,7 +2455,6 @@ mod tests {
                 group_id: "g1",
                 machine: "pc",
                 agent: "codex",
-                model: None,
                 session_id,
                 name: "coder",
                 description: "",
@@ -2455,39 +2469,6 @@ mod tests {
     }
 
     #[test]
-    fn group_member_model_round_trips_and_can_be_updated() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        store.insert_group("g1", None, 1);
-        store.insert_session(&session("s1", "pc", "codex")).unwrap();
-        store.insert_group_member(&GroupMemberInsert {
-            id: "m1",
-            group_id: "g1",
-            machine: "pc",
-            agent: "codex",
-            model: Some("gpt-5"),
-            session_id: "s1",
-            name: "coder",
-            description: "负责实现",
-            created_at: 1,
-        });
-
-        assert_eq!(
-            store
-                .group_member_by_session("s1")
-                .unwrap()
-                .model
-                .as_deref(),
-            Some("gpt-5")
-        );
-        store.set_group_member_model("s1", "gpt-4o");
-        assert_eq!(
-            store.group_member("m1").unwrap().model.as_deref(),
-            Some("gpt-4o")
-        );
-    }
-
-    #[test]
     fn group_history_resolves_member_session_messages() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -2498,7 +2479,6 @@ mod tests {
             group_id: "g1",
             machine: "pc",
             agent: "codex",
-            model: None,
             session_id: "s1",
             name: "coder",
             description: "负责实现",
@@ -2549,7 +2529,6 @@ mod tests {
             group_id: "g1",
             machine: "pc",
             agent: "codex",
-            model: None,
             session_id: "s1",
             name: "coder",
             description: "负责实现",

@@ -895,7 +895,7 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
     let member_session_id = group["sessions"][0]["id"].as_str().unwrap().to_string();
     assert_eq!(group["state"], "idle");
     assert_eq!(group["members"][0]["name"], "coder");
-    assert_eq!(group["members"][0]["model"], "gpt-5");
+    assert_eq!(group["sessions"][0]["model"], "gpt-5");
     assert_eq!(group["sessions"][0]["title"], "coder：负责实现");
 
     let options = client
@@ -986,9 +986,9 @@ async fn group_chat_drives_mentioned_member_and_hides_member_session() {
             }),
         )
         .await;
-    let group = client.get(&format!("/groups/{group_id}")).await;
+    let member_session = client.get(&format!("/sessions/{member_session_id}")).await;
     assert_eq!(
-        group["members"][0]["model"], "gpt-4o",
+        member_session["model"], "gpt-4o",
         "成员会话切换模型后应同步模型偏好"
     );
 

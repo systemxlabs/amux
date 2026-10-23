@@ -23,7 +23,7 @@ use agent_client_protocol::schema::v2::{
 };
 use agent_client_protocol::schema::MaybeUndefined;
 
-use crate::acp::{AcpEvent, CompactionPatch, MessageUpdate, ThinkingUpdate};
+use crate::acp::{AcpEvent, AgentConnection, CompactionPatch, MessageUpdate, ThinkingUpdate};
 use crate::config_store::ConfigStore;
 use crate::machines::MachineHub;
 use crate::store::Store;
@@ -102,6 +102,7 @@ impl<'a> SessionWorktree<'a> {
 pub struct CreateSessionParams<'a> {
     pub machine: &'a str,
     pub agent: &'a str,
+    pub model: Option<&'a str>,
     pub workspace: &'a str,
     pub worktree: SessionWorktree<'a>,
     pub title: Option<&'a str>,
@@ -162,11 +163,16 @@ impl SessionService {
         let CreateSessionParams {
             machine,
             agent,
+            model,
             workspace,
             worktree,
             title,
             project,
         } = request;
+        let model = model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string);
         let id = Uuid::new_v4().to_string();
         let worktree_dir = match worktree {
             SessionWorktree::Disabled => String::new(),
@@ -190,6 +196,7 @@ impl SessionService {
             group_id: None,
             machine: machine.to_string(),
             agent: agent.to_string(),
+            model,
             title: title.unwrap_or_default().to_string(),
             state: SessionState::Idle,
             project: project.map(str::to_string),
@@ -305,7 +312,7 @@ impl SessionService {
                 .await?;
             if updates_model {
                 if let Some(model) = model_value(&options) {
-                    self.store.set_group_member_model(id, &model);
+                    self.store.set_session_model(id, &model);
                 }
             }
             self.caches.options.lock().insert(id.to_string(), options);
@@ -547,28 +554,10 @@ impl SessionService {
         let resumed = self.caches.resumed.lock().contains(&session.id);
         match self.store.agent_session_id(&session.id) {
             None => {
-                let (agent_session_id, mut options) = conn.new_session(&cwd).await?;
-                if let Some(model) = self
-                    .store
-                    .group_member_by_session(&session.id)
-                    .and_then(|member| member.model)
-                    .filter(|model| !model.trim().is_empty())
-                {
-                    let config_id = model_config_id(&options).unwrap_or("model");
-                    options = conn
-                        .set_config_option(
-                            &agent_session_id,
-                            config_id,
-                            SessionConfigOptionValue::ValueId {
-                                value: model.clone(),
-                            },
-                        )
-                        .await?;
-                    log::info!(
-                        "群聊成员模型偏好已应用: session={} agent_session={agent_session_id} model={model}",
-                        session.id
-                    );
-                }
+                let (agent_session_id, options) = conn.new_session(&cwd).await?;
+                let options = self
+                    .apply_model_preference(&conn, session, &agent_session_id, options)
+                    .await?;
                 log::info!(
                     "agent 会话已创建: session={} machine={} agent={} agent_session={agent_session_id} cwd={cwd}",
                     session.id,
@@ -593,6 +582,9 @@ impl SessionService {
                 }
                 match conn.resume_session(&agent_session_id, &cwd).await {
                     Ok(options) => {
+                        let options = self
+                            .apply_model_preference(&conn, session, &agent_session_id, options)
+                            .await?;
                         log::info!(
                             "agent 会话已恢复: session={} machine={} agent={} agent_session={agent_session_id} cwd={cwd}",
                             session.id,
@@ -633,6 +625,39 @@ impl SessionService {
         let content = serde_json::to_string(&activity).unwrap_or_default();
         self.store
             .upsert_activity(session_id, &id, "error", &content, now_ms());
+    }
+
+    /// 在 agent 会话创建或恢复后应用普通会话的模型偏好（docs/DESIGN.md「ACP 通信」）。
+    async fn apply_model_preference(
+        &self,
+        conn: &AgentConnection,
+        session: &Session,
+        agent_session_id: &str,
+        options: Vec<SessionConfigOption>,
+    ) -> Result<Vec<SessionConfigOption>, String> {
+        let Some(model) = session
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
+            return Ok(options);
+        };
+        let config_id = model_config_id(&options).unwrap_or("model");
+        let options = conn
+            .set_config_option(
+                agent_session_id,
+                config_id,
+                SessionConfigOptionValue::ValueId {
+                    value: model.to_string(),
+                },
+            )
+            .await?;
+        log::info!(
+            "普通会话模型偏好已应用: session={} agent_session={agent_session_id} model={model}",
+            session.id
+        );
+        Ok(options)
     }
 
     fn model_config_id(&self, session_id: &str) -> Option<String> {
@@ -1064,6 +1089,7 @@ mod tests {
             group_id: None,
             machine: "pc".into(),
             agent: "codex".into(),
+            model: None,
             title: String::new(),
             state,
             project: None,

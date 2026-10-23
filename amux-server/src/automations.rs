@@ -166,6 +166,7 @@ impl AutomationService {
                 AutomationSessionOptions::NewSession {
                     machine,
                     agent,
+                    model,
                     workspace,
                     use_worktree,
                     worktree_base,
@@ -177,6 +178,7 @@ impl AutomationService {
                         .create(crate::sessions::CreateSessionParams {
                             machine,
                             agent,
+                            model: model.as_deref(),
                             workspace,
                             worktree,
                             title: None,
@@ -548,6 +550,7 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
         AutomationSessionOptions::NewSession {
             machine,
             agent,
+            model,
             workspace,
             worktree_base,
             project,
@@ -555,6 +558,10 @@ fn normalize_session_options(options: &mut AutomationSessionOptions) {
         } => {
             *machine = machine.trim().to_string();
             *agent = agent.trim().to_string();
+            *model = model
+                .take()
+                .map(|model| model.trim().to_string())
+                .filter(|model| !model.is_empty());
             *workspace = workspace.trim().to_string();
             if let Some(base) = worktree_base {
                 *worktree_base = WorktreeBase::parse(base.as_str().trim()).ok();
@@ -823,6 +830,7 @@ mod tests {
             session_options: AutomationSessionOptions::NewSession {
                 machine: " pc ".into(),
                 agent: " codex ".into(),
+                model: Some(" gpt-5 ".into()),
                 workspace: " /repo ".into(),
                 use_worktree: false,
                 worktree_base: None,
@@ -838,6 +846,7 @@ mod tests {
         assert_eq!(input.title, "每日任务");
         let AutomationSessionOptions::NewSession {
             machine,
+            model,
             worktree_base,
             project,
             ..
@@ -846,6 +855,7 @@ mod tests {
             panic!("应为新建普通会话");
         };
         assert_eq!(machine, "pc");
+        assert_eq!(model.as_deref(), Some("gpt-5"));
         assert_eq!(worktree_base, None);
         assert_eq!(project.as_deref(), Some("p"));
     }

@@ -20,6 +20,7 @@ import {
 } from "../components/GroupMembersEditor";
 import { MultiSelectCombobox } from "../components/MultiSelectCombobox";
 import {
+  AgentModelField,
   WorkflowPlanField,
   WorkspaceField,
   WorktreeBranchField,
@@ -590,6 +591,11 @@ function AutomationEditor({
   const [agent, setAgent] = useState(
     initial?.sessionOptions.mode === "new_session" ? initial.sessionOptions.agent : "",
   );
+  const [model, setModel] = useState<string | undefined>(
+    initial?.sessionOptions.mode === "new_session"
+      ? initial.sessionOptions.model
+      : undefined,
+  );
   const [workspace, setWorkspace] = useState(
     initial?.sessionOptions.mode === "new_session"
       ? initial.sessionOptions.workspace
@@ -700,6 +706,7 @@ function AutomationEditor({
             mode: "new_session",
             machine,
             agent,
+            model,
             workspace: workspace.trim(),
             useWorktree,
             worktreeBase: useWorktree ? (worktreeBase ?? undefined) : undefined,
@@ -948,6 +955,7 @@ function AutomationEditor({
                     onClick={() => {
                       setMachine(item.name);
                       setAgent("");
+                      setModel(undefined);
                     }}
                   >
                     {item.name}
@@ -962,12 +970,25 @@ function AutomationEditor({
                     key={item.name}
                     selected={agent === item.name}
                     disabled={!item.available}
-                    onClick={() => setAgent(item.name)}
+                    onClick={() => {
+                      setAgent(item.name);
+                      setModel(undefined);
+                    }}
                   >
                     {item.name}
                   </OptionButton>
                 ))}
               </OptionGroup>
+            </Field>
+            <Field label="模型">
+              <AgentModelField
+                core={core}
+                machine={machine}
+                agent={agent}
+                value={model}
+                onChange={setModel}
+                slotPrefix="automation-model"
+              />
             </Field>
             <Field label="工作目录">
               <WorkspaceField

@@ -926,6 +926,11 @@ impl WorkflowTools {
             "create_session" => {
                 let machine = string_arg(&arguments, "machine")?;
                 let agent = string_arg(&arguments, "agent")?;
+                let model = arguments
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty());
                 let cwd = string_arg(&arguments, "cwd")?;
                 let worktree = arguments
                     .get("worktree")
@@ -948,6 +953,7 @@ impl WorkflowTools {
                     .create(crate::sessions::CreateSessionParams {
                         machine: &machine,
                         agent: &agent,
+                        model,
                         workspace: &cwd,
                         worktree,
                         title: None,
@@ -1117,12 +1123,13 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "create_session".into(),
-            description: "创建关联普通会话，需指定机器、执行智能体、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
+            description: "创建关联普通会话，需指定机器、执行智能体、模型偏好、工作目录、是否开启 worktree 和基分支，若开启 worktree，系统会自动创建 worktree 并让执行智能体在 worktree 目录工作".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "machine": string("机器名"),
                     "agent": string("agent 名"),
+                    "model": string("模型偏好；缺省使用 Agent 默认模型"),
                     "cwd": string("工作目录"),
                     "worktree": { "type": "boolean", "description": "是否以 git worktree 方式工作；缺省 false" },
                     "base_branch": string("worktree 基分支完整引用名；开启 worktree 时必填，本地分支格式为 refs/heads/<name>，远程跟踪分支格式为 refs/remotes/<remote>/<branch>")
@@ -1504,6 +1511,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let service = test_service(dir.path());
         let workflow = service.create("计划", None, None).await.unwrap();
+        let workflow_id = workflow.id.clone();
         let tools = WorkflowTools {
             service,
             workflow_id: workflow.id,
@@ -1529,11 +1537,22 @@ mod tests {
         let output = tools
             .call(
                 "create_session",
-                serde_json::json!({ "machine": "pc", "agent": "codex", "cwd": "/repo" }),
+                serde_json::json!({
+                    "machine": "pc",
+                    "agent": "codex",
+                    "model": "gpt-5",
+                    "cwd": "/repo",
+                }),
             )
             .await
             .unwrap();
         assert!(output.contains("已创建关联普通会话"), "{output}");
+        assert_eq!(
+            tools.service.linked_sessions(&workflow_id)[0]
+                .model
+                .as_deref(),
+            Some("gpt-5")
+        );
     }
 
     #[tokio::test]
@@ -1546,6 +1565,7 @@ mod tests {
             .create(crate::sessions::CreateSessionParams {
                 machine: "pc",
                 agent: "codex",
+                model: None,
                 workspace: "/repo",
                 worktree: SessionWorktree::Disabled,
                 title: None,
@@ -1647,6 +1667,7 @@ mod tests {
                     group_id: None,
                     machine: "pc".into(),
                     agent: "codex".into(),
+                    model: None,
                     title: String::new(),
                     state,
                     project: None,

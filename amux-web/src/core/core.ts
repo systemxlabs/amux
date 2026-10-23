@@ -126,6 +126,8 @@ export type NewSessionState = {
   machine: string;
   /** 选中的 agent 名；空串 = 未选 */
   agent: string;
+  /** 模型偏好；undefined = 使用 Agent 默认模型 */
+  model?: string;
   /** 选中的项目；undefined/空串 = 未归属 */
   project?: string;
   workspace: string;
@@ -275,6 +277,7 @@ export function initialNewSession(): NewSessionState {
     mode: "normal",
     machine: "",
     agent: "",
+    model: undefined,
     project: undefined,
     workspace: "",
     useWorktree: false,

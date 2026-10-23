@@ -136,6 +136,7 @@ export type Session = {
   id: string;
   machine: string;
   agent: string;
+  model?: string;
   title: string;
   state: SessionState;
   project?: string;
@@ -151,6 +152,7 @@ export type SessionList = { sessions: Session[]; hasMore: boolean };
 export type CreateSessionRequest = {
   machine: string;
   agent: string;
+  model?: string;
   workspace: string;
   useWorktree: boolean;
   worktreeBase?: WorktreeBase;
@@ -236,7 +238,6 @@ export type GroupMember = {
   description: string;
   machine: string;
   agent: string;
-  model?: string;
   sessionId: string;
   pinned: boolean;
   createdAt: number;
@@ -323,6 +324,7 @@ export type AutomationSessionOptions =
       mode: "new_session";
       machine: string;
       agent: string;
+      model?: string;
       workspace: string;
       useWorktree: boolean;
       worktreeBase?: WorktreeBase;

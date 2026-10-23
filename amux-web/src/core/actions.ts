@@ -407,6 +407,7 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
       const session = await core.client.createSession({
         machine: entry.session.machine,
         agent: entry.session.agent,
+        model: entry.session.model,
         workspace: entry.session.workspace,
         useWorktree,
         worktreeBase,
@@ -449,7 +450,7 @@ export async function createFromEntry(core: Core, entry: ListEntry): Promise<voi
           description: member.description,
           machine: member.machine,
           agent: member.agent,
-          model: member.model,
+          model: session.model,
           workspace: session.workspace,
           useWorktree,
           worktreeBase,
@@ -689,7 +690,7 @@ export async function setProjectOrder(core: Core, names: string[]): Promise<void
 /** 普通模式创建会话。 */
 export async function createSession(core: Core): Promise<void> {
   if (!core.client) return;
-  const { machine, agent, workspace, useWorktree, worktreeBase, project } =
+  const { machine, agent, model, workspace, useWorktree, worktreeBase, project } =
     core.state.newSession;
   let base: WorktreeBase | undefined;
   if (useWorktree) {
@@ -703,6 +704,7 @@ export async function createSession(core: Core): Promise<void> {
     const session = await core.client.createSession({
       machine,
       agent,
+      model,
       workspace,
       useWorktree,
       worktreeBase: base,

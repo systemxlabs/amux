@@ -9,6 +9,7 @@ import { useCoreState } from "../core/store";
 import { branchLabel, preferredRemoteDefault } from "../lib/branch";
 import { truncate } from "../lib/format";
 import {
+  type AgentModel,
   type FsEntry,
   type GitBranch,
   type RecentWorkspace,
@@ -19,6 +20,13 @@ import { listAllDirs, matchingPrefix, splitDirQuery } from "../lib/workspace";
 import { cn } from "../lib/utils";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
 import { Textarea } from "./ui/textarea";
 
 type PlanPopupPlacement = { below: boolean; maxHeight: number };
@@ -28,6 +36,87 @@ type DirectoryListing = { machine: string; dir: string; entries: FsEntry[] };
 const PLAN_POPUP_HEIGHT = 224;
 const POPUP_GAP = 8;
 const POPUP_MIN_HEIGHT = 80;
+const DEFAULT_MODEL = "__default__";
+
+/** Agent 模型偏好下拉框：按机器与 agent 拉取候选，未选择时使用 Agent 默认模型。 */
+export function AgentModelField({
+  core,
+  machine,
+  agent,
+  value,
+  onChange,
+  slotPrefix = "agent-model",
+}: {
+  core: Core;
+  machine: string;
+  agent: string;
+  value: string | undefined;
+  onChange: (value: string | undefined) => void;
+  slotPrefix?: string;
+}) {
+  const [models, setModels] = useState<AgentModel[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const client = core.client;
+    if (client === null || machine === "" || agent === "") {
+      setModels([]);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void client.agentModels(machine, agent).then(
+      (next) => {
+        if (cancelled) return;
+        setModels(next);
+        setLoading(false);
+      },
+      () => {
+        if (cancelled) return;
+        setModels([]);
+        setLoading(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [core, machine, agent]);
+
+  const options =
+    value !== undefined && !models.some((model) => model.value === value)
+      ? [{ value, name: value }, ...models]
+      : models;
+
+  return (
+    <div className="grid gap-1.5">
+      <Select
+        value={value ?? DEFAULT_MODEL}
+        onValueChange={(next) => onChange(next === DEFAULT_MODEL ? undefined : next)}
+        disabled={agent === "" || loading}
+      >
+        <SelectTrigger className="w-full" data-slot={`${slotPrefix}-select`}>
+          <SelectValue placeholder="使用 Agent 默认模型" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={DEFAULT_MODEL}>使用 Agent 默认模型</SelectItem>
+          {options.map((model) => (
+            <SelectItem key={model.value} value={model.value}>
+              {model.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {loading ? (
+        <p className="text-xs text-muted-foreground">正在读取模型候选…</p>
+      ) : agent !== "" && options.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          未读取到模型候选，将使用 Agent 默认模型
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 /** 基分支展示名：优先用分支列表里的完整标注，列表未加载时退化为引用名。 */
 function worktreeBaseLabel(base: WorktreeBase, branches: readonly GitBranch[]): string {
