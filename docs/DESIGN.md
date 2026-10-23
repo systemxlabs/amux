@@ -444,7 +444,7 @@ Server 作为 ACP client 与 Agents 通信
   ```
   注意 (machine, workspace) 组合必须唯一。读写为低频操作，无需考虑并发和原子写入问题。
 
-Server 在接收到流式内容后，应按 ACP V2 流式传输的 upsert 语义立即落盘。
+Server 在接收到流式内容后，读取磁盘已有内容并按 ACP V2 流式传输语义进行合并，然后立即落盘。
 
 会话删除时，删除其对应的所有附件。
 
