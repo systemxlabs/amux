@@ -78,6 +78,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | DELETE `/sessions/<session_id>` | 删除指定普通会话 |
 | POST `/sessions/<session_id>/cancel` | 取消指定普通会话 |
 | POST `/sessions/<session_id>/configure` | 配置指定普通会话：会话标题、会话选项、所属项目、（取消）置顶等 |
+| POST `/sessions/<session_id>/read` | 已读指定普通会话 |
 | GET `/sessions/<session_id>/config_options` | 获取指定普通会话的会话选项 |
 | GET `/sessions/<session_id>/slash_commands` | 获取指定普通会话的斜杠命令 |
 | GET `/sessions/<session_id>/plan` | 获取指定普通会话的 agent 计划 |
@@ -103,6 +104,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | POST `/workflows/<workflow_id>` | 往指定工作流会话发送指令 |
 | DELETE `/workflows/<workflow_id>` | 删除指定工作流会话，级联删除关联普通会话 |
 | POST `/workflows/<workflow_id>/configure` | 配置指定工作流会话：会话标题、所属项目、（取消）置顶等 |
+| POST `/workflows/<workflow_id>/read` | 已读指定工作流会话 |
 | GET `/workflows/<workflow_id>/usage` | 查询指定工作流会话的会话用量 |
 | GET `/workflows/<workflow_id>/history` | 分页查询指定工作流会话的对话历史 |
 | GET `/workflows/<workflow_id>/activities` | 分页查询指定工作流会话的活动历史 |
@@ -119,6 +121,7 @@ Client 向 Server 发送请求时，其头部必须携带 `Authorization: Bearer
 | DELETE `/groups/<group_id>` | 删除指定群聊会话，级联删除成员普通会话 |
 | POST `/groups/<group_id>/cancel` | 取消指定群聊会话的所有成员普通会话 |
 | POST `/groups/<group_id>/configure` | 配置指定群聊会话：会话标题、所属项目、（取消）置顶等 |
+| POST `/groups/<group_id>/read` | 已读指定群聊会话 |
 | GET `/groups/<group_id>/history` | 分页查询指定群聊会话的对话历史 |
 | GET `/groups/<group_id>/attachments` | 分页获取附件列表 |
 | POST `/groups/<group_id>/attachments` | 上传一个附件 |
@@ -371,6 +374,7 @@ Server 作为 ACP client 与 Agents 通信
 
 普通会话数据包含三部分
 - 元数据：存储在 `~/.amux/session.sqlite` 文件中
+  - 当有新的 agent 消息插入时，将会话标记为未读
   ```SQL
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,             -- 会话 ID
@@ -380,6 +384,7 @@ Server 作为 ACP client 与 Agents 通信
     title TEXT,                      -- 会话标题
     project TEXT,                    -- 所属项目
     pinned BOOL NOT NULL,            -- 是否置顶
+    unread BOOL NOT NULL,            -- 是否未读
     workspace TEXT NOT NULL,         -- 工作目录
     worktree_dir TEXT,               -- worktree 目录
     machine TEXT NOT NULL,           -- 所属机器
@@ -511,6 +516,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 
 工作流数据包含如下部分
 - 元数据：存储在 `~/.amux/workflow.sqlite` 文件中
+  - 当有新的 agent 消息插入时，将会话标记为未读
   ```SQL
   CREATE TABLE IF NOT EXISTS workflows (
     id TEXT PRIMARY KEY,              -- 工作流会话 ID
@@ -519,6 +525,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     plan TEXT NOT NULL,               -- 执行计划
     project TEXT,                     -- 所属项目
     pinned BOOL NOT NULL,             -- 是否置顶
+    unread BOOL NOT NULL,             -- 是否未读
     created_at INTEGER NOT NULL,      -- 创建时间
     updated_at INTEGER NOT NULL       -- 更新时间
   );
@@ -598,6 +605,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
 群聊会话数据包含如下部分
 - 元数据：存储在 `~/.amux/group.sqlite` 文件中
   - 成员名称不能为 `all` 和 `user`
+  - 当有新的 agent 消息插入时，将会话标记为未读
   ```SQL
   CREATE TABLE IF NOT EXISTS groups (
     id TEXT PRIMARY KEY,              -- 群聊会话 ID
@@ -605,6 +613,7 @@ Server 缓存终端输出在内存中，有最大值上限，超限丢弃旧的�
     state TEXT NOT NULL,              -- 会话状态
     project TEXT,                     -- 所属项目
     pinned BOOL NOT NULL,             -- 是否置顶
+    unread BOOL NOT NULL,             -- 是否未读
     created_at INTEGER NOT NULL,      -- 创建时间
     updated_at INTEGER NOT NULL       -- 更新时间
   );
@@ -794,6 +803,12 @@ Github Webhook 触发
 - 快捷指令、会话选项和斜杠命令在视图打开时获取一次，不定时刷新
 
 对话滚动机制：按滚动位置计算应展示的页并拉取，预取上下相邻两页缓冲。页大小随面板可视高度自适应调整。
+
+会话标记已读机制
+- 会话打开时，立即发送请求标记会话已读
+- 会话打开期间，每次收到新消息后再次标记已读
+- 若会话为工作流会话或群聊会话，则级联标记关联普通会话和成员普通会话已读
+- 若会话为关联普通会话或成员普通会话，则仅标记该会话已读
 
 附件均不直接内联到提示词中，而是上传至 Server，返回附件名称，应用负责拼接完整附件 URI 并将其作为 Resource Link 加到提示词中，单个附件最大不得超过 20 MB。从输入区附件栏移除已上传附件时，从服务器删除该附件。
 
