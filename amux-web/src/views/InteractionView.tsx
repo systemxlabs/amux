@@ -913,7 +913,7 @@ function GroupMemberName({ name, sessionId }: { name: string; sessionId?: string
 function mentionsUser(content: readonly ContentBlock[]): boolean {
   const text = content
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("\n");
+    .join("");
   return text.includes("@user");
 }
 

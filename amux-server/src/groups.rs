@@ -488,6 +488,7 @@ fn has_mention(text: &str, name: &str) -> bool {
     text.contains(&format!("@{name}"))
 }
 
+/// 流式文本按相邻 text block 分片存储，按原顺序无分隔拼接。
 fn blocks_text(content: &[ContentBlock]) -> String {
     content
         .iter()
@@ -495,8 +496,7 @@ fn blocks_text(content: &[ContentBlock]) -> String {
             ContentBlock::Text(text) => Some(text.text.as_str()),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// 只含空白文本块视为空输出；图片等非文本内容算作有效输出。
@@ -587,6 +587,20 @@ mod tests {
         assert_eq!(mentioned_members("mail@coder", &members, None), ["m1"]);
         assert!(mentioned_members("@Coder 实现", &members, None).is_empty());
         assert!(mentioned_members("@user 请确认", &members, None).is_empty());
+    }
+
+    #[test]
+    fn mentions_match_across_stream_chunks() {
+        let members = vec![member("m1", "fabric-coder")];
+        let content = vec![
+            ContentBlock::Text(TextContent::new("请 @fabric")),
+            ContentBlock::Text(TextContent::new("-coder 处理")),
+        ];
+        assert_eq!(blocks_text(&content), "请 @fabric-coder 处理");
+        assert_eq!(
+            mentioned_members(&blocks_text(&content), &members, None),
+            ["m1"]
+        );
     }
 
     #[test]
