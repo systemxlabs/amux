@@ -87,14 +87,10 @@ fn daemon_binary() -> PathBuf {
     path
 }
 
-/// 假 bin 目录：`claude`（发现用）与 `npx`（发现 codex，并用于启动模拟 agent）。
+/// 假 bin 目录：`npx`（发现 codex/claude，并用于启动模拟 agent）。
 fn fake_bin(mock_agent: &Path, state_file: &Path) -> PathBuf {
     let dir = state_file.parent().expect("状态文件目录").join("bin");
     std::fs::create_dir_all(&dir).unwrap();
-    let mut files = Vec::new();
-    let file = dir.join("claude");
-    std::fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
-    files.push(file);
     let file = dir.join("npx");
     std::fs::write(
         &file,
@@ -105,16 +101,13 @@ fn fake_bin(mock_agent: &Path, state_file: &Path) -> PathBuf {
         ),
     )
     .unwrap();
-    files.push(file);
-    for file in files {
-        let mut permissions = std::fs::metadata(&file).unwrap().permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            permissions.set_mode(0o755);
-        }
-        std::fs::set_permissions(&file, permissions).unwrap();
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(0o755);
     }
+    std::fs::set_permissions(&file, permissions).unwrap();
     dir
 }
 

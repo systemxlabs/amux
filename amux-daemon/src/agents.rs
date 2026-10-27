@@ -43,10 +43,8 @@ fn launch_spec(agent: &str) -> Option<LaunchSpec> {
 fn is_installed(agent: &str) -> bool {
     match agent {
         amux_common::api::NANO_AGENT => true,
-        // codex 经 npx 启动：官方包内置 Codex，不依赖本机 codex CLI
-        "codex" => in_path("npx"),
-        // claude 经 npx 启动：需要 claude CLI 与 npx 同时可用
-        "claude" => in_path("claude") && in_path("npx"),
+        // 官方 ACP 包内置对应 Agent，不依赖本机 codex/claude CLI
+        "codex" | "claude" => in_path("npx"),
         _ => false,
     }
 }
