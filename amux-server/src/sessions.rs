@@ -557,15 +557,29 @@ impl SessionService {
                 let (agent_session_id, options) = conn.new_session(&cwd).await?;
                 let options = self
                     .apply_model_preference(&conn, session, &agent_session_id, options)
-                    .await?;
+                    .await;
+                if !self
+                    .store
+                    .claim_agent_session_id(&session.id, &agent_session_id)
+                {
+                    log::info!(
+                        "丢弃并发创建的 ACP 会话: session={} agent_session={agent_session_id}",
+                        session.id
+                    );
+                    if let Err(error) = conn.close(&agent_session_id).await {
+                        log::warn!(
+                            "关闭多余 ACP 会话失败: session={} agent_session={agent_session_id}: {error}",
+                            session.id
+                        );
+                    }
+                    return Ok(());
+                }
                 log::info!(
                     "agent 会话已创建: session={} machine={} agent={} agent_session={agent_session_id} cwd={cwd}",
                     session.id,
                     session.machine,
                     session.agent
                 );
-                self.store
-                    .set_agent_session_id(&session.id, &agent_session_id);
                 self.caches
                     .agent_sessions
                     .lock()
@@ -584,7 +598,7 @@ impl SessionService {
                     Ok(options) => {
                         let options = self
                             .apply_model_preference(&conn, session, &agent_session_id, options)
-                            .await?;
+                            .await;
                         log::info!(
                             "agent 会话已恢复: session={} machine={} agent={} agent_session={agent_session_id} cwd={cwd}",
                             session.id,
@@ -628,23 +642,24 @@ impl SessionService {
     }
 
     /// 在 agent 会话创建或恢复后应用普通会话的模型偏好（docs/DESIGN.md「ACP 通信」）。
+    /// 设置失败不阻断后续执行，仅记录会话活动。
     async fn apply_model_preference(
         &self,
         conn: &AgentConnection,
         session: &Session,
         agent_session_id: &str,
         options: Vec<SessionConfigOption>,
-    ) -> Result<Vec<SessionConfigOption>, String> {
+    ) -> Vec<SessionConfigOption> {
         let Some(model) = session
             .model
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty())
         else {
-            return Ok(options);
+            return options;
         };
         let config_id = model_config_id(&options).unwrap_or("model");
-        let options = conn
+        match conn
             .set_config_option(
                 agent_session_id,
                 config_id,
@@ -652,12 +667,24 @@ impl SessionService {
                     value: model.to_string(),
                 },
             )
-            .await?;
-        log::info!(
-            "普通会话模型偏好已应用: session={} agent_session={agent_session_id} model={model}",
-            session.id
-        );
-        Ok(options)
+            .await
+        {
+            Ok(options) => {
+                log::info!(
+                    "普通会话模型偏好已应用: session={} agent_session={agent_session_id} model={model}",
+                    session.id
+                );
+                options
+            }
+            Err(error) => {
+                log::warn!(
+                    "普通会话模型偏好设置失败: session={} agent_session={agent_session_id} model={model}: {error}",
+                    session.id
+                );
+                self.record_error(&session.id, &format!("设置模型偏好失败: {error}"));
+                options
+            }
+        }
     }
 
     fn model_config_id(&self, session_id: &str) -> Option<String> {

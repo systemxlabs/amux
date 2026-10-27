@@ -7,7 +7,7 @@
 //!
 //! 通知一律翻译为 [`AcpEvent`] 交给会话层落盘与驱动工作流，本模块不碰存储。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +35,8 @@ use amux_common::domain::{
 use futures_util::sink;
 use futures_util::stream;
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 
 /// ACP 通知 → 会话层事件。
 #[derive(Debug, Clone)]
@@ -167,47 +168,6 @@ enum Call {
         value: SessionConfigOptionValue,
         reply: oneshot::Sender<Result<Vec<SessionConfigOption>, String>>,
     },
-}
-
-/// 每会话异步锁：不同会话可并行，同一会话按调用入队顺序执行。
-#[derive(Clone, Default)]
-struct SessionLocks {
-    locks: Arc<Mutex<HashMap<String, Arc<RwLock<()>>>>>,
-}
-
-impl SessionLocks {
-    fn lock(&self, session_id: &str) -> Arc<RwLock<()>> {
-        self.locks
-            .lock()
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(RwLock::new(())))
-            .clone()
-    }
-}
-
-impl Call {
-    /// ACP request 的会话标识；`session/new` 稍后在响应中才知道会话。
-    fn session_id(&self) -> Option<&str> {
-        match self {
-            Call::NewSession { .. } => None,
-            Call::ResumeSession {
-                agent_session_id, ..
-            }
-            | Call::Prompt {
-                agent_session_id, ..
-            }
-            | Call::Cancel { agent_session_id }
-            | Call::Close {
-                agent_session_id, ..
-            }
-            | Call::Delete {
-                agent_session_id, ..
-            }
-            | Call::SetConfigOption {
-                agent_session_id, ..
-            } => Some(agent_session_id),
-        }
-    }
 }
 
 /// 一条 ACP 连接（`(machine, agent)` 维度）。
@@ -355,7 +315,6 @@ pub async fn connect(
     let (calls_tx, mut calls_rx) = mpsc::channel::<Call>(64);
     let (ready_tx, ready_rx) = oneshot::channel::<Result<bool, String>>();
     let opened_sessions = Arc::new(Mutex::new(HashSet::new()));
-    let session_locks = SessionLocks::default();
     let machine_name = machine.to_string();
     let agent_name = agent.to_string();
     let task_opened_sessions = Arc::clone(&opened_sessions);
@@ -437,22 +396,29 @@ pub async fn connect(
                         }
                     }
 
-                    while let Some(call) = calls_rx.recv().await {
-                        let cx = cx.clone();
-                        if call.session_id().is_none_or(str::is_empty) {
-                            handle_call(call, &cx, &task_opened_sessions).await;
-                            continue;
+                    let mut calls = JoinSet::new();
+                    loop {
+                        tokio::select! {
+                            call = calls_rx.recv() => {
+                                let Some(call) = call else {
+                                    break;
+                                };
+                                let cx = cx.clone();
+                                let opened_sessions = Arc::clone(&task_opened_sessions);
+                                calls.spawn(async move {
+                                    // 所有调用独立并发，同一会话的冲突由 Agent 处理并将错误返回调用方。
+                                    handle_call(call, &cx, &opened_sessions).await;
+                                });
+                            }
+                            Some(result) = calls.join_next(), if !calls.is_empty() => {
+                                if let Err(error) = result {
+                                    log::warn!("ACP 调用任务异常结束: {error}");
+                                }
+                            }
                         }
-                        let locks = session_locks.clone();
-                        let opened_sessions = task_opened_sessions.clone();
-                        tokio::spawn(async move {
-                            // RwLock 写锁排队保证同一会话按入队顺序执行；
-                            // 不同会话只竞争各自锁，可在同一条 ACP 连接上并行。
-                            let session_id = call.session_id().unwrap_or_default().to_string();
-                            let _guard = locks.lock(&session_id).write_owned().await;
-                            handle_call(call, &cx, &opened_sessions).await;
-                        });
                     }
+                    // 连接结束时中止并回收在途调用，避免任务和请求内容滞留。
+                    calls.shutdown().await;
                     Ok(())
                 }
             })
@@ -507,29 +473,37 @@ async fn handle_call(
     opened_sessions: &Mutex<HashSet<String>>,
 ) {
     match call {
-        Call::NewSession { cwd, reply } => {
-            let result = request(cx, NewSessionRequest::new(cwd))
-                .await
-                .map(|response| {
-                    let session_id = response.session_id.to_string();
-                    opened_sessions.lock().insert(session_id.clone());
-                    (session_id, config_options(response.config_options))
-                });
-            let _ = reply.send(result);
-        }
+        Call::NewSession { cwd, reply } => match request(cx, NewSessionRequest::new(cwd)).await {
+            Ok(response) => {
+                let session_id = response.session_id.to_string();
+                let options = config_options(response.config_options);
+                opened_sessions.lock().insert(session_id.clone());
+                if reply.send(Ok((session_id.clone(), options))).is_err() {
+                    close_unclaimed_session(cx, opened_sessions, &session_id).await;
+                }
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+            }
+        },
         Call::ResumeSession {
             agent_session_id,
             cwd,
             reply,
-        } => {
-            let result = request(cx, ResumeSessionRequest::new(agent_session_id.clone(), cwd))
-                .await
-                .map(|response| {
-                    opened_sessions.lock().insert(agent_session_id);
-                    config_options(response.config_options)
-                });
-            let _ = reply.send(result);
-        }
+        } => match request(cx, ResumeSessionRequest::new(agent_session_id.clone(), cwd)).await {
+            Ok(response) => {
+                opened_sessions.lock().insert(agent_session_id.clone());
+                if reply
+                    .send(Ok(config_options(response.config_options)))
+                    .is_err()
+                {
+                    close_unclaimed_session(cx, opened_sessions, &agent_session_id).await;
+                }
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+            }
+        },
         Call::Prompt {
             agent_session_id,
             input,
@@ -585,6 +559,22 @@ async fn handle_call(
                 .await
                 .map(|response| config_options(response.config_options));
             let _ = reply.send(result);
+        }
+    }
+}
+
+/// 调用方已离开时关闭刚创建/恢复的会话，避免 Agent 侧和 `opened_sessions` 残留。
+async fn close_unclaimed_session(
+    cx: &V2ConnectionTo<Agent>,
+    opened_sessions: &Mutex<HashSet<String>>,
+    agent_session_id: &str,
+) {
+    match request(cx, CloseSessionRequest::new(agent_session_id.to_string())).await {
+        Ok(_) => {
+            opened_sessions.lock().remove(agent_session_id);
+        }
+        Err(error) => {
+            log::warn!("未接管会话的 session/close 失败（{agent_session_id}）: {error}");
         }
     }
 }

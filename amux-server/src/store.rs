@@ -344,11 +344,16 @@ impl Store {
             .flatten()
     }
 
-    pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) {
-        let _ = self.sessions.lock().execute(
-            "UPDATE sessions SET agent_session_id = ?2 WHERE id = ?1",
-            params![id, agent_session_id],
-        );
+    /// 原子认领 Agent 会话；并发创建时只有一个调用能成功。
+    pub fn claim_agent_session_id(&self, id: &str, agent_session_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .execute(
+                "UPDATE sessions SET agent_session_id = ?2
+                 WHERE id = ?1 AND agent_session_id IS NULL",
+                params![id, agent_session_id],
+            )
+            .is_ok_and(|changed| changed == 1)
     }
 
     pub fn delete_session(&self, id: &str) {
@@ -2004,6 +2009,17 @@ mod tests {
             store.session("s1").unwrap().model.as_deref(),
             Some("gpt-4o")
         );
+    }
+
+    #[test]
+    fn agent_session_id_can_only_be_claimed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.insert_session(&session("s1", "pc", "codex")).unwrap();
+
+        assert!(store.claim_agent_session_id("s1", "agent-1"));
+        assert!(!store.claim_agent_session_id("s1", "agent-2"));
+        assert_eq!(store.agent_session_id("s1").as_deref(), Some("agent-1"));
     }
 
     #[test]
