@@ -515,6 +515,7 @@ export async function refreshHistory(core: Core): Promise<void> {
   try {
     if (target.kind === "group") {
       const page = await core.client!.groupHistory(target.id, limit, offset);
+      let changed = false;
       core.update((state) => {
         if (!sameTarget(state.open, target)) return;
         const merged = replaceWindow<GroupMessage>(
@@ -524,16 +525,18 @@ export async function refreshHistory(core: Core): Promise<void> {
           offset,
           page.hasMore,
         );
+        changed = !sameHistoryItems(state.detail.groupHistory, merged.items);
         state.detail.groupHistory = merged.items;
         state.detail.groupHistoryPaging = merged.paging;
       });
-      void markRead(core, target);
+      if (changed) void markRead(core, target);
       return;
     }
     const page =
       target.kind === "session"
         ? await core.client!.history(target.id, limit, offset)
         : await core.client!.workflowHistory(target.id, limit, offset);
+    let changed = false;
     core.update((state) => {
       if (!sameTarget(state.open, target)) return;
       const merged = replaceWindow<HistoryItem>(
@@ -543,16 +546,25 @@ export async function refreshHistory(core: Core): Promise<void> {
         offset,
         page.hasMore,
       );
+      changed = !sameHistoryItems(state.detail.history, merged.items);
       state.detail.history = merged.items;
       state.detail.historyPaging = merged.paging;
     });
-    void markRead(core, target);
+    if (changed) void markRead(core, target);
   } catch (error) {
     core.failure(`读取对话失败：${messageOf(error)}`);
   }
 }
 
-/** 标记会话已读；打开期间每轮历史刷新后调用，保持当前会话已读。 */
+/** 历史条目及内容是否完全相同，用于判断刷新是否带来新增或修改消息。 */
+function sameHistoryItems<T>(left: readonly T[], right: readonly T[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((item, index) => JSON.stringify(item) === JSON.stringify(right[index]))
+  );
+}
+
+/** 标记会话已读；打开时立即调用，之后仅在历史刷新发现新增或修改消息时调用。 */
 export async function markRead(core: Core, target: OpenTarget): Promise<void> {
   const client = core.client;
   if (!client) return;
