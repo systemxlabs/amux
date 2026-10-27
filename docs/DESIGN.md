@@ -188,7 +188,7 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 |---|---|
 | nano | 已内置 |
 | codex | npx 可用 |
-| claude | 本机装有 `claude` CLI & npx 可用 |
+| claude | npx 可用 |
 
 ### Agent 启动
 
