@@ -645,8 +645,7 @@ impl GitRunner {
                 .map_err(|error| format!("不是 git 仓库: {repo_cwd}: {error}"))?;
             let remote = remote_for_tracking_branch(&repo, base.as_str())
                 .ok_or_else(|| format!("worktree 基分支不属于已配置远程: {}", base.as_str()))?;
-            run(repo_cwd, &["fetch", "--prune", remote.as_str()])
-                .map_err(|error| format!("{}: {}", error.message, error.stderr.trim()))?;
+            fetch_remote_tracking_base(repo_cwd, base.as_str(), &remote)?;
         }
         let base_ref = base.as_str();
         let args = vec![
@@ -774,7 +773,19 @@ fn update_remote_tracking_base(cwd: &str, base: &str) -> Result<(), String> {
     let Some(remote) = remote_for_tracking_branch(&repo, base) else {
         return Ok(());
     };
-    run(cwd, &["fetch", "--prune", remote.as_str()])
+    fetch_remote_tracking_base(cwd, base, &remote)
+}
+
+/// 只更新基分支对应的远程跟踪引用，避免为了一个基分支刷新整个远程。
+fn fetch_remote_tracking_base(cwd: &str, base: &str, remote: &str) -> Result<(), String> {
+    let rest = base.strip_prefix("refs/remotes/").unwrap_or(base);
+    let prefix = format!("{remote}/");
+    let branch = rest
+        .strip_prefix(&prefix)
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| format!("无法解析远程跟踪基分支: {base}"))?;
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+    run(cwd, &["fetch", "--prune", remote, &refspec])
         .map(|_| ())
         .map_err(|error| format!("{}: {}", error.message, error.stderr.trim()))
 }
@@ -1094,6 +1105,9 @@ mod tests {
         );
         git(&repo, &["push", "-u", "origin", "main"]);
         let stale = git(&repo, &["rev-parse", "origin/main"]).trim().to_string();
+        git(&repo, &["branch", "side"]);
+        git(&repo, &["push", "-u", "origin", "side"]);
+        let side_stale = git(&repo, &["rev-parse", "origin/side"]).trim().to_string();
 
         let producer = unique_dir("amux-diff-producer");
         git(
@@ -1109,6 +1123,14 @@ mod tests {
         );
         git(&producer, &["config", "user.email", "t@t"]);
         git(&producer, &["config", "user.name", "t"]);
+        git(&producer, &["checkout", "-b", "side", "-q"]);
+        std::fs::write(producer.join("side-latest.txt"), "side latest\n").unwrap();
+        git(&producer, &["add", "."]);
+        git(&producer, &["commit", "-m", "side latest", "-q"]);
+        git(&producer, &["push", "-q", "-u", "origin", "side"]);
+        let side_latest = git(&producer, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_ne!(side_latest, side_stale);
+        git(&producer, &["checkout", "main", "-q"]);
         std::fs::write(producer.join("latest.txt"), "latest\n").unwrap();
         git(&producer, &["add", "."]);
         git(&producer, &["commit", "-m", "latest", "-q"]);
@@ -1120,6 +1142,11 @@ mod tests {
             .diff(repo.to_str().unwrap(), "origin/main")
             .unwrap();
         assert_eq!(git(&repo, &["rev-parse", "origin/main"]).trim(), latest);
+        assert_eq!(
+            git(&repo, &["rev-parse", "origin/side"]).trim(),
+            side_stale,
+            "只刷新基分支时不应更新其他远程跟踪分支"
+        );
 
         let _ = std::fs::remove_dir_all(&producer);
         let _ = std::fs::remove_dir_all(&remote);
@@ -1139,7 +1166,7 @@ mod tests {
         let error = GitRunner::new()
             .diff(repo.to_str().unwrap(), "origin/main")
             .unwrap_err();
-        assert!(error.contains("git fetch --prune origin 失败"), "{error}");
+        assert!(error.contains("git fetch --prune origin"), "{error}");
 
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -1381,6 +1408,9 @@ mod tests {
         );
         git(&repo, &["push", "-u", "origin", "main"]);
         let stale = git(&repo, &["rev-parse", "origin/main"]).trim().to_string();
+        git(&repo, &["branch", "side"]);
+        git(&repo, &["push", "-u", "origin", "side"]);
+        let side_stale = git(&repo, &["rev-parse", "origin/side"]).trim().to_string();
 
         let producer = unique_dir("amux-worktree-producer");
         git(
@@ -1396,6 +1426,14 @@ mod tests {
         );
         git(&producer, &["config", "user.email", "t@t"]);
         git(&producer, &["config", "user.name", "t"]);
+        git(&producer, &["checkout", "-b", "side", "-q"]);
+        std::fs::write(producer.join("side-latest.txt"), "side latest\n").unwrap();
+        git(&producer, &["add", "."]);
+        git(&producer, &["commit", "-m", "side latest", "-q"]);
+        git(&producer, &["push", "-q", "-u", "origin", "side"]);
+        let side_latest = git(&producer, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_ne!(side_latest, side_stale);
+        git(&producer, &["checkout", "main", "-q"]);
         std::fs::write(producer.join("latest.txt"), "latest\n").unwrap();
         git(&producer, &["add", "."]);
         git(&producer, &["commit", "-m", "latest", "-q"]);
@@ -1414,6 +1452,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(git(&target, &["rev-parse", "HEAD"]).trim(), latest);
+        assert_eq!(
+            git(&repo, &["rev-parse", "origin/side"]).trim(),
+            side_stale,
+            "创建 worktree 时不应刷新其他远程跟踪分支"
+        );
 
         runner.worktree_remove(repo.to_str().unwrap(), target.to_str().unwrap());
         let _ = std::fs::remove_dir_all(root);
