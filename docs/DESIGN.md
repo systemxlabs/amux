@@ -187,7 +187,7 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 | agent | 发现方式 |
 |---|---|
 | nano | 已内置 |
-| codex | 本机装有 `codex` CLI & bunx 可用 |
+| codex | npx 可用 |
 | claude | 本机装有 `claude` CLI & npx 可用 |
 
 ### Agent 启动
@@ -195,7 +195,7 @@ Daemon 关闭时，关闭所有已启动的 Agents。
 | agent | 启动方式 |
 |---|---|
 | nano | 进程内启动 |
-| codex | `INITIAL_AGENT_MODE=agent-full-access bunx @nyssance/codex-acp-v2` |
+| codex | `INITIAL_AGENT_MODE=agent-full-access npx -y @agentclientprotocol/codex-acp` |
 | claude | `CLAUDE_AGENT_ACP_EXPERIMENTAL_V2=1 npx -y @agentclientprotocol/claude-agent-acp` |
 
 ### Agent 模型列表
@@ -329,7 +329,7 @@ Server 作为 ACP client 与 Agents 通信
 - 惰性恢复已有会话：等待用户往已有会话发送指令或查询会话选项时，才向 Agent 发送 `session/resume` 请求恢复 agent 侧已有会话
 - 设置会话选项：用户可基于当前会话可选项进行会话设置，Server 向 Agent 发送 `session/set_config_option` 请求进行设置
   - 如果普通会话设置了模型偏好，则在每次 `session/new` 和 `session/resume` 请求后立即发送 `session/set_config_option` 请求进行设置
-- 主动关闭长时间无活动会话：当会话长时间无新活动（大于 1h）且会话状态为空闲时，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，释放资源
+- 主动关闭长时间无活动会话：当会话长时间无新活动（大于 24h）且会话状态为空闲时，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，释放资源
 - 取消会话：当用户取消会话时，向 Agent 发送 `session/cancel` 通知来取消会话执行
 - 删除会话：当用户删除会话时，如果会话已打开，向 Agent 发送 `session/close` 请求关闭 agent 侧会话，如果 Agent 支持会话删除，则发送 `session/delete` 请求删除 agent 侧会话
 
