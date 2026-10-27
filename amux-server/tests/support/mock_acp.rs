@@ -1,6 +1,6 @@
 //! 模拟 ACP v2 agent（官方 SDK `agent-client-protocol` 的 **Agent 侧**实现）。
 //! server 侧全部测试（连接对接、会话管理、端到端）都经此子进程走真实 ACP v2
-//! stdio 路径——与 `codex-acp-v2` 等真实 agent 的交互方式一致，测试不使用
+//! stdio 路径——与 `codex-acp` 等真实 agent 的交互方式一致，测试不使用
 //! 进程内连接替身。
 //!
 //! 行为要点（与 v2 语义对齐）：
